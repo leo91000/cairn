@@ -697,14 +697,18 @@ async fn discord_script_runs_a_conversation_in_a_thread_end_to_end() {
         json!({ "channel": "500", "source": "200", "message": "500", "threaded": true })
     );
     let chat = text(&delivery, "chatId").to_owned();
-    let prefix = format!("chat-attachment:{chat}:");
-    let stored = s.store.read(move |db| db.keys(&prefix)).await.unwrap();
+    let attachment_chat = chat.clone();
+    let stored = s
+        .store
+        .read(move |db| db.attachments(&attachment_chat))
+        .await
+        .unwrap();
     assert_eq!(
         stored.len(),
         1,
         "the screenshot is attached to the conversation"
     );
-    assert_eq!(stored[0].1["mediaType"], "image/png");
+    assert_eq!(stored[0].media_type, "image/png");
 
     // While the agent works: typing, a status message with Stop, then the question.
     s.chat_tick(&std::collections::HashSet::new())
@@ -778,13 +782,15 @@ async fn discord_script_runs_a_conversation_in_a_thread_end_to_end() {
         1
     );
     runtime::pump(&s, &connection, &mut session).await.unwrap();
+    let question_chat = chat.clone();
+    let question_id = question.clone();
     let pending = s
         .store
-        .kv(&format!("chat-question:{chat}:{question}"))
+        .read(move |db| db.question(&question_chat, &question_id))
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(pending["status"], "answering");
+    assert_eq!(pending.status.as_str(), "answering");
     assert!(
         mock.called("PATCH", "/api/v10/channels/500/messages/")
             .await
@@ -2405,13 +2411,15 @@ async fn channel_fallback_questions_retry_and_controls_route_to_the_right_conver
     .await
     .unwrap();
     runtime::pump(&s, &connection, &mut session).await.unwrap();
+    let question_chat = text(&chat, "id").to_owned();
+    let question_id = question.clone();
     let pending = s
         .store
-        .kv(&format!("chat-question:{}:{question}", text(&chat, "id")))
+        .read(move |db| db.question(&question_chat, &question_id))
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(pending["status"], "answering");
+    assert_eq!(pending.status.as_str(), "answering");
     // Stop buttons include the explicit conversation even without a shared thread.
     interact(&s, &connection, &[], json!({
         "id": "802", "token": "synthetic_interaction", "type": 3, "guild_id": "100", "channel_id": "200",
@@ -2602,15 +2610,22 @@ async fn concurrent_plugin_uploads_share_the_chat_attachment_quota() {
         .await
         .unwrap();
     let chat_id = text(&chat, "id");
-    let seed = cairn_installation::config::id();
-    s.store
-        .set(
-            &format!("chat-attachment:{chat_id}:{seed}"),
-            json!({ "id": seed, "size": 200 * 1024 * 1024 - 3 }),
-            None,
+    let bytes = vec![b'x'; cairn_installation::attachments::MAX_FILE];
+    for n in 0..20 {
+        let count = if n == 19 {
+            bytes.len() - 3
+        } else {
+            bytes.len()
+        };
+        s.store_attachment(
+            chat_id,
+            &cairn_installation::config::id(),
+            "seed.txt",
+            &bytes[..count],
         )
         .await
         .unwrap();
+    }
     let first = cairn_installation::config::id();
     let second = cairn_installation::config::id();
     let (left, right) = tokio::join!(

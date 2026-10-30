@@ -5,12 +5,14 @@ use crate::worker::checkpoint::RunCheckpoint;
 use cairn_contracts::EventKind;
 
 mod handoff;
+pub(crate) mod question_migration;
+pub(crate) mod question_storage;
 pub(crate) mod questions;
 
 pub use crate::waits as wait_for;
 
 pub use handoff::{execution_text, with_invoked_skills};
-pub use questions::{Question, QuestionField, QuestionStatus, question_prefix};
+pub use questions::{Question, QuestionField, QuestionStatus};
 
 use crate::{
     config::{id, now},
@@ -24,13 +26,16 @@ use crate::{
 };
 use handoff::handoff_context;
 use questions::{find_question, questions, save_question};
+use rusqlite::OptionalExtension;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::HashSet;
-pub use storage::{Conversation, Message};
+pub use storage::{Conversation, Message, MessageAnswer};
 
 pub mod engine_switch;
 pub(crate) mod migration;
+#[cfg(test)]
+mod read_tests;
 pub(crate) mod storage;
 
 pub use cairn_contracts::{MessageMode, MessageStatus};
@@ -149,33 +154,48 @@ pub(crate) fn view(db: &Db<'_>, chat: Value) -> Result<Value> {
 }
 
 fn conversation_view(db: &Db<'_>, chat: Conversation) -> Result<cairn_contracts::Chat> {
+    let run = db.conversation_run(chat.run_id.as_deref().unwrap_or(""))?;
+    conversation_view_with_run(db, chat, run.as_ref())
+}
+
+fn conversation_view_with_run(
+    db: &Db<'_>,
+    chat: Conversation,
+    run: Option<&Value>,
+) -> Result<cairn_contracts::Chat> {
     use cairn_contracts::{Chat, ChatRequester, ConversationLifecycle, ConversationStatus};
     let active = chat.lifecycle == ConversationLifecycle::Active;
-    let run = db.run(chat.run_id.as_deref().unwrap_or(""))?;
     let pending_questions = questions(db, &chat.id)?
         .iter()
         .filter(|question| question.status == QuestionStatus::Pending)
         .count() as u32;
-    let agent_name = db.agent(&chat.agent_id)?.map_or_else(
-        || {
+    let agent_name =
+        db.0.query_row(
+            "SELECT name FROM agents WHERE id=?",
+            [&chat.agent_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .unwrap_or_else(|| {
             chat.agent_name
                 .clone()
                 .unwrap_or_else(|| "Deleted agent".into())
-        },
-        |agent| agent.settings.name,
-    );
+        });
     let project_name = chat
         .project_id
         .as_ref()
         .map(|id| {
-            Ok::<_, Error>(db.project(id)?.map_or_else(
-                || {
+            Ok::<_, Error>(
+                db.0.query_row("SELECT name FROM projects WHERE id=?", [id], |row| {
+                    row.get::<_, String>(0)
+                })
+                .optional()?
+                .unwrap_or_else(|| {
                     chat.project_name
                         .clone()
                         .unwrap_or_else(|| "Deleted project".into())
-                },
-                |project| project.settings.name,
-            ))
+                }),
+            )
         })
         .transpose()?;
     let pending_delegation = run.is_none()
@@ -209,7 +229,7 @@ fn conversation_view(db: &Db<'_>, chat: Conversation) -> Result<cairn_contracts:
         })
         .transpose()?
         .flatten();
-    let compaction = Some(compaction_state(db, &chat, run.as_ref())?);
+    let compaction = Some(compaction_state(db, &chat, run)?);
     let coding_agent_switch = coding_agent::progress(db, &chat.id)?;
     let error = if active {
         db.kv(&format!("chat-error:{}", chat.id))?
@@ -226,10 +246,7 @@ fn conversation_view(db: &Db<'_>, chat: Conversation) -> Result<cairn_contracts:
         .map(|provider| serde_json::from_value(Value::from(provider.as_str())))
         .transpose()?;
     Ok(Chat {
-        can_request_new_session: crate::conversation_lifecycle::can_request_new_session(
-            &chat,
-            run.as_ref(),
-        ),
+        can_request_new_session: crate::conversation_lifecycle::can_request_new_session(&chat, run),
         finished_at: serde_json::from_value(run_field("finishedAt"))?,
         context_usage: serde_json::from_value(run_field("contextUsage"))?,
         account_wait_reason: serde_json::from_value(run_field("accountWaitReason"))?,
@@ -342,15 +359,14 @@ fn compaction_blocker(
             "This workspace has been cleaned up. Start a new chat.".into(),
         ));
     }
-    let fresh_session = chat.session_restart_requested
-        || RunCheckpoint::load_in(db, text(run, "id"))?
-            .is_some_and(|checkpoint| checkpoint.fresh_session == Some(true));
+    let fresh_session =
+        chat.session_restart_requested || RunCheckpoint::fresh_session_in(db, text(run, "id"))?;
     if !run["sessionId"].is_string() || fresh_session {
         return Ok(Some(
             "This conversation has no saved native session to compact.".into(),
         ));
     }
-    if chat.wakeup.as_ref().is_some_and(Value::is_object) {
+    if chat.wakeup.is_some() {
         return Ok(Some(
             "Compact after the scheduled continuation resumes.".into(),
         ));
@@ -428,7 +444,13 @@ pub(crate) fn list_all(db: &Db<'_>) -> Result<Vec<Value>> {
 }
 
 pub(crate) fn detail(db: &Db<'_>, id: &str) -> Result<Value> {
-    let mut result = view(db, serde_json::to_value(conversation(db, id)?)?)?;
+    detail_messages(db, id, false)
+}
+
+fn detail_messages(db: &Db<'_>, id: &str, undelivered: bool) -> Result<Value> {
+    let chat = conversation(db, id)?;
+    let run = db.run(chat.run_id.as_deref().unwrap_or(""))?;
+    let mut result = serde_json::to_value(conversation_view_with_run(db, chat, run.as_ref())?)?;
     if !is_active(&result) {
         result["questions"] = json!([]);
         result["messages"] = json!([]);
@@ -437,30 +459,37 @@ pub(crate) fn detail(db: &Db<'_>, id: &str) -> Result<Value> {
         return Ok(result);
     }
     result["questions"] = serde_json::to_value(questions(db, id)?)?;
-    result["messages"] = db.messages(id)?.into();
-    result["run"] = db.run(text(&result, "runId"))?.unwrap_or(Value::Null);
+    result["messages"] = if undelivered {
+        db.undelivered_messages(id)?
+    } else {
+        db.messages(id)?
+    }
+    .into();
+    result["run"] = run.unwrap_or(Value::Null);
     Ok(result)
 }
 
 /// One redacted read for every transport. Answers stay in A8's delivery storage;
 /// public history uses their structured text, with private replies masked.
 pub(crate) fn public_detail(db: &Db<'_>, id: &str) -> Result<Value> {
+    public_stream_detail(db, id, false)
+}
+
+/// A window already carries delivered input in its event history. Filter it in
+/// SQL, before decoding message bodies and loading their attachments.
+pub(crate) fn public_stream_detail(db: &Db<'_>, id: &str, window: bool) -> Result<Value> {
     if db.0.is_autocommit() {
         let transaction =
             rusqlite::Transaction::new_unchecked(db.0, rusqlite::TransactionBehavior::Deferred)?;
-        let result = public_detail(&Db(&transaction), id)?;
+        let result = public_stream_detail(&Db(&transaction), id, window)?;
         transaction.commit()?;
         return Ok(result);
     }
-    let mut result = detail(db, id)?;
-    let private = serde_json::from_value::<Vec<Question>>(result["questions"].clone())?
-        .into_iter()
-        .filter(Question::is_private)
-        .map(|question| question.id)
-        .collect::<HashSet<_>>();
+    let mut result = detail_messages(db, id, window)?;
+    let private = db.private_answer_messages(id)?;
     if let Some(messages) = result["messages"].as_array_mut() {
         for message in messages {
-            if message["questionId"]
+            if message["id"]
                 .as_str()
                 .is_some_and(|id| private.contains(id))
             {
@@ -800,11 +829,10 @@ fn acknowledge(db: &Db<'_>, run_id: &str, message_id: &str) -> Result<()> {
     }
     message.status = MessageStatus::Delivered;
     db.save_message(&message)?;
-    let mut private = false;
+    let private = db.private_answer_message(message_id)?;
     if let Some(question_id) = message.question_id.as_deref()
         && let Some(mut question) = find_question(db, &chat_id, question_id)?
     {
-        private = question.is_private();
         question.blocking = false;
         question.status = QuestionStatus::Answered;
         save_question(db, &question)?;
@@ -1096,15 +1124,14 @@ fn launch_turn(
         return Ok(());
     }
     let waking = message["wakeup"].is_object();
-    let chat_boundary = serde_json::to_value(&chat)?;
     let unchanged = if waking {
         let current = db.run(chat.run_id.as_deref().unwrap_or(""))?;
-        continuation::ready(db, &serde_json::to_value(&chat)?, current.as_ref(), now())?
-            && chat.wakeup.as_ref() == message.get("wakeup")
+        continuation::ready(db, &chat, current.as_ref(), now())?
+            && serde_json::to_value(&chat.wakeup)? == message["wakeup"]
             && current.as_ref().map(|run| &run["id"]) == run.as_ref().map(|run| &run["id"])
             && (!message["wakeup"]["condition"].is_object()
                 || current.as_ref().is_some_and(|run| {
-                    wait_for::observation(db, &chat_boundary, run, now())
+                    wait_for::observation(db, &chat.id, run, now())
                         .is_ok_and(|observation| observation.as_ref() == message.get("observation"))
                 }))
     } else {
@@ -1474,6 +1501,7 @@ impl Service {
     }
 
     pub async fn chat_tick(&self, active: &HashSet<String>) -> Result<()> {
+        self.expire_attachment_uploads().await?;
         for chat in self.store.conversations().await? {
             if chat.lifecycle != cairn_contracts::ConversationLifecycle::Active
                 || chat.environment_state == Some(EnvironmentState::Cleaning)
@@ -1525,13 +1553,7 @@ impl Service {
             let (waiting_chat, waiting_run) = (chat.clone(), run.clone());
             let waiting = self
                 .store
-                .read(move |db| {
-                    continuation::holds_queue(
-                        db,
-                        &serde_json::to_value(&waiting_chat)?,
-                        waiting_run.as_ref(),
-                    )
-                })
+                .read(move |db| continuation::holds_queue(db, &waiting_chat, waiting_run.as_ref()))
                 .await?;
             let chat_id = id.clone();
             let message = if waiting {
@@ -1551,14 +1573,7 @@ impl Service {
                     let run = run.clone();
                     let Some(message) = self
                         .store
-                        .read(move |db| {
-                            continuation::message(
-                                db,
-                                &serde_json::to_value(&chat)?,
-                                run.as_ref(),
-                                now(),
-                            )
-                        })
+                        .read(move |db| continuation::message(db, &chat, run.as_ref(), now()))
                         .await?
                     else {
                         continue;
@@ -1743,7 +1758,7 @@ mod tests {
             .execute_batch(
                 "ALTER TABLE chat_messages RENAME TO retained_messages;
 CREATE VIEW chat_messages AS SELECT rowid AS rowid,id,chat_id,revision,purge_marker(text) AS text,
-provider,model,reasoning,speed,mode,status,created_at,question_id,answers FROM retained_messages;",
+provider,model,reasoning,speed,mode,status,created_at,question_id FROM retained_messages;",
             )
             .unwrap();
         connection
@@ -1754,7 +1769,7 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,answers FROM r
                 move |context| {
                     let text: String = context.get(0)?;
                     rusqlite::Connection::open(&path)?.execute(
-                        "DELETE FROM kv WHERE key='chat-question:chat:private-question'",
+                        "DELETE FROM chat_questions WHERE chat_id='chat' AND id='private-question'",
                         [],
                     )?;
                     Ok(text)
@@ -1767,7 +1782,7 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,answers FROM r
         assert!(connection.is_autocommit());
         assert!(
             Db(&connection)
-                .kv("chat-question:chat:private-question")
+                .question("chat", "private-question")
                 .unwrap()
                 .is_none()
         );
@@ -2033,18 +2048,11 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,answers FROM r
                             "agentId": crate::config::MAIN_AGENT_ID,
                         });
                         db.save_conversation_boundary(&chat)?;
-                        db.set(
-                            "chat-question:chat:old-session",
-                            &json!({
-                                "id": "old-session",
-                                "chatId": "chat",
-                                "runId": "run",
-                                "status": "pending",
-                                "blocking": true,
-                                "fields": [],
-                            }),
-                            None,
-                        )?;
+                        db.save_question(&serde_json::from_value(json!({
+                            "id": "old-session", "chatId":"chat", "runId":"run",
+                            "source":"codex", "status":"pending", "blocking":true,
+                            "fields":[{"id":"field","title":"Question from previous session"}],
+                        }))?)?;
                         let mut prepared =
                             json!({ "isolated": isolated, "workspace": "preserved" });
                         if native {
@@ -2085,7 +2093,8 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,answers FROM r
                         assert!(checkpoint["controllerRecoveries"].is_null());
                         let chat = db.conversation_boundary("chat")?.unwrap();
                         assert_eq!(chat["sessionRestartRequested"], false);
-                        let question = db.kv("chat-question:chat:old-session")?.unwrap();
+                        let question =
+                            serde_json::to_value(db.question("chat", "old-session")?.unwrap())?;
                         assert_eq!(question["status"], "cancelled");
                         assert_eq!(question["blocking"], false);
 
@@ -2218,8 +2227,9 @@ provider,model,reasoning,speed,mode,status,created_at,question_id,answers FROM r
 
     #[test]
     fn provider_changes_must_wait_for_the_next_turn_and_model_aliases_are_valid() {
-        let connection = rusqlite::Connection::open_in_memory().unwrap();
-        connection.execute_batch(crate::runs::SCHEMA).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let _store = crate::store::Store::open(root.path()).unwrap();
+        let connection = rusqlite::Connection::open(root.path().join("manager.db")).unwrap();
         let run = json!({
             "status": "running",
             "snapshot": {

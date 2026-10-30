@@ -130,3 +130,172 @@
 .markdown ul { list-style: disc; }
 .markdown ol { list-style: decimal; }
 .markdown li + li { margin-top: 4px; }
+
+/* Mermaid diagrams drawn from Markdown fences. Android's DiagramColors uses the same palette. */
+.diagram, .diagram-viewer {
+  --dg-canvas: light-dark(#fbfaf7, #131319);
+  --dg-label: light-dark(#fbfaf7, #131319);
+  --dg-ink: light-dark(#16151d, #f3f2f7);
+  --dg-muted: light-dark(#6d6a78, #9d9bab);
+  --dg-edge: light-dark(#8a8694, #7d7b8c);
+  --dg-node: light-dark(#ffffff, #1e1e26);
+  --dg-node-line: light-dark(#cfc9bb, #3a3a47);
+  --dg-node-ink: light-dark(#16151d, #f3f2f7);
+  --dg-terminal: light-dark(#e4edf6, #1d2f44);
+  --dg-terminal-line: light-dark(#9dbbdc, #3d6894);
+  --dg-terminal-ink: light-dark(#14365a, #cfe2f6);
+  --dg-decision: light-dark(#f1ecfa, #2c2638);
+  --dg-decision-line: light-dark(#b9a5dd, #6c5a8e);
+  --dg-decision-ink: light-dark(#3f2a6b, #e5d8f3);
+  --dg-data: light-dark(#e3f3ef, #16302b);
+  --dg-data-line: light-dark(#8fcbbd, #2f6f62);
+  --dg-data-ink: light-dark(#0f5a4e, #bfeadf);
+  --dg-note: light-dark(#fff4cf, #353021);
+  --dg-note-line: light-dark(#e0c873, #6e5f35);
+  --dg-note-ink: light-dark(#5c4813, #f1e2b6);
+  --dg-cluster: light-dark(#f3f1ea, #18181f);
+  --dg-cluster-line: light-dark(#dcd7ca, #33333f);
+  --dg-cluster-ink: light-dark(#6d6a78, #a3a1b1);
+  --dg-series-0: light-dark(#3b7bbf, #8db8e8);
+  --dg-series-1: light-dark(#e2512f, #ff7b5e);
+  --dg-series-2: light-dark(#12806f, #4fc7a8);
+  --dg-series-3: light-dark(#7a5bbf, #ceb5e5);
+  --dg-series-4: light-dark(#c98a12, #dfc38e);
+  --dg-series-5: light-dark(#2a9db0, #7fd3e0);
+  --dg-series-6: light-dark(#c2457d, #f29cc2);
+  --dg-series-7: light-dark(#5d6b82, #a7b3c7);
+}
+
+.markdown .diagram {
+  margin: 16px 0;
+  overflow: hidden;
+  border: 1px solid var(--color-line);
+  border-radius: 14px;
+  background-color: var(--dg-canvas);
+  background-image: radial-gradient(light-dark(#16151d14, #ffffff0f) 1px, transparent 1.2px);
+  background-size: 16px 16px;
+  line-height: 1.4;
+}
+
+.diagram-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 6px 6px 14px;
+  border-bottom: 1px solid var(--color-line);
+  background: light-dark(#fffffff0, #17171ef0);
+  font-size: 12px;
+  color: var(--color-muted);
+}
+
+.diagram-kind {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.diagram-actions {
+  display: inline-flex;
+  gap: 2px;
+}
+
+.diagram-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  color: var(--color-muted);
+  transition: background-color 0.15s, color 0.15s;
+}
+
+.diagram-action:hover, .diagram-action[aria-pressed="true"] {
+  background: var(--color-hover);
+  color: var(--color-ink);
+}
+
+.diagram-action:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+.diagram-canvas {
+  overflow-x: auto;
+  padding: 18px 12px;
+}
+
+.diagram-svg {
+  display: block;
+  height: auto;
+  margin: 0 auto;
+  overflow: visible;
+  font-family: var(--font-sans);
+}
+
+.diagram-raised {
+  filter: drop-shadow(0 1px 1.5px light-dark(#16151d14, #00000066));
+}
+
+.diagram-link {
+  cursor: pointer;
+}
+
+.diagram-link:hover path {
+  filter: brightness(0.96) drop-shadow(0 2px 4px light-dark(#16151d24, #00000080));
+}
+
+.markdown .diagram-source {
+  display: none;
+  margin: 0;
+  border-radius: 0;
+  border-top: 1px solid var(--color-line);
+  background: var(--color-inset);
+  font-size: 12.5px;
+}
+
+.diagram-showing-source .diagram-source {
+  display: block;
+}
+
+.diagram-failed .diagram-source {
+  border-top: 0;
+}
+
+.diagram-failed .diagram-canvas {
+  padding: 10px 14px 0;
+}
+
+.diagram-error {
+  margin: 0 0 10px;
+  font-size: 12.5px;
+  color: var(--color-muted);
+}
+
+.diagram-stage {
+  background-color: var(--dg-canvas);
+  background-image: radial-gradient(light-dark(#16151d14, #ffffff0f) 1px, transparent 1.2px);
+  background-size: 18px 18px;
+  cursor: grab;
+}
+
+.diagram-stage:active {
+  cursor: grabbing;
+}
+
+.diagram-stage .diagram-svg {
+  max-width: none;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .markdown .diagram .diagram-svg {
+    animation: diagram-in 0.24s ease-out;
+  }
+}
+
+@keyframes diagram-in {
+  from { opacity: 0; transform: translateY(3px); }
+}

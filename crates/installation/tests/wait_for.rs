@@ -381,7 +381,10 @@ async fn already_finished_sources_return_results_without_scheduling_or_ending_th
     f.github_state("completed", Some("failure"), 0);
     let result = f.schedule(f.github_condition()).await;
     assert_eq!(result["deferred"], false);
-    assert_eq!(result["observation"]["conclusion"], "failure");
+    assert_eq!(
+        result["observation"]["pluginResult"]["conclusion"],
+        "failure"
+    );
     assert!(f.s.chat_detail(&f.chat).await.unwrap()["wakeup"].is_null());
     // The additive marker and reason live on the event; the public observation is unchanged.
     assert!(result["observation"].get("immediate").is_none());
@@ -433,8 +436,8 @@ async fn github_monitor_pins_identity_and_wakes_on_failure_without_polling_the_l
     let restarted = f.restart().await;
     conditions::poll_once(&restarted).await.unwrap();
     let result = restarted.chat_detail(&f.chat).await.unwrap()["wakeup"]["observation"].clone();
-    assert_eq!(result["conclusion"], "cancelled");
-    assert_eq!(result["headSha"], SHA);
+    assert_eq!(result["pluginResult"]["conclusion"], "cancelled");
+    assert_eq!(result["pluginResult"]["headSha"], SHA);
     restarted.chat_tick(&HashSet::new()).await.unwrap();
     assert!(
         text(
@@ -450,7 +453,7 @@ async fn github_monitor_pins_identity_and_wakes_on_failure_without_polling_the_l
     }
     assert_eq!(wait["wakeup"]["display"]["short"], "GitHub workflow");
     assert_eq!(result["display"]["tone"], "warning");
-    assert_eq!(result["pluginId"], "github");
+    assert_eq!(result["pluginResult"]["pluginId"], "github");
 }
 
 #[tokio::test]
@@ -503,7 +506,8 @@ async fn github_monitor_only_probes_resumable_wakeups() {
     conditions::poll_once(&f.s).await.unwrap();
     assert_eq!(f.calls().len(), 2);
     assert_eq!(
-        f.s.conversation_boundary(&f.chat).await.unwrap()["wakeup"]["observation"]["conclusion"],
+        f.s.conversation_boundary(&f.chat).await.unwrap()["wakeup"]["observation"]["pluginResult"]
+            ["conclusion"],
         "success"
     );
 }
@@ -725,6 +729,7 @@ async fn deferred_target_conversations_are_not_finished_and_cycles_are_rejected(
     let mut other = f.s.conversation_boundary(other_id).await.unwrap();
     other["wakeup"] = json!({
         "id": id(), "messageId": target["chatExecution"]["messageId"],
+        "reason": "Dependency fixture", "seconds": 420, "createdAt": now(),
         "condition": { "type": "run_finished", "runId": f.run },
         "wakeAt": now() + 420000,
     });
@@ -1339,7 +1344,7 @@ async fn mission_plugin_wait_survives_restart_and_resumes_on_the_pinned_result()
     let resumed = restarted.store.run(&f.run).await.unwrap();
     assert_eq!(resumed["status"], "queued");
     assert_eq!(
-        resumed["waitContinuation"]["observation"]["conclusion"],
+        resumed["waitContinuation"]["observation"]["pluginResult"]["conclusion"],
         "failure"
     );
     assert_eq!(resumed["missionTurnId"], wait["wakeup"]["id"]);
@@ -1409,7 +1414,7 @@ async fn missions_share_dependency_cycle_detection_with_conversations() {
     let f = Fixture::mission().await;
     let target = f.target().await;
     f.s.store
-        .update_run_boundary(
+        .change_run_fixture(
             text(&target, "id"),
             json!({
                 "wakeup": { "condition": { "type": "run_finished", "runId": f.run } },

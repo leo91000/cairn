@@ -1,4 +1,4 @@
-import type { ChatWakeup } from '../../../packages/contracts/chats'
+import type { ChatWakeup, WaitObservation } from '../../../packages/contracts/chats'
 import type { RunEvent } from '../../../packages/contracts/contracts'
 import type { AgentPlan, PlanChange, PlanProgress } from './agent-plan'
 import type { CompactionEntry } from './context-usage'
@@ -114,7 +114,7 @@ export interface ActivityWait {
   /** Absent when the condition had already completed and the agent never waited. */
   wakeup: ChatWakeup | null
   /** What Cairn observed once the condition completed or the deadline passed. */
-  observation?: Record<string, unknown> | null
+  observation?: WaitObservation | Record<string, unknown> | null
   /** When the conversation resumed. */
   resumedAt?: number
   /** A message from the user or a failed turn cancelled it, or another wait replaced it. */

@@ -240,7 +240,9 @@ impl Fixture {
     }
 
     pub async fn wait_for_blocked_request(&self, barrier_pid: i32) {
-        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        // This is an infrastructure watchdog, not an account-lock latency assertion.
+        // Allow scheduling stalls while still requiring an observed PostgreSQL waiter.
+        tokio::time::timeout(std::time::Duration::from_secs(35), async {
             loop {
                 let (waiting,): (bool,) = sqlx_core::query_as::query_as(
                     "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))",

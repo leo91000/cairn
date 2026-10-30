@@ -1,0 +1,123 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "DelegatedTask": {
+      "properties": {
+        "agentId": {
+          "type": "string"
+        },
+        "agentName": {
+          "type": "string"
+        },
+        "chatId": {
+          "type": "string"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "finished": {
+          "type": "boolean"
+        },
+        "finishedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "lifecycle": {
+          "pattern": "^(active|trash|purging)$",
+          "type": "string"
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outcome": {
+          "additionalProperties": true,
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-kotlin-type": "TaskOutcome"
+        },
+        "paused": {
+          "type": "boolean"
+        },
+        "pendingQuestions": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "preview": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "projectId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "pattern": "^(codex|claude|opencode)$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "report": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "pattern": "^(idle|queued|running|waiting|succeeded|failed|cancelled|interrupted)$",
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "chatId",
+        "title",
+        "agentId",
+        "agentName",
+        "status",
+        "lifecycle",
+        "finished",
+        "paused",
+        "pendingQuestions"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "tasks": {
+      "items": {
+        "$ref": "#/definitions/DelegatedTask"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "tasks"
+  ],
+  "title": "TaskStatusOutput",
+  "type": "object"
+}

@@ -178,10 +178,8 @@ pub struct Run {
     #[ts(optional = nullable)]
     pub context_usage: Option<crate::ContextUsage>,
     #[serde(default)]
-    #[schemars(with = "Option<std::collections::BTreeMap<String, serde_json::Value>>", extend("x-kotlin-type" = "ChatWakeup"))]
     #[ts(optional = nullable)]
-    #[ts(type = "import('../../chats').ChatWakeup | null")]
-    pub wakeup: Option<serde_json::Value>,
+    pub wakeup: Option<crate::ChatWakeup>,
     #[serde(default)]
     #[ts(optional = nullable)]
     pub chat_execution: Option<crate::ChatExecution>,

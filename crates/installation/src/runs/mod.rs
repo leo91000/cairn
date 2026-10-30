@@ -38,6 +38,7 @@ pub const RUN_FIELDS: &[&str] = &[
     "requestedBy",
     "retry",
     "snapshot",
+    "wakeup",
 ];
 
 // One projection of lifecycle columns; the full and summary views share it.
@@ -135,6 +136,7 @@ pub(crate) struct RunRecord {
     pub state: RunState,
     pub snapshot: Option<String>,
     pub boundary: Value,
+    pub wakeup: Option<cairn_contracts::ChatWakeup>,
 }
 
 impl RunRecord {
@@ -150,6 +152,7 @@ impl RunRecord {
             .map(serde_json::from_str)
             .transpose()?
             .unwrap_or(Value::Null);
+        value["wakeup"] = serde_json::to_value(self.wakeup)?;
         Ok(value)
     }
 }
@@ -223,6 +226,7 @@ fn state_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunState> {
 fn record_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunRecord> {
     let boundary: String = row.get(30)?;
     Ok(RunRecord {
+        wakeup: None,
         state: state_row(row)?,
         snapshot: row.get(29)?,
         boundary: serde_json::from_str(&boundary).map_err(|error| {
@@ -260,20 +264,71 @@ impl Db<'_> {
     }
 
     pub(crate) fn run_record(&self, id: &str) -> Result<Option<RunRecord>> {
-        Ok(self
+        if self.0.is_autocommit() {
+            let tx = rusqlite::Transaction::new_unchecked(
+                self.0,
+                rusqlite::TransactionBehavior::Deferred,
+            )?;
+            let result = Db(&tx).run_record(id)?;
+            tx.commit()?;
+            return Ok(result);
+        }
+        let mut record = self
             .0
             .prepare_cached(&format!(
                 "SELECT {STATE_COLUMNS},snapshot,boundary FROM runs WHERE id=?"
             ))?
             .query_row([id], record_row)
-            .optional()?)
+            .optional()?;
+        if let Some(record) = &mut record {
+            record.wakeup = self.wakeup(false, id)?;
+        }
+        Ok(record)
+    }
+
+    /// Conversation cards need lifecycle/display fields, never the frozen prompt,
+    /// skill sources or other execution inputs in the snapshot.
+    pub(crate) fn conversation_run(&self, id: &str) -> Result<Option<Value>> {
+        Ok(self.json_rows(
+            "SELECT json_object(
+                'id',id, 'status',status, 'finishedAt',finished_at,
+                'sessionId',session_id, 'workspaceCleanedAt',workspace_cleaned_at,
+                'recoveryPending',json(CASE WHEN recovery_pending THEN 'true' ELSE 'false' END),
+                'accountWaitReason',account_wait_reason, 'accountRequired',account_required,
+                'snapshot',json_object('agent',json_object('provider',provider)),
+                'contextUsage',json(boundary -> '$.contextUsage'),
+                'suspendedByExclusive',json(boundary -> '$.suspendedByExclusive'),
+                'restoredAt',json(boundary -> '$.restoredAt'),
+                'chatExecution',json_object('operation',json_extract(boundary,'$.chatExecution.operation'))
+             ) FROM runs WHERE id=?",
+            [id],
+        )?.pop())
     }
 
     pub(crate) fn queued_run_records(&self) -> Result<Vec<RunRecord>> {
-        let mut query = self.0.prepare_cached(&format!("SELECT {STATE_COLUMNS},snapshot,boundary FROM runs WHERE status='queued' ORDER BY created_at"))?;
-        Ok(query
-            .query_map([], record_row)?
-            .collect::<rusqlite::Result<_>>()?)
+        self.run_records(RunStatus::Queued)
+    }
+
+    pub(crate) fn waiting_run_records(&self) -> Result<Vec<RunRecord>> {
+        self.run_records(RunStatus::Waiting)
+    }
+
+    fn run_records(&self, status: RunStatus) -> Result<Vec<RunRecord>> {
+        if self.0.is_autocommit() {
+            let tx = rusqlite::Transaction::new_unchecked(
+                self.0,
+                rusqlite::TransactionBehavior::Deferred,
+            )?;
+            let result = Db(&tx).run_records(status)?;
+            tx.commit()?;
+            return Ok(result);
+        }
+        let mut records=self.0.prepare_cached(&format!("SELECT {STATE_COLUMNS},snapshot,boundary FROM runs WHERE status=? ORDER BY created_at"))?.query_map([status.as_str()],record_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut wakeups = self.wakeups(false, None)?;
+        for record in &mut records {
+            record.wakeup = wakeups.remove(&record.state.id);
+        }
+        Ok(records)
     }
 
     pub fn run_snapshot(&self, id: &str) -> Result<Option<cairn_contracts::RunSnapshot>> {
@@ -352,8 +407,10 @@ impl Db<'_> {
         // transaction. A savepoint keeps scalar, snapshot and boundary writes atomic.
         self.0.execute_batch("SAVEPOINT run_transition")?;
         let before = self.0.total_changes();
+        let discarded_before = self.discarded_change_count()?;
         let result = (|| {
             let mut state = required(self.run_state(id)?, "Run not found")?;
+            let wakeup = change.wakeup.clone();
             let (snapshot, boundary) = change.apply(&mut state);
             if let Some(snapshot) = snapshot {
                 self.0.execute(
@@ -362,6 +419,9 @@ impl Db<'_> {
                 )?;
             }
             self.write_run_state(&state)?;
+            if let Some(wakeup) = wakeup {
+                self.save_wakeup(false, id, wakeup.as_ref())?;
+            }
             if let Some(boundary) = boundary {
                 self.write_run_boundary(id, &boundary)?;
             }
@@ -375,20 +435,7 @@ impl Db<'_> {
             Err(error) => {
                 self.0
                     .execute_batch("ROLLBACK TO run_transition; RELEASE run_transition")?;
-                let discarded = self.0.total_changes() - before;
-                // Standalone Db connections have no live subscribers. Store's writer
-                // registers this connection-local counter for rolled-back rows.
-                if discarded > 0 && self.0.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM pragma_function_list WHERE name='cairn_discarded_changes')",
-                    [],
-                    |row| row.get::<_, bool>(0),
-                )? {
-                    self.0.query_row(
-                        "SELECT cairn_discarded_changes(?)",
-                        [i64::try_from(discarded).unwrap_or(i64::MAX)],
-                        |_| Ok(()),
-                    )?;
-                }
+                self.discard_savepoint_changes(before, discarded_before)?;
                 Err(error)
             }
         }

@@ -147,6 +147,21 @@ impl PartialEq<MessageStatus> for serde_json::Value {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UploadChatAttachmentInput {
+    #[serde(deserialize_with = "uuid_string")]
+    #[schemars(with = "uuid::Uuid")]
+    pub chat_id: String,
+    #[serde(deserialize_with = "uuid_string")]
+    #[schemars(with = "uuid::Uuid")]
+    pub attachment_id: String,
+    #[schemars(length(min = 1, max = 180))]
+    pub name: String,
+    #[schemars(length(max = 13981016))]
+    pub data: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatAttachment {
@@ -398,15 +413,11 @@ pub struct Chat {
     #[schemars(with = "Option<BTreeMap<String, serde_json::Value>>", extend("x-kotlin-type" = "ExclusiveReservation"))]
     #[ts(type = "import('../../nodes').ExclusiveReservation | null")]
     pub suspended_by_exclusive: Option<serde_json::Value>,
-    // A8 owns the wait and questionnaire models and their persistence.
     #[serde(default)]
-    #[schemars(with = "Option<BTreeMap<String, serde_json::Value>>", extend("x-kotlin-type" = "ChatWakeup"))]
-    #[ts(optional = nullable, type = "import('../../chats').ChatWakeup | null")]
-    pub wakeup: Option<serde_json::Value>,
+    #[ts(optional = nullable)]
+    pub wakeup: Option<ChatWakeup>,
     #[serde(default)]
-    #[schemars(with = "Vec<QuestionBoundary>")]
-    #[ts(type = "import('../../chats').ChatQuestion[]")]
-    pub questions: Vec<serde_json::Value>,
+    pub questions: Vec<ChatQuestion>,
     #[serde(default)]
     #[ts(type = "import('../../contracts').Run | null")]
     pub run: Option<Run>,
@@ -566,13 +577,6 @@ pub struct ConfirmChatInput {
     #[serde(default)]
     pub confirm: bool,
 }
-
-/// Temporary A8 questionnaire adapter, removed by that domain's conversion.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(transparent)]
-#[schemars(inline, with = "BTreeMap<String, serde_json::Value>", extend("x-kotlin-type" = "ChatQuestion"))]
-#[ts(type = "import('../../chats').ChatQuestion")]
-pub struct QuestionBoundary(pub serde_json::Value);
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -858,6 +862,13 @@ mod tests {
             "../../../tests/fixtures/conversation-contracts.json"
         ))
         .unwrap();
+        for value in corpus["uploads"].as_array().unwrap() {
+            let upload: UploadChatAttachmentInput = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(upload).unwrap(), *value);
+        }
+        for value in corpus["invalidUploads"].as_array().unwrap() {
+            assert!(serde_json::from_value::<UploadChatAttachmentInput>(value.clone()).is_err());
+        }
         for value in corpus["creates"].as_array().unwrap() {
             serde_json::from_value::<CreateChatInput>(value.clone()).unwrap();
         }
@@ -934,4 +945,19 @@ pub enum ConversationStatus {
     Failed,
     Cancelled,
     Interrupted,
+}
+
+impl ConversationStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Waiting => "waiting",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Interrupted => "interrupted",
+        }
+    }
 }
