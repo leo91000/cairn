@@ -725,7 +725,7 @@ mod tests {
         );
         // If the durable attempt loses its terminal evidence while settlement
         // waits, finish_recovery must retain its newly paid reservation.
-        for new_turn in [false, true] {
+        for existing_reservation in [false, true] {
             let retry_id = crate::config::id();
             let run = json!({ "id": retry_id, "taskId": retry_id, "status": "running" });
             service
@@ -756,7 +756,10 @@ mod tests {
                         let mut current = RunCheckpoint::load_in(db, &changed_id)?.unwrap();
                         current.completed = Some(false);
                         current.terminal_code = Some(None);
-                        current.turn_pending = Some(new_turn);
+                        if existing_reservation {
+                            current.controller_recoveries = Some(1);
+                            current.controller_recovery_reservation = Some("attempt".into());
+                        }
                         current.store_in(db, &changed_id)
                     })
                     .await
@@ -783,8 +786,8 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            assert_eq!(paid.controller_recoveries(), if new_turn { 0 } else { 1 });
-            assert_eq!(paid.has_controller_recovery_reservation(), !new_turn);
+            assert_eq!(paid.controller_recoveries(), 1);
+            assert!(paid.has_controller_recovery_reservation());
             assert_eq!(
                 paid.administrative_pause_observation.unwrap().total_ms,
                 30_000
