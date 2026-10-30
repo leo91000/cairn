@@ -446,11 +446,64 @@ async fn a8_continuation_storage_layouts() {
     measure(&values);
 }
 
+// Frozen v15 typed decoder, including the historical string-list variant.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(untagged)]
+enum PreviousMessageAnswer {
+    Legacy(Vec<String>),
+    Current {
+        #[serde(default)]
+        selected: Vec<String>,
+        #[serde(default)]
+        comment: String,
+    },
+}
+
+type CurrentAnswers = std::collections::BTreeMap<String, cairn_installation::chats::MessageAnswer>;
+
+type PreviousAnswers = std::collections::BTreeMap<String, PreviousMessageAnswer>;
+
+#[derive(Debug, Clone)]
 enum AnswerSample {
-    Current(std::collections::BTreeMap<String, cairn_contracts::QuestionAnswer>),
-    Previous(Value),
+    Prepared {
+        current: CurrentAnswers,
+        previous: PreviousAnswers,
+    },
+    Current(CurrentAnswers),
+    Previous(PreviousAnswers),
+}
+
+impl AnswerSample {
+    fn current(&self) -> &CurrentAnswers {
+        match self {
+            Self::Prepared { current, .. } | Self::Current(current) => current,
+            _ => panic!("prepared typed writer"),
+        }
+    }
+
+    fn previous(&self) -> &PreviousAnswers {
+        match self {
+            Self::Prepared { previous, .. } | Self::Previous(previous) => previous,
+            _ => panic!("prepared frozen writer"),
+        }
+    }
+}
+
+impl serde::Serialize for AnswerSample {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Prepared { current, .. } | Self::Current(current) => {
+                current.serialize(serializer)
+            }
+            Self::Previous(previous) => previous.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for AnswerSample {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        PreviousAnswers::deserialize(deserializer).map(Self::Previous)
+    }
 }
 
 impl PartialEq for AnswerSample {
@@ -558,9 +611,7 @@ impl StorageEntity for PrivateAnswer {
     }
 
     fn write(&self, db: &Db<'_>, _: bool) {
-        let AnswerSample::Current(answers) = &self.answers else {
-            panic!("typed writer")
-        };
+        let answers = self.answers.current();
         let message = cairn_installation::chats::Message {
             content: cairn_contracts::ChatMessage {
                 id: self.id.clone(),
@@ -584,7 +635,7 @@ impl StorageEntity for PrivateAnswer {
     }
 
     fn reference_schema(db: &Connection) {
-        db.execute_batch("DROP TABLE question_answer_choices; DROP TABLE question_answers; DROP TABLE question_answer_deliveries; ALTER TABLE chat_messages ADD COLUMN answers TEXT CHECK(answers IS NULL OR json_valid(answers));").unwrap();
+        db.execute_batch("DROP TABLE question_legacy_answer_items; DROP TABLE question_answer_choices; DROP TABLE question_answers; DROP TABLE question_answer_deliveries; ALTER TABLE chat_messages ADD COLUMN answers TEXT CHECK(answers IS NULL OR json_valid(answers));").unwrap();
     }
 
     fn reference_read(db: &Db<'_>, id: &str) -> Self {
@@ -598,7 +649,7 @@ impl StorageEntity for PrivateAnswer {
     fn reference_write(&self, db: &Db<'_>, _: bool) {
         db.0.execute_batch("SAVEPOINT conversation_message")
             .unwrap();
-        db.0.prepare_cached("INSERT INTO chat_messages(id,chat_id,revision,text,provider,model,reasoning,speed,mode,status,created_at,question_id,answers) VALUES(?,?,?,?,'codex','model','high','','queue','queued',1700000000000,'question',?) ON CONFLICT(id) DO UPDATE SET text=excluded.text,answers=excluded.answers,revision=excluded.revision").unwrap().execute(params![self.id,CHAT,cairn_installation::config::id(),self.text,serde_json::to_string(&self.answers).unwrap()]).unwrap();
+        db.0.prepare_cached("INSERT INTO chat_messages(id,chat_id,revision,text,provider,model,reasoning,speed,mode,status,created_at,question_id,answers) VALUES(?,?,?,?,'codex','model','high','','queue','queued',1700000000000,'question',?) ON CONFLICT(id) DO UPDATE SET text=excluded.text,answers=excluded.answers,revision=excluded.revision").unwrap().execute(params![self.id,CHAT,cairn_installation::config::id(),self.text,serde_json::to_string(self.answers.previous()).unwrap()]).unwrap();
         db.0.execute(
             "DELETE FROM message_attachments WHERE message_id=?",
             [&self.id],
@@ -621,9 +672,23 @@ async fn a8_private_answer_storage_layouts() {
                 .map(|f| {
                     (
                         format!("field-{f}"),
-                        cairn_contracts::QuestionAnswer {
-                            selected: vec!["second".into(), "first".into()],
-                            comment: "Synthetic private questionnaire answer. ".repeat(12),
+                        if n % 4 == 0 && f < 2 {
+                            cairn_installation::chats::MessageAnswer::Legacy(if f == 0 {
+                                vec![
+                                    "Synthetic historical free text. ".repeat(8),
+                                    "Second choice".into(),
+                                    "Synthetic historical free text. ".repeat(8),
+                                ]
+                            } else {
+                                vec![]
+                            })
+                        } else {
+                            cairn_installation::chats::MessageAnswer::Current(
+                                cairn_contracts::QuestionAnswer {
+                                    selected: vec!["second".into(), "first".into()],
+                                    comment: "Synthetic private questionnaire answer. ".repeat(12),
+                                },
+                            )
                         },
                     )
                 })
@@ -634,7 +699,11 @@ async fn a8_private_answer_storage_layouts() {
                     "My answers to your questions: {}",
                     serde_json::to_string(&answers).unwrap()
                 ),
-                answers: AnswerSample::Current(answers),
+                answers: AnswerSample::Prepared {
+                    previous: serde_json::from_value(serde_json::to_value(&answers).unwrap())
+                        .unwrap(),
+                    current: answers,
+                },
             }
         })
         .collect::<Vec<_>>();

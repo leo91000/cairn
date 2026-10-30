@@ -398,3 +398,39 @@ async fn nested_failed_wait_does_not_hide_a_subsequent_committed_notification() 
         1
     );
 }
+
+#[test]
+fn malformed_v15_answer_lists_roll_back_all_data_and_retry_without_private_diagnostics() {
+    use serde_json::json;
+    for malformed in [
+        json!(["synthetic-private", 1]),
+        json!([["synthetic-private"]]),
+        json!({"selected":[1],"comment":"synthetic-private"}),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let db = previous(root.path());
+        db.execute(
+            "UPDATE chat_messages SET answers=? WHERE answers IS NOT NULL",
+            [json!({"field":malformed}).to_string()],
+        )
+        .unwrap();
+        let before = snapshot(&db);
+        let error = Store::open(root.path()).err().unwrap();
+        assert!(!error.message.contains("synthetic-private"));
+        assert_eq!(snapshot(&db), before);
+        assert_eq!(
+            db.pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .unwrap(),
+            15
+        );
+        db.execute(
+            "UPDATE chat_messages SET answers=? WHERE answers IS NOT NULL",
+            [
+                json!({"field":["synthetic-private","second","synthetic-private"],"empty":[]})
+                    .to_string(),
+            ],
+        )
+        .unwrap();
+        drop(Store::open(root.path()).unwrap());
+    }
+}

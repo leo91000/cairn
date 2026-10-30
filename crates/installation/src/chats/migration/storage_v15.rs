@@ -98,11 +98,15 @@ pub struct MessageV15 {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct MessageAnswer {
-    #[serde(default)]
-    pub selected: Vec<String>,
-    #[serde(default)]
-    pub comment: String,
+#[serde(untagged)]
+pub enum MessageAnswer {
+    Legacy(Vec<String>),
+    Current {
+        #[serde(default)]
+        selected: Vec<String>,
+        #[serde(default)]
+        comment: String,
+    },
 }
 
 pub(super) fn save_conversation(

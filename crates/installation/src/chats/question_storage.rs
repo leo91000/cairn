@@ -1,13 +1,14 @@
 //! Questionnaire SQL; answer material is owned separately from public message views.
+use super::storage::MessageAnswer;
 use crate::{
     error::{Error, Result},
     store::Db,
 };
 use cairn_contracts::{ChatQuestion, QuestionField, QuestionOption, QuestionStatus};
 use rusqlite::params;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
-type AnswersByMessage = HashMap<String, BTreeMap<String, cairn_contracts::QuestionAnswer>>;
+type AnswersByMessage = HashMap<String, BTreeMap<String, MessageAnswer>>;
 
 pub(crate) const SCHEMA: &str = "
 CREATE TABLE chat_questions(
@@ -57,7 +58,10 @@ CREATE TABLE question_options(
 CREATE TABLE question_answers(
     message_id TEXT NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
     field_id TEXT NOT NULL,
-    comment TEXT NOT NULL CHECK(length(comment)<=10000),
+    kind TEXT NOT NULL CHECK(kind IN ('current','legacy')),
+    comment TEXT,
+    CHECK((kind='current' AND comment IS NOT NULL AND length(comment)<=10000)
+       OR (kind='legacy' AND comment IS NULL)),
     PRIMARY KEY(message_id,field_id)
 ) WITHOUT ROWID;
 CREATE TABLE question_answer_choices(
@@ -68,9 +72,20 @@ CREATE TABLE question_answer_choices(
     PRIMARY KEY(message_id,field_id,position),
     FOREIGN KEY(message_id,field_id) REFERENCES question_answers(message_id,field_id) ON DELETE CASCADE
 ) WITHOUT ROWID;
+-- Retired responses mixed selections and free text in one string list. Keep
+-- that list separately instead of inventing current choice/comment identities.
+CREATE TABLE question_legacy_answer_items(
+    message_id TEXT NOT NULL,
+    field_id TEXT NOT NULL,
+    position INTEGER NOT NULL CHECK(position>=0),
+    text TEXT NOT NULL,
+    PRIMARY KEY(message_id,field_id,position),
+    FOREIGN KEY(message_id,field_id) REFERENCES question_answers(message_id,field_id) ON DELETE CASCADE
+) WITHOUT ROWID;
 CREATE TABLE question_answer_deliveries(
     message_id TEXT PRIMARY KEY NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
-    text TEXT NOT NULL
+    text TEXT NOT NULL,
+    private INTEGER NOT NULL CHECK(private IN (0,1))
 ) WITHOUT ROWID;
 ";
 
@@ -106,6 +121,11 @@ fn question_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatQuestion> {
 }
 
 impl Db<'_> {
+    pub(super) fn private_answer_message(&self, message: &str) -> Result<bool> {
+        Ok(self.0.prepare_cached("SELECT EXISTS(SELECT 1 FROM question_answer_deliveries WHERE message_id=? AND private=1)")?
+            .query_row([message], |row| row.get(0))?)
+    }
+
     pub fn questions(&self, chat: &str) -> Result<Vec<ChatQuestion>> {
         self.load_questions(chat)
     }
@@ -309,6 +329,13 @@ impl Db<'_> {
 }
 
 impl Db<'_> {
+    /// Visibility belongs to the saved reply, even after a definition expires,
+    /// is purged, or its request identifier is reused for another question.
+    pub(super) fn private_answer_messages(&self, chat: &str) -> Result<HashSet<String>> {
+        Ok(self.0.prepare_cached("SELECT d.message_id FROM question_answer_deliveries d JOIN chat_messages m ON m.id=d.message_id WHERE m.chat_id=? AND d.private=1")?
+            .query_map([chat], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub(super) fn message_answers(
         &self,
         chat: &str,
@@ -319,45 +346,73 @@ impl Db<'_> {
         } else {
             "m.chat_id=?1 AND ?2 IS NULL"
         };
-        let deliveries=self.0.prepare_cached(&format!("SELECT d.message_id,d.text FROM question_answer_deliveries d JOIN chat_messages m ON m.id=d.message_id WHERE {filter}"))?
+        let deliveries = self.0.prepare_cached(&format!("SELECT d.message_id,d.text FROM question_answer_deliveries d JOIN chat_messages m ON m.id=d.message_id WHERE {filter}"))?
             .query_map(params![chat,message],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<HashMap<_,_>>>()?;
-        let mut answers = deliveries
-            .keys()
-            .map(|id| {
-                (
-                    id.clone(),
-                    std::collections::BTreeMap::<String, cairn_contracts::QuestionAnswer>::new(),
-                )
-            })
-            .collect::<HashMap<_, _>>();
-        let mut statement=self.0.prepare_cached(&format!("SELECT a.message_id,a.field_id,a.comment FROM question_answers a JOIN chat_messages m ON m.id=a.message_id WHERE {filter}"))?;
-        for value in statement.query_map(params![chat, message], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        })? {
-            let (message, field, comment) = value?;
-            answers.entry(message).or_default().insert(
-                field,
-                cairn_contracts::QuestionAnswer {
-                    selected: Vec::new(),
-                    comment,
-                },
-            );
+        if deliveries.is_empty() {
+            return Ok((HashMap::new(), deliveries));
         }
-        let mut statement=self.0.prepare_cached(&format!("SELECT c.message_id,c.field_id,c.option_id FROM question_answer_choices c JOIN chat_messages m ON m.id=c.message_id WHERE {filter} ORDER BY c.message_id,c.field_id,c.position"))?;
-        for value in statement.query_map(params![chat, message], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-            ))
+
+        let mut answers: AnswersByMessage = deliveries
+            .keys()
+            .map(|id| (id.clone(), BTreeMap::new()))
+            .collect();
+        let mut has_current = false;
+        let mut has_legacy = false;
+        let mut statement = self.0.prepare_cached(&format!("SELECT a.message_id,a.field_id,a.kind,a.comment FROM question_answers a JOIN chat_messages m ON m.id=a.message_id WHERE {filter}"))?;
+        for value in statement.query_map(params![chat, message], |row| {
+            let kind: String = row.get(2)?;
+            let answer = match kind.as_str() {
+                "current" => MessageAnswer::Current(cairn_contracts::QuestionAnswer {
+                    selected: Vec::new(),
+                    comment: row.get(3)?,
+                }),
+                "legacy" => MessageAnswer::Legacy(Vec::new()),
+                _ => return Err(rusqlite::Error::InvalidQuery),
+            };
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, answer))
         })? {
-            let (message, field, option) = value?;
-            if let Some(answer) = answers.get_mut(&message).and_then(|a| a.get_mut(&field)) {
+            let (message, field, answer) = value?;
+            has_current |= matches!(&answer, MessageAnswer::Current(_));
+            has_legacy |= matches!(&answer, MessageAnswer::Legacy(_));
+            answers.entry(message).or_default().insert(field, answer);
+        }
+
+        if has_current {
+            let mut statement = self.0.prepare_cached(&format!("SELECT c.message_id,c.field_id,c.option_id FROM question_answer_choices c JOIN chat_messages m ON m.id=c.message_id WHERE {filter} ORDER BY c.message_id,c.field_id,c.position"))?;
+            for value in statement.query_map(params![chat, message], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })? {
+                let (message, field, option) = value?;
+                let Some(MessageAnswer::Current(answer)) = answers
+                    .get_mut(&message)
+                    .and_then(|fields| fields.get_mut(&field))
+                else {
+                    return Err(rusqlite::Error::InvalidQuery.into());
+                };
                 answer.selected.push(option);
+            }
+        }
+        if has_legacy {
+            let mut statement = self.0.prepare_cached(&format!("SELECT a.message_id,a.field_id,a.text FROM question_legacy_answer_items a JOIN chat_messages m ON m.id=a.message_id WHERE {filter} ORDER BY a.message_id,a.field_id,a.position"))?;
+            for value in statement.query_map(params![chat, message], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })? {
+                let (message, field, text) = value?;
+                let Some(MessageAnswer::Legacy(items)) = answers
+                    .get_mut(&message)
+                    .and_then(|fields| fields.get_mut(&field))
+                else {
+                    return Err(rusqlite::Error::InvalidQuery.into());
+                };
+                items.push(text);
             }
         }
         Ok((answers, deliveries))
@@ -366,9 +421,17 @@ impl Db<'_> {
     pub(super) fn save_message_answers(
         &self,
         message: &str,
-        answers: Option<&std::collections::BTreeMap<String, cairn_contracts::QuestionAnswer>>,
+        answers: Option<&BTreeMap<String, MessageAnswer>>,
         text: &str,
     ) -> Result<()> {
+        // Preserve a reply's original classification across rewrites. Missing
+        // historical definitions cannot authorize revealing delivery material.
+        let private = if answers.is_some() {
+            self.0.prepare_cached("SELECT COALESCE((SELECT private FROM question_answer_deliveries WHERE message_id=?1), (SELECT CASE WHEN q.id IS NULL OR NOT EXISTS(SELECT 1 FROM question_fields f WHERE f.question_key=q.key) THEN 1 ELSE EXISTS(SELECT 1 FROM question_fields f WHERE f.question_key=q.key AND f.secret=1) END FROM chat_messages m LEFT JOIN chat_questions q ON q.id=m.question_id AND q.chat_id=m.chat_id WHERE m.id=?1))")?
+                .query_row([message], |row| row.get::<_, bool>(0))?
+        } else {
+            false
+        };
         self.0
             .execute("DELETE FROM question_answers WHERE message_id=?", [message])?;
         self.0.execute(
@@ -379,19 +442,35 @@ impl Db<'_> {
             return Ok(());
         };
         self.0.execute(
-            "INSERT INTO question_answer_deliveries VALUES(?,?)",
-            params![message, text],
+            "INSERT INTO question_answer_deliveries VALUES(?,?,?)",
+            params![message, text, private],
         )?;
         for (field, answer) in answers {
+            let (kind, comment) = match answer {
+                MessageAnswer::Current(answer) => ("current", Some(answer.comment.as_str())),
+                MessageAnswer::Legacy(_) => ("legacy", None),
+            };
             self.0.execute(
-                "INSERT INTO question_answers VALUES(?,?,?)",
-                params![message, field, answer.comment],
+                "INSERT INTO question_answers VALUES(?,?,?,?)",
+                params![message, field, kind, comment],
             )?;
-            for (position, option) in answer.selected.iter().enumerate() {
-                self.0.execute(
-                    "INSERT INTO question_answer_choices VALUES(?,?,?,?)",
-                    params![message, field, position as i64, option],
-                )?;
+            match answer {
+                MessageAnswer::Current(answer) => {
+                    for (position, option) in answer.selected.iter().enumerate() {
+                        self.0.execute(
+                            "INSERT INTO question_answer_choices VALUES(?,?,?,?)",
+                            params![message, field, position as i64, option],
+                        )?;
+                    }
+                }
+                MessageAnswer::Legacy(items) => {
+                    for (position, text) in items.iter().enumerate() {
+                        self.0.execute(
+                            "INSERT INTO question_legacy_answer_items VALUES(?,?,?,?)",
+                            params![message, field, position as i64, text],
+                        )?;
+                    }
+                }
             }
         }
         Ok(())

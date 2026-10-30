@@ -9,9 +9,13 @@ Question definitions move from `chat-question:*` keys into `chat_questions`,
 ordered `question_fields` and `question_options`. Their integer relation keys
 avoid repeating the external question digest in every field/option row. Answer selections, comments and
 private delivery text move from message payloads into `question_answers`,
-`question_answer_choices` and `question_answer_deliveries`. Public message headers
+`question_answer_choices` and `question_answer_deliveries`. Historical string-list
+answers retain an explicit legacy kind and ordered `question_legacy_answer_items`,
+including duplicates, empty lists and free text, without guessing selections or comments. Public message headers
 contain a placeholder; the internal delivery reader reconstructs the original
-text. Question, field, option and message identities and ordering remain intact.
+text. A private sensitivity snapshot belongs to each reply, survives rewrites and
+expired/purged/reused definitions, and defaults to private when its historical
+definition is unavailable. Known non-private replies retain their visibility. Question, field, option and message identities and ordering remain intact.
 Opaque retired engine extensions and any previous expiry are retained privately
 in `question_import_metadata`; they never supply current definitions. Expired
 questions remain expired. The `kv` constraint rejects the removed question path.

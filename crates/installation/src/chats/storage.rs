@@ -87,8 +87,8 @@ pub struct Conversation {
     pub account_id: Option<String>,
 }
 
-/// A8 still owns questionnaire delivery and answer validation. Its temporary
-/// payload is local to this boundary, never an open message decision document.
+/// Private answer material is reconstructed from the questionnaire tables.
+/// Public message views never expose this delivery representation.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Message {
@@ -106,7 +106,6 @@ pub enum MessageAnswer {
     Legacy(Vec<String>),
     Current(cairn_contracts::QuestionAnswer),
 }
-
 
 impl std::ops::Deref for Message {
     type Target = ChatMessage;

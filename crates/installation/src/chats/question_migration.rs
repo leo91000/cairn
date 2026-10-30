@@ -19,7 +19,6 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
     tx.execute_batch(super::question_storage::SCHEMA)?;
     tx.execute_batch(crate::waits::sql::SCHEMA)?;
     migrate_waits_and_lineage(&tx)?;
-    migrate_answers(&tx)?;
     migrate_wait_snapshots(&tx)?;
     let rows = tx
         .prepare("SELECT key,data,expires FROM kv WHERE key LIKE 'chat-question:%' ORDER BY key")?
@@ -98,6 +97,8 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
             )?;
         }
     }
+    // Definitions supply the initial sensitivity snapshot for historical replies.
+    migrate_answers(&tx)?;
     tx.execute_batch("CREATE TABLE kv_v16(key TEXT PRIMARY KEY CHECK(key NOT LIKE 'run-checkpoint:%' AND key NOT LIKE 'chat-coding-agent:%' AND key NOT LIKE 'chat-coding-agent-request:%' AND key NOT LIKE 'chat-question:%' AND key!='conversation-expiration'),data TEXT NOT NULL,expires INTEGER);
 INSERT INTO kv_v16 SELECT * FROM kv WHERE key NOT LIKE 'chat-question:%';
 DROP TABLE kv;
@@ -270,7 +271,7 @@ fn migrate_answers(tx: &Connection) -> Result<()> {
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for (id, text, answers) in rows {
-        let answers: std::collections::BTreeMap<String, cairn_contracts::QuestionAnswer> =
+        let answers: std::collections::BTreeMap<String, super::storage::MessageAnswer> =
             serde_json::from_str(&answers).map_err(|_| invalid())?;
         Db(tx)
             .save_message_answers(&id, Some(&answers), &text)

@@ -30,7 +30,7 @@ use rusqlite::OptionalExtension;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::HashSet;
-pub use storage::{Conversation, Message};
+pub use storage::{Conversation, Message, MessageAnswer};
 
 pub mod engine_switch;
 pub(crate) mod migration;
@@ -486,14 +486,10 @@ pub(crate) fn public_stream_detail(db: &Db<'_>, id: &str, window: bool) -> Resul
         return Ok(result);
     }
     let mut result = detail_messages(db, id, window)?;
-    let private = serde_json::from_value::<Vec<Question>>(result["questions"].clone())?
-        .into_iter()
-        .filter(Question::is_private)
-        .map(|question| question.id)
-        .collect::<HashSet<_>>();
+    let private = db.private_answer_messages(id)?;
     if let Some(messages) = result["messages"].as_array_mut() {
         for message in messages {
-            if message["questionId"]
+            if message["id"]
                 .as_str()
                 .is_some_and(|id| private.contains(id))
             {
@@ -833,11 +829,10 @@ fn acknowledge(db: &Db<'_>, run_id: &str, message_id: &str) -> Result<()> {
     }
     message.status = MessageStatus::Delivered;
     db.save_message(&message)?;
-    let mut private = false;
+    let private = db.private_answer_message(message_id)?;
     if let Some(question_id) = message.question_id.as_deref()
         && let Some(mut question) = find_question(db, &chat_id, question_id)?
     {
-        private = question.is_private();
         question.blocking = false;
         question.status = QuestionStatus::Answered;
         save_question(db, &question)?;
