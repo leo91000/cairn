@@ -10,7 +10,6 @@ export const suites = {
   contracts: [
     ['pnpm', 'check:contracts'],
     ['apps/android/gradlew', '-p', 'scripts/contracts-kotlin', 'spotlessCheck', 'test', '--no-daemon'],
-    ['node', '--import', 'tsx', 'scripts/backend-schemas.mjs'],
     ['git', 'diff', '--exit-code', '--', 'crates/installation/schemas/'],
   ],
   rust: [['cargo', 'clippy', '--locked', '--workspace', '--all-targets', '--', '-D', 'warnings']],

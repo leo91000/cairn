@@ -50,6 +50,17 @@ fn fill_snapshot(target: &mut Value, input: &Value) {
     }
 }
 
+/// Complete a deliberately abbreviated continuation fixture through the typed API.
+/// Existing explicit values (including invalid ones) remain untouched.
+pub fn complete_wakeup_fixture(input: &Value) -> cairn_contracts::ChatWakeup {
+    let mut value = serde_json::json!({
+        "id": "fixture-wait", "messageId": null, "reason": "Fixture continuation",
+        "seconds": 3600, "createdAt": 0, "wakeAt": 3600000,
+    });
+    fill_snapshot(&mut value, input);
+    serde_json::from_value(value).unwrap()
+}
+
 pub trait DbRunFixture {
     /// JSON assertions in other-domain tests adapt the typed current event page.
     fn events_fixture(&self, run: &str, after: i64, limit: i64) -> Result<Vec<Value>>;
@@ -67,6 +78,10 @@ impl DbRunFixture for Db<'_> {
 
     fn add_run_fixture(&self, input: &Value, dedupe: Option<&str>) -> Result<Value> {
         let state: RunState = serde_json::from_value(input.clone())?;
+        let wakeup = input
+            .get("wakeup")
+            .filter(|v| v.is_object())
+            .map(complete_wakeup_fixture);
         let mut payload = input.clone();
         for key in cairn_installation::runs::RUN_FIELDS {
             if *key != "snapshot" {
@@ -79,6 +94,7 @@ impl DbRunFixture for Db<'_> {
             .remove("snapshot")
             .map(|s| complete_snapshot_fixture(&s));
         self.admit_run(&state, None, &payload, dedupe)?;
+        self.save_wakeup(false, &state.id, wakeup.as_ref())?;
         if let Some(snapshot) = snapshot {
             self.0.execute(
                 "UPDATE runs SET snapshot=? WHERE id=?",
@@ -93,6 +109,10 @@ pub fn change_run_fixture(db: &Db<'_>, id: &str, input: &Value) -> Result<Value>
     let mut current = required(db.run(id)?, "Run not found")?;
     merge(&mut current, input);
     let state: RunState = serde_json::from_value(current.clone())?;
+    let wakeup = current
+        .get("wakeup")
+        .filter(|v| v.is_object())
+        .map(complete_wakeup_fixture);
     for key in cairn_installation::runs::RUN_FIELDS {
         if *key != "snapshot" {
             current.as_object_mut().unwrap().remove(*key);
@@ -110,6 +130,7 @@ pub fn change_run_fixture(db: &Db<'_>, id: &str, input: &Value) -> Result<Value>
     db.change_run(
         id,
         RunChanges {
+            wakeup: Some(wakeup),
             task_id: Some(state.task_id),
             project_id: Some(state.project_id),
             status: Some(state.status),

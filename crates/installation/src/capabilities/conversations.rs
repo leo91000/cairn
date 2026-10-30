@@ -16,6 +16,21 @@ pub(crate) struct ChatOperation {
 
 pub(crate) const CHAT_OPERATIONS: &[ChatOperation] = &[
     ChatOperation {
+        name: "list_chat_questions",
+        scope: "read",
+        description: "List conversation questionnaires with pagination, including fields and delivery status; saved answers are never returned.",
+    },
+    ChatOperation {
+        name: "answer_chat_question",
+        scope: "run",
+        description: "Answer a pending questionnaire. Supply selected option IDs and a separate comment for every field, with a stable answer message UUID for retries.",
+    },
+    ChatOperation {
+        name: "cancel_chat_question",
+        scope: "run",
+        description: "Cancel a pending questionnaire without supplying an answer or granting permission. Management can cancel a question from any turn; workspace withdraw_question remains limited to its own run.",
+    },
+    ChatOperation {
         name: "get_conversation_retention",
         scope: "read",
         description: "Read the installation inactivity policy. Default 7 days; 0 disables automatic environment expiration. Conversations, uploaded attachments, published artifact versions and public links are retained.",
@@ -124,6 +139,19 @@ pub(crate) fn chat_operation(name: &str) -> Option<&'static ChatOperation> {
 impl ChatOperation {
     pub(crate) fn descriptor(&self) -> Value {
         let (input, output) = match self.name {
+            "list_chat_questions" => (
+                schema_for::<GetChatInput>(Contract::Deserialize),
+                schema_for::<ListChatQuestionsOutput>(Contract::Serialize),
+            ),
+            "answer_chat_question" => (
+                schema_for::<AnswerChatQuestionInput>(Contract::Deserialize),
+                schema_for::<ChatQuestion>(Contract::Serialize),
+            ),
+            "cancel_chat_question" => (
+                schema_for::<ChatQuestionInput>(Contract::Deserialize),
+                schema_for::<ChatQuestion>(Contract::Serialize),
+            ),
+
             "get_conversation_retention" => (
                 schema_for::<GetConversationRetentionInput>(Contract::Deserialize),
                 schema_for::<ConversationRetention>(Contract::Serialize),
@@ -250,6 +278,29 @@ impl ChatOperation {
             }
         };
         let args = match self.name {
+            "list_chat_questions" => {
+                let input: GetChatInput = decode(input)?;
+                if !(1..=100).contains(&input.limit) {
+                    return Err(Error::bad("Choose a limit from 1 to 100."));
+                }
+                serde_json::to_value(input)?
+            }
+            "answer_chat_question" => {
+                let mut input: AnswerChatQuestionInput = decode(input)?;
+                input.answer.validate().map_err(Error::bad)?;
+                if input.question_id.is_empty() || input.question_id.chars().count() > 200 {
+                    return Err(Error::bad("Invalid question identity."));
+                }
+                serde_json::to_value(input)?
+            }
+            "cancel_chat_question" => {
+                let input: ChatQuestionInput = decode(input)?;
+                if input.question_id.is_empty() || input.question_id.chars().count() > 200 {
+                    return Err(Error::bad("Invalid question identity."));
+                }
+                serde_json::to_value(input)?
+            }
+
             "get_conversation_retention" => {
                 let _: GetConversationRetentionInput = decode(input)?;
                 json!({})

@@ -1,5 +1,6 @@
 //! Version-14 input only; current conversations never fall back to JSON records.
-use super::{Conversation, Message};
+mod storage_v15;
+
 use crate::{
     config::id,
     error::{Error, Result},
@@ -7,11 +8,12 @@ use crate::{
 };
 use rusqlite::{Connection, TransactionBehavior, params};
 use serde::Deserialize;
+use storage_v15::{ConversationV15 as Conversation, MessageV15 as Message};
 
 pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if matches!(version, 15 | 16) {
+    if matches!(version, 15..=17) {
         return Ok(());
     }
     if version != 14 {
@@ -23,7 +25,7 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
     tx.execute_batch(
         "ALTER TABLE chat_messages RENAME TO chat_messages_v14; DROP INDEX chat_messages_chat;",
     )?;
-    tx.execute_batch(super::storage::SCHEMA)?;
+    tx.execute_batch(include_str!("migration/schema-v15.sql"))?;
     tx.execute_batch(super::engine_switch::SCHEMA)?;
     let conversations = tx
         .prepare("SELECT id,data,updated_at FROM records WHERE kind='chats' ORDER BY id")?
@@ -44,7 +46,7 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
         if conversation.revision.is_empty() {
             conversation.revision = id();
         }
-        Db(&tx).save_conversation(&conversation)?;
+        storage_v15::save_conversation(&Db(&tx), &conversation)?;
         tx.execute(
             "UPDATE conversations SET slug=?,revision=?,persisted_at=? WHERE id=?",
             params![slug, conversation.revision, persisted_at, key],
@@ -71,7 +73,7 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
         if message.revision.is_empty() {
             message.revision = id();
         }
-        Db(&tx).save_message(&message)?;
+        storage_v15::save_message(&Db(&tx), &message)?;
         tx.execute(
             "UPDATE chat_messages SET revision=? WHERE id=?",
             params![message.revision, key],
@@ -113,28 +115,23 @@ ALTER TABLE kv_v15 RENAME TO kv;")?;
     Ok(())
 }
 
-/// Version 15 → 16: queued plan requests keep their plan flag. A version-14
-/// upgrade already creates the current message table, which has the column.
+/// Version 16 → 17: queued plan requests and plan-turn questions keep their plan flag.
 pub(crate) fn plan_requests(connection: &mut Connection) -> Result<()> {
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version == 16 {
+    if version == 17 {
         return Ok(());
     }
-    if version != 15 {
+    if version != 16 {
         return Err(Error::bad(
             "Unexpected installation database version during plan request upgrade.",
         ));
     }
-    let present = tx
-        .prepare("SELECT 1 FROM pragma_table_info('chat_messages') WHERE name='plan'")?
-        .exists([])?;
-    if !present {
-        tx.execute_batch(
-            "ALTER TABLE chat_messages ADD COLUMN plan INTEGER NOT NULL DEFAULT 0 CHECK(plan IN (0,1));",
-        )?;
-    }
-    tx.pragma_update(None, "user_version", 16)?;
+    tx.execute_batch(
+        "ALTER TABLE chat_messages ADD COLUMN plan INTEGER NOT NULL DEFAULT 0 CHECK(plan IN (0,1));
+ALTER TABLE chat_questions ADD COLUMN plan INTEGER NOT NULL DEFAULT 0 CHECK(plan IN (0,1));",
+    )?;
+    tx.pragma_update(None, "user_version", 17)?;
     tx.commit()?;
     Ok(())
 }

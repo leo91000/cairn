@@ -934,9 +934,6 @@ pub(crate) async fn invoke(
         | "list_chat_attachments"
         | "read_chat_attachment"
         | "upload_chat_attachment" => chat_files::invoke(s, name, args, bearer).await,
-        "list_chat_questions" | "answer_chat_question" | "withdraw_chat_question" => {
-            chat_tools::invoke(s, name, args, bearer).await
-        }
         "list_skills" | "read_skill" | "save_skill" | "edit_skill_files" => {
             skills_tool(s, name, &args, bearer).await
         }

@@ -7,7 +7,8 @@ const CHAT: &str = "00000000-0000-4000-8000-000000000001";
 // Exact affected version-14 DDL from 57855b96, the last pre-A7 main. Other
 // domain tables retain their current schemas, matching the inventory migration's fixture.
 pub(crate) fn version14(db: &Connection) {
-    db.execute_batch("DROP TABLE conversation_engine_switches; DROP TABLE message_attachments; DROP TABLE chat_messages; DROP TABLE conversations; DROP TABLE conversation_retention;
+    db.execute_batch("DROP TABLE question_legacy_answer_items; DROP TABLE question_answer_choices; DROP TABLE question_answers; DROP TABLE question_answer_deliveries; DROP TABLE question_options; DROP TABLE question_fields; DROP TABLE question_import_metadata; DROP TABLE chat_questions; DROP TABLE wait_conditions; DROP TABLE durable_wakeups; DROP TABLE conversation_lineage;
+DROP TABLE conversation_engine_switches; DROP TABLE message_attachments; DROP TABLE chat_messages; DROP TABLE conversations; DROP TABLE conversation_retention;
 DROP TABLE records;
 CREATE TABLE records(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind NOT IN ('agentAccounts','nodes','projects','agents','tasks','mcps','plugin-connections','plugin-packages','plugin-requests','plugin-activity','plugin-timers','plugin-events','plugin-deliveries','plugin-storage','plugin-http-receipts')),data TEXT NOT NULL,updated_at INTEGER NOT NULL);
 CREATE INDEX records_kind ON records(kind,updated_at DESC);
@@ -50,7 +51,7 @@ fn conversation() -> Value {
         "nativePrincipals":["second","first"],"nativeAuthorityNodes":["node-b","node-a"],
         "nativeParentRunId":"parent-run","nativeParentAccess":"owner-proof",
         "nativeProvenanceUnknown":false,"nativePluginGrants":[],
-        "wakeup":{"kind":"delay","privateState":"retained"},
+        "wakeup":{"id":"retained-wait","messageId":null,"reason":"Retained delay","seconds":60,"createdAt":51,"wakeAt":60051},
         "environmentState":"cleaning","environmentExpiredAt":60,"environmentRetryAfter":65,
         "environmentError":"retry"
     })
@@ -357,6 +358,131 @@ async fn upgraded_uppercase_questionnaire_answers_remain_idempotent() {
 }
 
 #[tokio::test]
+async fn historical_answer_lists_survive_upgrade_reopen_and_public_redaction() {
+    let root = tempfile::tempdir().unwrap();
+    let db = database(root.path()).await;
+    seed(&db);
+    // Public detail intentionally hides all messages from trashed conversations.
+    db.execute(
+        "UPDATE records SET data=? WHERE kind='chats' AND id=?",
+        params![
+            json!({
+                "id": CHAT,
+                "slug": "historical-answer-lists",
+                "agentId": "deleted-agent",
+                "title": "Historical answers",
+                "paused": true,
+                "lifecycle": "active",
+                "createdAt": 42,
+                "updatedAt": 51,
+            })
+            .to_string(),
+            CHAT
+        ],
+    )
+    .unwrap();
+    let answers = json!({
+        "old": ["Private free text", "second choice", "Private free text"],
+        "empty": [],
+        "current": {"selected": ["b", "a"], "comment": "Private comment"},
+    });
+    db.execute(
+        "UPDATE chat_messages SET data=json_set(data,'$.answers',json(?))",
+        [answers.to_string()],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO kv VALUES(?,?,NULL)",
+        params![
+            format!("chat-question:{CHAT}:question"),
+            json!({
+                "id": "question", "chatId": CHAT, "runId": "historical-run",
+                "blocking": false, "status": "answered",
+                "fields": [{"id": "old", "title": "Private question", "secret": true}],
+            })
+            .to_string()
+        ],
+    )
+    .unwrap();
+    drop(db);
+
+    for _ in 0..2 {
+        let store = Store::open(root.path()).unwrap();
+        let expected = answers.clone();
+        store
+            .transaction(move |db| {
+                let messages = db.conversation_messages(CHAT)?;
+                assert_eq!(messages.len(), 2);
+                for message in messages {
+                    assert_eq!(serde_json::to_value(&message.answers)?, expected);
+                    // Rewriting an existing message must retain its historical answers too.
+                    db.save_message(&message)?;
+                }
+                let detail = crate::chats::public_detail(db, CHAT)?;
+                assert_eq!(detail["messages"].as_array().unwrap().len(), 2);
+                for message in detail["messages"].as_array().unwrap() {
+                    assert_eq!(message["text"], "Private answer");
+                    assert!(message.get("answers").is_none());
+                }
+                assert!(!detail.to_string().contains("Private free text"));
+                assert!(!detail.to_string().contains("Private comment"));
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn malformed_historical_answers_roll_back_without_private_diagnostics() {
+    for answer in [
+        json!(["synthetic-private-answer", 1]),
+        json!([["synthetic-private-answer"], "synthetic-private-comment"]),
+        json!({"selected": [1], "comment": "synthetic-private-comment"}),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let db = database(root.path()).await;
+        seed(&db);
+        let answers = json!({"field": answer});
+        db.execute(
+            "UPDATE chat_messages SET data=json_set(data,'$.answers',json(?)) WHERE id='a-message'",
+            [answers.to_string()],
+        )
+        .unwrap();
+        let before: String = db
+            .query_row(
+                "SELECT group_concat(data) FROM chat_messages ORDER BY rowid",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let error = Store::open(root.path()).err().unwrap();
+        assert_eq!(error.message, invalid().message);
+        assert_eq!(
+            db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            14
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT group_concat(data) FROM chat_messages ORDER BY rowid",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            before
+        );
+        assert!(
+            db.prepare("SELECT data FROM records WHERE kind='chats'")
+                .unwrap()
+                .exists([])
+                .unwrap()
+        );
+        assert!(db.prepare("SELECT * FROM conversations").is_err());
+    }
+}
+
+#[tokio::test]
 async fn late_invalid_message_rolls_back_schema_and_all_original_data() {
     let root = tempfile::tempdir().unwrap();
     let db = database(root.path()).await;
@@ -417,12 +543,20 @@ async fn broken_run_reference_aborts_and_historical_resource_ids_remain_valid() 
             let mut other = conversation();
             other["id"] = "second".into();
             other["slug"] = "second-slug".into();
+            // Two unkeyed delegations of one requester must both remain valid.
+            other["requestedBy"]["requestId"] = Value::Null;
+            db.execute(
+                "UPDATE records SET data=json_remove(data,'$.requestedBy.requestId') WHERE id=?",
+                [CHAT],
+            )
+            .unwrap();
             db.execute(
                 "INSERT INTO records VALUES('second','chats',?,124)",
                 [other.to_string()],
             )
             .unwrap();
             assert!(Store::open(root.path()).is_ok());
+            assert_eq!(db.query_row("SELECT count(*) FROM conversation_lineage WHERE requester_chat_id='parent-chat' AND request_id IS NULL", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
         } else {
             let mut invalid = conversation();
             invalid["runId"] = "missing-run".into();
@@ -444,16 +578,11 @@ async fn broken_run_reference_aborts_and_historical_resource_ids_remain_valid() 
 
 #[tokio::test]
 async fn engine_switch_retains_current_progress_and_all_receipt_lifetimes() {
-    use crate::run_fixture::DbRunFixture;
     let root = tempfile::tempdir().unwrap();
     let db = database(root.path()).await;
     seed(&db);
-    Db(&db)
-        .add_run_fixture(
-            &json!({"id":"saved-run","taskId":"chat","status":"failed","createdAt":1}),
-            None,
-        )
-        .unwrap();
+    // This scenario is a version-14 input, before the current wait tables exist.
+    db.execute("INSERT INTO runs(id,task_id,status,created_at,recovery_pending,resume_available,resume_count,boundary) VALUES('saved-run','chat','failed',1,0,0,0,'{}')", []).unwrap();
     let expires = crate::config::now() + 500_000;
     let first = json!({"chatId":CHAT,"requestId":"first","runId":"saved-run","turnId":"turn-1","provider":"codex"});
     let second = json!({"chatId":CHAT,"requestId":"second","runId":"saved-run","turnId":"turn-2","provider":"claude"});
@@ -689,7 +818,7 @@ async fn actual_version14_preserves_conversations_accounts_leases_and_credential
 }
 
 #[tokio::test]
-async fn version15_messages_gain_plan_requests_without_other_changes() {
+async fn version16_messages_gain_plan_requests_without_other_changes() {
     let root = tempfile::tempdir().unwrap();
     let db = database(root.path()).await;
     let chat = json!({"id": CHAT, "slug": "retained-plan", "paused": true});
@@ -710,12 +839,17 @@ async fn version15_messages_gain_plan_requests_without_other_changes() {
     drop(db);
     let mut db = Connection::open(root.path().join("manager.db")).unwrap();
     upgrade(&mut db).unwrap();
-    // Version 15 as first merged by main d5e592ac had no plan column.
-    db.execute_batch("ALTER TABLE chat_messages DROP COLUMN plan;")
-        .unwrap();
+    // Version 16 is main 28bdc87f's typed questions layout, without a plan column.
+    crate::chats::question_migration::upgrade(&mut db).unwrap();
+    assert!(
+        !db.prepare("SELECT 1 FROM pragma_table_info('chat_messages') WHERE name='plan'")
+            .unwrap()
+            .exists([])
+            .unwrap()
+    );
     let retained = snapshot(&db);
     let rows = |db: &Connection| -> Vec<String> {
-        db.prepare("SELECT json_array(id,chat_id,revision,text,provider,model,reasoning,speed,mode,status,created_at,question_id,answers) FROM chat_messages ORDER BY rowid")
+        db.prepare("SELECT json_array(id,chat_id,revision,text,provider,model,reasoning,speed,mode,status,created_at,question_id) FROM chat_messages ORDER BY rowid")
             .unwrap()
             .query_map([], |r| r.get(0))
             .unwrap()
@@ -733,7 +867,7 @@ async fn version15_messages_gain_plan_requests_without_other_changes() {
     assert_eq!(
         db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        16
+        17
     );
     assert_eq!(snapshot(&db), retained);
     assert_eq!(rows(&db), before);
@@ -766,4 +900,13 @@ async fn version15_messages_gain_plan_requests_without_other_changes() {
         )
         .is_err()
     );
+    // Plan-turn question provenance has the same column and constraint.
+    let question = |plan: i64| {
+        db.execute(
+            "INSERT INTO chat_questions(id,chat_id,run_id,blocking,source,status,plan) VALUES(?,?,'run',0,'cairn','pending',?)",
+            params![format!("question-{plan}"), CHAT, plan],
+        )
+    };
+    question(1).unwrap();
+    assert!(question(2).is_err());
 }

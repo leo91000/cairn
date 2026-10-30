@@ -574,6 +574,14 @@ async fn plan_turns_list_and_call_only_workspace_tools_without_effects() {
     let after = answer(text(&later["result"]["structuredContent"], "questionId")).await;
     assert_eq!(after["plan"], true);
     assert_eq!(after["mode"], "queue");
+    // A question asked by a turn that can change files keeps an ordinary answer.
+    let current = s.store.run(text(&run, "id")).await.unwrap();
+    let ordinary_token = run_token(&s, &current).await;
+    let asked = workspace_rpc(&s, &ordinary_token, "tools/call", ask(&id().to_string())).await;
+    assert_ne!(asked["result"]["isError"], true, "{asked}");
+    let plain = answer(text(&asked["result"]["structuredContent"], "questionId")).await;
+    assert!(plain.get("plan").is_none(), "{plain}");
+    assert_eq!(plain["mode"], "steer");
 
     // The next turn's grant offers the whole catalog again.
     let next = json!({ "messageId": "next-message", "text": "Implement", "afterPlan": true });

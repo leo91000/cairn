@@ -2,6 +2,7 @@
 
 package build.cairn.app.ui
 
+import android.content.Context
 import android.content.Intent
 import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.foundation.horizontalScroll
@@ -411,6 +412,23 @@ fun Confirm(
 /** Larger messages render off the main thread first, behind a reserved placeholder. */
 private const val MARKDOWN_SYNC_RENDER = 8 * 1024
 
+/** Cairn file links open in the app; other http(s) links open in Custom Tabs. */
+private fun openMarkdownLink(context: Context, link: String, openArtifact: (String) -> Boolean) {
+    if (openArtifact(link)) return
+    val uri = link.toUri()
+    if (uri.scheme in setOf("https", "http") && uri.host != null) {
+        runCatching { CustomTabsIntent.Builder().build().launchUrl(context, uri) }
+            .onFailure {
+                android.widget.Toast.makeText(
+                        context,
+                        "Aucune application disponible pour ouvrir ce lien.",
+                        android.widget.Toast.LENGTH_LONG,
+                    )
+                    .show()
+            }
+    }
+}
+
 @Composable
 fun Markdown(content: String) {
     val openArtifact by rememberUpdatedState(LocalArtifactLinks.current)
@@ -428,23 +446,7 @@ fun Markdown(content: String) {
                             builder: io.noties.markwon.MarkwonConfiguration.Builder
                         ) {
                             builder.linkResolver { view, link ->
-                                if (openArtifact(link)) return@linkResolver
-                                val uri = link.toUri()
-                                if (uri.scheme in setOf("https", "http") && uri.host != null) {
-                                    runCatching {
-                                        CustomTabsIntent.Builder()
-                                            .build()
-                                            .launchUrl(view.context, uri)
-                                    }
-                                        .onFailure {
-                                            android.widget.Toast.makeText(
-                                                    view.context,
-                                                    "Aucune application disponible pour ouvrir ce lien.",
-                                                    android.widget.Toast.LENGTH_LONG,
-                                                )
-                                                .show()
-                                        }
-                                }
+                                openMarkdownLink(view.context, link, openArtifact)
                             }
                         }
                     }
@@ -458,7 +460,9 @@ fun Markdown(content: String) {
         onDispose { initial.finish() }
     }
     val currentContent by rememberUpdatedState(content)
-    val renderer = remember(markwon) { MarkdownBlocks(markwon) }
+    val renderer = remember(markwon) { MarkdownBlocks(markwon, DiagramFonts.get(context)) }
+    // Diagrams showing their code; re-renders while streaming keep the reader's choice.
+    val sourceViews = remember { mutableStateMapOf<String, Boolean>() }
     // A row scrolled into view must be measured at its real height at once: an estimated
     // placeholder resizes after rendering and moves the text the reader is looking at.
     var rendered by
@@ -495,7 +499,15 @@ fun Markdown(content: String) {
         }
         blocks.forEachIndexed { index, block ->
             key(index) {
-                if (block.tableColumns > 0) {
+                val diagram = block.diagram
+                if (diagram != null) {
+                    DiagramFigure(
+                        diagram,
+                        showSource = sourceViews[diagram.source] == true,
+                        onShowSource = { sourceViews[diagram.source] = it },
+                        openLink = { openMarkdownLink(context, it, openArtifact) },
+                    )
+                } else if (block.tableColumns > 0) {
                     BoxWithConstraints(Modifier.fillMaxWidth()) {
                         val minimum =
                             with(androidx.compose.ui.platform.LocalDensity.current) {

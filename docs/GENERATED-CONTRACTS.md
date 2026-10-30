@@ -702,8 +702,8 @@ owning domain adapters until A10/A11/A18. These adapters read the typed SQL writ
 never `records`, and do not accept another persisted format.
 
 SQLite v15 upgrades version 14 atomically at startup; see
-[the preserving migration](migrations/0015-typed-conversations.md); v16 adds the
-message plan flag ([migration](migrations/0016-plan-requests.md)). Fresh installs use `conversations`, `chat_messages`, `message_attachments`,
+[the preserving migration](migrations/0015-typed-conversations.md); v17 adds the
+message and question plan flags ([migration](migrations/0017-plan-requests.md)). Fresh installs use `conversations`, `chat_messages`, `message_attachments`,
 `conversation_engine_switches` and the singleton `conversation_retention` policy.
 Conversation and message revisions rotate with writes. Slugs are unique and never
 change on rename. The unique partial run index replaces `chat_for_run`'s collection
@@ -752,3 +752,33 @@ the A1/A2 harness against the frozen records/message mapping at `663259d9`, with
 alternating repetitions, cold/warm reads, list and transactional writes, CPU and
 DB/WAL/page reporting. PR descriptions own results and host conditions; raw results
 are never committed and local SQLite timings are not production network latency.
+
+## Questions, durable waits and delegated tasks (A8)
+
+`questions.rs`, `waits.rs` and `delegated_tasks.rs` own the DTOs shared by both
+apps and capability/workspace schemas. Management `list_chat_questions`,
+`answer_chat_question` and `cancel_chat_question` use the same authorization and
+handlers on HTTP, public MCP and `cairn_installation`. Workspace `ask_questions`,
+`pending_questions` and `withdraw_question` retain their current-run grants;
+workspace withdrawal never acquires management cancellation authority.
+
+Plugin conditions use `{type: "plugin", pluginId, conditionType, projectId?, input}`;
+plugin result extensions live in `pluginResult`. Native conditions and ordered
+all/any members remain named types. The exported schema bounds groups to external
+conditions and results to single results; nested groups are not supported by the
+workspace protocol. The Kotlin generator uses the union's actual discriminator
+(`kind` or `type`). Presentation adapters retain the existing timeline wording.
+
+`delegate_task.project` explicitly selects `{type: "inherit"}`, `{type: "none"}`
+or `{type: "selected", projectId}`; omission inherits. This replaces the former
+omitted/null `projectId` distinction with a tagged choice that all three languages
+encode identically. `task_status` always returns `{tasks: [...]}`, including a
+single requested task; task cancellation returns the task summary. Cairn delegation
+remains distinct from engine-native subagents.
+
+`tests/fixtures/questions-waits-contracts.json` is decoded by Rust, TS/Ajv and
+Kotlin. It covers defaults, ordered choices, private fields, native/plugin/group
+continuations, numeric plugin IDs and explicit project choices. Cross-field bounds,
+duplicate IDs, selection membership and the total encoded questionnaire limit are
+server invariants, with form feedback in both apps. No old dynamic question schema
+or separate client data class remains.

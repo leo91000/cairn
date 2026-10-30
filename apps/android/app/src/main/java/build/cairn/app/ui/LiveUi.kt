@@ -829,7 +829,7 @@ internal fun timelineEntries(
                 // The condition completed: right away (the agent never waited) or while it waited.
                 "chat.wait_ready",
                 "run.wait_ready" -> {
-                    val observation = event.activityData()
+                    val observation = event.activityData()?.let(::presentWaitObservation)
                     // Right away, the agent never waited, and this call replaced any wait.
                     val immediate = observation?.get("immediate") == JsonPrimitive(true)
                     if (immediate) {
@@ -846,7 +846,9 @@ internal fun timelineEntries(
                             }
                             .firstOrNull {
                                 it.type in listOf("chat.wakeup", "run.wakeup") &&
-                                    it.payload?.get("observation") == observation
+                                    (it.payload?.get("observation") as? JsonObject)?.let(
+                                        ::presentWaitObservation
+                                    ) == observation
                             }
                             ?.wakeupPayload()
                     val open =
@@ -913,7 +915,7 @@ internal fun timelineEntries(
                             }
                     updateWait(index) {
                         it.copy(
-                            observation = wakeup?.observation ?: it.observation,
+                            observation = wakeup?.observationJson ?: it.observation,
                             observed = true,
                             resumedAt = event.createdAt,
                         )
@@ -1188,7 +1190,7 @@ internal fun timelineEntries(
         if (knownWait != null && pendingWakeup.observation != null) {
             updateWait(knownWait) {
                 if (it.observed) it
-                else it.copy(observation = pendingWakeup.observation, observed = true)
+                else it.copy(observation = pendingWakeup.observationJson, observed = true)
             }
         }
         if (pendingWakeup != null && knownWait == null) {
@@ -1200,7 +1202,7 @@ internal fun timelineEntries(
                     wait =
                         ActivityWait(
                             pendingWakeup,
-                            pendingWakeup.observation,
+                            pendingWakeup.observationJson,
                             observed = pendingWakeup.observation != null,
                         ),
                 )

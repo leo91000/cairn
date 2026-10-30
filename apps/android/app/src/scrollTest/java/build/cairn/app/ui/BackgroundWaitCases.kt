@@ -428,7 +428,7 @@ abstract class BackgroundWaitCases {
     @Test
     fun longWaitReasonIsClampedUntilExpanded() {
         val reason = List(40) { "Vérifier la CI puis poursuivre le lot suivant." }.joinToString(" ")
-        val wakeup = ChatWakeup("wait", "message", reason, 60, 1, 60001)
+        val wakeup = wakeupFixture("wait", "message", reason, 60, 1, 60001)
         compose.setContent {
             CairnTheme {
                 CompositionLocalProvider(LocalLiveWait provides LiveWait(wakeup, paused = false)) {
@@ -444,7 +444,7 @@ abstract class BackgroundWaitCases {
     @Test
     fun resolvedWaitHonorsPauseAndCancellationUntilItResumes() {
         val wakeup =
-            ChatWakeup(
+            wakeupFixture(
                 "wait",
                 "message",
                 "Attendre les checks",
@@ -461,6 +461,7 @@ abstract class BackgroundWaitCases {
                     buildJsonObject {
                         put("title", "Waiting for required checks on PR #1")
                         put("short", "PR #1 checks")
+                        putJsonArray("details") {}
                     },
             )
         // The plugin words its result; the app shows it as given.
@@ -530,7 +531,7 @@ abstract class BackgroundWaitCases {
     @Test
     fun explicitImmediateResultReplacesPendingWaitWithChangedWording() {
         val wakeup =
-            ChatWakeup(
+            wakeupFixture(
                 "wake",
                 "message",
                 "Attente initiale",
@@ -658,7 +659,7 @@ abstract class BackgroundWaitCases {
                         ),
                     wakeup =
                         if (sleeping || conditional)
-                            ChatWakeup(
+                            wakeupFixture(
                                 "wake",
                                 "message",
                                 reason,

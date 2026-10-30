@@ -2,8 +2,6 @@
 package build.cairn.boundary
 
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonObject
 
 typealias ContextUsage = build.cairn.contracts.ContextUsage
 
@@ -21,31 +19,6 @@ data class TaskOutcome(
 @Serializable data class OutcomeDismissal(val until: Long? = null)
 
 typealias ChatExecution = build.cairn.contracts.ChatExecution
-
-@Serializable
-data class ChatWakeup(
-    val id: String,
-    val messageId: String? = null,
-    val reason: String,
-    val seconds: Long,
-    val createdAt: Long,
-    val wakeAt: Long,
-    val condition: JsonObject? = null,
-    /**
-     * A group's progress, in the order of its conditions: `{ observation, display, nextCheckAt,
-     * lastError }` each. Kept as JSON, like [display].
-     */
-    val members: JsonArray? = null,
-    val observation: JsonObject? = null,
-    /** Plugin conditions: when Cairn checks again, and why its last check failed. */
-    val nextCheckAt: Long? = null,
-    val lastError: String? = null,
-    /**
-     * A plugin condition's words while it waits: `{ title, short, details[] }`. Kept as JSON so a
-     * plugin's unexpected shape never hides the conversation.
-     */
-    val display: JsonObject? = null,
-)
 
 @Serializable
 data class ExclusiveReservation(

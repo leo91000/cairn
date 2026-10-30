@@ -1,5 +1,20 @@
 [
   {
+    "bodyField": "answer",
+    "input": "AnswerChatQuestionInput",
+    "method": "POST",
+    "name": "answerChatQuestion",
+    "output": "ChatQuestion",
+    "path": "/chats/{chatId}/questions/{questionId}/answer"
+  },
+  {
+    "input": "ChatQuestionInput",
+    "method": "POST",
+    "name": "cancelChatQuestion",
+    "output": "ChatQuestion",
+    "path": "/chats/{chatId}/questions/{questionId}/cancel"
+  },
+  {
     "input": "GetConversationRetentionInput",
     "method": "GET",
     "name": "getConversationRetention",

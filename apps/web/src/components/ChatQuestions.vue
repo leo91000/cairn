@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import type { ChatQuestion } from '../../../../packages/contracts/chats'
 import { computed, ref, watch } from 'vue'
-import { questionFields, validQuestionAnswer } from '../../../../packages/contracts/chats'
+import { validQuestionAnswer } from '../../../../packages/contracts/chats'
+import { answerChatQuestion } from '../../../../packages/contracts/generated/answerChatQuestion'
+import { cancelChatQuestion } from '../../../../packages/contracts/generated/cancelChatQuestion'
 import { api, state } from '../api'
 import { ChevronDown, MessageCircleQuestion, Send } from '../icons'
 import { exclusiveSuspensionLabel } from '../run-status'
@@ -22,10 +24,10 @@ const open = ref(false)
 const selected = ref('')
 const question = computed(() => pending.value.find(question => question.id === selected.value) ?? pending.value[0])
 const fields = computed(() => {
-  const parsed = questionFields.safeParse(question.value?.fields)
-  if (!parsed.success || parsed.data.some(field => new Set(field.options.map(option => option.id)).size !== field.options.length))
+  const fields = question.value?.fields
+  if (!fields?.length || fields.some(field => !['single', 'multiple'].includes(field.mode) || !Array.isArray(field.options) || field.options.some(option => !option.id) || new Set(field.options.map(option => option.id)).size !== field.options.length))
     return null
-  return parsed.data
+  return fields
 })
 const answers = ref<Record<string, Record<string, string[]>>>({})
 const custom = ref<Record<string, Record<string, string>>>({})
@@ -98,7 +100,7 @@ async function send() {
     const serialized = JSON.stringify({ questionId: current.id, answers: values })
     if (submission?.serialized !== serialized)
       submission = { id: crypto.randomUUID(), serialized }
-    await api(`/chats/${current.chatId}/questions/${current.id}/answer`, { method: 'POST', body: JSON.stringify({ id: submission.id, answers: values }) })
+    await answerChatQuestion(api, { chatId: current.chatId, questionId: current.id, answer: { id: submission.id, answers: values } })
     navigator.serviceWorker?.controller?.postMessage({ type: 'question-answered', installationId: state.installationId, questionId: current.id })
     delete answers.value[current.id]
     delete custom.value[current.id]
@@ -117,7 +119,7 @@ async function withdraw() {
   busy.value = true
   error.value = ''
   try {
-    await api(`/chats/${current.chatId}/questions/${current.id}/cancel`, { method: 'POST' })
+    await cancelChatQuestion(api, { chatId: current.chatId, questionId: current.id })
     navigator.serviceWorker?.controller?.postMessage({ type: 'question-answered', installationId: state.installationId, questionId: current.id })
     delete answers.value[current.id]
     delete custom.value[current.id]

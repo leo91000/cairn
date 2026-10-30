@@ -195,10 +195,10 @@ fn valid_record(db: &Db<'_>, record: &Value) -> Result<bool> {
             return Ok(false);
         }
     }
-    if let Some(chat) = crate::chats::chat_for_run(db, text(&run, "id"))?
-        && (chat["paused"] == true
-            || chat["wakeup"].is_object()
-            || !crate::conversation_lifecycle::is_active(&chat)
+    if let Some(chat) = db.conversation_for_run(text(&run, "id"))?
+        && (chat.paused
+            || chat.wakeup.is_some()
+            || chat.lifecycle != cairn_contracts::ConversationLifecycle::Active
             || crate::chats::continuation::has_unhandled_input(db, &chat)?)
     {
         return Ok(false);

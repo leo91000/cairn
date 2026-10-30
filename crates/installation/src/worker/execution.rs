@@ -139,7 +139,7 @@ async fn record_failure(
     }
     let mut patch = failure_changes(status, needs_fence, &summary);
     if status != RunStatus::Queued {
-        patch.boundary = Some(json!({ "wakeup": null }));
+        patch.wakeup = Some(None);
     }
     let kind = if s.shutdown.is_cancelled() {
         EventKind::Status
@@ -616,8 +616,10 @@ mod tests {
         // A real publication holds this operation across capture, every S3 PUT,
         // manifest verification and the node's acknowledgement.
         let publication = service.node_backup_operation.lock(&run).await;
+        // This is a deadlock watchdog, not a storage-latency SLA: the publication
+        // guard stays held until after release and all durable-demand assertions.
         tokio::time::timeout(
-            Duration::from_millis(250),
+            Duration::from_secs(5),
             release(&service, &checkpoint, None, true),
         )
         .await
