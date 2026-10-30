@@ -32,6 +32,7 @@ pub(crate) mod migration;
 pub(crate) mod sql;
 mod uploads;
 
+pub use sql::Reservation;
 pub use uploads::Attachments;
 
 pub(crate) fn filename(name: &str) -> String {
@@ -157,16 +158,6 @@ fn content_disposition(attachment: &ChatAttachment) -> String {
 }
 
 impl Service {
-    pub(crate) async fn attachment_path(&self, chat: &str, id: &str) -> Result<PathBuf> {
-        let upload = self.uploaded_attachment(chat, id).await?;
-        Ok(self
-            .config
-            .data_dir
-            .join("chat-attachments")
-            .join(chat)
-            .join(upload.storage_name))
-    }
-
     async fn uploaded_attachment(&self, chat: &str, id: &str) -> Result<sql::UploadedAttachment> {
         let chat = chat.to_owned();
         let id = id.to_owned();
@@ -290,11 +281,13 @@ impl Service {
     }
 
     async fn download_attachment(&self, chat: &str, id: &str) -> Result<Response> {
-        let attachment = self.uploaded_attachment(chat, id).await?.metadata;
+        let upload = self.uploaded_attachment(chat, id).await?;
+        let source = upload.path(&self.config.data_dir);
+        let attachment = upload.metadata;
         let file = tokio::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW)
-            .open(self.attachment_path(chat, id).await?)
+            .open(source)
             .await?;
         let body = Body::from_stream(tokio_util::io::ReaderStream::new(
             file.take(MAX_FILE as u64),
@@ -316,13 +309,17 @@ impl Service {
         Ok(response)
     }
 
-    async fn stored_attachment(&self, chat: &str, id: &str) -> Result<(ChatAttachment, Vec<u8>)> {
-        let attachment = self.uploaded_attachment(chat, id).await?.metadata;
+    async fn stored_attachment(
+        &self,
+        chat: &str,
+        id: &str,
+    ) -> Result<(sql::UploadedAttachment, Vec<u8>)> {
+        let attachment = self.uploaded_attachment(chat, id).await?;
         let mut bytes = Vec::new();
         tokio::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW)
-            .open(self.attachment_path(chat, id).await?)
+            .open(attachment.path(&self.config.data_dir))
             .await?
             .take(MAX_FILE as u64)
             .read_to_end(&mut bytes)
@@ -334,7 +331,7 @@ impl Service {
     async fn attachment_preview(&self, chat: &str, id: &str) -> Result<Response> {
         let (attachment, bytes) = self.stored_attachment(chat, id).await?;
         let pdf = bytes.starts_with(b"%PDF-");
-        if attachment.kind != "image" && !pdf {
+        if attachment.metadata.kind != "image" && !pdf {
             return Err(Error::not_found("Preview is unavailable."));
         }
 
@@ -344,7 +341,7 @@ impl Service {
             .map_err(Error::internal)?;
         let directory = tempfile::tempdir()?;
         let target = directory.path().join("preview.jpg");
-        let source = self.attachment_path(chat, id).await?;
+        let source = attachment.path(&self.config.data_dir);
         let render = async {
             if pdf {
                 crate::artifacts::preview::thumbnail(true, &source, &target).await
@@ -366,13 +363,13 @@ impl Service {
 
     /// Page count of a PDF, or line count and opening excerpt of a UTF-8 text file.
     async fn attachment_summary(&self, chat: &str, id: &str) -> Result<Response> {
-        let (_, bytes) = self.stored_attachment(chat, id).await?;
+        let (attachment, bytes) = self.stored_attachment(chat, id).await?;
         let summary = if bytes.starts_with(b"%PDF-") {
             let _permit = crate::artifacts::preview::JOBS
                 .acquire()
                 .await
                 .map_err(Error::internal)?;
-            let source = self.attachment_path(chat, id).await?;
+            let source = attachment.path(&self.config.data_dir);
             let pages = tokio::time::timeout(
                 Duration::from_secs(10),
                 crate::artifacts::preview::pdf_pages(&source),
@@ -398,13 +395,8 @@ impl Service {
             let id = text(attachment, "id");
             uuid(chat)?;
             uuid(id)?;
-            let stored = required(
-                Some(serde_json::to_value(
-                    self.uploaded_attachment(chat, id).await?.metadata,
-                )?),
-                "Attachment no longer available",
-            )?;
-            if stored != *attachment {
+            let stored = self.uploaded_attachment(chat, id).await?;
+            if serde_json::to_value(&stored.metadata)? != *attachment {
                 return Err(Error::bad("Attachment metadata changed."));
             }
             let target = self
@@ -419,7 +411,7 @@ impl Service {
             let source = tokio::fs::OpenOptions::new()
                 .read(true)
                 .custom_flags(libc::O_NOFOLLOW)
-                .open(self.attachment_path(chat, id).await?)
+                .open(stored.path(&self.config.data_dir))
                 .await?;
             let mut bytes = Vec::new();
             source

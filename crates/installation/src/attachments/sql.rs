@@ -13,7 +13,15 @@ pub struct UploadedAttachment {
     pub storage_name: String,
 }
 
-pub(crate) enum Reservation {
+impl UploadedAttachment {
+    pub(crate) fn path(&self, root: &std::path::Path) -> std::path::PathBuf {
+        root.join("chat-attachments")
+            .join(&self.metadata.chat_id)
+            .join(&self.storage_name)
+    }
+}
+
+pub enum Reservation {
     Existing(ChatAttachment),
     Acquired,
 }
@@ -67,7 +75,7 @@ impl Db<'_> {
             [&a.chat_id],
         )?;
         self.0
-            .prepare_cached("INSERT INTO attachments VALUES(?,?,?,?,?,?,?,?,?,?,?)")?
+            .prepare_cached("INSERT INTO attachments(id,chat_id,name,size,media_type,kind,digest,created_at,width,height,storage_name) VALUES(?,?,?,?,?,?,?,?,?,?,?)")?
             .execute(params![
                 a.id,
                 a.chat_id,
@@ -84,7 +92,7 @@ impl Db<'_> {
         Ok(())
     }
 
-    pub(crate) fn reserve_attachment(
+    pub fn reserve_attachment(
         &self,
         a: &ChatAttachment,
         token: &str,
@@ -126,9 +134,9 @@ impl Db<'_> {
         Ok(Reservation::Acquired)
     }
 
-    pub(crate) fn commit_attachment(&self, a: &ChatAttachment, token: &str) -> Result<()> {
-        let removed = self.0.execute("DELETE FROM attachment_reservations WHERE chat_id=? AND id=? AND token=? AND expires_at>?",
-            params![a.chat_id,a.id,token,crate::config::now()])?;
+    pub fn commit_attachment(&self, a: &ChatAttachment, token: &str) -> Result<()> {
+        let removed = self.0.execute("DELETE FROM attachment_reservations WHERE chat_id=? AND id=? AND token=? AND expires_at>? AND size=? AND name=? AND digest=?",
+            params![a.chat_id,a.id,token,crate::config::now(),i64::try_from(a.size).map_err(Error::internal)?,a.name,a.digest])?;
         if removed != 1 {
             return Err(Error::conflict(
                 "The attachment upload reservation expired. Retry the upload.",

@@ -3,6 +3,7 @@
 use super::{sql::Reservation, *};
 use crate::store::Store;
 use cairn_contracts::ChatAttachment;
+use rusqlite::OptionalExtension;
 use std::sync::{Arc, Mutex, Weak};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex as AsyncMutex, RwLock};
@@ -19,6 +20,10 @@ struct ConversationUploads {
 #[derive(Default)]
 pub struct Attachments {
     conversations: Mutex<HashMap<String, Weak<ConversationUploads>>>,
+    #[cfg(test)]
+    preparation: Mutex<HashMap<String, Arc<PreparationGate>>>,
+    #[cfg(test)]
+    writing: Mutex<HashMap<String, Arc<PreparationGate>>>,
 }
 
 impl Attachments {
@@ -44,7 +49,10 @@ impl Attachments {
     where
         F: Fn(&Db<'_>) -> Result<()> + Send + Sync + 'static,
     {
-        let cancelled = CancellationToken::new();
+        // Preserve the caller's preparation cancellation explicitly across spawn.
+        // Cancelling this upload never cancels its parent preparation or siblings.
+        let cancelled = crate::plugins::operations::publication_cancellation()
+            .map_or_else(CancellationToken::new, |parent| parent.child_token());
         let _cancel_on_drop = cancelled.clone().drop_guard();
         let domain = self.clone();
         // This task retains ownership until asynchronous filesystem work settles,
@@ -82,6 +90,8 @@ impl Attachments {
             let directory = root.join(&attachment.chat_id);
             let path = directory.join(format!("{}.{}", attachment.id, token));
             let publication = async {
+                #[cfg(test)]
+                wait_at(&domain.preparation, &attachment.id, &cancelled).await?;
                 private_dir(&directory).await?;
                 let mut file = tokio::fs::OpenOptions::new()
                     .write(true)
@@ -89,10 +99,18 @@ impl Attachments {
                     .mode(0o600)
                     .open(&path)
                     .await?;
-                file.write_all(&bytes).await?;
+                for chunk in bytes.chunks(64 * 1024) {
+                    if cancelled.is_cancelled() {
+                        return Err(Error::conflict("Attachment upload cancelled."));
+                    }
+                    file.write_all(chunk).await?;
+                    #[cfg(test)]
+                    wait_at(&domain.writing, &attachment.id, &cancelled).await?;
+                }
                 file.sync_all().await?;
                 drop(file);
                 tokio::fs::File::open(&directory).await?.sync_all().await?;
+                tokio::fs::File::open(&root).await?.sync_all().await?;
                 let a = attachment.clone();
                 let claim = token.clone();
                 store
@@ -156,8 +174,16 @@ where
         return Err(Error::conflict("Attachment upload cancelled."));
     }
     authorize(db)?;
-    let chat = required(db.conversation_boundary(chat)?, "Chat not found")?;
-    crate::conversation_lifecycle::require_active(&chat)
+    let lifecycle = required(
+        db.0.prepare_cached("SELECT lifecycle FROM conversations WHERE id=?")?
+            .query_row([chat], |row| row.get::<_, String>(0))
+            .optional()?,
+        "Chat not found",
+    )?;
+    if lifecycle != "active" {
+        return Err(Error::conflict("This conversation has been deleted."));
+    }
+    Ok(())
 }
 
 /// Expiry releases crash leftovers. Enumerate disk entries before checking each
@@ -193,10 +219,11 @@ pub(crate) async fn reconcile(store: &Store, root: &Path) -> Result<()> {
             }
             let check_chat = chat_id.clone();
             let check_name = name.clone();
+            let check_id = id.to_owned();
             let check_token = token.to_owned();
             let retained = store.read(move |db| Ok(db.0.query_row(
-                "SELECT EXISTS(SELECT 1 FROM attachments WHERE chat_id=? AND storage_name=?) OR EXISTS(SELECT 1 FROM attachment_reservations WHERE token=?)",
-                rusqlite::params![check_chat,check_name,check_token], |row| row.get::<_, bool>(0))?)).await?;
+                "SELECT EXISTS(SELECT 1 FROM attachments WHERE chat_id=? AND id=? AND storage_name=?) OR EXISTS(SELECT 1 FROM attachment_reservations WHERE token=?)",
+                rusqlite::params![check_chat,check_id,check_name,check_token], |row| row.get::<_, bool>(0))?)).await?;
             if !retained {
                 match tokio::fs::remove_file(file.path()).await {
                     Ok(()) => {}
@@ -225,3 +252,30 @@ pub(crate) async fn expire(store: &Store, root: &Path) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+async fn wait_at(
+    gates: &Mutex<HashMap<String, Arc<PreparationGate>>>,
+    id: &str,
+    cancelled: &CancellationToken,
+) -> Result<()> {
+    let gate = gates.lock().unwrap().remove(id);
+    if let Some(gate) = gate {
+        gate.reached.notify_one();
+        tokio::select! {
+            _ = gate.resume.notified() => {},
+            _ = cancelled.cancelled() => return Err(Error::conflict("Attachment upload cancelled.")),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct PreparationGate {
+    reached: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+mod tests;

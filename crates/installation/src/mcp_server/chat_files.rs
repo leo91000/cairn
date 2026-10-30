@@ -40,7 +40,8 @@ pub(super) async fn invoke(
     let listing = name.starts_with("list_");
     let input = args.clone();
     let check = authorize_chat.clone();
-    let record = s
+    let data_dir = s.config.data_dir.clone();
+    let (record, attachment_path) = s
         .store
         .read(move |db| {
             let transaction = rusqlite::Transaction::new_unchecked(
@@ -58,6 +59,7 @@ pub(super) async fn invoke(
             } else {
                 String::new()
             };
+            let mut attachment_path = None;
             let result = if listing {
                 let mut values: Vec<_> = if artifact {
                     db.keys(&prefix)?
@@ -96,17 +98,16 @@ pub(super) async fn invoke(
                         "File not found in this chat",
                     )?
                 } else {
-                    serde_json::to_value(
-                        required(
-                            db.uploaded_attachment(&chat_id, id)?,
-                            "File not found in this chat",
-                        )?
-                        .metadata,
-                    )?
+                    let upload = required(
+                        db.uploaded_attachment(&chat_id, id)?,
+                        "File not found in this chat",
+                    )?;
+                    attachment_path = Some(upload.path(&data_dir));
+                    serde_json::to_value(upload.metadata)?
                 }
             };
             transaction.commit()?;
-            Ok(result)
+            Ok((result, attachment_path))
         })
         .await?;
     if listing {
@@ -134,7 +135,7 @@ pub(super) async fn invoke(
     let path = if artifact {
         s.config.data_dir.join("artifacts").join(id)
     } else {
-        s.attachment_path(text(&args, "chatId"), id).await?
+        attachment_path.ok_or_else(|| Error::internal("Missing attachment file path"))?
     };
     let mut file = tokio::fs::OpenOptions::new()
         .read(true)

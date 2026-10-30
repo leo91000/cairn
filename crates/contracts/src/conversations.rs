@@ -150,8 +150,10 @@ impl PartialEq<MessageStatus> for serde_json::Value {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UploadChatAttachmentInput {
+    #[serde(deserialize_with = "uuid_string")]
     #[schemars(with = "uuid::Uuid")]
     pub chat_id: String,
+    #[serde(deserialize_with = "uuid_string")]
     #[schemars(with = "uuid::Uuid")]
     pub attachment_id: String,
     #[schemars(length(min = 1, max = 180))]
@@ -860,6 +862,13 @@ mod tests {
             "../../../tests/fixtures/conversation-contracts.json"
         ))
         .unwrap();
+        for value in corpus["uploads"].as_array().unwrap() {
+            let upload: UploadChatAttachmentInput = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(upload).unwrap(), *value);
+        }
+        for value in corpus["invalidUploads"].as_array().unwrap() {
+            assert!(serde_json::from_value::<UploadChatAttachmentInput>(value.clone()).is_err());
+        }
         for value in corpus["creates"].as_array().unwrap() {
             serde_json::from_value::<CreateChatInput>(value.clone()).unwrap();
         }

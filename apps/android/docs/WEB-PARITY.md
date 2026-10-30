@@ -410,3 +410,9 @@ du run courant gardent leurs autorisations distinctes. Les champs secrets resten
 absents des vues publiques après envoi. Les cartes d'attente et de délégation
 gardent leur présentation native et leur rendu existant ; les adaptateurs de
 présentation lisent les observations typées sans refonte de timeline.
+
+Attachment quota reservations (D2): both apps retain the generated A7 attachment
+model, binary upload endpoint, previews, retries and existing presentation. Limits
+remain 10 MiB/file, 40 MiB/message, 200 MiB/conversation and eight files/message.
+No platform difference or client error mapping changes; HTTP, both management
+tools and plugin imports share the reservation writer.
