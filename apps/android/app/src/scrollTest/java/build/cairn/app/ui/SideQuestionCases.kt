@@ -52,12 +52,13 @@ abstract class SideQuestionCases {
             settledAt = null,
         )
 
-    private fun chat(canAsk: Boolean, provider: String = "claude") =
+    private fun chat(canAsk: Boolean, provider: String = "claude", unavailable: String? = null) =
         Chat(
             id = CHAT_ID,
             provider = provider,
             status = "running",
             canAskSideQuestion = canAsk,
+            sideQuestionUnavailable = unavailable,
             sideQuestions = listOf(answered, pending),
         )
 
@@ -189,6 +190,7 @@ abstract class SideQuestionCases {
             val models = ViewModelStore().apply { put("fixture", vm) }
             val side = SideQuestionState().apply { show("reply-2") }
             var provider by mutableStateOf("codex")
+            var unavailable by mutableStateOf<String?>("codex")
             compose.setContent {
                 val state by vm.state.collectAsState()
                 LaunchedEffect(Unit) {
@@ -198,7 +200,12 @@ abstract class SideQuestionCases {
                 CairnTheme {
                     if (state.installation != null)
                         Column(Modifier.verticalScroll(rememberScrollState())) {
-                            SideQuestionPanel(vm, state, chat(canAsk = false, provider), side) {}
+                            SideQuestionPanel(
+                                vm,
+                                state,
+                                chat(canAsk = false, provider, unavailable),
+                                side,
+                            ) {}
                         }
                 }
             }
@@ -217,11 +224,19 @@ abstract class SideQuestionCases {
                 compose.onNodeWithText("Pourquoi cet ordre ?").assertDoesNotExist()
                 compose.onNodeWithText("Tout afficher").performClick()
                 compose.onNodeWithText("Pourquoi cet ordre ?").assertExists()
-                // A Claude reply that has not announced side questions yet says so.
+                // A Claude Code release too old for side questions says so.
                 provider = "claude"
+                unavailable = "claude-release"
                 compose
                     .onNodeWithText(
-                        "Claude Code n’a pas encore proposé de questions à côté pour cette réponse. Réessayez dans un instant ; s’il ne le fait jamais, mettez à jour Claude Code (2.1.308 ou plus récent) ou le runtime de la machine."
+                        "Cette version de Claude Code ne peut pas répondre aux questions à côté dans Cairn : la version 2.1.308 ou plus récente est nécessaire. Posez-la dans la conversation."
+                    )
+                    .assertExists()
+                // A reply that has not offered them yet says so too.
+                unavailable = "not-offered"
+                compose
+                    .onNodeWithText(
+                        "Claude Code n’a pas encore proposé de questions à côté pour cette réponse. Réessayez dans un instant ; s’il ne le fait jamais, son runtime doit peut-être être mis à jour."
                     )
                     .assertExists()
                 compose.onNodeWithText("Demander").assertDoesNotExist()

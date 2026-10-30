@@ -236,7 +236,8 @@ about the conversation, optionally quoting a passage (`question.quote`) of one o
 its replies (`question.itemId`, the agent message's item ID). Without a quote, a
 question about a reply reaches the agent with the start of that reply. It requires
 `canAskSideQuestion`, reported by `get_chat`, `list_chats` and
-`list_chat_side_questions` with `sideQuestionReason` when false: Claude Code must be
+`list_chat_side_questions` with `sideQuestionReason` (and its code,
+`sideQuestionUnavailable`) when false: Claude Code must be
 working on a reply. Codex and OpenCode conversations never take one. Supply
 a UUID in `question.id`; identical retries are safe. The answer, or why there is
 none, appears in `list_chat_side_questions`. `cancel_chat_side_question` withdraws

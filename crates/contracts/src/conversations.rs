@@ -408,6 +408,16 @@ pub struct Chat {
     #[serde(default)]
     #[ts(optional = nullable)]
     pub side_question_reason: Option<String>,
+    /// The case `side_question_reason` explains, for clients that word it themselves.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    #[schemars(
+        with = "Option<String>",
+        pattern(
+            "^(between-replies|codex|opencode|unknown-agent|stopping|compacting|claude-release|not-offered)$"
+        )
+    )]
+    pub side_question_unavailable: Option<SideQuestionUnavailable>,
     #[serde(default)]
     pub agent_name: String,
     #[serde(default)]

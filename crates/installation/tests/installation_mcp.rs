@@ -5360,6 +5360,10 @@ async fn side_questions_are_asked_withdrawn_and_answered_beside_the_running_repl
             .contains("not offered side questions"),
         "{summary}"
     );
+    assert_eq!(
+        result(&summary)["chat"]["sideQuestionUnavailable"],
+        "not-offered"
+    );
 
     // A Claude Code release not qualified for side questions says so.
     s.side_questions_available(&run_id, false).await.unwrap();
@@ -5368,6 +5372,14 @@ async fn side_questions_are_asked_withdrawn_and_answered_beside_the_running_repl
         old_release.to_string().contains("2.1.308 or later"),
         "{old_release}"
     );
+    let listed = call(
+        &s,
+        &configuration,
+        "list_chat_side_questions",
+        json!({ "chatId": chat_id }),
+    )
+    .await;
+    assert_eq!(result(&listed)["sideQuestionUnavailable"], "claude-release");
 
     s.side_questions_available(&run_id, true).await.unwrap();
     let first = ask("Why this order?");
@@ -5546,6 +5558,13 @@ async fn side_questions_are_asked_withdrawn_and_answered_beside_the_running_repl
         )
         .await
         .unwrap();
+    // Nor does an answer that arrives once the turn moved on.
+    s.side_question_settle(
+        &run_id,
+        &json!({ "type": "chat.side.answered", "sideQuestionId": earlier_id, "text": "Late." }),
+    )
+    .await
+    .unwrap();
     s.chat_tick(&std::collections::HashSet::new())
         .await
         .unwrap();
@@ -5734,4 +5753,47 @@ async fn side_questions_are_asked_withdrawn_and_answered_beside_the_running_repl
             .unwrap()
             .contains("Codex")
     );
+
+    // A conversation moved to trash fails the side questions its stopped turn left.
+    let (trashed_run, _) = active_run(&s, &claude).await;
+    let trashed_run_id = trashed_run["id"].as_str().unwrap().to_owned();
+    let mut trashed = s.chat_create(json!({})).await.unwrap();
+    trashed["runId"] = trashed_run["id"].clone();
+    let trashed_id = trashed["id"].as_str().unwrap().to_owned();
+    s.store.save_conversation_boundary(trashed).await.unwrap();
+    s.side_questions_available(&trashed_run_id, true)
+        .await
+        .unwrap();
+    let left = call(
+        &s,
+        &configuration,
+        "ask_chat_side_question",
+        json!({
+            "chatId": trashed_id,
+            "question": { "id": uuid::Uuid::new_v4(), "text": "Still there?" },
+        }),
+    )
+    .await;
+    assert_eq!(result(&left)["status"], "pending", "{left}");
+    s.store
+        .change_run(
+            &trashed_run_id,
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Cancelled),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    s.chat_trash(&trashed_id, true).await.unwrap();
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let stored = s
+        .store
+        .keys(&format!("chat-side-question:{trashed_id}:"))
+        .await
+        .unwrap();
+    assert_eq!(stored.len(), 1, "{stored:?}");
+    assert_eq!(stored[0].1["status"], "failed", "{stored:?}");
 }

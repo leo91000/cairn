@@ -2626,6 +2626,15 @@
         "null"
       ]
     },
+    "sideQuestionUnavailable": {
+      "default": null,
+      "description": "The case `side_question_reason` explains, for clients that word it themselves.",
+      "pattern": "^(between-replies|codex|opencode|unknown-agent|stopping|compacting|claude-release|not-offered)$",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "sideQuestions": {
       "default": [],
       "description": "Explanations asked beside the running reply, oldest first.",

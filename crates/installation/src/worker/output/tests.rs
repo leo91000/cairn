@@ -805,14 +805,34 @@ async fn side_answers_are_stored_redacted() {
             "status": "pending",
             "createdAt": 1,
         });
-        let key = format!("{key}{id}");
+        // Asked during the run's current turn, which is still running.
+        let open = json!({ "runId": run, "turn": "", "status": "pending" });
+        let (key, open_key) = (
+            format!("{key}{id}"),
+            format!("chat-side-question-open:{chat}:{id}"),
+        );
         fixture
             .service
             .store
-            .transaction(move |db| db.set(&key, &question, None))
+            .transaction(move |db| {
+                db.set(&key, &question, None)?;
+                db.set(&open_key, &open, None)
+            })
             .await
             .unwrap();
     }
+    fixture
+        .service
+        .store
+        .change_run(
+            &run,
+            crate::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Running),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
     fixture
         .event(json!({
             "type": "chat.side.answered",

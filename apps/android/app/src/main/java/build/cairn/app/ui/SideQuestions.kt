@@ -54,6 +54,10 @@ internal fun Modifier.withoutLineHeight() = layout { measurable, constraints ->
 /** Asks about the passage selected in a reply, from its text selection menu. */
 internal val LocalSideQuestionAsk = compositionLocalOf<((String) -> Unit)?> { null }
 
+/** At most [count] code points, as the server counts them, never cutting an emoji. */
+internal fun String.takeCodePoints(count: Int): String =
+    substring(0, offsetByCodePoints(0, minOf(count, codePointCount(0, length))))
+
 /** The side-question sheet of one conversation, and the answers its user has already read. */
 @Stable
 internal class SideQuestionState {
@@ -71,7 +75,7 @@ internal class SideQuestionState {
 
     fun ask(itemId: String, quote: String) {
         this.itemId = itemId
-        this.quote = quote.trim().take(4000)
+        this.quote = quote.trim().takeCodePoints(4000)
         focus = ""
         notice = ""
         open = true
@@ -243,7 +247,7 @@ internal fun ColumnScope.SideQuestionPanel(
                     else -> "Votre question"
                 },
                 side.text,
-                { side.text = it.take(4000) },
+                { side.text = it.takeCodePoints(4000) },
                 3,
                 enabled = !state.busy,
             )
@@ -278,22 +282,24 @@ internal fun ColumnScope.SideQuestionPanel(
             }
         } else
             Notice(
-                // The same cases as the server's `sideQuestionReason`, in French.
-                when {
-                    chat.status != "running" ->
+                // The server's reason, worded in French.
+                when (chat.sideQuestionUnavailable) {
+                    "between-replies" ->
                         "Les questions à côté sont possibles pendant que Claude Code travaille sur une réponse. Envoyez plutôt un message."
-                    chat.provider == "codex" ->
+                    "codex" ->
                         "Codex ne peut pas répondre aux questions à côté dans Cairn : ses conversations à côté peuvent encore utiliser des outils. Posez-la dans la conversation."
-                    chat.provider == "opencode" ->
+                    "opencode" ->
                         "OpenCode ne peut pas encore répondre aux questions à côté dans Cairn. Posez-la dans la conversation."
-                    chat.provider != "claude" ->
+                    "unknown-agent" ->
                         "Cet agent ne peut pas répondre aux questions à côté dans Cairn. Posez-la dans la conversation."
-                    chat.run?.cancelRequestedAt != null ->
+                    "stopping" ->
                         "La réponse s’arrête. Posez-la dans la conversation quand elle reprend."
-                    chat.compaction?.running == true ->
+                    "compacting" ->
                         "La conversation compacte son contexte. Réessayez une fois la compaction terminée."
+                    "claude-release" ->
+                        "Cette version de Claude Code ne peut pas répondre aux questions à côté dans Cairn : la version 2.1.308 ou plus récente est nécessaire. Posez-la dans la conversation."
                     else ->
-                        "Claude Code n’a pas encore proposé de questions à côté pour cette réponse. Réessayez dans un instant ; s’il ne le fait jamais, mettez à jour Claude Code (2.1.308 ou plus récent) ou le runtime de la machine."
+                        "Claude Code n’a pas encore proposé de questions à côté pour cette réponse. Réessayez dans un instant ; s’il ne le fait jamais, son runtime doit peut-être être mis à jour."
                 },
                 icon = CairnIcons.SideQuestion,
                 maxLines = 4,

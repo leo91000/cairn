@@ -12,6 +12,7 @@ import type { ConversationEnvironmentState } from './ConversationEnvironmentStat
 import type { ConversationLifecycle } from './ConversationLifecycle'
 import type { ConversationRequester } from './ConversationRequester'
 import type { ConversationStatus } from './ConversationStatus'
+import type { SideQuestionUnavailable } from './SideQuestionUnavailable'
 
 export interface Chat {
   id: string
@@ -60,6 +61,10 @@ export interface Chat {
    * Why a side question cannot be asked now, when it cannot.
    */
   sideQuestionReason?: string | null
+  /**
+   * The case `side_question_reason` explains, for clients that word it themselves.
+   */
+  sideQuestionUnavailable?: SideQuestionUnavailable | null
   agentName: string
   projectName: string | null
   status: ConversationStatus

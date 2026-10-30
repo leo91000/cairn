@@ -20,7 +20,9 @@ use crate::{
     store::Db,
     validation::text,
 };
-use cairn_contracts::{ChatSideQuestion, SideQuestionInput, SideQuestionStatus};
+use cairn_contracts::{
+    ChatSideQuestion, SideQuestionInput, SideQuestionStatus, SideQuestionUnavailable,
+};
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -181,49 +183,61 @@ fn reply_start(db: &Db<'_>, run_id: &str, item_id: &str) -> Result<String> {
 }
 
 /// Why the chat's current reply cannot take a side question, if it cannot.
-pub(crate) fn unavailable(run: Option<&Value>) -> Option<&'static str> {
+pub(crate) fn unavailable(run: Option<&Value>) -> Option<SideQuestionUnavailable> {
     // Queued and recovering runs have no adapter that announced it yet.
     let executing = |run: &&Value| RunStatus::of(run) == Some(RunStatus::Running);
     let Some(run) = run.filter(executing) else {
-        return Some(
-            "Side questions are answered while the agent works on a reply. Send a message instead.",
-        );
+        return Some(SideQuestionUnavailable::BetweenReplies);
     };
     match Provider::of_run(run) {
         Ok(Provider::Claude) => {}
-        Ok(Provider::Codex) => {
-            return Some(
-                "Codex cannot answer side questions in Cairn: its side conversations can still use tools. Ask in the conversation instead.",
-            );
-        }
-        Ok(Provider::Opencode) => {
-            return Some(
-                "OpenCode cannot answer side questions in Cairn yet. Ask in the conversation instead.",
-            );
-        }
-        Err(_) => {
-            return Some(
-                "This agent cannot answer side questions in Cairn. Ask in the conversation instead.",
-            );
-        }
+        Ok(Provider::Codex) => return Some(SideQuestionUnavailable::Codex),
+        Ok(Provider::Opencode) => return Some(SideQuestionUnavailable::Opencode),
+        Err(_) => return Some(SideQuestionUnavailable::UnknownAgent),
     }
     if !run["cancelRequestedAt"].is_null() {
-        return Some("The reply is stopping. Ask in the conversation once it continues.");
+        return Some(SideQuestionUnavailable::Stopping);
     }
     if is_compaction(run) {
-        return Some("The conversation is compacting its context. Try again once it finishes.");
+        return Some(SideQuestionUnavailable::Compacting);
     }
     if run["sideQuestions"] == false {
-        return Some(
-            "This Claude Code release cannot answer side questions in Cairn: version 2.1.308 or later is needed. Ask in the conversation instead.",
-        );
+        return Some(SideQuestionUnavailable::ClaudeRelease);
     }
     if run["sideQuestions"] != true {
-        return Some(
-            "The agent has not offered side questions for this reply yet. Try again in a moment; if it never does, its runtime may need an update.",
-        );
+        return Some(SideQuestionUnavailable::NotOffered);
     }
     None
+}
+
+/// What the API and tools say for each reason.
+pub(crate) fn reason(unavailable: SideQuestionUnavailable) -> &'static str {
+    match unavailable {
+        SideQuestionUnavailable::BetweenReplies => {
+            "Side questions are answered while the agent works on a reply. Send a message instead."
+        }
+        SideQuestionUnavailable::Codex => {
+            "Codex cannot answer side questions in Cairn: its side conversations can still use tools. Ask in the conversation instead."
+        }
+        SideQuestionUnavailable::Opencode => {
+            "OpenCode cannot answer side questions in Cairn yet. Ask in the conversation instead."
+        }
+        SideQuestionUnavailable::UnknownAgent => {
+            "This agent cannot answer side questions in Cairn. Ask in the conversation instead."
+        }
+        SideQuestionUnavailable::Stopping => {
+            "The reply is stopping. Ask in the conversation once it continues."
+        }
+        SideQuestionUnavailable::Compacting => {
+            "The conversation is compacting its context. Try again once it finishes."
+        }
+        SideQuestionUnavailable::ClaudeRelease => {
+            "This Claude Code release cannot answer side questions in Cairn: version 2.1.308 or later is needed. Ask in the conversation instead."
+        }
+        SideQuestionUnavailable::NotOffered => {
+            "The agent has not offered side questions for this reply yet. Try again in a moment; if it never does, its runtime may need an update."
+        }
+    }
 }
 
 /// The question as the agent receives it, with the passage or reply it is about.
@@ -295,10 +309,14 @@ fn ask(
     }
 
     let run = db.run(chat.run_id.as_deref().unwrap_or(""))?;
-    if let Some(reason) = unavailable(run.as_ref()) {
-        return Err(Error::conflict(reason));
+    if let Some(unavailable) = unavailable(run.as_ref()) {
+        return Err(Error::conflict(reason(unavailable)));
     }
-    let run = run.unwrap();
+    let Some(run) = run else {
+        return Err(Error::conflict(reason(
+            SideQuestionUnavailable::BetweenReplies,
+        )));
+    };
     // This reply's open questions; those of an earlier turn expire with its next tick.
     let open = open(db, chat_id)?
         .into_iter()
@@ -424,6 +442,12 @@ fn settle(
     if question.status != SideQuestionStatus::Pending || question.run_id != run_id {
         return Ok(());
     }
+    // Only the turn it was asked during answers it; it expires otherwise.
+    let open = db.kv_as::<Open>(&open_key(&question.chat_id, id))?;
+    let run = db.run(run_id)?;
+    if !open.is_some_and(|open| answers(run.as_ref(), &open)) {
+        return Ok(());
+    }
     match outcome {
         Ok(answer) => {
             question.status = SideQuestionStatus::Answered;
@@ -449,6 +473,15 @@ pub(crate) fn open_chats(db: &Db<'_>) -> Result<HashSet<String>> {
         .into_iter()
         .filter_map(|(key, _)| Some(key[OPEN.len()..].split_once(':')?.0.to_owned()))
         .collect())
+}
+
+/// Whether some open side question's turn is not running any more.
+pub(crate) fn expiring(db: &Db<'_>, chat_id: &str) -> Result<bool> {
+    let chat = conversation(db, chat_id)?;
+    let run = db.run(chat.run_id.as_deref().unwrap_or(""))?;
+    Ok(open(db, chat_id)?
+        .iter()
+        .any(|(_, open)| !answers(run.as_ref(), open)))
 }
 
 /// Side questions the chat's reply can no longer answer or withdraw: the turn they were
@@ -485,9 +518,10 @@ pub(crate) fn view(
         .iter()
         .filter(|(_, open)| open.status == SideQuestionStatus::Pending)
         .count() as u32;
-    let reason = unavailable(run);
-    chat.can_ask_side_question = reason.is_none();
-    chat.side_question_reason = reason.map(str::to_owned);
+    let unavailable = unavailable(run);
+    chat.can_ask_side_question = unavailable.is_none();
+    chat.side_question_reason = unavailable.map(|unavailable| reason(unavailable).to_owned());
+    chat.side_question_unavailable = unavailable;
     Ok(())
 }
 
@@ -532,15 +566,18 @@ pub(crate) async fn withdraw_announcement(
     forget_deliveries(run_directory).await
 }
 
-/// Writes the run's inbox, with side questions only while its announcement stands.
+/// Writes the run's inbox, with side questions only while its announcement stands and it
+/// still runs `side_turn`, the turn they were chosen for.
 pub(crate) async fn publish_inbox(
     store: &crate::store::Store,
     run_id: &str,
+    side_turn: &str,
     directory: &std::path::Path,
     mut entries: Vec<Value>,
 ) -> Result<()> {
     let _inbox = INBOX.lock().await;
-    if store.run(run_id).await?["sideQuestions"] != true {
+    let run = store.run(run_id).await?;
+    if run["sideQuestions"] != true || turn(&run) != side_turn {
         entries.retain(|entry| !is_side(entry));
     }
     crate::skills::private_dir(directory).await?;
@@ -599,7 +636,6 @@ impl Service {
         Ok(serde_json::to_value(question)?)
     }
 
-    /// The running reply's adapter can now answer side questions.
     /// Records whether the run's current attempt answers side questions: its adapter says
     /// so once its native session started.
     pub async fn side_questions_available(&self, run_id: &str, available: bool) -> Result<()> {
@@ -692,7 +728,8 @@ mod tests {
         assert!(unavailable(Some(&running("claude", true))).is_none());
         // A run whose engine cannot be read is refused without naming another engine.
         let unknown = unavailable(Some(&running("", true))).unwrap();
-        assert!(unknown.starts_with("This agent"), "{unknown}");
+        assert_eq!(unknown, SideQuestionUnavailable::UnknownAgent);
+        assert!(reason(unknown).starts_with("This agent"));
     }
 
     #[tokio::test]

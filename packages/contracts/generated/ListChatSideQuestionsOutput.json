@@ -102,6 +102,14 @@
         "null"
       ]
     },
+    "sideQuestionUnavailable": {
+      "description": "The case `side_question_reason` explains.",
+      "pattern": "^(between-replies|codex|opencode|unknown-agent|stopping|compacting|claude-release|not-offered)$",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "sideQuestions": {
       "items": {
         "$ref": "#/definitions/ChatSideQuestion"

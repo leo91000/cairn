@@ -10,9 +10,18 @@ data class ListChatSideQuestionsOutput(
     val hasMore: Boolean,
     val nextOffset: Long?,
     val sideQuestionReason: String?,
+    val sideQuestionUnavailable: String?,
     val sideQuestions: List<ChatSideQuestion>,
 ) {
     init {
         nextOffset?.let { require(it >= 0L) }
+        sideQuestionUnavailable?.let {
+            require(
+                Regex(
+                        "^(between-replies|codex|opencode|unknown-agent|stopping|compacting|claude-release|not-offered)\$"
+                    )
+                    .containsMatchIn(it)
+            )
+        }
     }
 }

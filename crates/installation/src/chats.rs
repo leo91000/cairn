@@ -288,6 +288,7 @@ fn conversation_view_with_run(
         pending_side_questions: 0,
         can_ask_side_question: false,
         side_question_reason: None,
+        side_question_unavailable: None,
         agent_name,
         project_name,
         status,
@@ -1527,18 +1528,25 @@ impl Service {
         self.expire_attachment_uploads().await?;
         let side_open = self.side_question_chats().await?;
         for chat in self.store.conversations().await? {
+            // Before anything holds the conversation (trash, cleaning, a pending agent
+            // switch): a stopped turn's side questions fail now.
+            if side_open.contains(&chat.id) {
+                let chat_id = chat.id.clone();
+                let expiring = self
+                    .store
+                    .read(move |db| side_questions::expiring(db, &chat_id))
+                    .await?;
+                if expiring {
+                    let chat_id = chat.id.clone();
+                    self.store
+                        .transaction(move |db| side_questions::expire(db, &chat_id))
+                        .await?;
+                }
+            }
             if chat.lifecycle != cairn_contracts::ConversationLifecycle::Active
                 || chat.environment_state == Some(EnvironmentState::Cleaning)
             {
                 continue;
-            }
-            // Before a pending agent switch holds the conversation: the stopped turn's
-            // side questions fail now rather than once the switch completes.
-            if side_open.contains(&chat.id) {
-                let chat_id = chat.id.clone();
-                self.store
-                    .transaction(move |db| side_questions::expire(db, &chat_id))
-                    .await?;
             }
             if self
                 .store
@@ -1633,17 +1641,19 @@ impl Service {
         let paused = chat.paused;
         let delivering = run["chatExecution"]["messageId"].clone();
         let run_id = text(run, "id").to_owned();
-        let mut steering = self
+        let (mut steering, side_turn) = self
             .store
             .transaction(move |db| {
                 let mut steering = claim_steering(db, &chat_id, paused, &delivering)?;
                 // Side questions are not chat messages: the queue, pause and steering never
                 // hold them, and the adapter answers them beside the turn. The run is read
                 // again here: a launch since the tick read it withdrew its announcement.
+                let mut side_turn = String::new();
                 if let Some(run) = db.run(&run_id)? {
                     steering.extend(side_questions::deliveries(db, &chat_id, &run)?);
+                    side_turn = text(&run["chatExecution"], "messageId").to_owned();
                 }
-                Ok(steering)
+                Ok((steering, side_turn))
             })
             .await?;
         let skills = &run["snapshot"]["skills"];
@@ -1673,8 +1683,16 @@ impl Service {
             .join("runs")
             .join(chat.run_id.as_deref().unwrap_or(""))
             .join("chat-input");
-        // Nor may this write restore side questions an attempt removed meanwhile.
-        side_questions::publish_inbox(&self.store, text(run, "id"), &directory, steering).await
+        // Nor may this write restore side questions an attempt removed meanwhile, or hand
+        // one turn's side questions to the next.
+        side_questions::publish_inbox(
+            &self.store,
+            text(run, "id"),
+            &side_turn,
+            &directory,
+            steering,
+        )
+        .await
     }
 
     async fn chat_prepare(

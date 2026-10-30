@@ -51,6 +51,7 @@ fn summary(chat: &Value) -> Result<Value> {
         "pendingSideQuestions",
         "canAskSideQuestion",
         "sideQuestionReason",
+        "sideQuestionUnavailable",
     ] {
         result[key] = chat[key].clone();
     }
@@ -186,6 +187,9 @@ fn side_question_page(detail: &Value, args: &Value) -> Result<Value> {
             has_more: next < values.len(),
             can_ask_side_question: detail["canAskSideQuestion"] == true,
             side_question_reason: detail["sideQuestionReason"].as_str().map(str::to_owned),
+            side_question_unavailable: serde_json::from_value(
+                detail["sideQuestionUnavailable"].clone(),
+            )?,
         },
     )?)
 }
