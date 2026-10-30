@@ -445,8 +445,12 @@ export async function grantFullAccess(page: Page) {
 
 // Creates the agent drafted on /agents/new and waits for its own page.
 export async function createAgent(page: Page) {
+  // The created agent's page loads who may use it; a navigation that cancels that request
+  // surfaces in WebKit as a page error, so callers continue once it has answered.
+  const members = page.waitForResponse(response => new URL(response.url()).pathname.endsWith('/sharing'), { timeout: 15000 }).catch(() => undefined)
   await page.getByRole('button', { name: 'Create agent', exact: true }).click()
   await expect(page).toHaveURL(/\/agents\/[0-9a-f-]{36}$/)
+  await members
   return page.url().split('/').at(-1)!
 }
 
