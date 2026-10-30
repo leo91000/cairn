@@ -442,6 +442,27 @@ async fn recover_or_wait(s: &Service, run: &Value) -> Result<bool> {
     Ok(false)
 }
 
+fn recovery_cannot_replay(
+    checkpoint: Option<&RunCheckpoint>,
+    recovery_deadline: Option<i64>,
+) -> bool {
+    checkpoint.is_some_and(|saved| {
+        recovery_deadline.is_some_and(|deadline| now() >= deadline)
+            || matches!(saved.remaining_ms, Some(Some(i64::MIN..=0)))
+            || saved.finalization_error().is_some()
+            || saved.output_error().is_some()
+            || (saved.managed() && saved.completed() && saved.terminal_code() == Some(0))
+            || saved.settled().is_some_and(|settled| {
+                matches!(settled.status, RunStatus::Failed | RunStatus::Cancelled)
+            })
+            || (saved.managed()
+                && saved.terminal_code() != Some(0)
+                && saved.controller_recoveries() >= super::execution::MAX_CONTROLLER_RECOVERIES
+                && !(saved.controller_recoveries() == super::execution::MAX_CONTROLLER_RECOVERIES
+                    && saved.has_controller_recovery_reservation()))
+    })
+}
+
 // Persist the controller's cumulative pause counter with the deadline it
 // extends. Both writes are atomic, so a restart cannot credit the same pause
 // twice. Never apply a response to a replacement execution.
@@ -648,21 +669,7 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
     // A parked turn only needs fencing/release, including a completed turn
     // requeued because its first fencing attempt failed. Placement and possible
     // disk relocation belong to admission after its wakeup.
-    let cannot_replay = checkpoint.as_ref().is_some_and(|saved| {
-        recovery_deadline.is_some_and(|deadline| now() >= deadline)
-            || matches!(saved.remaining_ms, Some(Some(i64::MIN..=0)))
-            || saved.finalization_error().is_some()
-            || saved.output_error().is_some()
-            || (saved.managed() && saved.completed() && saved.terminal_code() == Some(0))
-            || saved.settled().is_some_and(|settled| {
-                matches!(settled.status, RunStatus::Failed | RunStatus::Cancelled)
-            })
-            || (saved.managed()
-                && saved.terminal_code() != Some(0)
-                && saved.controller_recoveries() >= super::execution::MAX_CONTROLLER_RECOVERIES
-                && !(saved.controller_recoveries() == super::execution::MAX_CONTROLLER_RECOVERIES
-                    && saved.has_controller_recovery_reservation()))
-    });
+    let cannot_replay = recovery_cannot_replay(checkpoint.as_ref(), recovery_deadline);
     if !parked
         && !cannot_replay
         && !crate::nodes::moves::advance_for_attempt(s, run, expected_checkpoint.as_ref()).await?
@@ -705,7 +712,11 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
             .await?;
     }
     fenced?;
-    if cannot_replay && !parked {
+    let current = RunCheckpoint::load(&s.store, run_id).await?;
+    if !recovery::same_execution(current.as_ref(), expected_fenced.as_ref()) {
+        return Ok(false);
+    }
+    if recovery_cannot_replay(current.as_ref(), recovery_deadline) && !parked {
         crate::nodes::moves::abort_terminal_recovery(s, run_id, expected_fenced.as_ref()).await?;
     }
     let id = run_id.to_owned();
