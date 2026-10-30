@@ -136,7 +136,10 @@ async fn record_failure(
     let run_id = checkpoint.id.as_str();
     reconcile(s, checkpoint, cancel).await?;
     let saved = checkpoint.snapshot().await;
+    let observation_deferred =
+        s.shutdown.is_cancelled() && saved.managed() && saved.terminal_code.is_none();
     if !cancel.is_cancelled()
+        && !observation_deferred
         && (saved.terminal_code() == Some(0) || saved.finalization_error().is_some())
     {
         // Do not let the transport error or its exhausted replay budget hide

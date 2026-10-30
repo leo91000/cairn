@@ -583,14 +583,14 @@ impl Execution<'_> {
         self.checkpoint
             .update(|c| {
                 c.process = Some(None);
-                // 75 from the local client may mean no controller result was read.
-                c.terminal_code = exit
-                    .code
-                    .filter(|code| *code != crate::runner::CONTROLLER_INTERRUPTED)
-                    .map(Some);
+                // The runner client can return zero only after parsing a healthy
+                // controller result. Nonzero process statuses are ambiguous: local
+                // errors, panics, signals and worker stops share the same channel.
+                // Only a read of this attempt can establish their provenance.
+                c.terminal_code = (exit.code == Some(0)).then_some(Some(0));
             })
             .await?;
-        if exit.code == Some(crate::runner::CONTROLLER_INTERRUPTED) && !exit.timed_out {
+        if exit.code != Some(0) && !exit.timed_out {
             super::execution::reconcile(s, self.checkpoint, self.cancel).await?;
             if let Some(code) = self.checkpoint.snapshot().await.terminal_code() {
                 exit.code = Some(if code == STOPPED && !self.cancel.is_cancelled() {
@@ -603,7 +603,14 @@ impl Execution<'_> {
         drop(auth_broker);
         drop(mcp_channel);
         let saved = self.checkpoint.snapshot().await;
-        if s.shutdown.is_cancelled() && !self.cancel.is_cancelled() && !saved.completed() {
+        let observation_pending = saved.managed() && saved.terminal_code.is_none();
+        if s.shutdown.is_cancelled()
+            && !self.cancel.is_cancelled()
+            && (!saved.completed() || observation_pending)
+        {
+            // Shutdown may stop the local client before /wait responds. Keep
+            // that same attempt readable after restart rather than settling
+            // incomplete transport observations as failed finalization.
             return Err(Error::conflict("Worker is restarting"));
         }
         let session = s.store.run(&self.id).await?["sessionId"]

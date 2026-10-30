@@ -2787,6 +2787,201 @@ async fn controller_evidence_is_reconciled_before_replay_or_terminal_failure() {
     }
 }
 
+/// Manager SIGTERM is a local stop, not a controller completion observation.
+/// A recorded turn must retain the original attempt for reconciliation on restart.
+#[tokio::test]
+async fn manager_shutdown_between_turn_completion_and_wait_preserves_same_attempt_evidence() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    for interruption in ["shutdown", "cancel", "signal", "client-error", "timeout"] {
+        let cancel = interruption == "cancel";
+        let mut fixture = Fixture::new().await;
+        fixture.stop(false).await;
+        let controller = Arc::new(Controller {
+            data: fixture.service.config.data_dir.clone(),
+            plans: tokio::sync::Mutex::new(Vec::new()),
+            failures: 0,
+            slots: 4,
+            hold: std::sync::atomic::AtomicBool::new(false),
+        });
+        let waits = Arc::new(AtomicUsize::new(0));
+        let count = waits.clone();
+        let app = Router::new()
+            .fallback(any(
+                move |state: State<Arc<Controller>>, request: Request| {
+                    let count = count.clone();
+                    async move {
+                        if request.uri().path().ends_with("/wait") {
+                            let observation = count.fetch_add(1, Ordering::SeqCst);
+                            if interruption == "client-error" && observation < 4 {
+                                // Initial wait and all three client recovery reads fail
+                                // decoding. The CLI returns local exit 1, not remote 1.
+                                return Json(json!({})).into_response();
+                            }
+                            if interruption != "client-error" && observation == 0 {
+                                // Only the first client read is interrupted. Persisted
+                                // controller evidence is available to subsequent reads.
+                                return std::future::pending::<Response>().await;
+                            }
+                            return Json(json!({ "StatusCode": 0 })).into_response();
+                        }
+                        serve_controller(state, request).await
+                    }
+                },
+            ))
+            .with_state(controller.clone());
+        let (listener, address) = common::bind().await;
+        common::reconfigure(&mut fixture.service, |config| {
+            config.runner_url = format!("http://{address}");
+        })
+        .await;
+        let server = common::serve(listener, app);
+        let home = fixture.service.config.home.join(".codex");
+        tokio::fs::create_dir_all(&home).await.unwrap();
+        tokio::fs::write(home.join("auth.json"), "{}")
+            .await
+            .unwrap();
+        tokio::fs::write(
+            fixture.service.config.data_dir.join("storage-s3.json"),
+            json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
+        )
+        .await
+        .unwrap();
+        let run = fixture
+            .enqueue("Stop only this disposable manager after turn.completed")
+            .await;
+        let run_id = text(&run, "id");
+        fixture
+            .service
+            .store
+            .transaction({
+                let run_id = run_id.to_owned();
+                move |db| {
+                    db.save_checkpoint_boundary(
+                        &run_id,
+                        &json!({
+                            "controllerRecoveries": 3,
+                            "remainingMs": if interruption == "timeout" { json!(4000) } else { Value::Null },
+                        }),
+                    )
+                }
+            })
+            .await
+            .unwrap();
+        fixture.start().await;
+        eventually(
+            Duration::from_secs(10),
+            Duration::from_millis(10),
+            async || {
+                let saved = fixture
+                    .service
+                    .store
+                    .checkpoint_boundary(run_id)
+                    .await
+                    .unwrap()?;
+                (saved["completed"] == true && waits.load(Ordering::SeqCst) >= 1).then_some(())
+            },
+        )
+        .await;
+        if cancel {
+            // Persisted user cancellation takes precedence even when shutdown
+            // interrupts the client before the controller's healthy exit arrives.
+            fixture
+                .service
+                .store
+                .change_run(
+                    run_id,
+                    cairn_installation::runs::RunChanges {
+                        cancel_requested_at: Some(Some(now())),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        if interruption == "signal" {
+            let saved = fixture.checkpoint(run_id).await;
+            let process = saved["process"].clone();
+            let pid = u32::try_from(process["pid"].as_u64().unwrap()).unwrap();
+            let identity = cairn_installation::recovery::process_identity(pid)
+                .await
+                .unwrap();
+            assert_eq!(serde_json::to_value(identity).unwrap(), process);
+            // The checkpoint identifies the supervisor. Find only its runner
+            // child, validating the exact private attempt before sending a signal.
+            let mut tasks = tokio::fs::read_dir(format!("/proc/{pid}/task"))
+                .await
+                .unwrap();
+            let mut runner = None;
+            while let Some(task) = tasks.next_entry().await.unwrap() {
+                let children = tokio::fs::read_to_string(task.path().join("children"))
+                    .await
+                    .unwrap();
+                for child in children.split_whitespace() {
+                    let args = tokio::fs::read(format!("/proc/{child}/cmdline"))
+                        .await
+                        .unwrap();
+                    let args = args.split(|byte| *byte == 0).collect::<Vec<_>>();
+                    let command_matches = args.contains(&b"runner-client".as_slice());
+                    let attempt_matches = args.contains(&text(&saved, "runnerId").as_bytes());
+                    if command_matches && attempt_matches {
+                        runner = Some(child.parse::<i32>().unwrap());
+                    }
+                }
+            }
+            let runner = runner.expect("Fixture supervisor must own its runner-client");
+            assert_eq!(unsafe { libc::kill(runner, libc::SIGKILL) }, 0);
+        }
+        if matches!(interruption, "shutdown" | "cancel") {
+            fixture.stop(false).await;
+            let stopped = fixture.service.store.run(run_id).await.unwrap();
+            let checkpoint = fixture.checkpoint(run_id).await;
+            assert_eq!(checkpoint["completed"], true);
+            assert!(
+                checkpoint["terminalCode"].is_null(),
+                "Local stop must not fabricate terminal proof: {checkpoint}"
+            );
+            if !cancel {
+                assert_eq!(stopped["status"], RunStatus::Queued, "{stopped}");
+                assert!(checkpoint["settled"].is_null(), "{checkpoint}");
+            }
+            fixture.start().await;
+        }
+        if cancel {
+            let result = fixture
+                .until(run_id, |run| run["status"] == "cancelled")
+                .await;
+            assert_eq!(result["status"], RunStatus::Cancelled);
+            assert_eq!(waits.load(Ordering::SeqCst), 1);
+        } else if interruption == "timeout" {
+            let result = fixture.until_finished(run_id).await;
+            assert_eq!(result["status"], RunStatus::Failed, "{result}");
+            assert!(text(&result, "error").contains("time limit"), "{result}");
+            assert!(fixture.checkpoint(run_id).await["terminalCode"].is_null());
+            assert_eq!(waits.load(Ordering::SeqCst), 1);
+        } else {
+            let result = fixture.until_finished(run_id).await;
+            assert_eq!(
+                result["status"],
+                RunStatus::Succeeded,
+                "{interruption}: {result}"
+            );
+            assert_eq!(fixture.checkpoint(run_id).await["terminalCode"], 0);
+            assert_eq!(
+                waits.load(Ordering::SeqCst),
+                if interruption == "client-error" { 5 } else { 2 }
+            );
+        }
+        assert_eq!(
+            controller.plans.lock().await.len(),
+            1,
+            "Reconciliation must never launch another agent"
+        );
+        assert_eq!(fixture.checkpoint(run_id).await["controllerRecoveries"], 3);
+        fixture.stop(false).await;
+        server.abort();
+    }
+}
+
 #[tokio::test]
 async fn vm_chat_protocol_runs_receive_one_frame_with_plugin_instructions() {
     let mut fixture = Fixture::new().await;
