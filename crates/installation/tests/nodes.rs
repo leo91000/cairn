@@ -4737,92 +4737,116 @@ async fn idle_move_requested_before_old_worker_release_transfers_without_replay(
 #[tokio::test]
 #[ignore = "requires loopback S3; run scripts/tests/node_s3_test.py"]
 async fn paid_active_move_recovers_after_transfer_at_controller_ceiling() {
-    let (listener, address) = common::bind().await;
-    let owner = Owner::at(address.to_string()).await;
-    let (run, agent, source, destination, attempt) = (id(), id(), id(), id(), id());
-    owner
-        .grant_nodes(&agent, json!([source, destination]))
-        .await;
-    let mut record = run_record(&run, RunStatus::Running);
-    record["isolated"] = true.into();
-    record["sessionId"] = "retained-session".into();
-    record["nodeId"] = source.clone().into();
-    record["resources"] = limits(1, 512, 128);
-    record["snapshot"] = json!({ "agent": { "id": agent, "provider": "codex" } });
-    owner.add_run_fixture(&record).await;
-    owner
-        .set_checkpoint(
-            &run,
-            json!({
-                "nodeId": source, "runnerId": attempt, "runtimeId": "development",
-                "prepared": { "backend": "firecracker", "isolated": true },
-                "completed": false, "terminalCode": 75, "remainingMs": null,
-                "controllerRecoveries": 4, "controllerRecoveryReservation": attempt,
-            }),
-        )
-        .await;
-    let stop = CancellationToken::new();
-    let faults = MoveFaults {
-        failed: Arc::new(AtomicBool::new(false)),
-        cancel_during_capture: Arc::new(AtomicBool::new(false)),
-    };
-    let mut tasks = Vec::new();
-    for node in [&source, &destination] {
-        tasks.extend(
-            connect_node(
-                &owner,
-                &record,
-                node,
-                address,
-                &faults,
-                &stop,
-                node == &source,
+    for mode in ["failure", "cancel", "success"] {
+        let (listener, address) = common::bind().await;
+        let owner = Owner::at(address.to_string()).await;
+        let (run, agent, source, destination, attempt) = (id(), id(), id(), id(), id());
+        owner
+            .grant_nodes(&agent, json!([source, destination]))
+            .await;
+        let mut record = run_record(&run, RunStatus::Running);
+        record["isolated"] = true.into();
+        record["sessionId"] = "retained-session".into();
+        record["nodeId"] = source.clone().into();
+        record["resources"] = limits(1, 512, 128);
+        record["snapshot"] = json!({ "agent": { "id": agent, "provider": "codex" } });
+        owner.add_run_fixture(&record).await;
+        owner
+            .set_checkpoint(
+                &run,
+                json!({
+                    "nodeId": source, "runnerId": attempt, "runtimeId": "development",
+                    "prepared": { "backend": "firecracker", "isolated": true },
+                    "completed": false, "terminalCode": 75, "remainingMs": null,
+                    "controllerRecoveries": 4, "controllerRecoveryReservation": attempt,
+                }),
             )
-            .await,
-        );
-    }
-    tasks.push(owner.serve(listener));
-    let (status, body) = owner
-        .send(
-            "POST",
-            &format!("/api/nodes/placement/{run}/move"),
-            json!({ "nodeId": destination }),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    owner
-        .service
-        .store
-        .change_run(
-            &run,
-            cairn_installation::runs::RunChanges {
-                status: Some(RunStatus::Queued),
-                recovery_pending: Some(true),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    owner.service.worker.tick(&owner.service).await.unwrap();
-    let transferred = owner.run(&run).await;
-    assert_eq!(transferred["nodeId"], destination, "{transferred}");
-    assert!(transferred["moveRequest"].is_null());
-    assert_eq!(transferred["recoveryPending"], true);
-    owner.service.worker.tick(&owner.service).await.unwrap();
-    let resumed = owner.run(&run).await;
-    assert_eq!(resumed["status"], RunStatus::Queued, "{resumed}");
-    assert_eq!(resumed["recoveryPending"], false, "{resumed}");
-    let checkpoint = owner
-        .service
-        .store
-        .checkpoint_boundary(&run)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(checkpoint["controllerRecoveries"], 4);
-    stop.cancel();
-    for task in tasks {
-        task.abort();
+            .await;
+        let stop = CancellationToken::new();
+        let faults = MoveFaults {
+            failed: Arc::new(AtomicBool::new(mode == "failure")),
+            cancel_during_capture: Arc::new(AtomicBool::new(mode == "cancel")),
+        };
+        let mut tasks = Vec::new();
+        for node in [&source, &destination] {
+            tasks.extend(
+                connect_node(
+                    &owner,
+                    &record,
+                    node,
+                    address,
+                    &faults,
+                    &stop,
+                    node == &source,
+                )
+                .await,
+            );
+        }
+        tasks.push(owner.serve(listener));
+        let (status, body) = owner
+            .send(
+                "POST",
+                &format!("/api/nodes/placement/{run}/move"),
+                json!({ "nodeId": destination }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        owner
+            .service
+            .store
+            .change_run(
+                &run,
+                cairn_installation::runs::RunChanges {
+                    status: Some(RunStatus::Queued),
+                    recovery_pending: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        owner.service.worker.tick(&owner.service).await.unwrap();
+        let transferred = owner.run(&run).await;
+        if mode != "success" {
+            assert_eq!(transferred["nodeId"], source, "{transferred}");
+            if mode == "cancel" {
+                assert_eq!(transferred["status"], RunStatus::Cancelled, "{transferred}");
+            } else {
+                assert!(transferred["movementError"].is_string(), "{transferred}");
+            }
+            let checkpoint = owner
+                .service
+                .store
+                .checkpoint_boundary(&run)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(checkpoint["moveRecoveryReservation"].is_null());
+            assert_eq!(checkpoint["controllerRecoveries"], 4);
+            stop.cancel();
+            for task in tasks {
+                task.abort();
+            }
+            continue;
+        }
+        assert_eq!(transferred["nodeId"], destination, "{transferred}");
+        assert!(transferred["moveRequest"].is_null());
+        assert_eq!(transferred["recoveryPending"], true);
+        owner.service.worker.tick(&owner.service).await.unwrap();
+        let resumed = owner.run(&run).await;
+        assert_eq!(resumed["status"], RunStatus::Queued, "{resumed}");
+        assert_eq!(resumed["recoveryPending"], false, "{resumed}");
+        let checkpoint = owner
+            .service
+            .store
+            .checkpoint_boundary(&run)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(checkpoint["controllerRecoveries"], 4);
+        stop.cancel();
+        for task in tasks {
+            task.abort();
+        }
     }
 }
 
