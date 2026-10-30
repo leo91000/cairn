@@ -438,8 +438,7 @@ async fn requeue_pending_move(s: &Service, checkpoint: &Checkpoint, fenced: bool
     }
     checkpoint
         .update(|c| {
-            c.completed = Some(false);
-            c.terminal_code = Some(None);
+            // Retain the old attempt's evidence until recovery charges admission.
             c.settled = Some(None);
         })
         .await?;
