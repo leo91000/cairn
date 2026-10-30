@@ -675,7 +675,7 @@ pub(crate) async fn advance_for_attempt(
         ));
     }
     match transfer(s, &current).await {
-        Ok(backup) => resume_at_destination(s, &current, &backup).await?,
+        Ok(backup) => resume_at_destination(s, &current, &backup, expected_fenced.as_ref()).await?,
         Err(error) => fail_transfer(s, &current, &error).await?,
     }
     Ok(false)
@@ -767,7 +767,12 @@ async fn fail_transfer(s: &Service, current: &Value, error: &Error) -> Result<()
 }
 
 /// Points the checkpoint at the destination and queues the conversation to resume there.
-async fn resume_at_destination(s: &Service, current: &Value, backup: &Value) -> Result<()> {
+async fn resume_at_destination(
+    s: &Service,
+    current: &Value,
+    backup: &Value,
+    expected: Option<&crate::worker::checkpoint::RunCheckpoint>,
+) -> Result<()> {
     let run_id = text(current, "id").to_owned();
     let movement = &current["moveRequest"];
     let idle = movement["idle"] == true;
@@ -811,6 +816,8 @@ async fn resume_at_destination(s: &Service, current: &Value, backup: &Value) -> 
         ..Default::default()
     };
     let owner = run_id.clone();
+    let expected = expected.cloned();
+    let movement = movement.clone();
     s.store
         .transaction(move |db| {
             let mut checkpoint = db
@@ -821,6 +828,19 @@ async fn resume_at_destination(s: &Service, current: &Value, backup: &Value) -> 
                 .ok_or_else(|| Error::not_found("Conversation removed."))?;
             if !current["cancelRequestedAt"].is_null() {
                 return Err(Error::conflict("Conversation cancelled during restore."));
+            }
+            let saved = crate::worker::checkpoint::RunCheckpoint::load_in(db, &owner)?;
+            if !crate::recovery::same_execution(saved.as_ref(), expected.as_ref())
+                || current["moveRequest"] != movement
+            {
+                return Err(Error::conflict("Execution or movement changed during restore."));
+            }
+            if !idle
+                && let Some(saved) = saved.as_ref()
+                && saved.has_controller_recovery_reservation()
+                && let Some(attempt) = saved.runner_id()
+            {
+                checkpoint["moveRecoveryReservation"] = attempt.into();
             }
             checkpoint["nodeId"] = node;
             checkpoint["process"] = Value::Null;

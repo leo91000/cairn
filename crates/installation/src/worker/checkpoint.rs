@@ -78,6 +78,9 @@ pub struct RunCheckpoint {
     /// A recovery already charged to the budget, bound to the stopped attempt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub controller_recovery_reservation: Option<String>,
+    /// A paid move recovery that reached its destination, bound to the stopped attempt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub move_recovery_reservation: Option<String>,
     /// A provider retry already scheduled and charged to this attempt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_retry_reservation: Option<String>,
@@ -373,6 +376,7 @@ impl RunCheckpoint {
         }
         self.runner_id = Some(Some(runner.to_owned()));
         self.controller_recovery_reservation = None;
+        self.move_recovery_reservation = None;
         self.provider_retry_reservation = None;
     }
 

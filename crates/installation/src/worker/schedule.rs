@@ -471,6 +471,11 @@ fn controller_budget_exhausted(saved: &RunCheckpoint, state: &RunState, run: &Va
     if refunded_capacity {
         return false;
     }
+    if saved.has_controller_recovery_reservation()
+        && saved.runner_id() == saved.move_recovery_reservation.as_deref()
+    {
+        return false;
+    }
     let exception = (saved
         .prepared()
         .is_some_and(|prepared| prepared["backend"] == "native")
@@ -1845,6 +1850,61 @@ mod tests {
                 assert_eq!(durable.controller_recoveries(), 4);
                 Ok(())
             }).await.unwrap();
+        }
+        service.shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn transferred_move_authorization_is_attempt_scoped_and_consumed() {
+        let (_root, service, _chat, run, _workspace) = fixture().await;
+        for (replace, consume, cancelled, expired) in [
+            (false, false, false, false),
+            (true, false, false, false),
+            (false, true, false, false),
+            (false, false, true, false),
+            (false, false, false, true),
+        ] {
+            let id = run.clone();
+            service
+                .store
+                .transaction(move |db| {
+                    db.change_run(
+                        &id,
+                        crate::runs::RunChanges {
+                            status: Some(RunStatus::Queued),
+                            cancel_requested_at: Some(cancelled.then(now)),
+                            boundary: Some(json!({ "moveRequest": null })),
+                            ..Default::default()
+                        },
+                    )?;
+                    let mut saved = RunCheckpoint::from_value(json!({
+                        "prepared": { "backend": "firecracker", "isolated": true },
+                        "runnerId": "attempt", "completed": false, "terminalCode": 75,
+                        "remainingMs": if expired { Some(0) } else { None },
+                        "controllerRecoveries": 4, "controllerRecoveryReservation": "attempt",
+                        "moveRecoveryReservation": "attempt",
+                    }))?;
+                    if replace {
+                        saved.runner_id = Some(Some("replacement".into()));
+                    }
+                    if consume {
+                        saved.bind_paid_admission("new-attempt", &db.run_state(&id)?.unwrap());
+                    }
+                    saved.store_in(db, &id)?;
+                    assert_eq!(
+                        finish_recovery(db, &id, Some(&saved))?,
+                        !replace && !consume && !cancelled && !expired
+                    );
+                    assert_eq!(
+                        RunCheckpoint::load_in(db, &id)?
+                            .unwrap()
+                            .controller_recoveries(),
+                        4
+                    );
+                    Ok(())
+                })
+                .await
+                .unwrap();
         }
         service.shutdown.cancel();
     }
