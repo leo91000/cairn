@@ -40,6 +40,7 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class DirectTransportDeviceTest {
     @get:Rule val compose = createComposeRule()
+    private val diagnostics = DirectBenchDiagnostics()
 
     private suspend fun <T> duringPhase(
         name: String,
@@ -47,7 +48,8 @@ class DirectTransportDeviceTest {
         block: suspend CoroutineScope.() -> T,
     ): T =
         try {
-            withTimeout(timeoutMillis, block)
+            diagnostics.record("phase start", name)
+            withTimeout(timeoutMillis, block).also { diagnostics.record("phase completed", name) }
         } catch (error: TimeoutCancellationException) {
             throw AssertionError("Direct bench timed out during $name", error)
         }
@@ -78,6 +80,20 @@ class DirectTransportDeviceTest {
         val authorizationAttempts = AtomicInteger()
         val client =
             OkHttpClient.Builder()
+                .addInterceptor { chain ->
+                    diagnostics.primaryRequests.incrementAndGet()
+                    try {
+                        chain.proceed(chain.request()).also { response ->
+                            diagnostics.primaryResponses.incrementAndGet()
+                            if (response.request.tag(DirectChannel::class.java) != null)
+                                diagnostics.primaryDirectResponses.incrementAndGet()
+                        }
+                    } catch (error: Throwable) {
+                        diagnostics.primaryFailures.incrementAndGet()
+                        diagnostics.record("primary failure", error.javaClass.simpleName)
+                        throw error
+                    }
+                }
                 .addInterceptor { chain ->
                     val request = chain.request()
                     if (request.url.encodedPath.endsWith("/direct/authorize"))
@@ -174,6 +190,27 @@ class DirectTransportDeviceTest {
         val started = System.nanoTime()
         lateinit var activity: Activity
         var selectedVm by mutableStateOf<CairnViewModel?>(null)
+        val expectedInstallation = configuration["installation"]!!.jsonPrimitive.content
+        fun recordWorkspace() =
+            diagnostics.workspace(
+                selectedVm,
+                expectedInstallation,
+                runCatching { activity }.getOrNull(),
+            )
+        fun headerCategory(): String {
+            val headers = compose.onAllNodes(installationHeader()).fetchSemanticsNodes()
+            if (headers.isEmpty()) return "absent"
+            for ((label, category) in
+                listOf(
+                    "En ligne · Direct" to "direct",
+                    "En ligne · Relais" to "relay",
+                    "Hors ligne" to "offline",
+                    "Mise à jour requise" to "update-required",
+                )) {
+                if (headers.any { installationHeader(state = label).matches(it) }) return category
+            }
+            return "other"
+        }
         compose.setContent {
             activity = checkNotNull(LocalActivity.current)
             selectedVm?.let { vm -> CairnTheme { CairnApp(vm = vm) } }
@@ -198,6 +235,7 @@ class DirectTransportDeviceTest {
             }
         }
         try {
+            diagnostics.record("startup", "primary read")
             read()
             assertEquals("relay", api.transport.route.value)
             api.startDirect(context)
@@ -556,21 +594,24 @@ class DirectTransportDeviceTest {
 
                     awaitDirect()
                     val authorizationsBeforeLargeRequest = authorizationAttempts.get()
-                    val largeRequest = runCatching {
-                        api.request(
-                            "POST",
-                            "/chats/missing/messages",
-                            body(
-                                "id" to java.util.UUID.randomUUID().toString(),
-                                "text" to "x".repeat(1_000_000),
-                            ),
-                        )
-                    }
-                        .exceptionOrNull()
+                    val largeRequest =
+                        try {
+                            api.request(
+                                "POST",
+                                "/chats/missing/messages",
+                                body(
+                                    "id" to java.util.UUID.randomUUID().toString(),
+                                    "text" to "x".repeat(1_000_000),
+                                ),
+                            )
+                            throw AssertionError("Expected the router's oversized-body rejection")
+                        } catch (error: ApiException) {
+                            error
+                        }
                     assertEquals(
                         "The real router retains its 150 kB JSON body limit",
                         413,
-                        (largeRequest as? ApiException)?.status,
+                        largeRequest.status,
                     )
                     // An ID-backed POST may safely replay on relay under write pressure.
                     // The route records that response; observe a fresh direct read before
@@ -584,6 +625,7 @@ class DirectTransportDeviceTest {
                     )
 
                     // Real selected-installation UI exercises the asynchronous startup/indicator.
+                    diagnostics.record("startup", "construct ViewModel")
                     val vm =
                         withContext(Dispatchers.Main) {
                             CairnViewModel(
@@ -593,15 +635,45 @@ class DirectTransportDeviceTest {
                             )
                         }
                     withContext(Dispatchers.Main) { selectedVm = vm }
-                    compose.waitUntil(30000) {
-                        compose
-                            .onAllNodes(installationHeader(state = "En ligne · Direct"))
-                            .fetchSemanticsNodes()
-                            .isNotEmpty()
+                    diagnostics.record("startup", "show ViewModel")
+                    // Startup reads finish on relay before startDirect(). Peer readiness does
+                    // not change the observed route: drive a real workspace read through this
+                    // selected VM rather than relying on incidental live/poll traffic.
+                    duringPhase("selected-installation direct UI", 30000) {
+                        var refreshes = 0
+                        var observedDirect = false
+                        while (true) {
+                            recordWorkspace()
+                            val state = vm.state.value
+                            if (
+                                state.ready &&
+                                    !state.busy &&
+                                    state.session.authenticated &&
+                                    state.installation?.id == expectedInstallation &&
+                                    state.installation.online
+                            ) {
+                                diagnostics.record("selected VM refresh", "started ${++refreshes}")
+                                withContext(Dispatchers.Main) { vm.refresh() }
+                                diagnostics.record("selected VM refresh", "completed $refreshes")
+                                observedDirect = vm.api.transport.route.value == "direct"
+                                diagnostics.record(
+                                    "selected VM response route",
+                                    if (observedDirect) "direct" else "relay",
+                                )
+                            }
+                            recordWorkspace()
+                            val header = headerCategory()
+                            diagnostics.record("header", header)
+                            if (observedDirect && header == "direct") break
+                            delay(200)
+                        }
                     }
+                    assertEquals(expectedInstallation, vm.state.value.installation?.id)
+                    assertEquals("direct", vm.api.transport.route.value)
                     compose
                         .onNode(installationHeader(state = "En ligne · Direct"))
                         .assertIsDisplayed()
+                    diagnostics.record("startup", "real Direct header displayed")
                     vm.api.closeStreams()
                     ui = true
 
@@ -660,12 +732,21 @@ class DirectTransportDeviceTest {
                         put("foregroundBackoff", foregroundBackoff)
                         put("unavailableRenewal", unavailableRenewal)
                         put("refusedCandidates", refusedCandidates.get())
+                        put("phaseEvidence", diagnostics.summary())
                         put("sdk", Build.VERSION.SDK_INT)
                         put("abi", Build.SUPPORTED_ABIS.first())
                         put("elapsedMs", (System.nanoTime() - started) / 1000000)
                     }
                         .toString()
                 )
+        } catch (error: Throwable) {
+            runCatching {
+                recordWorkspace()
+                diagnostics.record("header", headerCategory())
+            }
+                .onFailure { diagnostics.record("snapshot failure", it.javaClass.simpleName) }
+            error.addSuppressed(AssertionError(diagnostics.summary()))
+            throw error
         } finally {
             api.closeStreams()
             if (scenario == "network-change") shell("svc wifi enable")

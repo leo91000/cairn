@@ -9,6 +9,7 @@ import {
   ref,
 } from 'vue'
 import { api, apiResourceUrl } from '../api'
+import { clientPerformance } from '../client-performance'
 import { artifactLink } from '../deliverables'
 import { isDiagramLanguage } from '../diagram'
 import { DiagramCache, diagramFigure, diagramFonts } from '../diagram-svg'
@@ -130,7 +131,7 @@ function closedFence(raw: string, literal: string) {
   return trailingFences(raw) > trailingFences(literal)
 }
 
-const html = computed(() => {
+const html = computed(() => clientPerformance.measure('MARKDOWN', () => {
   let rawHtml = false
   // Streaming fences stay code until their closing fence arrives, so drawings never flicker.
   const codeRenderer = new Renderer()
@@ -260,7 +261,7 @@ const html = computed(() => {
   }
 
   return container
-})
+}))
 </script>
 
 <template>
