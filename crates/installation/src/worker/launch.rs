@@ -1362,6 +1362,97 @@ fn current_exe() -> Result<String> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn active_clean_exit_requires_managed_provider_completion() {
+        use crate::run_fixture::DbRunFixture;
+        let root = tempfile::tempdir().unwrap();
+        let service = Service::new(crate::config::Config {
+            data_dir: root.path().join("data"),
+            home: root.path().join("home"),
+            workspace_roots: vec![root.path().into()],
+            public_url: "http://localhost:4310".into(),
+            host: "127.0.0.1".into(),
+            port: 0,
+            codex_bin: "codex".into(),
+            claude_bin: "claude".into(),
+            opencode_bin: "opencode".into(),
+            opencode_go_usage_url: crate::accounts::opencode::USAGE_URL.into(),
+            concurrency: 1,
+            logger: false,
+            worker_enabled: false,
+            runner_url: String::new(),
+        })
+        .await
+        .unwrap();
+        for backend in ["native", "firecracker", "shared"] {
+            for completed in [false, true] {
+                let id = crate::config::id();
+                let run_fixture = json!({ "id": id, "taskId": id, "status": "running" });
+                service
+                    .store
+                    .transaction(move |db| db.add_run_fixture(&run_fixture, None).map(|_| ()))
+                    .await
+                    .unwrap();
+                let saved = RunCheckpoint::from_value(json!({
+                    "prepared": { "backend": backend, "isolated": backend != "shared" },
+                    "completed": completed, "terminalCode": 0, "remainingMs": null,
+                }))
+                .unwrap();
+                let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), saved.clone());
+                let mut run = service.store.run(&id).await.unwrap();
+                let mut account = None;
+                let cancel = CancellationToken::new();
+                let mut sensitive = Vec::new();
+                let execution = Execution {
+                    s: &service,
+                    id: id.clone(),
+                    run: &mut run,
+                    account: &mut account,
+                    preparation: None,
+                    cancel: &cancel,
+                    checkpoint: &checkpoint,
+                    sensitive: &mut sensitive,
+                    provider: Provider::Codex,
+                    directory: root.path().into(),
+                    attempt_id: String::new(),
+                    reservation: None,
+                };
+                let workspace = Workspace {
+                    prepared: json!({ "output": root.path().join("missing-result").to_string_lossy() }),
+                    state_home: root.path().into(),
+                    env: Environment::new(),
+                    mcp: json!({}),
+                };
+                execution
+                    .finish(
+                        &workspace,
+                        &Exit {
+                            code: Some(0),
+                            ..Default::default()
+                        },
+                        &saved,
+                        false,
+                    )
+                    .await
+                    .unwrap();
+                let state = service.store.run_state(&id).await.unwrap();
+                let expected = if completed || backend == "shared" {
+                    RunStatus::Succeeded
+                } else {
+                    RunStatus::Failed
+                };
+                assert_eq!(
+                    state.status, expected,
+                    "backend={backend}, completed={completed}"
+                );
+                if expected == RunStatus::Failed {
+                    assert!(state.error.unwrap().contains("completion was recorded"));
+                }
+            }
+        }
+        service.shutdown.cancel();
+    }
+
     #[test]
     fn controller_messages_follow_the_execution_backend() {
         assert_eq!(
