@@ -875,25 +875,29 @@ async fn release_destination(s: &Service, run: &Value) -> Result<()> {
 /// A terminal recovery cannot resume the interrupted turn on a destination.
 /// Release only the pending destination reservation, retaining the source and
 /// its checkpoint until fencing and finalization have been resolved.
-pub(crate) async fn abort_terminal_recovery(s: &Service, run_id: &str) -> Result<()> {
-    let run = s.store.run(run_id).await?;
-    let movement = run["moveRequest"].clone();
-    if !movement.is_object() {
-        return Ok(());
-    }
-    if let Some(reservation) = movement["reservation"].as_str() {
-        super::placement::release(s, reservation).await?;
-    }
+pub(crate) async fn abort_terminal_recovery(
+    s: &Service,
+    run_id: &str,
+    expected_attempt: Option<&str>,
+) -> Result<()> {
     let id = run_id.to_owned();
+    let expected = expected_attempt.map(str::to_owned);
     s.store.transaction(move |db| {
-        let current = db.run(&id)?.ok_or_else(|| Error::not_found("Conversation removed."))?;
-        if current["moveRequest"] == movement {
-            db.update_run_boundary(&id, &serde_json::json!({
-                "moveRequest": null,
-                "nodeState": null,
-                "movementError": "Movement stopped because the interrupted execution cannot be replayed.",
-            }))?;
+        let checkpoint = crate::worker::checkpoint::RunCheckpoint::load_in(db, &id)?;
+        if checkpoint.as_ref().and_then(crate::worker::checkpoint::RunCheckpoint::runner_id) != expected.as_deref() {
+            return Err(Error::conflict("Execution attempt changed during recovery."));
         }
+        let current = db.run(&id)?.ok_or_else(|| Error::not_found("Conversation removed."))?;
+        let movement = &current["moveRequest"];
+        if !movement.is_object() { return Ok(()); }
+        if let Some(reservation) = movement["reservation"].as_str() {
+            super::placement::release_in(db, reservation)?;
+        }
+        db.update_run_boundary(&id, &serde_json::json!({
+            "moveRequest": null,
+            "nodeState": null,
+            "movementError": "Movement stopped because the interrupted execution cannot be replayed.",
+        }))?;
         Ok(())
     }).await
 }

@@ -619,9 +619,25 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
     }
     fenced?;
     if cannot_replay && !parked {
-        crate::nodes::moves::abort_terminal_recovery(s, run_id).await?;
+        crate::nodes::moves::abort_terminal_recovery(s, run_id, expected_attempt.as_deref())
+            .await?;
     }
-    s.mcps.revoke_run(s, run_id).await?;
+    let id = run_id.to_owned();
+    let expected = expected_attempt.clone();
+    let revoked = s
+        .store
+        .transaction(move |db| {
+            let current = RunCheckpoint::load_in(db, &id)?;
+            if current.as_ref().and_then(RunCheckpoint::runner_id) != expected.as_deref() {
+                return Ok(false);
+            }
+            db.revoke_mcp_run(&id)?;
+            Ok(true)
+        })
+        .await?;
+    if !revoked {
+        return Ok(false);
+    }
     s.accounts.recover_run(s, run).await?;
     let id = run_id.to_owned();
     s.store

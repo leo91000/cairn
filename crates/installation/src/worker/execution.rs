@@ -451,7 +451,7 @@ async fn requeue_pending_move(s: &Service, checkpoint: &Checkpoint, fenced: bool
     }
     if saved.managed() && saved.completed() && saved.terminal_code() == Some(0) {
         if fenced && run.state.status != RunStatus::Waiting {
-            crate::nodes::moves::abort_terminal_recovery(s, run_id).await?;
+            crate::nodes::moves::abort_terminal_recovery(s, run_id, saved.runner_id()).await?;
         }
         return Ok(());
     }
@@ -462,7 +462,7 @@ async fn requeue_pending_move(s: &Service, checkpoint: &Checkpoint, fenced: bool
         });
     if terminal_failure {
         if fenced {
-            crate::nodes::moves::abort_terminal_recovery(s, run_id).await?;
+            crate::nodes::moves::abort_terminal_recovery(s, run_id, saved.runner_id()).await?;
         }
         return Ok(());
     }
@@ -532,6 +532,7 @@ mod tests {
             "completed": true, "terminalCode": 70, "remainingMs": null,
         }))
         .unwrap();
+        saved.store(&service.store, &id).await.unwrap();
         let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), saved);
         release(&service, &checkpoint, None, true).await.unwrap();
         let current = checkpoint.snapshot().await;
@@ -560,6 +561,7 @@ mod tests {
             "completed": true, "remainingMs": null,
         }))
         .unwrap();
+        pending.store(&service.store, &id).await.unwrap();
         let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), pending);
         release(&service, &checkpoint, None, true).await.unwrap();
         let current = checkpoint.snapshot().await;
@@ -591,6 +593,7 @@ mod tests {
                 "completed": true, "terminalCode": 0, "remainingMs": null,
             }))
             .unwrap();
+            saved.store(&service.store, &id).await.unwrap();
             let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), saved);
             release(&service, &checkpoint, None, true).await.unwrap();
             let current = checkpoint.snapshot().await;
