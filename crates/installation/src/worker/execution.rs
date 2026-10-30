@@ -130,7 +130,7 @@ pub(super) async fn reconcile(
                                 reserved = current.reserve_observation(&attempt);
                             }
                             recovery::ObservationAction::Release => {
-                                current.release_observation(&attempt)
+                                current.release_observation(&attempt);
                             }
                             recovery::ObservationAction::Exhausted => {
                                 if !shutdown.is_cancelled()
