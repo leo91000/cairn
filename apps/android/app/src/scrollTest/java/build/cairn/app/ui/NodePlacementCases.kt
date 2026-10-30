@@ -1,13 +1,17 @@
 package build.cairn.app.ui
 
 import android.app.Application
+import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
 import android.view.inspector.WindowInspector
 import androidx.compose.runtime.*
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.core.graphics.Insets
 import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsAnimationCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.test.core.app.ApplicationProvider
@@ -294,58 +298,100 @@ abstract class NodePlacementCases {
                 )
             }
         }
-        compose.onNodeWithText("Slots d’exécution").assertIsEnabled().performTextReplacement("6")
-        // The editor's Dialog owns its focus and IME window, separate from setContent.
-        val editorWindow = compose.runOnIdle {
-            val window =
-                WindowInspector.getGlobalWindowViews().single { root ->
-                    val attributes = root.layoutParams as? WindowManager.LayoutParams
-                    attributes?.type == WindowManager.LayoutParams.TYPE_APPLICATION
-                }
-
-            window.findFocus()?.clearFocus()
-            val keyboard = window.context.getSystemService(InputMethodManager::class.java)
-            keyboard.hideSoftInputFromWindow(window.windowToken, 0)
-            window
-        }
-        compose.onNodeWithText("Slots d’exécution").assertIsNotFocused()
-        // Compose idleness does not wait for the native IME resize. Scroll only once the
-        // dialog has its full viewport, so the switch's touch coordinates remain valid.
-        compose.waitUntil(10000) {
+        val imeReadiness = ImeAnimationReadiness()
+        // Observe on a zero-size sibling, leaving Compose's own animation callback intact.
+        val (editorWindow, imeObserver) =
             compose.runOnIdle {
-                val insets = ViewCompat.getRootWindowInsets(editorWindow)
-                insets != null &&
-                    !insets.isVisible(WindowInsetsCompat.Type.ime()) &&
-                    insets.getInsets(WindowInsetsCompat.Type.ime()).bottom == 0
+                val window =
+                    WindowInspector.getGlobalWindowViews().single { root ->
+                        val attributes = root.layoutParams as? WindowManager.LayoutParams
+                        attributes?.type == WindowManager.LayoutParams.TYPE_APPLICATION
+                    }
+                val observer = View(window.context)
+                ViewCompat.setWindowInsetsAnimationCallback(observer, imeReadiness)
+                requireNotNull(window.findViewById<ViewGroup>(android.R.id.content))
+                    .addView(observer, 0, 0)
+                window to observer
+            }
+        try {
+            compose
+                .onNodeWithText("Slots d’exécution")
+                .assertIsEnabled()
+                .performTextReplacement("6")
+            // The editor's Dialog owns its focus and IME window, separate from setContent.
+            compose.runOnIdle {
+                editorWindow.findFocus()?.clearFocus()
+                val keyboard = editorWindow.context.getSystemService(InputMethodManager::class.java)
+                keyboard.hideSoftInputFromWindow(editorWindow.windowToken, 0)
+            }
+            compose.onNodeWithText("Slots d’exécution").assertIsNotFocused()
+            // Root insets describe the target before the native animation ends. Wait for
+            // both hidden insets and animation completion, then let Compose finish layout.
+            compose.waitUntil(10000) {
+                compose.runOnIdle {
+                    imeReadiness.hidden(ViewCompat.getRootWindowInsets(editorWindow))
+                }
+            }
+            compose
+                .onNodeWithText("Tous les slots partagent ces budgets.", substring = true)
+                .assertExists()
+            compose.onNodeWithText("Réservation exclusive").assertDoesNotExist()
+            compose.onNodeWithText("Mettez à jour le runtime", substring = true).assertExists()
+            compose.onNodeWithText("Personnes de confiance").performScrollTo().assertExists()
+            val nativeToggle =
+                compose
+                    .onNodeWithText("Activer l’exécution native")
+                    .performScrollTo()
+                    .assertIsDisplayed()
+            nativeToggle.performClick()
+            try {
+                nativeToggle.assertIsOn()
+            } catch (failure: AssertionError) {
+                // Preserve the failing device state before the fixture closes the editor.
+                runCatching { capture("native-node-toggle-failure") }
+                throw failure
+            }
+            compose.onNodeWithText("trusted@example.test").performScrollTo().performClick()
+            capture("native-node-trust")
+            compose.onNodeWithText("Enregistrer").performClick()
+            compose.runOnIdle {
+                assertEquals(true, saved?.nativeEnabled)
+                assertEquals(listOf("trusted"), saved?.nativeAccounts)
+                assertEquals(6, saved?.slots)
+            }
+        } finally {
+            compose.runOnIdle {
+                ViewCompat.setWindowInsetsAnimationCallback(imeObserver, null)
+                (imeObserver.parent as? ViewGroup)?.removeView(imeObserver)
             }
         }
-        compose
-            .onNodeWithText("Tous les slots partagent ces budgets.", substring = true)
-            .assertExists()
-        compose.onNodeWithText("Réservation exclusive").assertDoesNotExist()
-        compose.onNodeWithText("Mettez à jour le runtime", substring = true).assertExists()
-        compose.onNodeWithText("Personnes de confiance").performScrollTo().assertExists()
-        val nativeToggle =
-            compose
-                .onNodeWithText("Activer l’exécution native")
-                .performScrollTo()
-                .assertIsDisplayed()
-        nativeToggle.performClick()
-        try {
-            nativeToggle.assertIsOn()
-        } catch (failure: AssertionError) {
-            // Preserve the failing device state before the fixture closes the editor.
-            runCatching { capture("native-node-toggle-failure") }
-            throw failure
-        }
-        compose.onNodeWithText("trusted@example.test").performScrollTo().performClick()
-        capture("native-node-trust")
-        compose.onNodeWithText("Enregistrer").performClick()
-        compose.runOnIdle {
-            assertEquals(true, saved?.nativeEnabled)
-            assertEquals(listOf("trusted"), saved?.nativeAccounts)
-            assertEquals(6, saved?.slots)
-        }
+    }
+
+    @Test
+    fun hidingTargetInsetsDoNotMeanTheImeAnimationHasFinished() {
+        val readiness = ImeAnimationReadiness()
+        val hidden =
+            WindowInsetsCompat.Builder()
+                .setInsets(WindowInsetsCompat.Type.ime(), Insets.NONE)
+                .setVisible(WindowInsetsCompat.Type.ime(), false)
+                .build()
+        val hiding = WindowInsetsAnimationCompat(WindowInsetsCompat.Type.ime(), null, 200)
+        val overlapping = WindowInsetsAnimationCompat(WindowInsetsCompat.Type.ime(), null, 200)
+        val bars = WindowInsetsAnimationCompat(WindowInsetsCompat.Type.systemBars(), null, 200)
+
+        assertTrue(readiness.hidden(hidden))
+        readiness.onPrepare(hiding)
+        // Android publishes these final insets before Compose's intermediate onProgress.
+        assertFalse(readiness.hidden(hidden))
+        readiness.onProgress(hidden, mutableListOf(hiding))
+        assertFalse(readiness.hidden(hidden))
+        readiness.onPrepare(overlapping)
+        readiness.onEnd(hiding)
+        assertFalse(readiness.hidden(hidden))
+        readiness.onEnd(overlapping)
+        readiness.onPrepare(bars)
+        assertTrue(readiness.hidden(hidden))
+        readiness.onEnd(bars)
     }
 
     @Test fun aNewNativeNodeIsConfiguredThenAsksWhichNativeAgentsMayUseIt() = nativeEnrollment(true)
@@ -1728,5 +1774,31 @@ abstract class NodePlacementCases {
             )
             assertEquals(true, grant["add"]?.jsonPrimitive?.booleanOrNull)
         }
+    }
+}
+
+private class ImeAnimationReadiness :
+    WindowInsetsAnimationCompat.Callback(DISPATCH_MODE_CONTINUE_ON_SUBTREE) {
+    private val runningIme = mutableSetOf<WindowInsetsAnimationCompat>()
+
+    fun hidden(insets: WindowInsetsCompat?): Boolean =
+        runningIme.isEmpty() &&
+            insets != null &&
+            !insets.isVisible(WindowInsetsCompat.Type.ime()) &&
+            insets.getInsets(WindowInsetsCompat.Type.ime()).bottom == 0
+
+    override fun onPrepare(animation: WindowInsetsAnimationCompat) {
+        if (animation.typeMask and WindowInsetsCompat.Type.ime() != 0) {
+            runningIme += animation
+        }
+    }
+
+    override fun onProgress(
+        insets: WindowInsetsCompat,
+        runningAnimations: MutableList<WindowInsetsAnimationCompat>,
+    ): WindowInsetsCompat = insets
+
+    override fun onEnd(animation: WindowInsetsAnimationCompat) {
+        runningIme -= animation
     }
 }
