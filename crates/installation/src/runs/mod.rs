@@ -409,7 +409,8 @@ impl Db<'_> {
         let before = self.0.total_changes();
         let discarded_before = self.discarded_change_count()?;
         let result = (|| {
-            let mut state = required(self.run_state(id)?, "Run not found")?;
+            let previous_state = required(self.run_state(id)?, "Run not found")?;
+            let mut state = previous_state.clone();
             let wakeup = change.wakeup.clone();
             let (snapshot, boundary) = change.apply(&mut state);
             if let Some(snapshot) = snapshot {
@@ -418,7 +419,12 @@ impl Db<'_> {
                     params![serde_json::to_string(&snapshot)?, id],
                 )?;
             }
-            self.write_run_state(&state)?;
+            // Repeating a lifecycle assignment must not maintain unchanged
+            // indexes or wake every live subscriber. Other domain changes below
+            // still commit independently of whether lifecycle fields changed.
+            if state != previous_state {
+                self.write_run_state(&state)?;
+            }
             if let Some(wakeup) = wakeup {
                 self.save_wakeup(false, id, wakeup.as_ref())?;
             }
@@ -505,6 +511,12 @@ impl Db<'_> {
                     row.get(0)
                 })?;
         let mut boundary: Value = serde_json::from_str(&boundary)?;
+        if fields
+            .iter()
+            .all(|(key, value)| boundary.get(key) == Some(value))
+        {
+            return Ok(());
+        }
         crate::store::merge(&mut boundary, patch);
         self.0.execute(
             "UPDATE runs SET boundary=? WHERE id=?",

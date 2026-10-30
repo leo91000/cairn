@@ -81,6 +81,14 @@ agent processes or storage-object I/O. WAL bytes are not physical disk-write
 bytes. Cold reads and object compression are outside its scope. Keep results and
 reference/candidate SHAs in the PR description or temporary evidence, not here.
 
+Repeated lifecycle assignments and boundary patches skip unchanged SQL writes,
+so they do not wake live subscribers. Explicitly adding a null boundary field
+still differs from leaving it absent. Snapshot and durable-wakeup changes remain
+independent of lifecycle equality and commit atomically with their transition.
+The benchmark's unchanged cases expose both WAL bytes and subscriber revisions;
+`database_actor.completed` counts jobs, including these no-op transactions, not
+changed rows or physical writes.
+
 `agent_activity` emits a heartbeat every 30 seconds while its receive loop is
 waiting. If output writing or persistence itself blocks, `agent_wait` instead
 reports that specific await every 30 seconds until it returns. Timers skip missed
