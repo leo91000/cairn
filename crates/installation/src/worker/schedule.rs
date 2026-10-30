@@ -158,12 +158,17 @@ impl Worker {
         {
             let id = run_id.clone();
             let expected = checkpoint.clone();
-            s.store
+            let migrated = s
+                .store
                 .transaction(move |db| {
-                    migrate_legacy_provider_retry_in(db, &id, expected.as_ref())?;
-                    Ok(())
+                    Ok(migrate_legacy_provider_retry_in(db, &id, expected.as_ref())?.is_some())
                 })
                 .await?;
+            if !migrated {
+                // Identity or authorization changed after the snapshot. Retry
+                // scheduling from a fresh run rather than admitting stale work.
+                return Ok(());
+            }
         }
         // A recovering run may still own its workspace, so keep it reserved even
         // when it cannot start in this pass.
@@ -1454,12 +1459,16 @@ mod tests {
                 service.store.transaction(move |db| {
                     let cause = crate::run_retry::Cause::classify(&json!({"code":"server_error", "message":"Provider unavailable"})).unwrap();
                     let retry = crate::run_retry::Retry::next(None, cause.clone(), now()).unwrap();
-                    let saved = RunCheckpoint::from_value(json!({
+                    let mut legacy = json!({
                         "prepared":{"backend":"native","isolated":true}, "runnerId":"old-attempt",
                         "remainingMs":null, "completed":false, "terminalCode":null,
                         "providerFailed":true, "lastError":"Provider unavailable",
-                        "retryCause":cause, "controllerRecoveries":count
-                    }))?;
+                        "retryCause":cause
+                    });
+                    if count != 0 {
+                        legacy["controllerRecoveries"] = count.into();
+                    }
+                    let saved = RunCheckpoint::from_value(legacy)?;
                     db.change_run(&id, crate::runs::RunChanges {
                         status:Some(RunStatus::Queued), session_id:Some(Some("session".into())),
                         retry:Some(Some(retry.clone())), recovery_pending:Some(recovery_pending),
@@ -1478,6 +1487,100 @@ mod tests {
                 }).await.unwrap();
             }
         }
+        service.shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn legacy_retry_migration_rejects_stale_or_unsafe_evidence() {
+        let (_root, service, _chat, run, _workspace) = fixture().await;
+        service.store.transaction(move |db| {
+            let cause = crate::run_retry::Cause::classify(&json!({"code":"server_error", "message":"Provider unavailable"})).unwrap();
+            for case in ["cancel", "expired", "cause", "provider", "unknown_terminal", "finalization", "replacement_runner", "replacement_node", "replacement_process", "new_failure", "new_admission", "new_turn", "unfenced_release", "already_reserved"] {
+                let mut retry = crate::run_retry::Retry::next(None, cause.clone(), now()).unwrap();
+                if case == "expired" { retry.deadline_at = Some(now() - 1); }
+                if case == "cause" { retry.cause.message = "Different failure".into(); }
+                db.change_run(&run, crate::runs::RunChanges {
+                    status:Some(RunStatus::Queued), session_id:Some(Some("session".into())),
+                    retry:Some(Some(retry)), recovery_pending:Some(case != "unfenced_release"),
+                    cancel_requested_at:Some((case == "cancel").then(now)), ..Default::default()
+                })?;
+                let mut saved = RunCheckpoint::from_value(json!({
+                    "prepared":{"backend":"native","isolated":true}, "runnerId":"old-attempt",
+                    "nodeId":"old-node", "remainingMs":null, "completed":false, "terminalCode":null,
+                    "providerFailed":true, "lastError":"Provider unavailable", "retryCause":cause
+                }))?;
+                let expected = saved.clone();
+                match case {
+                    "provider" => saved.provider_failed = None,
+                    "unknown_terminal" => saved.terminal_code = None,
+                    "finalization" => saved.finalization_failure_attempt = Some("old-attempt".into()),
+                    "replacement_runner" => saved.runner_id = Some(Some("new-attempt".into())),
+                    "replacement_node" => saved.node_id = Some(Some("new-node".into())),
+                    "replacement_process" | "unfenced_release" => saved.process = Some(Some(crate::recovery::ProcessIdentity { pid: 10, start:"new".into(), boot:"boot".into() })),
+                    "new_failure" => saved.provider_failure_attempt = Some("old-attempt".into()),
+                    "new_admission" => saved.pending_paid_admission = Some(super::super::checkpoint::PaidAdmission { attempt:"old-attempt".into(), controller:false, capacity_refused:false, provider_cause:Some(cause.clone()) }),
+                    "new_turn" => saved.turn_pending = Some(true),
+                    "already_reserved" => saved.provider_retry_reservation = Some("old-attempt".into()),
+                    _ => {}
+                }
+                saved.store_in(db, &run)?;
+                let before = saved.to_value()?;
+                assert!(migrate_legacy_provider_retry_in(db, &run, Some(&expected))?.is_none(), "{case}");
+                assert_eq!(RunCheckpoint::load_in(db, &run)?.unwrap().to_value()?, before, "{case}");
+            }
+            Ok(())
+        }).await.unwrap();
+        service.shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn legacy_retry_is_bound_before_admission_after_release() {
+        let (_root, service, _chat, run, _workspace) = fixture().await;
+        let cause = crate::run_retry::Cause::classify(
+            &json!({"code":"server_error", "message":"Provider unavailable"}),
+        )
+        .unwrap();
+        let retry = crate::run_retry::Retry::next(None, cause.clone(), now()).unwrap();
+        let saved = RunCheckpoint::from_value(json!({
+            "prepared":{"backend":"native","isolated":true}, "runnerId":"old-attempt",
+            "remainingMs":null, "completed":false, "terminalCode":null,
+            "providerFailed":true, "lastError":"Provider unavailable", "retryCause":cause
+        }))
+        .unwrap();
+        saved.store(&service.store, &run).await.unwrap();
+        service
+            .store
+            .change_run(
+                &run,
+                crate::runs::RunChanges {
+                    status: Some(RunStatus::Queued),
+                    session_id: Some(Some("session".into())),
+                    retry: Some(Some(retry.clone())),
+                    recovery_pending: Some(false),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let state = service.store.run_state(&run).await.unwrap();
+        let wire = service.store.run(&run).await.unwrap();
+        service
+            .worker
+            .try_launch(&service, wire, state, &mut std::collections::HashSet::new())
+            .await
+            .unwrap();
+        let persisted = RunCheckpoint::load(&service.store, &run)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            persisted.provider_retry_reservation.as_deref(),
+            Some("old-attempt")
+        );
+        assert_eq!(
+            service.store.run_state(&run).await.unwrap().retry,
+            Some(retry)
+        );
         service.shutdown.cancel();
     }
 
