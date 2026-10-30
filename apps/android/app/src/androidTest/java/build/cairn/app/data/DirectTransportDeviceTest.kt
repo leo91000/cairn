@@ -310,6 +310,7 @@ class DirectTransportDeviceTest {
             val attemptsWhenUnavailable = AtomicInteger(-1)
             val renewalSetupRejected = AtomicBoolean()
             val renewalTrace = ConcurrentLinkedQueue<String>()
+            val renewalSignals = DirectBenchSignals()
             val renewalStarted = System.nanoTime()
             fun recordRenewal(event: String) {
                 val elapsedMillis = (System.nanoTime() - renewalStarted) / 1_000_000
@@ -355,7 +356,28 @@ class DirectTransportDeviceTest {
                             recordRenewal("${path.substringAfterLast('/')}:${response.code}")
                         if (path.endsWith("/direct/authorize"))
                             recordRenewal("authorize:response:${response.code}")
-                        if (path.endsWith("/direct/authorize") && response.isSuccessful) {
+                        if (path.endsWith("/events") && response.isSuccessful) {
+                            response
+                                .newBuilder()
+                                .body(renewalSignals.observe(response.body))
+                                .build()
+                        } else if (path.endsWith("/signal") && response.isSuccessful) {
+                            val body = Buffer()
+                            request.body?.writeTo(body)
+                            val kind =
+                                wireJson
+                                    .parseToJsonElement(body.readUtf8())
+                                    .jsonObject["kind"]
+                                    ?.jsonPrimitive
+                                    ?.contentOrNull
+                            if (kind == "offer") {
+                                // Controlled answer-before-ack probe on the ordinary device path.
+                                // The server may answer before this HTTP acknowledgement arrives.
+                                Thread.sleep(1000)
+                                recordRenewal("offer-ack:${renewalSignals.summary()}")
+                            } else recordRenewal("candidate-ack")
+                            response
+                        } else if (path.endsWith("/direct/authorize") && response.isSuccessful) {
                             // The control call permits 30 s. Exercise successful setup
                             // beyond the former 10 s fixture precondition before testing
                             // the unavailable renewal.
@@ -438,7 +460,8 @@ class DirectTransportDeviceTest {
                 throw error
             } catch (error: AssertionError) {
                 throw AssertionError(
-                    "${error.message}; renewal events=$renewalTrace",
+                    "${error.message}; renewal events=$renewalTrace; " +
+                        "signals=${renewalSignals.summary()}",
                     error,
                 )
             } catch (error: Exception) {
