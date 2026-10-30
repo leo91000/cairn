@@ -437,6 +437,7 @@ export function chatFixture() {
 
       if (text.includes('fixture:stream')) {
         const streaming = active
+        const limitFile = text.match(/^fixture:stream-limit:(.+)$/m)?.[1]
         const item = { id: `stream-${active.id}`, type: 'agentMessage', text: 'Streaming proof:' }
         active.items.push(item)
         notify('item/started', { threadId: thread.id, item: { ...item, text: '' } })
@@ -447,6 +448,11 @@ export function chatFixture() {
             clearInterval(timer)
             return
           }
+
+          // Let journeys hold real provider deltas until their consumers are ready.
+          const limit = limitFile ? Number(readFileSync(limitFile, 'utf8')) : 100
+          if (part >= limit)
+            return
 
           const delta = ` ${String(++part).padStart(3, '0')}`
           item.text += delta
