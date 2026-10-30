@@ -536,6 +536,34 @@ mod tests {
         let current = checkpoint.snapshot().await;
         assert!(current.completed() && current.terminal_code.is_none());
         assert!(service.store.run(&id).await.unwrap()["moveRequest"].is_object());
+
+        for status in [RunStatus::Succeeded, RunStatus::Waiting] {
+            service
+                .store
+                .change_run(
+                    &id,
+                    crate::runs::RunChanges {
+                        status: Some(status),
+                        boundary: Some(json!({ "moveRequest": { "nodeId": "destination" } })),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            let saved = RunCheckpoint::from_value(json!({
+                "prepared": { "backend": "native", "isolated": true }, "runnerId": "old-attempt",
+                "completed": true, "terminalCode": 0, "remainingMs": null,
+            }))
+            .unwrap();
+            let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), saved);
+            release(&service, &checkpoint, None, true).await.unwrap();
+            let current = checkpoint.snapshot().await;
+            assert!(current.completed());
+            assert_eq!(current.terminal_code(), Some(0));
+            let run = service.store.run(&id).await.unwrap();
+            assert_eq!(run["status"], status);
+            assert_eq!(run["moveRequest"].is_object(), status == RunStatus::Waiting);
+        }
         service.shutdown.cancel();
     }
 
