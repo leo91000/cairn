@@ -149,10 +149,20 @@ impl ConversationLists {
         scope: &Scope,
         revision: u64,
     ) -> Result<(Arc<Vec<Value>>, Option<Instant>)> {
+        self.get_with_clock(db, scope, revision, Instant::now)
+    }
+
+    fn get_with_clock(
+        &self,
+        db: &Db<'_>,
+        scope: &Scope,
+        revision: u64,
+        clock: impl Fn() -> Instant,
+    ) -> Result<(Arc<Vec<Value>>, Option<Instant>)> {
         if let Some(cached) = self.cache.lock().unwrap().get(&scope.account) {
             let refresh_at = cached.built_at + LIST_INTERVAL;
             let same_revision = cached.revision == revision;
-            if same_revision || Instant::now() < refresh_at {
+            if same_revision || clock() < refresh_at {
                 let mut metrics = self.metrics.lock().unwrap();
                 metrics.cache_hits += 1;
                 metrics.coalesced += u64::from(!same_revision);
@@ -166,7 +176,7 @@ impl ConversationLists {
             scope.account.clone(),
             CachedList {
                 revision,
-                built_at: Instant::now(),
+                built_at: clock(),
                 chats: chats.clone(),
             },
         );
