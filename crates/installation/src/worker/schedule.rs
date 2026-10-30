@@ -1592,6 +1592,15 @@ mod tests {
                 .is_err()
         );
         assert_eq!(deletes.load(Ordering::SeqCst), 0);
+        let mut changed_process = replacement.clone();
+        changed_process.runner_id = original.runner_id.clone();
+        changed_process.store(&service.store, &run).await.unwrap();
+        assert!(
+            recovery::fence_attempt(&service, &run_value, Some(&original))
+                .await
+                .is_err()
+        );
+        assert_eq!(deletes.load(Ordering::SeqCst), 0);
         original.store(&service.store, &run).await.unwrap();
         let s = service.clone();
         let task = tokio::spawn(async move { recover(&s, &run_value).await });
