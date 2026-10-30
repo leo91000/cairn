@@ -421,7 +421,7 @@ def android_crash_summary(logcat, exit_info):
         signal_name = re.search(r"\bsignal \d+ \((SIG[A-Z0-9]+)\)", line)
         if signal_name:
             retain("signals", signal_name[1])
-        frame = re.fullmatch(r"\s*at ([\w.$]+\((?:[\w.$]+\.(?:java|kt):\d+|Native Method|Unknown Source)\))", line)
+        frame = re.fullmatch(r"\s*at ([\w.$]+\.(?:[\w$]+|<init>|<clinit>)\((?:[\w.$]+\.(?:java|kt):\d+|Native Method|Unknown Source)\))", line)
         if frame:
             retain("javaFrames", frame[1])
         native = re.match(r"\s*#\d+\s+pc\s+([0-9a-f]+)\s+(?:\S*/)?([\w.!-]+)(?=\s|$)(.*)", line)
