@@ -10234,6 +10234,56 @@
         "height": 362,
         "items": 18
       }
+    },
+    {
+      "name": "sequence-nested-background-order",
+      "source": "sequenceDiagram\nparticipant A\nrect rgb(255,0,0)\nrect rgb(0,255,0)\nA->>A: Hi\nend\nend",
+      "diagram": {
+        "kind": "sequence",
+        "participants": [
+          {
+            "id": "A",
+            "label": "A",
+            "actor": false
+          }
+        ],
+        "items": [
+          {
+            "type": "block",
+            "kind": "rect",
+            "label": "",
+            "color": "rgb(255,0,0)"
+          },
+          {
+            "type": "block",
+            "kind": "rect",
+            "label": "",
+            "color": "rgb(0,255,0)"
+          },
+          {
+            "type": "message",
+            "from": "A",
+            "to": "A",
+            "label": "Hi",
+            "line": "solid",
+            "head": "arrow",
+            "both": false,
+            "activate": false,
+            "deactivate": false
+          },
+          {
+            "type": "end"
+          },
+          {
+            "type": "end"
+          }
+        ]
+      },
+      "layout": {
+        "width": 199,
+        "height": 268,
+        "items": 10
+      }
     }
   ],
   "errors": [

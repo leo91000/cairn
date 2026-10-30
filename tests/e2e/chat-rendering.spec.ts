@@ -806,6 +806,95 @@ test('horizontal cluster titles fit their boxes without hiding neighboring title
   }
 })
 
+for (const manual of [false, true]) {
+  test(`an open viewer updates its geometry after delayed app fonts load (manual=${manual})`, async ({ browser, browserName }) => {
+    const page = await browser.newPage({ viewport: { width: 1000, height: 800 } })
+    const held: Array<import('@playwright/test').Route> = []
+    let released = false
+    await page.route('**/*dm-sans*.woff2*', (route) => {
+      if (released)
+        return route.continue()
+      held.push(route)
+    })
+    try {
+      await page.goto(`${address}scripts/fixtures/chat-rendering.html`, { waitUntil: 'domcontentloaded' })
+      await page.waitForFunction(() => window.chatRendering)
+      await page.evaluate(source => window.chatRendering.markdown(source), `\`\`\`mermaid\npie\n"${'l'.repeat(100)} Łódź":1\n"Other":1\n\`\`\``)
+      await page.getByRole('button', { name: 'Open diagram' }).click()
+      const viewer = page.locator('.diagram-stage svg')
+      await expect(viewer).toBeVisible()
+      const before = await viewer.getAttribute('viewBox')
+      const stage = page.locator('.diagram-stage')
+      const drawing = page.locator('.diagram-stage > div')
+      if (manual) {
+        await page.getByRole('button', { name: 'Zoom in' }).click()
+        const area = await stage.boundingBox()
+        await page.mouse.move(area!.x + area!.width / 2, area!.y + area!.height / 2)
+        await page.mouse.down()
+        await page.mouse.move(area!.x + area!.width / 2 + 50, area!.y + area!.height / 2 + 20)
+        await page.mouse.up()
+      }
+
+      const transform = await drawing.evaluate(element => element.style.transform)
+      expect(held.length).toBeGreaterThan(0)
+      released = true
+      await Promise.all(held.map(route => route.continue()))
+      await page.evaluate(async () => {
+        await document.fonts.load('500 14px "DM Sans Variable"', 'l'.repeat(100))
+        await document.fonts.ready
+        await new Promise(resolve => requestAnimationFrame(resolve))
+      })
+      const card = page.locator('#app figure.diagram svg')
+      if (browserName === 'chromium')
+        await expect(card).not.toHaveAttribute('viewBox', before!)
+      await expect(viewer).toHaveAttribute('viewBox', (await card.getAttribute('viewBox'))!)
+      if (manual) {
+        expect(await drawing.evaluate(element => element.style.transform)).toBe(transform)
+      }
+      else {
+        const centered = await stage.evaluate((stage) => {
+          const area = stage.getBoundingClientRect()
+          const drawing = stage.querySelector('svg')!.getBoundingClientRect()
+          return Math.abs(drawing.left + drawing.right - area.left - area.right) < 1 && Math.abs(drawing.top + drawing.bottom - area.top - area.bottom) < 1
+        })
+        expect(centered).toBe(true)
+      }
+    }
+    finally {
+      if (!released) {
+        released = true
+        await Promise.allSettled(held.map(route => route.continue()))
+      }
+
+      await page.close()
+    }
+  })
+}
+
+test('nested sequence backgrounds paint the inner highlight above the outer one', async ({ page }) => {
+  await page.evaluate(source => window.chatRendering.markdown(source), '```mermaid\nsequenceDiagram\nparticipant A\nrect rgb(255,0,0)\nrect rgb(0,255,0)\nA->>A: Hi\nend\nend\n```')
+  const svg = page.locator('#app figure.diagram svg')
+  await expect(svg).toBeVisible()
+  const point = await svg.evaluate((svg) => {
+    const area = svg.getBoundingClientRect()
+    const frames = [...svg.querySelectorAll('path')].filter(path => !!path.style.opacity && path.style.fill !== 'none').map(path => path.getBoundingClientRect()).sort((a, b) => a.top - b.top)
+    return { x: Math.round(frames[1]!.left - area.left + 12), y: Math.round(frames[1]!.bottom - area.top - 12) }
+  })
+  const png = await svg.screenshot({ animations: 'disabled' })
+  const color = await page.evaluate(async ({ data, point }) => {
+    const image = new Image()
+    image.src = `data:image/png;base64,${data}`
+    await image.decode()
+    const canvas = document.createElement('canvas')
+    canvas.width = image.width
+    canvas.height = image.height
+    const context = canvas.getContext('2d')!
+    context.drawImage(image, 0, 0)
+    return [...context.getImageData(point.x, point.y, 1, 1).data]
+  }, { data: png.toString('base64'), point })
+  expect(color[1]).toBeGreaterThan(color[0]!)
+})
+
 test('nested sequence frames enclose short and empty children including unused participants', async ({ page }) => {
   const cases = [
     { source: 'sequenceDiagram\nparticipant A\nloop Outer\nloop Inner\nA->>A: Hi\nend\nend', texts: 7 },

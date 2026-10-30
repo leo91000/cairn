@@ -60,6 +60,12 @@ describe('diagrams (shared Android corpus)', () => {
 })
 
 describe('diagram layout', () => {
+  it('paints nested sequence backgrounds from parent to child', () => {
+    const scene = layoutDiagram(parseDiagram('sequenceDiagram\nparticipant A\nrect rgb(255,0,0)\nrect rgb(0,255,0)\nA->>A: Hi\nend\nend'), measure)
+    const colors = scene.items.filter((item): item is PathItem => item.kind === 'path' && item.opacity !== undefined && !!item.fill && 'color' in item.fill).map(item => item.fill && 'color' in item.fill ? item.fill.color : undefined)
+    expect(colors).toEqual(['rgb(255,0,0)', 'rgb(0,255,0)'])
+  })
+
   it.each([
     'sequenceDiagram\nparticipant A\nloop Outer\nloop Inner\nA->>A: Hi\nend\nend',
     'sequenceDiagram\nparticipant A\nloop Outer\nloop Inner\nend\nend',

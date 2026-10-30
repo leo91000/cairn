@@ -338,6 +338,7 @@ class DiagramDeviceTest {
                     "stateDiagram-v2\nclassDef critical fill:red\nA-->B:::critical : proceed",
                     "sequenceDiagram\nA->>B: Hello",
                     "sequenceDiagram\nparticipant A\nloop Outer\nloop Inner\nA->>A: Hi\nend\nend",
+                    "sequenceDiagram\nparticipant A\nrect rgb(255,0,0)\nrect rgb(0,255,0)\nA->>A: Hi\nend\nend",
                     "sequenceDiagram;A->>B: first #59;;B->>A: response",
                     "sequenceDiagram\nparticipant A\n" + "activate A\n".repeat(20),
                     "sequenceDiagram\nautonumber 1234567890123\nA->>A: work",

@@ -8,6 +8,23 @@ import org.junit.Test
 /** Mermaid parsing and layout, on the corpus the web's diagram tests check too. */
 class DiagramCorpusTest {
     @Test
+    fun `paints nested sequence backgrounds from parent to child`() {
+        val scene =
+            layoutDiagram(
+                parseDiagram(
+                    "sequenceDiagram\nparticipant A\nrect rgb(255,0,0)\nrect rgb(0,255,0)\nA->>A: Hi\nend\nend"
+                ),
+                measure,
+            )
+        val colors =
+            scene.items
+                .filterIsInstance<PathItem>()
+                .filter { it.opacity != null }
+                .mapNotNull { (it.fill as? DiagramPaint.Literal)?.color }
+        assertEquals(listOf("rgb(255,0,0)", "rgb(0,255,0)"), colors)
+    }
+
+    @Test
     fun `keeps complete nested sequence frames within their parents`() {
         val frameCases =
             cases("parse").filter {

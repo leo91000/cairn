@@ -6,6 +6,7 @@ Both layouts reserve the asymmetric flag notch when sizing multiline node labels
 Group borders share separation constraints across ranks, keeping sibling groups and unrelated nodes outside each other's frames.
 Group titles use the reserved space at the physical top in every direction.
 Sequence parent frames include the complete drawn bounds of nested frames, including short labels and empty children spanning unused participants.
+Nested sequence backgrounds paint parent before child, behind lifelines. The web viewer refreshes its layout when app fonts finish loading; Android measures its bundled typefaces synchronously. Automatic Fit follows that refresh, while manual zoom and pan stay in place.
 
 Both apps draw closed ```` ```mermaid ```` (or `mmd`) fences in chat Markdown as native
 diagrams: flowcharts (directions, node shapes, subgraphs, link styles, heads and labels,

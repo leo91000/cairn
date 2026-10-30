@@ -2357,7 +2357,7 @@ export function layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): 
     const { left, right } = frameBounds(frame)
     widest = Math.max(widest, right + MARGIN / 2)
     if (frame.kind === 'rect') {
-      frames.unshift({
+      frames.push({
         kind: 'path',
         d: roundedRect(left, frame.start, right - left, frame.end - frame.start, 8),
         fill: frame.color ? { color: frame.color } : { tone: 'cluster' },

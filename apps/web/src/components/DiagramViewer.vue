@@ -6,12 +6,13 @@ import {
   onBeforeUnmount,
   onMounted,
   ref,
+  watch,
 } from 'vue'
 import { apiResourceUrl } from '../api'
 import { artifactLink } from '../deliverables'
 import { diagramKind } from '../diagram'
 import { diagramExport } from '../diagram-export'
-import { sceneFor, sceneSvg } from '../diagram-svg'
+import { diagramFonts, sceneFor, sceneSvg } from '../diagram-svg'
 import {
   Check,
   Copy,
@@ -39,7 +40,10 @@ const TITLES = {
   pie: 'Pie chart',
 } as const
 const title = TITLES[diagramKind(props.source) ?? 'flowchart']
-const scene: Scene | undefined = sceneFor(props.source)
+const scene = computed<Scene | undefined>(() => {
+  void diagramFonts.value
+  return sceneFor(props.source)
+})
 const stage = ref<HTMLElement>()
 const drawing = ref<HTMLElement>()
 const scale = ref(1)
@@ -63,10 +67,10 @@ let copiedTimer: ReturnType<typeof setTimeout> | undefined
 
 function fitScale() {
   const area = stage.value
-  if (!area || !scene || !area.clientWidth || !area.clientHeight)
+  if (!area || !scene.value || !area.clientWidth || !area.clientHeight)
     return undefined
   const padding = Math.min(32, area.clientWidth / 4, area.clientHeight / 4)
-  return Math.min((area.clientWidth - padding * 2) / scene.width, (area.clientHeight - padding * 2) / scene.height, 2)
+  return Math.min((area.clientWidth - padding * 2) / scene.value.width, (area.clientHeight - padding * 2) / scene.value.height, 2)
 }
 
 function clamp(value: number) {
@@ -77,11 +81,11 @@ function clamp(value: number) {
 function fit() {
   const area = stage.value
   const next = fitScale()
-  if (!area || !scene || next === undefined)
+  if (!area || !scene.value || next === undefined)
     return
   scale.value = next
-  x.value = (area.clientWidth - scene.width * next) / 2
-  y.value = (area.clientHeight - scene.height * next) / 2
+  x.value = (area.clientWidth - scene.value.width * next) / 2
+  y.value = (area.clientHeight - scene.value.height * next) / 2
   fitted = true
 }
 
@@ -225,7 +229,7 @@ function exportColors() {
 
   try {
     resolve('canvas')
-    for (const item of scene!.items) {
+    for (const item of scene.value!.items) {
       for (const paint of item.kind === 'path' ? [item.fill, item.stroke] : [item.fill]) {
         if (paint && 'tone' in paint)
           resolve(paint.tone)
@@ -248,7 +252,7 @@ function save(blob: Blob, extension: string) {
 }
 
 async function download(format: 'svg' | 'png') {
-  if (!scene || exporting.value)
+  if (!scene.value || exporting.value)
     return
   exporting.value = true
   exportError.value = ''
@@ -264,17 +268,31 @@ async function download(format: 'svg' | 'png') {
   }
 }
 
-onMounted(async () => {
-  if (!scene)
+function renderScene() {
+  const area = drawing.value
+  if (!area)
     return
-  const svg = sceneSvg(scene)
+  area.replaceChildren()
+  if (!scene.value)
+    return
+  const svg = sceneSvg(scene.value)
   for (const link of svg.querySelectorAll('a[href]')) {
     const href = link.getAttribute('href')!
     if (artifactLink(href, window.location.origin))
       link.setAttribute('href', apiResourceUrl(href))
   }
 
-  drawing.value!.append(svg)
+  area.append(svg)
+}
+
+watch(scene, () => {
+  renderScene()
+  if (fitted)
+    fit()
+}, { flush: 'post' })
+
+onMounted(async () => {
+  renderScene()
   window.addEventListener('pointermove', onPointerMove, { passive: false })
   window.addEventListener('pointerup', onPointerUp)
   window.addEventListener('pointercancel', onPointerUp)

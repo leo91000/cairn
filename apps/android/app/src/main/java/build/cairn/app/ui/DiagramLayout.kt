@@ -2604,7 +2604,6 @@ internal fun layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): Sce
         widest = max(widest, frameEnd + MARGIN / 2)
         if (frame.kind == BlockKind.RECT) {
             frames.add(
-                0,
                 PathItem(
                     d =
                         roundedRect(
@@ -2616,7 +2615,7 @@ internal fun layoutSequence(diagram: SequenceDiagram, measure: TextMeasure): Sce
                         ),
                     fill = frame.color?.let { DiagramPaint.Literal(it) } ?: tone("cluster"),
                     opacity = if (frame.color != null) 0.22 else 1.0,
-                ),
+                )
             )
             continue
         }
