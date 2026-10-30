@@ -64,7 +64,7 @@ impl Db<'_> {
         let marks = statement
             .query_map([account], |row| {
                 Ok((
-                    (ReadKind::parse(&row.get::<_, String>(0)?)?, row.get(1)?),
+                    (ReadKind::parse(row.get_ref(0)?.as_str()?)?, row.get(1)?),
                     row.get(2)?,
                 ))
             })?

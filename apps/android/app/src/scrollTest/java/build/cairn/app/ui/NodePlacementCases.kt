@@ -349,10 +349,10 @@ abstract class NodePlacementCases {
                                 enrollmentConfigured.set(true)
                         }
 
-                        if (path == "/api/installations/fixture/api/overview") {
+                        if (path == "/api/installations/fixture/api/mcps") {
                             // Exercise the form while the initial workspace refresh is still busy.
                             return MockResponse()
-                                .setBody("{}")
+                                .setBody("""{"mcps":[]}""")
                                 .setHeadersDelay(2, java.util.concurrent.TimeUnit.SECONDS)
                         }
 

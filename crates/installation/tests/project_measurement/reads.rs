@@ -104,9 +104,14 @@ impl StorageEntity for Mark {
         db.read_marks(ACCOUNT).unwrap().len()
     }
 
+    /// The frozen `Reads::load`: a prefix scan collected into a map by item key.
     fn reference_list(db: &Db<'_>) -> usize {
-        db.keys_as::<i64>(&format!("read:{ACCOUNT}:"))
+        let prefix = format!("read:{ACCOUNT}:");
+        db.keys_as::<i64>(&prefix)
             .unwrap()
+            .into_iter()
+            .map(|(key, at)| (key[prefix.len()..].to_owned(), at))
+            .collect::<std::collections::HashMap<_, _>>()
             .len()
     }
 
@@ -221,8 +226,22 @@ impl StorageEntity for Aside {
         db.dismissals(ACCOUNT).unwrap().len()
     }
 
+    /// The frozen `Reads::load`: typed dismissals collected into a map by item key.
     fn reference_list(db: &Db<'_>) -> usize {
-        db.keys(&format!("dismissed:{ACCOUNT}:")).unwrap().len()
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        #[allow(dead_code)]
+        struct Dismissal {
+            finished_at: i64,
+            until: Option<i64>,
+        }
+        let prefix = format!("dismissed:{ACCOUNT}:");
+        db.keys_as::<Dismissal>(&prefix)
+            .unwrap()
+            .into_iter()
+            .map(|(key, dismissal)| (key[prefix.len()..].to_owned(), dismissal))
+            .collect::<std::collections::HashMap<_, _>>()
+            .len()
     }
 
     fn write(&self, db: &Db<'_>, _replacement: bool) {
