@@ -226,25 +226,40 @@ struct StaleDisk {
 /// Disk kept on nodes that no conversation needs there any more: the whole disk of a
 /// conversation now running elsewhere (it may hold changes newer than the recovery
 /// point used to resume it), or older copies set aside beside a current disk.
-async fn stale_disks(s: &Service, volumes: &[Value], attempts: &[Value]) -> Result<Vec<StaleDisk>> {
+fn stale_disks(db: &Db<'_>, volumes: &[Value], attempts: &[Value]) -> Result<Vec<StaleDisk>> {
+    use rusqlite::OptionalExtension;
+
+    let active: std::collections::HashSet<_> = attempts
+        .iter()
+        .filter(|attempt| is_active_attempt(attempt))
+        .map(|attempt| (text(attempt, "runId"), text(attempt, "nodeId")))
+        .collect();
+    // Inventory needs only move flags and checkpoint ownership. Frozen prompts,
+    // summaries and prepared checkpoints can be hundreds of KiB per volume.
+    let mut state = db.0.prepare_cached(
+        "SELECT coalesce(json_type(r.boundary,'$.moveRequest')='object',0)
+             OR coalesce(json_type(r.boundary,'$.moveReservation')='text',0),
+             CASE WHEN json_type(c.state,'$.nodeId')='text'
+                  THEN json_extract(c.state,'$.nodeId') END
+         FROM runs r LEFT JOIN run_checkpoints c ON c.run_id=r.id WHERE r.id=?",
+    )?;
     let mut stale = Vec::new();
     for volume in volumes.iter().filter(|v| v["materialized"] == true) {
         let run = volume["runId"].as_str().unwrap_or_default();
         let node = volume["nodeId"].as_str().unwrap_or_default();
-        let record = s.store.run(run).await.ok();
-        let executing = attempts
-            .iter()
-            .any(|a| a["runId"] == run && a["nodeId"] == node && is_active_attempt(a));
-        let moving = record
-            .as_ref()
-            .is_some_and(|r| r["moveRequest"].is_object() || r["moveReservation"].is_string());
-        if executing || moving {
+        if active.contains(&(run, node)) {
             continue;
         }
-        let checkpoint = checkpoint(s, run).await?;
+        let record: Option<(bool, Option<String>)> = state
+            .query_row([run], |row| Ok((row.get(0)?, row.get(1)?)))
+            .optional()?;
+        if record.as_ref().is_some_and(|(moving, _)| *moving) {
+            continue;
+        }
         let total = volume["diskMiB"].as_u64().unwrap_or(0);
-        let elsewhere = checkpoint["nodeId"]
-            .as_str()
+        let elsewhere = record
+            .as_ref()
+            .and_then(|(_, current)| current.as_deref())
             .is_some_and(|current| current != node);
         if record.is_none() || elsewhere {
             stale.push(StaleDisk {
@@ -347,24 +362,30 @@ pub(crate) fn slots(node: &Value) -> u64 {
 
 /// Nodes with their shared budgets, free slots and authorized agents.
 pub async fn typed_inventory(s: &Service) -> Result<Vec<ExecutionNode>> {
-    let attempts = s.store.list("node-attempts").await?;
-    let volumes = s.store.list("node-volumes").await?;
-    let agents = s.store.agent_snapshots().await?;
-    let stale = stale_disks(s, &volumes, &attempts).await?;
-    let usage = Usage {
-        attempts: &attempts,
-        agents: &agents,
-        stale: &stale,
-    };
-    let mut nodes = s
-        .store
-        .nodes()
-        .await?
-        .into_iter()
-        .map(|node| usage.describe(node))
-        .collect::<Result<Vec<_>>>()?;
+    let mut timing = crate::performance::Operation::new("node_inventory", &id(), "database_queue");
     s.store
         .read(move |db| {
+            timing.next("records");
+            // One consistent read snapshot, without hundreds of actor round trips.
+            let transaction = db.0.unchecked_transaction()?;
+            let db = &Db(&transaction);
+            let attempts = db.list("node-attempts")?;
+            let volumes = db.list("node-volumes")?;
+            let agents = db.agent_snapshots()?;
+            timing.next("stale_disks");
+            let stale = stale_disks(db, &volumes, &attempts)?;
+            let usage = Usage {
+                attempts: &attempts,
+                agents: &agents,
+                stale: &stale,
+            };
+            timing.next("describe");
+            let mut nodes = db
+                .nodes()?
+                .into_iter()
+                .map(|node| usage.describe(node))
+                .collect::<Result<Vec<_>>>()?;
+            timing.next("disk_accounting");
             for node in &mut nodes {
                 if node.capabilities.backend == NodeBackend::Native
                     && node.disk_growth_protocol == Some(1)
@@ -376,6 +397,8 @@ pub async fn typed_inventory(s: &Service) -> Result<Vec<ExecutionNode>> {
                     )?)?;
                 }
             }
+            transaction.commit()?;
+            timing.finish();
             Ok(nodes)
         })
         .await
@@ -827,7 +850,11 @@ async fn delete_stale_disks(s: &Service, node: &str) -> Result<Value> {
         .filter(|v| v["nodeId"] == node)
         .collect::<Vec<_>>();
     let (mut freed, mut failed) = (0u64, 0usize);
-    for disk in stale_disks(s, &volumes, &attempts).await? {
+    let stale = s
+        .store
+        .read(move |db| stale_disks(db, &volumes, &attempts))
+        .await?;
+    for disk in stale {
         let run = text(&disk.volume, "runId");
         match crate::conversation_deletion::discard_stale_disk(s, run, node, disk.whole).await {
             Ok(()) => freed += disk.mi_b,

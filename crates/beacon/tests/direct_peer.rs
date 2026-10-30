@@ -1,4 +1,6 @@
 mod common;
+#[path = "common/delayed_dtls.rs"]
+mod delayed_dtls;
 
 use cairn_protocol::{
     Frame,
@@ -130,9 +132,35 @@ async fn client_with_offer_candidates(
     Arc<dyn DataChannel>,
     DirectAuthorization,
 ) {
+    client_with_runtime(
+        relay,
+        cookie,
+        session,
+        mismatched,
+        extra_candidates,
+        channel_label,
+        Arc::new(webrtc::runtime::TokioRuntime),
+    )
+    .await
+}
+
+async fn client_with_runtime(
+    relay: &RelayedInstallation,
+    cookie: &str,
+    session: &serde_json::Value,
+    mismatched: bool,
+    extra_candidates: &str,
+    channel_label: &str,
+    runtime: Arc<dyn webrtc::runtime::Runtime>,
+) -> (
+    Arc<dyn PeerConnection>,
+    Arc<dyn DataChannel>,
+    DirectAuthorization,
+) {
     let (events, mut candidates) = mpsc::channel(32);
     let peer: Arc<dyn PeerConnection> = Arc::new(
         PeerConnectionBuilder::new()
+            .with_runtime(runtime)
             .with_handler(Arc::new(ClientEvents(events)))
             .with_setting_engine(
                 SettingEngineBuilder::new()
@@ -213,7 +241,9 @@ async fn client_with_offer_candidates(
         .await
         .unwrap();
     assert_eq!(events.status(), StatusCode::OK);
-    let negotiated = tokio::time::timeout(Duration::from_secs(3), async {
+    // Setup follows the installation handshake budget; later response, fairness
+    // and revocation assertions retain their own stricter behavior deadlines.
+    let negotiated = tokio::time::timeout(cairn_protocol::REQUEST_TIMEOUT, async {
         let mut buffered = String::new();
         loop {
             tokio::select! {
@@ -287,6 +317,106 @@ async fn authorized_client_opens_a_real_installation_data_channel() {
     let mut relay = RelayedInstallation::new(axum::Router::new()).await;
     production_connector(&mut relay).await;
     let (peer, _channel, _grant) = client(&relay).await;
+    peer.close().await.unwrap();
+    relay.close().await;
+}
+
+async fn renew_delayed_peer(
+    relay: &RelayedInstallation,
+    grant: &DirectAuthorization,
+) -> reqwest::Response {
+    let path = format!(
+        "/api/installations/{}/direct/{}/renew",
+        grant.claims.installation_id, grant.claims.connection_id
+    );
+    relay
+        .app
+        .authenticated(&relay.cookie, &relay.session, Method::POST, &path)
+        .json(&json!({
+            "fingerprint": grant.claims.fingerprint,
+            "version": 4,
+        }))
+        .send()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_delayed_dtls_flight_can_open_an_authorized_real_channel() {
+    let mut relay = RelayedInstallation::new(axum::Router::new()).await;
+    production_connector(&mut relay).await;
+
+    // The old three-second fixture budget expires before this real flight.
+    let runtime = Arc::new(delayed_dtls::DelayedDtlsRuntime::new(
+        Duration::from_millis(3_250),
+    ));
+    let (peer, channel, grant) = client_with_runtime(
+        &relay,
+        &relay.cookie,
+        &relay.session,
+        false,
+        "",
+        "cairn.v4",
+        runtime.clone(),
+    )
+    .await;
+    assert!(
+        runtime.delayed_flight_sent(),
+        "the delayed flight must actually reach UDP"
+    );
+    send_frame(
+        channel.as_ref(),
+        1,
+        &request("delayed-flight", "/api/chats"),
+    )
+    .await;
+    assert!(
+        matches!(response(channel.as_ref()).await, Frame::Response(reply) if reply.id == "delayed-flight" && reply.status == 200)
+    );
+
+    let renewed = renew_delayed_peer(&relay, &grant).await;
+    assert_eq!(renewed.status(), StatusCode::OK);
+    assert_eq!(
+        renewed.json::<serde_json::Value>().await.unwrap()["available"],
+        true
+    );
+
+    peer.close().await.unwrap();
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn a_wrong_certificate_is_rejected_even_after_a_delayed_dtls_flight() {
+    let mut relay = RelayedInstallation::new(axum::Router::new()).await;
+    production_connector(&mut relay).await;
+
+    let runtime = Arc::new(delayed_dtls::DelayedDtlsRuntime::new(
+        Duration::from_millis(3_250),
+    ));
+    let (peer, _, grant) = client_with_runtime(
+        &relay,
+        &relay.cookie,
+        &relay.session,
+        true,
+        "",
+        "cairn.v4",
+        runtime.clone(),
+    )
+    .await;
+    assert!(
+        runtime.delayed_flight_sent(),
+        "a timeout before the handshake cannot prove certificate rejection"
+    );
+    let refused = renew_delayed_peer(&relay, &grant).await;
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+    assert!(
+        refused
+            .text()
+            .await
+            .unwrap()
+            .contains("Installation refused direct authorization")
+    );
+
     peer.close().await.unwrap();
     relay.close().await;
 }
@@ -747,6 +877,9 @@ async fn a_new_beacon_key_closes_real_peers_and_a_fresh_peer_still_works() {
     .await
     .unwrap();
     relay.app.server = tokio::spawn(async move {
+        // Recovery can outlast the revocation deadline: established peers remain
+        // authorized until the installation receives the recreated Beacon's key.
+        tokio::time::sleep(Duration::from_secs(3)).await;
         axum::serve(
             listener,
             router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
@@ -754,8 +887,8 @@ async fn a_new_beacon_key_closes_real_peers_and_a_fresh_peer_still_works() {
         .await
         .unwrap();
     });
-    closed(old_channel.as_ref()).await;
-    assert!(grant.claims.expires_at > cairn_protocol::direct::unix_time());
+    // A relayed response through the new Beacon proves the installation has
+    // received its DirectKey, which precedes tunnel registration on the wire.
     tokio::time::timeout(Duration::from_secs(5), async {
         while relay.get("/chats").send().await.unwrap().status() != StatusCode::OK {
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -763,6 +896,8 @@ async fn a_new_beacon_key_closes_real_peers_and_a_fresh_peer_still_works() {
     })
     .await
     .unwrap();
+    closed(old_channel.as_ref()).await;
+    assert!(grant.claims.expires_at > cairn_protocol::direct::unix_time());
     let (fresh_peer, fresh_channel, _) = client(&relay).await;
     send_frame(fresh_channel.as_ref(), 1, &request("fresh", "/api/chats")).await;
     assert!(
@@ -1025,16 +1160,115 @@ async fn partial_transfer(channel: &dyn DataChannel, id: u32, total: usize) {
         .unwrap();
 }
 
+struct FairnessPhaseDiagnostics {
+    started: std::time::Instant,
+    phases: Vec<(&'static str, u32, &'static str, Duration)>,
+    last: Option<(&'static str, u32, &'static str, Duration)>,
+    dropped: usize,
+}
+
+impl FairnessPhaseDiagnostics {
+    const CAPACITY: usize = 128;
+
+    fn new() -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            phases: Vec::with_capacity(Self::CAPACITY),
+            last: None,
+            dropped: 0,
+        }
+    }
+
+    fn mark(&mut self, phase: &'static str, iteration: u32, role: &'static str) {
+        let event = (phase, iteration, role, self.started.elapsed());
+        self.last = Some(event);
+        if self.phases.len() == Self::CAPACITY {
+            self.dropped += 1;
+            return;
+        }
+        self.phases.push(event);
+    }
+}
+
+impl std::fmt::Display for FairnessPhaseDiagnostics {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let elapsed = self.started.elapsed();
+        writeln!(
+            output,
+            "[fairness-phases] elapsed_ms={} recorded={} dropped={}",
+            elapsed.as_millis(),
+            self.phases.len(),
+            self.dropped
+        )?;
+        let mut previous = Duration::ZERO;
+        for (phase, iteration, role, at) in &self.phases {
+            writeln!(
+                output,
+                "[fairness-phase] phase={phase} iteration={iteration} role={role} at_ms={} previous_phase_ms={}",
+                at.as_millis(),
+                at.saturating_sub(previous).as_millis()
+            )?;
+            previous = *at;
+        }
+        if let Some((phase, iteration, role, at)) = self.last {
+            writeln!(
+                output,
+                "[fairness-last-phase] phase={phase} iteration={iteration} role={role} pending_ms={}",
+                elapsed.saturating_sub(at).as_millis()
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for FairnessPhaseDiagnostics {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            return;
+        }
+        // No output or allocation while the real async phases are progressing.
+        // Dump once on failure, without a second panic if the sink is closed.
+        use std::io::Write as _;
+        let _ = write!(std::io::stderr().lock(), "{self}");
+    }
+}
+
+#[test]
+fn fairness_phase_diagnostics_are_bounded_and_keep_the_last_phase() {
+    let mut diagnostics = FairnessPhaseDiagnostics::new();
+    diagnostics.mark("setup_begin", 0, "fixture");
+    for _ in 1..FairnessPhaseDiagnostics::CAPACITY {
+        diagnostics.mark("small_get_wait_begin", 3, "member");
+    }
+    diagnostics.mark("cleanup_begin", 0, "fixture");
+    let report = diagnostics.to_string();
+    assert_eq!(diagnostics.phases.len(), FairnessPhaseDiagnostics::CAPACITY);
+    assert!(report.contains("recorded=128 dropped=1"));
+    assert!(report.contains("phase=setup_begin iteration=0 role=fixture"));
+    assert!(report.contains(
+        "[fairness-last-phase] phase=cleanup_begin iteration=0 role=fixture pending_ms="
+    ));
+    assert!(report.contains("previous_phase_ms="));
+}
+
 #[tokio::test]
 async fn a_member_trickling_every_twenty_nine_seconds_cannot_starve_small_requests() {
+    let mut diagnostics = FairnessPhaseDiagnostics::new();
+    diagnostics.mark("setup_begin", 0, "fixture");
     let router = axum::Router::new().route(
         "/api/fixture/echo",
         axum::routing::post(|bytes: axum::body::Bytes| async { bytes }),
     );
     let mut relay = RelayedInstallation::new(router).await;
+    diagnostics.mark("relay_ready", 0, "fixture");
+    diagnostics.mark("connector_setup_begin", 0, "fixture");
     production_connector(&mut relay).await;
+    diagnostics.mark("connector_ready", 0, "fixture");
+    diagnostics.mark("accounts_setup_begin", 0, "fixture");
     let cookies = common::stream_accounts_with_members(&relay, 2).await;
+    diagnostics.mark("accounts_ready", 0, "fixture");
     let member_cookie = &cookies[1];
+    diagnostics.mark("session_fetch_begin", 0, "member");
     let member_session = relay
         .app
         .client
@@ -1046,9 +1280,13 @@ async fn a_member_trickling_every_twenty_nine_seconds_cannot_starve_small_reques
         .json()
         .await
         .unwrap();
+    diagnostics.mark("session_ready", 0, "member");
+    diagnostics.mark("channel_connect_begin", 0, "member");
     let (member, member_channel, _) =
         client_with_fingerprint(&relay, member_cookie, &member_session, false).await;
+    diagnostics.mark("channel_ready", 0, "member");
     let waiting_cookie = &cookies[2];
+    diagnostics.mark("session_fetch_begin", 0, "waiting");
     let waiting_session = relay
         .app
         .client
@@ -1060,36 +1298,51 @@ async fn a_member_trickling_every_twenty_nine_seconds_cannot_starve_small_reques
         .json()
         .await
         .unwrap();
+    diagnostics.mark("session_ready", 0, "waiting");
+    diagnostics.mark("channel_connect_begin", 0, "waiting");
     let (waiting, waiting_channel, _) =
         client_with_fingerprint(&relay, waiting_cookie, &waiting_session, false).await;
+    diagnostics.mark("channel_ready", 0, "waiting");
+    diagnostics.mark("channel_connect_begin", 0, "owner");
     let (owner, owner_channel, _) = client(&relay).await;
+    diagnostics.mark("channel_ready", 0, "owner");
+    diagnostics.mark("reservation_send_begin", 0, "member");
     partial_transfer(member_channel.as_ref(), 1, cairn_protocol::MAX_FRAME).await;
+    diagnostics.mark("reservation_send_end", 0, "member");
     // A successful request on the holder is a barrier: its reservation is live.
+    diagnostics.mark("barrier_send_begin", 0, "member");
     send_frame(
         member_channel.as_ref(),
         2,
         &request("barrier", "/api/chats"),
     )
     .await;
+    diagnostics.mark("barrier_send_end", 0, "member");
+    diagnostics.mark("barrier_wait_begin", 0, "member");
     assert!(
         matches!(response(member_channel.as_ref()).await, Frame::Response(reply) if reply.id == "barrier" && reply.status == 200)
     );
+    diagnostics.mark("barrier_verified", 0, "member");
 
     let started = tokio::time::Instant::now();
     for offset in 1_u32..=3 {
         if offset > 1 {
+            diagnostics.mark("trickle_delay_begin", offset, "member");
             tokio::time::sleep_until(started + Duration::from_secs(29 * u64::from(offset - 1)))
                 .await;
+            diagnostics.mark("trickle_delay_end", offset, "member");
         }
         let mut packet = vec![1];
         packet.extend(1_u32.to_be_bytes());
         packet.extend((cairn_protocol::MAX_FRAME as u32).to_be_bytes());
         packet.extend(offset.to_be_bytes());
         packet.push(b' ');
+        diagnostics.mark("trickle_send_begin", offset, "member");
         member_channel
             .send(bytes::BytesMut::from(packet.as_slice()))
             .await
             .unwrap();
+        diagnostics.mark("trickle_send_end", offset, "member");
 
         // Prove the slow reservation is still held, even after the second
         // 29-second interval; otherwise expiry could hide the starvation bug.
@@ -1098,43 +1351,70 @@ async fn a_member_trickling_every_twenty_nine_seconds_cannot_starve_small_reques
         };
         upload.method = "POST".into();
         upload.body = vec![0; 20_000];
+        diagnostics.mark("rejection_send_begin", offset, "waiting");
         send_frame(
             waiting_channel.as_ref(),
             offset + 10,
             &Frame::Request(upload),
         )
         .await;
+        diagnostics.mark("rejection_send_end", offset, "waiting");
+        diagnostics.mark("rejection_wait_begin", offset, "waiting");
         let rejected =
             tokio::time::timeout(Duration::from_secs(2), response(waiting_channel.as_ref()))
                 .await
+                .inspect_err(|_| diagnostics.mark("rejection_wait_failed", offset, "waiting"))
                 .unwrap();
+        diagnostics.mark("rejection_wait_end", offset, "waiting");
         assert!(
             matches!(rejected, Frame::Response(reply) if reply.id == "still-reserved" && reply.status == 503)
         );
+        diagnostics.mark("rejection_503_verified", offset, "waiting");
 
-        for channel in [&waiting_channel, &owner_channel, &member_channel] {
+        for (role, channel) in [
+            ("waiting", &waiting_channel),
+            ("owner", &owner_channel),
+            ("member", &member_channel),
+        ] {
+            diagnostics.mark("small_get_send_begin", offset, role);
             send_frame(
                 channel.as_ref(),
                 offset + 2,
                 &request("small-request", "/api/chats"),
             )
             .await;
+            diagnostics.mark("small_get_send_end", offset, role);
+            diagnostics.mark("small_get_wait_begin", offset, role);
             let reply = tokio::time::timeout(Duration::from_secs(2), response(channel.as_ref()))
                 .await
+                .inspect_err(|_| diagnostics.mark("small_get_wait_failed", offset, role))
                 .expect("a trickling member must never delay a small request beyond two seconds");
+            diagnostics.mark("small_get_wait_end", offset, role);
             assert!(
                 matches!(reply, Frame::Response(reply) if reply.id == "small-request" && reply.status == 200)
             );
+            diagnostics.mark("small_get_200_verified", offset, role);
         }
+        diagnostics.mark("relay_get_begin", offset, "fixture");
         assert_eq!(
             relay.get("/chats").send().await.unwrap().status(),
             StatusCode::OK
         );
+        diagnostics.mark("relay_get_verified", offset, "fixture");
     }
+    diagnostics.mark("cleanup_begin", 0, "fixture");
+    diagnostics.mark("channel_close_begin", 0, "member");
     member.close().await.unwrap();
+    diagnostics.mark("channel_close_end", 0, "member");
+    diagnostics.mark("channel_close_begin", 0, "waiting");
     waiting.close().await.unwrap();
+    diagnostics.mark("channel_close_end", 0, "waiting");
+    diagnostics.mark("channel_close_begin", 0, "owner");
     owner.close().await.unwrap();
+    diagnostics.mark("channel_close_end", 0, "owner");
+    diagnostics.mark("relay_close_begin", 0, "fixture");
     relay.close().await;
+    diagnostics.mark("cleanup_complete", 0, "fixture");
 }
 
 #[tokio::test]
@@ -1775,6 +2055,9 @@ async fn observed_certificate_is_compared_with_the_grant_without_an_sdp_check() 
 
 struct PanicPeerStart(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
+const EXPECTED_PEER_PANIC_BEGIN: &str = "[expected-peer-panic:begin]";
+const EXPECTED_PEER_PANIC_END: &str = "[expected-peer-panic:end]";
+
 impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for PanicPeerStart {
     fn on_new_span(
         &self,
@@ -1790,9 +2073,79 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for PanicPeerStart {
     }
 }
 
+#[test]
+fn a_panicking_peer_task_releases_its_authorization_and_preserves_other_peers() {
+    use std::io::Write as _;
+
+    // A real panic runs its backtrace hook before the peer can unwind. Keep
+    // that expected diagnostic off the enclosing suite's shared capture sink,
+    // so a slow reader cannot stall this fixture's live peer and cleanup.
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "panicking_peer_task_child",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("RUST_BACKTRACE", "1")
+        .output()
+        .expect("run the isolated real-panic fixture");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "real-panic fixture failed: {}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        output.status
+    );
+    let expected_output = stderr
+        .trim()
+        .strip_prefix(EXPECTED_PEER_PANIC_BEGIN)
+        .and_then(|body| body.strip_suffix(EXPECTED_PEER_PANIC_END));
+    let framed_once = stderr.matches(EXPECTED_PEER_PANIC_BEGIN).count() == 1
+        && stderr.matches(EXPECTED_PEER_PANIC_END).count() == 1;
+    let real_expected_panic = expected_output.is_some_and(|body| {
+        body.contains("fixture peer task failure") && body.contains("stack backtrace:")
+    });
+    assert!(
+        framed_once && real_expected_panic,
+        "unexpected or missing child diagnostics\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    // Only the explicitly framed expected stderr is isolated. Successful-child
+    // stdout is still visible, including diagnostics from background tasks.
+    std::io::stdout()
+        .write_all(&output.stdout)
+        .expect("forward the isolated fixture's stdout");
+}
+
 #[tokio::test]
-async fn a_panicking_peer_task_releases_its_authorization_and_preserves_other_peers() {
+#[ignore = "isolated real panic; exercised by the enclosing parent test"]
+async fn panicking_peer_task_child() {
+    use std::io::Write as _;
     use tracing_subscriber::prelude::*;
+
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let expected = info
+            .payload()
+            .downcast_ref::<&str>()
+            .is_some_and(|message| *message == "fixture peer task failure")
+            && info
+                .location()
+                .is_some_and(|location| location.file() == file!());
+        if !expected {
+            original_hook(info);
+            return;
+        }
+
+        // Keep the real hook and backtrace. Serialize its marked block so
+        // another Rust stderr writer cannot be mistaken for expected output.
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "{EXPECTED_PEER_PANIC_BEGIN}");
+        original_hook(info);
+        let _ = writeln!(stderr, "{EXPECTED_PEER_PANIC_END}");
+    }));
+
     let panic_next = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let subscriber = tracing_subscriber::registry().with(PanicPeerStart(panic_next.clone()));
     let _subscriber = tracing::subscriber::set_default(subscriber);

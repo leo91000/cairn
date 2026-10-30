@@ -3,6 +3,7 @@ package build.cairn.app.data
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.util.Base64
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.cancelAndJoin
@@ -13,11 +14,18 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.*
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.Interceptor
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
+import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
+import okhttp3.ResponseBody.Companion.toResponseBody
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okio.Buffer
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -379,6 +387,129 @@ class DirectTransportTest {
                 } finally {
                     api.closeStreams()
                 }
+            }
+        }
+
+    @Test
+    fun `fragmented message write pressure can return a relay rejection before direct recovers`() =
+        runBlocking {
+            data class RelayRequest(val method: String, val path: String, val body: JsonElement)
+
+            val relayRequests = ConcurrentLinkedQueue<RelayRequest>()
+            lateinit var api: CairnApi
+            val client =
+                OkHttpClient.Builder()
+                    .addInterceptor { chain ->
+                        // Use the real route owner with an in-process relay continuation.
+                        // CairnApi still encodes the request and decodes the 413 response.
+                        api.transport.intercept(
+                            object : Interceptor.Chain by chain {
+                                override fun proceed(request: Request): Response {
+                                    val encoded = Buffer()
+                                    requireNotNull(request.body).writeTo(encoded)
+                                    relayRequests.add(
+                                        RelayRequest(
+                                            request.method,
+                                            request.url.encodedPath,
+                                            wireJson.parseToJsonElement(encoded.readUtf8()),
+                                        )
+                                    )
+                                    return Response.Builder()
+                                        .request(request)
+                                        .protocol(Protocol.HTTP_1_1)
+                                        .code(413)
+                                        .message("Payload rejected")
+                                        .body(
+                                            """{"error":"Fixture relay rejection."}"""
+                                                .toResponseBody("application/json".toMediaType())
+                                        )
+                                        .build()
+                                }
+                            }
+                        )
+                    }
+                    .build()
+            api = CairnApi("http://localhost/".toHttpUrl(), MemoryVault(), client, "test")
+            var disposed = false
+            var partialTransfer: Int? = null
+            var abortedTransfer: Int? = null
+            var acceptedFragments = 0
+            var pressuredFragments = 0
+            lateinit var channel: DirectChannel
+            channel =
+                DirectChannel(
+                    { packet, _, _ ->
+                        val envelope = ByteBuffer.wrap(packet)
+                        val transfer = envelope.getInt(1)
+                        val total = envelope.getInt(5)
+                        val offset = envelope.getInt(9)
+                        if (total == 0) {
+                            abortedTransfer = transfer
+                        } else if (total > DirectChannel.MAX_PACKET) {
+                            if (offset == 0) {
+                                partialTransfer = transfer
+                                acceptedFragments++
+                            } else {
+                                pressuredFragments++
+                                throw DirectRequestTimeout()
+                            }
+                        } else {
+                            val request =
+                                wireJson
+                                    .parseToJsonElement(String(packet.copyOfRange(13, packet.size)))
+                                    .jsonObject
+                            if (request["type"]!!.jsonPrimitive.content == "request")
+                                channel.receive(
+                                    singleFramePacket(
+                                        buildJsonObject {
+                                            put("type", "response")
+                                            put("id", request["id"]!!)
+                                            put("status", 200)
+                                            put("headers", buildJsonArray {})
+                                            put("body", "W10=")
+                                        }
+                                            .toString()
+                                            .toByteArray()
+                                    )
+                                )
+                        }
+                    },
+                    { disposed = true },
+                )
+            api.transport.attach(channel)
+            try {
+                assertEquals("[]", api.request("GET", "/chats"))
+                assertEquals("direct", api.transport.route.value)
+                assertEquals(0, relayRequests.size)
+                val message =
+                    body(
+                        "id" to "pressured-message",
+                        "text" to "x".repeat(DirectChannel.MAX_PACKET),
+                    )
+                val rejected =
+                    try {
+                        api.request("POST", "/chats/missing/messages", message)
+                        throw AssertionError("Expected the relay rejection")
+                    } catch (error: ApiException) {
+                        error
+                    }
+                assertEquals(413, rejected.status)
+                assertEquals("Fixture relay rejection.", rejected.message)
+                assertEquals(1, acceptedFragments)
+                assertEquals(1, pressuredFragments)
+                assertNotNull(partialTransfer)
+                assertEquals(partialTransfer, abortedTransfer)
+                assertFalse(disposed)
+                assertEquals("relay", api.transport.route.value)
+                assertEquals("[]", api.request("GET", "/chats"))
+                assertEquals("direct", api.transport.route.value)
+                assertEquals(1, relayRequests.size)
+                val replay = relayRequests.single()
+                assertEquals("POST", replay.method)
+                assertEquals("/api/installations/test/api/chats/missing/messages", replay.path)
+                assertEquals(message, replay.body)
+            } finally {
+                api.closeStreams()
             }
         }
 
