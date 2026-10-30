@@ -318,7 +318,12 @@ impl Broker {
     }
 
     pub async fn stop(&self, id: &str) -> Result<()> {
-        atomic_write(&self.state_file(id, "stopped"), b"").await?;
+        if let Err(error) = atomic_write(&self.state_file(id, "stopped"), b"").await {
+            if let Some(attempt) = self.active.lock().await.get(id) {
+                attempt.stop.cancel();
+            }
+            return Err(error);
+        }
         let attempt = {
             let active = self.active.lock().await;
             active.get(id).map(|a| {
@@ -349,11 +354,10 @@ impl Broker {
                 // Only physical teardown acknowledgment allows removal of a stale
                 // logical attempt after its execution task panicked or was aborted.
                 let mut active = self.active.lock().await;
-                atomic_write(
-                    &self.state_file(id, "exit"),
-                    CONTROLLER_INTERRUPTED.to_string().as_bytes(),
-                )
-                .await?;
+                let exit = self.state_file(id, "exit");
+                if !exit.exists() {
+                    atomic_write(&exit, CONTROLLER_INTERRUPTED.to_string().as_bytes()).await?;
+                }
                 remove_if_present(&self.state_file(id, "active")).await?;
                 active.remove(id);
             }
@@ -406,6 +410,7 @@ impl Execution {
         } else {
             code.to_string()
         };
+        let mut retry_delay = Duration::from_secs(1);
         loop {
             match atomic_write(&broker.state_file(id, "exit"), outcome.as_bytes()).await {
                 Ok(()) => break,
@@ -414,7 +419,8 @@ impl Execution {
                     if !finalization_failed {
                         break;
                     }
-                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    tokio::time::sleep(retry_delay).await;
+                    retry_delay = (retry_delay * 2).min(Duration::from_secs(30));
                 }
             }
         }

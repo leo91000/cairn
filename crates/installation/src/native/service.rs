@@ -512,12 +512,11 @@ impl Controller {
                                         "Native filesystem could not be flushed; the durable crash prefix was retained"
                                     );
                                     let exit = exit_record(code, true);
-                                    while let Err(error) =
+                                    if let Err(error) =
                                         atomic_write(&controller.file(&id, "exit"), exit.as_bytes())
                                             .await
                                     {
-                                        tracing::error!(attempt = id, %error, "Native flush failure must be saved before releasing the attempt");
-                                        tokio::time::sleep(Duration::from_secs(2)).await;
+                                        tracing::error!(attempt = id, %error, "Native flush evidence could not be saved before physical cleanup");
                                     }
                                 }
                                 break;
@@ -555,12 +554,14 @@ impl Controller {
             // The active marker must survive until suspension accounting is
             // finalized, so recovery can close it after any controller crash.
             let exit = exit_record(code, finalization_failed);
+            let mut retry_delay = Duration::from_secs(1);
             loop {
                 match atomic_write(&controller.file(&id, "exit"), exit.as_bytes()).await {
                     Ok(()) => break,
                     Err(error) if finalization_failed => {
                         tracing::error!(attempt = id, %error, "Native completion must be saved before releasing the attempt");
-                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        tokio::time::sleep(retry_delay).await;
+                        retry_delay = (retry_delay * 2).min(Duration::from_secs(30));
                     }
                     Err(_) => break,
                 }
@@ -1330,7 +1331,12 @@ impl Controller {
         uuid(id)?;
         // Publish cancellation before waiting for an admission that may itself
         // be waiting for storage. Its waiter observes this durable marker.
-        atomic_write(&self.file(id, "stopped"), b"1").await?;
+        if let Err(error) = atomic_write(&self.file(id, "stopped"), b"1").await {
+            if let Some(attempt) = self.active.lock().await.get(id) {
+                attempt.stop.cancel();
+            }
+            return Err(error);
+        }
         let _admission = self.admission.lock().await;
         self.stop_admitted(id).await
     }
@@ -1340,7 +1346,12 @@ impl Controller {
             self.record_stop(id, "controller_shutdown", Value::Null)
                 .await;
         }
-        atomic_write(&self.file(id, "stopped"), b"1").await?;
+        if let Err(error) = atomic_write(&self.file(id, "stopped"), b"1").await {
+            if let Some(attempt) = self.active.lock().await.get(id) {
+                attempt.stop.cancel();
+            }
+            return Err(error);
+        }
         let requested = self.active.lock().await.get(id).and_then(|attempt| {
             if attempt.stop.is_cancelled() {
                 return None;
@@ -3353,6 +3364,38 @@ mod tests {
         }
         let (code, failed) = completion_status(1, block::Completion::Flushed);
         assert_eq!(exit_record(code, failed), "1");
+    }
+
+    #[tokio::test]
+    async fn native_stop_cancels_workload_when_stop_marker_cannot_be_written() {
+        let (_root, controller) = fixture().await;
+        let id = crate::config::id();
+        let stop = CancellationToken::new();
+        controller.active.lock().await.insert(
+            id.clone(),
+            Attempt {
+                run: crate::config::id(),
+                expires: None,
+                stop: stop.clone(),
+                started: true,
+                protection: None,
+                suspension: Arc::new(super::super::suspension::Suspension::new(
+                    &controller.state,
+                    &id,
+                )),
+            },
+        );
+        tokio::fs::create_dir(controller.file(&id, "stopped"))
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), controller.stop_attempt(&id))
+                .await
+                .unwrap()
+                .is_err()
+        );
+        assert!(stop.is_cancelled());
+        assert!(controller.active.lock().await.contains_key(&id));
     }
 
     #[tokio::test]

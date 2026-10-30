@@ -172,6 +172,27 @@ mod tests {
         (done, attempt)
     }
 
+    #[tokio::test]
+    async fn vm_stop_cancels_workload_when_stop_marker_cannot_be_written() {
+        let root = tempfile::tempdir().unwrap();
+        let broker = fixture_broker(root.path()).await;
+        let id = crate::config::id();
+        let (_done, attempt) = starting_attempt(&id);
+        let stop = attempt.stop.clone();
+        broker.active.lock().await.insert(id.clone(), attempt);
+        tokio::fs::create_dir(broker.state.join(format!("{id}.stopped")))
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), broker.stop(&id))
+                .await
+                .unwrap()
+                .is_err()
+        );
+        assert!(stop.is_cancelled());
+        assert!(broker.active.lock().await.contains_key(&id));
+    }
+
     fn authorized_post(uri: String, body: Body) -> axum::http::Request<Body> {
         axum::http::Request::builder()
             .method("POST")
