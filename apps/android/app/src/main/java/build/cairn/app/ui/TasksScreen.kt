@@ -14,6 +14,7 @@ import build.cairn.contracts.SchedulePreviewInput
 import build.cairn.contracts.createMission
 import build.cairn.contracts.previewSchedule
 import build.cairn.contracts.replaceMission
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.jsonObject
@@ -29,6 +30,52 @@ internal fun taskGroup(task: Task, run: Run?): String =
         else -> "Terminées"
     }
 
+// The editor can have no selected agent. Keep incomplete input out of the validated wire contract.
+@Serializable
+private data class MissionDraft(
+    val name: String = "",
+    val prompt: String = "",
+    val agentId: String = "",
+    val projectId: String? = null,
+    val skills: List<String>? = null,
+    val tags: List<String> = emptyList(),
+    val cron: String? = null,
+    val timezone: String = java.time.ZoneId.systemDefault().id,
+    val enabled: Boolean = true,
+    val archived: Boolean = false,
+    val worktree: Boolean = true,
+) {
+    fun settings(tags: List<String>) =
+        MissionSettings(
+            name = name,
+            prompt = prompt,
+            agentId = agentId,
+            projectId = projectId,
+            skills = skills,
+            tags = tags,
+            cron = cron,
+            timezone = timezone,
+            enabled = enabled,
+            archived = archived,
+            worktree = worktree,
+        )
+}
+
+private fun MissionSettings.draft() =
+    MissionDraft(
+        name = name,
+        prompt = prompt,
+        agentId = agentId,
+        projectId = projectId,
+        skills = skills,
+        tags = tags,
+        cron = cron,
+        timezone = timezone,
+        enabled = enabled,
+        archived = archived,
+        worktree = worktree,
+    )
+
 @Composable
 internal fun TaskEditor(
     vm: CairnViewModel,
@@ -38,25 +85,21 @@ internal fun TaskEditor(
     onSaved: (Task) -> Unit = {},
     close: () -> Unit,
 ) {
-    var form by
-        rememberForm(
-            initial?.settings()
-                ?: draft
-                ?: MissionSettings(
-                    name = "",
-                    prompt = "",
-                    agentId = defaultAgent(state.usableAgents, state.agents),
-                    skills = null,
-                    timezone = java.time.ZoneId.systemDefault().id,
-                )
-        )
+    var form by rememberForm(initial?.settings()?.draft() ?: draft?.draft() ?: MissionDraft())
     var revision by rememberSaveable { mutableStateOf(initial?.revision.orEmpty()) }
-    // A member's usable agents may load after a new mission opened.
-    LaunchedEffect(state.usableAgents) {
-        if (initial == null && !canUseAgent(state.usableAgents, form.agentId))
-            form = form.copy(agentId = defaultAgent(state.usableAgents, state.agents))
-    }
     val saving = rememberResourceSave(initial?.id.orEmpty())
+    // A member's usable agents may load after a new mission opened.
+    LaunchedEffect(state.usableAgents, state.agents) {
+        val selectedAgentAvailable =
+            form.agentId.isNotBlank() && canUseAgent(state.usableAgents, form.agentId)
+        if (saving.id.isBlank() && !selectedAgentAvailable) {
+            val availableAgents = state.agents.filter { canUseAgent(state.usableAgents, it.id) }
+            val defaultAgentId = defaultAgent(state.usableAgents, state.agents)
+            val nextAgent =
+                availableAgents.find { it.id == defaultAgentId } ?: availableAgents.firstOrNull()
+            form = form.copy(agentId = nextAgent?.id.orEmpty())
+        }
+    }
     var saveError by rememberSaveable { mutableStateOf<String?>(null) }
     var cadence by rememberSaveable {
         mutableStateOf(if (initial?.cron == null) "once" else "custom")
@@ -101,7 +144,7 @@ internal fun TaskEditor(
                             "/tasks",
                             value = {
                                 wireJson.encodeToJsonElement(
-                                    form.copy(
+                                    form.settings(
                                         tags =
                                             tags
                                                 .split(',')
@@ -118,7 +161,7 @@ internal fun TaskEditor(
                                                 taskId = saving.id,
                                                 revision = revision,
                                                 settings =
-                                                    form.copy(
+                                                    form.settings(
                                                         tags =
                                                             tags
                                                                 .split(',')
@@ -183,9 +226,12 @@ internal fun TaskEditor(
             state.agents.filter {
                 canUseAgent(state.usableAgents, it.id) || it.id == form.agentId
             }
-        if (agents.isEmpty() && state.agents.isNotEmpty())
+        if (agents.isEmpty())
             Notice(
-                "Aucun agent ne vous est encore accessible. Demandez l’accès à un agent au propriétaire de l’installation.",
+                if (state.busy && state.agents.isEmpty()) "Chargement des agents…"
+                else if (state.agents.isEmpty()) "Aucun agent disponible pour cette mission."
+                else
+                    "Aucun agent ne vous est encore accessible. Demandez l’accès à un agent au propriétaire de l’installation.",
                 icon = CairnIcons.Shield,
             )
         val unusable =

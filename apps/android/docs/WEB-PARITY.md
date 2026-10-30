@@ -95,8 +95,15 @@ current membership. Loading, empty and unavailable states match; the overview ro
 shows a « Vous seul » / “Only you”, « Partagé » / “Shared” or « Indisponible » /
 “Unavailable” chip with the member count and the first allowed members' emails, and
 says it is checking the members while access loads. A new agent is the owner's alone.
-Members see only the agents they may use when starting a conversation or a mission;
-a conversation they cannot direct shows a read-only notice, a disabled composer and
+Members see only the agents they may use when starting a conversation or a mission.
+A new mission keeps its draft with Save disabled when no agent is available,
+including while access loads or after the last grant is revoked, and becomes
+saveable when access returns. Android keeps incomplete input in a native editor
+draft and constructs the validated mission contract only on save; web keeps its
+reactive form. An existing mission keeps its agent and requires access before
+edits can be saved. `MissionAuthorityCases` covers these native editor transitions
+and prevented writes on JVM and device.
+A conversation they cannot direct shows a read-only notice, a disabled composer and
 questions waiting for someone with access; attachments and the assistant picker are
 disabled there too. Losing access also dismisses an already-open question dialog,
 so its answer and withdrawal actions are unavailable. A quota or coding-agent switch
