@@ -679,6 +679,20 @@ mod tests {
         assert_eq!(saved.terminal_code(), Some(0));
         assert_eq!(saved.remaining_ms, Some(Some(0)));
         assert!(checkpoint.expired());
+        store
+            .transaction(move |db| {
+                assert!(!super::super::schedule::finish_recovery(
+                    db,
+                    "deadline-fixture",
+                    Some(&saved)
+                )?);
+                let state = db.run_state("deadline-fixture")?.unwrap();
+                assert_eq!(state.status, RunStatus::Failed);
+                assert_eq!(state.error.as_deref(), Some("Run exceeded its time limit."));
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
