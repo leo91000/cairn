@@ -1866,6 +1866,36 @@ async fn serve_controller(State(state): State<Arc<Controller>>, request: Request
             output.push_str(&format!("{delivered}\n"));
         }
         drop(plans);
+        if state.hold.load(std::sync::atomic::Ordering::Relaxed) {
+            let stream = futures_util::stream::unfold(
+                (0, state.clone(), output),
+                |(step, state, output)| async move {
+                    match step {
+                        0 => {
+                            let frame = json!({ "type": "output", "stderr": false, "data": STANDARD.encode(output) });
+                            Some((
+                                Ok::<_, std::io::Error>(format!("{frame}\n")),
+                                (1, state, String::new()),
+                            ))
+                        }
+                        1 => {
+                            if state.hold.load(std::sync::atomic::Ordering::Relaxed) {
+                                tokio::time::sleep(Duration::from_secs(1)).await;
+                                return Some((
+                                    Ok("{\"type\":\"heartbeat\"}\n".to_owned()),
+                                    (1, state, String::new()),
+                                ));
+                            }
+                            let output = "{\"type\":\"item.completed\",\"item\":{\"id\":\"reply\",\"type\":\"agent_message\",\"text\":\"resumed VM\"}}\n{\"type\":\"turn.completed\",\"usage\":{}}\n";
+                            let frame = json!({ "type": "output", "stderr": false, "data": STANDARD.encode(output) });
+                            Some((Ok(format!("{frame}\n")), (2, state, String::new())))
+                        }
+                        _ => None,
+                    }
+                },
+            );
+            return Body::from_stream(stream).into_response();
+        }
         if state.attempt_index(attempt).await >= state.failures {
             output.push_str("{\"type\":\"item.completed\",\"item\":{\"id\":\"reply\",\"type\":\"agent_message\",\"text\":\"resumed VM\"}}\n{\"type\":\"turn.completed\",\"usage\":{}}\n");
         }
@@ -2039,12 +2069,16 @@ async fn node_slots_exceed_manager_concurrency_without_overpreparing_the_queue()
         runs.push(fixture.enqueue("Inspect the VM fixture").await);
     }
     fixture.start().await;
-    eventually(
-        Duration::from_secs(20),
-        Duration::from_millis(30),
-        async || (controller.plans.lock().await.len() == slots).then_some(()),
-    )
-    .await;
+    // Placement serializes preparation. Bound each admission's progress instead
+    // of requiring every independent preparation to fit one disk deadline.
+    for admitted in 1..=slots {
+        eventually(
+            Duration::from_secs(20),
+            Duration::from_millis(30),
+            async || (controller.plans.lock().await.len() >= admitted).then_some(()),
+        )
+        .await;
+    }
     tokio::time::sleep(Duration::from_millis(1200)).await;
     let mut queued = Vec::new();
     let mut running = 0;
@@ -2072,10 +2106,8 @@ async fn node_slots_exceed_manager_concurrency_without_overpreparing_the_queue()
         .hold
         .store(false, std::sync::atomic::Ordering::Relaxed);
     for run in &runs {
-        assert_eq!(
-            fixture.until_finished(text(run, "id")).await["status"],
-            RunStatus::Succeeded
-        );
+        let completed = fixture.until_finished(text(run, "id")).await;
+        assert_eq!(completed["status"], RunStatus::Succeeded, "{completed}");
     }
     assert_eq!(controller.plans.lock().await.len(), slots + 1);
     fixture.stop(false).await;
@@ -2994,12 +3026,22 @@ async fn controller_interruptions_resume_saved_threads_and_stop_after_three_reco
         fixture.start().await;
         let run = fixture.enqueue("Inspect the VM fixture").await;
         let run_id = text(&run, "id");
-        let completed = fixture.until_finished(run_id).await;
         let (expected, attempts) = if failures == 1 {
             (RunStatus::Succeeded, 2)
         } else {
             (RunStatus::Failed, 4)
         };
+        // Each recovery prepares a new attempt; require bounded progress at
+        // every attempt before waiting for its terminal state.
+        for admitted in 1..=attempts {
+            eventually(
+                Duration::from_secs(20),
+                Duration::from_millis(30),
+                async || (controller.plans.lock().await.len() >= admitted).then_some(()),
+            )
+            .await;
+        }
+        let completed = fixture.until_finished(run_id).await;
         assert_eq!(completed["status"], expected, "{completed}");
         assert_eq!(completed["sessionId"], "fixture-session");
         let plans = controller.plans.lock().await;
