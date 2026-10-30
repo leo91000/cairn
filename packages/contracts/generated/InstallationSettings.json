@@ -1,0 +1,47 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "commit": {
+      "type": "string"
+    },
+    "concurrency": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "home": {
+      "type": "string"
+    },
+    "mcpUrl": {
+      "type": "string"
+    },
+    "protocol": {
+      "type": "string"
+    },
+    "publicUrl": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string"
+    },
+    "workspaceRoots": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "publicUrl",
+    "mcpUrl",
+    "workspaceRoots",
+    "home",
+    "concurrency",
+    "version",
+    "commit",
+    "protocol"
+  ],
+  "title": "InstallationSettings",
+  "type": "object"
+}

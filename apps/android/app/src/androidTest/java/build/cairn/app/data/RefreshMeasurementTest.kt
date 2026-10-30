@@ -136,25 +136,13 @@ class RefreshMeasurementTest {
                                                 it.id == id && it.name == editedName
                                             }
                                     assertTrue(published)
-                                    if (kind == "tasks")
-                                        assertTrue(
-                                            vm.state.value.overview.tasks.any {
-                                                it.id == id && it.name == editedName
-                                            }
-                                        )
                                 } else
                                     coroutineScope {
                                         // Read-set experiment only: no new product invalidation
                                         // rules.
                                         val tasks = async { vm.api.get<List<Task>>("/tasks") }
-                                        val overview = async { vm.api.get<Overview>("/overview") }
                                         assertTrue(
                                             tasks.await().any {
-                                                it.id == id && it.name == editedName
-                                            }
-                                        )
-                                        assertTrue(
-                                            overview.await().tasks.any {
                                                 it.id == id && it.name == editedName
                                             }
                                         )

@@ -369,7 +369,7 @@ abstract class SkillWorkbenchCases {
                             )
                     }
                     path == "$api/plugins" -> json(wireJson.encodeToString(catalog))
-                    path == "$api/overview" -> json("{}")
+                    path == "$api/overview" -> json(installationOverviewFixture())
                     path.endsWith("/models") -> json("""{"models":[]}""")
                     else ->
                         json(

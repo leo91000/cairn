@@ -48,6 +48,8 @@ fn summary(chat: &Value) -> Result<Value> {
         "lastActivityAt",
         "sessionRestartRequested",
         "canRequestNewSession",
+        "unread",
+        "preview",
     ] {
         result[key] = chat[key].clone();
     }
@@ -56,7 +58,8 @@ fn summary(chat: &Value) -> Result<Value> {
     >(result)?)?)
 }
 
-fn list(db: &Db<'_>, args: &Value) -> Result<Value> {
+/// Unread state and previews describe `reader`, the account that authorized the call.
+fn list(db: &Db<'_>, args: &Value, reader: Option<&str>) -> Result<Value> {
     let mut chats = chats::list_all(db)?;
     chats.retain(|chat| {
         in_view(chat, text(args, "view"))
@@ -71,12 +74,14 @@ fn list(db: &Db<'_>, args: &Value) -> Result<Value> {
     });
     let offset = args["offset"].as_u64().unwrap() as usize;
     let limit = args["limit"].as_u64().unwrap() as usize;
-    let page = chats
+    let mut page = chats
         .iter()
         .skip(offset)
         .take(limit)
-        .map(summary)
-        .collect::<Result<Vec<_>>>()?;
+        .cloned()
+        .collect::<Vec<_>>();
+    crate::reads::Reads::load_for(db, reader)?.chats(db, &mut page)?;
+    let page = page.iter().map(summary).collect::<Result<Vec<_>>>()?;
     let next = offset + page.len();
     Ok(json!({
         "chats": page,
@@ -239,6 +244,7 @@ pub(crate) async fn invoke(
     name: &str,
     args: Value,
     bearer: Option<&str>,
+    reader: Option<String>,
 ) -> Result<Value> {
     let origin = crate::native::policy::origin();
     let control = matches!(
@@ -293,6 +299,9 @@ pub(crate) async fn invoke(
         "list_chats" | "get_chat" | "list_chat_questions" | "read_chat_content"
     ) {
         let operation = name.to_owned();
+        if let Some(reader) = reader.as_deref().filter(|_| name == "list_chats") {
+            crate::reads::begin(s, reader).await?;
+        }
         return s
             .store
             .read(move |db| {
@@ -303,7 +312,7 @@ pub(crate) async fn invoke(
                 let db = &Db(&transaction);
                 authorize(db)?;
                 let result = match operation.as_str() {
-                    "list_chats" => list(db, &args)?,
+                    "list_chats" => list(db, &args, reader.as_deref())?,
                     "get_chat" => detail(db, &args)?,
                     "read_chat_content" => content(db, &args)?,
                     _ => {

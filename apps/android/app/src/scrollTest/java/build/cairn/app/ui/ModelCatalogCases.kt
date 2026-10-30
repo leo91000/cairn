@@ -55,7 +55,8 @@ abstract class ModelCatalogCases {
                                     otherRequests.incrementAndGet()
                                     "{}"
                                 }
-                                "/api/installations/fixture/api/overview" -> "{}"
+                                "/api/installations/fixture/api/overview" ->
+                                    installationOverviewFixture()
                                 else ->
                                     if (
                                         request.requestUrl

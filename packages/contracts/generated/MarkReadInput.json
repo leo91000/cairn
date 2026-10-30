@@ -1,0 +1,82 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "ReadMark": {
+      "additionalProperties": false,
+      "properties": {
+        "finishedAt": {
+          "description": "When the work the account saw finished. Later work stays unread.",
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "target": {
+          "$ref": "#/definitions/ReadTarget"
+        }
+      },
+      "required": [
+        "target",
+        "finishedAt"
+      ],
+      "type": "object"
+    },
+    "ReadTarget": {
+      "description": "Work an account can read: a conversation's latest turn or a mission's latest run.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "chatId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "kind": {
+              "const": "chat",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "chatId"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "mission",
+              "type": "string"
+            },
+            "taskId": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "taskId"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "properties": {
+    "items": {
+      "items": {
+        "$ref": "#/definitions/ReadMark"
+      },
+      "maxItems": 200,
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "items"
+  ],
+  "title": "MarkReadInput",
+  "type": "object"
+}
