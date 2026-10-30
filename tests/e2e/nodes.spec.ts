@@ -1,3 +1,4 @@
+import type { Locator, Page } from '@playwright/test'
 import type { ExecutionNode } from '../../packages/contracts/nodes'
 import { randomUUID } from 'node:crypto'
 import { MAIN_AGENT_ID } from '../../packages/contracts/constants'
@@ -8,6 +9,34 @@ import {
   useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
+
+function escape(text: string) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/** A machine's row in the fleet list. */
+function nodeRow(page: Page, name: string) {
+  return page.getByRole('list', { name: 'Machines' }).getByRole('button', { name: new RegExp(`^${escape(name)},`) })
+}
+
+/** Opens a machine's side panel on one of its sections. */
+async function openNode(page: Page, name: string, section?: 'Overview' | 'Access' | 'Storage' | 'Settings') {
+  await nodeRow(page, name).click()
+  const panel = page.getByRole('dialog', { name: new RegExp(`^${escape(name)}`) })
+  await expect(panel).toBeVisible()
+  if (section)
+    await showSection(panel, section)
+  return panel
+}
+
+async function showSection(panel: Locator, section: 'Overview' | 'Access' | 'Storage' | 'Settings') {
+  await panel.getByRole('group', { name: 'Node sections' }).getByRole('button', { name: section, exact: true }).click()
+}
+
+/** The value beside a label in a panel's figures. */
+function figure(region: Locator, label: string) {
+  return region.locator(`dt:text-is("${label}")`).locator('xpath=following-sibling::dd[1]')
+}
 
 test('shows disk accounting and keeps the storage draft revision through inventory polling', async ({ page, workspace }) => {
   test.setTimeout(60000)
@@ -43,7 +72,7 @@ test('shows disk accounting and keeps the storage draft revision through invento
     occupiedSlots: 0,
     availableSlots: 4,
     agents: [],
-    staleDisks: { count: 0, diskMiB: 0 },
+    staleDisks: { count: 2, diskMiB: 3072 },
     diskAccounting: null,
     storage: {
       cacheMiB: 102400,
@@ -89,19 +118,50 @@ test('shows disk accounting and keeps the storage draft revision through invento
     reclaimableBytes: 16 * 1024 ** 3,
     unsynchronizedBytes: 8 * 1024 ** 3,
   }
+  node.exclusiveReservation = {
+    id: 'reservation',
+    nodeId: node.id,
+    ownerRunId: randomUUID(),
+    reason: 'GPU benchmark',
+    state: 'acquired',
+    createdAt: Date.now(),
+    expiresAt: null,
+    waitUntil: Date.now(),
+    pausedRunIds: [],
+    minimumAvailableMemoryMiB: 0,
+  }
   await page.route('**/api/nodes', route => route.fulfill({ json: [node] }))
+  const releases: string[] = []
+  await page.route(`**/api/nodes/${node.id}/exclusive/reservation/release`, async (route) => {
+    releases.push(route.request().method())
+    await route.fulfill({ status: 503, json: { error: 'The node is unreachable.' } })
+  })
   await page.goto(workspacePath('/nodes'))
   await workspace.signIn(page)
-  const details = page.getByRole('region', { name: 'Disk capacity details' })
-  await expect(details).toContainText('80 GiB stored locally')
-  await expect(details).toContainText('16 GiB reclaimable')
-  await expect(details).toContainText('8 GiB of unpublished journal data')
+  const panel = await openNode(page, 'Disk capacity fixture')
+  // A failed action is reported inside the panel, above the page it covers.
+  await panel.getByRole('button', { name: 'Release reservation', exact: true }).click()
+  await expect(panel.getByRole('alert')).toContainText('The node is unreachable.')
+  expect(releases).toEqual(['POST'])
+  await showSection(panel, 'Storage')
+  await panel.getByRole('button', { name: 'Free old disks', exact: true }).click()
+  const cleaning = page.getByRole('dialog', { name: 'Free old disks on Disk capacity fixture' })
+  await expect(cleaning.getByRole('button', { name: 'Delete 3 GiB', exact: true })).toBeVisible()
+  // A newly opened dialog does not inherit the failed release.
+  await expect(cleaning.getByRole('alert')).toHaveCount(0)
+  await cleaning.getByRole('button', { name: 'Close dialog', exact: true }).click()
+  await expect(cleaning).toHaveCount(0)
+  await expect(panel).toBeVisible()
+  const details = panel.getByRole('region', { name: 'Disk capacity details' })
+  await expect(figure(details, 'Stored locally')).toHaveText('80 GiB')
+  await expect(figure(details, 'Reclaimable, at least')).toHaveText('16 GiB')
+  await expect(figure(details, 'Not yet synchronized')).toHaveText('8 GiB')
   await expect(details).toContainText('without the one-hour delay')
   await page.setViewportSize({ width: 390, height: 844 })
   await expect(details).toBeVisible()
   expect(await details.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true)
   await page.screenshot({ path: 'test-results/nodes-disk-accounting-phone.png', fullPage: true })
-  await page.getByRole('button', { name: 'Storage', exact: true }).click()
+  await panel.getByRole('button', { name: 'Edit storage settings', exact: true }).click()
   const editor = page.getByRole('dialog', { name: 'Storage · Disk capacity fixture' })
   await editor.getByLabel('Shared memory cache (MiB)', { exact: true }).fill('1024')
   const requests: { revision: string, storage: ExecutionNode['storage'] }[] = []
@@ -129,7 +189,7 @@ test('shows disk accounting and keeps the storage draft revision through invento
   expect(requests[0]?.revision).toBe('fixture')
   expect(node.storage.reservePercent).toBe(10)
   await editor.getByRole('button', { name: 'Close dialog', exact: true }).click()
-  await page.getByRole('button', { name: 'Storage', exact: true }).click()
+  await panel.getByRole('button', { name: 'Edit storage settings', exact: true }).click()
   await expect(editor.getByLabel('Minimum free disk (%)', { exact: true })).toHaveValue('10')
   await editor.getByLabel('Shared memory cache (MiB)', { exact: true }).fill('1024')
   await editor.getByRole('button', { name: 'Save storage settings', exact: true }).click()
@@ -181,28 +241,51 @@ test('registers, configures and revokes a node through the owner interface', asy
   await grant.getByRole('checkbox', { name: 'Main agent', exact: true }).check()
   await grant.getByRole('button', { name: 'Finish', exact: true }).click()
   await expect(grant).toHaveCount(0)
-  const node = page.getByRole('article').filter({ has: page.getByRole('heading', { name: 'Browser Linux' }) })
-  await expect(node).toContainText('online')
-  await expect(node).toContainText('1 agent can run here: Main agent')
-  await expect(node).not.toContainText('No agent can use this machine yet.')
-  await expect(node.getByRole('button', { name: /Choose agents|^Agents$/ })).toHaveCount(0)
-  await expect(node.getByRole('link', { name: 'Manage access from the agents ›' })).toBeVisible()
+  const row = nodeRow(page, 'Browser Linux')
+  await expect(row).toBeVisible()
+  // Connected and set up: whatever the runtime reports, it is neither offline nor waiting for setup.
+  await expect(row.locator('[data-state]')).not.toHaveAttribute('data-state', /^(offline|setup|revoked)$/)
+  await expect(row).not.toContainText('No agent can use this machine yet')
+  const summary = page.getByRole('region', { name: 'Fleet summary' })
+  await expect(summary.locator('div').filter({ hasText: 'connected' }).locator('dd')).toHaveText('1 / 1')
+  await expect(summary.locator('div').filter({ hasText: 'slots in use' }).locator('dd')).toHaveText('0 / 4')
   // It asks only once: the next refresh leaves the machine alone.
   await page.waitForResponse(reply => new URL(reply.url()).pathname.endsWith('/nodes') && reply.request().method() === 'GET', { timeout: 15000 })
   await expect(page.getByRole('dialog')).toHaveCount(0)
   await page.screenshot({ path: 'test-results/nodes-desktop.png' })
+  const node = await openNode(page, 'Browser Linux', 'Access')
+  await expect(node.getByRole('list', { name: 'Agents allowed' })).toContainText('Main agent')
+  await expect(node).not.toContainText('No agent can run here yet.')
+  await expect(node.getByRole('button', { name: /Choose agents|^Agents$/ })).toHaveCount(0)
+  await expect(node.getByRole('link', { name: 'Manage access from the agents ›' })).toBeVisible()
+  await showSection(node, 'Overview')
+  await page.screenshot({ path: 'test-results/nodes-desktop-panel.png' })
   await page.emulateMedia({ colorScheme: 'dark' })
   await page.screenshot({ path: 'test-results/nodes-desktop-dark.png' })
+  // Laptop widths keep usage and agents; narrower windows drop them for the name.
+  await page.setViewportSize({ width: 1100, height: 844 })
+  await expect(row.getByText('Usage unavailable')).toBeVisible()
+  await page.setViewportSize({ width: 800, height: 844 })
+  await expect(row.getByText('Usage unavailable')).toBeHidden()
+  await expect(row.getByText('VM', { exact: true })).toBeVisible()
   await page.setViewportSize({ width: 390, height: 844 })
   await page.screenshot({ path: 'test-results/nodes-phone.png', fullPage: true })
-  await node.getByRole('button', { name: 'Storage', exact: true }).click()
+  // On phones a row keeps the name and the free slots; the name gets the width.
+  const name = (await row.getByText('Browser Linux', { exact: true }).boundingBox())!
+  expect(name.width).toBeGreaterThan(70)
+  expect((await row.boundingBox())!.width).toBeLessThanOrEqual(390)
+  await showSection(node, 'Storage')
+  await node.getByRole('button', { name: 'Edit storage settings', exact: true }).click()
   const storage = page.getByRole('dialog', { name: 'Storage · Browser Linux' })
   await expect(storage.getByLabel('Clean disk cache budget (MiB)')).toBeVisible()
   await expect(storage.getByLabel('Shared memory cache (MiB)')).toHaveValue('256')
   await page.screenshot({ path: 'test-results/storage-phone.png' })
   await page.keyboard.press('Escape')
+  await expect(storage).toHaveCount(0)
+  await expect(node).toBeVisible()
+  await showSection(node, 'Settings')
   await node.getByRole('button', { name: 'Configure' }).click()
-  const dialog = page.getByRole('dialog')
+  const dialog = page.getByRole('dialog', { name: 'Configure node' })
   // Agent access is shown read-only; it is granted on each agent's page.
   await expect(dialog.getByRole('group', { name: 'Exclusive reservations' })).toHaveCount(0)
   await expect(dialog.getByRole('region', { name: 'Agents' })).toContainText('1 agent can run here: Main agent')
@@ -219,24 +302,35 @@ test('registers, configures and revokes a node through the owner interface', asy
   await dialog.getByRole('button', { name: 'Save', exact: true }).click()
   await expect(dialog).toHaveCount(0)
   expect((await configuring).postDataJSON()).not.toHaveProperty('exclusiveAgents')
-  await expect(node).toContainText('4 cores')
-  await expect(node).toContainText('fast · linux')
-  await expect(node).toContainText('12 of 12')
+  await expect(figure(node, 'Shared CPU budget')).toHaveText('4 of 8 cores')
+  await expect(figure(node, 'Tags')).toHaveText('fast · linux')
+  await expect(figure(node, 'Execution slots')).toHaveText('12')
+  await showSection(node, 'Overview')
+  await expect(figure(node, 'CPU')).toContainText('4 cores')
+  await expect(figure(node, 'Slots')).toContainText('12 of 12 free')
   const configured = (await workspace.api('/api/nodes')).find((value: { name: string }) => value.name === 'Browser Linux')
   expect(configured.limits.diskMiB).toBe(98304)
-  await page.getByText('Advanced: S3 synchronization and timeouts').click()
-  await page.getByRole('button', { name: 'Configure synchronization' }).click()
-  await dialog.getByLabel('Synchronization target (seconds)').fill('45')
-  await dialog.getByLabel('Pause after disconnection (seconds)').fill('30')
-  await expect(dialog.getByLabel('Recovery points to retain')).toHaveCount(0)
-  await dialog.getByRole('button', { name: 'Save', exact: true }).click()
-  await expect(dialog).toHaveCount(0)
-  expect(await workspace.api('/api/nodes/settings')).toMatchObject({ intervalSeconds: 45, disconnectTimeoutSeconds: 30 })
-  await node.getByRole('button', { name: 'Revoke', exact: true }).click()
-  await page.getByRole('dialog').getByRole('button', { name: 'Revoke node' }).click()
+  await page.keyboard.press('Escape')
   await expect(node).toHaveCount(0)
+  await page.getByRole('button', { name: 'Synchronization settings' }).click()
+  const synchronization = page.getByRole('dialog', { name: 'S3 synchronization' })
+  await synchronization.getByLabel('Synchronization target (seconds)').fill('45')
+  await synchronization.getByLabel('Pause after disconnection (seconds)').fill('30')
+  await expect(synchronization.getByLabel('Recovery points to retain')).toHaveCount(0)
+  await synchronization.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(synchronization).toHaveCount(0)
+  expect(await workspace.api('/api/nodes/settings')).toMatchObject({ intervalSeconds: 45, disconnectTimeoutSeconds: 30 })
+  await openNode(page, 'Browser Linux', 'Settings')
+  await node.getByRole('button', { name: 'Revoke', exact: true }).click()
+  await page.getByRole('dialog', { name: 'Revoke node' }).getByRole('button', { name: 'Revoke node' }).click()
+  await expect(node).toHaveCount(0)
+  await expect(row).toHaveCount(0)
+  // The dialog returns focus to the list the revoked machine left.
+  await expect(page.getByRole('heading', { name: 'Machines', level: 2 })).toBeFocused()
   await page.getByRole('button', { name: 'Show revoked machines (1)' }).click()
-  await expect(node).toContainText('revoked')
+  await expect(row).toContainText('Revoked')
+  await openNode(page, 'Browser Linux')
+  await expect(node).toContainText('This machine no longer has access')
   await expect(node.getByRole('button', { name: 'Configure' })).toHaveCount(0)
 })
 
@@ -626,23 +720,28 @@ test('native enrollment requires explicit people and native agent grants', async
   await grant.getByRole('button', { name: 'Finish', exact: true }).click()
   await expect(grant).toHaveCount(0)
   expect((await finishing).postDataJSON()).toEqual({ agentIds: [agent.id], add: true })
-  const node = page.getByRole('article').filter({ has: page.getByRole('heading', { name: 'Native desktop' }) })
+  await expect(nodeRow(page, 'Native desktop')).toContainText('ublk is unavailable')
+  const node = await openNode(page, 'Native desktop')
   await expect(node).toContainText('Native process')
+  await expect(node.getByRole('list', { name: 'Why Native desktop cannot take new work' })).toContainText('ublk is unavailable')
+  await expect(figure(node, 'Platform')).toContainText('ublk unavailable')
   // Native ublk disks honor the node storage policy like VM disks.
-  await expect(node.getByRole('button', { name: 'Storage', exact: true })).toBeVisible()
-  await expect(node).toContainText('ublk is unavailable')
-  await node.getByText('Technical details', { exact: true }).click()
-  await expect(node).toContainText('ublk unavailable')
+  await showSection(node, 'Storage')
+  await expect(node.getByRole('button', { name: 'Edit storage settings', exact: true })).toBeVisible()
+  await showSection(node, 'Settings')
   await node.getByRole('button', { name: 'Revoke', exact: true }).click()
   const revoke = page.getByRole('dialog', { name: 'Revoke node', exact: true })
   await expect(revoke).toContainText('mounts=$(findmnt -rno TARGET)')
   await expect(revoke).toContainText('the command lists it and stops before deleting anything')
   await page.keyboard.press('Escape')
   await expect(revoke).toHaveCount(0)
-  // Agents are granted on their own page; the card lists them read-only.
-  await expect(node).toContainText(`1 agent can run here: ${agent.name}`)
+  // Agents are granted on their own page; the panel lists them read-only.
+  await showSection(node, 'Access')
+  await expect(node.getByRole('list', { name: 'Agents allowed' })).toContainText(agent.name)
+  await expect(node).toContainText('Enabled · 1 trusted person')
   expect((await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id).access.nodes).toContain(desktop)
 
+  await showSection(node, 'Settings')
   await node.getByRole('button', { name: 'Configure', exact: true }).click()
   await expect(dialog.getByLabel('Execution slots')).toHaveValue('6')
   await expect(dialog.getByLabel(callers[0].email, { exact: true })).toBeChecked()
@@ -691,7 +790,10 @@ test('switching a machine to native enrolls it again and retires the previous no
   await useRelayForHttpMocks(page)
   await page.goto(workspacePath('/nodes'))
   await authenticateWorkspace(page)
-  await page.getByRole('article').filter({ has: page.getByRole('heading', { name: 'Workstation' }) }).getByRole('button', { name: 'Switch to native', exact: true }).click()
+  const workstation = await openNode(page, 'Workstation', 'Settings')
+  await workstation.getByRole('button', { name: 'Switch to native', exact: true }).click()
+  // The panel closes: the switch continues in its own steps.
+  await expect(workstation).toHaveCount(0)
   const switching = page.getByRole('dialog', { name: 'Switch Workstation to native process', exact: true })
   await expect(switching.getByLabel('Machine name')).toHaveValue('Workstation')
   // The backend is the point of the switch: it is not offered again.
@@ -825,6 +927,8 @@ test('previews node administrator powers and keeps failed transitions visibly bl
     tags: [],
     slots: 2,
     occupiedSlots: 2,
+    availableSlots: 0,
+    executionReady: true,
     agents: [{ id: 'builder', name: 'Builder', allNodes: true }],
     capabilities: {
       os: 'linux',
@@ -848,6 +952,8 @@ test('previews node administrator powers and keeps failed transitions visibly bl
     if (change.confirm) {
       node.nativeModeRequest = { mode: change.mode, generation: 'g1' }
       node.nativeModeStatus = 'failed'
+      // The server keeps the runtime unready until privileges are applied.
+      node.executionReady = false
       node.nativeModeObserved = {
         mode: 'protected',
         generation: null,
@@ -875,7 +981,10 @@ test('previews node administrator powers and keeps failed transitions visibly bl
   })
   await page.goto(workspacePath('/nodes'))
   await authenticateWorkspace(page)
-  const card = page.getByRole('article').filter({ hasText: 'Disposable administrator' })
+  const row = nodeRow(page, 'Disposable administrator')
+  await expect(row).toContainText('Full')
+  await expect(row).toContainText('All 2 slots in use')
+  const card = await openNode(page, 'Disposable administrator', 'Access')
   await expect(card).toContainText('Native protected')
   await card.getByRole('button', { name: 'Switch to Native administrator', exact: true }).click()
   const review = page.getByRole('dialog', { name: 'Switch Disposable administrator to Native administrator?' })
@@ -887,10 +996,308 @@ test('previews node administrator powers and keeps failed transitions visibly bl
   await review.getByRole('button', { name: 'Confirm access and restart managed executions' }).click()
   await expect(review).toHaveCount(0)
   await expect(card).toContainText('Change failed; new placements are blocked')
+  await expect(row).toContainText('The privilege change failed')
+  // The overview names the cause and leads to the privileges.
+  await showSection(card, 'Overview')
+  await expect(card.getByRole('list', { name: 'Why Disposable administrator cannot take new work' })).toContainText('The privilege change failed: retry it')
+  await card.getByRole('button', { name: 'Open host privileges', exact: true }).click()
+  await expect(card.getByRole('heading', { name: 'Native execution' })).toBeFocused()
+  await expect(page.getByRole('region', { name: 'Fleet summary' }).locator('div').filter({ hasText: 'attention' }).locator('dd')).toHaveText('1')
   await expect(card).toContainText('Last confirmed: Native protected')
   await expect(card).toContainText('Current privileges are unconfirmed')
   await expect(card).toContainText('Native protected')
   expect(requests[1]).toEqual({ mode: 'administrator', previewId: 'preview-one', confirm: true })
   await card.getByRole('button', { name: 'Switch to Native administrator', exact: true }).click()
   expect(requests.at(-1)).toEqual({ mode: 'administrator', previewId: null, confirm: false })
+})
+
+test('the overview links an agent\'s privilege request to its review, and keeps other machines\' errors out', async ({ page, workspace: _workspace }) => {
+  await useRelayForHttpMocks(page)
+  const machine = (name: string, extra: object) => ({
+    id: randomUUID(),
+    name,
+    revision: 'fixture',
+    local: false,
+    accepting: true,
+    status: 'online',
+    revoked: false,
+    executionReady: true,
+    tags: [],
+    systemTags: [],
+    slots: 2,
+    occupiedSlots: 0,
+    availableSlots: 2,
+    agents: [{ id: 'builder', name: 'Builder', allNodes: false }],
+    exclusiveAgents: [],
+    staleDisks: { count: 0, diskMiB: 0 },
+    storage: {
+      cacheMiB: 102400,
+      memoryCacheMiB: 256,
+      reserveMiB: 10240,
+      reservePercent: 5,
+      backupSeconds: 60,
+      maxDirtySeconds: 300,
+    },
+    limits: { cpu: 2, memoryMiB: 4096, diskMiB: 32768 },
+    lastSeen: Date.now(),
+    ...extra,
+  })
+  const requested = machine('Requested host', {
+    nativeEnabled: true,
+    nativeAccounts: ['trusted'],
+    capabilities: {
+      os: 'linux',
+      arch: 'x86_64',
+      backend: 'native',
+      ublk: true,
+      nativeModeProtocol: 1,
+      kvm: false,
+      cpu: 4,
+      memoryMiB: 8192,
+      diskMiB: 65536,
+    },
+    nativeModeObserved: { mode: 'protected', generation: null, status: 'applied' },
+    nativeModeProposal: { previewId: 'proposal', mode: 'administrator', status: 'pending' },
+  })
+  const other = machine('Other host', {
+    capabilities: {
+      os: 'linux',
+      arch: 'x86_64',
+      backend: 'firecracker',
+      kvm: true,
+      cpu: 4,
+      memoryMiB: 8192,
+      diskMiB: 65536,
+    },
+    staleDisks: { count: 1, diskMiB: 1024 },
+  })
+  await page.route('**/api/nodes', route => route.fulfill({ json: [requested, other] }))
+  await page.route('**/api/nodes/native-callers', route => route.fulfill({ json: [] }))
+  await page.route(`**/api/nodes/${other.id}/stale-disks/delete`, route => route.fulfill({ status: 503, json: { error: 'Other host is unreachable.' } }))
+  await page.goto(workspacePath('/nodes'))
+  await authenticateWorkspace(page)
+
+  // A pending request needs the owner, even on a machine that otherwise takes work.
+  await expect(nodeRow(page, 'Requested host')).toContainText('An agent requested Native administrator')
+  await expect(page.getByRole('region', { name: 'Fleet summary' }).locator('div').filter({ hasText: 'attention' }).locator('dd')).toHaveText('1')
+  const panel = await openNode(page, 'Requested host')
+  await panel.getByRole('button', { name: 'Review the request', exact: true }).click()
+  await expect(panel.getByRole('heading', { name: 'Native execution' })).toBeFocused()
+  await expect(panel.getByRole('button', { name: 'Review requested mode', exact: true })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(panel).toHaveCount(0)
+
+  // A failed action on one machine is reported in its own panel only.
+  const failing = await openNode(page, 'Other host', 'Storage')
+  await failing.getByRole('button', { name: 'Free old disks', exact: true }).click()
+  const cleaning = page.getByRole('dialog', { name: 'Free old disks on Other host' })
+  await cleaning.getByRole('button', { name: 'Delete 1 GiB', exact: true }).click()
+  await expect(cleaning.getByRole('alert')).toContainText('Other host is unreachable.')
+  await cleaning.getByRole('button', { name: 'Close dialog', exact: true }).click()
+  await expect(failing.getByRole('alert')).toContainText('Other host is unreachable.')
+  await page.keyboard.press('Escape')
+  await nodeRow(page, 'Requested host').click()
+  const unrelated = page.getByRole('dialog', { name: /^Requested host/ })
+  await expect(unrelated).toBeVisible()
+  await expect(unrelated.getByRole('alert')).toHaveCount(0)
+  // The page still names the failed machine; reopening that machine starts clean.
+  await page.keyboard.press('Escape')
+  await expect(unrelated).toHaveCount(0)
+  await expect(page.getByRole('alert').filter({ hasText: 'Other host: Other host is unreachable.' })).toBeVisible()
+  const reopened = await openNode(page, 'Other host')
+  await expect(reopened.getByRole('alert')).toHaveCount(0)
+})
+
+test('a silent built-in runner needs attention, and rows open and return focus from the keyboard', async ({ page, workspace: _workspace }) => {
+  await useRelayForHttpMocks(page)
+  const base = {
+    revision: 'fixture',
+    accepting: true,
+    revoked: false,
+    executionReady: true,
+    tags: [],
+    systemTags: [],
+    slots: 2,
+    occupiedSlots: 0,
+    availableSlots: 2,
+    agents: [{ id: 'builder', name: 'Builder', allNodes: true }],
+    exclusiveAgents: [],
+    staleDisks: { count: 0, diskMiB: 0 },
+    storage: {
+      cacheMiB: 102400,
+      memoryCacheMiB: 256,
+      reserveMiB: 10240,
+      reservePercent: 5,
+      backupSeconds: 60,
+      maxDirtySeconds: 300,
+    },
+    limits: { cpu: 2, memoryMiB: 4096, diskMiB: 32768 },
+    capabilities: {
+      os: 'linux',
+      arch: 'x86_64',
+      backend: 'firecracker',
+      kvm: true,
+      cpu: 4,
+      memoryMiB: 8192,
+      diskMiB: 65536,
+    },
+  }
+  // Server time comes from the online machine: the device clock does not matter.
+  const server = Date.now() - 3_600_000
+  const nodes = [
+    {
+      ...base,
+      id: '00000000-0000-4000-8000-000000000002',
+      name: 'This server',
+      local: true,
+      status: 'local',
+      lastSeen: server - 5 * 60_000,
+    },
+    {
+      ...base,
+      id: randomUUID(),
+      name: 'Online host',
+      local: false,
+      status: 'online',
+      lastSeen: server,
+    },
+  ]
+  await page.route('**/api/nodes', route => route.fulfill({ json: nodes }))
+  await page.goto(workspacePath('/nodes'))
+  await authenticateWorkspace(page)
+
+  const runner = nodeRow(page, 'This server (built-in runner)')
+  await expect(runner).toContainText('Needs attention')
+  await expect(runner).toContainText('Last usable report 5 min ago')
+  const summary = page.getByRole('region', { name: 'Fleet summary' })
+  await expect(summary.locator('div').filter({ hasText: 'connected' }).locator('dd')).toHaveText('1 / 2')
+
+  const row = nodeRow(page, 'Online host')
+  await row.focus()
+  await page.keyboard.press('Enter')
+  const panel = page.getByRole('dialog', { name: /^Online host/ })
+  await expect(panel).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(panel).toHaveCount(0)
+  await expect(row).toBeFocused()
+})
+
+test('slow listings still show the machines, and an older answer never replaces a newer one', async ({ page, workspace: _workspace }) => {
+  test.setTimeout(90000)
+  await useRelayForHttpMocks(page)
+  const machine = {
+    id: randomUUID(),
+    name: 'Slow host',
+    revision: 'fixture',
+    local: false,
+    accepting: true,
+    revoked: false,
+    status: 'online',
+    executionReady: true,
+    tags: [],
+    systemTags: [],
+    slots: 2,
+    occupiedSlots: 0,
+    availableSlots: 2,
+    agents: [{ id: 'builder', name: 'Builder', allNodes: true }],
+    exclusiveAgents: [],
+    staleDisks: { count: 0, diskMiB: 0 },
+    storage: {
+      cacheMiB: 102400,
+      memoryCacheMiB: 256,
+      reserveMiB: 10240,
+      reservePercent: 5,
+      backupSeconds: 60,
+      maxDirtySeconds: 300,
+    },
+    limits: { cpu: 2, memoryMiB: 4096, diskMiB: 32768 },
+    capabilities: {
+      os: 'linux',
+      arch: 'x86_64',
+      backend: 'firecracker',
+      kvm: true,
+      cpu: 4,
+      memoryMiB: 8192,
+      diskMiB: 65536,
+    },
+    lastSeen: Date.now(),
+  }
+  // Each answer arrives after the next poll has started.
+  let listings = 0
+  await page.route('**/api/nodes', async (route) => {
+    const listing = ++listings
+    // The third answer lands after the fourth: it must not win. Later listings stay pending, so a
+    // wrongly applied older answer would remain visible.
+    const delay = listing === 3 ? 15000 : listing === 4 ? 0 : listing >= 5 ? 60000 : 11000
+    await new Promise(resolve => setTimeout(resolve, delay))
+    await route.fulfill({ json: [{ ...machine, name: listing === 3 ? 'Old answer' : 'Slow host' }] }).catch(() => {})
+  })
+  await page.goto(workspacePath('/nodes'))
+  await authenticateWorkspace(page)
+  await expect(nodeRow(page, 'Slow host')).toBeVisible({ timeout: 30000 })
+  await expect.poll(() => listings, { timeout: 30000 }).toBeGreaterThanOrEqual(4)
+  // Long enough for the delayed third answer to land.
+  await page.waitForTimeout(16000)
+  await expect(nodeRow(page, 'Old answer')).toHaveCount(0)
+  await expect(nodeRow(page, 'Slow host')).toBeVisible()
+})
+
+test('a failed refresh is reported on the page and in the panel, then clears', async ({ page, workspace: _workspace }) => {
+  test.setTimeout(60000)
+  await useRelayForHttpMocks(page)
+  const machine = {
+    id: randomUUID(),
+    name: 'Refreshed host',
+    revision: 'fixture',
+    local: false,
+    accepting: true,
+    revoked: false,
+    status: 'online',
+    executionReady: true,
+    tags: [],
+    systemTags: [],
+    slots: 2,
+    occupiedSlots: 0,
+    availableSlots: 2,
+    agents: [{ id: 'builder', name: 'Builder', allNodes: true }],
+    exclusiveAgents: [],
+    staleDisks: { count: 1, diskMiB: 2048 },
+    storage: {
+      cacheMiB: 102400,
+      memoryCacheMiB: 256,
+      reserveMiB: 10240,
+      reservePercent: 5,
+      backupSeconds: 60,
+      maxDirtySeconds: 300,
+    },
+    limits: { cpu: 2, memoryMiB: 4096, diskMiB: 32768 },
+    capabilities: {
+      os: 'linux',
+      arch: 'x86_64',
+      backend: 'firecracker',
+      kvm: true,
+      cpu: 4,
+      memoryMiB: 8192,
+      diskMiB: 65536,
+    },
+    lastSeen: Date.now(),
+  }
+  let failing = false
+  await page.route('**/api/nodes', route => failing
+    ? route.fulfill({ status: 503, json: { error: 'The manager is restarting.' } })
+    : route.fulfill({ json: [{ ...machine, lastSeen: Date.now() }] }))
+  await page.goto(workspacePath('/nodes'))
+  await authenticateWorkspace(page)
+  const panel = await openNode(page, 'Refreshed host')
+  // Old disks are pointed out on the overview.
+  await panel.getByRole('button', { name: 'Open storage', exact: true }).click()
+  await expect(panel.getByRole('heading', { name: 'Storage settings' })).toBeFocused()
+  await expect(panel.getByRole('button', { name: 'Free old disks', exact: true })).toBeVisible()
+  failing = true
+  await expect(panel.getByRole('status').filter({ hasText: 'figures may be out of date' })).toContainText('The manager is restarting.', { timeout: 20000 })
+  await expect(panel.getByRole('alert')).toHaveCount(0)
+  failing = false
+  await expect(panel.getByRole('status').filter({ hasText: 'figures may be out of date' })).toHaveCount(0, { timeout: 20000 })
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('alert')).toHaveCount(0)
 })
