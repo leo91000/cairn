@@ -442,6 +442,62 @@ async fn recover_or_wait(s: &Service, run: &Value) -> Result<bool> {
     Ok(false)
 }
 
+// Persist the controller's cumulative pause counter with the deadline it
+// extends. Both writes are atomic, so a restart cannot credit the same pause
+// twice. Never apply a response to a replacement execution.
+async fn refresh_recovery_pause(
+    s: &Service,
+    run_id: &str,
+    expected: Option<&RunCheckpoint>,
+) -> Result<Option<i64>> {
+    let Some(saved) = expected.filter(|saved| saved.managed()) else {
+        return Ok(None);
+    };
+    let Some(attempt) = saved.runner_id() else {
+        return Ok(None);
+    };
+    let total = crate::nodes::exclusive::administrative_pause_for_node(
+        s,
+        saved.node_id.as_ref().and_then(|node| node.as_deref()),
+        attempt,
+    )
+    .await;
+    let id = run_id.to_owned();
+    let expected = expected.cloned();
+    let attempt = attempt.to_owned();
+    s.store
+        .transaction(move |db| {
+            let Some(mut current) = RunCheckpoint::load_in(db, &id)? else {
+                return Ok(None);
+            };
+            if !recovery::same_execution(Some(&current), expected.as_ref()) {
+                return Ok(None);
+            }
+            if let (Ok(total), Some(deadline)) = (total, current.recovery_deadline_ms) {
+                let previous = current
+                    .administrative_pause_observation
+                    .as_ref()
+                    .filter(|observation| observation.attempt == attempt)
+                    .map_or(0, |observation| observation.total_ms);
+                if total > previous {
+                    let credit = total.saturating_sub(previous).min(i64::MAX as u64) as i64;
+                    current.recovery_deadline_ms = Some(deadline.saturating_add(credit));
+                    current.administrative_pause_observation =
+                        Some(super::checkpoint::AdministrativePauseObservation {
+                            attempt,
+                            total_ms: total,
+                        });
+                }
+            }
+            if let Some(deadline) = current.recovery_deadline_ms {
+                current.remaining_ms = Some(Some(deadline.saturating_sub(now()).max(0)));
+                current.store_in(db, &id)?;
+            }
+            Ok(current.recovery_deadline_ms)
+        })
+        .await
+}
+
 /// Fences the previous execution, then either settles the run from its
 /// checkpoint or clears it for relaunch (`true`).
 async fn recover(s: &Service, run: &Value) -> Result<bool> {
@@ -457,7 +513,7 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
         .as_ref()
         .is_some_and(|saved| saved.turn_pending == Some(true));
     let expected_checkpoint = checkpoint.clone();
-    let recovery_deadline = if !parked && !new_turn {
+    let mut recovery_deadline = if !parked && !new_turn {
         let id = run_id.to_owned();
         let expected = expected_checkpoint.clone();
         s.store
@@ -484,6 +540,10 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
     } else {
         None
     };
+    if recovery_deadline.is_some() {
+        recovery_deadline = refresh_recovery_pause(s, run_id, expected_checkpoint.as_ref()).await?;
+        checkpoint = RunCheckpoint::load(&s.store, run_id).await?;
+    }
     let state = s.store.run_state(run_id).await?;
     if state.cancel_requested_at.is_none()
         && let Some(saved) = checkpoint.as_mut()
@@ -574,6 +634,10 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
         }
         checkpoint = RunCheckpoint::load(&s.store, run_id).await?;
     }
+    if recovery_deadline.is_some() {
+        recovery_deadline = refresh_recovery_pause(s, run_id, expected_checkpoint.as_ref()).await?;
+        checkpoint = RunCheckpoint::load(&s.store, run_id).await?;
+    }
     if !recovery::same_execution(checkpoint.as_ref(), expected_checkpoint.as_ref()) {
         return Ok(false);
     }
@@ -611,6 +675,14 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
         && let Some(saved) = &mut expected_fenced
     {
         saved.process = None;
+    }
+    if recovery_deadline.is_some() {
+        let expected = if fenced.is_ok() {
+            expected_fenced.as_ref()
+        } else {
+            expected_checkpoint.as_ref()
+        };
+        recovery_deadline = refresh_recovery_pause(s, run_id, expected).await?;
     }
     if let Some(deadline) = recovery_deadline {
         let id = run_id.to_owned();
