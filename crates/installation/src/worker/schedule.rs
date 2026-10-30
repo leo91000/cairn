@@ -456,6 +456,7 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
     let new_turn = checkpoint
         .as_ref()
         .is_some_and(|saved| saved.turn_pending == Some(true));
+    let expected_checkpoint = checkpoint.clone();
     let expected_attempt = checkpoint
         .as_ref()
         .and_then(RunCheckpoint::runner_id)
@@ -570,7 +571,7 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
         }
         checkpoint = RunCheckpoint::load(&s.store, run_id).await?;
     }
-    if checkpoint.as_ref().and_then(RunCheckpoint::runner_id) != expected_attempt.as_deref() {
+    if !recovery::same_execution(checkpoint.as_ref(), expected_checkpoint.as_ref()) {
         return Ok(false);
     }
     let parked = state.status == RunStatus::Waiting
@@ -597,11 +598,11 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
     });
     if !parked
         && !cannot_replay
-        && !crate::nodes::moves::advance_for_attempt(s, run, expected_attempt.as_deref()).await?
+        && !crate::nodes::moves::advance_for_attempt(s, run, expected_checkpoint.as_ref()).await?
     {
         return Ok(false);
     }
-    let fenced = recovery::fence_attempt(s, run, expected_attempt.as_deref()).await;
+    let fenced = recovery::fence_attempt(s, run, expected_checkpoint.as_ref()).await;
     if let Some(deadline) = recovery_deadline {
         let id = run_id.to_owned();
         let expected = expected_attempt.clone();
@@ -1586,7 +1587,7 @@ mod tests {
         replacement.store(&service.store, &run).await.unwrap();
         let run_value = service.store.run(&run).await.unwrap();
         assert!(
-            recovery::fence_attempt(&service, &run_value, Some("old-attempt"))
+            recovery::fence_attempt(&service, &run_value, Some(&original))
                 .await
                 .is_err()
         );

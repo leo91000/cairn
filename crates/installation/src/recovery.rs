@@ -167,18 +167,31 @@ where
 pub async fn fence(s: &Service, run: &Value) -> Result<()> {
     let run_id = text(run, "id");
     let checkpoint = RunCheckpoint::load(&s.store, run_id).await?;
-    let attempt = checkpoint
-        .as_ref()
-        .and_then(RunCheckpoint::runner_id)
-        .map(str::to_owned);
-    fence_attempt(s, run, attempt.as_deref()).await
+    fence_attempt(s, run, checkpoint.as_ref()).await
 }
 
-/// Fence only the attempt selected by the caller, including its original node.
-pub(crate) async fn fence_attempt(s: &Service, run: &Value, expected: Option<&str>) -> Result<()> {
+/// Compare the physical owner, not the checkpoint's mutable evidence.
+pub(crate) fn same_execution(left: Option<&RunCheckpoint>, right: Option<&RunCheckpoint>) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => {
+            left.runner_id() == right.runner_id()
+                && left.node_id == right.node_id
+                && left.process() == right.process()
+        }
+        _ => false,
+    }
+}
+
+/// Fence only the attempt selected by the caller, including its process and node.
+pub(crate) async fn fence_attempt(
+    s: &Service,
+    run: &Value,
+    expected: Option<&RunCheckpoint>,
+) -> Result<()> {
     let run_id = text(run, "id");
     let checkpoint = RunCheckpoint::load(&s.store, run_id).await?;
-    if checkpoint.as_ref().and_then(RunCheckpoint::runner_id) != expected {
+    if !same_execution(checkpoint.as_ref(), expected) {
         return Err(Error::conflict(
             "Execution attempt changed during recovery.",
         ));
@@ -198,12 +211,16 @@ pub(crate) async fn fence_attempt(s: &Service, run: &Value, expected: Option<&st
     let isolated =
         run["isolated"] == true || checkpoint.as_ref().is_some_and(RunCheckpoint::isolated);
     if isolated {
-        let attempt = expected.unwrap_or(run_id);
+        let attempt = expected
+            .and_then(RunCheckpoint::runner_id)
+            .unwrap_or(run_id);
         let runner_url = crate::nodes::transport::url_for_node(s, node.as_deref());
         fence_runner(s, &runner_url, attempt).await?;
     }
     let id = run_id.to_owned();
-    let expected = expected.map(str::to_owned);
+    let expected = expected
+        .and_then(RunCheckpoint::runner_id)
+        .map(str::to_owned);
     let release = isolated.then(|| expected.clone().unwrap_or_else(|| id.clone()));
     s.store
         .transaction(move |db| {

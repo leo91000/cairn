@@ -599,24 +599,18 @@ async fn plan_recovery(s: &Service, current: &Value) -> Result<Recovery> {
 pub async fn advance(s: &Service, run: &Value) -> Result<bool> {
     let checkpoint =
         crate::worker::checkpoint::RunCheckpoint::load(&s.store, text(run, "id")).await?;
-    let expected = checkpoint
-        .as_ref()
-        .and_then(crate::worker::checkpoint::RunCheckpoint::runner_id);
-    advance_for_attempt(s, run, expected).await
+    advance_for_attempt(s, run, checkpoint.as_ref()).await
 }
 
 pub(crate) async fn advance_for_attempt(
     s: &Service,
     run: &Value,
-    expected_attempt: Option<&str>,
+    expected_attempt: Option<&crate::worker::checkpoint::RunCheckpoint>,
 ) -> Result<bool> {
     let run_id = text(run, "id");
-    if crate::worker::checkpoint::RunCheckpoint::load(&s.store, run_id)
-        .await?
-        .as_ref()
-        .and_then(crate::worker::checkpoint::RunCheckpoint::runner_id)
-        != expected_attempt
-    {
+    let current_checkpoint =
+        crate::worker::checkpoint::RunCheckpoint::load(&s.store, run_id).await?;
+    if !crate::recovery::same_execution(current_checkpoint.as_ref(), expected_attempt) {
         return Err(Error::conflict(
             "Execution attempt changed during recovery.",
         ));
@@ -638,15 +632,14 @@ pub(crate) async fn advance_for_attempt(
             Recovery::Waiting => return Ok(false),
             Recovery::Planned(movement) => {
                 let owner = run_id.to_owned();
-                let expected = expected_attempt.map(str::to_owned);
+                let expected = expected_attempt.cloned();
                 let pending = movement.clone();
                 let accepted = s
                     .store
                     .transaction(move |db| {
-                        if crate::worker::checkpoint::RunCheckpoint::load_in(db, &owner)?
-                            .as_ref()
-                            .and_then(crate::worker::checkpoint::RunCheckpoint::runner_id)
-                            != expected.as_deref()
+                        let checkpoint =
+                            crate::worker::checkpoint::RunCheckpoint::load_in(db, &owner)?;
+                        if !crate::recovery::same_execution(checkpoint.as_ref(), expected.as_ref())
                             || source_mode_unconfirmed(db, &owner)?
                             || db
                                 .run(&owner)?
@@ -670,12 +663,13 @@ pub(crate) async fn advance_for_attempt(
         }
     }
     crate::recovery::fence_attempt(s, &current, expected_attempt).await?;
-    if crate::worker::checkpoint::RunCheckpoint::load(&s.store, run_id)
-        .await?
-        .as_ref()
-        .and_then(crate::worker::checkpoint::RunCheckpoint::runner_id)
-        != expected_attempt
-    {
+    let current_checkpoint =
+        crate::worker::checkpoint::RunCheckpoint::load(&s.store, run_id).await?;
+    let mut expected_fenced = expected_attempt.cloned();
+    if let Some(saved) = &mut expected_fenced {
+        saved.process = None;
+    }
+    if !crate::recovery::same_execution(current_checkpoint.as_ref(), expected_fenced.as_ref()) {
         return Err(Error::conflict(
             "Execution attempt changed during recovery.",
         ));
