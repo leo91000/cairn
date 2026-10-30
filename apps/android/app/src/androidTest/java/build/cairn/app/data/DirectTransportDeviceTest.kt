@@ -77,6 +77,7 @@ class DirectTransportDeviceTest {
         val initialExpiry = AtomicLong()
         val refusedPeers = ConcurrentHashMap.newKeySet<String>()
         val refusedCandidates = AtomicInteger()
+        val authorizationAttempts = AtomicInteger()
         val client =
             OkHttpClient.Builder()
                 .addInterceptor { chain ->
@@ -95,6 +96,8 @@ class DirectTransportDeviceTest {
                 }
                 .addInterceptor { chain ->
                     val request = chain.request()
+                    if (request.url.encodedPath.endsWith("/direct/authorize"))
+                        authorizationAttempts.incrementAndGet()
                     if (scenario == "same-lan" && request.url.encodedPath.endsWith("/signal")) {
                         val body = Buffer().also { request.body!!.writeTo(it) }.readUtf8()
                         val signal = wireJson.parseToJsonElement(body).jsonObject
@@ -222,10 +225,7 @@ class DirectTransportDeviceTest {
             phase: String = "initial direct response",
         ) =
             duringPhase(phase, 60000) {
-                do {
-                    delay(200)
-                    read(client)
-                } while (client.transport.route.value != "direct")
+                awaitDirectBenchRead(client) { read(client) }
             }
         fun shell(command: String) {
             instrumentation.uiAutomation.executeShellCommand(command).use { descriptor ->
@@ -377,10 +377,9 @@ class DirectTransportDeviceTest {
                             capacityAttempts.get(),
                         )
                         duringPhase("capacity retry direct response", 25000) {
-                            do {
-                                delay(200)
+                            awaitDirectBenchRead(capacity) {
                                 assertEquals("[]", capacity.request("GET", "/chats"))
-                            } while (capacity.transport.route.value != "direct")
+                            }
                         }
                         assertTrue(
                             "Retry must retain its fifteen-second deadline",
@@ -426,7 +425,24 @@ class DirectTransportDeviceTest {
                                             .build()
                                     }
                                 }
-                                val response = chain.proceed(request)
+                                val response =
+                                    try {
+                                        chain.proceed(request)
+                                    } catch (error: java.io.IOException) {
+                                        if (path.contains("/direct/"))
+                                            recordRenewal(
+                                                "${path.substringAfterLast('/')}:${error.javaClass.simpleName}"
+                                            )
+                                        throw error
+                                    }
+                                if (
+                                    path.endsWith("/signal") ||
+                                        path.endsWith("/events") ||
+                                        path.endsWith("/renew")
+                                )
+                                    recordRenewal(
+                                        "${path.substringAfterLast('/')}:${response.code}"
+                                    )
                                 if (path.endsWith("/direct/authorize"))
                                     recordRenewal("authorize:response:${response.code}")
                                 if (path.endsWith("/direct/authorize") && response.isSuccessful) {
@@ -487,6 +503,7 @@ class DirectTransportDeviceTest {
                     try {
                         renewal.startDirect(context)
                         awaitDirect(renewal, "unavailable renewal initial direct response")
+                        recordRenewal("observed-direct")
                         duringPhase("unavailable renewal acknowledgement", 20000) {
                             while (
                                 renewalReplies.get() == 0 ||
@@ -511,6 +528,21 @@ class DirectTransportDeviceTest {
                             renewalReplies.get(),
                         )
                         unavailableRenewal = true
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (error: AssertionError) {
+                        throw AssertionError(
+                            "${error.message}; renewal events=$renewalTrace",
+                            error,
+                        )
+                    } catch (error: Exception) {
+                        val failure =
+                            if (error is ApiException) "HTTP ${error.status}"
+                            else error.javaClass.simpleName
+                        throw AssertionError(
+                            "Renewal fixture failed ($failure); renewal events=$renewalTrace",
+                            error,
+                        )
                     } finally {
                         renewal.closeStreams()
                     }
@@ -561,6 +593,7 @@ class DirectTransportDeviceTest {
                     suspendedControl = true
 
                     awaitDirect()
+                    val authorizationsBeforeLargeRequest = authorizationAttempts.get()
                     val largeRequest =
                         try {
                             api.request(
@@ -585,6 +618,11 @@ class DirectTransportDeviceTest {
                     // asserting recovery, rather than requiring the rejection to stay direct.
                     awaitDirect()
                     assertEquals("direct", api.transport.route.value)
+                    assertEquals(
+                        "The rejected message must preserve the authorized peer",
+                        authorizationsBeforeLargeRequest,
+                        authorizationAttempts.get(),
+                    )
 
                     // Real selected-installation UI exercises the asynchronous startup/indicator.
                     diagnostics.record("startup", "construct ViewModel")
