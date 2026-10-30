@@ -236,6 +236,73 @@ async fn real_v17_upgrade_preserves_each_accounts_reads_and_set_aside_outcomes()
     );
 }
 
+#[tokio::test]
+async fn v17_upgrade_preserves_legacy_paid_retry_and_checkpoint() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join("data")).unwrap();
+    let db = previous(root.path());
+    let id = "00000000-0000-4000-8000-000000000010";
+    // Shape exported by the e1dac worker after scheduling and before fencing.
+    let cause = json!({
+        "kind": "server",
+        "message": "Provider unavailable",
+        "startup": false,
+    });
+    let checkpoint = json!({
+        "prepared": { "backend": "native", "isolated": true },
+        "runnerId": "old-attempt",
+        "remainingMs": null,
+        "completed": false,
+        "terminalCode": null,
+        "providerFailed": true,
+        "lastError": "Provider unavailable",
+        "retryCause": cause,
+        "controllerRecoveries": 3,
+    })
+    .to_string();
+    db.execute(
+        "UPDATE run_checkpoints SET state=? WHERE run_id=?",
+        (&checkpoint, id),
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE runs SET status='queued', recovery_pending=1, retry_attempt=2, retry_limit=5, retry_next_at=1700000005000, retry_started_at=1700000000000, retry_deadline_at=1700000600000, retry_cause=? WHERE id=?",
+        (cause.to_string(), id),
+    ).unwrap();
+    let old_retry: (i64, i64, i64, i64, i64, String) = db.query_row(
+        "SELECT retry_attempt,retry_limit,retry_next_at,retry_started_at,retry_deadline_at,retry_cause FROM runs WHERE id=?",
+        [id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)),
+    ).unwrap();
+    drop(db);
+
+    let store = Store::open(&root.path().join("data")).unwrap();
+    let persisted = store.checkpoint_boundary(id).await.unwrap().unwrap();
+    assert_eq!(
+        persisted,
+        serde_json::from_str::<Value>(&checkpoint).unwrap()
+    );
+    let db = Connection::open(root.path().join("data/manager.db")).unwrap();
+    let actual: (i64, i64, i64, i64, i64, String) = db.query_row(
+        "SELECT retry_attempt,retry_limit,retry_next_at,retry_started_at,retry_deadline_at,retry_cause FROM runs WHERE id=?",
+        [id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)),
+    ).unwrap();
+    assert_eq!(actual, old_retry);
+    assert_eq!(
+        db.query_row(
+            "SELECT state FROM run_checkpoints WHERE run_id=?",
+            [id],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        checkpoint
+    );
+    assert_eq!(
+        db.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
+            .unwrap(),
+        18
+    );
+}
+
 #[test]
 fn malformed_previous_read_state_rolls_back_schema_data_and_version() {
     let root = tempfile::tempdir().unwrap();

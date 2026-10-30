@@ -318,7 +318,17 @@ impl Broker {
     }
 
     pub async fn stop(&self, id: &str) -> Result<()> {
-        atomic_write(&self.state_file(id, "stopped"), b"").await?;
+        let written = tokio::time::timeout(
+            Duration::from_secs(1),
+            atomic_write(&self.state_file(id, "stopped"), b""),
+        )
+        .await;
+        if !matches!(written, Ok(Ok(()))) {
+            if let Some(attempt) = self.active.lock().await.get(id) {
+                attempt.stop.cancel();
+            }
+            return Err(Error::unavailable("Could not persist the VM stop marker."));
+        }
         let attempt = {
             let active = self.active.lock().await;
             active.get(id).map(|a| {
@@ -349,11 +359,10 @@ impl Broker {
                 // Only physical teardown acknowledgment allows removal of a stale
                 // logical attempt after its execution task panicked or was aborted.
                 let mut active = self.active.lock().await;
-                atomic_write(
-                    &self.state_file(id, "exit"),
-                    CONTROLLER_INTERRUPTED.to_string().as_bytes(),
-                )
-                .await?;
+                let exit = self.state_file(id, "exit");
+                if !exit.exists() {
+                    atomic_write(&exit, CONTROLLER_INTERRUPTED.to_string().as_bytes()).await?;
+                }
                 remove_if_present(&self.state_file(id, "active")).await?;
                 active.remove(id);
             }
@@ -395,10 +404,36 @@ impl Execution {
         if let Err(error) = &result {
             log_failure(broker, id, &error.message).await;
         }
-        let code = exit_code(result, lease_expired.load(Ordering::SeqCst));
-        let exit = atomic_write(&broker.state_file(id, "exit"), code.to_string().as_bytes()).await;
-        if let Err(error) = exit {
-            tracing::warn!(attempt = %id, message = %error.message, "Could not record VM exit");
+        let finalization_failed = matches!(result, Ok(crate::runner::FINALIZATION_FAILED_SENTINEL));
+        let code = if finalization_failed {
+            CONTROLLER_FAILED
+        } else {
+            exit_code(result, lease_expired.load(Ordering::SeqCst))
+        };
+        let outcome = if finalization_failed {
+            serde_json::json!({ "StatusCode": code, "FinalizationFailed": true }).to_string()
+        } else {
+            code.to_string()
+        };
+        let mut retry_delay = Duration::from_secs(1);
+        loop {
+            match crate::runner::write_final_result(
+                &broker.state_file(id, "exit"),
+                outcome.as_bytes(),
+                finalization_failed,
+            )
+            .await
+            {
+                Ok(()) => break,
+                Err(error) => {
+                    tracing::warn!(attempt = %id, message = %error.message, "Could not record VM exit before releasing the attempt");
+                    if !finalization_failed {
+                        break;
+                    }
+                    tokio::time::sleep(retry_delay).await;
+                    retry_delay = (retry_delay * 2).min(Duration::from_secs(30));
+                }
+            }
         }
         let _ = tokio::fs::remove_file(broker.state_file(id, "active")).await;
         broker.active.lock().await.remove(id);

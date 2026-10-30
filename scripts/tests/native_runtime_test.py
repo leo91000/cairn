@@ -33,6 +33,41 @@ import uuid
 import zipfile
 
 
+def controller_result(value):
+    """Normalize a controller wait result using the runner client's contract."""
+    if type(value) is int:
+        code = value
+        finalization_failed = False
+    elif isinstance(value, dict):
+        code = value.get('StatusCode')
+        finalization_failed = value.get('FinalizationFailed') is True and code == 70
+    else:
+        raise ValueError('Invalid controller result.')
+    if type(code) is not int or not 0 <= code <= 255:
+        raise ValueError('Invalid controller exit status.')
+    return {'StatusCode': code, 'FinalizationFailed': finalization_failed}
+
+
+def read_controller_result(path):
+    try:
+        value = json.loads(path.read_text())
+    except json.JSONDecodeError as error:
+        raise ValueError('Invalid controller exit record.') from error
+    return controller_result(value)
+
+
+def match_controller_result(path, wait_result):
+    recorded = read_controller_result(path)
+    assert controller_result(wait_result) == recorded, 'Wait result differs from the saved controller result.'
+    return recorded
+
+
+def require_finalization_failure(path, wait_result):
+    proof = match_controller_result(path, wait_result)
+    assert proof == {'StatusCode': 70, 'FinalizationFailed': True}, 'Missing controller flush-failure evidence.'
+    return proof
+
+
 def fixture_garbage_inventory(root):
     root = Path(root)
     database = root / 'manager/manager.db'
@@ -490,7 +525,7 @@ def main():
 
             eventually(execution_ready, timeout=600 if docker_script else 60)
             startup_ms = (time.perf_counter() - startup) * 1000
-            if (state / (attempt + '.exit')).exists() and int((state / (attempt + '.exit')).read_text()) != 0:
+            if (state / (attempt + '.exit')).exists() and read_controller_result(state / (attempt + '.exit'))['StatusCode'] != 0:
                 for record in (state / (attempt + '.log')).read_text().splitlines():
                     event = json.loads(record)
                     if event.get('data'):
@@ -615,12 +650,16 @@ def main():
             events = Path('/sys/fs/cgroup') / group.lstrip('/') / 'cgroup.events'
             return not events.exists() or 'populated 1' not in events.read_text().splitlines()
 
-        def fenced(run, attempt, timeout=90):
+        def fenced(run, attempt, timeout=90, expect_flush_failure=False):
             eventually(lambda: (state / (attempt + '.exit')).exists(), timeout=timeout)
             # Completion writes the exit marker before retiring admission. Use
             # the runner wait protocol to observe the entire ordered release.
             result = api('/runs/' + attempt + '/wait')
-            assert result['StatusCode'] == int((state / (attempt + '.exit')).read_text())
+            exit_file = state / (attempt + '.exit')
+            if expect_flush_failure:
+                metrics['nativeFlushFailure'] = require_finalization_failure(exit_file, result)
+            else:
+                match_controller_result(exit_file, result)
             assert not (state / (attempt + '.active')).exists()
             active = command('systemctl', 'show', 'cairn-native-' + attempt + '.service', '--property=ActiveState', '--value').stdout.strip()
             assert active not in ('active', 'activating'), 'Descendant escaped cgroup fencing.'
@@ -664,11 +703,7 @@ def main():
             command('sync', '-f', str(readonly_mount))
             (Path('/sys/fs/ext4') / sys_device.name / 'trigger_fs_error').write_text('cairn-disposable-flush-failure\n')
             api('/runs/' + readonly_attempt, method='DELETE')
-            readonly_snapshot = fenced(readonly_run, readonly_attempt)
-            assert int((state / (readonly_attempt + '.exit')).read_text()) == 70
-            output = b''.join(base64.b64decode(json.loads(record).get('data', ''))
-                              for record in (state / (readonly_attempt + '.log')).read_text().splitlines())
-            assert b'Native filesystem could not be flushed; the durable crash prefix was retained.' in output
+            readonly_snapshot = fenced(readonly_run, readonly_attempt, expect_flush_failure=True)
             assert not (state / 'native-block' / readonly_run / 'root/disk.blk').exists()
             assert readonly_snapshot['manifest']['kind'] == 'native-ext4-v1'
             # Resume the same local journal and confirm the acknowledged bytes.
@@ -852,7 +887,7 @@ def main():
             fenced(run, crashed)
             final = start(run, long=False)
             fenced(run, final)
-            assert int((state / (final + '.exit')).read_text()) == 0
+            assert read_controller_result(state / (final + '.exit'))['StatusCode'] == 0
             # Close the earlier disk while a later backend remains runnable.
             # CLONE_NEWNS alone copies the earlier mount into that backend,
             # causing DEL_DEV to block and retain every physical slot.
@@ -899,7 +934,7 @@ def main():
             assert host_marker.read_text() == 'administrative-change', 'Returning to protected must not claim to restore the host.'
             protected_again = start(run, long=False)
             fenced(run, protected_again)
-            assert int((state / (protected_again + '.exit')).read_text()) == 0
+            assert read_controller_result(state / (protected_again + '.exit'))['StatusCode'] == 0
             assert api('/native-mode', target) == applied, 'Retry of the applied generation must be idempotent.'
             assert api('/health', method='GET')['nativeMode'] == applied
             # A crash after persisting intent must never reopen admission on an
@@ -926,7 +961,7 @@ def main():
             current_mode.update(pending_generation)
             after_crash = start(run, long=False)
             fenced(run, after_crash)
-            assert int((state / (after_crash + '.exit')).read_text()) == 0
+            assert read_controller_result(state / (after_crash + '.exit'))['StatusCode'] == 0
             metrics['nativeAdministrator'] = dict(realHostSudo=True, ordinaryUser=True,
                 concurrentConversations=2, rootDescendantsStopped=True,
                 protectedAfterAdministrator=True, filesPreserved=True, hostChangesRetained=True,
@@ -1069,7 +1104,7 @@ def main():
                 progress('docker-memory-ceiling')
                 oom_docker = start(docker_run, lease=300000, docker_script=docker_script('oom'))
                 fenced(docker_run, oom_docker)
-                assert int((state / (oom_docker + '.exit')).read_text()) != 0, 'Over-budget container survived or exited normally.'
+                assert read_controller_result(state / (oom_docker + '.exit'))['StatusCode'] != 0, 'Over-budget container survived or exited normally.'
                 metrics['dockerMemoryCeilingFenced'] = True
                 progress('docker-readonly')
                 readonly_docker = start(docker_run, long=False, lease=300000, sandbox='read-only', docker_script=docker_script('readonly'))
