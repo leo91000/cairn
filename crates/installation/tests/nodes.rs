@@ -4325,41 +4325,69 @@ async fn connect_running_source(
             let (transport, node, client) = (transport.clone(), node.clone(), client.clone());
             tokio::spawn(async move {
                 let path = text(&command, "path");
-                let method = text(&command, "method");
-                let (status, content_type, bytes) = if path.starts_with("/prepare/") {
-                    (200, "application/json".to_owned(), b"{}".to_vec())
-                } else {
-                    let method = reqwest::Method::from_bytes(method.as_bytes()).unwrap();
-                    let body = STANDARD.decode(text(&command, "body")).unwrap();
-                    let response = client
-                        .request(method, format!("http://{address}{path}"))
-                        .bearer_auth("controller-fixture")
-                        .body(body)
-                        .send()
-                        .await
-                        .unwrap();
-                    let status = response.status().as_u16();
-                    let kind = response
-                        .headers()
-                        .get("content-type")
-                        .and_then(|value| value.to_str().ok())
-                        .unwrap_or("application/octet-stream")
-                        .to_owned();
-                    (status, kind, response.bytes().await.unwrap().to_vec())
-                };
                 let id = &command["id"];
-                transport
+                if path.starts_with("/prepare/") {
+                    let _ = transport
+                        .reply(
+                            &node,
+                            json!({ "id": id, "sequence": 0,
+                        "status": 200, "length": 2, "contentType": "application/json",
+                        "data": STANDARD.encode(b"{}"), "done": true }),
+                        )
+                        .await;
+                    return;
+                }
+                let method =
+                    reqwest::Method::from_bytes(text(&command, "method").as_bytes()).unwrap();
+                let body = STANDARD.decode(text(&command, "body")).unwrap();
+                let mut response = client
+                    .request(method, format!("http://{address}{path}"))
+                    .bearer_auth("controller-fixture")
+                    .body(body)
+                    .send()
+                    .await
+                    .unwrap();
+                let status = response.status().as_u16();
+                let kind = response
+                    .headers()
+                    .get("content-type")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("application/octet-stream")
+                    .to_owned();
+                if transport
                     .reply(
                         &node,
                         json!({ "id": id, "sequence": 0, "status": status,
-                    "length": bytes.len(), "contentType": content_type, "done": bytes.is_empty() }),
+                    "length": response.content_length(), "contentType": kind, "done": false }),
                     )
                     .await
-                    .unwrap();
-                for (index, chunk) in bytes.chunks(65_536).enumerate() {
-                    transport.reply(&node, json!({ "id": id, "sequence": index + 1,
-                        "data": STANDARD.encode(chunk), "done": (index + 1) * 65_536 >= bytes.len() })).await.unwrap();
+                    .is_err()
+                {
+                    return;
                 }
+                let mut sequence = 1;
+                while let Ok(Some(bytes)) = response.chunk().await {
+                    for chunk in bytes.chunks(65_536) {
+                        if transport
+                            .reply(
+                                &node,
+                                json!({ "id": id, "sequence": sequence,
+                            "data": STANDARD.encode(chunk), "done": false }),
+                            )
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                        sequence += 1;
+                    }
+                }
+                let _ = transport
+                    .reply(
+                        &node,
+                        json!({ "id": id, "sequence": sequence, "done": true }),
+                    )
+                    .await;
             });
         }
     });
