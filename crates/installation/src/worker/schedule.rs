@@ -1207,6 +1207,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recovery_pause_counter_is_durable_monotone_and_attempt_scoped() {
+        use axum::{Router, response::IntoResponse, routing::any};
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let counter = Arc::new(AtomicU64::new(100));
+        let value = counter.clone();
+        let app = Router::new().fallback(any(move || {
+            let value = value.clone();
+            async move {
+                let total = value.load(Ordering::SeqCst);
+                if total == u64::MAX {
+                    return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+                }
+                axum::Json(json!({ "administrativePausedMs": total })).into_response()
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (_root, service, _chat, run, _workspace) =
+            fixture_with_runner(format!("http://{address}")).await;
+        let deadline = now() + 10_000;
+        let mut saved = RunCheckpoint::from_value(json!({
+            "prepared": { "backend": "native", "isolated": true },
+            "runnerId": "old-attempt", "remainingMs": 10000,
+            "recoveryDeadlineMs": deadline,
+            "administrativePauseObservation": { "attempt": "old-attempt", "totalMs": 40 }
+        }))
+        .unwrap();
+        saved.store(&service.store, &run).await.unwrap();
+        for (total, expected) in [
+            (100, deadline + 60),
+            (100, deadline + 60),
+            (50, deadline + 60),
+            (u64::MAX, deadline + 60),
+            (130, deadline + 90),
+        ] {
+            counter.store(total, Ordering::SeqCst);
+            assert_eq!(
+                refresh_recovery_pause(&service, &run, Some(&saved))
+                    .await
+                    .unwrap(),
+                Some(expected)
+            );
+            saved = RunCheckpoint::load(&service.store, &run)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        let stale = saved.clone();
+        saved.runner_id = Some(Some("new-attempt".into()));
+        saved.store(&service.store, &run).await.unwrap();
+        counter.store(20, Ordering::SeqCst);
+        assert_eq!(
+            refresh_recovery_pause(&service, &run, Some(&stale))
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            refresh_recovery_pause(&service, &run, Some(&saved))
+                .await
+                .unwrap(),
+            Some(deadline + 110)
+        );
+        let reloaded = RunCheckpoint::load(&service.store, &run)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            refresh_recovery_pause(&service, &run, Some(&reloaded))
+                .await
+                .unwrap(),
+            Some(deadline + 110)
+        );
+        service.shutdown.cancel();
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn admin_pause_during_recovery_does_not_spend_budget() {
         use axum::{Router, extract::Request, response::IntoResponse, routing::any};
         let started = std::time::Instant::now();
@@ -1244,12 +1323,12 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(
-            recover(&service, &service.store.run(&run).await.unwrap())
-                .await
-                .unwrap()
-        );
+        let ready = recover(&service, &service.store.run(&run).await.unwrap())
+            .await
+            .unwrap();
         let state = service.store.run_state(&run).await.unwrap();
+        let final_checkpoint = RunCheckpoint::load(&service.store, &run).await.unwrap();
+        assert!(ready, "state={state:?} checkpoint={final_checkpoint:?}");
         assert_eq!(state.status, RunStatus::Queued);
         service.shutdown.cancel();
         server.abort();
