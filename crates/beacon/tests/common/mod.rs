@@ -464,7 +464,10 @@ impl RelayedInstallation {
             direct,
             root,
         };
-        tokio::time::timeout(Duration::from_secs(10), async {
+        // This bounds fixture startup on the shared HTTP/Postgres host, not an
+        // authorization or revocation deadline. Keep enough infrastructure slack
+        // for a scheduling stall while still requiring a real successful request.
+        tokio::time::timeout(Duration::from_secs(35), async {
             loop {
                 let response = fixture.get("/chats").send().await.unwrap();
                 if response.status() == reqwest::StatusCode::OK {
