@@ -1,5 +1,10 @@
 //! Per-actor wall timings without SQL, parameters, identifiers or per-job logs.
+use rusqlite::Connection;
 use std::time::{Duration, Instant};
+
+mod cache;
+
+use cache::Cache;
 
 pub(super) struct Completed {
     pub queue: Duration,
@@ -19,10 +24,15 @@ pub(super) struct Metrics {
     execution_us: u64,
     max_queue_us: u64,
     max_execution_us: u64,
+    cache: Option<Cache>,
 }
 
 impl Metrics {
-    pub fn new(lane: &'static str, index: usize) -> Self {
+    pub fn new(lane: &'static str, index: usize, connection: &Connection) -> Self {
+        Self::window(lane, index, Cache::read(connection))
+    }
+
+    fn window(lane: &'static str, index: usize, cache: Option<Cache>) -> Self {
         Self {
             lane,
             index,
@@ -34,10 +44,11 @@ impl Metrics {
             execution_us: 0,
             max_queue_us: 0,
             max_execution_us: 0,
+            cache,
         }
     }
 
-    pub fn record(&mut self, job: &Completed) {
+    pub fn record(&mut self, job: &Completed, connection: &Connection) {
         let micros = |duration: Duration| duration.as_micros().min(u128::from(u64::MAX)) as u64;
         let queue_us = micros(job.queue);
         let execution_us = micros(job.execution);
@@ -55,6 +66,12 @@ impl Metrics {
         if elapsed < Duration::from_secs(30) {
             return;
         }
+        let cache = Cache::read(connection);
+        let delta = cache
+            .zip(self.cache)
+            .and_then(|(now, before)| now.delta(before));
+        let cache_available = delta.is_some();
+        let cache_values = delta.unwrap_or_default();
         tracing::info!(
             target: "cairn_performance",
             operation = "database_actor",
@@ -68,7 +85,12 @@ impl Metrics {
             execution_us = self.execution_us,
             max_queue_us = self.max_queue_us,
             max_execution_us = self.max_execution_us,
+            cache_available,
+            cache_hits = cache_values.hits,
+            cache_misses = cache_values.misses,
+            cache_writes = cache_values.writes,
+            cache_bytes = cache_values.bytes,
         );
-        *self = Self::new(self.lane, self.index);
+        *self = Self::window(self.lane, self.index, cache);
     }
 }

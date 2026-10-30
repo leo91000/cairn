@@ -148,6 +148,12 @@ impl Db<'_> {
         self.load_questions(chat)
     }
 
+    /// Card metadata needs the visible pending count, without definition children.
+    pub(super) fn pending_question_count(&self, chat: &str) -> Result<u32> {
+        Ok(self.0.prepare_cached("SELECT count(*) FROM chat_questions q WHERE q.chat_id=?1 AND q.status='pending' AND NOT EXISTS(SELECT 1 FROM question_import_metadata m WHERE m.question_id=q.id AND m.expires<=?2)")?
+            .query_row(params![chat, crate::config::now()], |row| row.get(0))?)
+    }
+
     pub fn question(&self, chat: &str, id: &str) -> Result<Option<ChatQuestion>> {
         // A point read gets one atomic definition, including ordered children.
         // Internal integer keys keep the external digest out of every child key.

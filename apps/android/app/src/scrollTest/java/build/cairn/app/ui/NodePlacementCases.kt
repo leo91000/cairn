@@ -201,13 +201,16 @@ abstract class NodePlacementCases {
                 }
                 CairnTheme { if (state.session.authenticated) NodesScreen(vm, state) }
             }
-            // The page renders before connect() finishes refreshing the workspace.
             compose.waitUntil(20000) {
                 compose
                     .onAllNodes(hasText("Passer en Natif administrateur") and isEnabled())
                     .fetchSemanticsNodes()
                     .isNotEmpty()
             }
+            // The page renders before connect() finishes refreshing the workspace, and
+            // vm.perform ignores actions until then. This control's own busy state does not
+            // reflect it.
+            compose.waitUntil(10000) { !vm.state.value.busy }
             compose
                 .onNodeWithText("Passer en Natif administrateur")
                 .performScrollTo()
@@ -1150,6 +1153,9 @@ abstract class NodePlacementCases {
             capture("execution-sheet")
             compose.onNodeWithText("Enregistrer").performScrollTo().assertIsNotEnabled()
             compose.onNodeWithText("Préférer").performClick()
+            // The sheet renders before connect() finishes refreshing the workspace, and
+            // vm.perform ignores actions until then.
+            compose.waitUntil(10000) { !vm.state.value.busy }
             compose.onNodeWithText("Enregistrer").performScrollTo().performClick()
             // Receipt by the server precedes the response and its UI confirmation.
             compose.waitUntil(10000) {
@@ -1305,6 +1311,9 @@ abstract class NodePlacementCases {
             }
             assertTrue(submitted.isEmpty())
             capture("backend-migration-confirm")
+            // The migration renders before connect() finishes refreshing the workspace, and
+            // vm.perform ignores actions until then.
+            compose.waitUntil(10000) { !vm.state.value.busy }
             compose.onNodeWithText("Confirmer").performClick()
             compose.waitUntil(10000) { submitted.isNotEmpty() }
             assertEquals("native", submitted[0]["backend"]?.jsonPrimitive?.content)
