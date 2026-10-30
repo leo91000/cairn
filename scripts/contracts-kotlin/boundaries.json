@@ -4,8 +4,6 @@
       "x-kotlin-type": {
         "TaskOutcome": "build.cairn.boundary.TaskOutcome",
         "OutcomeDismissal": "build.cairn.boundary.OutcomeDismissal",
-        "ChatQuestion": "build.cairn.boundary.ChatQuestion",
-        "ChatWakeup": "build.cairn.boundary.ChatWakeup",
         "ExclusiveReservation": "build.cairn.boundary.ExclusiveReservation",
         "NodeBackup": "build.cairn.boundary.NodeBackup",
         "RunStorage": "build.cairn.boundary.RunStorage",

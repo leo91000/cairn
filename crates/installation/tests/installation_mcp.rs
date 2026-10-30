@@ -1242,6 +1242,9 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "delete_project",
     ]);
     public_names.extend([
+        "list_chat_questions",
+        "answer_chat_question",
+        "cancel_chat_question",
         "list_models",
         "list_coding_agent_accounts",
         "get_coding_agent_account_sign_in",
@@ -3091,7 +3094,7 @@ async fn chat_questions_redact_private_answers_and_content_chunks_detect_changes
     let withdrawn = call(
         &s,
         &configuration,
-        "withdraw_chat_question",
+        "cancel_chat_question",
         json!({ "chatId": chat_id, "questionId": obsolete }),
     )
     .await;
@@ -3642,7 +3645,7 @@ async fn waiting_missions_are_visible_and_cancellable_through_both_installation_
                 run_id,
                 cairn_installation::runs::RunChanges {
                     status: Some(cairn_contracts::RunStatus::Waiting),
-                    boundary: Some(serde_json::json!({"wakeup": wakeup})),
+                    wakeup: Some(Some(serde_json::from_value(wakeup.clone()).unwrap())),
                     ..Default::default()
                 },
             )

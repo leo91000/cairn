@@ -15,7 +15,7 @@ describe('pR validation', () => {
     expect(validationScope(['apps/android/app/build.gradle.kts'])).toEqual({ android: true, contracts: false })
     expect(validationScope(['crates/installation/src/lib.rs'])).toEqual({ android: false, contracts: true })
     expect(validationScope(['rust-toolchain.toml'])).toEqual({ android: false, contracts: true })
-    expect(validationScope(['scripts/backend-schemas.mjs'])).toEqual({ android: false, contracts: true })
+    expect(validationScope(['scripts/generate-contracts.mjs'])).toEqual({ android: true, contracts: true })
   })
 
   it('defaults to the full core and validates all suite names before running anything', () => {

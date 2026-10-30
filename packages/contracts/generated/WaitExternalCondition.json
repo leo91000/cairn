@@ -1,0 +1,75 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "PluginWaitData": {
+      "additionalProperties": true,
+      "type": "object",
+      "x-cairn-json-object": true
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "runId": {
+          "type": "string"
+        },
+        "type": {
+          "const": "run_finished",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "runId"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "chatId": {
+          "type": "string"
+        },
+        "type": {
+          "const": "task_finished",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "chatId"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "conditionType": {
+          "type": "string"
+        },
+        "input": {
+          "$ref": "#/definitions/PluginWaitData"
+        },
+        "pluginId": {
+          "type": "string"
+        },
+        "projectId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "const": "plugin",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "pluginId",
+        "conditionType",
+        "input"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "WaitExternalCondition"
+}

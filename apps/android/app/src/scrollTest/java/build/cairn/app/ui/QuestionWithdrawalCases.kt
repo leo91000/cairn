@@ -37,16 +37,16 @@ abstract class QuestionWithdrawalCases {
         MockWebServer().use { server ->
             val writes = CopyOnWriteArrayList<Pair<String, String>>()
             val question =
-                ChatQuestion(
+                questionFixture(
                     "question",
-                    "chat",
+                    "00000000-0000-4000-8000-000000000088",
                     blocking = true,
                     fields =
                         if (legacy)
                             wireJson.decodeFromString<List<QuestionField>>(
-                                """[{"id":"scope","title":"Quelle portée ?","options":[{"label":"Application entière"},{"label":"Un seul module"}]}]"""
+                                """[{"id":"scope","title":"Quelle portée ?","options":[{"id":"same","label":"Application entière"},{"id":"same","label":"Un seul module"}]}]"""
                             )
-                        else listOf(QuestionField("scope", "Quelle portée ?")),
+                        else listOf(fieldFixture("scope", "Quelle portée ?")),
                 )
             server.dispatcher =
                 object : Dispatcher() {
@@ -58,7 +58,10 @@ abstract class QuestionWithdrawalCases {
                                 return MockResponse()
                                     .setResponseCode(409)
                                     .setBody("""{"error":"Réessayez le retrait."}""")
-                            return MockResponse().setBody("""{"status":"cancelled"}""")
+                            return MockResponse()
+                                .setBody(
+                                    wireJson.encodeToString(question.copy(status = "cancelled"))
+                                )
                         }
                         val body =
                             when {
@@ -162,7 +165,7 @@ abstract class QuestionWithdrawalCases {
                 assertTrue(
                     writes.all {
                         it.first ==
-                            "/api/installations/fixture/api/chats/chat/questions/question/cancel"
+                            "/api/installations/fixture/api/chats/00000000-0000-4000-8000-000000000088/questions/question/cancel"
                     }
                 )
                 assertTrue(writes.all { !it.second.contains("answers") })
@@ -178,12 +181,12 @@ abstract class QuestionWithdrawalCases {
         MockWebServer().use { server ->
             val writes = CopyOnWriteArrayList<JsonObject>()
             val question =
-                ChatQuestion(
+                questionFixture(
                     "question",
-                    "chat",
+                    "00000000-0000-4000-8000-000000000088",
                     fields =
                         listOf(
-                            QuestionField(
+                            fieldFixture(
                                 "platforms",
                                 "Quelles plateformes ?",
                                 mode = "multiple",
@@ -191,13 +194,13 @@ abstract class QuestionWithdrawalCases {
                                 maxChoices = 2,
                                 options =
                                     listOf(
-                                        QuestionOption(
+                                        optionFixture(
                                             "Android",
                                             id = "android",
                                             recommended = true,
                                         ),
-                                        QuestionOption("Web", id = "web"),
-                                        QuestionOption("Desktop", id = "desktop"),
+                                        optionFixture("Web", id = "web"),
+                                        optionFixture("Desktop", id = "desktop"),
                                     ),
                             )
                         ),
@@ -209,7 +212,10 @@ abstract class QuestionWithdrawalCases {
                         if (request.method == "POST" && path.endsWith("/answer")) {
                             writes +=
                                 wireJson.parseToJsonElement(request.body.readUtf8()).jsonObject
-                            return MockResponse().setBody("{}")
+                            return MockResponse()
+                                .setBody(
+                                    wireJson.encodeToString(question.copy(status = "answering"))
+                                )
                         }
                         val body =
                             when {

@@ -149,7 +149,10 @@ async fn plugin_results_in_a_group_are_recorded_one_by_one() {
     conditions::poll_once(&f.s).await.unwrap();
     assert_eq!(f.calls().len(), probes + 1);
     let wakeup = f.wakeup().await;
-    assert_eq!(wakeup["members"][0]["observation"]["conclusion"], "success");
+    assert_eq!(
+        wakeup["members"][0]["observation"]["pluginResult"]["conclusion"],
+        "success"
+    );
     assert!(wakeup["observation"].is_null());
     assert!(f.ready_events().await.is_empty());
 
@@ -165,7 +168,10 @@ async fn plugin_results_in_a_group_are_recorded_one_by_one() {
     f.record_groups().await;
     let observation = f.wakeup().await["observation"].clone();
     assert_eq!(observation["state"], "completed");
-    assert_eq!(observation["members"][0]["result"]["conclusion"], "success");
+    assert_eq!(
+        observation["members"][0]["result"]["pluginResult"]["conclusion"],
+        "success"
+    );
     assert_eq!(f.tick().await["run"]["status"], "queued");
 }
 
@@ -301,6 +307,7 @@ async fn cycles_through_grouped_dependencies_are_rejected() {
     let mut other = f.s.conversation_boundary(other_id).await.unwrap();
     other["wakeup"] = json!({
         "id": id(), "messageId": target["chatExecution"]["messageId"],
+        "reason": "Dependency fixture", "seconds": 420, "createdAt": now(),
         "condition": {
             "type": "group", "mode": "any",
             "conditions": [run_condition(&unrelated), { "type": "run_finished", "runId": f.run }],
@@ -376,7 +383,7 @@ async fn recorded_member_and_final_group_results_recheck_authorization_before_re
                 .unwrap();
             f.finish().await;
             assert_eq!(
-                f.wakeup().await["members"][0]["observation"]["conclusion"],
+                f.wakeup().await["members"][0]["observation"]["pluginResult"]["conclusion"],
                 "success"
             );
             f.set_status(&target, "succeeded").await;
@@ -627,7 +634,7 @@ async fn long_dependency_chains_are_allowed_but_cycles_at_the_end_are_rejected()
     }
     for pair in targets.windows(2) {
         f.s.store
-            .update_run_boundary(
+            .change_run_fixture(
                 text(&pair[0], "id"),
                 json!({
                     "wakeup": { "condition": run_condition(&pair[1]) },
@@ -642,7 +649,7 @@ async fn long_dependency_chains_are_allowed_but_cycles_at_the_end_are_rejected()
         true
     );
     f.s.store
-        .update_run_boundary(
+        .change_run_fixture(
             text(&targets[39], "id"),
             json!({
                 "wakeup": { "condition": { "type": "run_finished", "runId": f.run } },
@@ -681,7 +688,7 @@ async fn large_plugin_groups_probe_one_initial_batch_then_observe_every_member()
             .as_array()
             .unwrap()
             .iter()
-            .all(|member| member["result"]["conclusion"] == "success")
+            .all(|member| member["result"]["pluginResult"]["conclusion"] == "success")
     );
     assert_eq!(
         f.calls().len(),

@@ -6,6 +6,7 @@ use serde_json::Value;
 /// JSON merge, every lifecycle assignment is checked by Rust and SQL.
 #[derive(Default)]
 pub struct RunChanges {
+    pub wakeup: Option<Option<cairn_contracts::ChatWakeup>>,
     pub snapshot: Option<cairn_contracts::RunSnapshot>,
     pub task_id: Option<String>,
     pub project_id: Option<Option<String>>,

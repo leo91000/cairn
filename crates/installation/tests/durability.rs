@@ -522,33 +522,30 @@ async fn old_pending_questions_are_retired_without_rewriting_historical_answers(
         "createdAt": now(),
     });
     let original = historical.clone();
-    let key = format!("chat-question:{chat_id}:{}", "a".repeat(64));
     s.store
         .transaction(move |db| {
             db.put_message(&historical)?;
-            db.set(
-                &key,
-                &json!({
-                    "id": "a".repeat(64),
-                    "chatId": chat_id,
-                    "runId": "old-run",
-                    "blocking": true,
-                    "status": "pending",
-                    "createdAt": now(),
-                    "fields": [
-                        {
-                            "id": "scope",
-                            "title": "An old question",
-                            "options": [
-                                {
-                                    "label": "Old option",
-                                },
-                            ],
-                        },
-                    ],
-                }),
-                None,
-            )
+            db.save_question(&serde_json::from_value(json!({
+                "id": "a".repeat(64),
+                "chatId": chat_id,
+                "runId": "old-run",
+                "source": "codex",
+                "blocking": true,
+                "status": "pending",
+                "createdAt": now(),
+                "fields": [
+                    {
+                        "id": "scope",
+                        "title": "An old question",
+                        "options": [
+                            {
+                                "id": "old-option",
+                                "label": "Old option",
+                            },
+                        ],
+                    },
+                ],
+            }))?)
         })
         .await
         .unwrap();

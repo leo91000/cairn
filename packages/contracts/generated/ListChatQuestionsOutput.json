@@ -1,0 +1,163 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "ChatQuestion": {
+      "properties": {
+        "blocking": {
+          "type": "boolean"
+        },
+        "chatId": {
+          "type": "string"
+        },
+        "createdAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "fields": {
+          "items": {
+            "$ref": "#/definitions/QuestionField"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "messageId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runId": {
+          "type": "string"
+        },
+        "source": {
+          "default": "",
+          "type": "string"
+        },
+        "status": {
+          "pattern": "^(pending|answering|answered|cancelled)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "chatId",
+        "runId",
+        "blocking",
+        "status",
+        "fields"
+      ],
+      "type": "object"
+    },
+    "QuestionField": {
+      "properties": {
+        "id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        },
+        "maxChoices": {
+          "format": "uint",
+          "maximum": 30,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "minChoices": {
+          "format": "uint",
+          "maximum": 30,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "mode": {
+          "default": "single",
+          "pattern": "^(single|multiple)$",
+          "type": "string"
+        },
+        "options": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/QuestionOption"
+          },
+          "maxItems": 30,
+          "type": "array"
+        },
+        "secret": {
+          "default": false,
+          "type": "boolean"
+        },
+        "title": {
+          "maxLength": 10000,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title"
+      ],
+      "type": "object"
+    },
+    "QuestionOption": {
+      "properties": {
+        "description": {
+          "default": "",
+          "maxLength": 4000,
+          "type": "string"
+        },
+        "id": {
+          "default": "",
+          "maxLength": 200,
+          "type": "string"
+        },
+        "label": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "recommended": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "label"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "hasMore": {
+      "type": "boolean"
+    },
+    "nextOffset": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "questions": {
+      "items": {
+        "$ref": "#/definitions/ChatQuestion"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "questions",
+    "hasMore"
+  ],
+  "title": "ListChatQuestionsOutput",
+  "type": "object"
+}

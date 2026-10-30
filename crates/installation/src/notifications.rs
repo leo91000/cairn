@@ -84,13 +84,8 @@ pub async fn pending(
                 }
 
                 if let NotificationKind::Question { question_id } = &event.kind {
-                    let question = db.kv(&format!(
-                        "{}{}",
-                        crate::chats::question_prefix(&event.chat_id),
-                        question_id
-                    ))?;
-                    if !question
-                        .is_some_and(|question| question["status"] == QuestionStatus::Pending)
+                    let question = db.question(&event.chat_id, question_id)?;
+                    if !question.is_some_and(|question| question.status == QuestionStatus::Pending)
                     {
                         db.delete(&key)?;
                         continue;

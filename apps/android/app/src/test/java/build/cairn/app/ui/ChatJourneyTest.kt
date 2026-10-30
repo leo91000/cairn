@@ -54,18 +54,18 @@ class ChatJourneyTest {
             var answered = false
             var edited = false
             val question =
-                ChatQuestion(
+                questionFixture(
                     "question",
                     chatId,
                     blocking = true,
                     fields =
                         listOf(
-                            QuestionField(
+                            fieldFixture(
                                 "scope",
                                 "Quelle portée pour la revue ?",
                                 options =
                                     listOf(
-                                        QuestionOption(
+                                        optionFixture(
                                             "Application entière",
                                             "Inclure le client Android et le serveur",
                                             id = "application",
@@ -347,7 +347,7 @@ class ChatJourneyTest {
                                     )
                                 "/api/installations/fixture/api/chats/$chatId/questions/question/answer" -> {
                                     answered = true
-                                    "{}"
+                                    wireJson.encodeToString(question.copy(status = "answering"))
                                 }
                                 "/api/installations/fixture/api/chats/$chatId/messages/00000000-0000-4000-8000-000000000089" -> {
                                     edited = true
