@@ -66,13 +66,17 @@ first = 'INSTRUMENTATION_RESULT: shortMsg=Process crashed.\\nINSTRUMENTATION_COD
 calls = []
 def adb(*args, **options):
     calls.append(args)
-    if args == ('logcat', '-b', 'crash', '-c'):
+    if args == ('logcat', '-b', 'crash', '-b', 'main', '-c'):
         assert options.get('timeout') == 5, options
     if args[:3] == ('shell', 'am', 'instrument'):
         return SimpleNamespace(stdout=first)
     if args[:3] == ('logcat', '-b', 'crash') and '-d' in args:
         assert '-m' in args and '-t' not in args, args
         return SimpleNamespace(stdout='E/AndroidRuntime(1): Process: build.cairn.app, PID: 1\\nE/AndroidRuntime(1): java.lang.IllegalStateException: secret')
+    if args[:3] == ('logcat', '-b', 'main'):
+        assert args == ('logcat', '-b', 'main', '-d', '-m', '256', '-v', 'brief', 'rtc:E', '*:S'), args
+        assert options.get('timeout') == 5, options
+        return SimpleNamespace(stdout='E/rtc(1): # Fatal error in: ../../rtc_base/thread.cc, line 503')
     if 'exit-info' in args:
         raise subprocess.TimeoutExpired('adb', 5)
     return SimpleNamespace(stdout='')
@@ -87,9 +91,10 @@ with tempfile.TemporaryDirectory() as directory:
     assert output.with_suffix('.instrumentation.txt').read_text() == first
     evidence = json.loads(output.with_suffix('.crash.json').read_text())
     assert evidence['exceptions'] == ['java.lang.IllegalStateException'], evidence
+    assert evidence['nativeAssertions'] == [{'source': 'thread.cc', 'line': 503}], evidence
     assert evidence['collectionErrors'] == ['exit-info-unavailable'], evidence
     assert 'secret' not in json.dumps(evidence)
-    assert calls[0] == ('logcat', '-b', 'crash', '-c'), calls
+    assert calls[0] == ('logcat', '-b', 'crash', '-b', 'main', '-c'), calls
     def offline(*args, **options):
         raise subprocess.CalledProcessError(1, ['adb'], stderr='secret')
     try:
@@ -99,7 +104,7 @@ with tempfile.TemporaryDirectory() as directory:
     else:
         raise AssertionError('ADB failure must propagate')
     evidence = json.loads(output.with_suffix('.crash.json').read_text())
-    assert evidence['collectionErrors'] == ['crash-log-unavailable', 'exit-info-unavailable'], evidence
+    assert evidence['collectionErrors'] == ['crash-log-unavailable', 'rtc-log-unavailable', 'exit-info-unavailable'], evidence
 `], { stdio: 'pipe' })
 })
 
@@ -121,6 +126,32 @@ assert evidence['signals'] == ['SIGABRT'], evidence
 assert evidence['nativeFrames'] == [{'pc': 0x52450, 'library': 'libjingle_peerconnection_so.so'}], evidence
 import json
 assert 'private' not in json.dumps(evidence), evidence
+`], { stdio: 'pipe' })
+})
+
+it('android native assertion evidence uses only the crashed process and closed source metadata', () => {
+  execFileSync('python3', ['-B', '-c', `
+import importlib.util
+import json
+spec = importlib.util.spec_from_file_location("network_bench", "tests/network-bench.py")
+bench = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(bench)
+crash = '''F/DEBUG(321): Cmdline: build.cairn.app
+F/DEBUG(321): pid: 123, tid: 124, name: private-thread >>> build.cairn.app <<<
+F/DEBUG(321): signal 6 (SIGABRT), code -1 (SI_QUEUE)
+'''
+rtc = '''E/rtc(123): # Fatal error in: ../../rtc_base/thread.cc, line 503
+E/rtc(123): # Check failed: private-fixture-cookie
+E/rtc(123): # Fatal error in: ../../private/private-file.cc, line 42
+E/rtc(321): # Fatal error in: ../../sdk/android/src/jni/jni_helpers.cc, line 23
+E/rtc(999): # Fatal error in: ../../rtc_base/checks.cc, line 72
+'''
+evidence = bench.android_crash_summary(crash, '', rtc)
+assert evidence['nativeAssertions'] == [{'source': 'thread.cc', 'line': 503}, {'source': 'other', 'line': 42}], evidence
+assert 'private' not in json.dumps(evidence) and 'Check failed' not in json.dumps(evidence), evidence
+assert bench.android_crash_summary('', '', rtc)['nativeAssertions'] == []
+assert bench.android_crash_summary('F/DEBUG(321): Cmdline: build.cairn.app', '', rtc)['nativeAssertions'] == []
+assert len(bench.android_crash_summary(crash, '', ''.join('E/rtc(123): # Fatal error in: thread.cc, line %d\\n' % value for value in range(100)))['nativeAssertions']) == 8
 `], { stdio: 'pipe' })
 })
 
