@@ -16,6 +16,11 @@ pub(crate) struct ChatOperation {
 
 pub(crate) const CHAT_OPERATIONS: &[ChatOperation] = &[
     ChatOperation {
+        name: "upload_chat_attachment",
+        scope: "manage",
+        description: "Upload a file to a conversation as base64 data (up to 10 MiB decoded, subject to transport request limits). Supply a fresh UUID attachmentId; identical retries are safe. Include its ID in message.attachmentIds to send it.",
+    },
+    ChatOperation {
         name: "list_chat_questions",
         scope: "read",
         description: "List conversation questionnaires with pagination, including fields and delivery status; saved answers are never returned.",
@@ -139,6 +144,10 @@ pub(crate) fn chat_operation(name: &str) -> Option<&'static ChatOperation> {
 impl ChatOperation {
     pub(crate) fn descriptor(&self) -> Value {
         let (input, output) = match self.name {
+            "upload_chat_attachment" => (
+                schema_for::<UploadChatAttachmentInput>(Contract::Deserialize),
+                schema_for::<ChatAttachment>(Contract::Serialize),
+            ),
             "list_chat_questions" => (
                 schema_for::<GetChatInput>(Contract::Deserialize),
                 schema_for::<ListChatQuestionsOutput>(Contract::Serialize),
@@ -277,6 +286,28 @@ impl ChatOperation {
                 )
             }
         };
+        if self.name == "upload_chat_attachment" {
+            use base64::Engine;
+            let input: UploadChatAttachmentInput = decode(input)?;
+            if input.name.is_empty()
+                || input.name.chars().count() > 180
+                || input.data.len() > 13981016
+            {
+                return Err(Error::bad("Invalid attachment name or encoded file size."));
+            }
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(&input.data)
+                .map_err(|_| Error::bad("Expected base64 file data."))?;
+            return s
+                .store_attachment_authorized(
+                    &input.chat_id,
+                    &input.attachment_id,
+                    &input.name,
+                    &bytes,
+                    crate::installation_mcp::management_authorization(bearer.as_deref()),
+                )
+                .await;
+        }
         let args = match self.name {
             "list_chat_questions" => {
                 let input: GetChatInput = decode(input)?;

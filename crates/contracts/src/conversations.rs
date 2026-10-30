@@ -147,6 +147,19 @@ impl PartialEq<MessageStatus> for serde_json::Value {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UploadChatAttachmentInput {
+    #[schemars(with = "uuid::Uuid")]
+    pub chat_id: String,
+    #[schemars(with = "uuid::Uuid")]
+    pub attachment_id: String,
+    #[schemars(length(min = 1, max = 180))]
+    pub name: String,
+    #[schemars(length(max = 13981016))]
+    pub data: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatAttachment {
