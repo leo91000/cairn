@@ -356,16 +356,26 @@ class DirectTransportDeviceTest {
                     // Keep authorization/DTLS real. Shorten only the client's scheduling input
                     // so a real acknowledged renewal can return the unavailable control fixture.
                     val renewalAttempts = AtomicInteger()
+                    val renewalTrace = ConcurrentLinkedQueue<String>()
+                    val renewalStarted = System.nanoTime()
+                    fun renewalEvent(event: String) {
+                        renewalTrace.add(
+                            "${(System.nanoTime() - renewalStarted) / 1_000_000}:$event"
+                        )
+                    }
                     val renewalReplies = AtomicInteger()
                     val renewalClient =
                         OkHttpClient.Builder()
                             .addInterceptor { chain ->
                                 val request = chain.request()
                                 val path = request.url.encodedPath
-                                if (path.endsWith("/direct/authorize"))
+                                if (path.endsWith("/direct/authorize")) {
                                     renewalAttempts.incrementAndGet()
+                                    renewalEvent("authorize:${renewalAttempts.get()}")
+                                }
                                 val response = chain.proceed(request)
                                 if (path.endsWith("/direct/authorize") && response.isSuccessful) {
+                                    renewalEvent("authorize-reply:${response.code}")
                                     // The control call permits 30 s. Exercise successful setup
                                     // beyond the former 10 s fixture precondition before testing
                                     // the unavailable renewal.
@@ -405,6 +415,7 @@ class DirectTransportDeviceTest {
                                 } else if (path.endsWith("/renew") && response.isSuccessful) {
                                     response.close()
                                     renewalReplies.incrementAndGet()
+                                    renewalEvent("unavailable:${renewalAttempts.get()}")
                                     response
                                         .newBuilder()
                                         .body("{\"available\":false}".toResponseBody())
@@ -425,7 +436,7 @@ class DirectTransportDeviceTest {
                         }
                         delay(18000)
                         assertEquals(
-                            "Unavailable renewal must not authorize again",
+                            "Unavailable renewal must not authorize again; events=$renewalTrace",
                             1,
                             renewalAttempts.get(),
                         )
