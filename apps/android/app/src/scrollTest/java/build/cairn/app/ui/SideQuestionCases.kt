@@ -20,6 +20,8 @@ import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
 
+private const val CHAT_ID = "a1b2c3d4-0000-4000-8000-0000000000c1"
+
 /** The same native side-question interactions run on the JVM and an Android device. */
 abstract class SideQuestionCases {
     @get:Rule val compose = createComposeRule()
@@ -27,7 +29,7 @@ abstract class SideQuestionCases {
     private val answered =
         ChatSideQuestion(
             id = "a1b2c3d4-0000-4000-8000-000000000001",
-            chatId = "chat",
+            chatId = CHAT_ID,
             runId = "run",
             text = "Pourquoi cet ordre ?",
             itemId = "reply-1",
@@ -40,7 +42,7 @@ abstract class SideQuestionCases {
     private val pending =
         ChatSideQuestion(
             id = "a1b2c3d4-0000-4000-8000-000000000002",
-            chatId = "chat",
+            chatId = CHAT_ID,
             runId = "run",
             text = "Et les tests ?",
             itemId = "reply-2",
@@ -52,7 +54,7 @@ abstract class SideQuestionCases {
 
     private fun chat(canAsk: Boolean, provider: String = "claude") =
         Chat(
-            id = "chat",
+            id = CHAT_ID,
             provider = provider,
             status = "running",
             canAskSideQuestion = canAsk,
@@ -80,6 +82,10 @@ abstract class SideQuestionCases {
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path.endsWith("/overview") || path.endsWith("/models") -> "{}"
+                                path.endsWith("/api/projects") -> """{"projects":[]}"""
+                                path.endsWith("/api/agents") -> """{"agents":[]}"""
+                                path.endsWith("/api/tasks") -> """{"tasks":[]}"""
+                                path.endsWith("/api/mcps") -> """{"mcps":[]}"""
                                 else -> "[]"
                             }
                         return MockResponse()
@@ -149,7 +155,7 @@ abstract class SideQuestionCases {
                 // Reading the UI drains the main looper, where the request completes.
                 compose.waitUntil(10000) { cleared() && writes.size == 1 && !vm.state.value.busy }
                 assertEquals(
-                    "/api/installations/fixture/api/chats/chat/side-questions",
+                    "/api/installations/fixture/api/chats/$CHAT_ID/side-questions",
                     writes[0].first,
                 )
                 val body = Json.parseToJsonElement(writes[0].second).jsonObject
@@ -163,7 +169,7 @@ abstract class SideQuestionCases {
                 compose.onNodeWithText("Retirer").performScrollTo().performClick()
                 compose.waitUntil(10000) { cleared() && writes.size == 2 && !vm.state.value.busy }
                 assertEquals(
-                    "/api/installations/fixture/api/chats/chat/side-questions/${pending.id}/cancel",
+                    "/api/installations/fixture/api/chats/$CHAT_ID/side-questions/${pending.id}/cancel",
                     writes[1].first,
                 )
                 compose.onAllNodesWithText("Voir la réponse")[1].performScrollTo().performClick()
@@ -226,20 +232,21 @@ abstract class SideQuestionCases {
         val models = ViewModelStore().apply { put("fixture", vm) }
         val event =
             RunEvent(
-                1,
-                0,
-                "item.completed",
-                "Réponse",
-                buildJsonObject {
-                    put(
-                        "item",
-                        buildJsonObject {
-                            put("id", "reply-1")
-                            put("type", "agent_message")
-                            put("text", "Réponse de l’agent")
-                        },
-                    )
-                },
+                id = 1,
+                createdAt = 0,
+                type = "item.completed",
+                text = "Réponse",
+                payload =
+                    buildJsonObject {
+                        put(
+                            "item",
+                            buildJsonObject {
+                                put("id", "reply-1")
+                                put("type", "agent_message")
+                                put("text", "Réponse de l’agent")
+                            },
+                        )
+                    },
                 runId = "run",
             )
         compose.setContent {
