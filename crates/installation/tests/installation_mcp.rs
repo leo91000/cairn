@@ -5553,6 +5553,52 @@ async fn side_questions_are_asked_withdrawn_and_answered_beside_the_running_repl
         .clone();
     assert_eq!(earlier["status"], "failed", "{earlier}");
 
+    // Asking and withdrawing again cannot grow a reply's side questions without bound.
+    let mut refused = Value::Null;
+    for index in 0..12 {
+        let asked = call(
+            &s,
+            &configuration,
+            "ask_chat_side_question",
+            ask(&format!("Again {index}?")),
+        )
+        .await;
+        if asked["result"]["isError"] == true {
+            refused = asked;
+            break;
+        }
+        let id = result(&asked)["id"].clone();
+        call(
+            &s,
+            &configuration,
+            "cancel_chat_side_question",
+            json!({ "chatId": chat_id, "sideQuestionId": id }),
+        )
+        .await;
+    }
+    assert!(
+        refused.to_string().contains("as many side questions"),
+        "{refused}"
+    );
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let inbox: Value = serde_json::from_slice(&std::fs::read(&inbox_path).unwrap()).unwrap();
+    assert_eq!(inbox.as_array().unwrap().len(), 10, "{inbox}");
+    // The next turn starts with none of them.
+    s.store
+        .update_run_boundary(
+            &run_id,
+            json!({ "chatExecution": { "messageId": "third-turn" } }),
+        )
+        .await
+        .unwrap();
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let inbox: Value = serde_json::from_slice(&std::fs::read(&inbox_path).unwrap()).unwrap();
+    assert_eq!(inbox, json!([]), "{inbox}");
+
     // Once the reply ends, a question it never answered says so.
     let third = call(
         &s,
@@ -5594,7 +5640,7 @@ async fn side_questions_are_asked_withdrawn_and_answered_beside_the_running_repl
         expired["error"]
             .as_str()
             .unwrap()
-            .contains("finished before")
+            .contains("stopped before")
     );
     assert_eq!(result(&listed)["canAskSideQuestion"], false);
     let late = call(&s, &configuration, "ask_chat_side_question", ask("Now?")).await;

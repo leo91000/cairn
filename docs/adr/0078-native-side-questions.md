@@ -52,9 +52,11 @@ patches and remove MCP servers in the fork, but they do not cover the tools abov
 Side questions travel in the existing chat inbox, so microVM and native-node transports
 carry them unchanged. Only a running Claude Code execution whose adapter announced
 `chat.side.available` receives them: an adapter from an earlier release, possibly on a
-node not yet updated, would otherwise deliver the question as steering. Each launch of
-the run clears that announcement, so a resumed, retried or recovered execution must
-announce again. Side questions never hold the reply: when it ends, Claude Code's
+node not yet updated, would otherwise deliver the question as steering. Each attempt to
+run it (a launch, a retry, a recovery or a resume on another account) clears that
+announcement and the side questions in its inbox, so its adapter receives them only
+once it announces again. A side question belongs to the turn it was asked during and
+fails once that turn no longer runs. Side questions never hold the reply: when it ends, Claude Code's
 requests still in progress are withdrawn and reported unanswered, and the turn completes
 exactly as without them. Answers use the running turn's account and are redacted like
 the rest of its output before they are stored. Side questions are additive key-value

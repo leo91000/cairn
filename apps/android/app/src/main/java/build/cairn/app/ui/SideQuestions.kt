@@ -275,6 +275,8 @@ internal fun ColumnScope.SideQuestionPanel(
                         "Codex ne peut pas répondre aux questions à côté dans Cairn : ses conversations à côté peuvent encore utiliser des outils. Posez-la dans la conversation."
                     chat.provider == "opencode" ->
                         "OpenCode ne peut pas encore répondre aux questions à côté dans Cairn. Posez-la dans la conversation."
+                    chat.provider != "claude" ->
+                        "Cet agent ne peut pas répondre aux questions à côté dans Cairn. Posez-la dans la conversation."
                     chat.run?.cancelRequestedAt != null ->
                         "La réponse s’arrête. Posez-la dans la conversation quand elle reprend."
                     chat.compaction?.running == true ->

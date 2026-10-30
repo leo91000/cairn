@@ -538,6 +538,12 @@ impl Execution<'_> {
         if self.checkpoint.expired() {
             return Err(Error::conflict("Run exceeded its time limit."));
         }
+        // Each attempt's adapter, such as one resumed on another account, announces again
+        // whether it answers side questions, and receives them only then.
+        s.store
+            .update_run_boundary(&self.id, json!({ "sideQuestions": null }))
+            .await?;
+        crate::chats::side_questions::forget_deliveries(&self.directory).await?;
         let output = workspace.output().to_owned();
         match tokio::fs::remove_file(&output).await {
             Ok(()) => {}

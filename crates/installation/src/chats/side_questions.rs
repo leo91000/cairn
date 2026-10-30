@@ -27,6 +27,9 @@ use std::collections::HashSet;
 
 /// Unanswered side questions a conversation can hold at once.
 const MAX_PENDING: usize = 5;
+/// Side questions one reply can still receive, withdrawals included, so a reply's inbox
+/// and the reads around it stay bounded.
+const MAX_OPEN: usize = 10;
 /// Side questions kept per conversation; the oldest settled ones are forgotten first.
 /// Conversation views carry them all, with their answers.
 const MAX_KEPT: usize = 30;
@@ -34,7 +37,7 @@ const MAX_KEPT: usize = 30;
 const MAX_ANSWER: usize = 20_000;
 const MAX_ERROR: usize = 1_000;
 
-pub(crate) const EXPIRED: &str = "The reply finished before this side question was answered. Ask it again during a reply, or ask in the conversation.";
+pub(crate) const EXPIRED: &str = "The reply stopped before this side question was answered. Ask it again while the agent works, or ask in the conversation.";
 
 const OPEN: &str = "chat-side-question-open:";
 
@@ -54,14 +57,12 @@ fn turn(run: &Value) -> &str {
     text(&run["chatExecution"], "messageId")
 }
 
-/// Whether `run` is still the turn an open question was asked during. A queued run that
-/// recovers this turn keeps it; one that waits, stopped or moved on does not.
+/// Whether `run` is still running the turn an open question was asked during. One that
+/// waits, retries later, stopped or moved on to another turn no longer answers it.
 fn answers(run: Option<&Value>, open: &Open) -> bool {
     run.is_some_and(|run| {
-        matches!(
-            RunStatus::of(run),
-            Some(RunStatus::Running | RunStatus::Queued)
-        ) && text(run, "id") == open.run_id
+        RunStatus::of(run) == Some(RunStatus::Running)
+            && text(run, "id") == open.run_id
             && turn(run) == open.turn
     })
 }
@@ -256,13 +257,19 @@ fn ask(
         return Err(Error::conflict(reason));
     }
     let run = run.unwrap();
-    let pending = open(db, chat_id)?
+    let open = open(db, chat_id)?;
+    let pending = open
         .iter()
         .filter(|(_, open)| open.status == SideQuestionStatus::Pending)
         .count();
     if pending >= MAX_PENDING {
         return Err(Error::conflict(
             "Wait for an answer before asking more side questions.",
+        ));
+    }
+    if open.len() >= MAX_OPEN {
+        return Err(Error::conflict(
+            "This reply has taken as many side questions as it can. Ask in the conversation, or again during the next reply.",
         ));
     }
 
@@ -666,8 +673,8 @@ mod tests {
         };
         let run = |status: &str, turn: &str| json!({ "id": "run", "status": status, "chatExecution": { "messageId": turn } });
         assert!(answers(Some(&run("running", "message-1")), &open));
-        // Recovering the same turn keeps it; waiting, finishing or another turn does not.
-        assert!(answers(Some(&run("queued", "message-1")), &open));
+        // Retrying later, waiting, finishing or another turn does not.
+        assert!(!answers(Some(&run("queued", "message-1")), &open));
         assert!(!answers(Some(&run("waiting", "message-1")), &open));
         assert!(!answers(Some(&run("succeeded", "message-1")), &open));
         assert!(!answers(Some(&run("running", "message-2")), &open));

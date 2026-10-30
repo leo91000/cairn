@@ -1622,14 +1622,17 @@ impl Service {
         let chat_id = chat.id.clone();
         let paused = chat.paused;
         let delivering = run["chatExecution"]["messageId"].clone();
-        let side_run = run.clone();
+        let run_id = text(run, "id").to_owned();
         let mut steering = self
             .store
             .transaction(move |db| {
                 let mut steering = claim_steering(db, &chat_id, paused, &delivering)?;
                 // Side questions are not chat messages: the queue, pause and steering never
-                // hold them, and the adapter answers them beside the turn.
-                steering.extend(side_questions::deliveries(db, &chat_id, &side_run)?);
+                // hold them, and the adapter answers them beside the turn. The run is read
+                // again here: a launch since the tick read it withdrew its announcement.
+                if let Some(run) = db.run(&run_id)? {
+                    steering.extend(side_questions::deliveries(db, &chat_id, &run)?);
+                }
                 Ok(steering)
             })
             .await?;
@@ -1653,6 +1656,18 @@ impl Service {
                 steering.truncate(index);
                 break;
             }
+        }
+        // Nor may this write restore side questions a launch removed meanwhile.
+        let announced = self
+            .store
+            .run(text(run, "id"))
+            .await?
+            .get("sideQuestions")
+            .is_some_and(|announced| announced == true);
+        if !announced {
+            steering.retain(|message| {
+                !message["sideQuestion"].is_object() && message["sideQuestionCancelled"] != true
+            });
         }
         let directory = self
             .config

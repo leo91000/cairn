@@ -1273,7 +1273,7 @@ async fn a_finished_turn_withdraws_the_side_questions_it_is_still_answering() {
     assert!(unfinished < completed);
     assert_eq!(
         events[unfinished]["error"],
-        "The reply finished before this side question was answered. Ask it again during a reply, or ask in the conversation."
+        "The reply stopped before this side question was answered. Ask it again while the agent works, or ask in the conversation."
     );
     let failed = outcome("a1b2c3d4-0000-4000-8000-000000000003");
     assert_eq!(
