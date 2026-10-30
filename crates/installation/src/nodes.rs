@@ -1081,6 +1081,10 @@ pub async fn internal(State(app): State<App>, request: Request) -> Result<Json<V
         }
         "/internal/nodes/enroll" => enroll(s, input.body).await?,
         "/internal/nodes/heartbeat" => heartbeat(s, &input).await?,
+        "/internal/nodes/project-catalog" => {
+            let node = transport::authenticate(s, &input.headers).await?;
+            serde_json::to_value(crate::project_archives::catalog(s, &node).await?)?
+        }
         _ => return Err(Error::not_found("Not found")),
     };
     Ok(Json(value))
@@ -1211,8 +1215,10 @@ async fn heartbeat(s: &Service, input: &Input) -> Result<Value> {
     } else {
         None
     };
-    if matching_version && input.body["capabilities"]["backend"] == "native" {
-        crate::native::policy::refresh(s).await?;
+    let node = transport::authenticate(s, &input.headers).await?;
+    let native = crate::native::policy::node_native(&s.node_boundary(&node).await?);
+    if matching_version && native {
+        crate::native::policy::refresh_for_heartbeat(s).await?;
     }
     let expected = Expectations {
         data_root: s.config.data_dir.to_string_lossy().into_owned(),
@@ -1227,16 +1233,7 @@ async fn heartbeat(s: &Service, input: &Input) -> Result<Value> {
     for lease in &reply.leases {
         record_lease(s, &lease.id, lease.remaining_ms).await;
     }
-    let mut value = serde_json::to_value(&reply)?;
-    // Catalogue failures must not interrupt current execution leases.
-    match crate::project_archives::catalog(s, &reply.node_id).await {
-        Ok(archives) => value["projectArchives"] = serde_json::to_value(archives)?,
-        Err(error) => tracing::warn!(
-            status = error.status,
-            "Archive catalogue unavailable; node leases remain valid"
-        ),
-    }
-    Ok(value)
+    Ok(serde_json::to_value(&reply)?)
 }
 
 fn record_heartbeat(
@@ -1279,7 +1276,11 @@ fn record_heartbeat(
         node.capabilities = capabilities;
     }
     node.image_digest = decode(body["imageDigest"].clone())?;
-    node.native_mode_observed = decode(body["nativeMode"].clone())?;
+    // Missing diagnostics do not revoke a previously confirmed mode. Current
+    // desired generation and authority still fence every existing grant.
+    if !body["nativeMode"].is_null() {
+        node.native_mode_observed = decode(body["nativeMode"].clone())?;
+    }
     if node.capabilities.backend == NodeBackend::Native {
         let boundary = serde_json::to_value(&node)?;
         node.native_mode_status = Some(
@@ -1328,6 +1329,7 @@ fn execution_ready(node: &Value, body: &Value, expected: &Expectations) -> bool 
         .is_none_or(|image| node["imageDigest"] == *image);
     if crate::native::policy::node_native(node) {
         return native_mode::applied(node)
+            && body["nativeMode"].is_object()
             && body["executionReady"] == true
             && body["backend"] == "native"
             && body["nodeProtocol"] == 2
@@ -1367,6 +1369,16 @@ fn renew_leases(db: &Db<'_>, node_id: &str, lease_ms: u64) -> Result<Vec<Lease>>
                     &db.node_boundary(node_id)?.unwrap_or_default(),
                 )?;
         if !owns_execution || !native_allowed {
+            continue;
+        }
+        let lease_ms = if crate::native::policy::node_native(
+            &db.node_boundary(node_id)?.unwrap_or_default(),
+        ) {
+            lease_ms.min(crate::native::policy::lease_remaining_ms(db)?)
+        } else {
+            lease_ms
+        };
+        if lease_ms == 0 {
             continue;
         }
         attempt["leaseExpiresAt"] = (now() + lease_ms as i64).into();
