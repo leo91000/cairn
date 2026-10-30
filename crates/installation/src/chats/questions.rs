@@ -85,7 +85,7 @@ fn receive(db: &Db<'_>, mut question: Question) -> Result<()> {
         return save_question(db, &existing);
     }
     save_question(db, &question)?;
-    notifications::enqueue(db, &chat, &question)
+    notifications::enqueue(db, &question)
 }
 
 pub(super) fn release(db: &Db<'_>, run_id: &str, id: Option<&str>) -> Result<()> {

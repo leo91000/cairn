@@ -53,6 +53,11 @@ async fn dispatch_inner(s: &Arc<Service>, input: &Input) -> Result<Value> {
         .split('/')
         .collect::<Vec<_>>();
     let route = (input.method.as_str(), segments.as_slice());
+    if let ("GET", ["notification-recipients", chat, question]) = route {
+        let recipients =
+            crate::notifications::recipients(s, input.identity.as_ref(), chat, question).await?;
+        return Ok(serde_json::to_value(recipients)?);
+    }
     if let Some(result) = record_routes(s, input, route).await? {
         return Ok(result);
     }

@@ -625,11 +625,27 @@ transient failures or tunnel loss retry without interrupting agent execution.
 Delivery is at least once: interruption after a provider accepted a push can
 repeat it. Notification tags include the installation and event identifiers.
 Question payloads contain generic text and identifiers, never question fields.
-A question event names the members who may answer it, those with access to the
-conversation's agent or to its requesting conversation's agent
-([ADR-0075](adr/0075-plugin-hooks-rules-and-scoped-grants.md)): Beacon sends it to
-the owner and to those current members only. Events without that list, such as
-alerts or events from older installations, reach the owner and every member.
+Question pushes reach the owner and the current memberships allowed to answer,
+through the conversation's agent or its active requesting conversation's agent
+([ADR-0075](adr/0075-plugin-hooks-rules-and-scoped-grants.md)). Immediately before
+each member device's provider attempt, Beacon asks the installation for the pending
+question's current eligible account and membership identifiers through its internal
+maintenance relay. This lookup reads local grants only. Beacon matches the returned
+membership identifier against its current membership under the sharing lock. A
+queued event therefore cannot preserve a revoked agent grant or an ended membership,
+including while delivery waits on another device or database lock. A provider
+attempt already admitted may finish. Owner notifications bypass the lookup, and
+alerts retain their existing owner-and-members audience.
+
+Transient recipient lookup failures keep member deliveries retryable. A missing,
+unsupported or incomplete lookup supplies no member eligibility: the question goes
+only to the owner. Current installations also send an empty legacy member list for
+questions, including persisted outbox events, so older Beacons that honor this list
+send only to the owner. Strict member question targeting requires an updated Beacon
+and installation; update Beacon first. Ancient Beacons that ignore the member list
+cannot acquire this guarantee from an additive change. Their historical delivery
+behavior is not covered by the current guarantee. Relay signatures and protocol
+frames are unchanged; the narrow maintenance response adds membership evidence.
 
 Successful deliveries are remembered per event and current device registration
 in process memory, across tunnel reconnects. An unavailable device therefore
@@ -776,8 +792,7 @@ succeeded. Pending rollout evidence is also retried before denying a directing
 write, so an older Beacon's missing membership timestamps do not require a list
 request to recover once usable evidence becomes available. A member's list of
 usable agents refreshes when the last check is older than 30 seconds, but still
-answers when the Beacon cannot. Question notifications computed before membership
-reconciliation can still include an ended membership. A member's scheduled task
+answers when the Beacon cannot. A member's scheduled task
 on an agent they cannot use skips its
 occurrences, with a wait reason, until access returns. No account session or member
 list is persisted on the installation for access control; it keeps only, per agent,

@@ -390,7 +390,7 @@ fn owner_operation(method: &str, path: &str) -> bool {
         ["skills" | "projects", ..] => !read,
         ["agents", ..] => true,
         ["tasks", _] => method == "DELETE",
-        ["task-authors", ..] => true,
+        ["task-authors" | "notification-recipients", ..] => true,
         ["runs", _, "artifacts", _, "visibility"] => !read,
         _ => false,
     }

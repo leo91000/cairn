@@ -750,10 +750,11 @@ fn resume(relay: &mut common::RelayedInstallation, router: axum::Router) {
 }
 
 #[tokio::test]
-async fn queued_events_exclude_removed_members_after_reconnection() {
+async fn queued_events_exclude_reinvited_members_after_reconnection() {
     let mail = std::sync::Arc::new(PushMailbox::default());
     let mut relay = common::RelayedInstallation::with_push(mail.clone()).await;
     let (cookie, session) = invite(&relay, "member@example.test").await;
+    allow_main(&relay, &session).await;
     register(
         &relay.app,
         &relay.cookie,
@@ -787,6 +788,33 @@ async fn queued_events_exclude_removed_members_after_reconnection() {
         .status(),
         StatusCode::NO_CONTENT
     );
+    let invited = request(
+        &relay.app,
+        &relay.cookie,
+        &relay.session,
+        Method::POST,
+        &format!("/api/installations/{installation}/sharing/invitations"),
+    )
+    .json(&json!({ "email": "member@example.test" }))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(invited.status(), StatusCode::CREATED);
+    let invitation: Value = invited.json().await.unwrap();
+    let accepted = request(
+        &relay.app,
+        &cookie,
+        &session,
+        Method::POST,
+        &format!(
+            "/api/account/invitations/{}/accept",
+            invitation["id"].as_str().unwrap()
+        ),
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(accepted.status(), StatusCode::NO_CONTENT);
     let router = cairn_installation::http::router(relay.installation.clone())
         .await
         .unwrap();
@@ -811,6 +839,336 @@ async fn queued_events_exclude_removed_members_after_reconnection() {
     .unwrap();
     assert_eq!(registered, json!({ "registered": true }));
     relay.close().await;
+}
+
+#[tokio::test]
+async fn queued_questions_recheck_agent_access_after_owner_revocation() {
+    let mail = std::sync::Arc::new(PushMailbox::default());
+    let mut relay = common::RelayedInstallation::with_push(mail.clone()).await;
+    let (cookie, session) = invite(&relay, "member@example.test").await;
+    allow_main(&relay, &session).await;
+    register(
+        &relay.app,
+        &relay.cookie,
+        &relay.session,
+        "https://fcm.googleapis.com/owner",
+    )
+    .await;
+    register(
+        &relay.app,
+        &cookie,
+        &session,
+        "https://fcm.googleapis.com/unavailable",
+    )
+    .await;
+    let (_, run) = chat_run(&relay).await;
+    question(&relay, &run, &"1".repeat(64)).await;
+    wait_pushes(&mail, 1).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while mail
+            .unavailable_attempts
+            .load(std::sync::atomic::Ordering::SeqCst)
+            == 0
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let member = session["account"]["id"].as_str().unwrap();
+    let base = relay.base.strip_prefix(&relay.app.url).unwrap();
+    let revoked = request(
+        &relay.app,
+        &relay.cookie,
+        &relay.session,
+        Method::DELETE,
+        &format!(
+            "{base}/agents/{}/accounts/{member}",
+            cairn_installation::config::MAIN_AGENT_ID
+        ),
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(revoked.status(), StatusCode::OK);
+    pause(&mut relay).await;
+    let router = cairn_installation::http::router(relay.installation.clone())
+        .await
+        .unwrap();
+    resume(&mut relay, router);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !relay
+            .installation
+            .store
+            .keys("push-outbox:")
+            .await
+            .unwrap()
+            .is_empty()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("revoking agent access must remove the failed member delivery from retries");
+    assert_eq!(
+        mail.unavailable_attempts
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    assert_eq!(mail.messages.lock().unwrap().len(), 1);
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn a_question_waiting_on_a_device_lock_rechecks_agent_access_at_provider_admission() {
+    let mail = std::sync::Arc::new(PushMailbox::default());
+    let relay = common::RelayedInstallation::with_push(mail.clone()).await;
+    let (cookie, session) = invite(&relay, "member@example.test").await;
+    allow_main(&relay, &session).await;
+    register(
+        &relay.app,
+        &relay.cookie,
+        &relay.session,
+        "https://fcm.googleapis.com/owner",
+    )
+    .await;
+    let device = register(
+        &relay.app,
+        &cookie,
+        &session,
+        "https://fcm.googleapis.com/member",
+    )
+    .await;
+    let (_, run) = chat_run(&relay).await;
+    let mut barrier = relay.app.pool.begin().await.unwrap();
+    let (pid,): (i32,) = sqlx_core::query_as::query_as("SELECT pg_backend_pid()")
+        .fetch_one(&mut *barrier)
+        .await
+        .unwrap();
+    query("SELECT id FROM notification_devices WHERE id=$1 FOR UPDATE")
+        .bind(&device)
+        .execute(&mut *barrier)
+        .await
+        .unwrap();
+    question(&relay, &run, &"2".repeat(64)).await;
+    relay.app.wait_for_blocked_request(pid).await;
+
+    let member = session["account"]["id"].as_str().unwrap();
+    let base = relay.base.strip_prefix(&relay.app.url).unwrap();
+    let revoked = request(
+        &relay.app,
+        &relay.cookie,
+        &relay.session,
+        Method::DELETE,
+        &format!(
+            "{base}/agents/{}/accounts/{member}",
+            cairn_installation::config::MAIN_AGENT_ID
+        ),
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(revoked.status(), StatusCode::OK);
+    barrier.commit().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !relay
+            .installation
+            .store
+            .keys("push-outbox:")
+            .await
+            .unwrap()
+            .is_empty()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let messages = mail.messages.lock().unwrap().clone();
+    assert_eq!(
+        messages.len(),
+        1,
+        "the queued member device lost its agent access"
+    );
+    assert_eq!(messages[0].0, "https://fcm.googleapis.com/owner");
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn a_question_waiting_on_the_sharing_lock_cannot_inherit_a_replacement_membership() {
+    let mail = std::sync::Arc::new(PushMailbox::default());
+    let relay = common::RelayedInstallation::with_push(mail.clone()).await;
+    let (cookie, session) = invite(&relay, "member@example.test").await;
+    allow_main(&relay, &session).await;
+    register(
+        &relay.app,
+        &relay.cookie,
+        &relay.session,
+        "https://fcm.googleapis.com/owner",
+    )
+    .await;
+    register(
+        &relay.app,
+        &cookie,
+        &session,
+        "https://fcm.googleapis.com/member",
+    )
+    .await;
+    let (_, run) = chat_run(&relay).await;
+    let installation = relay.session["installations"][0]["id"].as_str().unwrap();
+    let member = session["account"]["id"].as_str().unwrap();
+    let mut barrier = relay.app.pool.begin().await.unwrap();
+    let (pid,): (i32,) = sqlx_core::query_as::query_as("SELECT pg_backend_pid()")
+        .fetch_one(&mut *barrier)
+        .await
+        .unwrap();
+    query("SELECT id FROM installations WHERE id=$1 FOR UPDATE")
+        .bind(installation)
+        .execute(&mut *barrier)
+        .await
+        .unwrap();
+    question(&relay, &run, &"3".repeat(64)).await;
+    relay.app.wait_for_blocked_request(pid).await;
+
+    // Commit the same membership replacement as removal and re-invitation under the
+    // sharing lock, with both installation refreshes lost. Its old grant stays local.
+    query("DELETE FROM installation_members WHERE installation_id=$1 AND account_id=$2")
+        .bind(installation)
+        .bind(member)
+        .execute(&mut *barrier)
+        .await
+        .unwrap();
+    query("INSERT INTO installation_members (installation_id,account_id,joined_at) VALUES($1,$2,clock_timestamp())")
+        .bind(installation).bind(member).execute(&mut *barrier).await.unwrap();
+    barrier.commit().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !relay
+            .installation
+            .store
+            .keys("push-outbox:")
+            .await
+            .unwrap()
+            .is_empty()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let messages = mail.messages.lock().unwrap().clone();
+    assert_eq!(
+        messages.len(),
+        1,
+        "the earlier membership cannot grant a queued push"
+    );
+    assert_eq!(messages[0].0, "https://fcm.googleapis.com/owner");
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn missing_recipient_evidence_is_owner_only_and_transient_lookups_retry() {
+    for status in [
+        axum::http::StatusCode::NOT_FOUND,
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+    ] {
+        let mail = std::sync::Arc::new(PushMailbox::default());
+        let mut relay = common::RelayedInstallation::with_push(mail.clone()).await;
+        let (cookie, session) = invite(&relay, "member@example.test").await;
+        allow_main(&relay, &session).await;
+        register(
+            &relay.app,
+            &relay.cookie,
+            &relay.session,
+            "https://fcm.googleapis.com/owner",
+        )
+        .await;
+        register(
+            &relay.app,
+            &cookie,
+            &session,
+            "https://fcm.googleapis.com/member",
+        )
+        .await;
+        let (_, run) = chat_run(&relay).await;
+        pause(&mut relay).await;
+        question(&relay, &run, &"4".repeat(64)).await;
+        let lookups = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = lookups.clone();
+        let router = cairn_installation::http::router(relay.installation.clone())
+            .await
+            .unwrap()
+            .layer(axum::middleware::from_fn(
+                move |request: axum::extract::Request, next: axum::middleware::Next| {
+                    let observed = observed.clone();
+                    async move {
+                        use axum::response::IntoResponse;
+                        if request
+                            .uri()
+                            .path()
+                            .starts_with("/api/notification-recipients/")
+                        {
+                            observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            return status.into_response();
+                        }
+                        next.run(request).await
+                    }
+                },
+            ));
+        resume(&mut relay, router);
+        wait_pushes(&mail, 1).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while lookups.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        if status == axum::http::StatusCode::NOT_FOUND {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !relay
+                    .installation
+                    .store
+                    .keys("push-outbox:")
+                    .await
+                    .unwrap()
+                    .is_empty()
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(mail.messages.lock().unwrap().len(), 1);
+        } else {
+            assert_eq!(
+                relay
+                    .installation
+                    .store
+                    .keys("push-outbox:")
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+            pause(&mut relay).await;
+            let router = cairn_installation::http::router(relay.installation.clone())
+                .await
+                .unwrap();
+            resume(&mut relay, router);
+            wait_pushes(&mail, 2).await;
+            assert_eq!(
+                mail.messages
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(endpoint, _)| endpoint.ends_with("/owner"))
+                    .count(),
+                1
+            );
+        }
+        relay.close().await;
+    }
 }
 
 #[tokio::test]

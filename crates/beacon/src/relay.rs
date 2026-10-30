@@ -960,6 +960,70 @@ pub(super) async fn refresh_task_authors(service: &Service, installation: &str) 
     }
 }
 
+/// Ask the current installation immediately before a member's question push is admitted.
+/// Older installations lack this maintenance endpoint; absent evidence grants nothing.
+pub(super) async fn notification_recipients(
+    service: &Service,
+    installation: &str,
+    chat: &str,
+    question: &str,
+) -> Result<Option<cairn_protocol::NotificationRecipients>, ApiError> {
+    let tunnel = service
+        .relay
+        .connections
+        .lock()
+        .unwrap()
+        .get(installation)
+        .cloned();
+    let request = Request::builder()
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+    let response = tokio::time::timeout(
+        Duration::from_secs(5),
+        send(
+            service,
+            tunnel,
+            0,
+            String::new(),
+            Capability::Maintenance,
+            &format!("/api/notification-recipients/{chat}/{question}"),
+            request,
+        ),
+    )
+    .await
+    .map_err(|_| {
+        ApiError::Http(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Notification recipients unavailable",
+        )
+    })??;
+    if matches!(
+        response.status(),
+        StatusCode::NOT_FOUND
+            | StatusCode::METHOD_NOT_ALLOWED
+            | StatusCode::FORBIDDEN
+            | StatusCode::NOT_IMPLEMENTED
+    ) {
+        return Ok(None);
+    }
+    if !response.status().is_success() {
+        return Err(ApiError::Http(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Notification recipients unavailable",
+        ));
+    }
+    let body = to_bytes(response.into_body(), MAX_BODY)
+        .await
+        .map_err(|_| {
+            ApiError::Http(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Notification recipients unavailable",
+            )
+        })?;
+    Ok(serde_json::from_slice(&body).ok())
+}
+
 pub(super) async fn mcp(
     service: &Service,
     grant: super::mcp::McpAccess,

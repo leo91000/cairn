@@ -497,12 +497,48 @@ pub(super) async fn deliver(
         let Some((account, endpoint, p256dh, auth)) = device else {
             continue;
         };
-        // The installation names the members who may act on the event (ADR-0075).
-        if let Some(members) = &event.members
-            && account != owner
-            && !members.contains(&account)
-        {
-            continue;
+        if account != owner {
+            match &event.kind {
+                cairn_protocol::NotificationKind::Question { question_id } => {
+                    // A job may have waited on another device or database lock since
+                    // enqueue. Read current agent access at this provider admission.
+                    let recipients = match super::relay::notification_recipients(
+                        service,
+                        installation,
+                        &event.chat_id,
+                        question_id,
+                    )
+                    .await
+                    {
+                        Ok(Some(recipients)) => recipients,
+                        Ok(None) => continue,
+                        Err(_) => {
+                            complete = false;
+                            continue;
+                        }
+                    };
+                    let membership: Option<(String,)> = query_as(
+                        "SELECT access_id FROM installation_members WHERE installation_id=$1 AND account_id=$2",
+                    ).bind(installation).bind(&account).fetch_optional(&mut *transaction).await?;
+                    let allowed = membership.is_some_and(|(access,)| {
+                        recipients.members.iter().any(|member| {
+                            member.account_id == account && member.access_id == access
+                        })
+                    });
+                    if !allowed {
+                        continue;
+                    }
+                }
+                cairn_protocol::NotificationKind::Alert { .. } => {
+                    if event
+                        .members
+                        .as_ref()
+                        .is_some_and(|members| !members.contains(&account))
+                    {
+                        continue;
+                    }
+                }
+            }
         }
 
         let subscription = PushSubscription {

@@ -165,7 +165,10 @@ fn requesting(db: &Db<'_>, chat: &Conversation) -> Result<Option<Conversation>> 
 }
 
 /// The members who may direct a conversation, by the same rule as [`uses_chat`].
-pub(crate) fn chat_members(db: &Db<'_>, chat: &Conversation) -> Result<Vec<String>> {
+pub(crate) fn chat_members(
+    db: &Db<'_>,
+    chat: &Conversation,
+) -> Result<Vec<cairn_protocol::NotificationMember>> {
     let mut agents = vec![chat.agent_id.clone()];
     if let Some(requesting) = requesting(db, chat)? {
         agents.push(requesting.agent_id);
@@ -173,9 +176,16 @@ pub(crate) fn chat_members(db: &Db<'_>, chat: &Conversation) -> Result<Vec<Strin
     let mut members = Vec::new();
     for agent in agents {
         members.extend(
-            db.agent_accounts(&agent)?
-                .into_iter()
-                .map(|entry| entry.account_id),
+            db.0.prepare_cached(
+                "SELECT account_id,access_id FROM agent_account_access WHERE agent_id=?",
+            )?
+            .query_map([agent], |row| {
+                Ok(cairn_protocol::NotificationMember {
+                    account_id: row.get(0)?,
+                    access_id: row.get(1)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?,
         );
     }
     members.sort_unstable();
@@ -819,7 +829,10 @@ mod tests {
                 s.store
                     .transaction(move |db| {
                         db.save_conversation(&serde_json::from_value(requesting)?)?;
-                        chat_members(db, &serde_json::from_value(delegated)?)
+                        Ok(chat_members(db, &serde_json::from_value(delegated)?)?
+                            .into_iter()
+                            .map(|member| member.account_id)
+                            .collect::<Vec<_>>())
                     })
                     .await
                     .unwrap()
