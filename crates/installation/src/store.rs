@@ -47,7 +47,7 @@ fn actors(connections: Vec<Connection>, lane: &'static str) -> mpsc::Sender<Job>
         std::thread::Builder::new()
             .name("cairn-sqlite".into())
             .spawn(move || {
-                let mut metrics = performance::Metrics::new(lane, index);
+                let mut metrics = performance::Metrics::new(lane, index, &db);
                 loop {
                     // The guard is released before the job runs.
                     let job = rx.lock().ok().and_then(|mut rx| rx.blocking_recv());
@@ -55,7 +55,7 @@ fn actors(connections: Vec<Connection>, lane: &'static str) -> mpsc::Sender<Job>
                         break;
                     };
                     let completed = job(&mut db);
-                    metrics.record(&completed);
+                    metrics.record(&completed, &db);
                 }
             })
             .expect("database thread");

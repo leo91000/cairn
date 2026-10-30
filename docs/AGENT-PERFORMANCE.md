@@ -63,6 +63,34 @@ caller stopped waiting (`abandoned_replies`). Reader execution times can overlap
 do not sum them as elapsed wall time. SQL, parameters, errors and conversation or
 account identifiers are never included. Aggregation performs no database write.
 
+The same record samples the connection's pager cache at the interval boundary.
+`cache_hits`, `cache_misses` and `cache_writes` are interval deltas of counters
+read through SQLite's 64-bit connection-status API; `cache_bytes` is the current approximate pager
+heap usage, not a delta or configured limit. Startup/migration work before the
+actor starts is excluded. Counters are read without resetting them. If sampling
+fails or a counter decreases, `cache_available=false` and all four values are
+zero for that interval; do not interpret those zeroes as measured inactivity.
+The bundled pager stores individual activity counters in 32 bits; an ordinary
+rollover appears as a decrease and invalidates that interval.
+
+These counters describe SQLite pages, not query results, the prepared-statement
+cache or the OS page cache. A miss may be served from the OS cache without a
+physical disk read. Writes count dirty pages written to WAL/database files and
+exclude rollback/recovery writes; they are not bytes or physical disk I/O.
+Compare them with the actor's execution time and OS CPU/I/O measurements before
+changing cache limits or query projections. Sampling changes no SQLite setting,
+schema, stored row or subscriber notification.
+
+Measure the four status calls on a synthetic, warm in-memory connection with:
+
+```sh
+pnpm test:backend -p cairn-installation --lib store::performance::cache::tests::measure_pager_counter_sampling -- --ignored --nocapture --test-threads=1
+```
+
+This reports local wall time for 100,000 samples, not production query latency.
+The sampling path runs only at actor startup and the report boundary, never for
+every job. It performs no SQL statement or file I/O.
+
 An explicit local metadata-write benchmark exercises the real `Store` on synthetic
 0/128/512 KiB frozen snapshots:
 
