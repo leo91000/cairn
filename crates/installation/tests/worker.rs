@@ -2422,6 +2422,111 @@ async fn paid_recovery_survives_confirmed_capacity_rejection_and_restart() {
 }
 
 #[tokio::test]
+async fn transferred_paid_move_launches_once_without_resetting_controller_count() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let mut fixture = Fixture::new().await;
+    fixture.stop(false).await;
+    let controller = Arc::new(Controller {
+        data: fixture.service.config.data_dir.clone(),
+        plans: tokio::sync::Mutex::new(Vec::new()),
+        failures: 0,
+        slots: 4,
+        hold: AtomicBool::new(false),
+    });
+    let busy = Arc::new(AtomicBool::new(true));
+    let rejections = Arc::new(AtomicUsize::new(0));
+    let (reject, seen) = (busy.clone(), rejections.clone());
+    let app = Router::new()
+        .fallback(any(
+            move |state: State<Arc<Controller>>, request: Request| {
+                let (reject, seen) = (reject.clone(), seen.clone());
+                async move {
+                    let path = request.uri().path();
+                    if request.method() == "POST"
+                        && path.starts_with("/runs/")
+                        && path.trim_matches('/').split('/').count() == 2
+                        && reject.load(Ordering::SeqCst)
+                    {
+                        seen.fetch_add(1, Ordering::SeqCst);
+                        return (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            Json(json!({ "error": "All VM slots are occupied." })),
+                        )
+                            .into_response();
+                    }
+                    serve_controller(state, request).await
+                }
+            },
+        ))
+        .with_state(controller.clone());
+    let (listener, address) = common::bind().await;
+    common::reconfigure(&mut fixture.service, |config| {
+        config.runner_url = format!("http://{address}");
+    })
+    .await;
+    let server = common::serve(listener, app);
+    let service = fixture.service.clone();
+    let home = service.config.home.join(".codex");
+    tokio::fs::create_dir_all(&home).await.unwrap();
+    tokio::fs::write(home.join("auth.json"), "{}")
+        .await
+        .unwrap();
+    tokio::fs::write(
+        service.config.data_dir.join("storage-s3.json"),
+        json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
+    )
+    .await
+    .unwrap();
+    let run = fixture.enqueue("Resume paid move").await;
+    let id = text(&run, "id").to_owned();
+    fixture.start().await;
+    let waiting = fixture
+        .until(&id, |run| {
+            finished(run)
+                || (rejections.load(Ordering::SeqCst) >= 1
+                    && run["status"] == RunStatus::Queued
+                    && run["recoveryPending"] == false)
+        })
+        .await;
+    assert_eq!(waiting["status"], RunStatus::Queued, "{waiting}");
+    fixture.stop(false).await;
+    let mut saved = fixture.checkpoint(&id).await;
+    let old = text(&saved, "runnerId").to_owned();
+    saved["startRejected"] = false.into();
+    saved["terminalCode"] = 75.into();
+    saved["capacityRetryAt"] = (now() - 1).into();
+    saved["controllerRecoveries"] = 4.into();
+    saved["controllerRecoveryReservation"] = old.clone().into();
+    saved["moveRecoveryReservation"] = old.into();
+    service
+        .store
+        .save_checkpoint_boundary(&id, saved)
+        .await
+        .unwrap();
+    service
+        .store
+        .change_run(
+            &id,
+            cairn_installation::runs::RunChanges {
+                recovery_pending: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    busy.store(false, Ordering::SeqCst);
+    fixture.start().await;
+    let completed = fixture.until_finished(&id).await;
+    assert_eq!(completed["status"], RunStatus::Succeeded, "{completed}");
+    let saved = fixture.checkpoint(&id).await;
+    assert_eq!(saved["controllerRecoveries"], 4);
+    assert!(saved["moveRecoveryReservation"].is_null());
+    assert_eq!(controller.plans.lock().await.len(), 1);
+    fixture.stop(false).await;
+    server.abort();
+}
+
+#[tokio::test]
 async fn controller_capacity_rejection_waits_and_retries_without_an_agent_session() {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
