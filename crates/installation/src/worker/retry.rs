@@ -1,9 +1,9 @@
 //! Commit an agent retry once; admission waits without retaining an account.
-use super::checkpoint::{Checkpoint, RunCheckpoint};
+use super::checkpoint::Checkpoint;
 use crate::{
     config::now,
     error::{Error, Result},
-    run_retry::{Cause, Retry},
+    run_retry::Retry,
     run_status::RunStatus,
     service::Service,
     store::Db,

@@ -1452,7 +1452,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_move_does_not_requeue_completed_failed_finalization() {
+    async fn pending_move_does_not_requeue_completed_failed_finalization_reconciliation() {
         let root = tempfile::tempdir().unwrap();
         let service = Service::new(crate::config::Config {
             data_dir: root.path().join("data"),
@@ -1562,7 +1562,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failure_settlement_rechecks_deadline_after_waiting_for_store() {
+    async fn failure_settlement_rechecks_deadline_after_waiting_for_store_reconciliation() {
         let root = tempfile::tempdir().unwrap();
         let service = Service::new(crate::config::Config {
             data_dir: root.path().join("data"),
@@ -1745,7 +1745,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generic_failure_settlement_rechecks_cancel_and_deadline_in_transaction() {
+    async fn generic_failure_settlement_rechecks_cancel_and_deadline_in_transaction_reconciliation()
+    {
         let root = tempfile::tempdir().unwrap();
         let service = Service::new(crate::config::Config {
             data_dir: root.path().join("data"),
