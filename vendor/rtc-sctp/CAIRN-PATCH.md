@@ -56,6 +56,13 @@ connection cannot strand reset completion or consume receive-window credit.
 The gateway and manager also end a node peer when its control DataChannel closes,
 so SCTP loss cannot leave a stale peer advertised as connected while ICE remains up.
 
+Starting T3 for new DATA or a gap acknowledgement preserves an existing deadline,
+including an elapsed deadline whose expiration has not yet been handled. The
+write-before-timeout polling order must not postpone recovery of older lost DATA.
+Only the timeout handler consumes an expiration and applies retransmission/backoff;
+acknowledging the earliest outstanding DATA still explicitly restarts T3, as required
+by [RFC 9260 sections 6.3.2 and 6.3.3](https://www.rfc-editor.org/rfc/rfc9260.html#section-6.3.2).
+
 Keep the last completed incoming reset sequence for each wire stream ID across
 reuse, using SCTP serial-number comparisons. A repeated or older reset is still
 answered but cannot reset the replacement stream or wait for its unrelated data.
@@ -83,6 +90,9 @@ retry deadlines under unrelated traffic,
 duplicate/older resets, serial-number wraparound and deferred reset completion
 after stream reuse. An endpoint test delays the final reset ACK until replacement
 DATA has arrived and verifies eventual byte-for-byte delivery after retransmission.
+Association regressions also withhold reliable DATA, flush new DATA before handling
+an overdue T3, and require the original TSN/payload to retransmit at that instant.
+A gap acknowledgement of later DATA likewise cannot replace the pending expiration.
 Queued-close regressions preserve blocked DATA from both the closing stream and
 an unrelated stream before permitting ID reuse. Cancellation tests release unread
 credit and deliver only the replacement generation after teardown.
