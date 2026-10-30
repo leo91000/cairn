@@ -376,9 +376,11 @@ const overview = computed(() => [
         summary: peopleSummary.value.long,
         detail: peopleLoading.value
           ? 'Checking which members can use it'
-          : people.count.value
-            ? names(people.rows.value.filter(row => row.known && row.allowed).map(row => row.email), email => email)
-            : 'Members cannot start or continue its conversations',
+          : people.error.value
+            ? 'Who can use it could not be loaded'
+            : people.count.value
+              ? names(people.rows.value.filter(row => row.known && row.allowed).map(row => row.email), email => email)
+              : 'Members cannot start or continue its conversations',
         chip: people.error.value
           ? { tone: 'unavailable' as const, label: 'Unavailable' }
           : peopleLoading.value

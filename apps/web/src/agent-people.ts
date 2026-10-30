@@ -26,7 +26,10 @@ export function useAgentPeople(agentId: Ref<string | null>) {
   const loading = ref(false)
   const loaded = ref(false)
   const error = ref('')
-  const saving = ref<string[]>([])
+  // Changes in flight, per agent: the page is reused across agents, and one agent's pending
+  // change or refusal never shows on another's rows.
+  const pending = ref<Array<{ agent: string, accountId: string }>>([])
+  const saving = computed(() => pending.value.filter(entry => entry.agent === agentId.value).map(entry => entry.accountId))
   const failure = ref<{ accountId: string, message: string } | null>(null)
   let generation = 0
   let shown: string | null = null
@@ -69,7 +72,7 @@ export function useAgentPeople(agentId: Ref<string | null>) {
     const agent = agentId.value
     if (!agent || saving.value.includes(accountId))
       return
-    saving.value = [...saving.value, accountId]
+    pending.value = [...pending.value, { agent, accountId }]
     failure.value = null
     try {
       const input = { agentId: agent, accountId }
@@ -78,10 +81,11 @@ export function useAgentPeople(agentId: Ref<string | null>) {
         allowed.value = withAccess(allowed.value, accountId, output.accounts.map(account => account.accountId))
     }
     catch (cause) {
-      failure.value = { accountId, message: cause instanceof Error ? cause.message : 'Access could not be changed.' }
+      if (agentId.value === agent)
+        failure.value = { accountId, message: cause instanceof Error ? cause.message : 'Access could not be changed.' }
     }
     finally {
-      saving.value = saving.value.filter(account => account !== accountId)
+      pending.value = pending.value.filter(item => item.agent !== agent || item.accountId !== accountId)
     }
   }
 
