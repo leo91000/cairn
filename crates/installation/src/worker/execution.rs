@@ -542,6 +542,77 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn transport_failure_schedules_only_confirmed_provider_ending_for_current_attempt() {
+        let root = tempfile::tempdir().unwrap();
+        let service = Service::new(crate::config::Config {
+            data_dir: root.path().join("data"),
+            home: root.path().join("home"),
+            workspace_roots: vec![root.path().into()],
+            public_url: "http://localhost:4310".into(),
+            host: "127.0.0.1".into(),
+            port: 0,
+            codex_bin: "codex".into(),
+            claude_bin: "claude".into(),
+            opencode_bin: "opencode".into(),
+            opencode_go_usage_url: crate::accounts::opencode::USAGE_URL.into(),
+            concurrency: 1,
+            logger: false,
+            worker_enabled: false,
+            runner_url: String::new(),
+        })
+        .await
+        .unwrap();
+        for same in [true, false] {
+            let id = crate::config::id();
+            let run =
+                json!({ "id": id, "taskId": id, "status": "running", "sessionId": "session" });
+            service
+                .store
+                .transaction(move |db| db.add_run_fixture(&run, None).map(|_| ()))
+                .await
+                .unwrap();
+            let cause = crate::run_retry::Cause::classify(
+                &json!({ "code": "server_overloaded", "message": "Provider busy" }),
+            )
+            .unwrap();
+            let mut saved = RunCheckpoint::from_value(json!({
+                "prepared": { "backend": "firecracker", "isolated": true },
+                "runnerId": "current", "providerFailureAttempt": if same { "current" } else { "old" },
+                "completed": false, "terminalCode": 1, "outputInterrupted": true,
+                "remainingMs": null, "controllerRecoveries": 3,
+            })).unwrap();
+            saved.retry_cause = Some(Some(cause));
+            saved.store(&service.store, &id).await.unwrap();
+            let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), saved);
+            record_failure(
+                &service,
+                &checkpoint,
+                &CancellationToken::new(),
+                &Error::unavailable("Transport lost"),
+                &[],
+            )
+            .await
+            .unwrap();
+            let state = service.store.run_state(&id).await.unwrap();
+            let saved = RunCheckpoint::load(&service.store, &id)
+                .await
+                .unwrap()
+                .unwrap();
+            if same {
+                assert_eq!(state.status, RunStatus::Queued);
+                assert_eq!(state.retry.unwrap().cause.message, "Provider busy");
+                assert!(saved.has_provider_retry_reservation());
+            } else {
+                assert_eq!(state.status, RunStatus::Failed);
+                assert!(state.retry.is_none());
+                assert!(!saved.has_provider_retry_reservation());
+            }
+            assert_eq!(saved.controller_recoveries(), 3);
+        }
+        service.shutdown.cancel();
+    }
+
+    #[tokio::test]
     async fn capacity_refunds_only_paid_rejected_current_attempt() {
         let root = tempfile::tempdir().unwrap();
         let service = Service::new(crate::config::Config {
