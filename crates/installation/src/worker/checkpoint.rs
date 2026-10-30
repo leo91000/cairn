@@ -38,6 +38,9 @@ pub struct RunCheckpoint {
     /// A new explicit turn is queued but has not yet acquired an attempt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turn_pending: Option<bool>,
+    /// Absolute deadline while fencing an interrupted attempt, retained across crashes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_deadline_ms: Option<i64>,
     /// `null` means the run has no time limit; absent means its budget is spent.
     #[serde(default, with = "nullable", skip_serializing_if = "Option::is_none")]
     pub remaining_ms: Nullable<i64>,

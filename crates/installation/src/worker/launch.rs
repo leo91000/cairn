@@ -234,6 +234,7 @@ impl Execution<'_> {
                 checkpoint.runner_id = Some(Some(saved_runner));
                 checkpoint.controller_recovery_reservation = None;
                 checkpoint.turn_pending = None;
+                checkpoint.recovery_deadline_ms = None;
                 checkpoint.terminal_code = None;
                 checkpoint.node_id = Some(node);
                 checkpoint.runtime_id = Some(Some(runtime));
@@ -813,6 +814,7 @@ impl Execution<'_> {
                 c.runner_id = Some(Some(runner.clone()));
                 c.controller_recovery_reservation = None;
                 c.turn_pending = None;
+                c.recovery_deadline_ms = None;
                 c.terminal_code = None;
                 c.node_id = Some(node_id);
                 c.runtime_id = Some(Some(runtime_id));
@@ -997,6 +999,7 @@ impl Execution<'_> {
             .update(|c| {
                 c.process = Some(identity);
                 c.turn_pending = None;
+                c.recovery_deadline_ms = None;
                 c.launched = Some(true);
                 c.start_rejected = Some(false);
                 c.output_interrupted = None;

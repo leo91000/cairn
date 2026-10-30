@@ -1221,6 +1221,7 @@ pub(crate) async fn tick_missions(s: &Service, active: &HashSet<String>) -> Resu
                 checkpoint.completed = Some(false);
                 checkpoint.output_interrupted = None;
                 checkpoint.turn_pending = Some(true);
+                checkpoint.recovery_deadline_ms = None;
                 checkpoint.terminal_code = Some(None);
                 checkpoint.settled = Some(None);
                 checkpoint.last_message = None;

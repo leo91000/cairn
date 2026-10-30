@@ -450,20 +450,37 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
     let new_turn = checkpoint
         .as_ref()
         .is_some_and(|saved| saved.turn_pending == Some(true));
-    let recovery_deadline = (!parked && !new_turn)
-        .then(|| {
-            checkpoint
-                .as_ref()
-                .and_then(|saved| match saved.remaining_ms {
-                    Some(Some(remaining)) => Some(now().saturating_add(remaining)),
-                    Some(None) | None => None,
-                })
-        })
-        .flatten();
     let expected_attempt = checkpoint
         .as_ref()
         .and_then(RunCheckpoint::runner_id)
         .map(str::to_owned);
+    let recovery_deadline = if !parked && !new_turn {
+        let id = run_id.to_owned();
+        let expected = expected_attempt.clone();
+        s.store
+            .transaction(move |db| {
+                let Some(mut saved) = RunCheckpoint::load_in(db, &id)? else {
+                    return Ok(None);
+                };
+                if saved.runner_id() != expected.as_deref() {
+                    return Ok(None);
+                }
+                let deadline = saved
+                    .recovery_deadline_ms
+                    .or_else(|| match saved.remaining_ms {
+                        Some(Some(remaining)) => Some(now().saturating_add(remaining)),
+                        Some(None) | None => None,
+                    });
+                if saved.recovery_deadline_ms != deadline {
+                    saved.recovery_deadline_ms = deadline;
+                    saved.store_in(db, &id)?;
+                }
+                Ok(deadline)
+            })
+            .await?
+    } else {
+        None
+    };
     let state = s.store.run_state(run_id).await?;
     if state.cancel_requested_at.is_none()
         && let Some(saved) = checkpoint.as_mut()
@@ -572,7 +589,23 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
     if !parked && !cannot_replay && !crate::nodes::moves::advance(s, run).await? {
         return Ok(false);
     }
-    recovery::fence(s, run).await?;
+    let fenced = recovery::fence(s, run).await;
+    if let Some(deadline) = recovery_deadline {
+        let id = run_id.to_owned();
+        let expected = expected_attempt.clone();
+        s.store
+            .transaction(move |db| {
+                if let Some(mut saved) = RunCheckpoint::load_in(db, &id)?
+                    && saved.runner_id() == expected.as_deref()
+                {
+                    saved.remaining_ms = Some(Some(deadline.saturating_sub(now()).max(0)));
+                    saved.store_in(db, &id)?;
+                }
+                Ok(())
+            })
+            .await?;
+    }
+    fenced?;
     if cannot_replay && !parked {
         crate::nodes::moves::abort_terminal_recovery(s, run_id).await?;
     }
@@ -958,6 +991,55 @@ mod tests {
             service.store.run_state(&run).await.unwrap().status,
             RunStatus::Failed
         );
+        service.shutdown.cancel();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn failed_fences_spend_the_same_durable_deadline() {
+        use axum::{Router, routing::any};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let allow = Arc::new(AtomicBool::new(false));
+        let enabled = allow.clone();
+        let app = Router::new().fallback(any(move || {
+            let enabled = enabled.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                if enabled.load(Ordering::SeqCst) {
+                    axum::http::StatusCode::NO_CONTENT
+                } else {
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE
+                }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (_root, service, _chat, run, _workspace) =
+            fixture_with_runner(format!("http://{address}")).await;
+        let saved = RunCheckpoint::from_value(json!({
+            "prepared": { "backend": "native", "isolated": true },
+            "runnerId": "old-attempt", "completed": true, "terminalCode": 0,
+            "remainingMs": 350,
+        }))
+        .unwrap();
+        saved.store(&service.store, &run).await.unwrap();
+        for _ in 0..2 {
+            assert!(
+                recover(&service, &service.store.run(&run).await.unwrap())
+                    .await
+                    .is_err()
+            );
+        }
+        allow.store(true, Ordering::SeqCst);
+        assert!(
+            !recover(&service, &service.store.run(&run).await.unwrap())
+                .await
+                .unwrap()
+        );
+        let state = service.store.run_state(&run).await.unwrap();
+        assert_eq!(state.status, RunStatus::Failed);
+        assert_eq!(state.error.as_deref(), Some("Run exceeded its time limit."));
         service.shutdown.cancel();
         server.abort();
     }
