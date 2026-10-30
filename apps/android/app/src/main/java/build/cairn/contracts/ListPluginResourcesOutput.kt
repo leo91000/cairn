@@ -7,7 +7,9 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class ListPluginResourcesOutput(
     val items: List<PluginResource>,
-    val nextPage: Long?,
+    val nextPage: Int?,
 ) {
-    init {}
+    init {
+        nextPage?.let { require(it in 1..10000) }
+    }
 }

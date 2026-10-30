@@ -5984,7 +5984,13 @@ async fn resource_reads_match_http_public_mcp_and_installation_with_live_grants(
     ] {
         let http = common::send(
             &app,
-            common::request("GET", &path).body(Body::empty()).unwrap(),
+            common::request("GET", &path)
+                .extension(cairn_installation::auth::InstallationIdentity::trusted(
+                    cairn_installation::auth::InstallationRole::Owner,
+                    "fixture-owner",
+                ))
+                .body(Body::empty())
+                .unwrap(),
         )
         .await;
         assert_eq!(http.status(), StatusCode::OK);
@@ -6017,4 +6023,133 @@ async fn resource_reads_match_http_public_mcp_and_installation_with_live_grants(
     )
     .await;
     assert_eq!(refused["result"]["isError"], true, "{refused}");
+}
+
+#[tokio::test]
+async fn resource_handlers_stop_service_effects_when_the_initiating_authority_is_revoked() {
+    use axum::{Json, Router, routing::get};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Notify;
+
+    for internal in [false, true] {
+        let root = TempDir::new().unwrap();
+        let s = service(&root).await;
+        s.plugins
+            .use_worker(std::path::PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
+        let main = enabled_main(&s).await;
+        let (run, configuration) = active_run(&s, &main).await;
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let second_calls = Arc::new(AtomicUsize::new(0));
+        let upstream = Router::new()
+            .route(
+                "/hold",
+                get({
+                    let started = started.clone();
+                    let release = release.clone();
+                    move || {
+                        let started = started.clone();
+                        let release = release.clone();
+                        async move {
+                            started.notify_one();
+                            release.notified().await;
+                            Json(json!({}))
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/second",
+                get({
+                    let calls = second_calls.clone();
+                    move || {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        async { Json(json!({})) }
+                    }
+                }),
+            );
+        let (origin, server) = common::serve_locally(upstream).await;
+        s.plugins.route_http_to(Some(origin));
+        let installed = common::package_install(&s, &json!({
+            "manifest": {
+                "id": "resource-fence", "name": "Resource fence", "version": "1", "apiVersion": 2,
+                "capabilities": ["http"], "hosts": ["api.example.test"], "agentAccess": {},
+                "resources": [{ "name": "repository", "description": "Repository" }],
+            },
+            "source": r#"return {resources = function(input)
+                pcall(function() cairn.http.request({url = "https://api.example.test/hold"}) end)
+                pcall(function() cairn.http.request({url = "https://api.example.test/second"}) end)
+                return {items = cairn.array({})}
+            end}"#,
+        })).await.unwrap();
+        common::package_approve(&s, "resource-fence", "1", text(&installed, "digest"))
+            .await
+            .unwrap();
+        let saved = common::save_plugin(
+            &s,
+            "resource-fence",
+            &json!({
+                "name": "Private", "enabled": true, "agentIds": [MAIN_AGENT_ID],
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+        // The run's prior plugin snapshot need not grant this account: installation
+        // resource reads check the agent's current instance grant on every effect.
+        let token = common::relay_fixture::grant(&s, &["read"]).await;
+        let app = common::relay_fixture::router(s.clone()).await.unwrap();
+        let args = json!({
+            "pluginId": "resource-fence", "instanceId": saved["id"], "resourceType": "repository",
+        });
+        let invoke = async {
+            if internal {
+                call(&s, &configuration, "list_plugin_resources", args).await
+            } else {
+                let response = common::send(
+                    &app,
+                    common::request("POST", "/mcp")
+                        .header("authorization", format!("Bearer {token}"))
+                        .body(Body::from(
+                            json!({
+                                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                "params": common::mcp_arguments("list_plugin_resources", &args),
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::OK);
+                common::read_json(response).await
+            }
+        };
+        let revoke = async {
+            started.notified().await;
+            if internal {
+                s.mcps.revoke_run(&s, text(&run, "id")).await.unwrap();
+            } else {
+                s.store
+                    .delete(&format!(
+                        "test-relay:{}",
+                        cairn_installation::auth::digest(&token)
+                    ))
+                    .await
+                    .unwrap();
+            }
+            release.notify_one();
+        };
+        let (response, ()) = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            tokio::join!(Box::pin(invoke), Box::pin(revoke))
+        })
+        .await
+        .unwrap();
+        assert_eq!(response["result"]["isError"], true, "{response}");
+        assert_eq!(
+            second_calls.load(Ordering::SeqCst),
+            0,
+            "internal={internal}"
+        );
+        server.abort();
+    }
 }

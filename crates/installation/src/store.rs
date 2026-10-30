@@ -1343,7 +1343,7 @@ mod schema_tests {
     }
 
     #[test]
-    fn version_fourteen_upgrade_adds_hook_queues_without_touching_existing_work() {
+    fn version_nineteen_upgrade_adds_hook_queues_without_touching_existing_work() {
         let root = tempfile::tempdir().unwrap();
         drop(Store::open(root.path()).unwrap());
         let file = root.path().join("manager.db");

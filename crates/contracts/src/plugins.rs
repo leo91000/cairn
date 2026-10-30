@@ -488,6 +488,8 @@ pub struct ListPluginResourcesInput {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ListPluginResourcesOutput {
     pub items: Vec<PluginResource>,
+    #[schemars(range(min = 1_i64, max = 10000_i64))]
+    #[ts(type = "number | null")]
     pub next_page: Option<i64>,
 }
 

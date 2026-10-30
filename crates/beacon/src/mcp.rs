@@ -201,13 +201,23 @@ pub(super) async fn still_authorized(
     Ok(access(service, credential_digest).await?.is_some())
 }
 
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(super) enum PluginAuthorizationScope {
+    Read,
+    #[default]
+    Manage,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct PluginAuthorizationCheck {
     credential_digest: String,
+    #[serde(default)]
+    scope: PluginAuthorizationScope,
 }
 
-/// An authenticated installation may revalidate its own pending plugin publications.
+/// An authenticated installation revalidates the scope of its pending plugin work.
 pub(super) async fn plugin_authorization(
     State(service): State<Service>,
     Path(installation): Path<String>,
@@ -241,7 +251,12 @@ pub(super) async fn plugin_authorization(
     let authorized = access(&service, &input.credential_digest)
         .await?
         .is_some_and(|grant| {
-            grant.installation == installation && grant.scopes.iter().any(|scope| scope == "manage")
+            let required_scope = match input.scope {
+                PluginAuthorizationScope::Read => "read",
+                PluginAuthorizationScope::Manage => "manage",
+            };
+            grant.installation == installation
+                && grant.scopes.iter().any(|scope| scope == required_scope)
         });
     Ok((
         [(axum::http::header::CACHE_CONTROL, "no-store")],

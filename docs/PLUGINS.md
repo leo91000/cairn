@@ -1206,7 +1206,13 @@ resources = function(input)
     end
     -- input.op == "resolve", input.resourceType, input.id
     -- Resolve the exact ID, or fail when missing/inaccessible. Root: parent = nil.
-    return { resourceType = "server", id = input.id, name = "Team" }
+    if input.resourceType == "channel" and input.id == "200" then
+        return { resourceType = "channel", id = "200", name = "Support",
+                 parent = { resourceType = "server", id = "100" } }
+    elseif input.resourceType == "server" and input.id == "100" then
+        return { resourceType = "server", id = "100", name = "Team" }
+    end
+    error("Resource not found")
 end
 ```
 
@@ -1230,7 +1236,7 @@ Read surfaces share these implementations:
   MCP requires `read`. Installation agents also need a current grant on the
   instance, because discovery uses its service credentials; installation access
   alone does not confer access to the service account. Authorization and instance
-  grants are checked again after the handler. Generated web/Android clients use
+  grants are checked before each host capability, after slow I/O and after the handler. Generated web/Android clients use
   the same typed contracts; no picker UI is introduced in this ticket.
 
 Transport (`socket`) and durable `timer` handlers can emit declared hooks:

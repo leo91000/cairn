@@ -287,7 +287,7 @@ async fn empty_version13_pool_upgrades_and_unrelated_foreign_key_failure_rolls_b
 }
 
 #[tokio::test]
-async fn real_version12_database_completes_both_atomic_upgrades() {
+async fn real_version12_database_completes_all_atomic_upgrades() {
     let root = tempfile::tempdir().unwrap();
     let db = Connection::open(root.path().join("manager.db")).unwrap();
     db.execute_batch(include_str!("../../../tests/fixtures/account-pool-v12.sql"))

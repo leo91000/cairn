@@ -61,6 +61,8 @@
     },
     "nextPage": {
       "format": "int64",
+      "maximum": 10000,
+      "minimum": 1,
       "type": [
         "integer",
         "null"

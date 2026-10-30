@@ -1,6 +1,6 @@
 //! Bounded resource discovery and host-resolved ancestry for pickers and grants.
 use super::{
-    connections, registry,
+    connections, management, registry,
     scope::{self, Scope},
 };
 use crate::{
@@ -45,6 +45,7 @@ async fn instance(
     instance: &str,
     kind: &str,
     agent: Option<&str>,
+    authority: Option<management::Authority>,
 ) -> Result<(registry::Package, Scope)> {
     let package = registry::active(s, plugin).await?;
     if package.manifest.resource_type(kind).is_none() {
@@ -69,6 +70,10 @@ async fn instance(
     } else {
         Scope::Instance(Box::new(connection))
     };
+    let scope = match authority {
+        Some(authority) => Scope::Managed(Box::new(scope), authority),
+        None => scope,
+    };
     Ok((package, scope))
 }
 
@@ -76,6 +81,15 @@ pub async fn list(
     s: &Service,
     input: ListPluginResourcesInput,
     agent: Option<&str>,
+) -> Result<ListPluginResourcesOutput> {
+    list_authorized(s, input, agent, None).await
+}
+
+pub(crate) async fn list_authorized(
+    s: &Service,
+    input: ListPluginResourcesInput,
+    agent: Option<&str>,
+    authority: Option<management::Authority>,
 ) -> Result<ListPluginResourcesOutput> {
     if !(1..=10_000).contains(&input.page)
         || input.query.chars().count() > 200
@@ -91,6 +105,7 @@ pub async fn list(
         &input.instance_id.to_string(),
         &input.resource_type,
         agent,
+        authority,
     )
     .await?;
     let result = scope::invoke(
@@ -137,6 +152,15 @@ pub async fn resolve(
     input: ResolvePluginResourceInput,
     agent: Option<&str>,
 ) -> Result<ResolvePluginResourceOutput> {
+    resolve_authorized(s, input, agent, None).await
+}
+
+pub(crate) async fn resolve_authorized(
+    s: &Service,
+    input: ResolvePluginResourceInput,
+    agent: Option<&str>,
+    authority: Option<management::Authority>,
+) -> Result<ResolvePluginResourceOutput> {
     if !plain(&input.id, 200) {
         return Err(Error::bad("Choose a resource ID of at most 200 bytes."));
     }
@@ -146,6 +170,7 @@ pub async fn resolve(
         &input.instance_id.to_string(),
         &input.resource_type,
         agent,
+        authority,
     )
     .await?;
     let mut target = PluginResourceRef {

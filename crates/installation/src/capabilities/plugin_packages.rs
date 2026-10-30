@@ -87,6 +87,7 @@ pub(crate) struct Authority {
     pub bearer: Option<String>,
     owner: Option<cairn_protocol::TaskAuthorGrant>,
     public_credential: Option<String>,
+    public_scope: Option<&'static str>,
 }
 
 impl Authority {
@@ -117,12 +118,18 @@ impl Authority {
             bearer: None,
             owner: Some(policy.owner),
             public_credential: None,
+            public_scope: None,
         })
     }
 
     pub(crate) async fn recheck(&self, s: &Service) -> Result<()> {
         if let Some(credential) = &self.public_credential {
-            crate::relay::authorize_plugin_mcp(s, credential).await?;
+            crate::relay::authorize_plugin_mcp_scope(
+                s,
+                credential,
+                self.public_scope.unwrap_or("manage"),
+            )
+            .await?;
         }
         if let Some(expected) = &self.owner {
             let policy = crate::relay::task_author_policy(s).await?.ok_or_else(|| {
@@ -202,6 +209,17 @@ impl PluginPackageOperation {
         input: Value,
         context: ResumeContext,
     ) -> Result<Value> {
+        // Resource handlers add sizeable futures to this shared dispatcher. Keep
+        // that state off its HTTP/MCP callers' stacks, including nested preparation.
+        Box::pin(self.invoke_inner(s, input, context)).await
+    }
+
+    async fn invoke_inner(
+        &self,
+        s: &Arc<Service>,
+        input: Value,
+        context: ResumeContext,
+    ) -> Result<Value> {
         let owner = matches!(context, ResumeContext::Human(_));
         let authority = match context {
             ResumeContext::Installation(bearer) => Authority {
@@ -226,6 +244,7 @@ impl PluginPackageOperation {
                 }
                 Authority {
                     public_credential: credential,
+                    public_scope: Some(self.scope),
                     ..Default::default()
                 }
             }
@@ -259,9 +278,25 @@ impl PluginPackageOperation {
                     .as_ref()
                     .map(|run| crate::validation::text(&run["snapshot"]["agent"], "id"));
                 let result = if self.name == "list_plugin_resources" {
-                    serde_json::to_value(resources::list(s, decode(input)?, agent).await?)?
+                    serde_json::to_value(
+                        Box::pin(resources::list_authorized(
+                            s,
+                            decode(input)?,
+                            agent,
+                            Some(management::Authority::resource_read(authority.clone())),
+                        ))
+                        .await?,
+                    )?
                 } else {
-                    serde_json::to_value(resources::resolve(s, decode(input)?, agent).await?)?
+                    serde_json::to_value(
+                        Box::pin(resources::resolve_authorized(
+                            s,
+                            decode(input)?,
+                            agent,
+                            Some(management::Authority::resource_read(authority.clone())),
+                        ))
+                        .await?,
+                    )?
                 };
                 authority.recheck(s).await?;
                 result
