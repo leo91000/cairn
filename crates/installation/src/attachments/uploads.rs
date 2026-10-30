@@ -241,6 +241,21 @@ pub(crate) async fn reconcile(store: &Store, root: &Path) -> Result<()> {
 }
 
 pub(crate) async fn expire(store: &Store, root: &Path) -> Result<()> {
+    // Idle scheduler passes must remain readers when there is nothing to clean.
+    let has_expired_reservations = store
+        .read(|db| {
+            Ok(db
+                .0
+                .prepare_cached(
+                    "SELECT 1 FROM attachment_reservations WHERE expires_at<=? LIMIT 1",
+                )?
+                .exists([now()])?)
+        })
+        .await?;
+    if !has_expired_reservations {
+        return Ok(());
+    }
+
     let expired = store.transaction(|db| {
         let expired = db.0.prepare("DELETE FROM attachment_reservations WHERE expires_at<=? RETURNING chat_id,id,token")?
             .query_map([now()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))?
