@@ -5,6 +5,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import build.cairn.app.data.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
@@ -32,7 +33,8 @@ fun BackendMigration(vm: CairnViewModel, runId: String, onCompleted: () -> Unit 
     var state by remember(runId) { mutableStateOf<BackendMigrationState?>(null) }
     var destination by remember(runId) { mutableStateOf("") }
     var confirm by remember(runId) { mutableStateOf(false) }
-    var busy by remember(runId) { mutableStateOf(false) }
+    val workspace by vm.state.collectAsStateWithLifecycle()
+    val busy = workspace.busy
     var completed by remember(runId) { mutableStateOf(false) }
     var error by remember(runId) { mutableStateOf<String?>(null) }
     suspend fun load() {
@@ -133,26 +135,26 @@ fun BackendMigration(vm: CairnViewModel, runId: String, onCompleted: () -> Unit 
             error = error,
             dismiss = { confirm = false },
         ) {
-            busy = true
-            vm.perform {
-                try {
-                    api.request(
-                        "POST",
-                        "/nodes/placement/$runId/backend-migration",
-                        buildJsonObject {
-                            put("nodeId", destination)
-                            put("backend", value.toBackend)
-                            put("confirm", true)
-                        },
-                    )
-                    state = value.copy(pending = true)
-                    confirm = false
-                    load()
-                } catch (e: Exception) {
-                    error = e.message
-                } finally {
-                    busy = false
+            if (
+                !vm.tryPerform {
+                    try {
+                        api.request(
+                            "POST",
+                            "/nodes/placement/$runId/backend-migration",
+                            buildJsonObject {
+                                put("nodeId", destination)
+                                put("backend", value.toBackend)
+                                put("confirm", true)
+                            },
+                        )
+                        state = value.copy(pending = true)
+                        confirm = false
+                        load()
+                    } catch (e: Exception) {
+                        error = e.message
+                    }
                 }
-            }
+            )
+                error = "Une autre opération est en cours. Réessayez."
         }
 }
