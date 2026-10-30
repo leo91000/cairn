@@ -31,7 +31,8 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun rejectedQuotaSwitchRemainsVisibleAfterOptionsRefresh() =
-        conversation("running", quota = true, codingAgentChoices = true, rejectSwitch = true) {
+        conversation("running", quota = true, codingAgentChoices = true, rejectSwitch = true) { _, _
+            ->
             compose.waitUntil(5000) {
                 compose
                     .onAllNodesWithText("Continuer avec Codex")
@@ -56,7 +57,7 @@ abstract class BackgroundWaitCases {
             quota = true,
             codingAgentChoices = true,
             initialAlternatives = "unavailable",
-        ) {
+        ) { _, _ ->
             compose.waitUntil(15000) {
                 compose
                     .onAllNodesWithText("Continuer avec Codex")
@@ -73,7 +74,7 @@ abstract class BackgroundWaitCases {
             quota = true,
             codingAgentChoices = true,
             initialAlternatives = "error",
-        ) {
+        ) { _, _ ->
             compose.waitUntil(15000) {
                 compose
                     .onAllNodesWithText("Continuer avec Codex")
@@ -125,7 +126,7 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun recoveredQuotaDoesNotRestoreDuplicateErrors() =
-        conversation("succeeded", quota = true) {
+        conversation("succeeded", quota = true) { _, _ ->
             compose.onNodeWithTag("chat-quota").assertDoesNotExist()
             compose.onNodeWithText(SPEND_LIMIT).assertDoesNotExist()
             compose.onNodeWithText("L’agent a rencontré une erreur").assertDoesNotExist()
@@ -134,7 +135,7 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun quotaWaitFoldsDuplicateErrorsAndExpandsOneTechnicalMessage() =
-        conversation("running", quota = true) {
+        conversation("running", quota = true) { _, _ ->
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
             compose
                 .onAllNodesWithText("Limite de dépense Claude Code atteinte")
@@ -185,7 +186,7 @@ abstract class BackgroundWaitCases {
                         ),
                     )
             },
-        ) {
+        ) { _, _ ->
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
             compose.onNodeWithText("Quota Claude Code atteint").assertIsDisplayed()
             compose
@@ -200,7 +201,7 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun quotaWaitRemainsAutomaticWhileFollowupQueueIsPaused() =
-        conversation("running", quota = true, paused = true) {
+        conversation("running", quota = true, paused = true) { _, _ ->
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
             compose.onNodeWithText("En pause").assertExists()
             compose
@@ -212,7 +213,7 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun aMemberWithoutAccessSeesWhyTheConversationStoppedWithoutItsActions() =
-        conversation("failed", quota = true, readOnly = true) {
+        conversation("failed", quota = true, readOnly = true) { _, _ ->
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
             compose.onNodeWithText("Limite de dépense Claude Code atteinte").assertExists()
             compose.onNodeWithText("Reprendre la conversation").assertDoesNotExist()
@@ -343,7 +344,7 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun relayedBackgroundWaitReplacesWorking() =
-        conversation("running") {
+        conversation("running") { _, _ ->
             compose.onNodeWithTag("agent-waiting").assertExists()
             compose.onAllNodesWithTag("agent-working").assertCountEquals(0)
             compose
@@ -388,7 +389,7 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun failedResponseBannerCanBeDismissed() =
-        conversation("failed") {
+        conversation("failed") { _, _ ->
             val message =
                 "La réponse s’est arrêtée avant la fin. Reprenez la conversation pour continuer."
             compose.onNodeWithText(message).assertIsDisplayed()
@@ -400,7 +401,7 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun scheduledSleepDisplaysAutomaticResumeWithoutWorkingIndicator() =
-        conversation("succeeded", sleeping = true) {
+        conversation("succeeded", sleeping = true) { _, _ ->
             compose
                 .onNodeWithText("Reprise dans 7 min", substring = true, useUnmergedTree = true)
                 .assertExists()
@@ -417,7 +418,7 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun conditionWaitShowsResultAndDeadlineWithoutWorkingIndicator() =
-        conversation("succeeded", conditional = true) {
+        conversation("succeeded", conditional = true) { _, _ ->
             compose
                 .onNodeWithText(
                     "Résultat attendu · 7 min max",
@@ -492,7 +493,7 @@ abstract class BackgroundWaitCases {
                     ),
                 )
             },
-        ) {
+        ) { _, _ ->
             compose.waitUntil(10000) {
                 compose.onAllNodesWithText("Agent principal").fetchSemanticsNodes().size == 2
             }
