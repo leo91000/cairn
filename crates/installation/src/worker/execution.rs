@@ -801,7 +801,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn confirmed_provider_failure_keeps_its_policy_when_terminal_transport_is_lost() {
+    async fn provider_failure_with_lost_terminal_result_never_replays() {
         let root = tempfile::tempdir().unwrap();
         let service = Service::new(crate::config::Config {
             data_dir: root.path().join("data"),
@@ -821,7 +821,7 @@ mod tests {
         })
         .await
         .unwrap();
-        for (code, retryable) in [("server_error", true), ("authentication_error", false)] {
+        for code in ["server_error", "authentication_error"] {
             let id = crate::config::id();
             let record = json!({
                 "id": id,
@@ -882,12 +882,12 @@ mod tests {
                 "a confirmed provider outcome does not spend controller recoveries"
             );
             let state = service.store.run_state(&id).await.unwrap();
-            if retryable {
-                assert_eq!(state.retry.unwrap().attempt, 1);
-            } else {
-                assert!(state.retry.is_none());
-                assert_eq!(saved.settled().unwrap().status, RunStatus::Failed);
-            }
+            assert!(state.retry.is_none());
+            assert_eq!(saved.settled().unwrap().status, RunStatus::Failed);
+            assert_eq!(
+                saved.settled().unwrap().summary.as_deref(),
+                Some("Confirmed provider failure")
+            );
         }
         service.shutdown.cancel();
     }

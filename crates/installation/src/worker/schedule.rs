@@ -1989,6 +1989,8 @@ mod tests {
                 let saved = RunCheckpoint::from_value(json!({
                     "prepared": {"backend":"native","isolated":true}, "runnerId":format!("attempt-{attempt}"),
                     "remainingMs":null,"completed":false,"terminalCode":1,"controllerRecoveries":3,
+                    "providerFailureAttempt":format!("attempt-{attempt}"),
+                    "providerRetryReservation":format!("attempt-{attempt}"),
                     "retryCause":cause,
                 }))?;
                 saved.store_in(db, &run)?;
