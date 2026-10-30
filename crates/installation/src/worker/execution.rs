@@ -1101,6 +1101,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_mode_recovery_is_paid_and_admitted_after_fencing() {
+        use axum::{Router, routing::any};
+        let app = Router::new().fallback(any(|| async { axum::http::StatusCode::NO_CONTENT }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let root = tempfile::tempdir().unwrap();
+        let service = Service::new(crate::config::Config {
+            data_dir: root.path().join("data"),
+            home: root.path().join("home"),
+            workspace_roots: vec![root.path().into()],
+            public_url: "http://localhost:4310".into(),
+            host: "127.0.0.1".into(),
+            port: 0,
+            codex_bin: "codex".into(),
+            claude_bin: "claude".into(),
+            opencode_bin: "opencode".into(),
+            opencode_go_usage_url: crate::accounts::opencode::USAGE_URL.into(),
+            concurrency: 1,
+            logger: false,
+            worker_enabled: false,
+            runner_url: format!("http://{address}"),
+        })
+        .await
+        .unwrap();
+        for (count, forbidden, cancelled) in [
+            (3, false, false),
+            (4, false, false),
+            (3, true, false),
+            (3, false, true),
+        ] {
+            let id = crate::config::id();
+            let run = json!({ "id": id, "taskId": id, "status": "running", "createdAt": now(),
+                "nativeModeInterruption": crate::config::id(),
+                "snapshot": { "agent": { "id": crate::config::MAIN_AGENT_ID, "provider": "codex" } } });
+            service
+                .store
+                .transaction(move |db| db.add_run_fixture(&run, None).map(|_| ()))
+                .await
+                .unwrap();
+            let saved = RunCheckpoint::from_value(json!({
+                "prepared": { "backend": "native", "isolated": true }, "runnerId": crate::config::id(),
+                "completed": false, "terminalCode": null, "remainingMs": null,
+                "controllerRecoveries": count,
+            })).unwrap();
+            saved.store(&service.store, &id).await.unwrap();
+            let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), saved);
+            let cancel = CancellationToken::new();
+            if cancelled {
+                cancel.cancel();
+            }
+            let error = if forbidden {
+                Error::forbidden("Native admission revoked")
+            } else {
+                Error::unavailable("Controlled native stop")
+            };
+            record_failure(&service, &checkpoint, &cancel, &error, &[])
+                .await
+                .unwrap();
+            let reserved = RunCheckpoint::load(&service.store, &id)
+                .await
+                .unwrap()
+                .unwrap();
+            if forbidden || cancelled {
+                assert!(!reserved.has_controller_recovery_reservation());
+                assert!(reserved.settled().is_some());
+            } else {
+                assert_eq!(reserved.controller_recoveries(), count + 1);
+                assert!(reserved.has_controller_recovery_reservation());
+            }
+            // Fencing uses only the disposable controller; tick then settles the
+            // durable reservation before any new placement can be admitted.
+            service.worker.tick(&service).await.unwrap();
+            let current = service.store.run_state(&id).await.unwrap();
+            if forbidden || cancelled {
+                assert_eq!(
+                    current.status,
+                    if cancelled {
+                        RunStatus::Cancelled
+                    } else {
+                        RunStatus::Failed
+                    }
+                );
+            } else {
+                assert_eq!(current.status, RunStatus::Queued);
+                assert!(!current.recovery_pending);
+                let saved = RunCheckpoint::load(&service.store, &id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(saved.has_controller_recovery_reservation());
+                assert_eq!(saved.controller_recoveries(), count + 1);
+            }
+        }
+        service.shutdown.cancel();
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn native_mode_recovery_retries_pre_session_interruptions_but_not_revocations() {
         let root = tempfile::tempdir().unwrap();
         let service = Service::new(crate::config::Config {
