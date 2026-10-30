@@ -144,6 +144,36 @@ Durations use monotonic clocks within each process. Do not subtract wall-clock
 timestamps from different nodes to infer network delay. Logging remains
 observational; it does not send test messages or resume production conversations.
 
+## Node inventory reads
+
+The `node_inventory` operation measures the inventory shared by the web/Android
+node list, public MCP and authorized agent tools. A fresh random operation UUID
+correlates its phases; it is not a node, account or conversation identifier.
+
+- `database_queue`: waiting for a SQLite reader, including queue admission.
+- `records`: loading attempts, volumes and agent grants in one read snapshot.
+- `stale_disks`: checking active executions, moves and checkpoint ownership.
+- `describe`: reading nodes and deriving slots, grants and stale-disk totals.
+- `disk_accounting`: calculating native storage usage and reclaimable bytes.
+
+Each completion records `phase_ms` and `total_ms`; failures or dropped work record
+`incomplete`. These timings include local scheduling and database work. They
+exclude the caller's authentication, local-runner refresh, network and UI rendering.
+Logs contain fixed phase names and durations, never stored prompts, checkpoints,
+paths or request bodies. No diagnostic rows are written to SQLite.
+
+Run the synthetic inventory benchmark with:
+
+```sh
+pnpm test:backend -p cairn-installation --test node_inventory_performance -- --ignored --nocapture --test-threads=1
+```
+
+It varies saved snapshots and checkpoints across 300 materialized volumes and
+checks stale-disk and unsynchronized-byte results. Measurements are local reads
+through the shipped inventory function, not production HTTP or disk-transfer
+measurements. Keep raw measurements outside tracked files and include the
+reference comparison and host conditions in the PR description.
+
 ## VM import timings
 
 VM imports emit structured records under the existing `cairn_performance` target.
