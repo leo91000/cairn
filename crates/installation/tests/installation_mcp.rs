@@ -1261,6 +1261,16 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "cancel_coding_agent_account_sign_in",
         "delete_coding_agent_account",
     ]);
+    public_names.extend([
+        "mark_read",
+        "set_outcome_aside",
+        "get_installation_settings",
+        "get_installation_overview",
+        "list_audit",
+        "get_storage_settings",
+        "save_storage_settings",
+        "check_storage",
+    ]);
     assert_eq!(installed_names, public_names);
     assert!(tools.iter().all(|tool| tool.get("_meta").is_none()));
     let deletion = tools
@@ -5310,4 +5320,161 @@ async fn agents_follow_owner_sign_in_without_challenge_or_mutation_authority() {
     .await;
     assert_eq!(deleted["kind"], "completed");
     assert!(s.store.coding_account(id).await.unwrap().is_none());
+}
+
+/// Settings, overview, audit and redacted storage read the same on HTTP and both tools.
+/// Credentials stay owner-only in the apps and never appear in any output.
+#[tokio::test]
+async fn installation_settings_audit_and_storage_match_on_every_surface() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    std::fs::write(
+        s.config.data_dir.join("storage-s3.json"),
+        json!({
+            "bucket": "cairn-disks", "endpoint": "https://s3.example.test", "region": "eu-west-3",
+            "accessKeyId": "fixture-access-key", "secretAccessKey": "fixture-secret-key",
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
+    let owner = common::RelayContext::new(&common::relay_fixture::context(&s).await);
+    let member = common::RelayContext::new(
+        &common::relay_fixture::member_context(&s, "fixture-member").await,
+    );
+    let public = common::relay_fixture::grant(&s, &["read", "manage"]).await;
+    let http = async |who: &common::RelayContext, method: &str, path: &str, body: Value| {
+        let request = who
+            .authorize(common::request(method, path))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = common::send(&app, request).await;
+        (response.status(), common::read_json(response).await)
+    };
+    let public_call = async |name: &str, args: Value| {
+        let request = common::request("POST", "/mcp")
+            .header("authorization", format!("Bearer {public}"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                    "params": common::mcp_arguments(name, &args),
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        common::read_json(common::send(&app, request).await).await
+    };
+    let (status, _) = http(
+        &owner,
+        "PUT",
+        "/api/settings/conversations",
+        json!({ "inactivityDays": 9 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    for (name, path) in [
+        ("get_installation_settings", "/api/settings"),
+        ("get_installation_overview", "/api/overview"),
+        ("list_audit", "/api/audit"),
+        ("get_storage_settings", "/api/settings/storage"),
+    ] {
+        let (status, expected) = http(&owner, "GET", path, Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "{path}: {expected}");
+        let tool = call(&s, &configuration, name, json!({})).await;
+        assert_eq!(result(&tool), &expected, "{name}");
+        let tool = public_call(name, json!({})).await;
+        assert_eq!(result(&tool), &expected, "{name}");
+        for response in [expected.to_string(), tool.to_string()] {
+            assert!(
+                !response.contains("fixture-access-key")
+                    && !response.contains("fixture-secret-key")
+            );
+        }
+        let (status, _) = http(&member, "GET", path, Value::Null).await;
+        let member_allowed = path == "/api/overview";
+        assert_eq!(status.is_success(), member_allowed, "{path}");
+    }
+    let (_, audit) = http(&owner, "GET", "/api/audit", Value::Null).await;
+    let latest = &audit["entries"][0];
+    assert_eq!(latest["action"], "conversation.retention.updated");
+    assert_eq!(latest["detail"], json!({ "inactivityDays": 9 }).to_string());
+    let (_, storage) = http(&owner, "GET", "/api/settings/storage", Value::Null).await;
+    assert_eq!(
+        storage,
+        json!({
+            "configured": true, "integrated": false, "environmentManaged": false,
+            "bucket": "cairn-disks", "endpoint": "https://s3.example.test", "region": "eu-west-3",
+        })
+    );
+
+    // Storage credentials are configured only by the human owner, in the apps.
+    let replacement = json!({
+        "bucket": "other-disks", "endpoint": "https://s3.example.test", "region": "eu-west-3",
+        "accessKeyId": "agent-key", "secretAccessKey": "agent-secret",
+    });
+    for refused in [
+        call(
+            &s,
+            &configuration,
+            "save_storage_settings",
+            replacement.clone(),
+        )
+        .await,
+        public_call("save_storage_settings", replacement.clone()).await,
+    ] {
+        assert_eq!(refused["result"]["isError"], true, "{refused}");
+        assert!(
+            refused.to_string().contains("Only the installation owner"),
+            "{refused}"
+        );
+        // An actor refusal is not a missing scope: the client is not asked to step up.
+        assert!(
+            refused["result"]["_meta"]["mcp/www_authenticate"].is_null(),
+            "{refused}"
+        );
+    }
+    let (status, _) = http(&member, "PUT", "/api/settings/storage", replacement.clone()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    // The owner's writes still pass the server's bucket and HTTPS checks before any probe.
+    for (field, value) in [
+        ("bucket", "Cairn_Disks"),
+        ("endpoint", "http://s3.example.test"),
+    ] {
+        let mut invalid = replacement.clone();
+        invalid[field] = value.into();
+        let (status, body) = http(&owner, "PUT", "/api/settings/storage", invalid).await;
+        assert!(status.is_client_error(), "{field}: {status} {body}");
+        assert!(!body.to_string().contains("agent-secret"));
+    }
+    let saved: Value =
+        serde_json::from_slice(&std::fs::read(s.config.data_dir.join("storage-s3.json")).unwrap())
+            .unwrap();
+    assert_eq!(saved["bucket"], "cairn-disks");
+
+    // A read-only grant neither probes storage nor changes personal state.
+    let readonly = common::relay_fixture::grant(&s, &["read"]).await;
+    let request = common::request("POST", "/mcp")
+        .header("authorization", format!("Bearer {readonly}"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": common::mcp_arguments("check_storage", &json!({})),
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let denied = common::read_json(common::send(&app, request).await).await;
+    assert_eq!(denied["result"]["isError"], true, "{denied}");
+    assert!(
+        denied["result"]["_meta"]["mcp/www_authenticate"]
+            .as_str()
+            .unwrap()
+            .contains("manage")
+    );
 }

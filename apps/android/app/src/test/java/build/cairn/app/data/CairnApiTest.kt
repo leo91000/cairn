@@ -391,11 +391,6 @@ class CairnApiTest {
                 tags = listOf("release"),
             )
         assertEquals(task, wireJson.decodeFromString<Task>(wireJson.encodeToString(task)))
-        val audit =
-            wireJson.decodeFromString<Audit>(
-                """{"id":1,"created_at":1234,"action":"task.saved","detail":"{}"}"""
-            )
-        assertEquals(1234L, audit.at)
     }
 
     @Test

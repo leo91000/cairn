@@ -273,10 +273,7 @@ export const test = base.extend<object, { workspace: Workspace }>({
 
     try {
       const beaconChild = beacon.beacon(isolatedDatabase.toString())
-      await expect.poll(async () => {
-        expect(beaconChild.exitCode).toBeNull()
-        return fetch(`${url}/health`).then(response => response.ok).catch(() => false)
-      }, { timeout: 60000 }).toBe(true)
+      await beacon.waitForBeacon(beaconChild)
       await login()
       const claim = await fetch(`${url}/api/installations/claim-code`, { method: 'POST', headers, body: '{}' })
       expect(claim.ok).toBe(true)

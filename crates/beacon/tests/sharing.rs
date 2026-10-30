@@ -1941,7 +1941,7 @@ async fn revoked_and_unclaimed_identities_explain_scheduled_work_without_audit_f
     );
     assert_eq!(tasks[0]["nextRun"], 1);
     assert_eq!(tasks[0]["enabled"], true);
-    let audit: Vec<Value> = relay
+    let audit: cairn_contracts::ListAuditOutput = relay
         .get("/audit")
         .send()
         .await
@@ -1951,8 +1951,9 @@ async fn revoked_and_unclaimed_identities_explain_scheduled_work_without_audit_f
         .unwrap();
     assert_eq!(
         audit
+            .entries
             .iter()
-            .filter(|entry| entry["action"] == "schedule.deferred")
+            .filter(|entry| entry.action == "schedule.deferred")
             .count(),
         1
     );
@@ -1985,7 +1986,7 @@ async fn revoked_and_unclaimed_identities_explain_scheduled_work_without_audit_f
         .await
         .unwrap();
     assert_eq!(runs, json!([]));
-    let audit: Vec<Value> = relay
+    let audit: cairn_contracts::ListAuditOutput = relay
         .get("/audit")
         .send()
         .await
@@ -1995,8 +1996,9 @@ async fn revoked_and_unclaimed_identities_explain_scheduled_work_without_audit_f
         .unwrap();
     assert_eq!(
         audit
+            .entries
             .iter()
-            .filter(|entry| entry["action"] == "schedule.deferred")
+            .filter(|entry| entry.action == "schedule.deferred")
             .count(),
         2
     );
@@ -2133,7 +2135,7 @@ async fn a_task_preparation_error_advances_only_its_occurrence_and_is_audited_an
         .unwrap();
     assert!(admitted["scheduleFailure"].is_null());
 
-    let audit: Vec<Value> = relay
+    let audit: cairn_contracts::ListAuditOutput = relay
         .get("/audit")
         .send()
         .await
@@ -2143,8 +2145,9 @@ async fn a_task_preparation_error_advances_only_its_occurrence_and_is_audited_an
         .unwrap();
     assert_eq!(
         audit
+            .entries
             .iter()
-            .filter(|entry| entry["action"] == "schedule.failed")
+            .filter(|entry| entry.action == "schedule.failed")
             .count(),
         1
     );

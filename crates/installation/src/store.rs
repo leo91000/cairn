@@ -35,7 +35,7 @@ struct Pool {
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-const DATABASE_VERSION: i64 = 18;
+const DATABASE_VERSION: i64 = 19;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -47,7 +47,7 @@ fn actors(connections: Vec<Connection>, lane: &'static str) -> mpsc::Sender<Job>
         std::thread::Builder::new()
             .name("cairn-sqlite".into())
             .spawn(move || {
-                let mut metrics = performance::Metrics::new(lane, index);
+                let mut metrics = performance::Metrics::new(lane, index, &db);
                 loop {
                     // The guard is released before the job runs.
                     let job = rx.lock().ok().and_then(|mut rx| rx.blocking_recv());
@@ -55,7 +55,7 @@ fn actors(connections: Vec<Connection>, lane: &'static str) -> mpsc::Sender<Job>
                         break;
                     };
                     let completed = job(&mut db);
-                    metrics.record(&completed);
+                    metrics.record(&completed, &db);
                 }
             })
             .expect("database thread");
@@ -122,6 +122,10 @@ impl Store {
             version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
         }
         if !fresh && version == 17 {
+            crate::reads::migration::upgrade(&mut writer)?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        }
+        if !fresh && version == 18 {
             crate::agent_access::upgrade(&mut writer)?;
         }
         if fresh {
@@ -133,7 +137,7 @@ CREATE INDEX IF NOT EXISTS records_node_backups_run ON records(json_extract(data
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,created_at INTEGER NOT NULL CHECK(created_at BETWEEN 0 AND 9007199254740991),type TEXT NOT NULL CHECK(length(type)>0),text TEXT NOT NULL,payload TEXT CHECK(payload IS NULL OR json_valid(payload)));
 CREATE TABLE run_checkpoints(run_id TEXT PRIMARY KEY NOT NULL REFERENCES runs(id) ON DELETE CASCADE,state TEXT NOT NULL CHECK(json_valid(state) AND json_type(state)='object'));
 CREATE INDEX IF NOT EXISTS events_run ON events(run_id,id);
-CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY CHECK(key NOT LIKE 'run-checkpoint:%' AND key NOT LIKE 'chat-coding-agent:%' AND key NOT LIKE 'chat-coding-agent-request:%' AND key NOT LIKE 'chat-question:%' AND key NOT LIKE 'chat-attachment:%' AND key!='conversation-expiration'),data TEXT NOT NULL,expires INTEGER);
+CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY CHECK(key NOT LIKE 'run-checkpoint:%' AND key NOT LIKE 'chat-coding-agent:%' AND key NOT LIKE 'chat-coding-agent-request:%' AND key NOT LIKE 'chat-question:%' AND key NOT LIKE 'chat-attachment:%' AND key!='conversation-expiration' AND key NOT LIKE 'read-since:%' AND key NOT LIKE 'read:%' AND key NOT LIKE 'dismissed:%'),data TEXT NOT NULL,expires INTEGER);
 CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT,created_at INTEGER NOT NULL,action TEXT NOT NULL,detail TEXT NOT NULL);",
         )?;
             tx.pragma_update(None, "user_version", DATABASE_VERSION)?;
@@ -159,6 +163,7 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
             tx.execute_batch(crate::chats::storage::SCHEMA)?;
             tx.execute_batch(crate::chats::question_storage::SCHEMA)?;
             tx.execute_batch(crate::attachments::sql::SCHEMA)?;
+            tx.execute_batch(crate::reads::sql::SCHEMA)?;
             tx.execute_batch(crate::waits::sql::SCHEMA)?;
             tx.execute_batch(crate::chats::engine_switch::SCHEMA)?;
             tx.execute_batch(crate::agent_access::SCHEMA)?;
@@ -729,17 +734,6 @@ impl Db<'_> {
         )
     }
 
-    pub fn stats(&self) -> Result<Value> {
-        let mut stmt = self
-            .0
-            .prepare_cached("SELECT status,COUNT(*) FROM runs GROUP BY status")?;
-        let counts = stmt
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
-            .map(|row| row.map(|(status, count)| (status, Value::from(count))))
-            .collect::<std::result::Result<serde_json::Map<_, _>, _>>()?;
-        Ok(counts.into())
-    }
-
     pub fn event(
         &self,
         run: &str,
@@ -1222,7 +1216,7 @@ mod schema_tests {
 
     #[test]
     fn existing_other_versions_fail_without_changing_the_database() {
-        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 19, 99] {
+        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 99] {
             let root = tempfile::tempdir().unwrap();
             let db = Connection::open(root.path().join("manager.db")).unwrap();
             db.pragma_update(None, "user_version", version).unwrap();

@@ -21,7 +21,12 @@
   parity, but exclude them from public MCP and `cairn_installation`. They act on a
   person's Cairn account, whose authority an installation grant does not confer.
   Giving and removing account access to agents is owner-only on web/Android and
-  excluded from public MCP and `cairn_installation`. Through `cairn_installation`,
+  excluded from public MCP and `cairn_installation`. Saving installation storage
+  credentials likewise requires the human owner in the apps: both tools list the
+  operation and receive an explicit refusal, and no surface returns the keys. Read
+  marks and set-aside outcomes belong to the calling Cairn account: a public grant
+  acts for the account that authorized it, and an execution without an account
+  delegation is refused rather than acting as the owner. Through `cairn_installation`,
   agents may read and reduce agent grants but never widen them; they write hook rules
   only for one person, in a conversation that meets every provenance condition of
   ADR-0075, never in tasks or missions; they never touch another account's rule, never

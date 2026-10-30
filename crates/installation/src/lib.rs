@@ -54,7 +54,7 @@ pub mod project_git;
 pub mod project_workspaces;
 pub mod projects;
 pub mod provider;
-mod reads;
+pub mod reads;
 pub mod recovery;
 pub mod relay;
 pub mod rpc;

@@ -1,6 +1,6 @@
-# 0018 — Account access to agents
+# 0019 — Account access to agents
 
-Version 17 upgrades to 18 automatically in `Store::open`, before the SQL actors
+Version 18 upgrades to 19 automatically in `Store::open`, before the SQL actors
 start ([ADR-0075](../adr/0075-plugin-hooks-rules-and-scoped-grants.md), « Accès des
 comptes aux agents »).
 
@@ -17,8 +17,8 @@ access. The installation keeps no list of members, so someone invited between th
 upgrade and that check, which only a Beacon outage can delay, counts as an existing
 member.
 
-A failure leaves the schema, KV and version intact at 17. A successful upgrade
-has no downgrade path. Intermediate 11 → 17 migrations remain supported and retain
+A failure leaves the schema, KV and version intact at 18. A successful upgrade
+has no downgrade path. Intermediate 11 → 18 migrations remain supported and retain
 their own transaction boundaries.
 
 `agent_access` covers the rollout for existing members only, a member's scheduled

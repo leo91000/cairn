@@ -71,17 +71,17 @@ impl App {
         find(&runs, "id", run)["dismissal"].clone()
     }
 
-    async fn dismiss(&self, items: Value) -> (StatusCode, Value) {
+    async fn dismiss(&self, task: &str, action: Value) -> (StatusCode, Value) {
         self.request(
             &self.owner,
             "POST",
             "/api/dismissals",
-            json!({ "items": items }),
+            json!({ "taskId": task, "action": action }),
         )
         .await
     }
 
-    async fn read(&self, who: &RelayContext, items: &[String]) -> (StatusCode, Value) {
+    async fn read(&self, who: &RelayContext, items: &[Value]) -> (StatusCode, Value) {
         self.request(who, "POST", "/api/reads", json!({ "items": items }))
             .await
     }
@@ -134,6 +134,14 @@ impl App {
     }
 }
 
+fn chat_read(id: &str, finished_at: &Value) -> Value {
+    json!({ "target": { "kind": "chat", "chatId": id }, "finishedAt": finished_at })
+}
+
+fn mission_read(id: &str, finished_at: &Value) -> Value {
+    json!({ "target": { "kind": "mission", "taskId": id }, "finishedAt": finished_at })
+}
+
 fn find<'a>(list: &'a Value, key: &str, id: &str) -> &'a Value {
     list.as_array()
         .unwrap()
@@ -160,7 +168,11 @@ async fn finished_conversations_stay_unread_for_each_account_until_opened() {
         assert_eq!(item["preview"], "Release ready. I shipped the 0.53 notes.");
     }
 
-    let (status, marked) = app.read(&app.owner, &[format!("chat:{chat_id}")]).await;
+    let finished_at =
+        find(&app.get(&app.owner, "/api/chats").await, "id", chat_id)["finishedAt"].clone();
+    let (status, marked) = app
+        .read(&app.owner, &[chat_read(chat_id, &finished_at)])
+        .await;
     assert_eq!(status, StatusCode::OK, "{marked}");
     assert_eq!(marked["read"], 1);
     let owner = app.get(&app.owner, "/api/chats").await;
@@ -261,7 +273,9 @@ async fn mission_runs_are_unread_until_their_mission_is_opened() {
     let runs = app.get(&app.member, "/api/tasks/activity").await;
     assert_eq!(find(&runs, "id", &run)["unread"], false);
 
-    let (status, _) = app.read(&app.owner, &[format!("task:{task_id}")]).await;
+    let (status, _) = app
+        .read(&app.owner, &[mission_read(task_id, &item["finishedAt"])])
+        .await;
     assert_eq!(status, StatusCode::OK);
     let runs = app.get(&app.owner, "/api/tasks/activity").await;
     assert_eq!(find(&runs, "id", &run)["unread"], false);
@@ -270,15 +284,16 @@ async fn mission_runs_are_unread_until_their_mission_is_opened() {
 #[tokio::test]
 async fn marking_as_read_accepts_only_conversations_and_missions() {
     let app = App::new().await;
+    let at = json!(now() - 1000);
     for items in [
         json!([]),
-        json!(["agent:00000000-0000-4000-8000-000000000000"]),
-        json!(["chat:not-a-uuid"]),
-        json!([7]),
-        json!([{ "key": format!("chat:{}", id()), "finishedAt": 0 }]),
-        json!([{ "key": format!("chat:{}", id()), "finishedAt": now() + 60_000 }]),
-        json!([{ "key": format!("chat:{}", id()) }]),
-        json!(vec![format!("chat:{}", id()); 201]),
+        json!([{ "target": { "kind": "agent", "agentId": id() }, "finishedAt": at }]),
+        json!([chat_read("not-a-uuid", &at)]),
+        json!([format!("chat:{}", id())]),
+        json!([chat_read(&id(), &json!(0))]),
+        json!([chat_read(&id(), &json!(now() + 60_000))]),
+        json!([{ "target": { "kind": "chat", "chatId": id() } }]),
+        json!(vec![chat_read(&id(), &at); 201]),
     ] {
         let (status, body) = app
             .request(&app.member, "POST", "/api/reads", json!({ "items": items }))
@@ -288,7 +303,7 @@ async fn marking_as_read_accepts_only_conversations_and_missions() {
     let (status, body) = app
         .read(
             &app.member,
-            &[format!("chat:{}", id()), format!("task:{}", id())],
+            &[chat_read(&id(), &at), mission_read(&id(), &at)],
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -314,11 +329,7 @@ async fn reading_an_observed_completion_does_not_consume_newer_work() {
         .await
         .unwrap();
 
-    let read = |at| {
-        json!({
-            "items": [{ "key": format!("chat:{chat_id}"), "finishedAt": at }],
-        })
-    };
+    let read = |at: i64| json!({ "items": [chat_read(chat_id, &json!(at))] });
     let (status, _) = app
         .request(&app.owner, "POST", "/api/reads", read(first_at))
         .await;
@@ -367,9 +378,7 @@ async fn opening_an_old_mission_run_leaves_the_latest_result_unread() {
             &app.owner,
             "POST",
             "/api/reads",
-            json!({
-                "items": [{ "key": format!("task:{task_id}"), "finishedAt": old["finishedAt"] }],
-            }),
+            json!({ "items": [mission_read(task_id, &old["finishedAt"])] }),
         )
         .await;
     assert_eq!(status, StatusCode::OK);
@@ -414,7 +423,9 @@ async fn the_live_conversation_list_follows_each_subscribers_reads() {
                     unread_states.push(find(chats, "id", &chat_id)["unread"].clone());
                 }
                 if unread_states.len() == 1 {
-                    app.read(&app.owner, &[format!("chat:{chat_id}")]).await;
+                    let finished_at = find(chats, "id", &chat_id)["finishedAt"].clone();
+                    app.read(&app.owner, &[chat_read(&chat_id, &finished_at)])
+                        .await;
                 }
             }
             if unread_states.len() == 2 {
@@ -426,211 +437,6 @@ async fn the_live_conversation_list_follows_each_subscribers_reads() {
     .expect("the read mark reached the stream");
     assert_eq!(unread_states, [json!(true), json!(false)]);
     server.abort();
-}
-
-/// Local SQLite measurements, comparing the original overwrite with observed monotonic marks.
-#[tokio::test]
-#[ignore = "manual storage measurements"]
-async fn read_watermark_measurements() {
-    use cairn_installation::store::Store;
-    use std::time::Instant;
-
-    fn cpu_ms() -> f64 {
-        let mut time = libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        // CLOCK_PROCESS_CPUTIME_ID includes the SQLite actor threads.
-        assert_eq!(
-            unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut time) },
-            0
-        );
-        time.tv_sec as f64 * 1000.0 + time.tv_nsec as f64 / 1_000_000.0
-    }
-
-    for monotonic in [false, true] {
-        let root = TempDir::new().unwrap();
-        let store = Store::open(root.path()).unwrap();
-        let finished_at = 1_792_000_000_000_i64;
-        let keys: Vec<String> = (0..200)
-            .map(|n| format!("read:account:chat:{n:08x}-0000-4000-8000-000000000000"))
-            .collect();
-        let records = keys.clone();
-        let cpu_start = cpu_ms();
-        let start = Instant::now();
-        for _ in 0..100 {
-            let keys = keys.clone();
-            store
-                .transaction(move |db| {
-                    for key in keys {
-                        let at = if monotonic {
-                            db.kv_as::<i64>(&key)?.unwrap_or(0).max(finished_at)
-                        } else {
-                            finished_at
-                        };
-                        db.set(&key, &at.into(), None)?;
-                    }
-                    Ok(())
-                })
-                .await
-                .unwrap();
-        }
-        let write_ms = start.elapsed().as_secs_f64() * 10.0;
-        let write_cpu_ms = (cpu_ms() - cpu_start) / 100.0;
-        drop(store);
-
-        // New connections and empty statement caches; OS page cache remains warm.
-        let store = Store::open(root.path()).unwrap();
-        let start = Instant::now();
-        let marks = store.keys_as::<i64>("read:account:").await.unwrap();
-        let cold_ms = start.elapsed().as_secs_f64() * 1000.0;
-        assert_eq!(marks.len(), 200);
-        let cpu_start = cpu_ms();
-        let start = Instant::now();
-        for _ in 0..100 {
-            assert_eq!(
-                store.keys_as::<i64>("read:account:").await.unwrap().len(),
-                200
-            );
-        }
-        let warm_ms = start.elapsed().as_secs_f64() * 10.0;
-        let read_cpu_ms = (cpu_ms() - cpu_start) / 100.0;
-        let encoded_bytes: usize = records
-            .iter()
-            .map(|key| key.len() + finished_at.to_string().len())
-            .sum();
-        println!(
-            "monotonic={monotonic} marks=200 encoded_bytes={encoded_bytes} cold_ms={cold_ms:.3} warm_ms={warm_ms:.3} write_ms={write_ms:.3} read_cpu_ms={read_cpu_ms:.3} write_cpu_ms={write_cpu_ms:.3}"
-        );
-    }
-}
-
-#[tokio::test]
-#[ignore = "manual storage measurements"]
-async fn dismissal_storage_measurements() {
-    use cairn_installation::store::Store;
-    use std::time::Instant;
-
-    #[derive(serde::Serialize, serde::Deserialize, Clone)]
-    #[serde(rename_all = "camelCase")]
-    struct Dismissal {
-        finished_at: i64,
-        until: Option<i64>,
-    }
-
-    fn cpu_ms() -> f64 {
-        let mut time = libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        assert_eq!(
-            unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut time) },
-            0
-        );
-        time.tv_sec as f64 * 1000.0 + time.tv_nsec as f64 / 1_000_000.0
-    }
-
-    async fn read(store: &Store, dismissals: bool) {
-        store
-            .read(move |db| {
-                assert!(db.kv_as::<i64>("read-since:account")?.is_some());
-                assert_eq!(db.keys_as::<i64>("read:account:")?.len(), 200);
-                if dismissals {
-                    assert_eq!(db.keys_as::<Dismissal>("dismissed:account:")?.len(), 200);
-                }
-                Ok(())
-            })
-            .await
-            .unwrap();
-    }
-
-    for dismissals in [false, true] {
-        let root = TempDir::new().unwrap();
-        let store = Store::open(root.path()).unwrap();
-        let finished_at = 1_792_000_000_000_i64;
-        let marks: Vec<String> = (0..200)
-            .map(|n| format!("read:account:task:{n:08x}-0000-4000-8000-000000000000"))
-            .collect();
-        let outcomes: Vec<(String, Dismissal)> = (0..200)
-            .map(|n| {
-                (
-                    format!("dismissed:account:task:{n:08x}-0000-4000-8000-000000000000"),
-                    Dismissal {
-                        finished_at,
-                        until: (n % 2 == 0).then_some(finished_at + 86_400_000),
-                    },
-                )
-            })
-            .collect();
-        let seed_marks = marks.clone();
-        store
-            .transaction(move |db| {
-                db.set("read-since:account", &finished_at.into(), None)?;
-                for key in seed_marks {
-                    db.set(&key, &finished_at.into(), None)?;
-                }
-                Ok(())
-            })
-            .await
-            .unwrap();
-
-        let cpu_start = cpu_ms();
-        let start = Instant::now();
-        for _ in 0..100 {
-            let marks = marks.clone();
-            let outcomes = outcomes.clone();
-            store
-                .transaction(move |db| {
-                    if dismissals {
-                        for (key, value) in outcomes {
-                            db.set_as(&key, &value, None)?;
-                        }
-                    } else {
-                        for key in marks {
-                            let at = db.kv_as::<i64>(&key)?.unwrap_or(0).max(finished_at);
-                            db.set(&key, &at.into(), None)?;
-                        }
-                    }
-                    Ok(())
-                })
-                .await
-                .unwrap();
-        }
-        let write_ms = start.elapsed().as_secs_f64() * 10.0;
-        let write_cpu_ms = (cpu_ms() - cpu_start) / 100.0;
-        drop(store);
-
-        // Empty SQLite connection/statement caches; OS page cache stays warm.
-        let store = Store::open(root.path()).unwrap();
-        let start = Instant::now();
-        read(&store, dismissals).await;
-        let cold_ms = start.elapsed().as_secs_f64() * 1000.0;
-        let cpu_start = cpu_ms();
-        let start = Instant::now();
-        for _ in 0..100 {
-            read(&store, dismissals).await;
-        }
-        let warm_ms = start.elapsed().as_secs_f64() * 10.0;
-        let read_cpu_ms = (cpu_ms() - cpu_start) / 100.0;
-        let watermark_bytes = "read-since:account".len() + finished_at.to_string().len();
-        let mark_bytes: usize = marks
-            .iter()
-            .map(|key| key.len() + finished_at.to_string().len())
-            .sum();
-        let dismissal_bytes: usize = if dismissals {
-            outcomes
-                .iter()
-                .map(|(key, value)| key.len() + serde_json::to_vec(value).unwrap().len())
-                .sum()
-        } else {
-            0
-        };
-        let encoded_bytes = watermark_bytes + mark_bytes + dismissal_bytes;
-        println!(
-            "dismissals={dismissals} marks=200 outcomes={} encoded_bytes={encoded_bytes} cold_ms={cold_ms:.3} warm_ms={warm_ms:.3} write_ms={write_ms:.3} read_cpu_ms={read_cpu_ms:.3} write_cpu_ms={write_cpu_ms:.3}",
-            if dismissals { 200 } else { 0 }
-        );
-    }
 }
 
 #[tokio::test]
@@ -645,7 +451,6 @@ async fn blocked_missions_stay_set_aside_for_each_account_until_they_finish_agai
         .await
         .unwrap();
     let task_id = text(&task, "id");
-    let key = format!("task:{task_id}");
     let blocked =
         |status: &str| json!({ "outcome": { "status": status, "reason": "CI is the parent's." } });
     let run = app.finished_run(task_id, "mcp", RunStatus::Succeeded).await;
@@ -659,7 +464,10 @@ async fn blocked_missions_stay_set_aside_for_each_account_until_they_finish_agai
     assert!(app.dismissal(&app.owner, &run).await.is_null());
 
     let (status, body) = app
-        .dismiss(json!([{ "key": key, "finishedAt": finished_at }]))
+        .dismiss(
+            task_id,
+            json!({ "kind": "dismiss", "finishedAt": finished_at }),
+        )
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
@@ -677,20 +485,32 @@ async fn blocked_missions_stay_set_aside_for_each_account_until_they_finish_agai
         .unwrap();
     assert!(app.dismissal(&app.owner, &run).await.is_null());
     let until = now() + 60_000;
-    app.dismiss(json!([{ "key": key, "finishedAt": finished_at, "until": until }]))
+    let (_, snoozed) = app
+        .dismiss(
+            task_id,
+            json!({ "kind": "snooze", "finishedAt": finished_at, "until": until }),
+        )
         .await;
+    assert_eq!(
+        snoozed,
+        json!({ "taskId": task_id, "dismissal": { "until": until } })
+    );
     assert_eq!(
         app.dismissal(&app.owner, &run).await,
         json!({ "until": until })
     );
 
-    let (status, _) = app.dismiss(json!([{ "key": key, "restore": true }])).await;
+    let (status, restored) = app.dismiss(task_id, json!({ "kind": "restore" })).await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(restored, json!({ "taskId": task_id, "dismissal": null }));
     assert!(app.dismissal(&app.owner, &run).await.is_null());
 
     // A later finish asks again.
-    app.dismiss(json!([{ "key": key, "finishedAt": finished_at }]))
-        .await;
+    app.dismiss(
+        task_id,
+        json!({ "kind": "dismiss", "finishedAt": finished_at }),
+    )
+    .await;
     let next = app.finished_run(task_id, "mcp", RunStatus::Succeeded).await;
     app.service
         .store
@@ -700,14 +520,212 @@ async fn blocked_missions_stay_set_aside_for_each_account_until_they_finish_agai
     let runs = app.get(&app.owner, "/api/tasks/activity").await;
     assert!(find(&runs, "id", &next)["dismissal"].is_null());
 
-    for items in [
-        json!([]),
-        json!([{ "key": format!("chat:{}", id()), "finishedAt": finished_at }]),
-        json!([{ "key": key }]),
-        json!([{ "key": key, "finishedAt": finished_at, "until": now() - 1 }]),
-        json!([{ "key": key, "finishedAt": finished_at, "until": now() + 31 * 24 * 60 * 60 * 1000 }]),
+    for action in [
+        json!({ "kind": "dismiss" }),
+        json!({ "kind": "dismiss", "finishedAt": 0 }),
+        json!({ "kind": "hide", "finishedAt": finished_at }),
+        json!({ "kind": "snooze", "finishedAt": finished_at, "until": now() - 1 }),
+        json!({ "kind": "snooze", "finishedAt": finished_at, "until": now() + 31 * 24 * 60 * 60 * 1000 }),
     ] {
-        let (status, body) = app.dismiss(items.clone()).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{items}: {body}");
+        let (status, body) = app.dismiss(task_id, action.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{action}: {body}");
     }
+    let (status, body) = app
+        .dismiss("not-a-task", json!({ "kind": "restore" }))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+}
+
+async fn tool(app: &Router, endpoint: &str, bearer: &str, name: &str, input: Value) -> Value {
+    let request = common::request("POST", endpoint)
+        .header("authorization", format!("Bearer {bearer}"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": common::mcp_arguments(name, &input),
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    common::read_json(common::send(app, request).await).await
+}
+
+fn result(response: &Value) -> &Value {
+    assert_ne!(response["result"]["isError"], true, "{response}");
+    assert!(response["error"].is_null(), "{response}");
+    &response["result"]["structuredContent"]["result"]
+}
+
+/// A running execution of an agent granted installation access.
+async fn installation_token(s: &Arc<Service>) -> String {
+    use common::AgentFixture;
+    std::fs::create_dir_all(&s.config.home).unwrap();
+    let agent = s
+        .agent_fixture(
+            json!({ "name": "Manager", "access": { "installation": true } }),
+            None,
+        )
+        .await
+        .unwrap();
+    let task = s
+        .task_fixture(
+            json!({ "name": "Caller", "prompt": "Manage", "agentId": agent["id"] }),
+            None,
+        )
+        .await
+        .unwrap();
+    let run = s.enqueue(text(&task, "id"), "manual", None).await.unwrap();
+    s.store
+        .change_run(
+            text(&run, "id"),
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Running),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let run = s.store.run(text(&run, "id")).await.unwrap();
+    let config = s.mcps.run_configuration(s, &run).await.unwrap();
+    config["env"]["CAIRN_MCP_RUN_TOKEN"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[tokio::test]
+async fn personal_state_follows_the_authorizing_account_and_never_an_execution() {
+    let app = App::new().await;
+    let execution = installation_token(&app.service).await;
+    let public = common::relay_fixture::grant(&app.service, &["read", "manage"]).await;
+    app.get(&app.owner, "/api/chats").await;
+    app.get(&app.member, "/api/chats").await;
+    let chat = app.finished_chat().await;
+    let chat_id = text(&chat, "id");
+    let page = json!({ "view": "active", "limit": 100, "offset": 0 });
+
+    // The public grant belongs to the owner who authorized it.
+    let listed = tool(&app.router, "/mcp", &public, "list_chats", page.clone()).await;
+    let item = find(&result(&listed)["chats"], "id", chat_id).clone();
+    assert_eq!(item["unread"], true, "{item}");
+    assert_eq!(item["preview"], "Release ready. I shipped the 0.53 notes.");
+    // An execution has no account: nothing is unread for it, and nothing borrowed.
+    let listed = tool(
+        &app.router,
+        "/mcp-installation",
+        &execution,
+        "list_chats",
+        page.clone(),
+    )
+    .await;
+    let unowned = find(&result(&listed)["chats"], "id", chat_id);
+    assert_eq!(unowned["unread"], false, "{unowned}");
+    assert!(unowned["preview"].is_null());
+
+    let mark = json!({ "items": [chat_read(chat_id, &item["finishedAt"])] });
+    let refused = tool(
+        &app.router,
+        "/mcp-installation",
+        &execution,
+        "mark_read",
+        mark.clone(),
+    )
+    .await;
+    assert_eq!(refused["result"]["isError"], true, "{refused}");
+    assert!(refused.to_string().contains("no delegation"), "{refused}");
+    let readonly = common::relay_fixture::grant(&app.service, &["read"]).await;
+    let refused = tool(&app.router, "/mcp", &readonly, "mark_read", mark.clone()).await;
+    assert_eq!(refused["result"]["isError"], true, "{refused}");
+    for who in [&app.owner, &app.member] {
+        let listed = app.get(who, "/api/chats").await;
+        assert_eq!(find(&listed, "id", chat_id)["unread"], true);
+    }
+
+    let marked = tool(&app.router, "/mcp", &public, "mark_read", mark).await;
+    assert_eq!(result(&marked)["read"], 1, "{marked}");
+    let owner = app.get(&app.owner, "/api/chats").await;
+    assert_eq!(find(&owner, "id", chat_id)["unread"], false);
+    let member = app.get(&app.member, "/api/chats").await;
+    assert_eq!(find(&member, "id", chat_id)["unread"], true);
+}
+
+#[tokio::test]
+async fn mission_outcomes_set_aside_on_a_tool_stay_with_its_account() {
+    let app = App::new().await;
+    let execution = installation_token(&app.service).await;
+    let public = common::relay_fixture::grant(&app.service, &["read", "manage"]).await;
+    let task = app
+        .service
+        .task_fixture(
+            json!({ "name": "Device proof", "prompt": "Prove it", "agentId": MAIN_AGENT_ID }),
+            None,
+        )
+        .await
+        .unwrap();
+    let task_id = text(&task, "id");
+    for who in [&app.owner, &app.member] {
+        app.get(who, "/api/tasks/activity").await;
+    }
+    let run = app.finished_run(task_id, "mcp", RunStatus::Succeeded).await;
+    let stored = app
+        .service
+        .store
+        .change_run_fixture(
+            &run,
+            json!({ "outcome": { "status": "blocked", "reason": "Waiting for review." } }),
+        )
+        .await
+        .unwrap();
+    let dismiss = json!({
+        "taskId": task_id,
+        "action": { "kind": "dismiss", "finishedAt": stored["finishedAt"] },
+    });
+
+    let refused = tool(
+        &app.router,
+        "/mcp-installation",
+        &execution,
+        "set_outcome_aside",
+        dismiss.clone(),
+    )
+    .await;
+    assert_eq!(refused["result"]["isError"], true, "{refused}");
+    assert!(refused.to_string().contains("no delegation"), "{refused}");
+    let set = tool(&app.router, "/mcp", &public, "set_outcome_aside", dismiss).await;
+    assert_eq!(
+        result(&set),
+        &json!({ "taskId": task_id, "dismissal": { "until": null } })
+    );
+
+    // Each surface lists the latest run with its own caller's state; executions get none.
+    assert_eq!(
+        app.dismissal(&app.owner, &run).await,
+        json!({ "until": null })
+    );
+    assert!(app.dismissal(&app.member, &run).await.is_null());
+    let activity = tool(
+        &app.router,
+        "/mcp",
+        &public,
+        "list_task_activity",
+        json!({}),
+    )
+    .await;
+    let listed = find(result(&activity), "id", &run);
+    assert_eq!(listed["dismissal"], json!({ "until": null }));
+    assert_eq!(listed["unread"], true);
+    let activity = tool(
+        &app.router,
+        "/mcp-installation",
+        &execution,
+        "list_task_activity",
+        json!({}),
+    )
+    .await;
+    let listed = find(result(&activity), "id", &run);
+    assert!(listed["dismissal"].is_null(), "{listed}");
+    assert_eq!(listed["unread"], false);
 }

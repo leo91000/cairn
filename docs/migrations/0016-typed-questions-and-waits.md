@@ -47,3 +47,39 @@ the unchanged version 15 database. No downgrade or reset is supplied.
 version's Store, then checks preserved data, secrets/order, grouped progress,
 plugin history/mission snapshots, expiry/engine metadata, reopen stability and
 rollback/retry. The fixture contains synthetic content and credentials only.
+
+Retained snapshots can predate the GitHub plugin migration: native
+`github_workflow` and `github_pr_checks` conditions/results did not include a
+`pluginId`. The v15 importer identifies those two historical kinds as belonging
+to GitHub before converting their condition input and result payload. This does
+not create connections, grants or active continuations. Numeric workflow IDs,
+commit identities, event envelopes, ordering and timestamps remain intact.
+Unknown condition kinds and explicitly invalid plugin identities still fail
+atomically. Synthetic regression fixtures cover the historical event shape,
+group results, run continuation snapshots, absence of reactivation and rollback.
+
+## Private Store-only rehearsal
+
+The test-only `browser_fixture` binary supports `upgradeStoreCopy` before any
+Config, Service, Vault, credential refresh or network setup. Build it from the
+reviewed source (`cargo build --locked -p cairn-installation --example browser_fixture`)
+or use that exact source's full-CI `browser-backend` artifact. It is not included
+in production images and adds no service endpoint.
+
+Use only a private, consistent **offline copy** of the installation database,
+with the original backup retained unchanged. Never point this operation at the
+live directory, even when the installed manager is stopped. For example:
+
+```sh
+browser_fixture <<'JSON'
+{"operation":"upgradeStoreCopy","args":["/private/rehearsal-copy"]}
+JSON
+```
+
+No config or credentials are needed. The directory must already contain
+`manager.db`; a missing database fails without creating one. The command opens
+only the real Store, runs its ordinary migrations, and reports `versionBefore`,
+`versionAfter`, `quickCheck` and `foreignKeyCheck`. Its output contains no row
+contents or identities. Failure returns a fixed diagnostic, without printing
+the underlying private error. Check that the source backup remains unchanged
+and the copy reaches the expected version before attempting the real upgrade.

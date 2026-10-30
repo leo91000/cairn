@@ -189,10 +189,8 @@ pub struct Run {
     #[ts(type = "import('../../contracts').TaskOutcome | null")]
     pub outcome: Option<serde_json::Value>,
     #[serde(default)]
-    #[schemars(with = "Option<std::collections::BTreeMap<String, serde_json::Value>>", extend("x-kotlin-type" = "OutcomeDismissal"))]
-    #[ts(type = "{ until: number | null } | null")]
     #[ts(optional = nullable)]
-    pub dismissal: Option<serde_json::Value>,
+    pub dismissal: Option<crate::OutcomeDismissal>,
     #[serde(default)]
     #[schemars(with = "Option<crate::NodeResources>")]
     #[ts(optional = nullable)]

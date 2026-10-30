@@ -1,0 +1,43 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Work an account can read: a conversation's latest turn or a mission's latest run.",
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "chatId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "kind": {
+          "const": "chat",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "chatId"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "mission",
+          "type": "string"
+        },
+        "taskId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "taskId"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "ReadTarget"
+}
