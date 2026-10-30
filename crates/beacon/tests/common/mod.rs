@@ -177,6 +177,7 @@ impl Fixture {
         )
         .await
         .unwrap();
+        let app = cairn_beacon::observe_performance_uploads(app);
         let server = tokio::spawn(async move {
             axum::serve(
                 listener,

@@ -403,7 +403,7 @@ async fn run() -> Result<(), String> {
         ));
     }
 
-    app = hosts.layer(app, pool.clone());
+    app = cairn_beacon::observe_performance_uploads(hosts.layer(app, pool.clone()));
 
     let listener = tokio::net::TcpListener::bind(address)
         .await

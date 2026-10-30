@@ -893,6 +893,12 @@ jobs:
             [[ "$id" == "$IMAGE_DIGEST" || "$repo_digests" == *"@$IMAGE_DIGEST"* ]]
           fi
           echo "SMOKE_IMAGE=$LOCAL_IMAGE" >> "$GITHUB_ENV"
+      - name: Pull the published image before runtime qualification
+        if: steps.target.outputs.local == ''
+        timeout-minutes: 10
+        # A cold digest pull can exceed docker run's three-minute startup budget.
+        # Keep registry transfer separate without relaxing any runtime checks.
+        run: docker --context default pull "$SMOKE_IMAGE"
       - uses: ./.github/actions/setup-pnpm
         with:
           cache: true
