@@ -213,8 +213,15 @@ pub(crate) fn unavailable(run: Option<&Value>) -> Option<&'static str> {
     if is_compaction(run) {
         return Some("The conversation is compacting its context. Try again once it finishes.");
     }
+    if run["sideQuestions"] == false {
+        return Some(
+            "This Claude Code release cannot answer side questions in Cairn: version 2.1.308 or later is needed. Ask in the conversation instead.",
+        );
+    }
     if run["sideQuestions"] != true {
-        return Some("The agent is still starting its reply. Try again in a moment.");
+        return Some(
+            "The agent has not offered side questions for this reply yet. Try again in a moment; if it never does, its runtime may need an update.",
+        );
     }
     None
 }
@@ -420,7 +427,11 @@ fn settle(
     match outcome {
         Ok(answer) => {
             question.status = SideQuestionStatus::Answered;
-            question.answer = Some(answer.chars().take(MAX_ANSWER).collect());
+            question.answer = Some(if answer.chars().count() > MAX_ANSWER {
+                format!("{}…", answer.chars().take(MAX_ANSWER).collect::<String>())
+            } else {
+                answer.to_owned()
+            });
         }
         Err(error) => {
             question.status = SideQuestionStatus::Failed;
@@ -589,9 +600,11 @@ impl Service {
     }
 
     /// The running reply's adapter can now answer side questions.
-    pub async fn side_questions_available(&self, run_id: &str) -> Result<()> {
+    /// Records whether the run's current attempt answers side questions: its adapter says
+    /// so once its native session started.
+    pub async fn side_questions_available(&self, run_id: &str, available: bool) -> Result<()> {
         self.store
-            .update_run_boundary(run_id, json!({ "sideQuestions": true }))
+            .update_run_boundary(run_id, json!({ "sideQuestions": available }))
             .await?;
         Ok(())
     }

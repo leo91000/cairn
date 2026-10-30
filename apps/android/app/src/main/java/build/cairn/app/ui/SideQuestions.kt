@@ -63,6 +63,8 @@ internal class SideQuestionState {
     var text by mutableStateOf("")
     /** Shows only the side questions about one reply. */
     var focus by mutableStateOf("")
+    /** Why « Voir la réponse » could not show the reply. */
+    var notice by mutableStateOf("")
     private var seen by mutableStateOf<Set<String>?>(null)
     private var submission = ""
     private var submissionKey = ""
@@ -71,6 +73,7 @@ internal class SideQuestionState {
         this.itemId = itemId
         this.quote = quote.trim().take(4000)
         focus = ""
+        notice = ""
         open = true
     }
 
@@ -82,7 +85,15 @@ internal class SideQuestionState {
             quote = ""
         }
         focus = itemId
+        notice = ""
         open = true
+    }
+
+    /** Reopens the sheet when the reply a question is about is not loaded. */
+    fun unreachable(itemId: String) {
+        show(itemId)
+        notice =
+            "Cette réponse n’est pas dans la conversation chargée. Remontez pour charger les messages précédents, puis réessayez."
     }
 
     /**
@@ -281,12 +292,14 @@ internal fun ColumnScope.SideQuestionPanel(
                         "La réponse s’arrête. Posez-la dans la conversation quand elle reprend."
                     chat.compaction?.running == true ->
                         "La conversation compacte son contexte. Réessayez une fois la compaction terminée."
-                    else -> "Claude Code démarre encore sa réponse. Réessayez dans un instant."
+                    else ->
+                        "Claude Code n’a pas encore proposé de questions à côté pour cette réponse. Réessayez dans un instant ; s’il ne le fait jamais, mettez à jour Claude Code (2.1.308 ou plus récent) ou le runtime de la machine."
                 },
                 icon = CairnIcons.SideQuestion,
                 maxLines = 4,
             )
         state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        if (side.notice.isNotEmpty()) Text(side.notice, color = MaterialTheme.colorScheme.error)
         if (side.focus.isNotEmpty())
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text(

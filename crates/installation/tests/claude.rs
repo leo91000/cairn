@@ -1260,6 +1260,11 @@ async fn a_claude_release_not_qualified_for_side_questions_never_takes_one() {
             .iter()
             .any(|event| event["type"] == "chat.side.available")
     );
+    let unavailable = events
+        .iter()
+        .find(|event| event["type"] == "chat.side.unavailable")
+        .unwrap();
+    assert_eq!(unavailable["release"], "2.1.280");
 }
 
 #[tokio::test]
@@ -1636,6 +1641,7 @@ async fn engine_retries_limits_and_notices_are_reported_without_ending_the_turn(
     let known = [
         "thread.started",
         "chat.side.available",
+        "chat.side.unavailable",
         "context.usage",
         "chat.delivered",
         "engine.retry",

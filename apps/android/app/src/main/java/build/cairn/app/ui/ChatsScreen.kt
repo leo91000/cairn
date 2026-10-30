@@ -1834,6 +1834,7 @@ internal fun ChatPage(
                         sideScope.launch {
                             listState.animateScrollToItem(index + if (id == null) 1 else 0)
                         }
+                    else side.unreachable(itemId)
                 }
             if (newSession && chat != null)
                 Confirm(

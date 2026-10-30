@@ -1201,7 +1201,7 @@ function key(event: KeyboardEvent) {
               :can-ask="!!detail.canAskSideQuestion"
               :reason="detail.sideQuestionReason"
               :provider="detail.provider"
-              @reveal="activity?.reveal($event)"
+              @reveal="activity?.reveal($event) || sideQuestions?.unreachable($event)"
             />
             <section
               v-if="openCodeRegionBlocked && !dismissedError"

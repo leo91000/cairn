@@ -108,7 +108,8 @@ without steering it. On the web, use the quote icon in an agent reply's header
 selection**. On Android, use the **Poser une question à côté** icon or **Demander à côté**
 in the text-selection menu. The question opens a side panel (a drawer on desktop, a
 bottom sheet on phones and Android) where the answer appears, linked back to its reply:
-**Show reply** scrolls the conversation to it, and each reply shows how many side
+**Show reply** scrolls the conversation to it (or, for a reply outside the loaded
+history, reopens the panel and says so), and each reply shows how many side
 questions it has. A card above the composer reports a pending or unread answer.
 
 A side question never joins the queue, steers the turn, pauses or resumes it, or
@@ -125,7 +126,8 @@ withdrawn; withdrawal does not affect the reply. Up to five can wait at once.
 | OpenCode | Unavailable: it has no side mechanism. |
 
 Codex and OpenCode conversations never offer the action, nor does a Claude reply
-that is starting, stopping or compacting, or a conversation between replies. The
+that is starting, stopping or compacting, one run by a Claude Code release before
+2.1.308, or a conversation between replies. The
 side-question panel, when its earlier questions open it, and the API and tools
 (`sideQuestionReason`) say why. No second coding agent with write access is started,
 and the conversation's own transcript never contains the side question.

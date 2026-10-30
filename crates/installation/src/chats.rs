@@ -1532,6 +1532,14 @@ impl Service {
             {
                 continue;
             }
+            // Before a pending agent switch holds the conversation: the stopped turn's
+            // side questions fail now rather than once the switch completes.
+            if side_open.contains(&chat.id) {
+                let chat_id = chat.id.clone();
+                self.store
+                    .transaction(move |db| side_questions::expire(db, &chat_id))
+                    .await?;
+            }
             if self
                 .store
                 .read({
@@ -1542,12 +1550,6 @@ impl Service {
                 .is_some_and(|value| value.pending)
             {
                 continue;
-            }
-            if side_open.contains(&chat.id) {
-                let chat_id = chat.id.clone();
-                self.store
-                    .transaction(move |db| side_questions::expire(db, &chat_id))
-                    .await?;
             }
             let run = match chat.run_id.as_deref() {
                 Some(run) => Some(self.store.run(run).await?),

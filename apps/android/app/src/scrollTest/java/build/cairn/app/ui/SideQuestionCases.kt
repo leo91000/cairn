@@ -221,7 +221,7 @@ abstract class SideQuestionCases {
                 provider = "claude"
                 compose
                     .onNodeWithText(
-                        "Claude Code démarre encore sa réponse. Réessayez dans un instant."
+                        "Claude Code n’a pas encore proposé de questions à côté pour cette réponse. Réessayez dans un instant ; s’il ne le fait jamais, mettez à jour Claude Code (2.1.308 ou plus récent) ou le runtime de la machine."
                     )
                     .assertExists()
                 compose.onNodeWithText("Demander").assertDoesNotExist()

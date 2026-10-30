@@ -512,6 +512,8 @@ struct Turn<'a> {
     attempt: String,
     /// Side questions Claude Code is answering, by control request ID.
     sides: HashMap<String, String>,
+    /// This Claude Code release announced side questions; it takes none otherwise.
+    side_available: bool,
 }
 
 impl Turn<'_> {
@@ -709,6 +711,11 @@ impl Turn<'_> {
             if self.submitted.contains(id) {
                 continue;
             }
+            let side =
+                message["sideQuestion"].is_object() || message["sideQuestionCancelled"] == true;
+            if side && !self.side_available {
+                continue;
+            }
             if message["sideQuestionCancelled"] == true {
                 self.withdraw_side(text(&message, "sideQuestionId")).await?;
                 self.submitted.insert(id.into());
@@ -824,8 +831,14 @@ impl Turn<'_> {
                 crate::validation::uuid(session)?;
                 self.emit(json!({ "type": "thread.started", "thread_id": session }))
                     .await?;
-                if answers_side_questions(text(value, "claude_code_version")) {
+                let release = text(value, "claude_code_version");
+                self.side_available = answers_side_questions(release);
+                if self.side_available {
                     self.emit(json!({ "type": "chat.side.available" })).await?;
+                } else {
+                    // Says why, instead of leaving the reply "still starting".
+                    self.emit(json!({ "type": "chat.side.unavailable", "release": release }))
+                        .await?;
                 }
             }
             "system" if value["subtype"] == "background_tasks_changed" => {
@@ -1740,6 +1753,7 @@ pub async fn run(
         compaction_attempts: 0,
         attempt: crate::config::id(),
         sides: HashMap::new(),
+        side_available: false,
     };
     let operation = turn.execute(&mut stdout, auth.as_mut(), &cancel).await;
     // Closes Claude Code's stdin.

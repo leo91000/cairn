@@ -153,6 +153,12 @@ async function withdraw(question: ChatSideQuestion) {
   catch (e) { error.value = (e as Error).message }
 }
 
+/** Reopens the panel when the reply a question is about is not loaded. */
+function unreachable(item: string) {
+  show(item)
+  error.value = 'This reply is not in the loaded conversation. Scroll up to load earlier messages, then try again.'
+}
+
 function reveal(question: ChatSideQuestion) {
   if (!question.itemId)
     return
@@ -160,7 +166,7 @@ function reveal(question: ChatSideQuestion) {
   emit('reveal', question.itemId)
 }
 
-defineExpose({ ask, show })
+defineExpose({ ask, show, unreachable })
 </script>
 
 <template>

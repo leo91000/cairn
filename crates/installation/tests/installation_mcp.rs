@@ -5339,7 +5339,10 @@ async fn side_questions_are_asked_withdrawn_and_answered_beside_the_running_repl
     // Until the running reply's adapter announces it, side questions wait for it.
     let early = call(&s, &configuration, "ask_chat_side_question", ask("Why?")).await;
     assert_eq!(early["result"]["isError"], true, "{early}");
-    assert!(early.to_string().contains("still starting"), "{early}");
+    assert!(
+        early.to_string().contains("not offered side questions"),
+        "{early}"
+    );
     let listed = call(
         &s,
         &configuration,
@@ -5351,11 +5354,22 @@ async fn side_questions_are_asked_withdrawn_and_answered_beside_the_running_repl
     let summary = call(&s, &configuration, "get_chat", json!({ "chatId": chat_id })).await;
     let reason = &result(&summary)["chat"]["sideQuestionReason"];
     assert!(
-        reason.as_str().unwrap().contains("still starting"),
+        reason
+            .as_str()
+            .unwrap()
+            .contains("not offered side questions"),
         "{summary}"
     );
 
-    s.side_questions_available(&run_id).await.unwrap();
+    // A Claude Code release not qualified for side questions says so.
+    s.side_questions_available(&run_id, false).await.unwrap();
+    let old_release = call(&s, &configuration, "ask_chat_side_question", ask("Why?")).await;
+    assert!(
+        old_release.to_string().contains("2.1.308 or later"),
+        "{old_release}"
+    );
+
+    s.side_questions_available(&run_id, true).await.unwrap();
     let first = ask("Why this order?");
     let asked = call(&s, &configuration, "ask_chat_side_question", first.clone()).await;
     assert_eq!(result(&asked)["status"], "pending");
@@ -5683,7 +5697,7 @@ async fn side_questions_are_asked_withdrawn_and_answered_beside_the_running_repl
     // A Codex reply never takes one, even if an adapter announced it: its side
     // conversations keep tools Cairn cannot remove before they run.
     let codex_id = codex["id"].as_str().unwrap();
-    s.side_questions_available(codex_id).await.unwrap();
+    s.side_questions_available(codex_id, true).await.unwrap();
     let mut codex_chat = s.chat_create(json!({})).await.unwrap();
     codex_chat["runId"] = codex["id"].clone();
     let codex_chat_id = codex_chat["id"].as_str().unwrap().to_owned();

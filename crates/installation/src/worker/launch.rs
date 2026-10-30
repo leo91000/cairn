@@ -547,10 +547,16 @@ impl Execution<'_> {
         if self.checkpoint.expired() {
             return Err(Error::conflict("Run exceeded its time limit."));
         }
-        // Each attempt's adapter, such as one resumed on another account, announces again
-        // whether it answers side questions, and receives them only then.
-        crate::chats::side_questions::withdraw_announcement(&s.store, &self.id, &self.directory)
+        // Each attempt's adapter of a conversation, such as one resumed on another account,
+        // announces again whether it answers side questions, and receives them only then.
+        if self.run["chatExecution"].is_object() {
+            crate::chats::side_questions::withdraw_announcement(
+                &s.store,
+                &self.id,
+                &self.directory,
+            )
             .await?;
+        }
         let output = workspace.output().to_owned();
         match tokio::fs::remove_file(&output).await {
             Ok(()) => {}

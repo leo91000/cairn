@@ -797,8 +797,14 @@ async fn side_answers_are_stored_redacted() {
         "a1b2c3d4-0000-4000-8000-000000000002",
     );
     for id in [answered, failed] {
-        let question = json!({ "id": id, "chatId": chat, "runId": run, "text": "What was printed?",
-            "status": "pending", "createdAt": 1 });
+        let question = json!({
+            "id": id,
+            "chatId": chat,
+            "runId": run,
+            "text": "What was printed?",
+            "status": "pending",
+            "createdAt": 1,
+        });
         let key = format!("{key}{id}");
         fixture
             .service
@@ -808,16 +814,18 @@ async fn side_answers_are_stored_redacted() {
             .unwrap();
     }
     fixture
-        .event(
-            json!({ "type": "chat.side.answered", "sideQuestionId": answered,
-            "text": "It printed sensitive-tool-credential." }),
-        )
+        .event(json!({
+            "type": "chat.side.answered",
+            "sideQuestionId": answered,
+            "text": "It printed sensitive-tool-credential.",
+        }))
         .await;
     fixture
-        .event(
-            json!({ "type": "chat.side.failed", "sideQuestionId": failed,
-            "error": "Failed near sensitive-tool-credential" }),
-        )
+        .event(json!({
+            "type": "chat.side.failed",
+            "sideQuestionId": failed,
+            "error": "Failed near sensitive-tool-credential",
+        }))
         .await;
 
     let stored = fixture
