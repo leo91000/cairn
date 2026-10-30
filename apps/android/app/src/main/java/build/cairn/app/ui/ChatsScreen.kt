@@ -1857,7 +1857,8 @@ internal fun ChatPage(
             }
             asking?.let { selected ->
                 val current = questions.find { it.id == selected.id }
-                if (current == null) LaunchedEffect(selected.id) { asking = null }
+                if (current == null || readOnly)
+                    LaunchedEffect(selected.id, readOnly) { asking = null }
                 else
                     QuestionDialog(vm, state, current, questions, { asking = it }) { asking = null }
             }

@@ -98,9 +98,11 @@ says it is checking the members while access loads. A new agent is the owner's a
 Members see only the agents they may use when starting a conversation or a mission;
 a conversation they cannot direct shows a read-only notice, a disabled composer and
 questions waiting for someone with access; attachments and the assistant picker are
-disabled there too, and a quota or coding-agent switch card still says why the
-conversation stopped, without its actions. Pending invitations are listed without a
-switch, and run workspace cleanup is offered only with access to the run's agent. Both apps reload a member's usable agents every 30 seconds while
+disabled there too. Losing access also dismisses an already-open question dialog,
+so its answer and withdrawal actions are unavailable. A quota or coding-agent switch
+card still says why the conversation stopped, without its actions. Pending invitations
+are listed without a switch, and run workspace cleanup is offered only with access to
+the run's agent. Both apps reload a member's usable agents every 30 seconds while
 shown, when they come back to the foreground and after a refused change. Question
 notifications reach only the owner and the members who may answer them. Unknown
 access (an older installation) offers every agent and the installation decides.
