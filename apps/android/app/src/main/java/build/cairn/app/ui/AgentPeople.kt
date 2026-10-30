@@ -147,7 +147,7 @@ internal fun PeopleSection(
     }
     if (creating) {
         Text(
-            "Seul vous pouvez utiliser un nouvel agent. Créez-le d’abord, puis choisissez ici qui d’autre peut l’utiliser.",
+            "Vous seul pouvez utiliser un nouvel agent. Créez-le d’abord, puis choisissez ici qui d’autre peut l’utiliser.",
             Modifier.fillMaxWidth()
                 .clip(RoundedCornerShape(14.dp))
                 .background(MaterialTheme.colorScheme.surfaceVariant)

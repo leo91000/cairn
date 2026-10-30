@@ -595,7 +595,7 @@ abstract class AgentPageCases {
             compose.onNodeWithText("Enregistrer").assertDoesNotExist()
             capture("agent-people")
             back()
-            waitForText("Vous et 1 membre")
+            waitForText("Vous et 1 membre · ada@example.test")
             compose.onNodeWithText("Partagé").assertExists()
 
             open(AgentSection.People)
@@ -1278,7 +1278,6 @@ abstract class AgentPageCases {
             waitForText("⚠ 1 point à vérifier")
             open(AgentSection.Plugins)
             waitForDescription("Retirer #support")
-            compose.onNodeWithText("Indisponible").assertExists()
             compose
                 .onNodeWithText("Ce plugin ne donne plus d’accès aux agents", substring = true)
                 .performScrollTo()

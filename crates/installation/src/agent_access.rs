@@ -568,7 +568,13 @@ impl Service {
 
         // The entry belongs to the membership the Beacon reports now.
         let _authors = self.missions.authors.lock().await;
-        let policy = self.missions.observe(self).await?.ok_or_else(|| {
+        let observed = self.missions.observe(self).await.map_err(|error| {
+            tracing::warn!(status = error.status, "Members could not be confirmed");
+            Error::unavailable(
+                "The installation's members could not be confirmed right now. Try again in a moment.",
+            )
+        })?;
+        let policy = observed.ok_or_else(|| {
             Error::conflict("Claim the installation before sharing agents with members.")
         })?;
         if policy.owner.account_id == account {
@@ -764,6 +770,36 @@ mod tests {
         direct(&s, start.clone()).await.unwrap();
         s.missions.expire_membership_check();
         assert_eq!(direct(&s, start).await.unwrap_err().0, 403);
+    }
+
+    #[tokio::test]
+    async fn the_owner_is_told_plainly_when_members_cannot_be_confirmed() {
+        let root = tempfile::tempdir().unwrap();
+        let s = service(&root).await;
+        relay_fixture::claimed(&s).await.unwrap();
+        relay_fixture::add_member(&s, MEMBER, "membership-1").await;
+        let reviewer = s
+            .agent_fixture(json!({ "name": "Reviewer" }), None)
+            .await
+            .unwrap();
+        let reviewer = AgentId(text(&reviewer, "id").parse().unwrap());
+        let owner = InstallationIdentity::trusted(InstallationRole::Owner, "fixture-owner");
+
+        relay_fixture::authority_unavailable(&s, true).await;
+        let error = s
+            .grant_agent_account(Some(&owner), reviewer, MEMBER)
+            .await
+            .unwrap_err();
+        assert_eq!(error.status, 503);
+        assert!(
+            error.message.contains("could not be confirmed right now"),
+            "{}",
+            error.message
+        );
+        relay_fixture::authority_unavailable(&s, false).await;
+        s.grant_agent_account(Some(&owner), reviewer, MEMBER)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

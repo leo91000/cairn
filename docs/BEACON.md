@@ -345,7 +345,10 @@ conversation and creating or editing a task require access to its agent; every m
 still sees every conversation and can pause, archive or stop any work. Renaming a
 conversation, removing a message still waiting in its queue and cleaning up a
 task run's workspace stay open to every member too: none of them makes the agent
-work. A delegated task's title is still shown to its requesting agent, as every
+work. Access is checked when a message is sent or queued: a message a member queued
+while they had access is still delivered after the owner removes it, unless someone
+removes it from the queue first; their scheduled tasks on that agent are suspended.
+A delegated task's title is still shown to its requesting agent, as every
 title is to an agent with installation access. A delegated
 task can be directed with access to its requesting conversation's agent. The
 installation refuses management of agents, projects, skills, nodes, coding-agent

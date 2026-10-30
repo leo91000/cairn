@@ -91,8 +91,10 @@ is fixed (« Toujours »), every member has a switch that applies at once (outsi
 profile draft), and the section explains that the agent acts as a role and warns
 when the agent manages the whole installation. Members come from the Beacon's
 sharing list; the installation keeps, per agent, the accounts allowed in their
-current membership. Loading, empty and unavailable states match; the overview shows
-« Vous seul » / “Only you” or the member count. A new agent is the owner's alone.
+current membership. Loading, empty and unavailable states match; the overview row
+shows a « Vous seul » / “Only you”, « Partagé » / “Shared” or « Indisponible » /
+“Unavailable” chip with the member count and the first allowed members' emails, and
+says it is checking the members while access loads. A new agent is the owner's alone.
 Members see only the agents they may use when starting a conversation or a mission;
 a conversation they cannot direct shows a read-only notice, a disabled composer and
 questions waiting for someone with access; attachments and the assistant picker are

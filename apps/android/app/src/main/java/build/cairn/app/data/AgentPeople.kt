@@ -78,3 +78,13 @@ fun agentAccessSummary(allowed: Int): String =
         1 -> "Vous et 1 membre"
         else -> "Vous et $allowed membres"
     }
+
+/** The overview's line: how many may use the agent, then the first members who may, by email. */
+fun agentAccessOverview(rows: List<AgentAccessRow>, limit: Int = 3): String {
+    val emails = rows.filter { it.known && it.allowed }.map { it.email }
+    if (emails.isEmpty())
+        return "Les membres ne peuvent ni démarrer ni poursuivre ses conversations"
+    val listed = emails.take(limit).joinToString(", ")
+    val more = if (emails.size > limit) " +${emails.size - limit}" else ""
+    return "${agentAccessSummary(emails.size)} · $listed$more"
+}

@@ -997,13 +997,19 @@ private fun AgentOverview(
         OverviewRow(
             AgentSection.People,
             when {
-                creating -> agentAccessSummary(0)
+                creating -> agentAccessOverview(emptyList())
                 people.error != null -> NOT_LOADED
-                !people.loaded -> ""
-                else -> agentAccessSummary(allowed)
+                !people.loaded -> "Vérification des membres qui peuvent l’utiliser…"
+                else -> agentAccessOverview(people.rows)
             },
             chips = {
-                if (people.loaded && allowed > 0) ToneChip(PluginBadge("Partagé", PluginTone.OK))
+                when {
+                    people.error != null ->
+                        ToneChip(PluginBadge("Indisponible", PluginTone.WARNING))
+                    creating || (people.loaded && allowed == 0) ->
+                        ToneChip(PluginBadge("Vous seul", PluginTone.MUTED))
+                    people.loaded -> ToneChip(PluginBadge("Partagé", PluginTone.OK))
+                }
             },
         ) {
             open(AgentSection.People)

@@ -104,6 +104,30 @@ class AgentPeopleTest {
     }
 
     @Test
+    fun theOverviewNamesTheFirstMembersWhoMayUseTheAgent() {
+        fun member(id: String, allowed: Boolean = true) =
+            AgentAccessRow(id, "$id@example.test", known = true, allowed = allowed)
+        assertEquals(
+            "Les membres ne peuvent ni démarrer ni poursuivre ses conversations",
+            agentAccessOverview(listOf(member("ada", allowed = false))),
+        )
+        assertEquals(
+            "Vous et 1 membre · bo@example.test",
+            agentAccessOverview(
+                listOf(
+                    member("ada", allowed = false),
+                    member("bo"),
+                    AgentAccessRow("gone", "Ancien membre", known = false, allowed = true),
+                )
+            ),
+        )
+        assertEquals(
+            "Vous et 4 membres · a@example.test, b@example.test, c@example.test +1",
+            agentAccessOverview(listOf("a", "b", "c", "d").map { member(it) }),
+        )
+    }
+
+    @Test
     fun aResponseChangesOnlyItsOwnMember() {
         // Two quick grants: the first response, listing only its own member, arrives last.
         val afterSecond = withAccess(emptyList(), "b", listOf("a", "b"))
