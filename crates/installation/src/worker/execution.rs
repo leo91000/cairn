@@ -197,64 +197,88 @@ async fn record_failure(
     if super::retry::schedule(s, checkpoint, cancel, error).await? {
         return Ok(());
     }
-    // Another conversation took the last room after the scheduler checked:
-    // wait again instead of failing.
-    if !cancel.is_cancelled() && crate::nodes::placement::is_no_capacity(error) {
-        checkpoint
-            .update(|state| state.capacity_retry_at = Some(now() + CONTROLLER_CAPACITY_RETRY_MS))
-            .await?;
-        let patch = crate::runs::RunChanges {
-            status: Some(RunStatus::Queued),
-            recovery_pending: Some(true),
-            finished_at: Some(None),
-            ..Default::default()
-        };
-        let run = s.store.change_run(run_id, patch).await?;
-        return super::schedule::report_capacity_wait(s, &run, &error.message).await;
-    }
-    let saved = checkpoint.snapshot().await;
-    let recover_controller = recovers_controller(s, checkpoint, &saved, cancel, error).await?;
-    if recover_controller {
-        let recoveries = saved.controller_recoveries() + 1;
-        let attempt = saved.runner_id().map(str::to_owned);
-        checkpoint
-            .update(|c| {
-                c.controller_recoveries = Some(recoveries);
-                c.controller_recovery_reservation = attempt;
-            })
-            .await?;
-    }
-    let status = if cancel.is_cancelled() {
-        RunStatus::Cancelled
-    } else if s.shutdown.is_cancelled() || recover_controller {
-        RunStatus::Queued
-    } else {
-        RunStatus::Failed
-    };
-    let needs_fence = saved.isolated() && saved.runner_id().is_some();
+    let id = run_id.to_owned();
     let summary = run_output::redact(&error.message, sensitive);
-    if needs_fence && status != RunStatus::Queued {
-        let settled = Settled::failure(status, &summary);
-        checkpoint
-            .update(|c| c.settled = Some(Some(settled)))
-            .await?;
-    }
-    let mut patch = failure_changes(status, needs_fence, &summary);
-    if status != RunStatus::Queued {
-        patch.wakeup = Some(None);
-    }
-    let kind = if s.shutdown.is_cancelled() {
-        EventKind::Status
-    } else {
-        EventKind::Error
-    };
-    let run_id = run_id.to_owned();
-    s.store
-        .transaction(move |db| {
-            db.change_run(&run_id, patch)?;
-            db.event(&run_id, &kind, &summary, None)
+    let unavailable = error.is_unavailable();
+    let capacity = crate::nodes::placement::is_no_capacity(error);
+    let cancel = cancel.clone();
+    let shutdown = s.shutdown.clone();
+    let capacity_detail = error.message.clone();
+    let capacity_wait = checkpoint
+        .decide(move |saved, db| {
+            let run = db
+                .run_record(&id)?
+                .ok_or_else(|| Error::not_found("Run not found"))?;
+            let cancelled = cancel.is_cancelled() || run.state.cancel_requested_at.is_some();
+            let expired = matches!(saved.remaining_ms, Some(Some(i64::MIN..=0)));
+            if capacity && !cancelled && !expired && !shutdown.is_cancelled() {
+                saved.capacity_retry_at = Some(now() + CONTROLLER_CAPACITY_RETRY_MS);
+                db.change_run(
+                    &id,
+                    crate::runs::RunChanges {
+                        status: Some(RunStatus::Queued),
+                        recovery_pending: Some(true),
+                        finished_at: Some(None),
+                        ..Default::default()
+                    },
+                )?;
+                return Ok(true);
+            }
+            let mode_change = run.boundary["nativeModeInterruption"].is_string();
+            let may_retry = mode_change
+                || saved.controller_recoveries() < MAX_CONTROLLER_RECOVERIES
+                || run.boundary["moveRequest"].is_object();
+            let recover_controller = unavailable
+                && saved.managed()
+                && !saved.completed()
+                && may_retry
+                && (mode_change || run.state.session_id.is_some())
+                && !cancelled
+                && !expired
+                && !shutdown.is_cancelled();
+            if recover_controller && !saved.has_controller_recovery_reservation() {
+                saved.controller_recoveries = Some(saved.controller_recoveries() + 1);
+                saved.controller_recovery_reservation = saved.runner_id().map(str::to_owned);
+            }
+            let status = if cancelled {
+                RunStatus::Cancelled
+            } else if expired {
+                RunStatus::Failed
+            } else if shutdown.is_cancelled() || recover_controller {
+                RunStatus::Queued
+            } else {
+                RunStatus::Failed
+            };
+            let message = if cancelled {
+                "Run stopped. You can resume this conversation."
+            } else if expired {
+                "Run exceeded its time limit."
+            } else {
+                &summary
+            };
+            let needs_fence = saved.isolated() && saved.runner_id().is_some();
+            if needs_fence && status != RunStatus::Queued {
+                saved.settled = Some(Some(Settled::failure(status, message)));
+            }
+            let mut patch = failure_changes(status, needs_fence, message);
+            if status != RunStatus::Queued {
+                patch.wakeup = Some(None);
+            }
+            let kind = if shutdown.is_cancelled() {
+                EventKind::Status
+            } else {
+                EventKind::Error
+            };
+            db.change_run(&id, patch)?;
+            db.event(&id, &kind, message, None)?;
+            Ok(false)
         })
-        .await
+        .await?;
+    if capacity_wait {
+        let run = s.store.run_state(run_id).await?;
+        super::schedule::report_capacity_wait(s, &run, &capacity_detail).await?;
+    }
+    Ok(())
 }
 
 /// Controller recovery is bounded on both local and remote nodes. An explicit

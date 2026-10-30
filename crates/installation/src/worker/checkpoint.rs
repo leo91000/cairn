@@ -485,6 +485,36 @@ impl Checkpoint {
         Ok(())
     }
 
+    /// Decide a run transition and its checkpoint under the same store transaction.
+    pub async fn decide<T: Send + 'static>(
+        &self,
+        decision: impl FnOnce(&mut RunCheckpoint, &mut Db<'_>) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let mut state = self.state.lock().await;
+        let expected = state.runner_id().map(str::to_owned);
+        let fallback = state.clone();
+        let id = self.id.clone();
+        let deadline = self.deadline();
+        let (saved, value) = self
+            .store
+            .transaction(move |db| {
+                let mut saved = RunCheckpoint::load_in(db, &id)?.unwrap_or(fallback);
+                if saved.runner_id() != expected.as_deref() {
+                    return Err(crate::error::Error::conflict(
+                        "Execution attempt changed during settlement.",
+                    ));
+                }
+                saved.remaining_ms =
+                    Some(deadline.map(|deadline| deadline.saturating_sub(now()).max(0)));
+                let value = decision(&mut saved, db)?;
+                saved.store_in(db, &id)?;
+                Ok((saved, value))
+            })
+            .await?;
+        *state = saved;
+        Ok(value)
+    }
+
     /// Publishes engine state, its checkpoint and the event in one commit. A
     /// streamed text snapshot only changes memory; it does not rewrite the
     /// checkpoint per token. Memory advances only after successful publication.

@@ -29,13 +29,25 @@ pub(super) async fn schedule(
         return Ok(false);
     }
     let id = checkpoint.id.clone();
+    let expected = saved.runner_id().map(str::to_owned);
+    let deadline = checkpoint.deadline();
+    let cancel = cancel.clone();
+    let shutdown = s.shutdown.clone();
     let cause = cause.clone();
     s.store
         .transaction(move |db| {
             let run = db
                 .run_state(&id)?
                 .ok_or_else(|| Error::not_found("Run not found"))?;
-            if run.cancel_requested_at.is_some()
+            let current = super::checkpoint::RunCheckpoint::load_in(db, &id)?;
+            if cancel.is_cancelled()
+                || shutdown.is_cancelled()
+                || deadline.is_some_and(|deadline| now() >= deadline)
+                || current
+                    .as_ref()
+                    .and_then(super::checkpoint::RunCheckpoint::runner_id)
+                    != expected.as_deref()
+                || run.cancel_requested_at.is_some()
                 || (run.session_id.is_none() && !cause.startup)
                 || !run.status.is_active()
             {
