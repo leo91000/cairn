@@ -77,6 +77,7 @@ export class NativeFixture {
     addRun: (value: unknown) => this.call('addRun', value),
     updateRun: (id: string, patch: unknown) => this.call('updateRun', id, patch),
     event: (id: string, type: string, text: string, payload?: unknown) => this.call('event', id, type, text, payload),
+    seedEvents: (id: string, events: Pick<RunEvent, 'type' | 'text' | 'payload'>[]) => this.call('seedEvents', id, events),
     events: (id: string, after = 0, limit = 10000): RunEvent[] => this.call('events', id, after, limit),
     chatMessages: (id: string): any[] => this.call('chatMessages', id),
     set: (key: string, value: unknown, expires?: number) => this.call('set', key, value, expires),
