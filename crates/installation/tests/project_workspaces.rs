@@ -541,8 +541,8 @@ async fn plan_turns_list_and_call_only_workspace_tools_without_effects() {
             },
         })
     };
-    let answer = |question: &str| {
-        let (s, chat_id, question) = (s.clone(), chat_id.clone(), question.to_owned());
+    let answer = |s: Arc<Service>, question: &str| {
+        let (chat_id, question) = (chat_id.clone(), question.to_owned());
         async move {
             let id = id();
             s.question_answer(
@@ -565,13 +565,23 @@ async fn plan_turns_list_and_call_only_workspace_tools_without_effects() {
     let asked = workspace_rpc(&s, &token, "tools/call", ask(&id().to_string())).await;
     assert_ne!(asked["result"]["isError"], true, "{asked}");
     let later = workspace_rpc(&s, &token, "tools/call", ask(&id().to_string())).await;
-    let during = answer(text(&asked["result"]["structuredContent"], "questionId")).await;
+    let during = answer(
+        s.clone(),
+        text(&asked["result"]["structuredContent"], "questionId"),
+    )
+    .await;
     assert_eq!(during["plan"], true);
     assert_eq!(during["mode"], "steer");
     // Once a turn that can change files runs, the answer waits for its own plan turn.
     let ordinary = json!({ "messageId": "ordinary-message", "text": "Implement" });
     patch_run(&s, &run, json!({ "chatExecution": ordinary })).await;
-    let after = answer(text(&later["result"]["structuredContent"], "questionId")).await;
+    // Reopen the real database through a new service before answering.
+    let restarted = Service::new(s.config.clone()).await.unwrap();
+    let after = answer(
+        restarted,
+        text(&later["result"]["structuredContent"], "questionId"),
+    )
+    .await;
     assert_eq!(after["plan"], true);
     assert_eq!(after["mode"], "queue");
     // A question asked by a turn that can change files keeps an ordinary answer.
@@ -579,7 +589,11 @@ async fn plan_turns_list_and_call_only_workspace_tools_without_effects() {
     let ordinary_token = run_token(&s, &current).await;
     let asked = workspace_rpc(&s, &ordinary_token, "tools/call", ask(&id().to_string())).await;
     assert_ne!(asked["result"]["isError"], true, "{asked}");
-    let plain = answer(text(&asked["result"]["structuredContent"], "questionId")).await;
+    let plain = answer(
+        s.clone(),
+        text(&asked["result"]["structuredContent"], "questionId"),
+    )
+    .await;
     assert!(plain.get("plan").is_none(), "{plain}");
     assert_eq!(plain["mode"], "steer");
 
