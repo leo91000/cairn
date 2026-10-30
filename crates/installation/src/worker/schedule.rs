@@ -605,7 +605,7 @@ pub(super) fn finish_recovery(
                 }
                 message => message,
             };
-            let waiting = current.trigger != "chat" && record.boundary["wakeup"].is_object();
+            let waiting = current.trigger != "chat" && record.wakeup.is_some();
             if waiting && current.session_id.is_none() {
                 db.change_run(id,crate::runs::RunChanges {
                     status: Some(RunStatus::Failed),
@@ -613,7 +613,7 @@ pub(super) fn finish_recovery(
                     recovery_pending: Some(false),
                     account_wait_reason: Some(None),
                     error: Some(Some("Cannot wait without a saved agent session. Working files were preserved.".into())),
-                    boundary: Some(json!({"wakeup": null})),
+                    wakeup: Some(None),
                     ..Default::default()
                 })?;
                 return Ok(false);
@@ -682,7 +682,7 @@ fn cancel_recovery(db: &Db<'_>, id: &str, run: &RunState) -> Result<()> {
             account_wait_reason: Some(None),
             recovery_pending: Some(false),
             retry: Some(None),
-            boundary: Some(json!({"wakeup": null})),
+            wakeup: Some(None),
             ..Default::default()
         },
     )?;
@@ -1350,7 +1350,7 @@ mod tests {
             drop(original);
             let service = Service::new(config).await.unwrap();
             let wakeup = json!({
-                "id": "wake", "seconds": 3600,
+                "id": "wake", "messageId": null, "reason": "Waiting", "seconds": 3600,
                 "createdAt": now(), "wakeAt": now() + 3_600_000,
             });
             service
@@ -1366,7 +1366,8 @@ mod tests {
                         recovery_pending: Some(queued),
                         trigger: Some(("manual").to_owned()),
                         session_id: Some(Some("saved".into())),
-                        boundary: Some(json!({"isolated": true,"wakeup": wakeup})),
+                        wakeup: Some(Some(serde_json::from_value(wakeup.clone()).unwrap())),
+                        boundary: Some(json!({"isolated": true})),
                         ..Default::default()
                     },
                 )
@@ -1459,7 +1460,7 @@ mod tests {
                             status: Some(cairn_contracts::RunStatus::Queued),
                             recovery_pending: Some(true),
                             cancel_requested_at: Some(Some(now())),
-                            boundary: Some(json!({"wakeup": null})),
+                            wakeup: Some(None),
                             ..Default::default()
                         },
                     )?;

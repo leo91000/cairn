@@ -1,11 +1,16 @@
 import type { ChatQuestion } from '../../packages/contracts/chats'
 import type { RunEvent } from '../../packages/contracts/contracts'
+import Ajv from 'ajv'
+import addFormats from 'ajv-formats'
 import { createApp, h, shallowRef } from 'vue'
 import ActivityFeed from '../../apps/web/src/components/ActivityFeed.vue'
 import ChatQuestions from '../../apps/web/src/components/ChatQuestions.vue'
-import { questionFields } from '../../packages/contracts/chats'
+import questionSchema from '../../packages/contracts/generated/ChatQuestion.json'
 import '../../apps/web/src/styles/index.css'
 
+const ajv = new Ajv({ strict: false, useDefaults: true })
+addFormats(ajv)
+const validate = ajv.compile<ChatQuestion>(questionSchema)
 const questions = shallowRef<ChatQuestion[]>([])
 const history = shallowRef<RunEvent[]>([])
 window.questionnaireHistory = (text: string) => {
@@ -26,21 +31,26 @@ window.questionnaireRaw = (fields: unknown) => {
     runId: 'run',
     blocking: false,
     status: 'pending',
+    source: 'cairn',
     createdAt: 1,
     fields: fields as ChatQuestion['fields'],
   }]
 }
 
 window.questionnaire = (fields: unknown) => {
-  questions.value = [{
+  const value = {
     id: 'question',
     chatId: 'chat',
     runId: 'run',
     blocking: false,
     status: 'pending',
+    source: 'cairn',
     createdAt: 1,
-    fields: questionFields.parse(fields),
-  }]
+    fields: structuredClone(fields),
+  }
+  if (!validate(value))
+    throw new Error(JSON.stringify(validate.errors))
+  questions.value = [value]
 }
 
 createApp({

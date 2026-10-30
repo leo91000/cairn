@@ -64,6 +64,8 @@ Version 13 then upgrades to version 14 through the
 account identities, quota state, order, encrypted credentials and references.
 Version 14 then upgrades to 15 through the
 [typed conversation migration](migrations/0015-typed-conversations.md).
+Version 15 then upgrades to 16 through the
+[typed questions and waits migration](migrations/0016-typed-questions-and-waits.md).
 Stop the old manager and retain a consistent database/WAL backup first. Keep the
 installation identity, configuration, data roots, node state and object storage.
 The migration preserves node identities, credentials, configuration and references;

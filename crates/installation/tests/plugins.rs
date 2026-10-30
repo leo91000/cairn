@@ -778,13 +778,15 @@ async fn discord_script_runs_a_conversation_in_a_thread_end_to_end() {
         1
     );
     runtime::pump(&s, &connection, &mut session).await.unwrap();
+    let question_chat = chat.clone();
+    let question_id = question.clone();
     let pending = s
         .store
-        .kv(&format!("chat-question:{chat}:{question}"))
+        .read(move |db| db.question(&question_chat, &question_id))
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(pending["status"], "answering");
+    assert_eq!(pending.status.as_str(), "answering");
     assert!(
         mock.called("PATCH", "/api/v10/channels/500/messages/")
             .await
@@ -2405,13 +2407,15 @@ async fn channel_fallback_questions_retry_and_controls_route_to_the_right_conver
     .await
     .unwrap();
     runtime::pump(&s, &connection, &mut session).await.unwrap();
+    let question_chat = text(&chat, "id").to_owned();
+    let question_id = question.clone();
     let pending = s
         .store
-        .kv(&format!("chat-question:{}:{question}", text(&chat, "id")))
+        .read(move |db| db.question(&question_chat, &question_id))
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(pending["status"], "answering");
+    assert_eq!(pending.status.as_str(), "answering");
     // Stop buttons include the explicit conversation even without a shared thread.
     interact(&s, &connection, &[], json!({
         "id": "802", "token": "synthetic_interaction", "type": 3, "guild_id": "100", "channel_id": "200",

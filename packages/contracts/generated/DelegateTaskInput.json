@@ -1,0 +1,119 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "DelegationProject": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "inherit",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "none",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "projectId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "selected",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "projectId"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "properties": {
+    "agentId": {
+      "format": "uuid",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "model": {
+      "maxLength": 120,
+      "pattern": "^[\\w./:\\[\\]-]*$",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "project": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/DelegationProject"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Omission inherits the requester project. An explicit choice can clear it."
+    },
+    "provider": {
+      "pattern": "^(codex|claude|opencode)$",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "reasoning": {
+      "maxLength": 40,
+      "pattern": "^(?:[a-z][a-z0-9_-]*)?$",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "requestId": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "task": {
+      "maxLength": 50000,
+      "minLength": 1,
+      "type": "string"
+    },
+    "title": {
+      "maxLength": 90,
+      "minLength": 1,
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "task"
+  ],
+  "title": "DelegateTaskInput",
+  "type": "object"
+}
