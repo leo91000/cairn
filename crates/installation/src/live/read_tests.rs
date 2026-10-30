@@ -162,16 +162,21 @@ async fn list_cache_coalesces_revisions_and_preserves_account_and_external_refre
         .unwrap();
     let lists = ConversationLists::default();
     let scope = Scope::new("chats", "", "first-account");
-    let (initial, deadline) = lists.get(&db, &scope, 1).unwrap();
+    let frozen = Instant::now();
+    let clock = || frozen;
+    let (initial, deadline) = lists.get_with_clock(&db, &scope, 1, clock).unwrap();
     assert!(deadline.is_none());
     assert_eq!(initial[0]["title"], "before");
     db.0.execute("UPDATE conversations SET title='after' WHERE id='chat'", [])
         .unwrap();
-    let (coalesced, deadline) = lists.get(&db, &scope, 2).unwrap();
+    let (coalesced, deadline) = lists.get_with_clock(&db, &scope, 2, clock).unwrap();
     assert_eq!(coalesced[0]["title"], "before");
     assert!(deadline.is_some());
     let other = Scope::new("chats", "", "second-account");
-    assert_eq!(lists.get(&db, &other, 2).unwrap().0[0]["title"], "after");
+    assert_eq!(
+        lists.get_with_clock(&db, &other, 2, clock).unwrap().0[0]["title"],
+        "after"
+    );
     lists
         .cache
         .lock()
@@ -179,7 +184,7 @@ async fn list_cache_coalesces_revisions_and_preserves_account_and_external_refre
         .get_mut(&scope.account)
         .unwrap()
         .built_at -= LIST_INTERVAL;
-    let (fresh, deadline) = lists.get(&db, &scope, 2).unwrap();
+    let (fresh, deadline) = lists.get_with_clock(&db, &scope, 2, clock).unwrap();
     assert_eq!(fresh[0]["title"], "after");
     assert!(deadline.is_none());
     db.0.execute(
@@ -187,9 +192,15 @@ async fn list_cache_coalesces_revisions_and_preserves_account_and_external_refre
         [],
     )
     .unwrap();
-    assert_eq!(lists.get(&db, &scope, 2).unwrap().0[0]["title"], "after");
+    assert_eq!(
+        lists.get_with_clock(&db, &scope, 2, clock).unwrap().0[0]["title"],
+        "after"
+    );
     lists.invalidate(&scope.account);
-    assert_eq!(lists.get(&db, &scope, 2).unwrap().0[0]["title"], "external");
+    assert_eq!(
+        lists.get_with_clock(&db, &scope, 2, clock).unwrap().0[0]["title"],
+        "external"
+    );
 }
 
 #[tokio::test]
