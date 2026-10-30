@@ -596,7 +596,20 @@ async fn plan_recovery(s: &Service, current: &Value) -> Result<Recovery> {
 
 /// Advances a conversation's pending move, or starts recovery from an unavailable node.
 /// Returns whether the conversation may keep executing where it is.
-pub async fn advance(s: &Service, run: &Value, expected_attempt: Option<&str>) -> Result<bool> {
+pub async fn advance(s: &Service, run: &Value) -> Result<bool> {
+    let checkpoint =
+        crate::worker::checkpoint::RunCheckpoint::load(&s.store, text(run, "id")).await?;
+    let expected = checkpoint
+        .as_ref()
+        .and_then(crate::worker::checkpoint::RunCheckpoint::runner_id);
+    advance_for_attempt(s, run, expected).await
+}
+
+pub(crate) async fn advance_for_attempt(
+    s: &Service,
+    run: &Value,
+    expected_attempt: Option<&str>,
+) -> Result<bool> {
     let run_id = text(run, "id");
     if crate::worker::checkpoint::RunCheckpoint::load(&s.store, run_id)
         .await?
