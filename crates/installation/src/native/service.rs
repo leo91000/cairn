@@ -729,15 +729,10 @@ impl Controller {
             "usage": usage,
         });
         tracing::warn!(attempt = id, diagnostics = %details, "Native controller stopping workload");
-        let recorded = tokio::time::timeout(Duration::from_secs(1), async {
-            if let Err(error) =
-                super::record_stop_once(&self.file(id, "stop-reason.json"), &details).await
-            {
-                tracing::warn!(attempt = id, %error, "Could not persist native stop reason");
-            }
-            let message = format!("Native controller stopping workload: {details}\n");
-            let _ = self.append(id, true, message.as_bytes()).await;
-        })
+        let recorded = tokio::time::timeout(
+            Duration::from_secs(1),
+            self.write_stop_diagnostics(id, &details),
+        )
         .await;
         if recorded.is_err() {
             tracing::warn!(
@@ -745,6 +740,16 @@ impl Controller {
                 "Native stop diagnostics timed out; proceeding with workload fencing"
             );
         }
+    }
+
+    async fn write_stop_diagnostics(&self, id: &str, details: &Value) {
+        if let Err(error) =
+            super::record_stop_once(&self.file(id, "stop-reason.json"), details).await
+        {
+            tracing::warn!(attempt = id, %error, "Could not persist native stop reason");
+        }
+        let message = format!("Native controller stopping workload: {details}\n");
+        let _ = self.append(id, true, message.as_bytes()).await;
     }
 
     async fn execute(&self, id: &str, plan: &Value, stop: CancellationToken) -> Result<i32> {
@@ -3213,7 +3218,8 @@ mod tests {
             "nodeLimitBytes": 512,
         });
         let reason = supervision_stop_reason(true, false, 48, 32, 100, 512).unwrap();
-        controller.record_stop(&id, reason, usage.clone()).await;
+        let details = json!({ "reason": reason, "at": crate::config::now(), "usage": usage });
+        controller.write_stop_diagnostics(&id, &details).await;
         let saved: Value = serde_json::from_slice(
             &tokio::fs::read(controller.file(&id, "stop-reason.json"))
                 .await
@@ -3221,7 +3227,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(saved["reason"], "conversation_disk_limit");
-        assert_eq!(saved["usage"], usage);
+        assert_eq!(saved["usage"], details["usage"]);
         assert!(saved["at"].as_i64().unwrap() > 0);
         assert!(
             tokio::fs::metadata(controller.file(&id, "log"))
@@ -3243,6 +3249,41 @@ mod tests {
             Some("node_disk_limit")
         );
         assert_eq!(supervision_stop_reason(true, false, 32, 32, 512, 512), None);
+    }
+
+    #[tokio::test]
+    async fn native_stop_fences_after_the_log_lock_remains_held() {
+        let (_fixture, controller) = fixture().await;
+        let id = crate::config::id();
+        atomic_write(&controller.file(&id, "log"), b"")
+            .await
+            .unwrap();
+        let details = json!({ "reason": "time_limit", "at": crate::config::now(), "usage": null });
+        super::super::record_stop_once(&controller.file(&id, "stop-reason.json"), &details)
+            .await
+            .unwrap();
+        let held = controller.log_lock.lock().await;
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            controller.record_stop(&id, "time_limit", Value::Null),
+        )
+        .await
+        .expect("Stop diagnostics must not prevent fencing when the log lock is held");
+        assert_eq!(
+            tokio::fs::metadata(controller.file(&id, "log"))
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
+        let marker: Value = serde_json::from_slice(
+            &tokio::fs::read(controller.file(&id, "stop-reason.json"))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(marker, details);
+        drop(held);
     }
 
     fn request(path: &str, body: &Value) -> Request {
