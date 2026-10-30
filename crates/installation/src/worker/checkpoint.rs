@@ -438,9 +438,27 @@ impl Checkpoint {
         change: impl FnOnce(&mut RunCheckpoint),
         publish: impl FnOnce(&mut Db<'_>) -> Result<()> + Send + 'static,
     ) -> Result<()> {
+        self.update_and_publish_if(
+            move |saved| {
+                change(saved);
+                true
+            },
+            publish,
+        )
+        .await
+    }
+
+    /// Commits an event only when its checkpoint transition is new.
+    pub async fn update_and_publish_if(
+        &self,
+        change: impl FnOnce(&mut RunCheckpoint) -> bool,
+        publish: impl FnOnce(&mut Db<'_>) -> Result<()> + Send + 'static,
+    ) -> Result<()> {
         let mut state = self.state.lock().await;
         let mut saved = state.clone();
-        change(&mut saved);
+        if !change(&mut saved) {
+            return Ok(());
+        }
         {
             let previous = self.pause_observation.lock().unwrap();
             saved.administrative_pause_observation = Some(AdministrativePauseObservation {
