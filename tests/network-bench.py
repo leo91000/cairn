@@ -485,7 +485,7 @@ def android_crash_summary(logcat, exit_info, native_log=""):
             retain("nativeFrames", frame)
     # WebRTC's FatalLog writes source/line to main's rtc tag before abort().
     # Its free-form check text and arguments must never reach the artifact.
-    for line in native_log[-65536:].splitlines():
+    for line in native_log[:65536].splitlines():
         record = re.fullmatch(r"([EF])/([^\r\n(]+)\(\s*(\d+)\):\s?(.*)", line)
         if not record or record[3] not in target_pids:
             continue

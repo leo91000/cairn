@@ -182,6 +182,12 @@ assert evidence['unexpectedOpcodes'] == [0x73, 0x79, 0x7a], evidence
 assert evidence['nativeFrames'] == [{'pc': 0x5fd29a, 'library': 'libart.so', 'buildId': '108a321dc93c20580e74b855c407e975'}, {'pc': 0x5fd29b, 'library': 'libart.so'}, {'pc': 0x5fd29c, 'library': 'other'}], evidence
 assert 'private' not in json.dumps(evidence), evidence
 assert bench.android_crash_summary('', '', main)['abortCategories'] == []
+header = crash.split('F/DEBUG(321): Abort message', 1)[0]
+large_main = 'F/art(123): Unexpected instruction: unused-3e\\n' + 'F/art(123): ' + 'private-fixture-cookie' * 10000
+bounded = bench.android_crash_summary(header, '', large_main)
+assert bounded['abortCategories'] == ['ART_UNEXPECTED_INSTRUCTION'], bounded
+assert bounded['unexpectedOpcodes'] == [0x3e], bounded
+assert 'private' not in json.dumps(bounded), bounded
 `], { stdio: 'pipe' })
 })
 
