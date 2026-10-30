@@ -1237,6 +1237,32 @@ async fn a_side_question_is_answered_natively_while_the_turn_continues() {
 }
 
 #[tokio::test]
+async fn a_claude_release_not_qualified_for_side_questions_never_takes_one() {
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    std::fs::create_dir_all(c.home.join(".claude")).unwrap();
+    std::fs::write(c.home.join(".claude/fixture-claude-2.1.280"), "").unwrap();
+    let p = plan(&root, "Hello");
+    let (tx, mut rx) = mpsc::channel(64);
+    let config = c.clone();
+    let task =
+        tokio::spawn(
+            async move { claude_process::run(&config, p, tx, CancellationToken::new()).await },
+        );
+    let mut events = Vec::new();
+    while let Some(event) = rx.recv().await {
+        events.push(event);
+    }
+    task.await.unwrap().unwrap();
+    assert!(events.iter().any(|event| event["type"] == "turn.completed"));
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["type"] == "chat.side.available")
+    );
+}
+
+#[tokio::test]
 async fn a_finished_turn_withdraws_the_side_questions_it_is_still_answering() {
     let (_root, c, events) = with_side_questions("fixture:slow", |root, event| {
         if event["type"] == "chat.side.available" {

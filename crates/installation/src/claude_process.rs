@@ -27,6 +27,16 @@ const STOPPED: &str = "Claude execution stopped.";
 const MAX_LINE: usize = 32_000_000;
 const MAX_IMAGE: usize = 10_000_000;
 
+/// Whether this Claude Code release was qualified to answer side questions with every tool
+/// denied before it runs (ADR-0078). Earlier or unknown releases never receive them.
+fn answers_side_questions(version: &str) -> bool {
+    let release = version
+        .split('.')
+        .map(|part| part.parse::<u64>().ok())
+        .collect::<Option<Vec<_>>>();
+    release.is_some_and(|release| release >= vec![2, 1, 308])
+}
+
 /// Prefix of the context usage requests this adapter sends Claude Code.
 const CONTEXT_REQUEST: &str = "cairn-context-";
 
@@ -814,7 +824,9 @@ impl Turn<'_> {
                 crate::validation::uuid(session)?;
                 self.emit(json!({ "type": "thread.started", "thread_id": session }))
                     .await?;
-                self.emit(json!({ "type": "chat.side.available" })).await?;
+                if answers_side_questions(text(value, "claude_code_version")) {
+                    self.emit(json!({ "type": "chat.side.available" })).await?;
+                }
             }
             "system" if value["subtype"] == "background_tasks_changed" => {
                 self.background_tasks(value).await?;

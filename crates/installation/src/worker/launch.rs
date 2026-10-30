@@ -294,8 +294,7 @@ impl Execution<'_> {
                 },
             )
             .await?;
-        private_dir(&self.directory).await?;
-        crate::chats::side_questions::forget_deliveries(&self.directory).await
+        private_dir(&self.directory).await
     }
 
     /// Refuses grants reduced since the run was queued. The run keeps the grants it
@@ -540,10 +539,8 @@ impl Execution<'_> {
         }
         // Each attempt's adapter, such as one resumed on another account, announces again
         // whether it answers side questions, and receives them only then.
-        s.store
-            .update_run_boundary(&self.id, json!({ "sideQuestions": null }))
+        crate::chats::side_questions::withdraw_announcement(&s.store, &self.id, &self.directory)
             .await?;
-        crate::chats::side_questions::forget_deliveries(&self.directory).await?;
         let output = workspace.output().to_owned();
         match tokio::fs::remove_file(&output).await {
             Ok(()) => {}

@@ -1657,30 +1657,14 @@ impl Service {
                 break;
             }
         }
-        // Nor may this write restore side questions a launch removed meanwhile.
-        let announced = self
-            .store
-            .run(text(run, "id"))
-            .await?
-            .get("sideQuestions")
-            .is_some_and(|announced| announced == true);
-        if !announced {
-            steering.retain(|message| {
-                !message["sideQuestion"].is_object() && message["sideQuestionCancelled"] != true
-            });
-        }
         let directory = self
             .config
             .data_dir
             .join("runs")
             .join(chat.run_id.as_deref().unwrap_or(""))
             .join("chat-input");
-        crate::skills::private_dir(&directory).await?;
-        crate::skills::atomic_write(
-            &directory.join("messages.json"),
-            &serde_json::to_vec(&steering)?,
-        )
-        .await
+        // Nor may this write restore side questions an attempt removed meanwhile.
+        side_questions::publish_inbox(&self.store, text(run, "id"), &directory, steering).await
     }
 
     async fn chat_prepare(

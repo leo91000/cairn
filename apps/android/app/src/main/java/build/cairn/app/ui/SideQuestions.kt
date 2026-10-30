@@ -338,40 +338,42 @@ private fun SideQuestionRow(
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.Medium,
             )
-            // The answer or failure is announced when it replaces « Réponse en cours… ».
-            Box(Modifier.semantics { liveRegion = LiveRegionMode.Polite }) {
-                when (question.status) {
-                    "pending" ->
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Box(
-                                Modifier.size(6.dp)
-                                    .clip(CircleShape)
-                                    .background(MaterialTheme.colorScheme.primary)
-                            )
-                            Spacer(Modifier.width(8.dp))
-                            Text(
-                                "Réponse en cours…",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    "answered" ->
-                        Box(Modifier.testTag("side-question-answer")) {
-                            Markdown(question.answer.orEmpty())
-                        }
-                    "failed" ->
-                        Text(
-                            question.error.orEmpty(),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error,
-                        )
-                    else ->
-                        Text(
-                            "Retirée",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+            // One persistent status per question, announced when the answer arrives: the
+            // Markdown answer itself renders outside the Compose semantics tree.
+            Row(
+                Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (question.status == "pending") {
+                    Box(
+                        Modifier.size(6.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.primary)
+                    )
+                    Spacer(Modifier.width(8.dp))
                 }
+                Text(
+                    when (question.status) {
+                        "pending" -> "Réponse en cours…"
+                        "answered" -> "Répondue"
+                        "failed" -> "Sans réponse"
+                        else -> "Retirée"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            when (question.status) {
+                "answered" ->
+                    Box(Modifier.testTag("side-question-answer")) {
+                        Markdown(question.answer.orEmpty())
+                    }
+                "failed" ->
+                    Text(
+                        question.error.orEmpty(),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 if (question.itemId.isNotEmpty())

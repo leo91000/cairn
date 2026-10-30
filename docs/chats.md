@@ -140,7 +140,9 @@ like those still pending, marked unanswered with an explanation. Retried submiss
 are idempotent by their UUID. The answer uses the subscription of the account running
 the turn, and secrets masked in the conversation are masked in it too. A conversation
 keeps its 30 latest side questions, at most 5 waiting at once, with answers of up to
-20,000 characters. One reply takes at most 10, withdrawn ones included.
+20,000 characters. A reply holds at most 10 open side questions at once: those waiting
+and those withdrawn while it runs. A question about a whole reply reaches the agent with
+the first 2,000 characters of that reply.
 
 ## Notifications
 

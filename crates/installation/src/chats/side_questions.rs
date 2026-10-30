@@ -21,20 +21,23 @@ use crate::{
     validation::text,
 };
 use cairn_contracts::{ChatSideQuestion, SideQuestionInput, SideQuestionStatus};
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 
 /// Unanswered side questions a conversation can hold at once.
 const MAX_PENDING: usize = 5;
-/// Side questions one reply can still receive, withdrawals included, so a reply's inbox
-/// and the reads around it stay bounded.
+/// Open side questions one reply holds at once: waiting, or withdrawn while it runs (its
+/// inbox carries each withdrawal until it ends). Keeps the inbox and reads bounded.
 const MAX_OPEN: usize = 10;
 /// Side questions kept per conversation; the oldest settled ones are forgotten first.
 /// Conversation views carry them all, with their answers.
 const MAX_KEPT: usize = 30;
 /// Answers longer than this are cut, as no explanation needs more.
 const MAX_ANSWER: usize = 20_000;
+/// How much of a reply a question about the whole reply carries to the agent.
+const MAX_ABOUT: usize = 2_000;
 const MAX_ERROR: usize = 1_000;
 
 pub(crate) const EXPIRED: &str = "The reply stopped before this side question was answered. Ask it again while the agent works, or ask in the conversation.";
@@ -49,6 +52,9 @@ struct Open {
     /// The turn asked about: its run continues with other turns under the same identifier.
     #[serde(default)]
     turn: String,
+    /// The start of the reply a question without a quoted passage is about.
+    #[serde(default)]
+    about: String,
     status: SideQuestionStatus,
 }
 
@@ -116,33 +122,62 @@ fn find(db: &Db<'_>, chat: &str, id: &str) -> Result<Option<ChatSideQuestion>> {
     db.kv_as(&key(chat, id))
 }
 
-fn save(db: &Db<'_>, question: &ChatSideQuestion) -> Result<()> {
-    save_in_turn(db, question, None)
+/// Saves a question asked during `turn` of its run, and what the reply receives about it.
+fn open_question(db: &Db<'_>, question: &ChatSideQuestion, turn: &str, about: &str) -> Result<()> {
+    db.set_as(&key(&question.chat_id, &question.id), question, None)?;
+    if !matches!(
+        question.status,
+        SideQuestionStatus::Pending | SideQuestionStatus::Cancelled
+    ) {
+        return Ok(());
+    }
+    let open = Open {
+        run_id: question.run_id.clone(),
+        turn: turn.to_owned(),
+        about: about.to_owned(),
+        status: question.status,
+    };
+    db.set_as(&open_key(&question.chat_id, &question.id), &open, None)
 }
 
-/// Saves the question, and its open marker while the reply may still receive it. The
-/// marker keeps the turn it was asked during unless `turn` names it.
-fn save_in_turn(db: &Db<'_>, question: &ChatSideQuestion, turn: Option<&str>) -> Result<()> {
+/// Saves a question's new state. It keeps its open marker only while the reply may still
+/// receive it or its withdrawal.
+fn save(db: &Db<'_>, question: &ChatSideQuestion) -> Result<()> {
     db.set_as(&key(&question.chat_id, &question.id), question, None)?;
     let open_key = open_key(&question.chat_id, &question.id);
-    match question.status {
-        SideQuestionStatus::Pending | SideQuestionStatus::Cancelled => {
-            let turn = match turn {
-                Some(turn) => turn.to_owned(),
-                None => db
-                    .kv_as::<Open>(&open_key)?
-                    .map(|open| open.turn)
-                    .unwrap_or_default(),
-            };
-            let open = Open {
-                run_id: question.run_id.clone(),
-                turn,
-                status: question.status,
-            };
+    let open = db.kv_as::<Open>(&open_key)?;
+    match (question.status, open) {
+        (SideQuestionStatus::Pending | SideQuestionStatus::Cancelled, Some(mut open)) => {
+            open.status = question.status;
             db.set_as(&open_key, &open, None)
         }
         _ => db.delete(&open_key),
     }
+}
+
+/// The start of the agent reply `item_id`, so the agent knows which reply a question is
+/// about when it quotes no passage.
+fn reply_start(db: &Db<'_>, run_id: &str, item_id: &str) -> Result<String> {
+    if item_id.is_empty() {
+        return Ok(String::new());
+    }
+    let reply: Option<String> = db
+        .0
+        .prepare_cached(
+            "SELECT json_extract(payload,'$.item.text') FROM events WHERE run_id=?1 AND json_extract(payload,'$.item.type')='agent_message' AND json_extract(payload,'$.item.id')=?2 ORDER BY id DESC LIMIT 1",
+        )?
+        .query_row(rusqlite::params![run_id, item_id], |row| row.get(0))
+        .optional()?
+        .flatten();
+    let reply = reply.unwrap_or_default();
+    let reply = reply.trim();
+    if reply.chars().count() <= MAX_ABOUT {
+        return Ok(reply.to_owned());
+    }
+    Ok(format!(
+        "{}…",
+        reply.chars().take(MAX_ABOUT).collect::<String>()
+    ))
 }
 
 /// Why the chat's current reply cannot take a side question, if it cannot.
@@ -184,21 +219,21 @@ pub(crate) fn unavailable(run: Option<&Value>) -> Option<&'static str> {
     None
 }
 
-/// The question as the agent receives it, with the passage it is about.
-fn wire_text(question: &ChatSideQuestion) -> String {
-    if question.quote.is_empty() {
+/// The question as the agent receives it, with the passage or reply it is about.
+fn wire_text(question: &ChatSideQuestion, about: &str) -> String {
+    let (heading, excerpt) = if !question.quote.is_empty() {
+        ("About this passage of your reply:", question.quote.as_str())
+    } else if !about.is_empty() {
+        ("About this reply of yours:", about)
+    } else {
         return question.text.clone();
-    }
-    let quoted = question
-        .quote
+    };
+    let quoted = excerpt
         .lines()
         .map(|line| format!("> {line}"))
         .collect::<Vec<_>>()
         .join("\n");
-    format!(
-        "About this passage of your reply:\n{quoted}\n\n{}",
-        question.text
-    )
+    format!("{heading}\n{quoted}\n\n{}", question.text)
 }
 
 fn same_question(existing: &ChatSideQuestion, input: &SideQuestionInput) -> bool {
@@ -257,7 +292,11 @@ fn ask(
         return Err(Error::conflict(reason));
     }
     let run = run.unwrap();
-    let open = open(db, chat_id)?;
+    // This reply's open questions; those of an earlier turn expire with its next tick.
+    let open = open(db, chat_id)?
+        .into_iter()
+        .filter(|(_, open)| answers(Some(&run), open))
+        .collect::<Vec<_>>();
     let pending = open
         .iter()
         .filter(|(_, open)| open.status == SideQuestionStatus::Pending)
@@ -269,7 +308,7 @@ fn ask(
     }
     if open.len() >= MAX_OPEN {
         return Err(Error::conflict(
-            "This reply has taken as many side questions as it can. Ask in the conversation, or again during the next reply.",
+            "This reply already holds as many open side questions as it can, withdrawn ones included. Ask in the conversation, or again during the next reply.",
         ));
     }
 
@@ -291,7 +330,12 @@ fn ask(
         created_at: now(),
         settled_at: None,
     };
-    save_in_turn(db, &question, Some(turn(&run)))?;
+    let about = if question.quote.is_empty() {
+        reply_start(db, &question.run_id, &question.item_id)?
+    } else {
+        String::new()
+    };
+    open_question(db, &question, turn(&run), &about)?;
     prune(db, chat_id)?;
     Ok(question)
 }
@@ -326,23 +370,23 @@ pub(crate) fn deliveries(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<Vec<
             continue;
         }
         if let Some(question) = find(db, chat_id, &id)? {
-            questions.push(question);
+            questions.push((question, open.about));
         }
     }
     // In the order they were asked.
-    questions.sort_by(|a, b| {
+    questions.sort_by(|(a, _), (b, _)| {
         a.created_at
             .cmp(&b.created_at)
             .then_with(|| a.id.cmp(&b.id))
     });
     let mut entries = Vec::new();
-    for question in questions {
+    for (question, about) in questions {
         match question.status {
             SideQuestionStatus::Pending => entries.push(json!({
                 "id": format!("side-question:{}", question.id),
                 "sideQuestion": {
                     "id": question.id,
-                    "text": wire_text(&question),
+                    "text": wire_text(&question, &about),
                 },
             })),
             SideQuestionStatus::Cancelled => entries.push(json!({
@@ -436,8 +480,15 @@ pub(crate) fn view(
     Ok(())
 }
 
-/// Removes side questions from a run's inbox before another execution reads it: only an
-/// execution that announced it can answer them, and it receives them again then.
+/// Serialises inbox writes with the attempts that withdraw an announcement, so a write
+/// decided before an attempt never restores side questions it removed.
+static INBOX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn is_side(entry: &Value) -> bool {
+    entry["sideQuestion"].is_object() || entry["sideQuestionCancelled"] == true
+}
+
+/// Removes side questions from a run's inbox.
 pub(crate) async fn forget_deliveries(run_directory: &std::path::Path) -> Result<()> {
     let inbox = run_directory.join("chat-input").join("messages.json");
     let Ok(bytes) = tokio::fs::read(&inbox).await else {
@@ -448,14 +499,45 @@ pub(crate) async fn forget_deliveries(run_directory: &std::path::Path) -> Result
     };
     let kept = entries
         .iter()
-        .filter(|entry| {
-            !entry["sideQuestion"].is_object() && entry["sideQuestionCancelled"] != true
-        })
+        .filter(|entry| !is_side(entry))
         .collect::<Vec<_>>();
     if kept.len() == entries.len() {
         return Ok(());
     }
     crate::skills::atomic_write(&inbox, &serde_json::to_vec(&kept)?).await
+}
+
+/// Before another attempt reads the run's inbox: only an attempt whose adapter announced
+/// side questions receives them, once it has.
+pub(crate) async fn withdraw_announcement(
+    store: &crate::store::Store,
+    run_id: &str,
+    run_directory: &std::path::Path,
+) -> Result<()> {
+    let _inbox = INBOX.lock().await;
+    store
+        .update_run_boundary(run_id, json!({ "sideQuestions": null }))
+        .await?;
+    forget_deliveries(run_directory).await
+}
+
+/// Writes the run's inbox, with side questions only while its announcement stands.
+pub(crate) async fn publish_inbox(
+    store: &crate::store::Store,
+    run_id: &str,
+    directory: &std::path::Path,
+    mut entries: Vec<Value>,
+) -> Result<()> {
+    let _inbox = INBOX.lock().await;
+    if store.run(run_id).await?["sideQuestions"] != true {
+        entries.retain(|entry| !is_side(entry));
+    }
+    crate::skills::private_dir(directory).await?;
+    crate::skills::atomic_write(
+        &directory.join("messages.json"),
+        &serde_json::to_vec(&entries)?,
+    )
+    .await
 }
 
 impl Service {
@@ -566,10 +648,15 @@ mod tests {
 
     #[test]
     fn quotes_each_line_of_the_passage_before_the_question() {
-        assert_eq!(wire_text(&question("")), "Why this order?");
+        assert_eq!(wire_text(&question(""), ""), "Why this order?");
         assert_eq!(
-            wire_text(&question("first\nsecond")),
+            wire_text(&question("first\nsecond"), "the whole reply"),
             "About this passage of your reply:\n> first\n> second\n\nWhy this order?"
+        );
+        // Without a passage, the agent still learns which reply the question is about.
+        assert_eq!(
+            wire_text(&question(""), "I traced it.\nThen I fixed it."),
+            "About this reply of yours:\n> I traced it.\n> Then I fixed it.\n\nWhy this order?"
         );
     }
 
@@ -609,7 +696,7 @@ mod tests {
                     question.id = id.into();
                     question.chat_id = chat.into();
                     question.status = status;
-                    save(db, &question)
+                    open_question(db, &question, "", "")
                 };
                 ask("pending", &chat, SideQuestionStatus::Pending)?;
                 ask("withdrawn", &chat, SideQuestionStatus::Cancelled)?;
@@ -669,6 +756,7 @@ mod tests {
         let open = Open {
             run_id: "run".into(),
             turn: "message-1".into(),
+            about: String::new(),
             status: SideQuestionStatus::Pending,
         };
         let run = |status: &str, turn: &str| json!({ "id": "run", "status": status, "chatExecution": { "messageId": turn } });
@@ -745,7 +833,7 @@ mod tests {
             let started = Instant::now();
             store
                 .transaction(move |db| {
-                    save(db, &pending)?;
+                    open_question(db, &pending, "", "")?;
                     prune(db, &pending.chat_id)
                 })
                 .await

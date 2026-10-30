@@ -35,7 +35,8 @@ test('asks side questions about a running reply without steering, queuing or rec
   await panel.getByRole('textbox', { name: 'Your question about this reply' }).fill('Why trace the boundaries first?')
   await page.screenshot({ path: test.info().outputPath('side-question-desktop-light.png'), animations: 'disabled' })
   await panel.getByRole('button', { name: 'Ask', exact: true }).click()
-  await expect(panel.getByText('Side answer: Why trace the boundaries first?')).toBeVisible()
+  // The agent received the start of the reply with the question (the fixture echoes it).
+  await expect(panel.getByText(/Side answer: About this reply of yours:/)).toBeVisible()
   await expectSingleScroll(page)
   await page.emulateMedia({ colorScheme: 'dark' })
   await page.screenshot({ path: test.info().outputPath('side-question-answer-desktop-dark.png'), animations: 'disabled' })
@@ -56,7 +57,7 @@ test('asks side questions about a running reply without steering, queuing or rec
     document.getSelection()!.addRange(range)
   })
   await page.getByRole('button', { name: 'Ask about selection' }).click()
-  await expect(panel.getByText('trace the component boundaries')).toBeVisible()
+  await expect(panel.getByText('trace the component boundaries', { exact: true })).toBeVisible()
   await panel.getByRole('textbox', { name: 'Your question about this passage' }).fill('Which boundaries?')
   await panel.getByRole('button', { name: 'Ask', exact: true }).click()
   await expect(panel.getByText(/Side answer: About this passage of your reply:/)).toBeVisible()

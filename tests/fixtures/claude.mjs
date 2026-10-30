@@ -18,6 +18,8 @@ const home = process.env.CLAUDE_CONFIG_DIR
 if (!home)
   throw new Error('Missing isolated fixture home')
 mkdirSync(home, { recursive: true })
+// The release the init event reports: side questions were qualified on 2.1.308.
+const version = existsSync(path.join(home, 'fixture-claude-2.1.280')) ? '2.1.280' : '2.1.308'
 const auth = path.join(process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR || home, '.credentials.json')
 const args = process.argv.slice(2)
 const out = value => process.stdout.write(`${JSON.stringify(value)}\n`)
@@ -97,7 +99,12 @@ else {
     instructionsMode,
     backgroundTasksDisabled,
   })}\n`)
-  out({ type: 'system', subtype: 'init', session_id: session })
+  out({
+    type: 'system',
+    subtype: 'init',
+    session_id: session,
+    claude_code_version: version,
+  })
   let question
   let serial = 0
   const sides = new Map()
@@ -340,7 +347,12 @@ else {
           compact_result: 'success',
           session_id: session,
         })
-        out({ type: 'system', subtype: 'init', session_id: session })
+        out({
+          type: 'system',
+          subtype: 'init',
+          session_id: session,
+          claude_code_version: version,
+        })
         out({
           type: 'system',
           subtype: 'compact_boundary',

@@ -233,7 +233,8 @@ of installation-management access. Native question tools are not used.
 
 `ask_chat_side_question` asks the running agent a [side question](chats.md#side-questions)
 about the conversation, optionally quoting a passage (`question.quote`) of one of
-its replies (`question.itemId`, the agent message's item ID). It requires
+its replies (`question.itemId`, the agent message's item ID). Without a quote, a
+question about a reply reaches the agent with the start of that reply. It requires
 `canAskSideQuestion`, reported by `get_chat`, `list_chats` and
 `list_chat_side_questions` with `sideQuestionReason` when false: Claude Code must be
 working on a reply. Codex and OpenCode conversations never take one. Supply

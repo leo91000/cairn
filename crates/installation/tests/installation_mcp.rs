@@ -5577,7 +5577,7 @@ async fn side_questions_are_asked_withdrawn_and_answered_beside_the_running_repl
         .await;
     }
     assert!(
-        refused.to_string().contains("as many side questions"),
+        refused.to_string().contains("as many open side questions"),
         "{refused}"
     );
     s.chat_tick(&std::collections::HashSet::new())
@@ -5598,6 +5598,40 @@ async fn side_questions_are_asked_withdrawn_and_answered_beside_the_running_repl
         .unwrap();
     let inbox: Value = serde_json::from_slice(&std::fs::read(&inbox_path).unwrap()).unwrap();
     assert_eq!(inbox, json!([]), "{inbox}");
+
+    // A question about a whole reply carries the start of that reply to the agent.
+    s.store
+        .event(
+            &run_id,
+            &cairn_contracts::EventKind::ItemCompleted,
+            "I traced the boundaries first.",
+            Some(json!({
+                "type": "item.completed",
+                "item": { "id": "reply-7", "type": "agent_message", "text": "I traced the boundaries first." },
+            })),
+        )
+        .await
+        .unwrap();
+    let whole = call(
+        &s,
+        &configuration,
+        "ask_chat_side_question",
+        json!({
+            "chatId": chat_id,
+            "question": { "id": uuid::Uuid::new_v4(), "text": "Which boundaries?", "itemId": "reply-7" },
+        }),
+    )
+    .await;
+    assert_eq!(result(&whole)["status"], "pending", "{whole}");
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let inbox: Value = serde_json::from_slice(&std::fs::read(&inbox_path).unwrap()).unwrap();
+    assert_eq!(
+        inbox[0]["sideQuestion"]["text"],
+        "About this reply of yours:\n> I traced the boundaries first.\n\nWhich boundaries?",
+        "{inbox}"
+    );
 
     // Once the reply ends, a question it never answered says so.
     let third = call(

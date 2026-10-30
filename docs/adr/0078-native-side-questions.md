@@ -27,7 +27,10 @@ withdraws it. A probe with Cairn's launch flags confirmed it: a side reply calli
 finished. The same held with `--dangerously-skip-permissions`. Claude Code still runs
 `PreToolUse` hooks before that denial. Cairn launches it with no setting sources and
 no hooks, and the probe saw no user or project hook run; only an operator's
-managed-policy hooks could.
+managed-policy hooks could. The adapter announces side questions only to releases from
+2.1.308, the one probed (as reported by its `system/init` `claude_code_version`);
+earlier supported releases never receive them. A question about a whole reply carries
+the reply's first 2,000 characters, so the forked turn knows which reply it concerns.
 
 Codex's app-server forks the running thread with `thread/fork` (`ephemeral`), which is
 how its own `/side` works. Cairn cannot make that fork tool-less:
