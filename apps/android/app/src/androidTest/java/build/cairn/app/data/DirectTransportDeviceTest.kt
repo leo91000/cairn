@@ -523,21 +523,24 @@ class DirectTransportDeviceTest {
                     suspendedControl = true
 
                     awaitDirect()
-                    val largeRequest = runCatching {
-                        api.request(
-                            "POST",
-                            "/chats/missing/messages",
-                            body(
-                                "id" to java.util.UUID.randomUUID().toString(),
-                                "text" to "x".repeat(1_000_000),
-                            ),
-                        )
-                    }
-                        .exceptionOrNull()
+                    val largeRequest =
+                        try {
+                            api.request(
+                                "POST",
+                                "/chats/missing/messages",
+                                body(
+                                    "id" to java.util.UUID.randomUUID().toString(),
+                                    "text" to "x".repeat(1_000_000),
+                                ),
+                            )
+                            throw AssertionError("Expected the router's oversized-body rejection")
+                        } catch (error: ApiException) {
+                            error
+                        }
                     assertEquals(
                         "The real router retains its 150 kB JSON body limit",
                         413,
-                        (largeRequest as? ApiException)?.status,
+                        largeRequest.status,
                     )
                     // An ID-backed POST may safely replay on relay under write pressure.
                     // The route records that response; observe a fresh direct read before
