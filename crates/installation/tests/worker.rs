@@ -2818,11 +2818,11 @@ async fn interrupted_controller_output_after_healthy_exit_never_replays_the_turn
         let run_id = text(&run, "id").to_owned();
         let wait_returned = Arc::new(AtomicBool::new(false));
         let app = Router::new().fallback(any({
-            let service = fixture.service.clone();
+            let store = fixture.service.store.clone();
             let id = run_id.clone();
             let wait_returned = wait_returned.clone();
             move |state: State<Arc<Controller>>, request: Request| {
-                let service = service.clone();
+                let store = store.clone();
                 let id = id.clone();
                 let wait_returned = wait_returned.clone();
                 async move {
@@ -2836,17 +2836,17 @@ async fn interrupted_controller_output_after_healthy_exit_never_replays_the_turn
                             output.push_str("{\"type\":\"item.completed\",\"item\":{\"id\":\"reply\",\"type\":\"agent_message\",\"text\":\"committed answer\"}}\n{\"type\":\"turn.completed\",\"usage\":{}}\n");
                         }
                         let frame = format!("{}\n", json!({ "type": "output", "stderr": false, "data": STANDARD.encode(output) }));
-                        let stream = futures_util::stream::unfold((0, service, id, wait_returned, frame), move |(stage, service, id, wait_returned, frame)| async move {
+                        let stream = futures_util::stream::unfold((0, store, id, wait_returned, frame), move |(stage, store, id, wait_returned, frame)| async move {
                             if stage == 0 {
-                                return Some((Ok::<_, std::io::Error>(axum::body::Bytes::from(frame.clone())), (1, service, id, wait_returned, frame)));
+                                return Some((Ok::<_, std::io::Error>(axum::body::Bytes::from(frame.clone())), (1, store, id, wait_returned, frame)));
                             }
                             if stage == 1 && truncated {
                                 while !wait_returned.load(Ordering::SeqCst)
-                                    || (completed && service.store.checkpoint_boundary(&id).await.unwrap().is_none_or(|saved| saved["completed"] != true))
+                                    || (completed && store.checkpoint_boundary(&id).await.unwrap().is_none_or(|saved| saved["completed"] != true))
                                 {
                                     tokio::time::sleep(Duration::from_millis(10)).await;
                                 }
-                                return Some((Ok(axum::body::Bytes::from_static(b"{\"type\":")), (2, service, id, wait_returned, frame)));
+                                return Some((Ok(axum::body::Bytes::from_static(b"{\"type\":")), (2, store, id, wait_returned, frame)));
                             }
                             if stage == 1 {
                                 return std::future::pending().await;
