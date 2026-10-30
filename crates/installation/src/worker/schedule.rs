@@ -628,16 +628,14 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
         && !matches!(saved.remaining_ms, Some(Some(i64::MIN..=0)))
         && let Some(attempt) = saved.runner_id().map(str::to_owned)
     {
-        let observation_limit = recovery_deadline.map_or(Duration::from_secs(5), |deadline| {
-            Duration::from_millis(deadline.saturating_sub(now()).max(0) as u64)
-                .min(Duration::from_secs(5))
-        });
-        recovery::terminal_code(
+        let cancel = CancellationToken::new();
+        let node = saved.node_id.clone().flatten();
+        let observation = recovery::terminal_code(
             s,
             &attempt,
-            saved.node_id.as_ref().and_then(|node| node.as_deref()),
-            &CancellationToken::new(),
-            observation_limit,
+            node.as_deref(),
+            &cancel,
+            recovery_observation_limit(recovery_deadline),
             |action| {
                 let id = run_id.to_owned();
                 let attempt = attempt.clone();
@@ -702,8 +700,29 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
                         .await
                 }
             },
-        )
-        .await?;
+        );
+        tokio::pin!(observation);
+        let cancellation = async {
+            loop {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                if s.store
+                    .run_state(run_id)
+                    .await?
+                    .cancel_requested_at
+                    .is_some()
+                {
+                    return Ok::<_, Error>(());
+                }
+            }
+        };
+        tokio::select! {
+            result = &mut observation => result?,
+            result = cancellation => {
+                cancel.cancel();
+                observation.await?;
+                result?;
+            }
+        }
         if s.shutdown.is_cancelled() {
             return Err(Error::unavailable("Worker is restarting."));
         }
@@ -839,6 +858,35 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
         .await
 }
 
+fn scheduled_provider_retry(saved: &RunCheckpoint, state: &RunState) -> bool {
+    state.retry.as_ref().is_some_and(|retry| {
+        retry.next_attempt_at.is_some()
+            && saved.retry_cause.as_ref().and_then(Option::as_ref) == Some(&retry.cause)
+    })
+}
+
+fn terminal_provider_failure(saved: &RunCheckpoint, state: &RunState) -> bool {
+    if !saved.provider_failed() {
+        return false;
+    }
+    let Some(cause) = saved.retry_cause.as_ref().and_then(Option::as_ref) else {
+        return true;
+    };
+    (state.session_id.is_none() && !cause.startup)
+        || crate::run_retry::Retry::expired(state.retry.as_ref(), now())
+        || (!scheduled_provider_retry(saved, state)
+            && state
+                .retry
+                .as_ref()
+                .is_some_and(|retry| retry.attempt >= crate::run_retry::MAX_ATTEMPTS))
+}
+
+fn recovery_observation_limit(deadline: Option<i64>) -> Duration {
+    deadline.map_or(Duration::from_secs(5), |deadline| {
+        Duration::from_millis(deadline.saturating_sub(now()).clamp(0, 5000) as u64)
+    })
+}
+
 /// Cancellation and the final recovery state commit together. In particular,
 /// a completed provider turn must never restore a wait cancellation removed.
 pub(super) fn finish_recovery(
@@ -895,7 +943,21 @@ pub(super) fn finish_recovery(
             }
             return Ok(false);
         }
-        if checkpoint.terminal_code() == Some(0) || checkpoint.completed() {
+        if checkpoint.provider_failed() && !provider_retry_paid(checkpoint, current) {
+            if super::retry::expire_in(db, id)? {
+                return Ok(false);
+            }
+            let message = if checkpoint.last_error().is_empty() {
+                "Agent turn failed."
+            } else {
+                checkpoint.last_error()
+            };
+            let mut patch = Settled::failure(RunStatus::Failed, message).run_changes();
+            patch.wakeup = Some(None);
+            db.change_run(id, patch)?;
+            return Ok(false);
+        }
+        if (checkpoint.terminal_code() == Some(0) && !checkpoint.provider_failed()) || checkpoint.completed() {
             let summary = match checkpoint.last_message() {
                 "" => {
                     "Conversation completed before worker restart. See Activity for the recorded result."
@@ -980,6 +1042,7 @@ pub(super) fn finish_recovery(
 /// Settles a recovering run whose cancellation was requested. One waiting for an automatic
 /// retry shows the stop in its conversation; a wait's own card already shows its cancellation.
 fn cancel_recovery(db: &Db<'_>, id: &str, run: &RunState) -> Result<()> {
+    crate::nodes::moves::release_terminal_destination_in(db, id)?;
     db.change_run(
         id,
         crate::runs::RunChanges {
@@ -1212,6 +1275,253 @@ mod tests {
         assert!(current.controller_observation.is_none());
         service.shutdown.cancel();
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn terminal_recovery_releases_a_transferred_destination_reservation() {
+        let (_root, service, _chat, run, _workspace) = fixture().await;
+        let held = crate::config::id();
+        let saved =
+            RunCheckpoint::from_value(json!({"runnerId":"old-source-attempt","remainingMs":0}))
+                .unwrap();
+        saved.store(&service.store, &run).await.unwrap();
+        service
+            .store
+            .put(
+                "node-attempts",
+                json!({"id":held,"runId":run,"nodeId":"destination","released":false}),
+            )
+            .await
+            .unwrap();
+        service
+            .store
+            .change_run(
+                &run,
+                crate::runs::RunChanges {
+                    boundary: Some(
+                        json!({"moveRequest":null,"moveReservation":held,"nodeState":"resuming"}),
+                    ),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        crate::nodes::moves::abort_terminal_recovery(&service, &run, Some(&saved))
+            .await
+            .unwrap();
+        assert_eq!(
+            service
+                .store
+                .get("node-attempts", &held)
+                .await
+                .unwrap()
+                .unwrap()["released"],
+            true
+        );
+        let current = service.store.run(&run).await.unwrap();
+        assert!(current["moveReservation"].is_null());
+        assert!(current["nodeState"].is_null());
+        for cancelled in [true, false] {
+            let held = crate::config::id();
+            service
+                .store
+                .put(
+                    "node-attempts",
+                    json!({"id":held,"runId":run,"nodeId":"destination","released":false}),
+                )
+                .await
+                .unwrap();
+            let cause = crate::run_retry::Cause::classify(
+                &json!({"code":"request_timeout","message":"expired"}),
+            )
+            .unwrap();
+            let retry = crate::run_retry::Retry::next(
+                None,
+                cause,
+                now() - crate::run_retry::MAX_RECOVERY_MS - 1,
+            )
+            .unwrap();
+            service
+                .store
+                .change_run(
+                    &run,
+                    crate::runs::RunChanges {
+                        status: Some(RunStatus::Queued),
+                        cancel_requested_at: Some(None),
+                        recovery_pending: Some(false),
+                        retry: Some(Some(retry)),
+                        boundary: Some(json!({"moveReservation":held,"nodeState":"resuming"})),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            if cancelled {
+                service.worker.cancel(&service, &run).await.unwrap();
+            } else {
+                assert!(super::super::retry::expire(&service, &run).await.unwrap());
+            }
+            assert_eq!(
+                service
+                    .store
+                    .get("node-attempts", &held)
+                    .await
+                    .unwrap()
+                    .unwrap()["released"],
+                true
+            );
+            assert!(service.store.run(&run).await.unwrap()["moveReservation"].is_null());
+        }
+    }
+
+    #[tokio::test]
+    async fn restart_provider_failure_reserves_each_retry_once_and_keeps_its_ceiling() {
+        let (_root, service, _chat, run, _workspace) = fixture().await;
+        service
+            .store
+            .change_run(
+                &run,
+                crate::runs::RunChanges {
+                    session_id: Some(Some("session".into())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let cause = crate::run_retry::Cause::classify(
+            &json!({"code":"server_error","message":"Provider unavailable"}),
+        )
+        .unwrap();
+        for attempt in 1..=crate::run_retry::MAX_ATTEMPTS + 1 {
+            let id = run.clone();
+            let cause = cause.clone();
+            service
+                .store
+                .transaction(move |db| {
+                    let mut previous = db.run_state(&id)?.unwrap().retry;
+                    if let Some(retry) = &mut previous {
+                        retry.next_attempt_at = None;
+                    }
+                    db.change_run(
+                        &id,
+                        crate::runs::RunChanges {
+                            status: Some(RunStatus::Queued),
+                            retry: Some(previous),
+                            ..Default::default()
+                        },
+                    )?;
+                    let saved = RunCheckpoint::from_value(json!({
+                        "prepared": {"backend":"native","isolated":true},
+                        "runnerId":format!("attempt-{attempt}"), "remainingMs":null,
+                        "terminalCode":null, "providerFailed":true,
+                        "lastError":"Provider unavailable", "retryCause":cause
+                    }))?;
+                    saved.store_in(db, &id)?;
+                    assert!(!finish_recovery(db, &id, Some(&saved))?);
+                    let current = db.run_state(&id)?.unwrap();
+                    assert_eq!(
+                        RunCheckpoint::load_in(db, &id)?
+                            .unwrap()
+                            .controller_recoveries(),
+                        0
+                    );
+                    if attempt <= crate::run_retry::MAX_ATTEMPTS {
+                        assert_eq!(current.retry.unwrap().attempt, attempt);
+                        assert!(finish_recovery(db, &id, Some(&saved))?);
+                        assert_eq!(
+                            db.run_state(&id)?.unwrap().retry.unwrap().attempt,
+                            attempt,
+                            "repeat settlement must not reserve twice"
+                        );
+                    } else {
+                        assert_eq!(current.status, RunStatus::Failed);
+                    }
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn expired_provider_retry_during_settlement_keeps_the_expiry_outcome() {
+        let (_root, service, _chat, run, _workspace) = fixture().await;
+        service
+            .store
+            .transaction(move |db| {
+                let cause = crate::run_retry::Cause::classify(
+                    &json!({"code": "server_error", "message": "Provider unavailable"}),
+                )
+                .unwrap();
+                let retry = crate::run_retry::Retry::next(
+                    None,
+                    cause.clone(),
+                    now() - crate::run_retry::MAX_RECOVERY_MS - 1,
+                )
+                .unwrap();
+                db.change_run(
+                    &run,
+                    crate::runs::RunChanges {
+                        status: Some(RunStatus::Queued),
+                        session_id: Some(Some("session".into())),
+                        retry: Some(Some(retry)),
+                        ..Default::default()
+                    },
+                )?;
+                let saved = RunCheckpoint::from_value(json!({
+                    "prepared": {"backend": "native", "isolated": true},
+                    "runnerId": "fenced-attempt",
+                    "remainingMs": null,
+                    "providerFailed": true,
+                    "lastError": "Provider unavailable",
+                    "retryCause": cause,
+                }))?;
+                saved.store_in(db, &run)?;
+                assert!(!finish_recovery(db, &run, Some(&saved))?);
+                let current = db.run_state(&run)?.unwrap();
+                assert_eq!(current.status, RunStatus::Failed);
+                assert!(current.error.unwrap().contains("10-minute limit"));
+                assert!(current.retry.unwrap().next_attempt_at.is_none());
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn confirmed_terminal_provider_failure_never_becomes_success_from_controller_zero() {
+        let (_root, service, _chat, run, _workspace) = fixture().await;
+        for code in [None, Some(0)] {
+            let id = run.clone();
+            service
+                .store
+                .transaction(move |db| {
+                    db.change_run(
+                        &id,
+                        crate::runs::RunChanges {
+                            status: Some(RunStatus::Queued),
+                            ..Default::default()
+                        },
+                    )?;
+                    let saved = RunCheckpoint::from_value(json!({
+                        "prepared":{"backend":"native","isolated":true},"runnerId":"same-attempt",
+                        "remainingMs":null,"terminalCode":code,"providerFailed":true,
+                        "lastError":"Permission denied","retryCause":null
+                    }))?;
+                    saved.store_in(db, &id)?;
+                    assert!(!finish_recovery(db, &id, Some(&saved))?);
+                    assert_eq!(db.run_state(&id)?.unwrap().status, RunStatus::Failed);
+                    assert_eq!(
+                        RunCheckpoint::load_in(db, &id)?
+                            .unwrap()
+                            .controller_recoveries(),
+                        0
+                    );
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
     }
 
     #[tokio::test]
@@ -1667,6 +1977,101 @@ mod tests {
         assert_eq!(observation.attempt, "old-attempt");
         assert_eq!(observation.requests, 1);
         assert!(!observation.in_flight);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn scheduled_provider_retries_do_not_spend_controller_recovery_reservations() {
+        let (_root, service, _chat, run, _workspace) = fixture().await;
+        service.store.transaction(move |db| {
+            let cause = crate::run_retry::Cause::classify(&json!({"code":"request_timeout","message":"fixture provider timeout"})).unwrap();
+            let mut retry = None;
+            for attempt in 1..=crate::run_retry::MAX_ATTEMPTS {
+                retry = crate::run_retry::Retry::next(retry.as_ref(), cause.clone(), now());
+                assert_eq!(retry.as_ref().unwrap().attempt, attempt);
+                db.change_run(&run, crate::runs::RunChanges { retry: Some(retry.clone()), ..Default::default() })?;
+                let saved = RunCheckpoint::from_value(json!({
+                    "prepared": {"backend":"native","isolated":true}, "runnerId":format!("attempt-{attempt}"),
+                    "remainingMs":null,"completed":false,"terminalCode":1,"controllerRecoveries":3,
+                    "retryCause":cause,
+                }))?;
+                saved.store_in(db, &run)?;
+                assert!(finish_recovery(db, &run, Some(&saved))?);
+                let saved = RunCheckpoint::load_in(db, &run)?.unwrap();
+                assert_eq!(saved.controller_recoveries(), 3);
+                assert!(!saved.has_controller_recovery_reservation());
+            }
+            Ok(())
+        }).await.unwrap();
+    }
+
+    #[test]
+    fn recovery_observation_is_capped_by_the_remaining_execution_deadline() {
+        assert_eq!(recovery_observation_limit(None), Duration::from_secs(5));
+        assert_eq!(recovery_observation_limit(Some(now() - 1)), Duration::ZERO);
+        assert!(recovery_observation_limit(Some(now() + 100)) <= Duration::from_millis(100));
+    }
+
+    #[tokio::test]
+    async fn cancellation_interrupts_a_pending_scheduler_observation() {
+        use axum::{Router, routing::any};
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let app = Router::new().fallback(any({
+            let entered = entered.clone();
+            move || {
+                let entered = entered.clone();
+                async move {
+                    entered.notify_one();
+                    std::future::pending::<axum::http::StatusCode>().await
+                }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (_root, service, _chat, run, _workspace) =
+            fixture_with_runner(format!("http://{address}")).await;
+        RunCheckpoint::from_value(json!({
+            "prepared":{"backend":"native","isolated":true},"runnerId":"old-attempt","remainingMs":null
+        })).unwrap().store(&service.store, &run).await.unwrap();
+        let (s, id) = (service.clone(), run.clone());
+        let task = tokio::spawn(async move { recover(&s, &s.store.run(&id).await.unwrap()).await });
+        tokio::time::timeout(Duration::from_secs(3), entered.notified())
+            .await
+            .unwrap();
+        service
+            .store
+            .change_run(
+                &run,
+                crate::runs::RunChanges {
+                    cancel_requested_at: Some(Some(now())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        // Fencing may fail against this deliberately silent fake controller. We
+        // assert the pending observation itself was released promptly.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let saved = RunCheckpoint::load(&service.store, &run)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if saved
+                    .controller_observation
+                    .as_ref()
+                    .is_some_and(|observation| !observation.in_flight)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("cancellation must interrupt the read before its five-second deadline");
+        task.abort();
+        let _ = task.await;
         server.abort();
     }
 

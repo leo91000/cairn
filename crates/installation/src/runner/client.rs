@@ -17,7 +17,8 @@ use tokio_util::sync::CancellationToken;
 /// Exit code reported when this client is asked to stop.
 const STOPPED: i32 = 143;
 const ERROR_BODY_LIMIT: usize = 10_000;
-/// Only recovery/draining is bounded; an intact attempt may run normally.
+const LOCAL_OUTPUT_FAILURE: &str = "Local output forwarding failed.";
+/// Terminal reconciliation after output EOF is bounded independently of execution.
 pub(crate) const RECONCILE_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct Controller {
@@ -92,13 +93,15 @@ impl Controller {
         Ok(())
     }
 
-    async fn logs(&self) -> Result<reqwest::Response> {
-        let logs = self
+    async fn logs(&self, offset: u64) -> Result<reqwest::Response> {
+        let request = self
             .http
-            .get(format!("{}/logs", self.url))
+            .get(format!("{}/logs?cursor=1&offset={offset}", self.url))
             .bearer_auth(&self.token)
-            .send()
+            .send();
+        let logs = tokio::time::timeout(Duration::from_secs(10), request)
             .await
+            .map_err(|_| Error::unavailable("Execution output connection timed out."))?
             .map_err(|_| Error::unavailable("Could not read execution output."))?;
         if !logs.status().is_success() {
             return Err(Error::unavailable("Could not read execution output."));
@@ -112,9 +115,18 @@ impl Controller {
             .code)
     }
 
+    async fn output(&self) -> Result<()> {
+        relay_attempt_output(
+            |offset| self.logs(offset),
+            &mut tokio::io::stdout(),
+            &mut tokio::io::stderr(),
+        )
+        .await
+    }
+
     async fn run(&self) -> Result<i32> {
         self.start().await?;
-        let output = async { relay_output(self.logs().await?).await };
+        let output = self.output();
         let (output, status) = collect_completion(output, self.wait()).await;
         if let Err(error) = output {
             eprintln!("{}", error.message);
@@ -146,8 +158,77 @@ impl Controller {
     }
 }
 
-/// Keep both observations even when one fails. Once either channel closes,
-/// allow the other a bounded drain, without reconnecting or replaying logs.
+#[derive(Default)]
+struct OutputProgress {
+    first_packet: Option<tokio::time::Instant>,
+    observed_span: Duration,
+}
+
+impl OutputProgress {
+    fn received(&mut self) {
+        let now = tokio::time::Instant::now();
+        let first = self.first_packet.get_or_insert(now);
+        self.observed_span = now.duration_since(*first);
+    }
+}
+
+async fn relay_attempt_output<F, Fut>(
+    mut connect: F,
+    stdout: &mut (impl tokio::io::AsyncWrite + Unpin),
+    stderr: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<()>
+where
+    F: FnMut(u64) -> Fut,
+    Fut: Future<Output = Result<reqwest::Response>>,
+{
+    let mut offset = 0;
+    let mut failures = 0;
+    loop {
+        let mut progress = OutputProgress::default();
+        let result = match connect(offset).await {
+            Ok(logs)
+                if logs
+                    .headers()
+                    .get("content-type")
+                    .and_then(|value| value.to_str().ok())
+                    == Some(super::logs::CONTENT_TYPE) =>
+            {
+                relay_cursor_output(logs, &mut offset, stdout, stderr, &mut progress).await
+            }
+            // Old controllers cannot resume safely: use the legacy reader once.
+            Ok(logs) if offset == 0 => return relay_output(logs, stdout, stderr).await,
+            Ok(_) => {
+                return Err(Error::unavailable(
+                    "Execution output cursor support changed.",
+                ));
+            }
+            Err(error) => Err(error),
+        };
+        if result.as_ref().is_ok()
+            || result
+                .as_ref()
+                .is_err_and(|error| error.message == LOCAL_OUTPUT_FAILURE)
+        {
+            return result;
+        }
+        if progress.observed_span >= Duration::from_secs(15) {
+            failures = 0;
+        }
+        if failures >= 3 {
+            return result;
+        }
+        failures += 1;
+        tracing::warn!(
+            offset,
+            failures,
+            "Reconnecting output of the same execution attempt"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// A failed channel cannot truncate its intact peer. Output readers bound
+/// transport inactivity per record, so an actively draining backlog can finish.
 async fn collect_completion(
     output: impl Future<Output = Result<()>>,
     status: impl Future<Output = Result<i32>>,
@@ -155,14 +236,16 @@ async fn collect_completion(
     tokio::pin!(output, status);
     tokio::select! {
         output = &mut output => {
-            let status = tokio::time::timeout(RECONCILE_TIMEOUT, status).await
-                .unwrap_or_else(|_| Err(Error::unavailable("Execution completion is not confirmed.")));
+            let status = if output.is_ok() {
+                tokio::time::timeout(RECONCILE_TIMEOUT, status).await
+                    .unwrap_or_else(|_| Err(Error::unavailable("Execution completion is not confirmed.")))
+            } else {
+                status.await
+            };
             (output, status)
         }
         status = &mut status => {
-            let output = tokio::time::timeout(RECONCILE_TIMEOUT, output).await
-                .unwrap_or_else(|_| Err(Error::unavailable("Execution output drain was interrupted.")));
-            (output, status)
+            (output.await, status)
         }
     }
 }
@@ -206,22 +289,101 @@ pub(crate) async fn wait_for_exit(
     })
 }
 
+/// A cursor is acknowledged only after the complete frame reached its output.
+async fn relay_cursor_output(
+    logs: reqwest::Response,
+    offset: &mut u64,
+    stdout: &mut (impl tokio::io::AsyncWrite + Unpin),
+    stderr: &mut (impl tokio::io::AsyncWrite + Unpin),
+    progress: &mut OutputProgress,
+) -> Result<()> {
+    let stream = logs
+        .bytes_stream()
+        .map(|result| result.map_err(std::io::Error::other));
+    let mut reader = BufReader::new(tokio_util::io::StreamReader::new(stream));
+    loop {
+        let packet = tokio::time::timeout(Duration::from_secs(10), wire::read(&mut reader))
+            .await
+            .map_err(|_| {
+                Error::unavailable("Execution output stopped making transport progress.")
+            })??
+            .ok_or_else(|| {
+                Error::unavailable("Execution output ended without a completion marker.")
+            })?;
+        match packet["type"].as_str() {
+            Some("heartbeat") => {
+                progress.received();
+                continue;
+            }
+            Some("end") if packet["offset"].as_u64() == Some(*offset) => {
+                stdout.flush().await?;
+                stderr.flush().await?;
+                return Ok(());
+            }
+            Some("log") => {
+                let next = packet["offset"]
+                    .as_u64()
+                    .filter(|next| *next > *offset)
+                    .ok_or_else(|| Error::bad("Invalid execution output cursor."))?;
+                let event: Event =
+                    wire::decode(packet["event"].clone(), "Invalid execution output.")?;
+                if let Event::Output {
+                    stderr: to_stderr,
+                    data,
+                } = event
+                {
+                    let bytes = STANDARD
+                        .decode(data)
+                        .map_err(|_| Error::bad("Invalid execution output."))?;
+                    if to_stderr {
+                        stderr
+                            .write_all(&bytes)
+                            .await
+                            .map_err(|_| Error::bad(LOCAL_OUTPUT_FAILURE))?;
+                        stderr
+                            .flush()
+                            .await
+                            .map_err(|_| Error::bad(LOCAL_OUTPUT_FAILURE))?;
+                    } else {
+                        stdout
+                            .write_all(&bytes)
+                            .await
+                            .map_err(|_| Error::bad(LOCAL_OUTPUT_FAILURE))?;
+                        stdout
+                            .flush()
+                            .await
+                            .map_err(|_| Error::bad(LOCAL_OUTPUT_FAILURE))?;
+                    }
+                }
+                *offset = next;
+                progress.received();
+            }
+            _ => return Err(Error::bad("Invalid execution output packet.")),
+        }
+    }
+}
+
 /// Writes attempt output to this process's stdout and stderr.
-async fn relay_output(logs: reqwest::Response) -> Result<()> {
+async fn relay_output(
+    logs: reqwest::Response,
+    stdout: &mut (impl tokio::io::AsyncWrite + Unpin),
+    stderr: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<()> {
     let stream = logs
         .bytes_stream()
         .map(|r| r.map_err(std::io::Error::other));
     let mut reader = BufReader::new(tokio_util::io::StreamReader::new(stream));
-    let mut stdout = tokio::io::stdout();
-    let mut stderr = tokio::io::stderr();
     loop {
-        let event = wire::read(&mut reader).await.map_err(|error| {
-            if error.status == 500 {
-                Error::unavailable("Execution output connection was interrupted.")
-            } else {
-                error
-            }
-        })?;
+        let event = tokio::time::timeout(Duration::from_secs(10), wire::read(&mut reader))
+            .await
+            .map_err(|_| Error::unavailable("Execution output stopped making transport progress."))?
+            .map_err(|error| {
+                if error.status == 500 {
+                    Error::unavailable("Execution output connection was interrupted.")
+                } else {
+                    error
+                }
+            })?;
         let Some(event) = event else {
             stdout.flush().await?;
             stderr.flush().await?;
@@ -329,19 +491,46 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_cut_before_completion_is_bounded_and_never_claims_success() {
+    async fn a_failed_channel_or_confirmed_exit_preserves_its_intact_peer() {
         let started = tokio::time::Instant::now();
         let (output, status) = collect_completion(
             async { Err(Error::unavailable("fixture output cut")) },
-            std::future::pending(),
+            async {
+                tokio::time::sleep(RECONCILE_TIMEOUT * 2).await;
+                Ok(0)
+            },
         )
         .await;
         assert!(output.is_err());
-        assert!(status.is_err());
-        assert_eq!(started.elapsed(), RECONCILE_TIMEOUT);
-        let (output, status) = collect_completion(std::future::pending(), async { Ok(0) }).await;
-        assert!(output.is_err());
         assert_eq!(status.unwrap(), 0);
+        assert_eq!(started.elapsed(), RECONCILE_TIMEOUT * 2);
+        let (output, status) = collect_completion(
+            async {
+                tokio::time::sleep(RECONCILE_TIMEOUT * 2).await;
+                Ok(())
+            },
+            async { Ok(0) },
+        )
+        .await;
+        assert!(output.is_ok());
+        assert_eq!(status.unwrap(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_wait_never_truncates_an_intact_attempt_output_channel() {
+        let started = tokio::time::Instant::now();
+        let duration = RECONCILE_TIMEOUT * 2;
+        let (output, status) = collect_completion(
+            async {
+                tokio::time::sleep(duration).await;
+                Ok(())
+            },
+            async { Err(Error::unavailable("fixture wait transport failed")) },
+        )
+        .await;
+        assert!(output.is_ok());
+        assert!(status.is_err());
+        assert!(started.elapsed() >= duration);
     }
 
     #[tokio::test]
@@ -382,6 +571,40 @@ mod tests {
         assert!(controller.run().await.unwrap_err().is_unavailable());
         assert_eq!(requests.load(Ordering::SeqCst), 1);
         server.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn delayed_headers_and_silent_bodies_cannot_reset_connection_failures() {
+        let mut requests = 0;
+        let connect = |_offset| {
+            requests += 1;
+            async {
+                tokio::time::sleep(Duration::from_secs(6)).await;
+                let body = reqwest::Body::wrap_stream(futures_util::stream::pending::<
+                    std::io::Result<bytes::Bytes>,
+                >());
+                let response = axum::http::Response::builder()
+                    .status(200)
+                    .header("content-type", super::super::logs::CONTENT_TYPE)
+                    .body(body)
+                    .unwrap();
+                Ok(reqwest::Response::from(response))
+            }
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let result = tokio::time::timeout(
+            Duration::from_secs(100),
+            relay_attempt_output(connect, &mut stdout, &mut stderr),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "silent attempts must exhaust the reconnect ceiling"
+        );
+        assert!(result.unwrap().is_err());
+        assert_eq!(requests, 4);
+        assert!(stdout.is_empty() && stderr.is_empty());
     }
 
     #[test]

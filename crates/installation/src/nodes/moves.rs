@@ -909,22 +909,43 @@ pub(crate) async fn abort_terminal_recovery(
 ) -> Result<()> {
     let id = run_id.to_owned();
     let expected = expected_attempt.cloned();
-    s.store.transaction(move |db| {
-        let checkpoint = crate::worker::checkpoint::RunCheckpoint::load_in(db, &id)?;
-        if !crate::recovery::same_execution(checkpoint.as_ref(), expected.as_ref()) {
-            return Err(Error::conflict("Execution attempt changed during recovery."));
-        }
-        let current = db.run(&id)?.ok_or_else(|| Error::not_found("Conversation removed."))?;
-        let movement = &current["moveRequest"];
-        if !movement.is_object() { return Ok(()); }
-        if let Some(reservation) = movement["reservation"].as_str() {
-            super::placement::release_in(db, reservation)?;
-        }
-        db.update_run_boundary(&id, &serde_json::json!({
-            "moveRequest": null,
-            "nodeState": null,
-            "movementError": "Movement stopped because the interrupted execution cannot be replayed.",
-        }))?;
-        Ok(())
-    }).await
+    s.store
+        .transaction(move |db| {
+            let checkpoint = crate::worker::checkpoint::RunCheckpoint::load_in(db, &id)?;
+            if !crate::recovery::same_execution(checkpoint.as_ref(), expected.as_ref()) {
+                return Err(Error::conflict(
+                    "Execution attempt changed during recovery.",
+                ));
+            }
+            release_terminal_destination_in(db, &id)
+        })
+        .await
+}
+
+/// Only unclaimed destination reservations are released; retained disks and the
+/// source execution stay owned by their existing fencing/storage lifecycle.
+pub(crate) fn release_terminal_destination_in(db: &crate::store::Db<'_>, id: &str) -> Result<()> {
+    let current = db
+        .run(id)?
+        .ok_or_else(|| Error::not_found("Conversation removed."))?;
+    let movement = &current["moveRequest"];
+    if !movement.is_object() && current["moveReservation"].is_null() {
+        return Ok(());
+    }
+    for reservation in [
+        movement["reservation"].as_str(),
+        current["moveReservation"].as_str(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        super::placement::release_in(db, reservation)?;
+    }
+    db.update_run_boundary(id, &serde_json::json!({
+        "moveRequest": null,
+        "moveReservation": null,
+        "nodeState": null,
+        "movementError": "Movement stopped because the execution will not resume automatically.",
+    }))?;
+    Ok(())
 }

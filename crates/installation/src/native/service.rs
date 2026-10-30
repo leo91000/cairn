@@ -2,6 +2,7 @@
 mod exclusive;
 #[cfg(test)]
 mod exclusive_tests;
+mod health;
 
 use super::{atomic_write, block, disk, mode, systemd, workspace};
 use crate::runner::exclusive::{Ledger, Reservations};
@@ -172,6 +173,7 @@ struct Controller {
     mode: Arc<Mutex<Value>>,
     changed: Arc<Notify>,
     log_lock: Arc<Mutex<()>>,
+    telemetry: health::Telemetry,
     stop: CancellationToken,
     identity: Arc<systemd::Identity>,
 }
@@ -1441,7 +1443,10 @@ impl Controller {
                     return None;
                 }
                 // An exit marker alone does not release physical ownership.
-                let released = !controller.active.lock().await.contains_key(&id);
+                let released = controller
+                    .active
+                    .try_lock()
+                    .is_ok_and(|active| !active.contains_key(&id));
                 if released
                     && let Ok(code) = tokio::fs::read_to_string(controller.file(&id, "exit")).await
                 {
@@ -1584,33 +1589,28 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
     let path = request.uri().path().to_owned();
     let method = request.method().as_str().to_owned();
     if path == "/health" && method == "GET" {
-        let capabilities = crate::nodes::connector::capabilities(&controller.state)?;
-        let usage = controller.usage().await?;
-        let budget = controller.budget.lock().await.clone();
-        let capacity = controller.capacity.lock().await.clone();
-        let disk_growth = if storage::ublk::supports_growth() {
-            serde_json::to_value(
-                capacity
-                    .report(&controller.state, usage["diskBytes"].as_u64().unwrap_or(0))
-                    .await?,
-            )?
-        } else {
-            Value::Null
-        };
-        let runtime_id = crate::nodes::component_runtime();
-        systemd::tools(&runtime_id)?;
-        return Ok(Json(json!({
-            "status": "ok", "backend": "native", "nodeProtocol": 2,
-            "directStorageProtocol": 1,
-            "runtimeId": runtime_id,
-            "dataRoot": controller.data, "capabilities": capabilities,
-            "nativeMode": controller.mode.lock().await.clone(),
-            "pool": { "capacity": budget["slots"] }, "activeRuns": controller.active.lock().await.len(),
-            "sharedResources": true, "exclusiveReservations": true, "budget": budget,
-            "usage": usage, "pressure": null, "diskGrowth": disk_growth,
-            "storagePolicy": controller.storage_policy.current().await
-        })).into_response());
+        return Ok(Json(controller.health().await).into_response());
     }
+
+    // This read-only endpoint is local to the root-private controller socket.
+    // Its caller retains storage ownership through the bounded staging write;
+    // taking that same lock here would deadlock the caller.
+    if path == "/staging-budget" && method == "GET" {
+        let started = std::time::Instant::now();
+        let available = controller.disk_growth().await;
+        let elapsed = started.elapsed();
+        if elapsed >= Duration::from_secs(1) || available.is_err() {
+            tracing::info!(
+                target: "cairn_performance",
+                operation = "native_staging_budget",
+                elapsed_ms = elapsed.as_millis() as u64,
+                status = available.as_ref().map_or_else(|error| error.status, |_| 200),
+                "Authoritative native staging budget observation finished"
+            );
+        }
+        return Ok(Json(json!({"availableBytes": available?})).into_response());
+    }
+
     let secret = tokio::fs::read_to_string(controller.data.join("runner-secret")).await?;
     let bearer = crate::nodes::bearer(request.headers()).unwrap_or("");
     if !crate::auth::safe_equal(bearer, secret.trim()) {
@@ -1752,6 +1752,20 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
         }
         ("GET", ["runs", id, "logs"]) => {
             uuid(id)?;
+            if let Some(offset) = crate::runner::logs::offset(request.uri().query())? {
+                let path = controller.file(id, "log");
+                let (controller, id) = (controller.clone(), (*id).to_owned());
+                return crate::runner::logs::response(path, offset, move || {
+                    let (controller, id) = (controller.clone(), id.clone());
+                    async move {
+                        controller
+                            .active
+                            .try_lock()
+                            .is_ok_and(|active| !active.contains_key(&id))
+                    }
+                })
+                .await;
+            }
             let (mut writer, reader) = tokio::io::duplex(65536);
             let (controller, id) = (controller.clone(), (*id).to_owned());
             tokio::spawn(async move {
@@ -1772,7 +1786,11 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                             if attempt_finished {
                                 break;
                             }
-                            if !controller.active.lock().await.contains_key(&id) {
+                            if controller
+                                .active
+                                .try_lock()
+                                .is_ok_and(|active| !active.contains_key(&id))
+                            {
                                 // The final append can land between the EOF read and
                                 // retirement observation. Drain again after retirement.
                                 attempt_finished = true;
@@ -2123,25 +2141,33 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             uuid(id)?;
             uuid(project)?;
             let value = input(request, 16384).await?;
-            let active = controller.active.lock().await;
-            let attempt = active
-                .get(*id)
-                .ok_or_else(|| Error::conflict("Native attempt is not active."))?;
-            if value["runId"] != attempt.run || attempt.stop.is_cancelled() {
-                return Err(Error::forbidden("Wrong native project scope."));
-            }
+            // Disk ownership protects the import through completion. Keep the
+            // global attempt map available to unrelated streams and cancellation.
+            let (run, stop) = {
+                let active = controller.active.lock().await;
+                let attempt = active
+                    .get(*id)
+                    .ok_or_else(|| Error::conflict("Native attempt is not active."))?;
+                if value["runId"] != attempt.run || attempt.stop.is_cancelled() {
+                    return Err(Error::forbidden("Wrong native project scope."));
+                }
+                (attempt.run.clone(), attempt.stop.clone())
+            };
             let plan = controller.plan(id).await?;
+            if stop.is_cancelled() {
+                return Err(Error::conflict("Native project import stopped."));
+            }
             let source = controller
                 .data
                 .join("runs")
-                .join(&attempt.run)
+                .join(&run)
                 .join("workspace")
                 .join(project);
             let expected = Path::new(text(&plan, "projectRoot")).join(project);
             if value["source"]
                 != guest_data(&plan, &controller.data)
                     .join("runs")
-                    .join(&attempt.run)
+                    .join(&run)
                     .join("workspace")
                     .join(project)
                     .to_string_lossy()
@@ -2150,11 +2176,11 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             {
                 return Err(Error::forbidden("Invalid native project path."));
             }
-            let target = workspace::directory(&controller.state, &attempt.run)?
+            let target = workspace::directory(&controller.state, &run)?
                 .join("data/workspaces")
                 .join(project);
             if !target.exists() {
-                let data = workspace::directory(&controller.state, &attempt.run)?.join("data");
+                let data = workspace::directory(&controller.state, &run)?.join("data");
                 // Stage on the mounted filesystem so installation is an atomic
                 // rename, and do not walk all lazy files to estimate free space.
                 let staged = tempfile::tempdir_in(&data)?;
@@ -2166,12 +2192,17 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                     remaining.min(controller.disk_growth().await?),
                 )
                 .await?;
-                let mut identity =
-                    super::identity::provision(&controller.state, &attempt.run).await?;
+                if stop.is_cancelled() {
+                    return Err(Error::conflict("Native project import stopped."));
+                }
+                let mut identity = super::identity::provision(&controller.state, &run).await?;
                 if plan["nativeMode"]["mode"] == "administrator" {
                     identity.host_engine = Some((controller.identity.uid, controller.identity.gid));
                 }
                 workspace::own_tree(&received, identity.uid(), identity.gid()).await?;
+                if stop.is_cancelled() {
+                    return Err(Error::conflict("Native project import stopped."));
+                }
                 tokio::fs::rename(received, &target).await?;
             }
             json!({ "ok": true })
@@ -2298,11 +2329,13 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
         mode: Arc::new(Mutex::new(mode)),
         changed: Arc::default(),
         log_lock: Arc::default(),
+        telemetry: health::Telemetry::default(),
         stop: stop.clone(),
         identity,
     };
     controller.recover_exclusive().await?;
     let exclusive_monitor = tokio::spawn(controller.clone().monitor_exclusive());
+    let telemetry_monitor = tokio::spawn(controller.clone().sample_health());
     let socket = controller.state.join("controller.sock");
     let listener = bind_controller(&socket).await?;
     let router = Router::new()
@@ -2326,6 +2359,8 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     exclusive_monitor.await.map_err(Error::internal)?;
+    telemetry_monitor.abort();
+    let _ = telemetry_monitor.await;
     controller.base_warmer.wait_idle().await;
     match result {
         Some(result) => result.map_err(Error::internal)??,
@@ -2695,6 +2730,7 @@ mod tests {
             )),
             changed: Arc::default(),
             log_lock: Arc::default(),
+            telemetry: health::Telemetry::default(),
             stop: CancellationToken::new(),
             identity: Arc::new(systemd::Identity {
                 user: "synthetic-workload".into(),

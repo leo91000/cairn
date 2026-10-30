@@ -4,6 +4,7 @@ use crate::runner::exclusive::Reservations;
 mod broker;
 mod client;
 pub(crate) mod exclusive;
+pub(crate) mod logs;
 mod routes;
 
 pub(crate) use broker::validate as validate_plan;

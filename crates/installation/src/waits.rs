@@ -1220,6 +1220,7 @@ pub(crate) async fn tick_missions(s: &Service, active: &HashSet<String>) -> Resu
                 // Keep remainingMs: elapsed waiting time never spends the execution budget.
                 checkpoint.completed = Some(false);
                 checkpoint.output_interrupted = None;
+                checkpoint.provider_failed = None;
                 checkpoint.turn_pending = Some(true);
                 checkpoint.recovery_deadline_ms = None;
                 checkpoint.terminal_code = Some(None);

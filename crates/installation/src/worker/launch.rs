@@ -236,6 +236,7 @@ impl Execution<'_> {
                 checkpoint.turn_pending = None;
                 checkpoint.recovery_deadline_ms = None;
                 checkpoint.terminal_code = None;
+                checkpoint.provider_failed = None;
                 checkpoint.node_id = Some(node);
                 checkpoint.runtime_id = Some(Some(runtime));
             })
@@ -280,7 +281,10 @@ impl Execution<'_> {
             .map(|name| format!("Using {} account: {name}", self.provider.label()));
         self.checkpoint
             .update_and_publish(
-                |state| state.capacity_retry_at = None,
+                |state| {
+                    state.capacity_retry_at = None;
+                    state.provider_failed = None;
+                },
                 move |db| {
                     db.change_run(&id, patch)?;
                     if let Some(message) = account_message {
@@ -484,6 +488,7 @@ impl Execution<'_> {
                         .update_and_publish(
                             |saved| {
                                 saved.completed = Some(false);
+                                saved.provider_failed = Some(true);
                                 saved.terminal_code = Some(None);
                                 saved.last_error = Some(Some(error.message.clone()));
                                 saved.retry_cause = Some(cause);
@@ -645,7 +650,7 @@ impl Execution<'_> {
             return Ok(Attempt::Finished);
         }
         let interrupted = exit.code == Some(crate::runner::CONTROLLER_INTERRUPTED);
-        if managed && stopped_by_controller && interrupted {
+        if managed && stopped_by_controller && interrupted && !saved.provider_failed() {
             if saved.start_rejected == Some(true) {
                 return Err(Error::unavailable(format!(
                     "{} Working files were preserved; retry when the controller is available.",
@@ -816,6 +821,7 @@ impl Execution<'_> {
                 c.turn_pending = None;
                 c.recovery_deadline_ms = None;
                 c.terminal_code = None;
+                c.provider_failed = None;
                 c.node_id = Some(node_id);
                 c.runtime_id = Some(Some(runtime_id));
             })
@@ -1223,7 +1229,11 @@ impl Execution<'_> {
             .unwrap_or_default();
         let status = if self.cancel.is_cancelled() {
             RunStatus::Cancelled
-        } else if exit.timed_out || self.checkpoint.expired() || saved.output_error().is_some() {
+        } else if exit.timed_out
+            || self.checkpoint.expired()
+            || saved.output_error().is_some()
+            || saved.provider_failed()
+        {
             RunStatus::Failed
         } else if exit.code == Some(0)
             || (s.shutdown.is_cancelled() && saved.completed() && !saved.managed())

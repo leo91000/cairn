@@ -283,6 +283,11 @@ async fn interrupted_output_after_completion_records_one_safe_diagnostic() {
 async fn controller_cleanup_does_not_replace_a_provider_failure_or_its_retry() {
     let mut fixture = Fixture::new().await;
     fixture
+        .checkpoint
+        .update(|saved| saved.prepared = Some(Some(json!({"backend":"native","isolated":true}))))
+        .await
+        .unwrap();
+    fixture
         .event(json!({
             "type": "turn.failed",
             "error": { "message": "Provider unavailable", "code": "server_error" },
@@ -294,7 +299,14 @@ async fn controller_cleanup_does_not_replace_a_provider_failure_or_its_retry() {
             "error": { "message": "Controller cleanup failed" },
         }))
         .await;
+    fixture
+        .event(json!({"type":"runner.output_interrupted"}))
+        .await;
     let saved = fixture.checkpoint.snapshot().await;
+    assert!(
+        saved.output_error().is_none(),
+        "confirmed provider failure retains its separate retry policy"
+    );
     assert_eq!(saved.last_error(), "Provider unavailable");
     assert_eq!(
         saved.retry_cause.unwrap().unwrap().kind,

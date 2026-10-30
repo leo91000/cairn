@@ -66,6 +66,9 @@ pub struct RunCheckpoint {
     pub process: Nullable<ProcessIdentity>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completed: Option<bool>,
+    /// The adapter confirmed failure, independently of controller transport/exit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_failed: Option<bool>,
     /// Controller result for runner_id, distinct from the provider turn and logs.
     /// Absent: an attempt may need observation. Null: observation was exhausted
     /// or a new turn invalidated the old result; recovery must only fence it.
@@ -297,13 +300,17 @@ impl RunCheckpoint {
         self.completed == Some(true)
     }
 
+    pub fn provider_failed(&self) -> bool {
+        self.provider_failed == Some(true)
+    }
+
     pub fn terminal_code(&self) -> Option<i32> {
         self.terminal_code.flatten()
     }
 
     /// A healthy controller exit cannot prove that the provider finished its turn.
     pub fn output_error(&self) -> Option<&'static str> {
-        if !self.managed() || self.completed() {
+        if !self.managed() || self.completed() || self.provider_failed() {
             return None;
         }
         if self.confirmed_provider_failure().is_some() {
@@ -660,7 +667,9 @@ impl Checkpoint {
         changes: EventChanges,
     ) -> Result<()> {
         let mut state = self.state.lock().await;
-        let failure = changes.failure.filter(|_| state.last_error().is_empty());
+        let failure = changes.failure.filter(|(_, _, provider)| {
+            state.last_error().is_empty() || (*provider && !state.provider_failed())
+        });
         let persist = changes.completed || failure.is_some();
         let mut last_message = changes.last_message;
         let mut saved = persist.then(|| state.clone());
@@ -672,6 +681,7 @@ impl Checkpoint {
                 saved.last_error = Some(Some(message));
                 saved.retry_cause = Some(cause);
                 if provider_failure {
+                    saved.provider_failed = Some(true);
                     saved.completed = Some(false);
                     // The provider ending does not prove controller finalization;
                     // leave the attempt observable if the worker crashes here.
@@ -683,6 +693,7 @@ impl Checkpoint {
             }
             if changes.completed {
                 saved.completed = Some(true);
+                saved.provider_failed = None;
             }
         }
         let deadline = if let Some(saved) = &mut saved {

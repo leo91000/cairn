@@ -212,6 +212,7 @@ fn request_cancel(db: &Db<'_>, id: &str, is_active: bool) -> Result<()> {
     // its in-memory slot; cancellation must settle this wait even in that gap.
     // Executing or recovering runs are settled by their worker once stopped.
     if (!is_active || run.status == RunStatus::Waiting) && !run.recovery_pending {
+        crate::nodes::moves::release_terminal_destination_in(db, id)?;
         let patch = crate::runs::RunChanges {
             status: Some(RunStatus::Cancelled),
             finished_at: Some(Some(now())),
@@ -297,6 +298,7 @@ fn requeue(db: &Db<'_>, id: &str) -> Result<Value> {
         checkpoint.turn_pending = Some(true);
         checkpoint.recovery_deadline_ms = None;
         checkpoint.output_interrupted = None;
+        checkpoint.provider_failed = None;
         if !before_launch {
             checkpoint.completed = Some(false);
             checkpoint.terminal_code = Some(None);

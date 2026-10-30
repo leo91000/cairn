@@ -430,7 +430,8 @@ pub async fn proxy(State(app): State<App>, request: Request) -> Result<Response>
     }
     let path = request
         .uri()
-        .path()
+        .path_and_query()
+        .map_or("", |path| path.as_str())
         .trim_start_matches("/internal/execution/");
     let (node, path) = path
         .split_once('/')

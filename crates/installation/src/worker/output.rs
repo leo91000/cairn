@@ -431,9 +431,14 @@ async fn apply_event(
     text_value: String,
     secrets: &[String],
 ) -> Result<()> {
-    let failure = text(&event["error"], "message");
     let provider_failure = event["type"] == "turn.failed";
     let controller_failure = event["type"] == "runner.failed";
+    let failure = text(&event["error"], "message");
+    let failure = if provider_failure && failure.is_empty() {
+        "Agent turn failed."
+    } else {
+        failure
+    };
     let failure = ((provider_failure || controller_failure) && !failure.is_empty()).then(|| {
         let message = truncate(&run_output::redact(failure, secrets), ERROR_LIMIT);
         let mut error = run_output::payload(&event["error"], secrets);

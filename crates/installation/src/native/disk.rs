@@ -160,24 +160,41 @@ pub(crate) async fn lock(state: &Path) -> Result<StorageGuard> {
 /// Called with the storage lock held, before receiving a temporary seed. A
 /// missing or incompatible controller cannot authorize unbounded staging.
 pub(crate) async fn staging_budget() -> Result<u64> {
-    let response = crate::nodes::local_client()?
-        .get("http://localhost/health")
+    staging_budget_from(&crate::nodes::local_client()?, "http://localhost").await
+}
+
+pub(super) async fn staging_budget_from(client: &reqwest::Client, origin: &str) -> Result<u64> {
+    let started = std::time::Instant::now();
+    let response = client
+        .get(format!("{origin}/staging-budget"))
         .timeout(Duration::from_secs(30))
         .send()
         .await
-        .map_err(Error::internal)?;
+        .map_err(|error| {
+            tracing::warn!(
+                target: "cairn_performance",
+                operation = "native_staging_budget",
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                timeout = error.is_timeout(),
+                connect = error.is_connect(),
+                "Native staging budget request failed"
+            );
+            Error::internal(error)
+        })?;
     if !response.status().is_success() {
+        tracing::warn!(
+            target: "cairn_performance",
+            operation = "native_staging_budget",
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            status = response.status().as_u16(),
+            "Native staging budget request rejected"
+        );
         return Err(Error::unavailable("Native disk budget is unavailable."));
     }
-    let health: serde_json::Value = response.json().await.map_err(Error::internal)?;
-    let limit = health["budget"]["limits"]["diskMiB"]
+    let budget: serde_json::Value = response.json().await.map_err(Error::internal)?;
+    budget["availableBytes"]
         .as_u64()
-        .ok_or_else(|| Error::unavailable("Native disk budget is unavailable."))?
-        .saturating_mul(MIB);
-    let used = health["usage"]["diskBytes"]
-        .as_u64()
-        .ok_or_else(|| Error::unavailable("Native disk usage is unavailable."))?;
-    Ok(available(limit, used))
+        .ok_or_else(|| Error::unavailable("Native disk budget is unavailable."))
 }
 
 #[cfg(test)]

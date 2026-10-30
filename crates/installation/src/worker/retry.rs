@@ -1,9 +1,9 @@
 //! Commit an agent retry once; admission waits without retaining an account.
-use super::checkpoint::Checkpoint;
+use super::checkpoint::{Checkpoint, RunCheckpoint};
 use crate::{
     config::now,
     error::{Error, Result},
-    run_retry::Retry,
+    run_retry::{Cause, Retry},
     run_status::RunStatus,
     service::Service,
     store::Db,
@@ -123,6 +123,7 @@ pub(super) fn expire_in(db: &Db<'_>, id: &str) -> Result<bool> {
         Err(error) if error.is_conflict() => return Ok(false),
         Err(error) => return Err(error),
     }
+    crate::nodes::moves::release_terminal_destination_in(db, id)?;
     let message = "Automatic recovery reached its 10-minute limit. Your conversation and files are preserved; resume when ready.";
     let mut retry = run.retry;
     if let Some(retry) = &mut retry {
