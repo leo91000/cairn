@@ -182,6 +182,7 @@ class DirectTransportDeviceTest {
                 }
             }
         }
+        var phase = "initial direct connection"
         try {
             read()
             assertEquals("relay", api.transport.route.value)
@@ -244,6 +245,7 @@ class DirectTransportDeviceTest {
                 }
 
                 if (scenario == "same-lan") {
+                    phase = "background and foreground recovery"
                     val authorizations = control.count { it == "authorize:200" }
                     val inFlight =
                         List(8) {
@@ -301,6 +303,7 @@ class DirectTransportDeviceTest {
                     val capacity = CairnApi(origin, vault, capacityClient, api.installationId)
                     capacity.csrf = api.csrf
                     try {
+                        phase = "capacity initial authorization"
                         capacity.startDirect(context)
                         withTimeout(10000) { while (capacityAttempts.get() == 0) delay(100) }
                         delay(500)
@@ -321,6 +324,7 @@ class DirectTransportDeviceTest {
                             1,
                             capacityAttempts.get(),
                         )
+                        phase = "capacity retry direct response"
                         withTimeout(25000) {
                             do {
                                 delay(200)
@@ -395,6 +399,7 @@ class DirectTransportDeviceTest {
                     val renewal = CairnApi(origin, vault, renewalClient, api.installationId)
                     renewal.csrf = api.csrf
                     try {
+                        phase = "unavailable renewal initial direct response"
                         renewal.startDirect(context)
                         withTimeout(10000) {
                             do {
@@ -402,6 +407,7 @@ class DirectTransportDeviceTest {
                                 assertEquals("[]", renewal.request("GET", "/chats"))
                             } while (renewal.transport.route.value != "direct")
                         }
+                        phase = "unavailable renewal acknowledgement"
                         withTimeout(20000) {
                             while (
                                 renewalReplies.get() == 0 ||
@@ -449,6 +455,7 @@ class DirectTransportDeviceTest {
                         val probe = CairnApi(origin, vault, unavailableClient, api.installationId)
                         probe.csrf = api.csrf
                         try {
+                            phase = "control rejection initial authorization: $status"
                             probe.startDirect(context)
                             withTimeout(10000) { while (attempts.get() == 0) delay(100) }
                             delay(18000)
@@ -463,6 +470,7 @@ class DirectTransportDeviceTest {
                             probe.closeStreams()
                         }
                     }
+                    phase = "large request and UI"
                     suspendedControl = true
                     val largeRequest = runCatching {
                         api.request(
@@ -506,6 +514,7 @@ class DirectTransportDeviceTest {
                     vm.api.closeStreams()
                     ui = true
 
+                    phase = "real renewal"
                     // The delivered lease lasts 180 s: observe a real renewal before expiry.
                     withTimeout(180000) {
                         while (!control.contains("renew:200")) {
@@ -533,6 +542,7 @@ class DirectTransportDeviceTest {
                     }
                     withTimeout(15000) { streaming.await() }
                     assertEquals("direct", api.transport.route.value)
+                    phase = "live revocation"
                     api.request("POST", "/account/logout")
                     val status = withTimeout(10000) { terminal.await().httpStatus }
                     assertEquals(401, status)
@@ -566,6 +576,13 @@ class DirectTransportDeviceTest {
                     }
                         .toString()
                 )
+        } catch (error: TimeoutCancellationException) {
+            throw AssertionError(
+                "Direct bench timed out during $phase; elapsedMs=" +
+                    (System.nanoTime() - started) / 1000000 +
+                    "; route=${api.transport.route.value}; controlResponses=${control.size}",
+                error,
+            )
         } finally {
             api.closeStreams()
             if (scenario == "network-change") shell("svc wifi enable")
