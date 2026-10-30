@@ -129,32 +129,26 @@ class PlanTurnJourneyTest {
             compose.onNodeWithText("Plan · ", substring = true).assertExists()
             screenshot("plan-turn")
 
-            // A follow-up question stays a plan turn while the toggle is on.
-            compose.onNodeWithTag("plan-toggle").assertIsEnabled().performClick()
-            compose.onNodeWithTag("plan-toggle").assertIsSelected()
-            compose.onNode(hasSetTextAction()).performTextInput("Et pour les tests ?")
-            compose.onNodeWithTag("conversation-send").performClick()
+            // An idle proposal can be explicitly implemented as an ordinary message.
+            compose.onNodeWithTag("implement-plan").assertIsEnabled().performClick()
             compose.waitUntil(20000) { calls.size == 1 }
-            val question = wireJson.parseToJsonElement(calls[0]).jsonObject
-            assertEquals(true, question["plan"]?.jsonPrimitive?.boolean)
-            assertEquals("Et pour les tests ?", question["text"]?.jsonPrimitive?.content)
-
-            // Implementing is explicit: an ordinary message in the same conversation.
-            compose.waitUntil(20000) {
-                compose
-                    .onAllNodes(hasTestTag("implement-plan") and isEnabled())
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
-            }
-            compose.onNodeWithTag("implement-plan").performClick()
-            compose.waitUntil(20000) { calls.size == 2 }
-            val implementing = wireJson.parseToJsonElement(calls[1]).jsonObject
+            val implementing = wireJson.parseToJsonElement(calls[0]).jsonObject
             assertEquals(false, implementing["plan"]?.jsonPrimitive?.boolean)
             assertEquals(
                 "Implémente le plan que tu as proposé.",
                 implementing["text"]?.jsonPrimitive?.content,
             )
             compose.onNodeWithTag("plan-toggle").assertIsNotSelected()
+
+            // A later explicit question can still be queued as a protected plan turn.
+            compose.onNodeWithTag("plan-toggle").assertIsEnabled().performClick()
+            compose.onNodeWithTag("plan-toggle").assertIsSelected()
+            compose.onNode(hasSetTextAction()).performTextInput("Et pour les tests ?")
+            compose.onNodeWithTag("conversation-send").performClick()
+            compose.waitUntil(20000) { calls.size == 2 }
+            val question = wireJson.parseToJsonElement(calls[1]).jsonObject
+            assertEquals(true, question["plan"]?.jsonPrimitive?.boolean)
+            assertEquals("Et pour les tests ?", question["text"]?.jsonPrimitive?.content)
             vm.api.closeStreams()
         }
     }
@@ -266,6 +260,79 @@ class PlanTurnJourneyTest {
                 assertEquals("opencode", ordinary["provider"]?.jsonPrimitive?.content)
             } finally {
                 initialSnapshot.countDown()
+                vm.api.closeStreams()
+            }
+        }
+    }
+
+    @Test
+    fun `queued Plan revision cannot approve the preceding proposal`() {
+        pendingRevisionCannotImplement("queued")
+    }
+
+    @Test
+    fun `sending Plan revision cannot approve the preceding proposal`() {
+        pendingRevisionCannotImplement("sending")
+    }
+
+    @Test
+    fun `unfinished Plan turn cannot approve a later proposal`() {
+        pendingRevisionCannotImplement(null, "running")
+    }
+
+    private fun pendingRevisionCannotImplement(status: String?, runStatus: String = "succeeded") {
+        MockWebServer().use { server ->
+            val calls = CopyOnWriteArrayList<String>()
+            val chat =
+                Chat(
+                    id = CHAT,
+                    title = "Révision du plan",
+                    agentId = MAIN_AGENT_ID,
+                    paused = status == "queued",
+                    run = Run(id = "run", taskId = CHAT, status = runStatus, trigger = "chat"),
+                    messages =
+                        if (status == null) emptyList()
+                        else
+                            listOf(
+                                ChatMessage(
+                                    id = "revision",
+                                    chatId = CHAT,
+                                    text = "Révise la proposition",
+                                    plan = true,
+                                    status = status,
+                                    createdAt = 1789315193000,
+                                )
+                            ),
+                )
+            val events =
+                listOf(
+                    RunEvent(
+                        id = 1,
+                        createdAt = 1789315191000,
+                        type = "item.completed",
+                        text = "",
+                        payload =
+                            buildJsonObject {
+                                put(
+                                    "item",
+                                    buildJsonObject {
+                                        put("id", "original-plan")
+                                        put("type", "proposed_plan")
+                                        put("text", "Proposition initiale")
+                                    },
+                                )
+                            },
+                    ),
+                    RunEvent(id = 2, createdAt = 1789315192000, type = "turn.completed", text = ""),
+                )
+            val vm = mountPlanChat(server, chat, events, calls)
+            try {
+                compose.waitUntil(20000) {
+                    compose.onAllNodesWithTag("implement-plan").fetchSemanticsNodes().isNotEmpty()
+                }
+                compose.onNodeWithTag("implement-plan").assertIsNotEnabled()
+                assertTrue(calls.isEmpty())
+            } finally {
                 vm.api.closeStreams()
             }
         }

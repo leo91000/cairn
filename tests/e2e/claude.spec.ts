@@ -768,6 +768,22 @@ test('a plan turn proposes without changes and Implement continues the same chat
   await expect(proposal).not.toContainText('Partial child approach')
   await page.screenshot({ path: testInfo.outputPath('plan-turn-web.png'), animations: 'disabled' })
 
+  // A queued revision must be reviewed before an ordinary implementation can follow it.
+  await workspace.api(`/api/chats/${chat.id}/pause`, 'POST', { paused: true })
+  const revision = crypto.randomUUID()
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
+    id: revision,
+    text: 'fixture:plan-turn Revise the approach before implementation',
+    provider: 'claude',
+    plan: true,
+  })
+  await page.reload()
+  await expect(proposal.getByRole('button', { name: 'Implement' })).toBeDisabled()
+  await workspace.api(`/api/chats/${chat.id}/messages/${revision}`, 'DELETE')
+  await workspace.api(`/api/chats/${chat.id}/pause`, 'POST', { paused: false })
+  await page.reload()
+  await expect(proposal.getByRole('button', { name: 'Implement' })).toBeEnabled()
+
   // Leaving plan mode is an ordinary message in the same chat, with the agent's usual access.
   await proposal.getByRole('button', { name: 'Implement' }).click()
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.chatExecution?.text, { timeout: 30000 }).toBe('Implement the plan you proposed.')

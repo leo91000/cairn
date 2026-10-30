@@ -793,7 +793,7 @@ function edit(message: ChatMessage) {
 // Leaving plan mode is explicit: this queues an ordinary turn in the same conversation,
 // with the agent's usual permissions.
 async function implementPlan() {
-  if (hasDraft.value || editing.value)
+  if (hasDraft.value || editing.value || active.value || pending.value.length || delivery.value.sending.length)
     return
   planning.value = false
   draft.value = 'Implement the plan you proposed.'
@@ -1210,7 +1210,7 @@ function key(event: KeyboardEvent) {
             :subagent-bar="subagentBar"
             compact-toolbar
             chat
-            :can-implement="!hasDraft && !editing && !busy && !inactive"
+            :can-implement="!hasDraft && !editing && !busy && !inactive && !active && !pending.length && !delivery.sending.length"
             @resume-quota="resumeQuota"
             @coding-agent-switched="chosenProvider = $event"
             @load="live.loadOlder"

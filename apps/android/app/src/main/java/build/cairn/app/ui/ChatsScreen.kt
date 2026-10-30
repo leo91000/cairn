@@ -821,7 +821,15 @@ internal fun ChatPage(
     // Leaving plan mode is explicit: this queues an ordinary turn in the same conversation, with
     // the agent's usual permissions.
     fun implementPlan() {
-        if (draft.isNotBlank() || attachments.isNotEmpty() || editing != null) return
+        if (
+            draft.isNotBlank() ||
+                attachments.isNotEmpty() ||
+                editing != null ||
+                active ||
+                pending.isNotEmpty() ||
+                delivery.sending.isNotEmpty()
+        )
+            return
         planning = false
         composer.setTextAndPlaceCursorAtEnd("Implémente le plan que tu as proposé.")
         send("queue", plan = false)
@@ -1399,6 +1407,9 @@ internal fun ChatPage(
                                                     else null,
                                                 canImplement =
                                                     !state.busy &&
+                                                        !active &&
+                                                        pending.isEmpty() &&
+                                                        delivery.sending.isEmpty() &&
                                                         editing == null &&
                                                         draft.isBlank() &&
                                                         attachments.isEmpty(),
