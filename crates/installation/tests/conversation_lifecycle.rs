@@ -1268,7 +1268,12 @@ async fn retention_protects_pending_work_recent_completion_and_worker_finalizati
         .await;
         chat["runId"] = run.clone().into();
         if protection == "wakeup" {
-            chat["wakeup"] = json!({ "at": 1 });
+            chat["wakeup"] =
+                serde_json::to_value(common::run_fixture::complete_wakeup_fixture(&json!({
+                    "id": "retention-wakeup", "createdAt": cairn_installation::config::now(),
+                    "wakeAt": cairn_installation::config::now() + 3600000,
+                })))
+                .unwrap();
         }
         if protection == "finalizing" {
             app.service
