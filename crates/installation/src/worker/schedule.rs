@@ -1183,7 +1183,7 @@ mod tests {
     #[tokio::test]
     async fn clean_controller_exit_without_provider_completion_fails_on_restart() {
         let (_root, service, _chat, run, _workspace) = fixture().await;
-        for backend in ["native", "firecracker"] {
+        for backend in ["native", "firecracker", "shared"] {
             for completed in [false, true] {
                 let id = run.clone();
                 service
@@ -1206,13 +1206,13 @@ mod tests {
                         let state = db.run_state(&id)?.unwrap();
                         assert_eq!(
                             state.status,
-                            if completed {
+                            if completed || backend == "shared" {
                                 RunStatus::Succeeded
                             } else {
                                 RunStatus::Failed
                             }
                         );
-                        if !completed {
+                        if !completed && backend != "shared" {
                             assert!(state.error.unwrap().contains("completion was recorded"));
                         }
                         Ok(())
