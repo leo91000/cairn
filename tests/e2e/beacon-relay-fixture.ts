@@ -95,8 +95,8 @@ export async function beaconRelayFixture(port = 4395, listen = '127.0.0.1', dire
     return Object.assign(child, { diagnostics, closed })
   }
 
-  async function waitForBeacon(child: ReturnType<typeof beacon>) {
-    const deadline = Date.now() + 60000
+  async function waitForBeacon(child: ReturnType<typeof beacon>, timeoutMs = 60000) {
+    const deadline = Date.now() + timeoutMs
     while (Date.now() < deadline) {
       if (child.exitCode !== null || child.signalCode !== null || child.diagnostics().spawnError) {
         await child.closed
@@ -106,13 +106,19 @@ export async function beaconRelayFixture(port = 4395, listen = '127.0.0.1', dire
 
       // A healthy response from a different process must not establish readiness.
       const { listening } = child.diagnostics()
-      const ready = listening && await fetch(`${url}/health`, { signal: AbortSignal.timeout(1000) }).then(response => response.ok).catch(() => false)
-      if (ready && child.exitCode === null && child.signalCode === null && !child.diagnostics().spawnError)
+      const remainingMs = deadline - Date.now()
+      if (remainingMs <= 0)
+        break
+      const ready = listening && await fetch(`${url}/health`, { signal: AbortSignal.timeout(Math.min(1000, remainingMs)) }).then(response => response.ok).catch(() => false)
+      if (ready && Date.now() < deadline && child.exitCode === null && child.signalCode === null && !child.diagnostics().spawnError)
         return
-      await delay(100)
+
+      const waitMs = Math.min(100, deadline - Date.now())
+      if (waitMs > 0)
+        await delay(waitMs)
     }
 
-    throw new Error(`Beacon did not become ready within 60000ms.\n${child.diagnostics().output}`)
+    throw new Error(`Beacon did not become ready within ${timeoutMs}ms.\n${child.diagnostics().output}`)
   }
 
   async function close() {
