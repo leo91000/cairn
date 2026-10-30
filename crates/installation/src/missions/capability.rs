@@ -188,6 +188,7 @@ impl MissionOperation {
                             crate::store::RUN_SUMMARY,
                         );
                         let mut runs = db.json_rows(&query, [])?;
+                        db.hydrate_run_wakeups(&mut runs)?;
                         crate::reads::Reads::load(&db, &account)?.runs(&db, &mut runs)?;
                         transaction.commit()?;
                         Ok(runs.into())

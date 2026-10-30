@@ -1501,6 +1501,7 @@ impl Service {
     }
 
     pub async fn chat_tick(&self, active: &HashSet<String>) -> Result<()> {
+        self.expire_attachment_uploads().await?;
         for chat in self.store.conversations().await? {
             if chat.lifecycle != cairn_contracts::ConversationLifecycle::Active
                 || chat.environment_state == Some(EnvironmentState::Cleaning)

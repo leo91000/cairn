@@ -36,7 +36,7 @@ pub struct Service {
     pub models: Arc<crate::models::Models>,
     pub opencode: Arc<crate::opencode::Catalog>,
     pub conversation_storage_lock: Arc<tokio::sync::Mutex<()>>,
-    pub attachment_upload: Arc<tokio::sync::Mutex<()>>,
+    pub attachments: Arc<crate::attachments::Attachments>,
     pub conversation_lists: Arc<crate::live::ConversationLists>,
     pub config: Config,
     pub store: Store,
@@ -81,7 +81,7 @@ impl Service {
             models: Arc::default(),
             opencode: Arc::default(),
             conversation_storage_lock: Arc::default(),
-            attachment_upload: Arc::default(),
+            attachments: Arc::default(),
             conversation_lists: Arc::default(),
             skills: Skills {
                 config: config.clone(),
@@ -107,6 +107,7 @@ impl Service {
         crate::chats::questions::retire_native(&service).await?;
         service.bootstrap_main_agent().await?;
         service.avatars.recover(&service).await?;
+        service.reconcile_attachments().await?;
         tokio::spawn(crate::artifacts::preview::recover(service.clone()));
         Ok(service)
     }
