@@ -28,6 +28,7 @@ pub(super) async fn schedule(
     if saved.completed()
         || (saved.managed()
             && saved.provider_failed()
+            && !cause.startup
             && saved.confirmed_provider_failure() != Some(cause))
         || saved.finalization_error().is_some()
         || (cause.message != error.message && saved.confirmed_provider_failure() != Some(cause))
@@ -51,6 +52,7 @@ pub(super) async fn schedule(
                 || current.finalization_error().is_some()
                 || (current.managed()
                     && current.provider_failed()
+                    && !cause.startup
                     && current.confirmed_provider_failure() != Some(&cause))
                 || current.retry_cause.as_ref().and_then(Option::as_ref) != Some(&cause)
                 || (cause.message != error_message

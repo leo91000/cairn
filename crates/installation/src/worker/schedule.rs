@@ -445,12 +445,12 @@ async fn recover_or_wait(s: &Service, run: &Value) -> Result<bool> {
 // A provider retry is paid by Retry::next, not by the controller recovery
 // budget. Bind that authorization to the attempt and its confirmed cause.
 pub(super) fn provider_retry_paid(saved: &RunCheckpoint, state: &RunState) -> bool {
-    saved.turn_pending != Some(true)
-        && saved.has_provider_retry_reservation()
-        && state.retry.as_ref().is_some_and(|retry| {
-            retry.next_attempt_at.is_some()
-                && saved.retry_cause.as_ref().and_then(Option::as_ref) == Some(&retry.cause)
-        })
+    state.retry.as_ref().is_some_and(|retry| {
+        retry.next_attempt_at.is_some()
+            && (saved.turn_pending != Some(true) || (!saved.managed() && retry.cause.startup))
+            && (!saved.managed() || saved.has_provider_retry_reservation())
+            && saved.retry_cause.as_ref().and_then(Option::as_ref) == Some(&retry.cause)
+    })
 }
 
 fn controller_budget_exhausted(saved: &RunCheckpoint, state: &RunState, run: &Value) -> bool {
