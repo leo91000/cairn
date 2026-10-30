@@ -537,6 +537,100 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn capacity_refunds_only_paid_rejected_current_attempt() {
+        let root = tempfile::tempdir().unwrap();
+        let service = Service::new(crate::config::Config {
+            data_dir: root.path().join("data"),
+            home: root.path().join("home"),
+            workspace_roots: vec![root.path().into()],
+            public_url: "http://localhost:4310".into(),
+            host: "127.0.0.1".into(),
+            port: 0,
+            codex_bin: "codex".into(),
+            claude_bin: "claude".into(),
+            opencode_bin: "opencode".into(),
+            opencode_go_usage_url: crate::accounts::opencode::USAGE_URL.into(),
+            concurrency: 1,
+            logger: false,
+            worker_enabled: false,
+            runner_url: String::new(),
+        })
+        .await
+        .unwrap();
+        for (count, rejected, same_attempt, cancelled, expired, paid) in [
+            (3, true, true, false, false, true),
+            (4, true, true, false, false, true),
+            (3, false, true, false, false, true),
+            (3, true, false, false, false, true),
+            (3, true, true, true, false, true),
+            (3, true, true, false, true, true),
+            (3, true, true, false, false, false),
+        ] {
+            let id = crate::config::id();
+            let run = json!({ "id": id, "taskId": id, "status": "running" });
+            service
+                .store
+                .transaction(move |db| db.add_run_fixture(&run, None).map(|_| ()))
+                .await
+                .unwrap();
+            let mut saved = RunCheckpoint::from_value(json!({
+                "prepared": { "backend": "native", "isolated": true }, "runnerId": "current",
+                "completed": false, "terminalCode": null, "remainingMs": if expired { Some(0) } else { None },
+                "startRejected": rejected, "controllerRecoveries": count,
+            })).unwrap();
+            if paid {
+                saved.pending_paid_admission = Some(super::super::checkpoint::PaidAdmission {
+                    attempt: if same_attempt { "current" } else { "old" }.into(),
+                    controller: true,
+                    capacity_refused: false,
+                    provider_cause: None,
+                });
+            }
+            saved.store(&service.store, &id).await.unwrap();
+            let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), saved);
+            let cancel = CancellationToken::new();
+            if cancelled {
+                cancel.cancel();
+            }
+            let error = Error::unavailable(format!(
+                "{} has no capacity",
+                crate::nodes::placement::NO_CAPACITY
+            ));
+            record_failure(&service, &checkpoint, &cancel, &error, &[])
+                .await
+                .unwrap();
+            let durable = RunCheckpoint::load(&service.store, &id)
+                .await
+                .unwrap()
+                .unwrap();
+            let expected = rejected && same_attempt && !cancelled && !expired && paid;
+            assert_eq!(
+                durable.has_controller_recovery_reservation(),
+                expected,
+                "count={count}, rejected={rejected}, same_attempt={same_attempt}, cancelled={cancelled}, expired={expired}, paid={paid}"
+            );
+            assert_eq!(durable.controller_recoveries(), count);
+            if expected {
+                let run = service.store.run_state(&id).await.unwrap();
+                assert_eq!(run.status, RunStatus::Queued);
+                let key = id.clone();
+                assert!(
+                    service
+                        .store
+                        .transaction(move |db| super::super::schedule::finish_recovery(
+                            db,
+                            &key,
+                            Some(&durable)
+                        ))
+                        .await
+                        .unwrap()
+                );
+            }
+        }
+        service.shutdown.cancel();
+    }
+
+    #[tokio::test]
     async fn completed_worker_release_keeps_explicit_idle_move_and_reservation() {
         use crate::{agent_fixture::StoreAgentFixture, node_fixture::StoreNodeFixture};
         let root = tempfile::tempdir().unwrap();
