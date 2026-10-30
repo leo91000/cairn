@@ -2787,6 +2787,227 @@ async fn controller_evidence_is_reconciled_before_replay_or_terminal_failure() {
     }
 }
 
+/// The real runner client and manager must retain a broken output stream even
+/// when the controller reports a healthy physical completion.
+#[tokio::test]
+async fn interrupted_controller_output_after_healthy_exit_never_replays_the_turn() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    for (completed, truncated) in [(false, true), (true, true), (false, false), (true, false)] {
+        let mut fixture = Fixture::new().await;
+        fixture.stop(false).await;
+        let controller = Arc::new(Controller {
+            data: fixture.service.config.data_dir.clone(),
+            plans: tokio::sync::Mutex::new(Vec::new()),
+            failures: 0,
+            slots: 4,
+            hold: AtomicBool::new(false),
+        });
+        let home = fixture.service.config.home.join(".codex");
+        tokio::fs::create_dir_all(&home).await.unwrap();
+        tokio::fs::write(home.join("auth.json"), "{}")
+            .await
+            .unwrap();
+        tokio::fs::write(
+            fixture.service.config.data_dir.join("storage-s3.json"),
+            json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
+        )
+        .await
+        .unwrap();
+        let run = fixture.enqueue("Test interrupted controller output").await;
+        let run_id = text(&run, "id").to_owned();
+        let wait_returned = Arc::new(AtomicBool::new(false));
+        let app = Router::new().fallback(any({
+            let service = fixture.service.clone();
+            let id = run_id.clone();
+            let wait_returned = wait_returned.clone();
+            move |state: State<Arc<Controller>>, request: Request| {
+                let service = service.clone();
+                let id = id.clone();
+                let wait_returned = wait_returned.clone();
+                async move {
+                    if request.uri().path().ends_with("/wait") {
+                        wait_returned.store(true, Ordering::SeqCst);
+                        return Json(json!({ "StatusCode": 0 })).into_response();
+                    }
+                    if request.uri().path().ends_with("/logs") {
+                        let mut output = String::from("{\"type\":\"thread.started\",\"thread_id\":\"fixture-session\"}\n");
+                        if completed {
+                            output.push_str("{\"type\":\"item.completed\",\"item\":{\"id\":\"reply\",\"type\":\"agent_message\",\"text\":\"committed answer\"}}\n{\"type\":\"turn.completed\",\"usage\":{}}\n");
+                        }
+                        let frame = format!("{}\n", json!({ "type": "output", "stderr": false, "data": STANDARD.encode(output) }));
+                        let stream = futures_util::stream::unfold((0, service, id, wait_returned, frame), move |(stage, service, id, wait_returned, frame)| async move {
+                            if stage == 0 {
+                                return Some((Ok::<_, std::io::Error>(axum::body::Bytes::from(frame.clone())), (1, service, id, wait_returned, frame)));
+                            }
+                            if stage == 1 && truncated {
+                                while !wait_returned.load(Ordering::SeqCst)
+                                    || (completed && service.store.checkpoint_boundary(&id).await.unwrap().is_none_or(|saved| saved["completed"] != true))
+                                {
+                                    tokio::time::sleep(Duration::from_millis(10)).await;
+                                }
+                                return Some((Ok(axum::body::Bytes::from_static(b"{\"type\":")), (2, service, id, wait_returned, frame)));
+                            }
+                            if stage == 1 {
+                                return std::future::pending().await;
+                            }
+                            None
+                        });
+                        return Body::from_stream(stream).into_response();
+                    }
+                    serve_controller(state, request).await
+                }
+            }
+        })).with_state(controller.clone());
+        let (listener, address) = common::bind().await;
+        common::reconfigure(&mut fixture.service, |config| {
+            config.runner_url = format!("http://{address}")
+        })
+        .await;
+        let server = common::serve(listener, app);
+        fixture.start().await;
+        let result = fixture.until_finished(&run_id).await;
+        assert_eq!(
+            result["status"],
+            if completed {
+                RunStatus::Succeeded
+            } else {
+                RunStatus::Failed
+            },
+            "completed={completed}, truncated={truncated}: {result}"
+        );
+        let saved = fixture.checkpoint(&run_id).await;
+        assert_eq!(saved["terminalCode"], 0);
+        assert_eq!(saved["outputInterrupted"], true);
+        assert_eq!(saved["completed"], completed);
+        if !completed {
+            assert!(
+                text(&result, "error").contains("output was interrupted"),
+                "{result}"
+            );
+        }
+        assert_eq!(
+            controller.plans.lock().await.len(),
+            1,
+            "must not replay the turn"
+        );
+        fixture.stop(false).await;
+        server.abort();
+    }
+}
+
+/// Hold the SQLite writer after the manager reserves an observation and before
+/// its healthy response can be committed. The live deadline must still win.
+#[tokio::test]
+async fn active_observation_expiring_during_result_persistence_fails_without_replay() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let mut fixture = Fixture::new().await;
+    fixture.stop(false).await;
+    let controller = Arc::new(Controller {
+        data: fixture.service.config.data_dir.clone(),
+        plans: tokio::sync::Mutex::new(Vec::new()),
+        failures: 0,
+        slots: 4,
+        hold: AtomicBool::new(false),
+    });
+    let waits = Arc::new(AtomicUsize::new(0));
+    let response_gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let app = Router::new()
+        .fallback(any({
+            let waits = waits.clone();
+            let gate = response_gate.clone();
+            move |state: State<Arc<Controller>>, request: Request| {
+                let waits = waits.clone();
+                let gate = gate.clone();
+                async move {
+                    if request.uri().path().ends_with("/wait") {
+                        let index = waits.fetch_add(1, Ordering::SeqCst);
+                        if index == 0 {
+                            return Json(json!({ "StatusCode": 75 })).into_response();
+                        }
+                        gate.acquire().await.unwrap().forget();
+                        return Json(json!({ "StatusCode": 0 })).into_response();
+                    }
+                    serve_controller(state, request).await
+                }
+            }
+        }))
+        .with_state(controller.clone());
+    let (listener, address) = common::bind().await;
+    common::reconfigure(&mut fixture.service, |config| {
+        config.runner_url = format!("http://{address}")
+    })
+    .await;
+    let server = common::serve(listener, app);
+    let home = fixture.service.config.home.join(".codex");
+    tokio::fs::create_dir_all(&home).await.unwrap();
+    tokio::fs::write(home.join("auth.json"), "{}")
+        .await
+        .unwrap();
+    tokio::fs::write(
+        fixture.service.config.data_dir.join("storage-s3.json"),
+        json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
+    )
+    .await
+    .unwrap();
+    let run = fixture
+        .enqueue("Test expiry during controller result persistence")
+        .await;
+    let run_id = text(&run, "id").to_owned();
+    fixture
+        .service
+        .store
+        .save_checkpoint_boundary(&run_id, json!({ "remainingMs": 4000 }))
+        .await
+        .unwrap();
+    fixture.start().await;
+    let saved = eventually(
+        Duration::from_secs(3),
+        Duration::from_millis(10),
+        async || {
+            let saved = fixture.checkpoint(&run_id).await;
+            (waits.load(Ordering::SeqCst) >= 2
+                && saved["completed"] == true
+                && saved["controllerObservation"]["inFlight"] == true)
+                .then_some(saved)
+        },
+    )
+    .await;
+    let remaining = saved["remainingMs"].as_u64().unwrap();
+    assert!((300..=4000).contains(&remaining), "{saved}");
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let store = fixture.service.store.clone();
+    let blocker = tokio::spawn(async move {
+        store
+            .transaction(move |_| {
+                let _ = entered_tx.send(());
+                release_rx.recv().unwrap();
+                Ok(())
+            })
+            .await
+            .unwrap();
+    });
+    entered_rx.await.unwrap();
+    response_gate.add_permits(1);
+    tokio::time::sleep(Duration::from_millis(remaining + 250)).await;
+    release_tx.send(()).unwrap();
+    blocker.await.unwrap();
+    let result = fixture.until_finished(&run_id).await;
+    assert_eq!(result["status"], RunStatus::Failed, "{result}");
+    assert!(text(&result, "error").contains("time limit"), "{result}");
+    let saved = fixture.checkpoint(&run_id).await;
+    assert_eq!(saved["terminalCode"], 0, "{saved}");
+    assert_eq!(saved["remainingMs"], 0, "{saved}");
+    assert_eq!(
+        controller.plans.lock().await.len(),
+        1,
+        "must not replay the turn"
+    );
+    fixture.stop(false).await;
+    server.abort();
+}
+
 /// Manager SIGTERM is a local stop, not a controller completion observation.
 /// A recorded turn must retain the original attempt for reconciliation on restart.
 #[tokio::test]
