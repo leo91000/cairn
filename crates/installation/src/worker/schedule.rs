@@ -1461,7 +1461,50 @@ mod tests {
                 .await
                 .unwrap()
         );
-        assert_eq!(reads.load(Ordering::SeqCst), 1);
+        // The deadline can expire before the first request is sent; either way
+        // it must prevent a second observation.
+        assert!(reads.load(Ordering::SeqCst) <= 1);
+        let state = service.store.run_state(&run).await.unwrap();
+        assert_eq!(state.status, RunStatus::Failed);
+        assert_eq!(state.error.as_deref(), Some("Run exceeded its time limit."));
+        service.shutdown.cancel();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn expired_recovery_deadline_never_observes_controller() {
+        use axum::{Router, extract::Request, response::IntoResponse, routing::any};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let reads = Arc::new(AtomicUsize::new(0));
+        let count = reads.clone();
+        let app = Router::new().fallback(any(move |request: Request| {
+            let count = count.clone();
+            async move {
+                if request.method() == "DELETE" {
+                    return axum::http::StatusCode::NO_CONTENT.into_response();
+                }
+                count.fetch_add(1, Ordering::SeqCst);
+                std::future::pending::<axum::response::Response>().await
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (_root, service, _chat, run, _workspace) =
+            fixture_with_runner(format!("http://{address}")).await;
+        let mut saved = RunCheckpoint::from_value(json!({
+            "prepared": { "backend": "native", "isolated": true }, "runnerId": "old-attempt",
+            "completed": false, "remainingMs": 200,
+        }))
+        .unwrap();
+        saved.recovery_deadline_ms = Some(now() - 1);
+        saved.store(&service.store, &run).await.unwrap();
+        assert!(
+            !recover(&service, &service.store.run(&run).await.unwrap())
+                .await
+                .unwrap()
+        );
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
         let state = service.store.run_state(&run).await.unwrap();
         assert_eq!(state.status, RunStatus::Failed);
         assert_eq!(state.error.as_deref(), Some("Run exceeded its time limit."));

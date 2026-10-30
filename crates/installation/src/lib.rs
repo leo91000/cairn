@@ -81,6 +81,9 @@ pub mod agents;
 extern crate self as cairn_installation;
 
 #[cfg(test)]
+pub(crate) mod test_process;
+
+#[cfg(test)]
 #[path = "../tests/common/agent_fixture.rs"]
 pub(crate) mod agent_fixture;
 

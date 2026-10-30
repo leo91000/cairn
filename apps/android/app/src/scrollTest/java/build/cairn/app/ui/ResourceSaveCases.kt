@@ -48,6 +48,10 @@ abstract class ResourceSaveCases {
         saveAfterFailure("projects", true)
 
     @Test
+    fun lateProjectCatalogKeepsTheUncertainCreationSourceDisabled() =
+        saveAfterFailure("projects", true, delayCatalog = true)
+
+    @Test
     fun rejectedReplayStillAppliesTheLatestMissionEdits() =
         saveAfterFailure("tasks", true, rejectReplay = true)
 
@@ -77,6 +81,7 @@ abstract class ResourceSaveCases {
         restore: Boolean = false,
         malformedResponse: Boolean = false,
         editBranch: Boolean = false,
+        delayCatalog: Boolean = false,
     ) {
         val savedId = "00000000-0000-4000-8000-000000000005"
         val uncertainResponse = loseResponse || malformedResponse
@@ -94,6 +99,8 @@ abstract class ResourceSaveCases {
             recoveryTimeline += "$elapsedMillis ms: $message"
         }
 
+        val catalogRequested = CountDownLatch(1)
+        val allowCatalog = CountDownLatch(if (delayCatalog) 1 else 0)
         val allowRecoveryProbe = CountDownLatch(1)
         val recoveryRefreshStarted = CountDownLatch(1)
         val allowRecoveryRefresh = CountDownLatch(1)
@@ -200,6 +207,12 @@ abstract class ResourceSaveCases {
                             return MockResponse()
                                 .setResponseCode(409)
                                 .setBody("""{"error":"Lecture refusée"}""")
+                        if (path.endsWith("/api/plugins") && delayCatalog) {
+                            traceRecovery("Project catalogue waiting for uncertain save")
+                            catalogRequested.countDown()
+                            check(allowCatalog.await(20, TimeUnit.SECONDS))
+                            traceRecovery("Project catalogue released")
+                        }
                         return json(
                             when {
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
@@ -236,7 +249,8 @@ abstract class ResourceSaveCases {
                                     )
                                         """{"mcps":[]}"""
                                     else "[]"
-                            }
+                            },
+                            delayBody = path.endsWith("/api/plugins") && delayCatalog,
                         )
                     }
                 }
@@ -352,8 +366,22 @@ abstract class ResourceSaveCases {
                 if (uncertainResponse)
                     compose.onNodeWithText("Sauvegarde", substring = true).assertIsDisplayed()
                 captureFailure("$kind-${if (uncertainResponse) "uncertain" else "reload"}")
-                if (uncertainResponse && kind == "projects")
+                if (uncertainResponse && kind == "projects") {
+                    if (delayCatalog) {
+                        waitFor { catalogRequested.count == 0L }
+                        compose.onNodeWithText("Dossier sur le serveur").assertDoesNotExist()
+                        allowCatalog.countDown()
+                    }
+                    // The optional source catalogue loads independently of the save. A failed
+                    // creation can return before the source selector has entered composition.
+                    waitFor {
+                        compose
+                            .onAllNodesWithText("Dossier sur le serveur")
+                            .fetchSemanticsNodes()
+                            .isNotEmpty()
+                    }
                     compose.onNodeWithText("Dossier sur le serveur").assertIsNotEnabled()
+                }
                 if (loseResponse) {
                     // A lost response also starts background recovery. Hold its refresh so this
                     // test exercises the disabled Save, then retry only after recovery completes.
@@ -473,6 +501,7 @@ abstract class ResourceSaveCases {
                 )
                 if (loseResponse) assertEquals(mutations[0].second, mutations[1].second)
             } finally {
+                allowCatalog.countDown()
                 allowRecoveryProbe.countDown()
                 allowRecoveryRefresh.countDown()
                 models.clear()
@@ -481,6 +510,9 @@ abstract class ResourceSaveCases {
         }
     }
 
-    private fun json(value: String) =
-        MockResponse().setHeader("Content-Type", "application/json").setBody(value)
+    private fun json(value: String, delayBody: Boolean = false) =
+        MockResponse().setHeader("Content-Type", "application/json").setBody(value).apply {
+            // Keep delivery asynchronous after the latch release to expose a missing UI wait.
+            if (delayBody) setBodyDelay(1, TimeUnit.SECONDS)
+        }
 }
