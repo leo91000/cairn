@@ -133,6 +133,7 @@ pub enum Event {
         code: Option<i64>,
         result: String,
     },
+    FinalizationFailed,
     Heartbeat,
     #[serde(other)]
     Unknown,

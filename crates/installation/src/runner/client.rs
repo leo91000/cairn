@@ -110,7 +110,9 @@ impl Controller {
     }
 
     async fn wait(&self) -> Result<i32> {
-        wait_for_exit(&self.http, &self.url, &self.token).await
+        Ok(wait_for_exit(&self.http, &self.url, &self.token)
+            .await?
+            .code)
     }
 
     async fn output(&self) -> Result<()> {
@@ -250,7 +252,17 @@ async fn collect_completion(
 
 /// Read only the terminal result of this exact attempt. Both controller backends
 /// publish it after finalization and physical ownership release.
-pub(crate) async fn wait_for_exit(http: &reqwest::Client, url: &str, token: &str) -> Result<i32> {
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ControllerResult {
+    pub code: i32,
+    pub finalization_failed: bool,
+}
+
+pub(crate) async fn wait_for_exit(
+    http: &reqwest::Client,
+    url: &str,
+    token: &str,
+) -> Result<ControllerResult> {
     let response = http
         .post(format!("{url}/wait"))
         .bearer_auth(token)
@@ -264,11 +276,17 @@ pub(crate) async fn wait_for_exit(http: &reqwest::Client, url: &str, token: &str
         .json()
         .await
         .map_err(|_| Error::unavailable("Execution completion connection was interrupted."))?;
-    value["StatusCode"]
+    let code = value["StatusCode"]
         .as_i64()
         .filter(|n| (0..=255).contains(n))
         .map(|n| n as i32)
-        .ok_or_else(|| Error::bad("Invalid execution exit status."))
+        .ok_or_else(|| Error::bad("Invalid execution exit status."))?;
+    let finalization_failed =
+        value["FinalizationFailed"] == true && code == super::CONTROLLER_FAILED;
+    Ok(ControllerResult {
+        code,
+        finalization_failed,
+    })
 }
 
 /// A cursor is acknowledged only after the complete frame reached its output.

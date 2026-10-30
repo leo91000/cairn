@@ -55,7 +55,17 @@ still stops the attempt. The worker durably observes the terminal result before
 fencing and deciding whether a replacement is safe; output and finalization
 errors remain distinct from provider completion. A confirmed provider failure is
 also durable and cannot become success from controller exit zero or spend the
-controller recovery budget after a lost terminal response.
+controller recovery budget after a lost terminal response. A classified provider
+retry needs the matching attempt and a confirmed ordinary controller failure;
+an unclassified failure remains terminal.
+
+A controller reports an authenticated finalization-failure signal separately from
+workload output and the local client exit. Older controllers and VM guests do not
+provide that signal, so mixed versions cannot offer the same distinction. The
+signal is persisted before cleanup where possible, but if every initial evidence
+write fails and the controller dies before recording it, interruption recovery
+can still replay the attempt. This is not an exactly-once guarantee. Persistent
+storage errors can keep physical ownership quarantined until cleanup succeeds.
 
 Controller recovery reservations belong to an attempt and are charged once.
 Explicit new turns and manual resumes obtain a new recovery budget. Automatic

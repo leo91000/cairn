@@ -21,7 +21,10 @@ use std::{
     os::fd::AsRawFd,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 use tokio::{
@@ -712,6 +715,7 @@ impl Vm {
         let mcp_relay = mcp::relay(mcp_listener, channel, relay_stop.clone());
         let socket = &self.socket;
         let warmed = self.warmed;
+        let finalization_failed = Arc::new(AtomicBool::new(false));
         let operation = async {
             timing.next("imports");
             let status = host::status(socket).await?;
@@ -729,12 +733,17 @@ impl Vm {
                 timing.next("current_entrypoint");
                 host::prepare_entrypoint(socket).await?;
             }
-            run(socket, plan, state, timing).await
+            run(socket, plan, state, timing, &finalization_failed).await
         };
         let result = tokio::select! {
             result = operation => result,
             () = stop.cancelled() => Ok(STOPPED),
             result = watch_backend(self.mounted.as_ref()) => result,
+        };
+        let result = if finalization_failed.load(Ordering::SeqCst) {
+            Ok(crate::runner::FINALIZATION_FAILED_SENTINEL)
+        } else {
+            result
         };
         relay_stop.cancel();
         relay.abort();
@@ -868,7 +877,13 @@ async fn refresh_imports(socket: &Path, plan: &Plan) -> Result<()> {
 }
 
 /// Starts the agent and records its output until the guest reports its exit.
-async fn run(socket: &Path, plan: &Plan, state: &Path, mut timing: Operation) -> Result<i32> {
+async fn run(
+    socket: &Path,
+    plan: &Plan,
+    state: &Path,
+    mut timing: Operation,
+    finalization_failed: &AtomicBool,
+) -> Result<i32> {
     timing.next("run_connect");
     let mut stream = connect(socket).await?;
     let request = GuestRequest::Run {
@@ -911,6 +926,25 @@ async fn run(socket: &Path, plan: &Plan, state: &Path, mut timing: Operation) ->
                     std::os::unix::fs::chown(output, Some(1000), Some(1000))?;
                 }
                 return Ok(code as i32);
+            }
+            Event::FinalizationFailed => {
+                finalization_failed.store(true, Ordering::SeqCst);
+                let exit = state.join(format!("{}.exit", plan.id()));
+                let outcome = serde_json::json!({ "StatusCode": crate::runner::CONTROLLER_FAILED, "FinalizationFailed": true });
+                if !matches!(
+                    tokio::time::timeout(
+                        Duration::from_secs(1),
+                        atomic_write(&exit, outcome.to_string().as_bytes())
+                    )
+                    .await,
+                    Ok(Ok(()))
+                ) {
+                    tracing::error!(
+                        attempt = plan.id(),
+                        "Guest flush evidence could not be saved before physical cleanup"
+                    );
+                }
+                return Ok(crate::runner::FINALIZATION_FAILED_SENTINEL);
             }
             Event::Heartbeat | Event::Unknown => return Err(Error::bad("Unknown guest event.")),
         }
