@@ -52,10 +52,13 @@ async fn transfer_diagnostics_isolate_concurrent_attempts_and_conserve_volumes()
     let root = tempfile::tempdir().unwrap();
     let s = service(root.path()).await;
     let fail = Arc::new(AtomicBool::new(false));
+    let body_release = Arc::new(tokio::sync::Semaphore::new(0));
     let node = Router::new().fallback({
         let fail = fail.clone();
+        let body_release = body_release.clone();
         move |request: Request| {
             let fail = fail.clone();
+            let body_release = body_release.clone();
             async move {
                 let input: Value =
                     serde_json::from_slice(&to_bytes(request.into_body(), 16384).await.unwrap())
@@ -66,16 +69,20 @@ async fn transfer_diagnostics_isolate_concurrent_attempts_and_conserve_volumes()
                     return StatusCode::SERVICE_UNAVAILABLE.into_response();
                 }
                 let count = input["hashes"].as_array().unwrap().len();
-                let stream = futures_util::stream::unfold(count, |left| async move {
-                    if left == 0 {
-                        return None;
-                    }
-                    tokio::time::sleep(Duration::from_millis(25)).await;
-                    Some((
-                        Ok::<_, std::io::Error>(Bytes::from(vec![42; 4096])),
-                        left - 1,
-                    ))
-                });
+                let stream = futures_util::stream::unfold(
+                    (count, body_release),
+                    |(left, body_release)| async move {
+                        if left == 0 {
+                            return None;
+                        }
+                        body_release.acquire().await.unwrap().forget();
+                        tokio::time::sleep(Duration::from_millis(25)).await;
+                        Some((
+                            Ok::<_, std::io::Error>(Bytes::from(vec![42; 4096])),
+                            (left - 1, body_release),
+                        ))
+                    },
+                );
                 Body::from_stream(stream).into_response()
             }
         }
@@ -129,10 +136,28 @@ async fn transfer_diagnostics_isolate_concurrent_attempts_and_conserve_volumes()
     let first = diagnostic::Metrics::new(&attempt, &run_id, &snapshot_id, "manager");
     let second = diagnostic::Metrics::new(&other_attempt, &run_id, &snapshot_id, "manager");
     let manifest = json!({});
-    let (one, two) = tokio::join!(
-        publication.transfer_observed(&first, &manifest, &objects),
-        publication.transfer_observed(&second, &manifest, &objects),
-    );
+    let ((one, two), ()) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(
+            async {
+                tokio::join!(
+                    publication.transfer_observed(&first, &manifest, &objects),
+                    publication.transfer_observed(&second, &manifest, &objects),
+                )
+            },
+            async {
+                // Server timers can expire before the client receives headers.
+                // Start their delays only after both body measurements are active.
+                while first.snapshot()["stages"]["nodeBody"]["inFlight"] != 1
+                    || second.snapshot()["stages"]["nodeBody"]["inFlight"] != 1
+                {
+                    tokio::task::yield_now().await;
+                }
+                body_release.add_permits(2);
+            }
+        )
+    })
+    .await
+    .expect("both node body measurements must start before releasing fixture responses");
     assert_eq!(one.unwrap(), 4096);
     assert_eq!(two.unwrap(), 4096);
     for metrics in [&first, &second] {
