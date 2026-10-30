@@ -1299,20 +1299,15 @@ async fn retention_protects_pending_work_recent_completion_and_worker_finalizati
                 .unwrap();
         }
         if protection == "question" {
+            let question = serde_json::from_value(json!({
+                "id": "question", "chatId": chat_id, "runId": run,
+                "source": "cairn", "blocking": false, "status": "pending",
+                "fields": [{"id":"scope","title":"Pending question"}],
+            }))
+            .unwrap();
             app.service
                 .store
-                .set(
-                    &format!("chat-question:{chat_id}:question"),
-                    json!({
-                        "id": "question",
-                        "chatId": chat_id,
-                        "runId": run,
-                        "blocking": false,
-                        "fields": [],
-                        "status": "pending",
-                    }),
-                    None,
-                )
+                .transaction(move |db| db.save_question(&question))
                 .await
                 .unwrap();
         }

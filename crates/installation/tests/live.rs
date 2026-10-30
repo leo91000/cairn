@@ -782,20 +782,15 @@ async fn chat_state_questions_and_artifacts_update_without_text_events() {
     f.service.chat_pause(chat_id, true).await.unwrap();
     assert_eq!(stream.batch().await.1["state"]["chat"]["paused"], true);
     // Mutations of metadata have no event id of their own and still reach every client.
+    let question = serde_json::from_value(json!({
+        "id": "question", "chatId": chat_id, "runId": f.run,
+        "source": "cairn", "blocking": false, "status": "pending",
+        "fields": [{"id":"scope","title":"Pending question"}],
+    }))
+    .unwrap();
     f.service
         .store
-        .set(
-            &format!("chat-question:{chat_id}:question"),
-            json!({
-                "id": "question",
-                "chatId": chat_id,
-                "runId": f.run,
-                "blocking": false,
-                "fields": [],
-                "status": "pending",
-            }),
-            None,
-        )
+        .transaction(move |db| db.save_question(&question))
         .await
         .unwrap();
     assert_eq!(
