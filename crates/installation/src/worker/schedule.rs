@@ -463,13 +463,13 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
         .map(str::to_owned);
     let recovery_deadline = if !parked && !new_turn {
         let id = run_id.to_owned();
-        let expected = expected_attempt.clone();
+        let expected = expected_checkpoint.clone();
         s.store
             .transaction(move |db| {
                 let Some(mut saved) = RunCheckpoint::load_in(db, &id)? else {
                     return Ok(None);
                 };
-                if saved.runner_id() != expected.as_deref() {
+                if !recovery::same_execution(Some(&saved), expected.as_ref()) {
                     return Ok(None);
                 }
                 let deadline = saved
@@ -507,6 +507,7 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
             |action| {
                 let id = run_id.to_owned();
                 let attempt = attempt.clone();
+                let expected = expected_checkpoint.clone();
                 let shutdown = s.shutdown.clone();
                 async move {
                     s.store
@@ -522,7 +523,7 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
                             let Some(mut current) = RunCheckpoint::load_in(db, &id)? else {
                                 return Ok(false);
                             };
-                            if current.runner_id() != Some(attempt.as_str()) {
+                            if !recovery::same_execution(Some(&current), expected.as_ref()) {
                                 return Ok(false);
                             }
                             let mut reserved = false;
