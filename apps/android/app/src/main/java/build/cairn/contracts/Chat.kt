@@ -114,14 +114,6 @@ data class Chat(
         provider?.let { require(Regex("^(codex|claude|opencode)\$").containsMatchIn(it)) }
         purgeAt?.let { require(it in 0L..9007199254740991L) }
         restoredAt?.let { require(it in 0L..9007199254740991L) }
-        sideQuestionUnavailable?.let {
-            require(
-                Regex(
-                        "^(between-replies|codex|opencode|unknown-agent|stopping|compacting|claude-release|not-offered)\$"
-                    )
-                    .containsMatchIn(it)
-            )
-        }
         require(
             Regex("^(idle|queued|running|waiting|succeeded|failed|cancelled|interrupted)\$")
                 .containsMatchIn(status)

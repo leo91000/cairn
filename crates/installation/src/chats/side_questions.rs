@@ -535,10 +535,14 @@ fn is_side(entry: &Value) -> bool {
 
 /// Removes side questions from a run's inbox.
 pub(crate) async fn forget_deliveries(run_directory: &std::path::Path) -> Result<()> {
-    let inbox = run_directory.join("chat-input").join("messages.json");
-    let Ok(bytes) = tokio::fs::read(&inbox).await else {
+    let directory = run_directory.join("chat-input");
+    // An inbox beyond the transport limit is unreadable, by adapters too.
+    let Ok(Some(bytes)) =
+        crate::chat_inbox::messages(&directory, crate::chat_inbox::TRANSPORT_LIMIT).await
+    else {
         return Ok(());
     };
+    let inbox = directory.join("messages.json");
     let Ok(Value::Array(entries)) = serde_json::from_slice::<Value>(&bytes) else {
         return Ok(());
     };
@@ -575,11 +579,17 @@ pub(crate) async fn publish_inbox(
     directory: &std::path::Path,
     mut entries: Vec<Value>,
 ) -> Result<()> {
-    let _inbox = INBOX.lock().await;
-    let run = store.run(run_id).await?;
-    if run["sideQuestions"] != true || turn(&run) != side_turn {
-        entries.retain(|entry| !is_side(entry));
-    }
+    // Without side questions, nothing can be restored: no lock or run read.
+    let _inbox = if entries.iter().any(is_side) {
+        let inbox = INBOX.lock().await;
+        let run = store.run(run_id).await?;
+        if run["sideQuestions"] != true || turn(&run) != side_turn {
+            entries.retain(|entry| !is_side(entry));
+        }
+        Some(inbox)
+    } else {
+        None
+    };
     crate::skills::private_dir(directory).await?;
     crate::skills::atomic_write(
         &directory.join("messages.json"),

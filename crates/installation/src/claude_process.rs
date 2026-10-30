@@ -30,7 +30,9 @@ const MAX_IMAGE: usize = 10_000_000;
 /// Whether this Claude Code release was qualified to answer side questions with every tool
 /// denied before it runs (ADR-0078). Earlier or unknown releases never receive them.
 fn answers_side_questions(version: &str) -> bool {
-    let release = version
+    // A pre-release or build of a later release qualifies like the release itself.
+    let core = version.split(['-', '+']).next().unwrap_or_default();
+    let release = core
         .split('.')
         .map(|part| part.parse::<u64>().ok())
         .collect::<Option<Vec<_>>>();
@@ -1812,4 +1814,25 @@ fn resolved(path: &Path) -> Option<PathBuf> {
         let parent = std::fs::canonicalize(path.parent()?).ok()?;
         Some(parent.join(path.file_name().unwrap_or_default()))
     })
+}
+
+#[cfg(test)]
+mod side_question_release_tests {
+    use super::answers_side_questions;
+
+    #[test]
+    fn only_releases_from_the_qualified_one_answer_side_questions() {
+        for release in [
+            "2.1.308",
+            "2.1.310",
+            "2.2.0",
+            "2.1.310-beta.1",
+            "3.0.0+build",
+        ] {
+            assert!(answers_side_questions(release), "{release}");
+        }
+        for release in ["2.1.280", "2.1.307", "2.1.307-rc", "2.1", "", "next"] {
+            assert!(!answers_side_questions(release), "{release}");
+        }
+    }
 }

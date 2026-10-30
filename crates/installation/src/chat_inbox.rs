@@ -6,7 +6,8 @@ pub(crate) const ADAPTER_LIMIT: usize = 2_000_000;
 // Transport reads allow headroom above the adapters’ 2 MB validation limit.
 pub(crate) const TRANSPORT_LIMIT: usize = 16_000_000;
 
-async fn messages(directory: &Path, limit: usize) -> Result<Option<Vec<u8>>> {
+/// The inbox's messages alone, without the controller's notice lane.
+pub(crate) async fn messages(directory: &Path, limit: usize) -> Result<Option<Vec<u8>>> {
     let Ok(file) = tokio::fs::File::open(directory.join("messages.json")).await else {
         return Ok(None);
     };

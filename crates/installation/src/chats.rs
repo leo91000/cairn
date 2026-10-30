@@ -1641,6 +1641,9 @@ impl Service {
         let paused = chat.paused;
         let delivering = run["chatExecution"]["messageId"].clone();
         let run_id = text(run, "id").to_owned();
+        // Only a reply that announced side questions reads them; a later tick sees an
+        // announcement made since this one read the run.
+        let announced = run["sideQuestions"] == true;
         let (mut steering, side_turn) = self
             .store
             .transaction(move |db| {
@@ -1649,7 +1652,7 @@ impl Service {
                 // hold them, and the adapter answers them beside the turn. The run is read
                 // again here: a launch since the tick read it withdrew its announcement.
                 let mut side_turn = String::new();
-                if let Some(run) = db.run(&run_id)? {
+                if announced && let Some(run) = db.run(&run_id)? {
                     steering.extend(side_questions::deliveries(db, &chat_id, &run)?);
                     side_turn = text(&run["chatExecution"], "messageId").to_owned();
                 }

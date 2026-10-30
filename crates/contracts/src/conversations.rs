@@ -411,12 +411,8 @@ pub struct Chat {
     /// The case `side_question_reason` explains, for clients that word it themselves.
     #[serde(default)]
     #[ts(optional = nullable)]
-    #[schemars(
-        with = "Option<String>",
-        pattern(
-            "^(between-replies|codex|opencode|unknown-agent|stopping|compacting|claude-release|not-offered)$"
-        )
-    )]
+    // An open string, so older clients keep decoding when a code is added.
+    #[schemars(with = "Option<String>")]
     pub side_question_unavailable: Option<SideQuestionUnavailable>,
     #[serde(default)]
     pub agent_name: String,

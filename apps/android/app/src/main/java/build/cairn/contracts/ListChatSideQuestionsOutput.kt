@@ -15,13 +15,5 @@ data class ListChatSideQuestionsOutput(
 ) {
     init {
         nextOffset?.let { require(it >= 0L) }
-        sideQuestionUnavailable?.let {
-            require(
-                Regex(
-                        "^(between-replies|codex|opencode|unknown-agent|stopping|compacting|claude-release|not-offered)\$"
-                    )
-                    .containsMatchIn(it)
-            )
-        }
     }
 }

@@ -126,11 +126,7 @@ pub struct ListChatSideQuestionsOutput {
     /// Why a side question cannot be asked now, when it cannot.
     pub side_question_reason: Option<String>,
     /// The case `side_question_reason` explains.
-    #[schemars(
-        with = "Option<String>",
-        pattern(
-            "^(between-replies|codex|opencode|unknown-agent|stopping|compacting|claude-release|not-offered)$"
-        )
-    )]
+    // An open string, so older clients keep decoding when a code is added.
+    #[schemars(with = "Option<String>")]
     pub side_question_unavailable: Option<SideQuestionUnavailable>,
 }
