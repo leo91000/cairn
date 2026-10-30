@@ -124,13 +124,29 @@ mod tests {
     use crate::storage::Disk;
     use serde_json::json;
 
-    #[tokio::test]
-    async fn retained_resume_can_write_while_manifest_reconstruction_waits_for_a_block() {
-        check_writes_during_reconstruction(true).await;
+    #[test]
+    fn retained_resume_can_write_while_manifest_reconstruction_waits_for_a_block() {
+        crate::test_process::run_ignored(
+            "nodes::checkpoint::tests::retained_resume_can_write_while_manifest_reconstruction_waits_for_a_block_child",
+        );
     }
 
     #[tokio::test]
-    async fn periodic_capture_keeps_guest_running_and_fences_the_captured_prefix() {
+    #[ignore = "executed by the isolated checkpoint wrapper"]
+    async fn retained_resume_can_write_while_manifest_reconstruction_waits_for_a_block_child() {
+        check_writes_during_reconstruction(true).await;
+    }
+
+    #[test]
+    fn periodic_capture_keeps_guest_running_and_fences_the_captured_prefix() {
+        crate::test_process::run_ignored(
+            "nodes::checkpoint::tests::periodic_capture_keeps_guest_running_and_fences_the_captured_prefix_child",
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "executed by the isolated checkpoint wrapper"]
+    async fn periodic_capture_keeps_guest_running_and_fences_the_captured_prefix_child() {
         check_writes_during_reconstruction(false).await;
     }
 

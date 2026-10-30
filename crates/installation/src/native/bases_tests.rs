@@ -304,8 +304,16 @@ async fn changed_cache_payload_is_rejected_before_a_conversation_can_claim_it() 
     );
 }
 
+#[test]
+fn background_preparation_yields_to_foreground_intent_and_then_finishes() {
+    crate::test_process::run_ignored(
+        "native::bases_tests::background_preparation_yields_to_foreground_intent_and_then_finishes_child",
+    );
+}
+
 #[tokio::test]
-async fn background_preparation_yields_to_foreground_intent_and_then_finishes() {
+#[ignore = "executed by the isolated background preparation wrapper"]
+async fn background_preparation_yields_to_foreground_intent_and_then_finishes_child() {
     use std::{sync::Arc, time::Duration};
     let (_root, bases, archive, policy) = fixture().await;
     super::atomic_write(
