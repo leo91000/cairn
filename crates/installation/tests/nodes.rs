@@ -4266,7 +4266,6 @@ async fn connect_running_source(
     faults: &MoveFaults,
     stop: &CancellationToken,
     gate: Arc<ReleaseRaceGate>,
-    seed: bool,
 ) -> [tokio::task::JoinHandle<()>; 2] {
     use axum::routing::{any, get, post};
     let run = text(record, "id");
@@ -4275,7 +4274,7 @@ async fn connect_running_source(
     std::fs::create_dir_all(&image).unwrap();
     std::fs::write(image.join("root.ext4"), b"fixture runtime").unwrap();
     std::fs::write(image.join("vmlinux"), b"fixture kernel").unwrap();
-    if seed {
+    if node == text(record, "nodeId") {
         seed_source_disk(owner, &state, record, node, &format!("http://{master}/")).await;
     }
     let token = auth::token();
@@ -4588,7 +4587,6 @@ async fn idle_move_requested_before_old_worker_release_transfers_without_replay(
         &faults,
         &stop,
         gate.clone(),
-        true,
     )
     .await
     .into_iter()
@@ -4741,6 +4739,7 @@ async fn idle_move_requested_before_old_worker_release_transfers_without_replay(
 #[tokio::test]
 #[ignore = "requires loopback S3; run scripts/tests/node_s3_test.py"]
 async fn paid_active_move_recovers_after_transfer_at_controller_ceiling() {
+    use tokio::io::AsyncBufReadExt;
     for mode in ["failure", "cancel", "success"] {
         let (listener, address) = common::bind().await;
         let owner = Owner::at(address.to_string()).await;
@@ -4803,7 +4802,6 @@ async fn paid_active_move_recovers_after_transfer_at_controller_ceiling() {
                 &faults,
                 &stop,
                 gate.clone(),
-                false,
             )
             .await,
         );
@@ -4861,7 +4859,6 @@ async fn paid_active_move_recovers_after_transfer_at_controller_ceiling() {
         assert_eq!(transferred["nodeId"], destination, "{transferred}");
         assert!(transferred["moveRequest"].is_null());
         assert_eq!(transferred["recoveryPending"], true);
-        use tokio::io::{AsyncBufReadExt, BufReader};
         let mut config = owner.service.config.clone();
         config.worker_enabled = true;
         config.port = 0;
