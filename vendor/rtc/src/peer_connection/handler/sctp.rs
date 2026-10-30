@@ -2150,6 +2150,39 @@ mod tests {
             channel.ready_state(),
             crate::data_channel::RTCDataChannelState::Closing
         );
+
+        // A new negotiated channel has not created its SCTP stream yet. The
+        // retained association's shutdown still forbids accepting its writes.
+        let fresh = peer
+            .create_data_channel(
+                "after shutdown",
+                Some(crate::data_channel::RTCDataChannelInit {
+                    negotiated: Some(3),
+                    ..Default::default()
+                }),
+            )
+            .expect("new negotiated channel")
+            .id();
+        assert!(
+            !peer
+                .sctp_transport()
+                .sctp_associations
+                .get(&established.client_ch)
+                .unwrap()
+                .stream_ids()
+                .contains(&3)
+        );
+        let mut channel = peer.data_channel(fresh).unwrap();
+        let outstanding = channel.outstanding_bytes();
+        assert!(matches!(
+            channel.send(now, BytesMut::from(&b"new stream after shutdown"[..])),
+            Err(Error::ErrDataChannelClosed)
+        ));
+        assert!(matches!(
+            channel.send_text(now, "new stream after shutdown"),
+            Err(Error::ErrDataChannelClosed)
+        ));
+        assert_eq!(channel.outstanding_bytes(), outstanding);
     }
 
     #[test]

@@ -764,8 +764,9 @@ impl Association {
         }
     }
 
-    /// Whether an existing stream accepts new outgoing data. `None` means the
-    /// stream has not been opened, or has already been removed.
+    /// Whether a stream accepts new outgoing data. A stopping association
+    /// returns `Some(false)` even before stream creation. Otherwise, `None`
+    /// means the stream has not been opened, or has already been removed.
     pub fn stream_is_writable(&self, stream_identifier: StreamId) -> Option<bool> {
         let shutting_down = matches!(
             self.state(),
@@ -774,12 +775,14 @@ impl Association {
                 | AssociationState::ShutdownPending
                 | AssociationState::ShutdownReceived
         );
+        if shutting_down || (self.is_closed() && self.handshake_completed) {
+            return Some(false);
+        }
         self.streams.get(&stream_identifier).map(|stream| {
-            !shutting_down
-                && matches!(
-                    stream.state,
-                    RecvSendState::Writable | RecvSendState::ReadWritable
-                )
+            matches!(
+                stream.state,
+                RecvSendState::Writable | RecvSendState::ReadWritable
+            )
         })
     }
 

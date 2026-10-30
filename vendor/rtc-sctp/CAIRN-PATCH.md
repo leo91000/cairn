@@ -48,6 +48,7 @@ reset cannot conceal another reset that receives no response.
 The non-mutating stream-writability query shares the write path's stream and
 association-shutdown eligibility. RTC rejects new application writes while
 retaining the closing stream for reset completion and final received data.
+Shutdown refusal also applies to a negotiated channel whose stream is not yet created.
 Already established closed associations reject new streams and late packets.
 Cancelling a stream's read half releases unread receive data and acknowledges
 later old-generation DATA without retaining it, so an abandoned local HTTP
