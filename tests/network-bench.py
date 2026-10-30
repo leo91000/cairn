@@ -409,28 +409,49 @@ def android_crash_summary(logcat, exit_info):
             lines.extend(group)
     result = {"targetProcessObserved": bool(lines), "exceptions": [], "signals": [],
               "javaFrames": [], "nativeFrames": [], "exitReasons": []}
+    exception_types = {
+        "java.lang.OutOfMemoryError", "java.lang.IllegalStateException", "java.lang.IllegalArgumentException",
+        "java.lang.NullPointerException", "java.lang.AssertionError", "java.lang.RuntimeException",
+        "java.lang.ExceptionInInitializerError", "java.lang.NoClassDefFoundError", "java.lang.Throwable",
+        "java.io.IOException", "java.net.SocketTimeoutException", "java.util.concurrent.CancellationException",
+        "kotlinx.coroutines.TimeoutCancellationException", "kotlinx.coroutines.JobCancellationException",
+        "build.cairn.app.data.DirectLost", "build.cairn.app.data.DirectNotSent",
+        "build.cairn.app.data.DirectRequestTimeout", "build.cairn.app.data.DirectStreamLost",
+    }
+    java_sources = {"NativeDirect.kt", "DirectTransport.kt", "CairnApi.kt", "CairnViewModel.kt",
+                    "DirectIceGrace.kt", "DirectRetry.kt", "DirectTransportDeviceTest.kt",
+                    "PeerConnection.java", "PeerConnectionFactory.java", "DataChannel.java", "Thread.java"}
+    native_modules = {"libc.so", "libart.so", "libandroid_runtime.so", "libjingle_peerconnection_so.so",
+                      "base.apk", "libc++_shared.so", "liblog.so", "libbase.so"}
+    signals = {"SIGABRT", "SIGSEGV", "SIGBUS", "SIGILL", "SIGFPE", "SIGTRAP", "SIGKILL", "SIGTERM"}
 
     def retain(key, value, limit=32):
         if value not in result[key] and len(result[key]) < limit:
             result[key].append(value)
 
+    root_type = False
     for line in lines:
-        exception = re.match(r"(?:Caused by: )?((?:[A-Za-z_$][\w$]*\.)+[A-Za-z_$][\w$]*)(?::|$)", line.strip())
-        if exception:
-            retain("exceptions", exception[1])
+        value = line.strip()
+        if re.match(r"Process: build\.cairn\.app(?:,|$)", value):
+            root_type = True
+            continue
+        if not value:
+            continue
+        cause = re.match(r"(?:Caused by:|Suppressed:) (.*)", value)
+        if root_type or cause:
+            exception = re.match(r"((?:[A-Za-z_$][\w$]*\.)+[A-Za-z_$][\w$]*)(?::|$)", cause[1] if cause else value)
+            if exception:
+                retain("exceptions", exception[1] if exception[1] in exception_types else "other")
+            root_type = False
         signal_name = re.search(r"\bsignal \d+ \((SIG[A-Z0-9]+)\)", line)
         if signal_name:
-            retain("signals", signal_name[1])
-        frame = re.fullmatch(r"\s*at ([\w.$]+\.(?:[\w$]+|<init>|<clinit>)\((?:[\w.$]+\.(?:java|kt):\d+|Native Method|Unknown Source)\))", line)
+            retain("signals", signal_name[1] if signal_name[1] in signals else "other")
+        frame = re.fullmatch(r"\s*at [\w.$<>]+\(([\w.$]+\.(?:java|kt)):(\d{1,10})\)", line)
         if frame:
-            retain("javaFrames", frame[1])
-        native = re.match(r"\s*#\d+\s+pc\s+([0-9a-f]+)\s+(?:\S*/)?([\w.!-]+)(?=\s|$)(.*)", line)
+            retain("javaFrames", {"source": frame[1] if frame[1] in java_sources else "other", "line": int(frame[2])})
+        native = re.match(r"\s*#\d+\s+pc\s+([0-9a-f]{1,16})\s+(?:\S*/)?([\w.!-]+)(?=\s|$)", line)
         if native:
-            suffix = re.sub(r"^\s+\(offset 0x[0-9a-f]+\)", "", native[3])
-            suffix = re.sub(r" \(BuildId: [0-9a-f]+\)$", "", suffix)
-            symbol = re.fullmatch(r"\s+\(([\w:$<>+., *&()=-]{1,200})\)", suffix)
-            function = symbol[1] if symbol else None
-            retain("nativeFrames", {"pc": native[1], "library": native[2], "symbol": function})
+            retain("nativeFrames", {"pc": int(native[1], 16), "library": native[2] if native[2] in native_modules else "other"})
     # ApplicationExitInfo labels and line layout vary by Android version. Its
     # numeric reason/status fields are stable; never retain free-form labels.
     reasons = ["UNKNOWN", "EXIT_SELF", "SIGNALED", "LOW_MEMORY", "CRASH", "CRASH_NATIVE",
@@ -439,8 +460,8 @@ def android_crash_summary(logcat, exit_info):
                "PACKAGE_STATE_CHANGE", "PACKAGE_UPDATED"]
     # This scoped OS history can include earlier exits, not just this test.
     for record in re.split(r"\bApplicationExitInfo\b", exit_info[:16384]):
-        reason = re.search(r"(?:^|\s)reason=(\d+)\b", record)
-        status = re.search(r"(?:^|\s)status=(-?\d+)\b", record)
+        reason = re.search(r"(?:^|\s)reason=(\d{1,3})\b", record)
+        status = re.search(r"(?:^|\s)status=(-?\d{1,10})\b", record)
         if reason and status:
             code = int(reason[1])
             category = reasons[code] if code < len(reasons) else "UNRECOGNIZED"
@@ -486,6 +507,20 @@ def android_instrumentation(adb, scenario, output):
     if not passed:
         android_failure_evidence(adb, output)
         raise RuntimeError("Native Android transport scenario failed; see instrumentation result")
+
+
+def android_cleanup(adb, failed):
+    first_error = None
+    for command in [("shell", "am", "force-stop", "build.cairn.app"),
+                    ("shell", "run-as", "build.cairn.app", "rm", "-f", "files/direct-fixture.json"),
+                    ("reverse", "--remove", "tcp:4398")]:
+        try:
+            adb(*command, timeout=5)
+        except (OSError, subprocess.SubprocessError) as error:
+            if first_error is None:
+                first_error = error
+    if first_error is not None and not failed:
+        raise first_error
 
 
 def android(network, directory, args, report):
@@ -537,6 +572,7 @@ def android(network, directory, args, report):
                  "apps/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"]:
         adb("install", "-r", "-t", path)
     adb("shell", "run-as", "build.cairn.app", "mkdir", "-p", "files")
+    completed = False
     try:
         adb("shell", "run-as", "build.cairn.app", "sh", "-c", "'cat > files/direct-fixture.json'", input=private.read_bytes())
         android_instrumentation(adb, args.scenario, args.output)
@@ -546,10 +582,9 @@ def android(network, directory, args, report):
             raise RuntimeError("Android's observed application response used the wrong route")
         report["android"] = evidence
         args.output.write_text(json.dumps(report) + "\n")
+        completed = True
     finally:
-        adb("shell", "am", "force-stop", "build.cairn.app")
-        adb("shell", "run-as", "build.cairn.app", "rm", "-f", "files/direct-fixture.json")
-        adb("reverse", "--remove", "tcp:4398")
+        android_cleanup(adb, failed=not completed)
 
 
 def browser(network, binary, directory, args, report):

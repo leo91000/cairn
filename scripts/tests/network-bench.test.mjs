@@ -11,17 +11,22 @@ spec.loader.exec_module(bench)
 raw = '''E/AndroidRuntime(123): FATAL EXCEPTION: main
 E/AndroidRuntime(123): Process: build.cairn.app, PID: 123
 E/AndroidRuntime(123): java.lang.IllegalStateException: private-fixture-cookie body=secret
+E/AndroidRuntime(123): private.payload.Value
 E/AndroidRuntime(123):     at org.webrtc.PeerConnection.dispose(PeerConnection.java:546)
 E/AndroidRuntime(123): Caused by: java.lang.ExceptionInInitializerError: private-fixture-cookie
 E/AndroidRuntime(123):     at org.webrtc.PeerConnection.<clinit>(PeerConnection.java:44)
 E/AndroidRuntime(123):     at org.webrtc.PeerConnection.<init>(PeerConnection.java:45)
 E/AndroidRuntime(123): Caused by: java.lang.Throwable: private-fixture-cookie
 E/AndroidRuntime(123): Caused by: build.cairn.app.data.DirectRequestTimeout: private-fixture-cookie
+E/AndroidRuntime(123): Caused by: private.payload.Secret: private-fixture-cookie
+E/AndroidRuntime(123):     at private.payload.Value.method(PrivateFile.java:42)
 F/DEBUG(321): Cmdline: build.cairn.app
 F/DEBUG(321): signal 6 (SIGABRT), code -1 (SI_QUEUE)
 F/DEBUG(321): Abort message: 'private-fixture-cookie SDP=secret'
 F/DEBUG(321): #00 pc 0000000000052450  /apex/com.android.runtime/lib64/bionic/libc.so (abort+152)
 F/DEBUG(321): #01 pc 0000000000052451  /data/app/private-path/base.apk (offset 0x12000) (webrtc::Dispose()+42) (BuildId: abcd)
+F/DEBUG(321): #02 pc 0000000000052452  /data/private/private-module.so (private-symbol+42)
+F/DEBUG(321): signal 9 (SIGPRIVATE), code 0
 '''
 exit_info = '''ApplicationExitInfo #0:
  process=build.cairn.app reason=5 (APP CRASH(NATIVE)) subreason=0 (UNKNOWN) status=6
@@ -33,13 +38,13 @@ ApplicationExitInfo #1:
  status=0
 '''
 evidence = bench.android_crash_summary(raw, exit_info)
-assert evidence['exceptions'] == ['java.lang.IllegalStateException', 'java.lang.ExceptionInInitializerError', 'java.lang.Throwable', 'build.cairn.app.data.DirectRequestTimeout'], evidence
-assert evidence['javaFrames'] == ['org.webrtc.PeerConnection.dispose(PeerConnection.java:546)', 'org.webrtc.PeerConnection.<clinit>(PeerConnection.java:44)', 'org.webrtc.PeerConnection.<init>(PeerConnection.java:45)'], evidence
-assert evidence['signals'] == ['SIGABRT'], evidence
-assert evidence['nativeFrames'] == [{'pc': '0000000000052450', 'library': 'libc.so', 'symbol': 'abort+152'}, {'pc': '0000000000052451', 'library': 'base.apk', 'symbol': 'webrtc::Dispose()+42'}], evidence
+assert evidence['exceptions'] == ['java.lang.IllegalStateException', 'java.lang.ExceptionInInitializerError', 'java.lang.Throwable', 'build.cairn.app.data.DirectRequestTimeout', 'other'], evidence
+assert evidence['javaFrames'] == [{'source': 'PeerConnection.java', 'line': 546}, {'source': 'PeerConnection.java', 'line': 44}, {'source': 'PeerConnection.java', 'line': 45}, {'source': 'other', 'line': 42}], evidence
+assert evidence['signals'] == ['SIGABRT', 'other'], evidence
+assert evidence['nativeFrames'] == [{'pc': 0x52450, 'library': 'libc.so'}, {'pc': 0x52451, 'library': 'base.apk'}, {'pc': 0x52452, 'library': 'other'}], evidence
 assert evidence['exitReasons'] == [{'reason': 5, 'category': 'CRASH_NATIVE', 'status': 6}, {'reason': 4, 'category': 'CRASH', 'status': 0}], evidence
 encoded = json.dumps(evidence)
-assert 'private-fixture' not in encoded and 'secret' not in encoded and '/apex/' not in encoded, encoded
+assert 'private' not in encoded and 'secret' not in encoded and '/apex/' not in encoded and 'Dispose' not in encoded, encoded
 bounded = bench.android_crash_summary(raw * 1000, exit_info * 1000)
 assert len(bounded['javaFrames']) <= 32 and len(bounded['nativeFrames']) <= 32
 assert len(bounded['exitReasons']) <= 8
@@ -152,6 +157,39 @@ with tempfile.TemporaryDirectory() as directory, patch.object(Path, 'write_text'
         else:
             raise AssertionError('Missing success evidence must still fail qualification')
         collect.assert_called_once()
+`], { stdio: 'pipe' })
+})
+
+it('android cleanup remains bounded, attempts every resource and preserves the primary failure', () => {
+  execFileSync('python3', ['-B', '-c', `
+import importlib.util
+import subprocess
+spec = importlib.util.spec_from_file_location("network_bench", "tests/network-bench.py")
+bench = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(bench)
+calls = []
+cleanup_error = subprocess.TimeoutExpired('adb cleanup', 5)
+def adb(*args, **options):
+    calls.append(args)
+    assert options.get('timeout') == 5, options
+    raise cleanup_error
+primary = AssertionError('original instrumentation failure')
+try:
+    try:
+        raise primary
+    finally:
+        bench.android_cleanup(adb, failed=True)
+except AssertionError as error:
+    assert error is primary
+assert len(calls) == 3, calls
+calls.clear()
+try:
+    bench.android_cleanup(adb, failed=False)
+except subprocess.TimeoutExpired as error:
+    assert error is cleanup_error
+else:
+    raise AssertionError('Cleanup failure must fail an otherwise successful qualification')
+assert len(calls) == 3, calls
 `], { stdio: 'pipe' })
 })
 
