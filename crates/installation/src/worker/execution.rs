@@ -116,6 +116,7 @@ pub(super) async fn reconcile(
         s,
         &checkpoint.id,
         attempt,
+        saved.node_id.as_ref().and_then(|node| node.as_deref()),
         cancel,
         Duration::from_millis(remaining_ms as u64),
         |action| async move {

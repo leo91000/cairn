@@ -501,6 +501,7 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
             s,
             run_id,
             &attempt,
+            saved.node_id.as_ref().and_then(|node| node.as_deref()),
             &CancellationToken::new(),
             Duration::from_secs(5),
             |action| {

@@ -91,6 +91,7 @@ pub(crate) async fn terminal_code<F, Fut>(
     s: &Service,
     run_id: &str,
     attempt: &str,
+    node: Option<&str>,
     cancel: &tokio_util::sync::CancellationToken,
     limit: Duration,
     mut persist: F,
@@ -99,7 +100,7 @@ where
     F: FnMut(ObservationAction) -> Fut,
     Fut: std::future::Future<Output = Result<bool>>,
 {
-    let runner_url = crate::nodes::transport::url(s, run_id).await?;
+    let runner_url = crate::nodes::transport::url_for_node(s, node);
     if runner_url.is_empty() {
         persist(ObservationAction::Exhausted).await?;
         return Ok(());
