@@ -3,6 +3,7 @@ import type { Provider } from '../../../../packages/contracts/accounts'
 import type { Deliverable } from '../../../../packages/contracts/artifacts'
 import type { ChatWakeup } from '../../../../packages/contracts/chats'
 import type { RunEvent, TaskOutcome } from '../../../../packages/contracts/contracts'
+import type { TimelineEntry } from '../../../../packages/contracts/live'
 import type { ActivityEntry } from '../activity'
 import type { SendingMessage } from '../chat-delivery'
 import type { ChatQuota } from '../chat-quota'
@@ -22,7 +23,6 @@ import {
 import { latestArtifacts } from '../../../../packages/contracts/artifacts'
 import { activityEntries, ActivityGroups } from '../activity'
 import { currentPlan } from '../agent-plan'
-import { quotaEntries } from '../chat-quota'
 import { deliveryEntries } from '../deliverables'
 import { ArrowDown, Maximize2, Minimize2 } from '../icons'
 import { MessageTimes } from '../message-times'
@@ -51,6 +51,8 @@ import WorkingIndicator from './WorkingIndicator.vue'
 
 const props = defineProps<{
   events: RunEvent[]
+  /** Timeline cards the server interpreted: messages, the run cycle, errors and retries. */
+  timeline: TimelineEntry[]
   active: boolean
   suspended?: boolean
   agent: string
@@ -100,10 +102,9 @@ const pendingWakeup = computed<ChatWakeup | null>((previous) => {
   return previous && next?.id === previous.id && JSON.stringify(next.observation) === JSON.stringify(previous.observation) ? previous : next
 })
 const entries = computed(() => {
-  const projected = activityEntries(props.events, props.chat, activityGroups.value, pendingWakeup.value)
-  const entries = props.chat ? quotaEntries(projected, props.events) : projected
+  const entries = activityEntries(props.events, props.chat, activityGroups.value, pendingWakeup.value, props.timeline)
 
-  const acknowledged = new Set(props.events.filter(event => event.type === 'chat.user').map(event => event.payload?.messageId))
+  const acknowledged = new Set(entries.flatMap(entry => entry.kind === 'message' && entry.messageId ? [entry.messageId] : []))
   for (const { message, label } of props.sending ?? []) {
     if (!acknowledged.has(message.id)) {
       entries.push({
@@ -127,7 +128,7 @@ const plan = computed(() => currentPlan(activity.value))
 // Only the latest plan is still being followed.
 const livePlan = computed(() => props.active && !props.suspended ? activity.value.findLast(entry => entry.kind === 'plan')?.id : undefined)
 const working = computed(() => {
-  const wait = backgroundWait(props.events)
+  const wait = backgroundWait(props.events, props.timeline)
   if (wait)
     return { ...waitingStep(wait), subagents: waitingForSubagents(props.events, subagents.value) }
   return workingStep(activity.value, props.agent, props.events[0]?.createdAt ?? null)

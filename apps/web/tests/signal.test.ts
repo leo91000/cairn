@@ -1,7 +1,6 @@
 import type { ChatView } from '../../../packages/contracts/chats'
 import type { RunEvent, RunListItem, Task } from '../../../packages/contracts/contracts'
 import { describe, expect, it } from 'vitest'
-import { activityEntries } from '../src/activity'
 import { exclusiveSuspensionLabel } from '../src/run-status'
 import {
   backgroundWait,
@@ -14,6 +13,7 @@ import {
   waitingStep,
   workingStep,
 } from '../src/signal'
+import { fixtureEntries } from './timeline-fixture'
 
 function chat(id: string, values: Partial<ChatView> = {}): ChatView {
   return {
@@ -420,14 +420,14 @@ describe('the Fil', () => {
 
 describe('the working indicator', () => {
   it('names the step in progress with its command, timed from the latest message', () => {
-    const entries = activityEntries([user(1, 5000), command(2, 5100, 'cat README.md'), command(3, 5200, 'pnpm test', true)], true)
+    const entries = fixtureEntries([user(1, 5000), command(2, 5100, 'cat README.md'), command(3, 5200, 'pnpm test', true)], true)
     expect(workingStep(entries, 'Cairn', 10)).toEqual({ title: expect.any(String), detail: 'pnpm test', since: 5000 })
   })
 
   it('says the agent is working with its last step, ignoring earlier turns', () => {
-    const entries = activityEntries([command(1, 1000, 'pnpm build', true), user(2, 7000)], true)
+    const entries = fixtureEntries([command(1, 1000, 'pnpm build', true), user(2, 7000)], true)
     expect(workingStep(entries, '', 3000)).toEqual({ title: 'The agent is working', detail: '', since: 7000 })
-    const done = activityEntries([user(1, 1), command(2, 2, 'pnpm lint')], true)
+    const done = fixtureEntries([user(1, 1), command(2, 2, 'pnpm lint')], true)
     expect(workingStep(done, 'Cairn', null).detail).toMatch(/^Last step: /)
     expect(workingStep([], 'Cairn', 3000)).toEqual({ title: 'Cairn is working', detail: '', since: 3000 })
   })
@@ -463,7 +463,7 @@ describe('the working indicator', () => {
   })
 
   it('labels background waits in the activity log', () => {
-    const [group] = activityEntries([waiting(1, 1, ['Build', 'Watch CI']), waiting(2, 2, [])])
+    const [group] = fixtureEntries([waiting(1, 1, ['Build', 'Watch CI']), waiting(2, 2, [])])
     expect(group?.kind === 'group' && group.artifacts.map(artifact => [artifact.title, artifact.subtitle])).toEqual([
       ['Waiting for background tasks', 'Build · Watch CI'],
       ['Background tasks finished', ''],

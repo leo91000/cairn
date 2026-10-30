@@ -412,9 +412,9 @@ abstract class ChatSwipeCases {
                             return MockResponse()
                                 .setBody(
                                     wireJson.encodeToString(
-                                        HistoryPage(
+                                        timelinePage(
                                             events = emptyList(),
-                                            history = "v1:swipe:1",
+                                            history = "v2:swipe:1",
                                             oldest = 1,
                                             hasOlder = false,
                                         )
@@ -456,12 +456,12 @@ abstract class ChatSwipeCases {
                                 if (chat == null) LiveState(chats = chats)
                                 else LiveState(chat = chat)
                             val batch =
-                                LiveBatch(
+                                timelineBatch(
                                     events,
                                     state,
                                     false,
                                     false,
-                                    history = if (paginated) "v1:swipe:1" else null,
+                                    history = if (paginated) "v2:swipe:1" else null,
                                     oldest = if (paginated) events.firstOrNull()?.id else null,
                                     hasOlder = paginated && chat != null,
                                 )

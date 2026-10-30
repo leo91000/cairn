@@ -268,7 +268,7 @@ async fn run_history_includes_the_engine_retries_limits_and_notices() {
         .as_i64()
         .unwrap();
     let revision = result(&response)["history"].as_str().unwrap().to_owned();
-    assert_eq!(revision, format!("v1:{run_id}:{first}"));
+    assert_eq!(revision, format!("v2:{run_id}:{first}"));
     let window = mcp
         .call(
             "read_run_history",
@@ -351,7 +351,7 @@ async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
         .await
         .unwrap();
     let revision = page["history"].as_str().unwrap().to_owned();
-    assert_eq!(revision, format!("v1:{run_id}:{}", expected[0]));
+    assert_eq!(revision, format!("v2:{run_id}:{}", expected[0]));
     let mut before = 9_007_199_254_740_991_i64;
     let mut backwards = Vec::new();
     let mut saw_preview = false;
@@ -384,6 +384,24 @@ async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
     assert!(saw_preview);
     backwards.sort_unstable();
     assert_eq!(backwards, expected);
+    // The same answer is one timeline card; its preview names the source event
+    // whose complete content read_run_content returns below.
+    let timeline = mcp
+        .bounded("read_run_timeline", json!({ "runId": run_id }))
+        .await;
+    assert_ne!(timeline["result"]["isError"], true);
+    let cards = result(&timeline)["entries"].as_array().unwrap().clone();
+    let reply = cards
+        .iter()
+        .find(|card| card["kind"] == "truncated")
+        .unwrap();
+    assert_eq!(reply["preview"]["kind"], "agentMessage");
+    assert_eq!(reply["preview"]["source"], event_id);
+    assert!(
+        cards
+            .iter()
+            .any(|card| card["entry"]["content"]["notice"]["code"] == "turnCompleted")
+    );
     let (original, digest) = read_whole_event(&mcp, run_id, event_id).await;
     assert_eq!(
         serde_json::from_str::<Value>(&original).unwrap()["payload"],

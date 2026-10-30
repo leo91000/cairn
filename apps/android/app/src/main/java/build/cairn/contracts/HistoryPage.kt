@@ -6,6 +6,7 @@ import kotlinx.serialization.Serializable
 @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
 data class HistoryPage(
+    val entries: List<TimelineEntry> = listOf(),
     val events: List<RunEvent>,
     val hasOlder: Boolean,
     val history: String,

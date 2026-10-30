@@ -875,6 +875,67 @@ pub(crate) fn bounded_history_window(
     })
 }
 
+/// The newest cards before a position, as complete cards or explicit previews that
+/// keep the card's identity, cursor and source event for read_run_content.
+pub(crate) fn run_timeline(
+    db: &Db<'_>,
+    run: &str,
+    before: i64,
+) -> Result<cairn_contracts::RunTimelineOutput> {
+    use cairn_contracts::{TimelineContent, TimelineEntryPage, TimelinePreview};
+    const PREVIEW_BYTES: usize = 1024;
+    let (cards, mut has_older) = crate::timeline::page(db, run, before, 100)?;
+    let mut entries = Vec::new();
+    let mut bytes = 2;
+    let mut oldest = before;
+    for entry in cards.into_iter().rev() {
+        let position = entry.position;
+        let total_bytes = encoded_size(&entry)? as u64;
+        let page = if total_bytes as usize <= RUN_PAGE_BYTES - 2 {
+            TimelineEntryPage::Complete {
+                entry: Box::new(entry),
+            }
+        } else {
+            let (kind, text) = match &entry.content {
+                TimelineContent::UserMessage { text, .. } => ("userMessage", text.as_str()),
+                TimelineContent::AgentMessage { text, .. } => ("agentMessage", text.as_str()),
+                TimelineContent::Notice { notice } => {
+                    ("notice", notice.detail.as_deref().unwrap_or_default())
+                }
+            };
+            let mut end = text.len().min(PREVIEW_BYTES);
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            TimelineEntryPage::Truncated {
+                total_bytes,
+                preview: TimelinePreview {
+                    id: entry.id.clone(),
+                    position,
+                    revision: entry.revision,
+                    source: entry.source,
+                    kind: kind.to_owned(),
+                    text: text[..end].to_owned(),
+                },
+            }
+        };
+        let size = encoded_size(&page)? + usize::from(!entries.is_empty());
+        if !entries.is_empty() && bytes + size > RUN_PAGE_BYTES {
+            has_older = true;
+            break;
+        }
+        bytes += size;
+        oldest = position;
+        entries.push(page);
+    }
+    entries.reverse();
+    Ok(cairn_contracts::RunTimelineOutput {
+        entries,
+        oldest,
+        has_older,
+    })
+}
+
 pub(crate) fn run_history(db: &Db<'_>, id: &str, after: i64) -> Result<Value> {
     let run = required(db.run_view(id)?, "Run not found")?;
     let total_bytes = encoded_size(&run)? as u64;
@@ -914,7 +975,7 @@ pub(crate) fn run_history(db: &Db<'_>, id: &str, after: i64) -> Result<Value> {
     let history = cairn_contracts::RunHistoryOutput {
         run,
         events,
-        history: format!("v1:{id}:{first}"),
+        history: format!("v2:{id}:{first}"),
         next_after: next,
         has_more: newest > next,
     };

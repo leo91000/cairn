@@ -1172,6 +1172,7 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "list_runs",
         "get_run",
         "read_run_history",
+        "read_run_timeline",
         "read_run_content",
     ]);
     public_names.extend([
@@ -1389,6 +1390,25 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
             .any(|record| record["event"]["type"] == "engine.retry"
                 && record["event"]["payload"] == engine)
     );
+    // The timeline gives agents the same interpreted card the apps present.
+    let timeline = call(
+        &s,
+        &configuration,
+        "read_run_timeline",
+        json!({ "runId": run["id"] }),
+    )
+    .await;
+    let cards = result(&timeline)["entries"].as_array().unwrap().clone();
+    let card = cards
+        .iter()
+        .find(|page| page["entry"]["content"]["notice"]["code"] == "engineRetry")
+        .unwrap();
+    assert_eq!(card["kind"], "complete");
+    assert_eq!(
+        card["entry"]["content"]["notice"]["engineRetry"],
+        json!({"attempt": 2, "maxRetries": 10, "reason": "overloaded", "httpStatus": null, "delayMs": null, "noResponse": false})
+    );
+    assert_eq!(card["entry"]["content"]["notice"]["prominent"], true);
     let chunk = call(
         &s,
         &configuration,

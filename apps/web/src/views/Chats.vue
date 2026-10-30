@@ -32,7 +32,7 @@ import { resumeRun } from '../../../../packages/contracts/generated/resume-run'
 import { sendChatMessage } from '../../../../packages/contracts/generated/sendChatMessage'
 import { setChatPaused } from '../../../../packages/contracts/generated/setChatPaused'
 import { stopChat } from '../../../../packages/contracts/generated/stopChat'
-import { failureReason, sameReason, stopEcho } from '../activity'
+import { sameReason } from '../activity'
 import {
   api,
   apiUpload,
@@ -48,7 +48,7 @@ import {
 } from '../attachments'
 import { chatDelivery, chatWaitNotice, scheduledWakeup } from '../chat-delivery'
 import { chatListCarried, chatList as chats, publishChats } from '../chat-list'
-import { chatQuota, isQuotaMessage, quotaHiddenEvents } from '../chat-quota'
+import { chatQuota, isQuotaMessage } from '../chat-quota'
 import { liveWakeup, waitStatus } from '../chat-wait'
 import ActivityFeed from '../components/ActivityFeed.vue'
 import AgentAvatar from '../components/AgentAvatar.vue'
@@ -171,7 +171,12 @@ const live = useLiveRun(() => streamPath.value, {
 // so the Fil keeps working even when the conversation cannot.
 watch(live.carriesList, value => chatListCarried.value = value, { immediate: true, flush: 'sync' })
 onBeforeUnmount(() => chatListCarried.value = false)
-const { events, connectionNotice, catchingUp } = live
+const {
+  events,
+  timeline,
+  connectionNotice,
+  catchingUp,
+} = live
 const deliverables = computed(() => live.snapshot.value?.artifacts ?? [])
 const draft = ref('')
 const model = ref('')
@@ -250,7 +255,7 @@ function switcherAnchor() {
 
 const error = ref('')
 const dismissedError = ref(false)
-const quota = computed(() => chatQuota(detail.value?.run, events.value))
+const quota = computed(() => chatQuota(detail.value?.run, timeline.value))
 const visibleError = computed(() => {
   if (error.value)
     return error.value
@@ -267,9 +272,8 @@ const errorShown = computed(() => {
   const reason = run?.status === 'failed' ? run.error : undefined
   if (error.value || detail.value?.error || !reason)
     return false
-  // Quota bookkeeping hides some failures from the conversation: they show nothing.
-  const hidden = quotaHiddenEvents(events.value)
-  return events.value.some(event => event.runId === run?.id && !hidden.has(`${event.runId}:${event.id}`) && sameReason(failureReason(event) ?? '', reason) && !stopEcho(event))
+  // The server hides usage-limit bookkeeping and the adapter's stop echoes: they show nothing.
+  return timeline.value.some(card => card.runId === run?.id && card.content.kind === 'notice' && card.content.notice.code === 'failure' && card.content.notice.prominent && sameReason(card.content.notice.detail ?? '', reason))
 })
 watch(() => [visibleError.value, detail.value?.id, detail.value?.run?.finishedAt], () => {
   dismissedError.value = false
@@ -411,7 +415,7 @@ const liveWait = computed<LiveWait | undefined>(() => detail.value
       busy: busy.value,
     }
   : undefined)
-const backgroundTasks = computed(() => detail.value?.run?.status === 'running' ? backgroundWait(events.value)?.tasks.length ?? 0 : 0)
+const backgroundTasks = computed(() => detail.value?.run?.status === 'running' ? backgroundWait(events.value, timeline.value)?.tasks.length ?? 0 : 0)
 const chatStatus = computed(() => {
   if (quota.value && !detail.value?.paused)
     return 'Waiting for quota'
@@ -439,11 +443,11 @@ const chatStatus = computed(() => {
   return 'Ready'
 })
 const outgoing = ref<ChatMessage | null>(null)
-const delivery = computed(() => chatDelivery(detail.value, events.value, outgoing.value))
+const delivery = computed(() => chatDelivery(detail.value, timeline.value, outgoing.value))
 const pending = computed(() => delivery.value.queued)
 const responding = computed(() => active.value || delivery.value.sending.length > 0)
-watch(events, (items) => {
-  if (outgoing.value && items.some(event => event.type === 'chat.user' && event.payload?.messageId === outgoing.value?.id))
+watch(timeline, (cards) => {
+  if (outgoing.value && cards.some(card => card.content.kind === 'userMessage' && card.content.messageId === outgoing.value?.id))
     outgoing.value = null
 })
 const selectedAgent = computed(() => state.agents.find(agent => agent.id === (detail.value?.agentId || agentId.value)))
@@ -1128,6 +1132,7 @@ function key(event: KeyboardEvent) {
             :outcome="detail?.run?.status === 'succeeded' ? detail.run.outcome : null"
             :sending="delivery.sending"
             :events="events"
+            :timeline="timeline"
             :quota="quota"
             :chat-id="detail?.id"
             :coding-agent-switch="detail?.codingAgentSwitch"

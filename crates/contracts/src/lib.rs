@@ -171,6 +171,10 @@ pub mod events;
 
 pub use events::*;
 
+mod timeline;
+
+pub use timeline::*;
+
 mod nodes;
 
 pub use nodes::*;

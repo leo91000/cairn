@@ -51,6 +51,11 @@ pub(crate) const RUN_OPERATIONS: &[RunOperation] = &[
         description: "Read a previous history window selected with a 256 KiB gzip budget, at most 1,000 events and a decoded-size ceiling. Tool responses retain bounded previews; read truncated events with read_run_content. Pass history from get_run and use oldest as the next before cursor while hasOlder is true. Reconnect when the history revision changes.",
     },
     RunOperation {
+        name: "read_run_timeline",
+        scope: "read",
+        description: "Read the run's timeline: messages, run cycle, errors and retries as Cairn interprets them for every coding agent, newest page first. Cards keep a stable id; a newer revision replaces an older one. Use oldest as the next before cursor while hasOlder is true. Read a truncated card's source event with read_run_content.",
+    },
+    RunOperation {
         name: "read_run_content",
         scope: "read",
         description: "Read complete run metadata or an event in UTF-8 JSON chunks. Continue with nextOffset and sha256, restarting from zero if the content changes.",
@@ -72,6 +77,7 @@ impl RunOperation {
             "list_runs" => schema_for::<ListRunsInput>(Contract::Deserialize),
             "get_run" => schema_for::<GetRunInput>(Contract::Deserialize),
             "read_run_history" => schema_for::<ReadRunHistoryInput>(Contract::Deserialize),
+            "read_run_timeline" => schema_for::<ReadRunTimelineInput>(Contract::Deserialize),
             "read_run_content" => schema_for::<ReadRunContentInput>(Contract::Deserialize),
             _ => schema_for::<RunInput>(Contract::Deserialize),
         };
@@ -81,6 +87,7 @@ impl RunOperation {
             "list_runs" => schema_for::<Vec<Run>>(Contract::Serialize),
             "get_run" => schema_for::<RunHistoryOutput>(Contract::Serialize),
             "read_run_history" => schema_for::<RunHistoryWindowOutput>(Contract::Serialize),
+            "read_run_timeline" => schema_for::<RunTimelineOutput>(Contract::Serialize),
             "read_run_content" => schema_for::<RunContentOutput>(Contract::Serialize),
             _ => schema_for::<Run>(Contract::Serialize),
         };
@@ -217,6 +224,28 @@ impl RunOperation {
                         Ok(serde_json::to_value(
                             crate::mcp_server::bounded_history_window(page)?,
                         )?)
+                    })
+                    .await
+            }
+            "read_run_timeline" => {
+                let input: ReadRunTimelineInput = decode(input)?;
+                input.validate().map_err(Error::bad)?;
+                s.store
+                    .read(move |db| {
+                        let tx = rusqlite::Transaction::new_unchecked(
+                            db.0,
+                            rusqlite::TransactionBehavior::Deferred,
+                        )?;
+                        let db = Db(&tx);
+                        authorize(&db)?;
+                        let run = input.run_id.to_string();
+                        db.require_run(&run)?;
+                        crate::conversation_lifecycle::require_active_run(&db, &run)?;
+                        Ok(serde_json::to_value(crate::mcp_server::run_timeline(
+                            &db,
+                            &run,
+                            input.before,
+                        )?)?)
                     })
                     .await
             }

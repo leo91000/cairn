@@ -16,10 +16,11 @@ import {
 
 function record(): CachedHistory {
   return {
-    version: 1,
+    version: 2,
     cursor: 2,
-    history: 'v1:r:1',
+    history: 'v2:r:1',
     state: { run: null, chat: null, artifacts: [] },
+    entries: [],
     events: [{
       id: 2,
       runId: 'r',

@@ -77,11 +77,21 @@ private fun RunEvent.resumesWork(): Boolean {
  * The background tasks the agent waits for, when its latest announcement still holds: the agent
  * finished responding and its run stays open until those tasks notify it.
  */
-internal fun backgroundWait(events: List<RunEvent>): BackgroundWait? {
+internal fun backgroundWait(
+    events: List<RunEvent>,
+    cards: List<build.cairn.app.data.TimelineCard> = emptyList(),
+): BackgroundWait? {
     val index = events.indexOfLast { it.type == "turn.waiting" }
     if (index < 0 || (index + 1 until events.size).any { events[it].resumesWork() }) return null
 
     val announcement = events[index]
+    // A reply streaming after the announcement shows the agent at work again.
+    if (
+        cards.any {
+            it.content is build.cairn.contracts.TimelineContent.B && it.position > announcement.id
+        }
+    )
+        return null
     val tasks =
         announcement.activityData()?.get("tasks").asArray().orEmpty().map {
             it.asObject()?.get("description").plain().trim().ifEmpty { "Tâche en arrière-plan" }
@@ -123,7 +133,7 @@ internal fun workingStep(events: List<RunEvent>, agent: String, fallbackStart: L
     // Subagent steps belong to their subagent; the agent's own latest step decides.
     val subagents = subagentTimeline(events)
     val latestEvent = turn.lastOrNull {
-        !it.isMessage() &&
+        it.timeline != true &&
             (it.id in subagents.anchors ||
                 (it.id !in subagents.captured && presentActivity(it).kind != ActivityKind.NOTICE))
     }

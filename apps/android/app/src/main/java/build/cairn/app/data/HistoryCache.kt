@@ -33,9 +33,11 @@ data class CachedHistory(
     val history: String,
     val state: LiveState,
     val events: List<RunEvent>,
+    /** Timeline cards the server interpreted; never derived from the events. */
+    val entries: List<TimelineCard> = emptyList(),
     val savedAt: Long = System.currentTimeMillis(),
     val position: ReadingPosition? = null,
-    val version: Int = 1,
+    val version: Int = 2,
     val oldest: Long = 0,
     val hasOlder: Boolean = false,
 )
@@ -74,8 +76,8 @@ class HistoryCache(
             .joinToString("") { "%02x".format(it) }
 
     private fun valid(value: CachedHistory) =
-        value.version == 1 &&
-            value.history.startsWith("v1:") &&
+        value.version == 2 &&
+            value.history.startsWith("v2:") &&
             value.cursor >= 0 &&
             System.currentTimeMillis() - value.savedAt < ttl &&
             value.events.all { it.id > 0 && it.id <= value.cursor }

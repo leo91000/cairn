@@ -225,6 +225,8 @@ fn serialize_chats<S: serde::Serializer>(
 struct Page {
     state: State,
     events: Vec<crate::store::Event>,
+    /// Timeline cards: the window's snapshot, or the cards its events changed.
+    entries: Vec<TimelineEntry>,
     reset: bool,
     more: bool,
     history: String,
@@ -237,7 +239,8 @@ struct Page {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Batch {
-    events: Vec<Value>,
+    events: Vec<crate::store::Event>,
+    entries: Vec<TimelineChange>,
     reset: bool,
     more: bool,
     history: String,
@@ -249,7 +252,7 @@ struct Batch {
     state: Option<State>,
 }
 
-use cairn_contracts::HistoryPage;
+use cairn_contracts::{HistoryPage, TimelineChange, TimelineContent, TimelineEntry, TimelineState};
 
 #[cfg(test)]
 mod read_tests;
@@ -331,7 +334,8 @@ fn read_page(
     let (first, max) = event_bounds(db, run_id)?;
     // Events are append-only and IDs are AUTOINCREMENT. The retained first
     // ID changes on pruning; a new run has a new UUID. No full-history hash.
-    let history = format!("v1:{run_id}:{first}");
+    // v2 histories carry timeline cards: a v1 reader resets to receive them.
+    let history = format!("v2:{run_id}:{first}");
     let mut reset = after > max
         || (after > 0 && after < first)
         || expected.as_ref().is_some_and(|value| *value != history);
@@ -366,6 +370,14 @@ fn read_page(
     }
     let oldest = tail.then(|| events.first().map_or(0, |e| e.id));
     let cursor = events.last().map_or(start, |e| e.id);
+    // A window carries a snapshot of its cards; a continuation carries the cards its
+    // events changed. The change cursor is the same event sequence as the stream's.
+    let entries = if tail {
+        let from = if has_older { oldest.unwrap_or(0) } else { 0 };
+        crate::timeline::window(db, run_id, from)?
+    } else {
+        crate::timeline::changed(db, run_id, start, cursor)?
+    };
     let state = State {
         artifacts: artifacts(db, run_id)?,
         run,
@@ -378,6 +390,7 @@ fn read_page(
     Ok(Page {
         state,
         events,
+        entries,
         reset,
         more: cursor < max,
         history,
@@ -475,7 +488,7 @@ pub async fn http(s: Arc<Service>, kind: &str, id: &str, input: Input) -> Result
         pending: Some(first),
         previous: None,
         history: None,
-        deltas: crate::live_text::TextDeltas::default(),
+        replies: Replies::default(),
         read_at: Instant::now(),
         list_refresh_at: None,
     };
@@ -503,7 +516,7 @@ struct Subscription {
     pending: Option<Page>,
     previous: Option<State>,
     history: Option<String>,
-    deltas: crate::live_text::TextDeltas,
+    replies: Replies,
     /// When the last page was read, to pace rebuilding the conversation list.
     read_at: Instant,
     list_refresh_at: Option<Instant>,
@@ -578,10 +591,11 @@ impl Subscription {
         }
         self.history = Some(current.history.clone());
         let changed = self.previous.as_ref() != Some(&current.state);
-        let has_events = !current.events.is_empty();
+        let has_events = !current.events.is_empty() || !current.entries.is_empty();
         self.cursor = current.events.last().map_or(self.cursor, |e| e.id);
         let batch = Batch {
-            events: self.deltas.encode(current.events, reset)?,
+            events: ui_events(current.events),
+            entries: self.replies.encode(current.entries, reset),
             reset,
             more: current.more,
             history: current.history,
@@ -629,10 +643,76 @@ pub async fn history(s: &Service, kind: &str, id: &str, input: &Input) -> Result
             } else {
                 text(&scoped_run(&db, &scope, &Value::Null)?, "id").to_owned()
             };
-            history_page(&db, &run, before, expected.as_deref().unwrap())
+            let mut page = history_page(&db, &run, before, expected.as_deref().unwrap())?;
+            let from = if page.has_older { page.oldest } else { 0 };
+            page.entries = crate::timeline::between(&db, &run, from, before)?;
+            page.events = ui_events(std::mem::take(&mut page.events));
+            Ok(page)
         })
         .await?;
     Ok(serde_json::to_value(page)?)
+}
+
+/// The UI receives a reply through its timeline card, never as raw snapshots;
+/// other events the timeline presents remain boundaries of unconverted families.
+pub fn ui_events(events: Vec<crate::store::Event>) -> Vec<crate::store::Event> {
+    events
+        .into_iter()
+        .filter_map(|mut event| {
+            let (reply, covered) = crate::timeline::presentation(&event);
+            event.timeline = covered;
+            (!reply).then_some(event)
+        })
+        .collect()
+}
+
+/// Wire-only compression of streaming replies. Persisted cards and history pages
+/// keep complete text; a new connection or reset always receives whole cards.
+#[derive(Default)]
+struct Replies(HashMap<String, (String, Option<String>)>);
+
+impl Replies {
+    fn encode(&mut self, entries: Vec<TimelineEntry>, reset: bool) -> Vec<TimelineChange> {
+        if reset {
+            self.0.clear();
+        }
+        entries
+            .into_iter()
+            .map(|entry| {
+                let TimelineContent::AgentMessage {
+                    text, state, via, ..
+                } = &entry.content
+                else {
+                    return TimelineChange::Upsert {
+                        entry: Box::new(entry),
+                    };
+                };
+                let previous = self.0.remove(&entry.id);
+                let suffix = previous.as_ref().and_then(|(sent, sent_via)| {
+                    (*state == TimelineState::Running && sent_via == via)
+                        .then(|| text.strip_prefix(sent.as_str()))
+                        .flatten()
+                });
+                let change = match suffix {
+                    Some(suffix) => TimelineChange::Append {
+                        id: entry.id.clone(),
+                        revision: entry.revision,
+                        source: entry.source,
+                        updated_at: entry.updated_at,
+                        text: suffix.to_owned(),
+                    },
+                    None => TimelineChange::Upsert {
+                        entry: Box::new(entry.clone()),
+                    },
+                };
+                // Only a reply still streaming can grow; a finished one is sent whole.
+                if *state == TimelineState::Running {
+                    self.0.insert(entry.id, (text.clone(), via.clone()));
+                }
+                change
+            })
+            .collect()
+    }
 }
 
 /// Both the UI's backwards pages and the agent capability read the same snapshot.
@@ -643,7 +723,7 @@ pub(crate) fn history_page(
     expected: &str,
 ) -> Result<HistoryPage> {
     let (first, _) = event_bounds(db, run)?;
-    let history = format!("v1:{run}:{first}");
+    let history = format!("v2:{run}:{first}");
     if expected != history {
         return Err(Error::conflict(
             "History changed. Reconnect before loading older messages.",
@@ -653,6 +733,7 @@ pub(crate) fn history_page(
     Ok(HistoryPage {
         oldest: events.first().map_or(before, |event| event.id),
         events,
+        entries: Vec::new(),
         history,
         has_older,
     })

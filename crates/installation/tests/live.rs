@@ -462,10 +462,10 @@ async fn resuming_past_replaced_text_snapshots_keeps_the_cached_history() {
         .await
         .unwrap();
     let all = ids(&f).await;
-    let replaced = all[all.len() - 1302..all.len() - 2].to_vec();
+    let replaced = all[all.len() - 1302..all.len() - 1].to_vec();
 
-    // Following or not, the catch-up is the tool call, the final answer, the turn's
-    // end and any later output: none of the 1300 replaced snapshots.
+    // Following or not, the catch-up is the tool call, the turn's end and any later
+    // output, with the answer as one timeline card: none of its 1301 snapshots.
     for following in ["&recent=1", ""] {
         let expected: Vec<i64> = ids(&f)
             .await
@@ -485,8 +485,16 @@ async fn resuming_past_replaced_text_snapshots_keeps_the_cached_history() {
         assert_eq!(batch["more"], false);
         assert!(batch.get("oldest").is_none());
         assert_eq!(event_ids(&batch["events"]), expected);
+        let answer = batch["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|change| change["entry"]["content"]["kind"] == "agentMessage")
+            .unwrap();
+        assert_eq!(answer["kind"], "upsert");
+        assert_eq!(answer["entry"]["content"]["state"], "done");
         assert!(
-            batch["events"][1]["payload"]["item"]["text"]
+            answer["entry"]["content"]["text"]
                 .as_str()
                 .unwrap()
                 .ends_with("word 1300 ")
@@ -870,20 +878,31 @@ async fn wire_deltas_reestablish_baselines_after_reconnect_and_keep_rest_compati
             .unwrap();
     };
     publish("Bonjour 👋").await;
+    // The reply crosses the wire as its timeline card, never as raw snapshots.
     let (cursor, first) = stream.batch().await;
-    assert_eq!(first["events"][0]["payload"]["item"]["text"], "Bonjour 👋");
+    assert!(first["events"].as_array().unwrap().is_empty());
+    assert_eq!(first["entries"][0]["kind"], "upsert");
+    assert_eq!(
+        first["entries"][0]["entry"]["content"]["text"],
+        "Bonjour 👋"
+    );
     publish("Bonjour 👋 café").await;
     let (_, second) = stream.batch().await;
-    assert_eq!(second["events"][0]["payload"]["item"]["delta"], " café");
-    assert!(second["events"][0]["payload"]["item"]["text"].is_null());
+    assert_eq!(second["entries"][0]["kind"], "append");
+    assert_eq!(second["entries"][0]["text"], " café");
+    // A new connection establishes its own baseline with the whole card.
     let mut resumed = f.open(cursor).await;
+    let resumed = resumed.batch().await.1;
+    assert_eq!(resumed["entries"][0]["kind"], "upsert");
     assert_eq!(
-        resumed.batch().await.1["events"][0]["payload"]["item"]["text"],
+        resumed["entries"][0]["entry"]["content"]["text"],
         "Bonjour 👋 café"
     );
     publish("Corrected message").await;
+    let corrected = stream.batch().await.1;
+    assert_eq!(corrected["entries"][0]["kind"], "upsert");
     assert_eq!(
-        stream.batch().await.1["events"][0]["payload"]["item"]["text"],
+        corrected["entries"][0]["entry"]["content"]["text"],
         "Corrected message"
     );
     let run = f.run.clone();
@@ -1273,7 +1292,8 @@ async fn profile_long_answer_delivery_with_small_wire_deltas() {
             publish(&content).await;
             let (_, batch) = stream.batch().await;
             times.push(start.elapsed().as_secs_f64() * 1000.0);
-            assert_eq!(batch["events"][0]["payload"]["item"]["delta"], suffix);
+            assert_eq!(batch["entries"][0]["kind"], "append");
+            assert_eq!(batch["entries"][0]["text"], suffix);
             bytes.push(serde_json::to_vec(&batch).unwrap().len());
         }
         times.sort_by(f64::total_cmp);
@@ -1326,13 +1346,12 @@ async fn backwards_pages_skip_superseded_long_answers_but_keep_reused_ids_in_old
         .open_path(&format!("/api/runs/{}/stream?window=1", f.run), None)
         .await;
     let (_, first) = stream.batch().await;
-    assert_eq!(first["events"].as_array().unwrap().len(), 1);
-    assert!(
-        first["events"][0]["payload"]["item"]["text"]
-            .as_str()
-            .unwrap()
-            .ends_with("-79")
-    );
+    // The window holds only the latest snapshot; the reply arrives as its complete card,
+    // although it first appeared before the window.
+    assert!(first["events"].as_array().unwrap().is_empty());
+    let reply = &first["entries"][0]["entry"];
+    assert!(reply["content"]["text"].as_str().unwrap().ends_with("-79"));
+    assert!(reply["position"].as_i64().unwrap() < first["oldest"].as_i64().unwrap());
     assert_eq!(first["hasOlder"], true);
     let before = first["oldest"].as_i64().unwrap();
     let history = first["history"].as_str().unwrap();
@@ -1345,12 +1364,27 @@ async fn backwards_pages_skip_superseded_long_answers_but_keep_reused_ids_in_old
     assert_eq!(page["hasOlder"], false);
     let events = page["events"].as_array().unwrap();
     assert!(events.iter().any(|e| e["text"] == "Older question"));
-    let messages: Vec<_> = events
+    assert!(
+        events
+            .iter()
+            .all(|e| e["payload"]["item"]["type"] != "agent_message")
+    );
+    // The reused item ID stays two replies, one per turn, each with its latest text.
+    let replies: Vec<_> = page["entries"]
+        .as_array()
+        .unwrap()
         .iter()
-        .filter(|e| e["payload"]["item"]["type"] == "agent_message")
+        .filter(|card| card["content"]["kind"] == "agentMessage")
         .collect();
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0]["payload"]["item"]["text"], "previous turn");
+    assert_eq!(replies.len(), 2);
+    assert_eq!(replies[0]["content"]["text"], "previous turn");
+    assert_ne!(replies[0]["id"], replies[1]["id"]);
+    assert!(
+        replies[1]["content"]["text"]
+            .as_str()
+            .unwrap()
+            .ends_with("-79")
+    );
 }
 
 /// Process CPU time, including the SQLite actor threads, in milliseconds.
@@ -1658,7 +1692,7 @@ async fn typed_history_get_keeps_native_history_readable_to_members_after_agent_
         .unwrap();
     let response = reqwest::Client::new()
         .get(format!(
-            "{}/api/runs/{}/history?history=v1:{}:{first}",
+            "{}/api/runs/{}/history?history=v2:{}:{first}",
             fixture.url, fixture.run, fixture.run
         ))
         .header("x-test-relay-token", text(&token, "value"))

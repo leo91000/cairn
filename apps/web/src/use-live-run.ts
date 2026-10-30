@@ -1,5 +1,5 @@
 import type { RunEvent } from '../../../packages/contracts/contracts'
-import type { HistoryPage, LiveState } from '../../../packages/contracts/live'
+import type { HistoryPage, LiveState, TimelineEntry } from '../../../packages/contracts/live'
 import type { CachedHistory, ReadingPosition } from './history-cache'
 import type { LiveStatus } from './live-connection'
 import {
@@ -20,7 +20,7 @@ import {
   writeHistory,
 } from './history-cache'
 import { liveConnection } from './live-connection'
-import { LiveEvents } from './live-events'
+import { LiveTimeline } from './live-timeline'
 
 /** A revalidation that takes longer than this says so; a quick one stays silent. */
 const SLOW_UPDATE = 1000
@@ -45,6 +45,8 @@ export interface LiveRunOptions {
 export function useLiveRun(path: () => string | undefined, options: LiveRunOptions = {}) {
   const snapshot = ref<LiveState>()
   const events = ref<RunEvent[]>([])
+  /** Timeline cards, in the order they first appeared. */
+  const timeline = ref<TimelineEntry[]>([])
   const status = ref<LiveStatus>('connecting')
   const slow = ref(false)
   const catchingUp = ref(true)
@@ -103,8 +105,7 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
         return
     }
 
-    let accumulator = new LiveEvents()
-    let rows: RunEvent[] = cached?.events.slice() ?? []
+    let accumulator = new LiveTimeline()
     let detail = cached?.state
     let cursor = cached?.cursor ?? 0
     let history = cached?.history
@@ -116,13 +117,19 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
     let replacements = 0
     let storedPosition = cached?.position
     position.value = storedPosition
-    accumulator.restore(rows, cursor)
+    accumulator.restore(cached?.events ?? [], cursor, cached?.entries ?? [])
+
+    function show() {
+      events.value = accumulator.events.slice()
+      timeline.value = accumulator.entries()
+    }
 
     function showSaved(saved: CachedHistory) {
       hasOlder.value = older
       restored.value = true
       snapshot.value = saved.state
       events.value = saved.events
+      timeline.value = saved.entries
       catchingUp.value = false
     }
 
@@ -137,11 +144,12 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
         return
       storedPosition = position.value
       const record = {
-        version: 1 as const,
+        version: 2 as const,
         cursor,
         history,
         state: detail,
-        events: rows.slice(),
+        events: accumulator.events.slice(),
+        entries: accumulator.entries(),
         oldest,
         hasOlder: older,
         savedAt: Date.now(),
@@ -168,16 +176,13 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
           return
         if (page.hasOlder && page.oldest >= before)
           throw new Error('Invalid history page')
-        const next: RunEvent[] = []
-        const candidate = new LiveEvents()
-        candidate.append(next, [...new Map([...page.events, ...rows].map(e => [e.id, e])).values()].sort((a, b) => a.id - b.id))
-        candidate.restore(next, cursor)
+        const candidate = accumulator.copy()
+        candidate.merge(page.events, page.entries)
         accumulator = candidate
-        rows = next
         oldest = page.oldest
         older = page.hasOlder
         hasOlder.value = older
-        events.value = rows.slice()
+        show()
         scheduleSave()
       }
       catch (e) {
@@ -207,8 +212,7 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
         || (batch.state && detail?.run?.id !== batch.state.run?.id)
       if (reset) {
         replacements++
-        rows = []
-        accumulator = new LiveEvents()
+        accumulator = new LiveTimeline()
         oldest = 0
         older = false
         complete = false
@@ -219,11 +223,9 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
       }
 
       // Persist a complete snapshot only. An interrupted catch-up cannot corrupt it.
-      const next = rows.slice()
       const candidate = accumulator.copy()
-      candidate.append(next, batch.events)
+      candidate.apply(batch.events, batch.entries, accepted)
       accumulator = candidate
-      rows = next
       if (batch.state)
         detail = batch.state
       carriesList.value = !!options.list && !!detail?.chats
@@ -245,7 +247,7 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
         if (batch.state)
           restored.value = false
         snapshot.value = detail
-        events.value = rows.slice()
+        show()
         catchingUp.value = false
         scheduleSave()
       }
@@ -277,6 +279,7 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
           connection?.close()
           snapshot.value = undefined
           events.value = []
+          timeline.value = []
           if (scope)
             saved().forEach(path => void removeHistory(scope, path))
         }
@@ -300,6 +303,7 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
     hasOlder.value = false
     snapshot.value = undefined
     events.value = []
+    timeline.value = []
     catchingUp.value = true
     setStatus('connecting')
     error.value = ''
@@ -335,6 +339,7 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
     olderError,
     loadOlder,
     events,
+    timeline,
     catchingUp,
     synced,
     error,

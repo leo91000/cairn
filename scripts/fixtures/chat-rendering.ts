@@ -1,4 +1,4 @@
-import type { RunEvent } from '../../packages/contracts/contracts'
+import type { TimelineEntry } from '../../packages/contracts/live'
 import {
   createApp,
   h,
@@ -9,7 +9,7 @@ import {
 import { activityEntries, ActivityGroups } from '../../apps/web/src/activity'
 import ActivityFeed from '../../apps/web/src/components/ActivityFeed.vue'
 import Markdown from '../../apps/web/src/components/Markdown.vue'
-import { LiveEvents } from '../../apps/web/src/live-events'
+import { LiveTimeline } from '../../apps/web/src/live-timeline'
 import '@fontsource-variable/dm-sans/wght.css'
 import '@fontsource-variable/manrope/wght.css'
 import '../../apps/web/src/styles/index.css'
@@ -43,14 +43,32 @@ function source(workload: Workload, characters: number) {
   return fragments[workload].repeat(Math.ceil(characters / fragments[workload].length)).slice(0, characters)
 }
 
-function event(id: number, text: string, user = false): RunEvent {
+/** A timeline card as the server sends it: a person's message or the agent's reply. */
+function event(id: number, text: string, user = false): TimelineEntry {
+  const createdAt = 1_700_000_000_000 + id
   return {
-    id,
+    id: user ? `user:${id}` : `message:1:answer-${id}`,
     runId: 'measurement',
-    createdAt: 1_700_000_000_000 + id,
-    type: user ? 'chat.user' : 'item.updated',
-    text,
-    payload: user ? {} : { item: { id: `answer-${id}`, type: 'agent_message', text } },
+    position: id,
+    revision: id,
+    source: id,
+    turn: 1,
+    attempt: 0,
+    createdAt,
+    updatedAt: createdAt,
+    content: user
+      ? {
+          kind: 'userMessage',
+          text,
+          sentAt: createdAt,
+          attachments: [],
+        }
+      : {
+          kind: 'agentMessage',
+          itemId: `answer-${id}`,
+          text,
+          state: 'running',
+        },
   }
 }
 
@@ -86,7 +104,8 @@ async function measure(scenario: Scenario) {
       render: () => scenario.component === 'markdown'
         ? h(Markdown, { content: content.value })
         : h(ActivityFeed, {
-            events: events.value,
+            events: [],
+            timeline: events.value,
             active: true,
             agent: 'Synthetic agent',
             task: 'Measurement',
@@ -163,7 +182,8 @@ async function scroll(history: number) {
   root.style.cssText = 'height:100dvh;display:flex;flex-direction:column'
   const app = createApp({
     render: () => h(ActivityFeed, {
-      events,
+      events: [],
+      timeline: events,
       active: false,
       agent: 'Synthetic',
       task: 'Scroll',
@@ -199,17 +219,26 @@ async function scroll(history: number) {
 function algorithms(count: number) {
   const events = Array.from({ length: count }, (_, index) => event(index + 1, `Question ${index + 1}`, index % 2 === 0))
   const groups = new ActivityGroups()
-  const accumulator = new LiveEvents()
-  accumulator.restore(events, count)
+  const accumulator = new LiveTimeline()
+  accumulator.restore([], count, events)
+  const reply = event(count + 1, '')
+  accumulator.upsert(reply)
   const times = []
   const reduction = []
   for (let index = 0; index < 120; index++) {
     const start = performance.now()
-    const next = event(count + index + 1, `Suite ${index}`)
-    next.payload = { item: { id: `answer-${count}`, type: 'agent_message', text: next.text } }
-    accumulator.append(events, [next])
+    // A streaming reply appends its new text to the card this stream delivered.
+    accumulator.apply([], [{
+      kind: 'append',
+      id: reply.id,
+      revision: count + index + 2,
+      source: count + index + 2,
+      updatedAt: reply.createdAt + index,
+      text: ` Suite ${index}`,
+    }])
+    const cards = accumulator.entries()
     const reduced = performance.now()
-    activityEntries(events, true, groups)
+    activityEntries([], true, groups, undefined, cards)
     const done = performance.now()
     if (index >= 20) {
       reduction.push(reduced - start)

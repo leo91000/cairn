@@ -86,7 +86,7 @@ class HistoryScrollDeviceTest {
     }
 
     private val turns = 60
-    private val history = "v1:long:1"
+    private val history = "v2:long:1"
 
     // Each turn folds into three rows: the question, one « A lancé 8 commandes » group, the answer.
     private val events =

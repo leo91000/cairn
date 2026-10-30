@@ -242,7 +242,7 @@ internal fun subagentTimeline(events: List<RunEvent>): SubagentTimeline {
             continue
         }
 
-        if (parent != null && !event.isMessage()) {
+        if (parent != null && event.timeline != true) {
             val key = "${parent.id}:${itemId.ifBlank { "event:${event.id}" }}"
             parent.steps[key] = presentActivity(event)
             captured += event.id
@@ -414,7 +414,7 @@ internal class SubagentTeamKeys {
 
 /** Current-request agents and any earlier children still working in the same execution. */
 internal fun currentSubagents(timeline: List<TimelineEntry>): List<Subagent> {
-    val start = timeline.indexOfLast { it.message && it.events.single().type == "chat.user" }
+    val start = timeline.indexOfLast { it.message && it.card?.userMessage == true }
     val current = subagentTeams(timeline.drop(start + 1)).flatten().map { it.id }.toSet()
     // A delegated task reports through its own conversation: earlier ones stay with their request.
     return subagentTeams(timeline).flatten().filter {

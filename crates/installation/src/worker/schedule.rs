@@ -102,6 +102,8 @@ impl Worker {
                 db.0.execute("DELETE FROM audit WHERE created_at<?", [now() - 90 * DAY_MS])?;
                 db.0.execute("DELETE FROM records WHERE kind='node-exclusive-requests' AND json_extract(data,'$.state') IN ('released','failed','expired') AND json_extract(data,'$.createdAt')<?", [now() - 30 * DAY_MS])?;
                 db.0.execute("DELETE FROM events WHERE created_at<? AND run_id IN (SELECT id FROM runs WHERE status NOT IN ('queued','running','waiting') AND trigger!='chat')", [now() - 30 * DAY_MS])?;
+                // Timeline cards read their source event; a card whose source expired goes with it.
+                db.0.execute("DELETE FROM timeline_entries WHERE run_id IN (SELECT id FROM runs WHERE status NOT IN ('queued','running','waiting') AND trigger!='chat') AND NOT EXISTS(SELECT 1 FROM events e WHERE e.id=timeline_entries.source)", [])?;
                 Ok(())
             })
             .await?;

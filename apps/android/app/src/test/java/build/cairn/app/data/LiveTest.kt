@@ -1,5 +1,6 @@
 package build.cairn.app.data
 
+import build.cairn.contracts.TimelineChange
 import java.io.File
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.*
@@ -30,6 +31,39 @@ class LiveTest {
             runId = "r1",
         )
 
+    private fun reply(revision: Long, text: String, position: Long = 1, item: String = "answer") =
+        TimelineChange.A(
+            TimelineCard(
+                attempt = 0,
+                content =
+                    build.cairn.contracts.TimelineContent.B(
+                        itemId = item,
+                        state = "running",
+                        text = text,
+                    ),
+                createdAt = position * 10,
+                id = "message:1:$item",
+                position = position,
+                revision = revision,
+                runId = "r1",
+                source = revision,
+                turn = 1,
+                updatedAt = revision * 10,
+            )
+        )
+
+    private fun appended(revision: Long, text: String, item: String = "answer") =
+        TimelineChange.B(
+            id = "message:1:$item",
+            revision = revision,
+            source = revision,
+            text = text,
+            updatedAt = revision * 10,
+        )
+
+    private fun LiveSnapshot.replyText() =
+        (entries.single().content as build.cairn.contracts.TimelineContent.B).text
+
     private fun frame(cursor: Long, batch: LiveBatch) =
         "event: batch\nid: $cursor\ndata: ${wireJson.encodeToString(batch)}\n\n"
 
@@ -37,7 +71,7 @@ class LiveTest {
     fun `older pages survive an IOException reconnect while the session lock remains occupied`() =
         runBlocking {
             MockWebServer().use { server ->
-                val history = "v1:r1:1"
+                val history = "v2:r1:1"
                 val state =
                     LiveState(
                         run =
@@ -174,7 +208,7 @@ class LiveTest {
                                 ))
                                 ?.let { kotlinx.serialization.json.JsonObject(it) },
                     )
-                val value = CachedHistory(1, "v1:r1:1", state, listOf(spawn))
+                val value = CachedHistory(1, "v2:r1:1", state, listOf(spawn))
                 server.dispatcher =
                     object : Dispatcher() {
                         override fun dispatch(request: RecordedRequest): MockResponse {
@@ -200,7 +234,7 @@ class LiveTest {
                     server.takeRequest().requestUrl!!.queryParameter("after"),
                 )
                 val worker =
-                    build.cairn.app.ui.timelineEntries(final.events).single().agents.single()
+                    build.cairn.app.ui.fixtureEntries(final.events).single().agents.single()
                 assertEquals(build.cairn.app.ui.SubagentState.DONE, worker.state)
                 assertEquals(1, worker.steps.size)
                 assertTrue(final.events.all { it.runId == "r1" })
@@ -212,7 +246,7 @@ class LiveTest {
     fun `revalidation retains the cached paging boundary and a reset replaces it`() = runBlocking {
         for (reset in listOf(false, true)) {
             MockWebServer().use { server ->
-                val revision = "v1:r1:1"
+                val revision = "v2:r1:1"
                 val state =
                     LiveState(
                         run =
@@ -269,7 +303,7 @@ class LiveTest {
     fun `a reader following the latest output resumes on the recent window`() = runBlocking {
         for (follow in listOf(true, false)) {
             MockWebServer().use { server ->
-                val revision = "v1:r1:1"
+                val revision = "v2:r1:1"
                 val state =
                     LiveState(
                         run =
@@ -347,7 +381,7 @@ class LiveTest {
                         frame(
                             1,
                             LiveBatch(
-                                listOf(message(1, "Bonjour")),
+                                emptyList(),
                                 LiveState(
                                     run =
                                         Run(
@@ -358,11 +392,21 @@ class LiveTest {
                                 ),
                                 false,
                                 false,
+                                entries = listOf(reply(1, "Bonjour")),
                             ),
                         )
                     )
                     for (id in 2L..101L) append(
-                        frame(id, LiveBatch(listOf(message(id, " é$id", true)), null, false, false))
+                        frame(
+                            id,
+                            LiveBatch(
+                                emptyList(),
+                                null,
+                                false,
+                                false,
+                                entries = listOf(appended(id, " é$id")),
+                            ),
+                        )
                     )
                 }
                 server.enqueue(
@@ -382,117 +426,88 @@ class LiveTest {
                     }
                 assertEquals(
                     "Bonjour" + (2..101).joinToString("") { " é$it" },
-                    final.events.single().text,
+                    final.replyText(),
                 )
                 assertEquals(101L, final.cursor)
-                assertEquals(1L, final.events.single().displayId)
+                assertEquals(1L, final.entries.single().position)
                 assertTrue(api.streamCalls.isEmpty())
             }
         }
 
     @Test
-    fun `backwards page keeps latest message snapshot and intervening tools`() {
-        fun message(id: Long, content: String) =
-            RunEvent(
-                id = id,
-                createdAt = id,
-                type = "item.updated",
-                text = content,
-                payload =
-                    kotlinx.serialization.json.JsonObject(
-                        mapOf(
-                            "item" to
-                                buildJsonObject {
-                                    put("id", "m")
-                                    put("type", "agent_message")
-                                    put("text", content)
-                                }
-                        )
-                    ),
-            )
-        val merged =
-            mergeHistory(
-                listOf(
-                    message(1, "old"),
-                    RunEvent(
-                        id = 2,
-                        createdAt = 2,
-                        type = "output",
-                        text = "tool",
-                    ),
-                ),
-                listOf(message(3, "complete")),
-            )
-        assertEquals(2, merged.size)
-        assertEquals("complete", merged[0].text)
-        assertEquals("tool", merged[1].text)
-        assertEquals(merged, mergeHistory(listOf(message(1, "old")), merged))
+    fun `backwards pages keep the newer revision of a card and every event`() {
+        val tool = RunEvent(id = 2, createdAt = 2, type = "output", text = "tool")
+        assertEquals(
+            listOf(1L, 2L),
+            mergeHistory(listOf(message(1, "old"), tool), listOf(tool)).map { it.id },
+        )
+        val newer = reply(9, "complete").entry
+        val older = reply(3, "partial").entry
+        assertEquals(listOf(newer), mergeCards(listOf(older), listOf(newer)))
+        assertEquals(listOf(newer), mergeCards(listOf(newer), listOf(older)))
     }
 
     @Test
-    fun `restoring a folded snapshot retains the delta baseline without duplicating a message`() {
+    fun `restoring a saved snapshot keeps the reply baseline without duplicating events`() {
         val first = LiveAccumulator()
-        val saved = first.append(listOf(message(1, "Bonjour"), message(2, " Cairn", true)))
+        first.append(listOf(message(1, "Bonjour")), listOf(reply(1, "Bonjour")), 1)
+        first.append(emptyList(), listOf(appended(2, " Cairn")), 2)
         val restored = LiveAccumulator()
-        restored.restore(saved, 2)
-        val result = restored.append(listOf(message(2, "duplicate", true), message(3, " !", true)))
-        assertEquals(1, result.size)
-        assertEquals("Bonjour Cairn !", result.single().text)
+        restored.restore(first.events, 2, first.entries)
+        restored.append(listOf(message(1, "duplicate")), listOf(appended(3, " !")), 3)
+        assertEquals(1, restored.events.size)
+        assertEquals(
+            "Bonjour Cairn !",
+            (restored.entries.single().content as build.cairn.contracts.TimelineContent.B).text,
+        )
         assertEquals(3L, restored.cursor)
     }
 
     @Test
-    fun `deltas fold assistant rows and a new turn isolates reused item identifiers`() {
+    fun `a new turn's reply with a reused item identifier is a separate card`() {
         val accumulator = LiveAccumulator()
-        accumulator.append(listOf(message(1, "Bonjour"), message(2, " Cairn", true)))
-        val rows =
-            accumulator.append(
-                listOf(
-                    message(2, "duplicate", true),
-                    RunEvent(
-                        id = 3,
-                        createdAt = 30,
-                        type = "turn.started",
-                        text = "",
-                    ),
-                    message(4, "Nouvelle réponse"),
-                )
+        accumulator.append(emptyList(), listOf(reply(1, "Bonjour")), 1)
+        val next =
+            TimelineChange.A(
+                reply(4, "Nouvelle réponse", position = 4)
+                    .entry
+                    .copy(id = "message:2:answer", turn = 2)
             )
-        assertEquals(3, rows.size)
-        assertEquals(
-            "Bonjour Cairn",
-            (rows[0].payload!!["item"] as JsonObject)["text"]!!.jsonPrimitive.content,
+        accumulator.append(
+            listOf(
+                RunEvent(id = 3, createdAt = 30, type = "turn.started", text = "", timeline = true)
+            ),
+            listOf(next),
+            4,
         )
-        assertEquals(10L, rows[0].createdAt)
+        assertEquals(
+            listOf("message:1:answer", "message:2:answer"),
+            accumulator.entries.map { it.id },
+        )
+        assertEquals(10L, accumulator.entries.first().createdAt)
         assertEquals(4L, accumulator.cursor)
     }
 
     @Test
-    fun `a corrupt delta batch does not commit its preceding events`() {
+    fun `a corrupt reply change does not commit its preceding events`() {
         val accumulator = LiveAccumulator()
-        accumulator.append(listOf(message(1, "baseline")))
+        accumulator.append(listOf(message(1, "baseline")), emptyList(), 1)
         assertThrows(IllegalArgumentException::class.java) {
             accumulator.append(
-                listOf(
-                    RunEvent(
-                        id = 2,
-                        createdAt = 20,
-                        type = "turn.started",
-                        text = "",
-                    ),
-                    message(3, "delta", true),
-                )
+                listOf(RunEvent(id = 2, createdAt = 20, type = "turn.started", text = "")),
+                listOf(appended(3, "delta")),
+                3,
             )
         }
         assertEquals(1L, accumulator.cursor)
-        assertEquals(1, accumulator.append(emptyList()).size)
+        assertEquals(1, accumulator.events.size)
     }
 
     @Test
     fun `a verified cached snapshot stays synced after the transport closes immediately`() =
         runBlocking {
             MockWebServer().use { server ->
-                val revision = "v1:r1:1"
+                val revision = "v2:r1:1"
                 server.enqueue(
                     MockResponse()
                         .setHeader("Content-Type", "text/event-stream")
@@ -616,14 +631,14 @@ class LiveTest {
     fun `retained session resumes compressed messages and isolates paths and generations`() =
         runBlocking {
             MockWebServer().use { server ->
-                fun response(id: Long, event: RunEvent) =
+                fun response(id: Long, change: TimelineChange) =
                     MockResponse()
                         .setHeader("Content-Type", "text/event-stream")
                         .setBody(
                             frame(
                                 id,
                                 LiveBatch(
-                                    listOf(event),
+                                    emptyList(),
                                     LiveState(
                                         run =
                                             Run(
@@ -634,48 +649,29 @@ class LiveTest {
                                     ),
                                     false,
                                     false,
+                                    entries = listOf(change),
                                 ),
                             )
                         )
-                server.enqueue(response(1, message(1, "Bonjour")))
-                server.enqueue(response(2, message(2, " Cairn", true)))
-                server.enqueue(response(1, message(1, "Autre conversation")))
-                server.enqueue(response(1, message(1, "Nouvelle session")))
+                server.enqueue(response(1, reply(1, "Bonjour")))
+                server.enqueue(response(2, appended(2, " Cairn")))
+                server.enqueue(response(1, reply(1, "Autre conversation")))
+                server.enqueue(response(1, reply(1, "Nouvelle session")))
                 server.start()
                 val api = CairnApi(server.url("/"), MemoryVault())
                 val session = LiveSession()
                 withTimeout(10000) {
-                    api.live("/chats/one/stream", session).first {
-                        it.events.lastOrNull()?.id == 1L
-                    }
-                    val resumed =
-                        api.live("/chats/one/stream", session).first {
-                            it.events.lastOrNull()?.id == 2L
-                        }
-                    assertEquals("Bonjour Cairn", resumed.events.single().text)
+                    api.live("/chats/one/stream", session).first { it.cursor == 1L }
+                    // The retained session keeps the card the appended text extends.
+                    val resumed = api.live("/chats/one/stream", session).first { it.cursor == 2L }
+                    assertEquals("Bonjour Cairn", resumed.replyText())
                     val other =
-                        api.live("/chats/two/stream", session).first { it.events.isNotEmpty() }
-                    assertEquals(
-                        "Autre conversation",
-                        other.events
-                            .single()
-                            .payload!!["item"]!!
-                            .jsonObject["text"]!!
-                            .jsonPrimitive
-                            .content,
-                    )
+                        api.live("/chats/two/stream", session).first { it.entries.isNotEmpty() }
+                    assertEquals("Autre conversation", other.replyText())
                     api.closeStreams()
                     val fresh =
-                        api.live("/chats/two/stream", session).first { it.events.isNotEmpty() }
-                    assertEquals(
-                        "Nouvelle session",
-                        fresh.events
-                            .single()
-                            .payload!!["item"]!!
-                            .jsonObject["text"]!!
-                            .jsonPrimitive
-                            .content,
-                    )
+                        api.live("/chats/two/stream", session).first { it.entries.isNotEmpty() }
+                    assertEquals("Nouvelle session", fresh.replyText())
                 }
                 assertEquals("/api/chats/one/stream?after=0&window=1", server.takeRequest().path)
                 assertEquals(

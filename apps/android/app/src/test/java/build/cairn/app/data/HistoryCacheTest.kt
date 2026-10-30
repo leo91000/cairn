@@ -23,7 +23,7 @@ class HistoryCacheTest {
     private fun record() =
         CachedHistory(
             2,
-            "v1:r:1",
+            "v2:r:1",
             LiveState(),
             listOf(
                 RunEvent(
@@ -94,7 +94,7 @@ class HistoryCacheTest {
             val original =
                 CachedHistory(
                     1250,
-                    "v1:r:1",
+                    "v2:r:1",
                     LiveState(),
                     events,
                     position = ReadingPosition(5, 10, false),
@@ -126,7 +126,7 @@ class HistoryCacheTest {
                 "bytes",
                 CachedHistory(
                     4,
-                    "v1:r:1",
+                    "v2:r:1",
                     LiveState(),
                     events,
                     position = ReadingPosition(5, 10, false),
@@ -152,7 +152,7 @@ class HistoryCacheTest {
             assertEquals(record().events, second.read(key)?.events)
             assertEquals(ReadingPosition(12, 30, false), second.read(key)?.position)
             assertNull(second.read(second.key("https://cairn.example", "other", "/chats/a/stream")))
-            second.save(key, record().copy(history = "v1:r:2"), true)
+            second.save(key, record().copy(history = "v2:r:2"), true)
             assertNull(second.read(key)?.position)
             val previousGeneration = second.generation
             second.clear()

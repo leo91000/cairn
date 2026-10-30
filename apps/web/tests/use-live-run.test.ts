@@ -69,12 +69,13 @@ it.each(['navigation', 'hidden', 'dispose'] as const)('retains older history whe
   const scope = await cacheScope('test-session')
   const stream = '/chats/a/stream'
   const saved: CachedHistory = {
-    version: 1,
+    version: 2,
     cursor: 20,
-    history: 'v1:r:1',
+    history: 'v2:r:1',
     oldest: 20,
     hasOlder: true,
     state: { run: null, chat: null, artifacts: [] },
+    entries: [],
     events: [{
       id: 20,
       runId: 'r',
@@ -121,11 +122,12 @@ it.each(['navigation', 'hidden', 'dispose'] as const)('retains older history whe
   expect(reopened.hasOlder.value).toBe(true)
   vi.mocked(api).mockResolvedValueOnce({
     events: [],
+    entries: [],
     oldest: 1,
     hasOlder: false,
     history: saved.history,
   })
   await reopened.loadOlder()
-  expect(api).toHaveBeenCalledWith('/chats/a/history?before=20&history=v1%3Ar%3A1')
+  expect(api).toHaveBeenCalledWith('/chats/a/history?before=20&history=v2%3Ar%3A1')
   expect(reopened.hasOlder.value).toBe(false)
 })

@@ -1,0 +1,219 @@
+{
+  "entries": [
+    {
+      "id": "user:12",
+      "runId": "00000000-0000-4000-8000-000000000001",
+      "position": 12,
+      "revision": 12,
+      "source": 12,
+      "turn": 0,
+      "attempt": 0,
+      "createdAt": 1700000000012,
+      "updatedAt": 1700000000012,
+      "content": {
+        "kind": "userMessage",
+        "text": "Answered a private question.",
+        "messageId": "00000000-0000-4000-8000-0000000000c1",
+        "questionId": "question",
+        "sentAt": 1700000000010,
+        "attachments": [
+          {
+            "id": "00000000-0000-4000-8000-0000000000f1",
+            "chatId": "00000000-0000-4000-8000-000000000071",
+            "name": "log 🦊.txt",
+            "size": 41943040,
+            "mediaType": "text/plain",
+            "kind": "file",
+            "digest": "",
+            "createdAt": 9007199254740991
+          }
+        ]
+      }
+    },
+    {
+      "id": "message:3:msg_1",
+      "runId": "00000000-0000-4000-8000-000000000001",
+      "position": 14,
+      "revision": 9007199254740991,
+      "source": 9007199254740991,
+      "turn": 3,
+      "attempt": 1,
+      "createdAt": 1700000000014,
+      "updatedAt": 1700000000099,
+      "content": {
+        "kind": "agentMessage",
+        "itemId": "msg_1",
+        "text": "Réponse 🦊 en cours",
+        "state": "running",
+        "via": "OpenRouter"
+      }
+    },
+    {
+      "id": "message:20",
+      "runId": "00000000-0000-4000-8000-000000000001",
+      "position": 20,
+      "revision": 20,
+      "source": 20,
+      "turn": 0,
+      "attempt": 0,
+      "createdAt": 0,
+      "updatedAt": 0,
+      "content": { "kind": "agentMessage", "itemId": "", "text": "", "state": "done" }
+    },
+    {
+      "id": "notice:23",
+      "runId": "00000000-0000-4000-8000-000000000001",
+      "position": 23,
+      "revision": 25,
+      "source": 23,
+      "turn": 3,
+      "attempt": 0,
+      "createdAt": 1700000000023,
+      "updatedAt": 1700000000025,
+      "content": {
+        "kind": "notice",
+        "notice": {
+          "code": "failure",
+          "state": "info",
+          "prominent": false,
+          "detail": "Rate limit exceeded",
+          "origin": "turn",
+          "retry": { "attempt": 1, "limit": 3 }
+        }
+      }
+    },
+    {
+      "id": "notice:28",
+      "runId": "00000000-0000-4000-8000-000000000001",
+      "position": 28,
+      "revision": 28,
+      "source": 28,
+      "turn": 4,
+      "attempt": 1,
+      "createdAt": 1700000000028,
+      "updatedAt": 1700000000028,
+      "content": {
+        "kind": "notice",
+        "notice": { "code": "failure", "state": "error", "prominent": true, "detail": "Rate limit exceeded", "origin": "turn", "retried": 1 }
+      }
+    },
+    {
+      "id": "notice:30",
+      "runId": "00000000-0000-4000-8000-000000000001",
+      "position": 30,
+      "revision": 31,
+      "source": 30,
+      "turn": 4,
+      "attempt": 1,
+      "createdAt": 1700000000030,
+      "updatedAt": 1700000000031,
+      "content": {
+        "kind": "notice",
+        "notice": {
+          "code": "engineRetry",
+          "state": "info",
+          "prominent": false,
+          "recovered": true,
+          "engineRetry": { "attempt": 2, "maxRetries": 10, "reason": "overloaded", "httpStatus": 529, "delayMs": 4000, "noResponse": false }
+        }
+      }
+    },
+    {
+      "id": "notice:32",
+      "runId": "00000000-0000-4000-8000-000000000001",
+      "position": 32,
+      "revision": 32,
+      "source": 32,
+      "turn": 4,
+      "attempt": 1,
+      "createdAt": 1700000000032,
+      "updatedAt": 1700000000032,
+      "content": {
+        "kind": "notice",
+        "notice": {
+          "code": "usageLimit",
+          "state": "info",
+          "prominent": true,
+          "usageLimit": { "status": "allowed_warning", "window": "five_hour", "blocked": false, "resetsAt": 9007199254740991 }
+        }
+      }
+    },
+    {
+      "id": "notice:33",
+      "runId": "00000000-0000-4000-8000-000000000001",
+      "position": 33,
+      "revision": 33,
+      "source": 33,
+      "turn": 4,
+      "attempt": 1,
+      "createdAt": 1700000000033,
+      "updatedAt": 1700000000033,
+      "content": {
+        "kind": "notice",
+        "notice": { "code": "turnCompleted", "state": "done", "prominent": false, "usage": { "inputTokens": 1200, "outputTokens": 340 }, "tasks": ["npm test"] }
+      }
+    },
+    {
+      "id": "notice:34",
+      "runId": "00000000-0000-4000-8000-000000000001",
+      "position": 34,
+      "revision": 34,
+      "source": 34,
+      "turn": 4,
+      "attempt": 1,
+      "createdAt": 1700000000034,
+      "updatedAt": 1700000000034,
+      "content": {
+        "kind": "notice",
+        "notice": { "code": "accountSelected", "state": "done", "prominent": false, "account": { "agent": "Codex", "name": "Studio" }, "speed": "standard", "status": "Using Codex account: Studio", "level": "warning" }
+      }
+    }
+  ],
+  "changes": [
+    { "kind": "append", "id": "message:3:msg_1", "revision": 15, "source": 15, "updatedAt": 1700000000015, "text": " 🦊 suite" },
+    {
+      "kind": "upsert",
+      "entry": {
+        "id": "notice:35",
+        "runId": "00000000-0000-4000-8000-000000000001",
+        "position": 35,
+        "revision": 35,
+        "source": 35,
+        "turn": 4,
+        "attempt": 1,
+        "createdAt": 1700000000035,
+        "updatedAt": 1700000000035,
+        "content": { "kind": "notice", "notice": { "code": "diagnostic", "state": "info", "prominent": false, "detail": "{\"type\":\"turn.completed\"}" } }
+      }
+    }
+  ],
+  "window": {
+    "entries": [
+      { "kind": "truncated", "preview": { "id": "message:4:answer", "position": 40, "revision": 41, "source": 41, "kind": "agentMessage", "text": "Début" }, "totalBytes": 2000000 },
+      {
+        "kind": "complete",
+        "entry": {
+          "id": "notice:42",
+          "runId": "00000000-0000-4000-8000-000000000001",
+          "position": 42,
+          "revision": 42,
+          "source": 42,
+          "turn": 4,
+          "attempt": 1,
+          "createdAt": 1700000000042,
+          "updatedAt": 1700000000042,
+          "content": { "kind": "notice", "notice": { "code": "runStatus", "state": "stopped", "prominent": true, "status": "cancelled" } }
+        }
+      }
+    ],
+    "oldest": 40,
+    "hasOlder": true
+  },
+  "input": { "runId": "00000000-0000-4000-8000-000000000001", "before": 9007199254740991 },
+  "invalidEntries": [
+    { "id": "user:1", "runId": "r", "position": 1, "revision": 1, "source": 1, "turn": 0, "attempt": 0, "createdAt": 1, "updatedAt": 1, "content": { "kind": "toolCall" } },
+    { "id": "user:1", "runId": "r", "position": 9007199254740992, "revision": 1, "source": 1, "turn": 0, "attempt": 0, "createdAt": 1, "updatedAt": 1, "content": { "kind": "userMessage", "text": "", "sentAt": 1, "attachments": [] } },
+    { "id": "notice:1", "runId": "r", "position": 1, "revision": 1, "source": 1, "turn": 0, "attempt": 0, "createdAt": 1, "updatedAt": 1, "content": { "kind": "notice", "notice": { "code": "unknownCode", "state": "done", "prominent": false } } },
+    { "id": "notice:1", "runId": "r", "position": 1, "revision": 1, "source": 1, "turn": 0, "attempt": 0, "createdAt": 1, "updatedAt": 1 }
+  ]
+}

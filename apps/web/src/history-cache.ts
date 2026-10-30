@@ -1,15 +1,17 @@
 import type { RunEvent } from '../../../packages/contracts/contracts'
-import type { LiveState } from '../../../packages/contracts/live'
+import type { LiveState, TimelineEntry } from '../../../packages/contracts/live'
 
 export interface ReadingPosition { top: number, follow: boolean }
 export interface CachedHistory {
   oldest?: number
   hasOlder?: boolean
-  version: 1
+  version: 2
   cursor: number
   history: string
   state: LiveState
   events: RunEvent[]
+  /** Timeline cards; cards are interpreted by the server, never derived from events. */
+  entries: TimelineEntry[]
   savedAt: number
   position?: ReadingPosition
 }
@@ -40,14 +42,15 @@ export function knownScope(session: string) {
 }
 
 function valid(value: CachedHistory): boolean {
-  return value?.version === 1 && typeof value.history === 'string' && value.history.startsWith('v1:')
-    && Number.isSafeInteger(value.cursor) && value.cursor >= 0 && Array.isArray(value.events)
+  return value?.version === 2 && typeof value.history === 'string' && value.history.startsWith('v2:')
+    && Number.isSafeInteger(value.cursor) && value.cursor >= 0 && Array.isArray(value.events) && Array.isArray(value.entries)
     && !!value.state && Array.isArray(value.state.artifacts)
     && (value.state.run === null || typeof value.state.run?.id === 'string')
     && (value.state.chat === null || (typeof value.state.chat?.id === 'string' && Array.isArray(value.state.chat.messages)))
     && (!value.position || (Number.isFinite(value.position.top) && value.position.top >= 0 && typeof value.position.follow === 'boolean'))
     && Number.isFinite(value.savedAt) && Date.now() - value.savedAt < TTL
     && value.events.every(e => !!e && typeof e.text === 'string' && Number.isSafeInteger(e.id) && e.id > 0 && e.id <= value.cursor && typeof e.type === 'string')
+    && value.entries.every(card => !!card && typeof card.id === 'string' && Number.isSafeInteger(card.position) && Number.isSafeInteger(card.revision) && typeof card.content?.kind === 'string')
 }
 
 // Saved conversations indexed by age and size for bounded eviction.

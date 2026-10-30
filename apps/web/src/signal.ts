@@ -1,6 +1,7 @@
 import type { Provider } from '../../../packages/contracts/accounts'
 import type { ChatView } from '../../../packages/contracts/chats'
 import type { RunEvent, RunListItem, Task } from '../../../packages/contracts/contracts'
+import type { TimelineEntry } from '../../../packages/contracts/live'
 import type { ActivityEntry } from './activity'
 import { isQuotaWait } from './chat-quota'
 import { waitTarget } from './chat-wait'
@@ -324,11 +325,14 @@ function resumesWork(event: RunEvent) {
  * The background tasks the agent waits for, when its latest announcement still holds: the agent
  * finished responding and its run stays open until those tasks notify it.
  */
-export function backgroundWait(events: RunEvent[]): { tasks: string[], since: number } | null {
+export function backgroundWait(events: RunEvent[], cards: TimelineEntry[] = []): { tasks: string[], since: number } | null {
   const index = events.findLastIndex(event => event.type === 'turn.waiting')
   if (index < 0 || events.slice(index + 1).some(resumesWork))
     return null
   const announcement = events[index]!
+  // A reply streaming after the announcement shows the agent at work again.
+  if (cards.some(card => card.content.kind === 'agentMessage' && card.position > announcement.id))
+    return null
   const tasks = Array.isArray(announcement.payload?.tasks) ? announcement.payload.tasks : []
   const descriptions = tasks.map((task) => {
     const description = task && typeof task === 'object' ? (task as Record<string, unknown>).description : ''
