@@ -1305,6 +1305,9 @@ abstract class NodePlacementCases {
             }
             assertTrue(submitted.isEmpty())
             capture("backend-migration-confirm")
+            // The migration renders before connect() finishes refreshing the workspace, and
+            // vm.perform ignores actions until then.
+            compose.waitUntil(10000) { !vm.state.value.busy }
             compose.onNodeWithText("Confirmer").performClick()
             compose.waitUntil(10000) { submitted.isNotEmpty() }
             assertEquals("native", submitted[0]["backend"]?.jsonPrimitive?.content)
