@@ -396,7 +396,7 @@ def main():
                 args.output.write_text(json.dumps({**saved, "lossCounters": counts}) + "\n")
 
 
-def android_crash_summary(logcat, exit_info):
+def android_crash_summary(logcat, exit_info, rtc_log=""):
     """Keep crash categories and stack metadata, never exception/abort messages."""
     groups = {}
     # The crash buffer was cleared before this test. Keep the beginning of its
@@ -406,11 +406,16 @@ def android_crash_summary(logcat, exit_info):
         if record:
             groups.setdefault(record[1], []).append(record[2])
     lines = []
+    target_pids = set()
     for group in groups.values():
         if any(re.search(r"(?:Process:|Cmdline:) build\.cairn\.app(?:,|$)|>>> build\.cairn\.app <<<", line) for line in group):
             lines.extend(group)
+            for line in group:
+                pid = re.match(r"\s*(?:Process: build\.cairn\.app, PID:|pid:)\s*(\d+)(?:,|$)", line)
+                if pid:
+                    target_pids.add(pid[1])
     result = {"targetProcessObserved": bool(lines), "exceptions": [], "signals": [],
-              "javaFrames": [], "nativeFrames": [], "exitReasons": []}
+              "javaFrames": [], "nativeFrames": [], "nativeAssertions": [], "exitReasons": []}
     exception_types = {
         "java.lang.OutOfMemoryError", "java.lang.IllegalStateException", "java.lang.IllegalArgumentException",
         "java.lang.NullPointerException", "java.lang.AssertionError", "java.lang.RuntimeException",
@@ -425,6 +430,10 @@ def android_crash_summary(logcat, exit_info):
                     "PeerConnection.java", "PeerConnectionFactory.java", "DataChannel.java", "Thread.java"}
     native_modules = {"libc.so", "libart.so", "libandroid_runtime.so", "libjingle_peerconnection_so.so",
                       "base.apk", "libc++_shared.so", "liblog.so", "libbase.so"}
+    native_sources = {"thread.cc", "checks.cc", "jni_helpers.cc", "jni_common.cc", "jvm.cc",
+                      "java_types.cc", "peer_connection.cc", "peer_connection_factory.cc",
+                      "peer_connection_factory_jni.cc", "data_channel.cc", "sctp_data_channel.cc",
+                      "data_channel_controller.cc"}
     signals = {"SIGABRT", "SIGSEGV", "SIGBUS", "SIGILL", "SIGFPE", "SIGTRAP", "SIGKILL", "SIGTERM"}
 
     def retain(key, value, limit=32):
@@ -454,6 +463,15 @@ def android_crash_summary(logcat, exit_info):
         native = re.match(r"\s*#\d+\s+pc\s+([0-9a-f]{1,16})\s+(?:\S*/)?([\w.!-]+)(?=\s|$)", line)
         if native:
             retain("nativeFrames", {"pc": int(native[1], 16), "library": native[2] if native[2] in native_modules else "other"})
+    # WebRTC's FatalLog writes source/line to main's rtc tag before abort().
+    # Its free-form check text and arguments must never reach the artifact.
+    for line in rtc_log[-65536:].splitlines():
+        record = re.fullmatch(r"E/rtc\s*\(\s*(\d+)\):\s?(.*)", line)
+        if not record or record[1] not in target_pids:
+            continue
+        fatal = re.search(r"# Fatal error in: (?:[^,\r\n]{0,1024}/)?([^/,\r\n]{1,128}), line (\d{1,10})(?!\d)", record[2])
+        if fatal:
+            retain("nativeAssertions", {"source": fatal[1] if fatal[1] in native_sources else "other", "line": int(fatal[2])}, 8)
     # ApplicationExitInfo labels and line layout vary by Android version. Its
     # numeric reason/status fields are stable; never retain free-form labels.
     reasons = ["UNKNOWN", "EXIT_SELF", "SIGNALED", "LOW_MEMORY", "CRASH", "CRASH_NATIVE",
@@ -472,17 +490,18 @@ def android_crash_summary(logcat, exit_info):
 
 
 def android_failure_evidence(adb, output):
-    values = []
+    values = {}
     errors = []
     for category, arguments in [
             ("crash-log", ("logcat", "-b", "crash", "-d", "-m", "256", "-v", "brief")),
+            ("rtc-log", ("logcat", "-b", "main", "-d", "-m", "256", "-v", "brief", "rtc:E", "*:S")),
             ("exit-info", ("shell", "dumpsys", "activity", "exit-info", "build.cairn.app"))]:
         try:
-            values.append(adb(*arguments, text=True, errors="replace", timeout=5).stdout)
+            values[category] = adb(*arguments, text=True, errors="replace", timeout=5).stdout
         except (OSError, subprocess.SubprocessError, UnicodeError):
-            values.append("")
+            values[category] = ""
             errors.append(category + "-unavailable")
-    evidence = android_crash_summary(*values)
+    evidence = android_crash_summary(values["crash-log"], values["exit-info"], values["rtc-log"])
     evidence["collectionErrors"] = errors
     try:
         output.with_suffix(".crash.json").write_text(json.dumps(evidence) + "\n")
@@ -494,7 +513,7 @@ def android_failure_evidence(adb, output):
 def android_instrumentation(adb, scenario, output):
     try:
         # This dedicated test emulator must not attribute a previous run's crash.
-        adb("logcat", "-b", "crash", "-c", timeout=5)
+        adb("logcat", "-b", "crash", "-b", "main", "-c", timeout=5)
         result = adb("shell", "am", "instrument", "-w", "-e", "class", "build.cairn.app.data.DirectTransportDeviceTest",
                      "-e", "cairnDirectScenario", scenario, "build.cairn.app.test/androidx.test.runner.AndroidJUnitRunner", text=True, timeout=360)
     except (OSError, subprocess.SubprocessError, UnicodeError):
