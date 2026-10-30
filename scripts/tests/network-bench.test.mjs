@@ -15,15 +15,24 @@ E/AndroidRuntime(123):     at org.webrtc.PeerConnection.dispose(PeerConnection.j
 F/DEBUG(321): Cmdline: build.cairn.app
 F/DEBUG(321): signal 6 (SIGABRT), code -1 (SI_QUEUE)
 F/DEBUG(321): Abort message: 'private-fixture-cookie SDP=secret'
-F/DEBUG(321): #00 pc 0000000000052450 /apex/com.android.runtime/lib64/bionic/libc.so (abort+152)
+F/DEBUG(321): #00 pc 0000000000052450  /apex/com.android.runtime/lib64/bionic/libc.so (abort+152)
+F/DEBUG(321): #01 pc 0000000000052451  /data/app/private-path/base.apk (offset 0x12000) (webrtc::Dispose()+42) (BuildId: abcd)
 '''
-exit_info = 'reason=4 (CRASH) status=0\\n description=private-fixture-cookie'
+exit_info = '''ApplicationExitInfo #0:
+ process=build.cairn.app reason=5 (APP CRASH(NATIVE)) subreason=0 (UNKNOWN) status=6
+ description=private-fixture-cookie
+ApplicationExitInfo #1:
+ process=build.cairn.app
+ reason=4 (APP CRASH(EXCEPTION))
+ subreason=0 (UNKNOWN)
+ status=0
+'''
 evidence = bench.android_crash_summary(raw, exit_info)
 assert evidence['exceptions'] == ['java.lang.IllegalStateException'], evidence
 assert evidence['javaFrames'] == ['org.webrtc.PeerConnection.dispose(PeerConnection.java:546)'], evidence
 assert evidence['signals'] == ['SIGABRT'], evidence
-assert evidence['nativeFrames'] == [{'pc': '0000000000052450', 'library': 'libc.so', 'symbol': 'abort+152'}], evidence
-assert evidence['exitReasons'] == [{'reason': 4, 'category': 'CRASH', 'status': 0}], evidence
+assert evidence['nativeFrames'] == [{'pc': '0000000000052450', 'library': 'libc.so', 'symbol': 'abort+152'}, {'pc': '0000000000052451', 'library': 'base.apk', 'symbol': 'webrtc::Dispose()+42'}], evidence
+assert evidence['exitReasons'] == [{'reason': 5, 'category': 'CRASH_NATIVE', 'status': 6}, {'reason': 4, 'category': 'CRASH', 'status': 0}], evidence
 encoded = json.dumps(evidence)
 assert 'private-fixture' not in encoded and 'secret' not in encoded and '/apex/' not in encoded, encoded
 bounded = bench.android_crash_summary(raw * 1000, exit_info * 1000)

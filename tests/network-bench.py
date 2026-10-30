@@ -424,11 +424,26 @@ def android_crash_summary(logcat, exit_info):
         frame = re.fullmatch(r"\s*at ([\w.$]+\((?:[\w.$]+\.(?:java|kt):\d+|Native Method|Unknown Source)\))", line)
         if frame:
             retain("javaFrames", frame[1])
-        native = re.match(r"\s*#\d+ pc ([0-9a-f]+) (?:\S*/)?([\w.!-]+)(?: \(([\w:$<>+., *&()-]{1,200})\))?", line)
+        native = re.match(r"\s*#\d+\s+pc\s+([0-9a-f]+)\s+(?:\S*/)?([\w.!-]+)(?=\s|$)(.*)", line)
         if native:
-            retain("nativeFrames", {"pc": native[1], "library": native[2], "symbol": native[3]})
-    for reason, category, status in re.findall(r"\breason=(\d+) \(([A-Z_]{1,40})\) status=(-?\d+)\b", exit_info[-16384:]):
-        retain("exitReasons", {"reason": int(reason), "category": category, "status": int(status)}, 8)
+            suffix = re.sub(r"^\s+\(offset 0x[0-9a-f]+\)", "", native[3])
+            suffix = re.sub(r" \(BuildId: [0-9a-f]+\)$", "", suffix)
+            symbol = re.fullmatch(r"\s+\(([\w:$<>+., *&()=-]{1,200})\)", suffix)
+            function = symbol[1] if symbol else None
+            retain("nativeFrames", {"pc": native[1], "library": native[2], "symbol": function})
+    # ApplicationExitInfo labels and line layout vary by Android version. Its
+    # numeric reason/status fields are stable; never retain free-form labels.
+    reasons = ["UNKNOWN", "EXIT_SELF", "SIGNALED", "LOW_MEMORY", "CRASH", "CRASH_NATIVE",
+               "ANR", "INITIALIZATION_FAILURE", "PERMISSION_CHANGE", "EXCESSIVE_RESOURCE_USAGE",
+               "USER_REQUESTED", "USER_STOPPED", "DEPENDENCY_DIED", "OTHER", "FREEZER",
+               "PACKAGE_STATE_CHANGE", "PACKAGE_UPDATED"]
+    for record in re.split(r"\bApplicationExitInfo\b", exit_info[:16384]):
+        reason = re.search(r"(?:^|\s)reason=(\d+)\b", record)
+        status = re.search(r"(?:^|\s)status=(-?\d+)\b", record)
+        if reason and status:
+            code = int(reason[1])
+            category = reasons[code] if code < len(reasons) else "UNRECOGNIZED"
+            retain("exitReasons", {"reason": code, "category": category, "status": int(status[1])}, 8)
     return result
 
 
