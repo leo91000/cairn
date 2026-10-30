@@ -1135,6 +1135,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admin_pause_during_recovery_does_not_spend_budget() {
+        use axum::{Router, extract::Request, response::IntoResponse, routing::any};
+        let started = std::time::Instant::now();
+        let app = Router::new().fallback(any(move |request: Request| async move {
+            if request.uri().path().ends_with("/administrative-pause") {
+                let paused_ms = started.elapsed().as_millis().min(500) as u64;
+                return axum::Json(json!({ "administrativePausedMs": paused_ms })).into_response();
+            }
+            if request.uri().path().ends_with("/wait") {
+                return std::future::pending::<axum::response::Response>().await;
+            }
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            axum::http::StatusCode::NO_CONTENT.into_response()
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (_root, service, _chat, run, _workspace) =
+            fixture_with_runner(format!("http://{address}")).await;
+        let saved = RunCheckpoint::from_value(json!({
+            "prepared": { "backend": "native", "isolated": true }, "runnerId": "old-attempt",
+            "completed": false, "remainingMs": 200,
+            "administrativePauseObservation": { "attempt": "old-attempt", "totalMs": 0 },
+        }))
+        .unwrap();
+        saved.store(&service.store, &run).await.unwrap();
+        service
+            .store
+            .change_run(
+                &run,
+                crate::runs::RunChanges {
+                    session_id: Some(Some("saved-session".into())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            recover(&service, &service.store.run(&run).await.unwrap())
+                .await
+                .unwrap()
+        );
+        let state = service.store.run_state(&run).await.unwrap();
+        assert_eq!(state.status, RunStatus::Queued);
+        service.shutdown.cancel();
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn failed_fences_spend_the_same_durable_deadline() {
         use axum::{Router, routing::any};
         use std::sync::atomic::{AtomicBool, Ordering};
