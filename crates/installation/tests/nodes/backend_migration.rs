@@ -158,9 +158,35 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
         "text": "keep this history",
         "createdAt": now(),
         "status": "delivered",
+        "provider": "codex",
+        "model": "retained-model",
+        "reasoning": "high",
+        "speed": "fast",
+        "mode": "steer",
+        "attachments": [{
+            "id": id(),
+            "chatId": chat,
+            "name": "retained-image.png",
+            "size": 42,
+            "mediaType": "image/png",
+            "kind": "image",
+            "width": 3,
+            "height": 4,
+            "digest": "retained-image-digest",
+            "createdAt": now(),
+        }, {
+            "id": id(),
+            "chatId": chat,
+            "name": "retained-notes.txt",
+            "size": 17,
+            "mediaType": "text/plain",
+            "kind": "file",
+            "digest": "retained-file-digest",
+            "createdAt": now(),
+        }],
     });
     let saved = message.clone();
-    owner
+    let message = owner
         .service
         .store
         .transaction(move |db| db.put_message(&saved))
@@ -203,7 +229,19 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     publication::capture(&owner.service, &owner.run(&run).await)
         .await
         .unwrap();
-    let sending = json!({ "id": id(), "chatId": chat, "text": "stop this input", "createdAt": now(), "status": "sending" });
+    let sending = json!({
+        "id": id(),
+        "chatId": chat,
+        "text": "stop this input",
+        "createdAt": now(),
+        "status": "sending",
+        "provider": "claude",
+        "model": "active-model",
+        "reasoning": "medium",
+        "speed": "standard",
+        "mode": "steer",
+        "attachments": message["attachments"],
+    });
     let queued = json!({
         "id": id(),
         "chatId": chat,
@@ -212,16 +250,19 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
         "status": "queued",
     });
     let (active_input, later_input) = (sending.clone(), queued.clone());
-    owner
+    let (sending, queued) = owner
         .service
         .store
         .transaction(move |db| {
-            db.put_message(&active_input)?;
-            db.put_message(&later_input)?;
-            Ok(())
+            Ok((
+                db.put_message(&active_input)?,
+                db.put_message(&later_input)?,
+            ))
         })
         .await
         .unwrap();
+    // Compare complete stored records, including defaults and generated revisions.
+    let mut expected_messages = vec![message, sending, queued];
     for (backend, destination) in [("native", &native_node), ("firecracker", &vm_node)] {
         let source_node = if backend == "native" {
             &vm_node
@@ -320,9 +361,15 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
             .read(move |db| db.messages(&key))
             .await
             .unwrap();
-        let mut cancelled = sending.clone();
-        cancelled["status"] = "cancelled".into();
-        assert_eq!(messages, vec![message.clone(), cancelled, queued.clone()]);
+        if expected_messages[1]["status"] == "sending" {
+            // Only cancellation rewrites a message, so only that revision changes.
+            let revision = messages[1]["revision"].as_str().unwrap();
+            assert!(!revision.is_empty());
+            assert_ne!(messages[1]["revision"], expected_messages[1]["revision"]);
+            expected_messages[1]["status"] = "cancelled".into();
+            expected_messages[1]["revision"] = messages[1]["revision"].clone();
+        }
+        assert_eq!(messages, expected_messages);
         assert!(
             disk_grants::authorize(&owner.service, credential)
                 .await

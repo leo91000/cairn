@@ -13,6 +13,7 @@ use crate::{
     store::Db,
     validation::{text, uuid},
 };
+use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
@@ -161,7 +162,11 @@ impl Reads {
 }
 
 fn summary_preview(db: &Db<'_>, run: &str) -> Result<Value> {
-    let summary = db.run(run)?.map(|run| preview(text(&run, "summary")));
+    let summary =
+        db.0.prepare_cached("SELECT summary FROM runs WHERE id=?")?
+            .query_row([run], |row| row.get::<_, String>(0))
+            .optional()?
+            .map(|summary| preview(&summary));
     Ok(summary.filter(|preview| !preview.is_empty()).into())
 }
 
@@ -320,6 +325,58 @@ pub(crate) async fn routes(s: &Service, input: &Input) -> Option<Result<Value>> 
 #[cfg(test)]
 mod tests {
     use super::preview;
+
+    #[tokio::test]
+    async fn unread_previews_do_not_read_execution_snapshots() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store.transaction(|db| {
+            let state = serde_json::from_value(serde_json::json!({
+                "id": "run", "taskId": "task", "status": "succeeded", "summary": "## Finished\n\nSaved **answer**.",
+            }))?;
+            db.admit_run(&state, None, &serde_json::json!({}), None)?;
+            Ok(())
+        }).await.unwrap();
+        let connection = rusqlite::Connection::open(root.path().join("manager.db")).unwrap();
+        let columns = connection
+            .prepare("PRAGMA table_xinfo(runs)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .map(|name| {
+                let name = name.unwrap();
+                if name == "snapshot" {
+                    "snapshot_probe(snapshot) AS snapshot".to_owned()
+                } else {
+                    format!("\"{name}\"")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        connection.execute_batch(&format!("ALTER TABLE runs RENAME TO retained_runs; CREATE VIEW runs AS SELECT {columns} FROM retained_runs;")).unwrap();
+        connection
+            .create_scalar_function(
+                "snapshot_probe",
+                1,
+                rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+                |_| -> rusqlite::Result<String> {
+                    Err(rusqlite::Error::UserFunctionError(Box::new(
+                        std::io::Error::other("snapshot was read"),
+                    )))
+                },
+            )
+            .unwrap();
+        let db = crate::store::Db(&connection);
+        assert_eq!(
+            super::summary_preview(&db, "run").unwrap(),
+            "Finished. Saved answer."
+        );
+        assert!(super::summary_preview(&db, "missing").unwrap().is_null());
+        assert!(
+            db.run("run").is_err(),
+            "the full run read must exercise the probe"
+        );
+    }
 
     #[test]
     fn previews_read_as_one_plain_line() {
