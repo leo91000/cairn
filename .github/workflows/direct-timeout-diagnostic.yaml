@@ -7,43 +7,15 @@ permissions:
   contents: read
   actions: read
 jobs:
-  android-direct-build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: ./.github/actions/setup-pnpm
-        with:
-          install: false
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: '21'
-      - uses: android-actions/setup-android@v3
-        with:
-          packages: platform-tools
-      - uses: gradle/actions/setup-gradle@v5
-      - run: sdkmanager 'platforms;android-37.0' 'build-tools;36.0.0'
-      - name: Build the native client and instrumented tests
-        working-directory: apps/android
-        run: ./gradlew assembleDebug assembleDebugAndroidTest --no-daemon --stacktrace
-      - uses: actions/upload-artifact@v7.0.1
-        with:
-          name: android-direct-apks
-          path: |
-            apps/android/app/build/outputs/apk/debug/app-debug.apk
-            apps/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
-          if-no-files-found: error
-          retention-days: 1
   android-direct:
-    name: Android direct-relay device bench (${{ matrix.scenario }})
-    needs: android-direct-build
+    name: Android direct-relay diagnostic (${{ matrix.repetition }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         scenario: [same-lan]
+        repetition: [1, 2, 3]
     services:
       postgres:
         image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
@@ -83,6 +55,8 @@ jobs:
         with:
           name: android-direct-apks
           path: apps/android/app/build/outputs/apk/
+          run-id: 40981568183
+          github-token: ${{ github.token }}
       - uses: android-actions/setup-android@v3
         with:
           packages: platform-tools
@@ -104,13 +78,10 @@ jobs:
           target: google_apis
           profile: pixel_6
           disable-animations: true
-          script: |
-            for repetition in 1 2 3; do
-              python3 tests/network-bench.py "$ANDROID_SCENARIO" --android --output "test-results/android-direct/$ANDROID_SCENARIO-$repetition.json" || exit 1
-            done
+          script: python3 tests/network-bench.py "$ANDROID_SCENARIO" --android --output "test-results/android-direct/$ANDROID_SCENARIO.json"
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
-          name: android-direct-device-evidence-${{ matrix.scenario }}
+          name: android-direct-device-evidence-${{ matrix.scenario }}-${{ matrix.repetition }}
           path: test-results/android-direct/
           retention-days: 14
