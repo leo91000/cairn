@@ -396,7 +396,7 @@ def main():
                 args.output.write_text(json.dumps({**saved, "lossCounters": counts}) + "\n")
 
 
-def android_crash_summary(logcat, exit_info, rtc_log=""):
+def android_crash_summary(logcat, exit_info, native_log=""):
     """Keep crash categories and stack metadata, never exception/abort messages."""
     groups = {}
     # The crash buffer was cleared before this test. Keep the beginning of its
@@ -407,15 +407,21 @@ def android_crash_summary(logcat, exit_info, rtc_log=""):
             groups.setdefault(record[1], []).append(record[2])
     lines = []
     target_pids = set()
-    for group in groups.values():
+    selected = set()
+    for logger_pid, group in groups.items():
         if any(re.search(r"(?:Process:|Cmdline:) build\.cairn\.app(?:,|$)|>>> build\.cairn\.app <<<", line) for line in group):
             lines.extend(group)
+            selected.add(logger_pid)
             for line in group:
                 pid = re.match(r"\s*(?:Process: build\.cairn\.app, PID:|pid:)\s*(\d+)(?:,|$)", line)
                 if pid:
                     target_pids.add(pid[1])
+    for logger_pid, group in groups.items():
+        if logger_pid in target_pids and logger_pid not in selected:
+            lines.extend(group)
     result = {"targetProcessObserved": bool(lines), "exceptions": [], "signals": [],
-              "javaFrames": [], "nativeFrames": [], "nativeAssertions": [], "exitReasons": []}
+              "javaFrames": [], "nativeFrames": [], "nativeAssertions": [],
+              "abortCategories": [], "unexpectedOpcodes": [], "exitReasons": []}
     exception_types = {
         "java.lang.OutOfMemoryError", "java.lang.IllegalStateException", "java.lang.IllegalArgumentException",
         "java.lang.NullPointerException", "java.lang.AssertionError", "java.lang.RuntimeException",
@@ -440,8 +446,18 @@ def android_crash_summary(logcat, exit_info, rtc_log=""):
         if value not in result[key] and len(result[key]) < limit:
             result[key].append(value)
 
+    def abort_details(line):
+        if "Unexpected instruction:" in line:
+            retain("abortCategories", "ART_UNEXPECTED_INSTRUCTION", 4)
+            opcode = re.search(r"Unexpected instruction:\s+unused-([0-9a-fA-F]{2})\b", line)
+            if opcode:
+                retain("unexpectedOpcodes", int(opcode[1], 16), 8)
+        if "JNI DETECTED ERROR IN APPLICATION:" in line:
+            retain("abortCategories", "JNI_ERROR", 4)
+
     root_type = False
     for line in lines:
+        abort_details(line)
         value = line.strip()
         if re.match(r"Process: build\.cairn\.app(?:,|$)", value):
             root_type = True
@@ -462,14 +478,22 @@ def android_crash_summary(logcat, exit_info, rtc_log=""):
             retain("javaFrames", {"source": frame[1] if frame[1] in java_sources else "other", "line": int(frame[2])})
         native = re.match(r"\s*#\d+\s+pc\s+([0-9a-f]{1,16})\s+(?:\S*/)?([\w.!-]+)(?=\s|$)", line)
         if native:
-            retain("nativeFrames", {"pc": int(native[1], 16), "library": native[2] if native[2] in native_modules else "other"})
+            frame = {"pc": int(native[1], 16), "library": native[2] if native[2] in native_modules else "other"}
+            build_id = re.search(r"\(BuildId: ([0-9a-fA-F]{16,64})\)(?:\s|$)", line)
+            if build_id and native[2] in native_modules:
+                frame["buildId"] = build_id[1].lower()
+            retain("nativeFrames", frame)
     # WebRTC's FatalLog writes source/line to main's rtc tag before abort().
     # Its free-form check text and arguments must never reach the artifact.
-    for line in rtc_log[-65536:].splitlines():
-        record = re.fullmatch(r"E/rtc\s*\(\s*(\d+)\):\s?(.*)", line)
-        if not record or record[1] not in target_pids:
+    for line in native_log[-65536:].splitlines():
+        record = re.fullmatch(r"([EF])/([^\r\n(]+)\(\s*(\d+)\):\s?(.*)", line)
+        if not record or record[3] not in target_pids:
             continue
-        fatal = re.search(r"# Fatal error in: (?:[^,\r\n]{0,1024}/)?([^/,\r\n]{1,128}), line (\d{1,10})(?!\d)", record[2])
+        if record[1] == "F":
+            abort_details(record[4])
+        if record[1] != "E" or record[2].strip() != "rtc":
+            continue
+        fatal = re.search(r"# Fatal error in: (?:[^,\r\n]{0,1024}/)?([^/,\r\n]{1,128}), line (\d{1,10})(?!\d)", record[4])
         if fatal:
             retain("nativeAssertions", {"source": fatal[1] if fatal[1] in native_sources else "other", "line": int(fatal[2])}, 8)
     # ApplicationExitInfo labels and line layout vary by Android version. Its
@@ -494,14 +518,14 @@ def android_failure_evidence(adb, output):
     errors = []
     for category, arguments in [
             ("crash-log", ("logcat", "-b", "crash", "-d", "-m", "256", "-v", "brief")),
-            ("rtc-log", ("logcat", "-b", "main", "-d", "-m", "256", "-v", "brief", "rtc:E", "*:S")),
+            ("native-log", ("logcat", "-b", "main", "-d", "-m", "256", "-v", "brief", "rtc:E", "*:F")),
             ("exit-info", ("shell", "dumpsys", "activity", "exit-info", "build.cairn.app"))]:
         try:
             values[category] = adb(*arguments, text=True, errors="replace", timeout=5).stdout
         except (OSError, subprocess.SubprocessError, UnicodeError):
             values[category] = ""
             errors.append(category + "-unavailable")
-    evidence = android_crash_summary(values["crash-log"], values["exit-info"], values["rtc-log"])
+    evidence = android_crash_summary(values["crash-log"], values["exit-info"], values["native-log"])
     evidence["collectionErrors"] = errors
     try:
         output.with_suffix(".crash.json").write_text(json.dumps(evidence) + "\n")

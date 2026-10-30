@@ -74,7 +74,7 @@ def adb(*args, **options):
         assert '-m' in args and '-t' not in args, args
         return SimpleNamespace(stdout='E/AndroidRuntime(1): Process: build.cairn.app, PID: 1\\nE/AndroidRuntime(1): java.lang.IllegalStateException: secret')
     if args[:3] == ('logcat', '-b', 'main'):
-        assert args == ('logcat', '-b', 'main', '-d', '-m', '256', '-v', 'brief', 'rtc:E', '*:S'), args
+        assert args == ('logcat', '-b', 'main', '-d', '-m', '256', '-v', 'brief', 'rtc:E', '*:F'), args
         assert options.get('timeout') == 5, options
         return SimpleNamespace(stdout='E/rtc(1): # Fatal error in: ../../rtc_base/thread.cc, line 503')
     if 'exit-info' in args:
@@ -104,7 +104,7 @@ with tempfile.TemporaryDirectory() as directory:
     else:
         raise AssertionError('ADB failure must propagate')
     evidence = json.loads(output.with_suffix('.crash.json').read_text())
-    assert evidence['collectionErrors'] == ['crash-log-unavailable', 'rtc-log-unavailable', 'exit-info-unavailable'], evidence
+    assert evidence['collectionErrors'] == ['crash-log-unavailable', 'native-log-unavailable', 'exit-info-unavailable'], evidence
 `], { stdio: 'pipe' })
 })
 
@@ -152,6 +152,36 @@ assert 'private' not in json.dumps(evidence) and 'Check failed' not in json.dump
 assert bench.android_crash_summary('', '', rtc)['nativeAssertions'] == []
 assert bench.android_crash_summary('F/DEBUG(321): Cmdline: build.cairn.app', '', rtc)['nativeAssertions'] == []
 assert len(bench.android_crash_summary(crash, '', ''.join('E/rtc(123): # Fatal error in: thread.cc, line %d\\n' % value for value in range(100)))['nativeAssertions']) == 8
+`], { stdio: 'pipe' })
+})
+
+it('android ART abort evidence retains only fixed categories, numeric opcodes and bounded build IDs', () => {
+  execFileSync('python3', ['-B', '-c', `
+import importlib.util
+import json
+spec = importlib.util.spec_from_file_location("network_bench", "tests/network-bench.py")
+bench = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(bench)
+crash = '''F/DEBUG(321): Cmdline: build.cairn.app
+F/DEBUG(321): pid: 123, tid: 124, name: private-thread >>> build.cairn.app <<<
+F/DEBUG(321): Abort message: 'Unexpected instruction: unused-73 private-fixture-cookie'
+F/DEBUG(321): #00 pc 00000000005fd29a /apex/com.android.art/lib64/libart.so (private-symbol) (BuildId: 108A321DC93C20580E74B855C407E975)
+F/DEBUG(321): #01 pc 00000000005fd29b /apex/com.android.art/lib64/libart.so (BuildId: private-fixture-cookie)
+F/DEBUG(321): #02 pc 00000000005fd29c /private/private-module.so (BuildId: aaaaaaaaaaaaaaaa)
+F/art(123): interpreter_common.cc:201] Unexpected instruction: unused-79
+F/art(999): Unexpected instruction: unused-ff
+'''
+main = '''F/build.cairn.app(123): interpreter_common.cc:201] Unexpected instruction: unused-7a private-fixture-cookie
+F/art(123): JNI DETECTED ERROR IN APPLICATION: private-fixture-cookie
+F/art(999): Unexpected instruction: unused-ff
+E/private-tag(123): Unexpected instruction: unused-ff
+'''
+evidence = bench.android_crash_summary(crash, '', main)
+assert evidence['abortCategories'] == ['ART_UNEXPECTED_INSTRUCTION', 'JNI_ERROR'], evidence
+assert evidence['unexpectedOpcodes'] == [0x73, 0x79, 0x7a], evidence
+assert evidence['nativeFrames'] == [{'pc': 0x5fd29a, 'library': 'libart.so', 'buildId': '108a321dc93c20580e74b855c407e975'}, {'pc': 0x5fd29b, 'library': 'libart.so'}, {'pc': 0x5fd29c, 'library': 'other'}], evidence
+assert 'private' not in json.dumps(evidence), evidence
+assert bench.android_crash_summary('', '', main)['abortCategories'] == []
 `], { stdio: 'pipe' })
 })
 
