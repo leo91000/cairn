@@ -23,7 +23,9 @@ async fn call(
     path: &str,
     body: Value,
 ) -> (StatusCode, Value) {
-    let app = relay_fixture::router(s.clone()).await.unwrap();
+    // The trusted identity reaches the real HTTP boundary without the fixture relay's
+    // membership refresh. Direct connections must authorize even if refreshes were lost.
+    let app = cairn_installation::http::router(s.clone()).await.unwrap();
     let identity = match account {
         Some(account) => InstallationIdentity::trusted(InstallationRole::Member, account),
         None => InstallationIdentity::trusted(InstallationRole::Owner, "fixture-owner"),
@@ -473,6 +475,10 @@ async fn an_entry_from_an_ended_membership_is_dropped_before_it_allows_work() {
     let reviewer = agent(&s, "Reviewer").await;
     relay_fixture::allow_member(&s, MEMBER, &reviewer).await;
 
+    // Warm the membership cache with an admitted request from the original membership.
+    let (status, chat) = member(&s, "POST", "/api/chats", json!({ "agentId": reviewer })).await;
+    assert_eq!(status, StatusCode::OK, "{chat}");
+
     // Removed and invited again while the installation missed both reconciliations.
     relay_fixture::remove_member(&s, MEMBER).await;
     relay_fixture::add_member(&s, MEMBER, "membership-2").await;
@@ -669,6 +675,71 @@ async fn rollout_waits_for_membership_evidence_and_never_overrides_owner_decisio
     );
     s.synchronize_task_authors().await.unwrap();
     assert_eq!(usable(&s).await, json!([]));
+}
+
+#[tokio::test]
+async fn a_direct_write_retries_pending_rollout_evidence_before_denial() {
+    let root = tempfile::tempdir().unwrap();
+    let existing = {
+        let s = service(root.path()).await;
+        for account in [MEMBER, "new-member", "reinvited-member", "boundary-member"] {
+            relay_fixture::add_member_at(&s, account, &format!("membership-{account}"), None).await;
+        }
+        agent(&s, "Existing").await
+    };
+    let db = rusqlite::Connection::open(root.path().join("data/manager.db")).unwrap();
+    db.execute_batch("DROP TABLE agent_account_access; PRAGMA user_version=18;")
+        .unwrap();
+    drop(db);
+
+    let s = Service::new(common::config(root.path())).await.unwrap();
+    relay_fixture::claimed(&s).await.unwrap();
+    let boundary = s.store.kv("agent-access-rollout").await.unwrap().unwrap();
+    let cutoff = boundary["upgradedAt"].as_i64().unwrap();
+    let start = json!({ "agentId": existing });
+    assert_eq!(
+        member(&s, "POST", "/api/chats", start.clone()).await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        s.store.kv("agent-access-rollout").await.unwrap(),
+        Some(boundary)
+    );
+
+    // An owner decision made while evidence is missing still excludes that agent.
+    let excluded = format!("/api/agents/{MAIN_AGENT_ID}/accounts/{MEMBER}");
+    assert_eq!(
+        owner(&s, "DELETE", &excluded, Value::Null).await.0,
+        StatusCode::OK
+    );
+
+    // A newer Beacon now supplies timestamps. No relay refresh or list request happens
+    // before the member's next direct write; only the original membership qualifies.
+    relay_fixture::add_member_at(&s, MEMBER, &format!("membership-{MEMBER}"), Some(0)).await;
+    relay_fixture::add_member_at(&s, "new-member", "membership-new", Some(cutoff + 1)).await;
+    relay_fixture::remove_member(&s, "reinvited-member").await;
+    relay_fixture::add_member_at(&s, "reinvited-member", "membership-again", Some(cutoff + 1))
+        .await;
+    relay_fixture::add_member_at(&s, "boundary-member", "membership-boundary", Some(cutoff)).await;
+    let (status, chat) = member(&s, "POST", "/api/chats", start.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{chat}");
+    assert!(s.store.kv("agent-access-rollout").await.unwrap().is_none());
+
+    for account in ["new-member", "reinvited-member", "boundary-member"] {
+        let (status, denied) = call(&s, Some(account), "POST", "/api/chats", start.clone()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{account}: {denied}");
+    }
+    assert_eq!(
+        member(
+            &s,
+            "POST",
+            "/api/chats",
+            json!({ "agentId": MAIN_AGENT_ID })
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
 }
 
 #[tokio::test]

@@ -183,12 +183,20 @@ pub(crate) fn chat_members(db: &Db<'_>, chat: &Conversation) -> Result<Vec<Strin
     Ok(members)
 }
 
-/// Allowed requests report whether a member's entry allowed them.
-fn require(allowed: bool, member: bool) -> Result<bool> {
-    if allowed {
-        Ok(member)
-    } else {
-        Err(Error::forbidden(DENIED))
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Admission {
+    Unrestricted,
+    Granted,
+    Denied,
+}
+
+/// Keep a missing entry distinct from routes that do not direct an agent: pending
+/// rollout evidence can still turn a denial into a membership-bound grant.
+fn require(allowed: bool, member: bool) -> Admission {
+    match (allowed, member) {
+        (false, _) => Admission::Denied,
+        (true, true) => Admission::Granted,
+        (true, false) => Admission::Unrestricted,
     }
 }
 
@@ -196,37 +204,37 @@ fn member(identity: &InstallationIdentity) -> bool {
     identity.role == InstallationRole::Member && identity.mcp_scopes.is_none()
 }
 
-fn require_agent(db: &Db<'_>, identity: &InstallationIdentity, agent: &str) -> Result<bool> {
-    require(uses_agent(db, identity, agent)?, member(identity))
+fn require_agent(db: &Db<'_>, identity: &InstallationIdentity, agent: &str) -> Result<Admission> {
+    Ok(require(uses_agent(db, identity, agent)?, member(identity)))
 }
 
-fn require_chat(db: &Db<'_>, identity: &InstallationIdentity, id: &str) -> Result<bool> {
+fn require_chat(db: &Db<'_>, identity: &InstallationIdentity, id: &str) -> Result<Admission> {
     let chat = required(db.conversation(id)?, "Chat not found")?;
-    require(uses_chat(db, identity, &chat)?, member(identity))
+    Ok(require(uses_chat(db, identity, &chat)?, member(identity)))
 }
 
 /// A conversation's run follows its conversation; a task run follows its agent.
-fn require_run(db: &Db<'_>, identity: &InstallationIdentity, id: &str) -> Result<bool> {
+fn require_run(db: &Db<'_>, identity: &InstallationIdentity, id: &str) -> Result<Admission> {
     if let Some(chat) = db.conversation_for_run(id)? {
-        return require(uses_chat(db, identity, &chat)?, member(identity));
+        return Ok(require(uses_chat(db, identity, &chat)?, member(identity)));
     }
     let run = required(db.run(id)?, "Run not found")?;
     // An earlier run of a conversation still follows the conversation.
     if let Some(chat) = db.conversation(text(&run, "taskId"))? {
-        return require(uses_chat(db, identity, &chat)?, member(identity));
+        return Ok(require(uses_chat(db, identity, &chat)?, member(identity)));
     }
     require_agent(db, identity, crate::nodes::run_agent(&run))
 }
 
-fn require_task(db: &Db<'_>, identity: &InstallationIdentity, id: &str) -> Result<bool> {
+fn require_task(db: &Db<'_>, identity: &InstallationIdentity, id: &str) -> Result<Admission> {
     let task = required(db.mission(id)?, "Mission not found")?;
     require_agent(db, identity, &task.settings.agent_id.to_string())
 }
 
 /// Read-only admission preflight for people, before dispatch, like native authority.
 /// Reductions (pause, archive, stop, cancel) and reads stay open to every member.
-/// Access allowed by a member's entry relies on a recently verified membership, so an
-/// entry from an ended membership never serves a re-invited member for long. As with
+/// Access allowed by a member's entry relies on a membership check started during this
+/// request, so a cached entry from an ended membership cannot serve a re-invitation. As with
 /// native authority, a change committed between this check and the command can still let
 /// that one request through.
 pub(crate) async fn authorize_request(s: &Service, input: &crate::http::Input) -> Result<()> {
@@ -260,32 +268,42 @@ pub(crate) async fn authorize_upload(
     .await
 }
 
-/// Runs a check that reports whether a member's entry allowed the request, first
-/// confirming the membership again when the last check is too old.
+/// Reconcile before trusting a member's entry, or denying one while rollout evidence is
+/// pending. Cached checks cannot distinguish a re-invitation of the same account.
 async fn authorize<F>(s: &Service, identity: InstallationIdentity, check: F) -> Result<()>
 where
-    F: Fn(&Db<'_>, &InstallationIdentity) -> Result<bool> + Send + Sync + 'static,
+    F: Fn(&Db<'_>, &InstallationIdentity) -> Result<Admission> + Send + Sync + 'static,
 {
     if identity.role == InstallationRole::Owner || identity.mcp_scopes.is_some() {
         return Ok(());
     }
+    let started = std::time::Instant::now();
     let check = Arc::new(check);
     let run = || {
         let (identity, check) = (identity.clone(), check.clone());
-        s.store.read(move |db| check(db, &identity))
+        s.store.read(move |db| {
+            let admission = check(db, &identity)?;
+            let pending_rollout = admission == Admission::Denied && db.kv(ROLLOUT)?.is_some();
+            Ok((admission, pending_rollout))
+        })
     };
-    if !run().await? || s.missions.membership_verified_within(MEMBERSHIP_AGE) {
-        return Ok(());
+    match run().await? {
+        (Admission::Unrestricted, _) => return Ok(()),
+        (Admission::Denied, false) => return Err(Error::forbidden(DENIED)),
+        (Admission::Granted, _) | (Admission::Denied, true) => {}
     }
 
     // A failed check fails closed: these requests direct an agent.
-    if let Err(error) = s.missions.verify_membership(s, MEMBERSHIP_AGE).await {
+    if let Err(error) = s.missions.verify_membership_since(s, started).await {
         tracing::warn!(status = error.status, "Agent access could not be confirmed");
         return Err(Error::unavailable(
             "Your access to this agent could not be confirmed right now. Try again in a moment.",
         ));
     }
-    run().await.map(|_| ())
+    match run().await?.0 {
+        Admission::Denied => Err(Error::forbidden(DENIED)),
+        Admission::Unrestricted | Admission::Granted => Ok(()),
+    }
 }
 
 /// The agents a person may use now. A member's list first confirms their membership when
@@ -312,18 +330,18 @@ pub(crate) async fn confirm_memberships(s: &Service) {
     }
 }
 
-/// How long a membership check vouches for a member's entries.
+/// How long a membership check vouches for read-only lists of member entries.
 const MEMBERSHIP_AGE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Whether the request needs access to an agent, and then that the identity holds it.
-/// Returns true when a member's entry allowed it.
+/// Distinguishes an allowed entry, a missing entry, and an unrestricted route.
 fn gate(
     db: &Db<'_>,
     identity: &InstallationIdentity,
     method: &str,
     path: &str,
     body: &Value,
-) -> Result<bool> {
+) -> Result<Admission> {
     let parts = path
         .trim_start_matches("/api/")
         .split('/')
@@ -364,26 +382,26 @@ fn gate(
         // A missing agent is left to the command's own validation.
         ("POST", ["tasks"]) => match body["settings"]["agentId"].as_str() {
             Some(agent) => require_agent(db, identity, agent),
-            None => Ok(false),
+            None => Ok(Admission::Unrestricted),
         },
         // Members edit only their own tasks; like a rule, a suspended task can move to an
         // agent its author may use. Pausing or archiving it stays open to everyone.
         ("PUT", ["tasks", id]) => match body["settings"]["agentId"].as_str() {
-            Some(_) if reduces_task(db, id, &body["settings"])? => Ok(false),
+            Some(_) if reduces_task(db, id, &body["settings"])? => Ok(Admission::Unrestricted),
             Some(agent) => require_agent(db, identity, agent),
-            None => Ok(false),
+            None => Ok(Admission::Unrestricted),
         },
         ("POST", ["tasks", id, "state"]) => {
             let task = required(db.mission(id)?, "Mission not found")?;
             let reduces =
                 body["enabled"] == false && (body["archived"] == true || !task.settings.archived);
             if reduces {
-                return Ok(false);
+                return Ok(Admission::Unrestricted);
             }
             require_agent(db, identity, &task.settings.agent_id.to_string())
         }
         ("POST", ["tasks", id, "run"]) => require_task(db, identity, id),
-        _ => Ok(false),
+        _ => Ok(Admission::Unrestricted),
     }
 }
 
@@ -825,7 +843,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_stale_membership_check_is_repeated_and_fails_closed_without_the_beacon() {
+    async fn directing_writes_need_fresh_membership_even_when_a_cached_check_succeeded() {
         let root = tempfile::tempdir().unwrap();
         let s = service(&root).await;
         std::fs::create_dir_all(&s.config.home).unwrap();
@@ -847,11 +865,15 @@ mod tests {
         relay_fixture::authority_unavailable(&s, false).await;
         direct(&s, start.clone()).await.unwrap();
 
-        // A recent check vouches for the entry; an expired one drops an ended membership.
+        // Even a warm cache cannot authorize a new write while the Beacon is down.
+        relay_fixture::authority_unavailable(&s, true).await;
+        assert_eq!(direct(&s, start.clone()).await.unwrap_err().0, 503);
+        relay_fixture::authority_unavailable(&s, false).await;
+
+        // Neither removal nor re-invitation refreshed the warm cache. The old entry
+        // still cannot authorize the new membership's first write.
         relay_fixture::remove_member(&s, MEMBER).await;
         relay_fixture::add_member(&s, MEMBER, "membership-2").await;
-        direct(&s, start.clone()).await.unwrap();
-        s.missions.expire_membership_check();
         assert_eq!(direct(&s, start).await.unwrap_err().0, 403);
     }
 
@@ -1008,5 +1030,64 @@ mod tests {
             .unwrap()
             .unwrap();
         drop(authors);
+    }
+
+    #[tokio::test]
+    async fn fresh_requests_share_a_check_started_after_their_preflight() {
+        let root = tempfile::tempdir().unwrap();
+        let s = service(&root).await;
+        relay_fixture::claimed(&s).await.unwrap();
+        let authors = s.missions.authors.lock().await;
+        let started = std::time::Instant::now();
+        let waiting = {
+            let s = s.clone();
+            tokio::spawn(async move { s.missions.verify_membership_since(&s, started).await })
+        };
+
+        s.missions.observe(&s).await.unwrap();
+        // A qualifying concurrent check suffices while its holder still owns the lock.
+        tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
+            .await
+            .expect("the request must share a check begun after its preflight")
+            .unwrap()
+            .unwrap();
+        drop(authors);
+    }
+
+    #[tokio::test]
+    async fn an_earlier_in_flight_check_keeps_fresh_requests_waiting_for_the_lock() {
+        use std::{future::Future, task::Poll};
+
+        let root = tempfile::tempdir().unwrap();
+        let s = service(&root).await;
+        relay_fixture::claimed(&s).await.unwrap();
+        let authors = s.missions.authors.lock().await;
+        let mut earlier = Box::pin(s.missions.observe(&s));
+        // Poll once to begin the real observation before this request's boundary.
+        std::future::poll_fn(|cx| {
+            assert!(earlier.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        let started = std::time::Instant::now();
+        let mut waiting = Box::pin(s.missions.verify_membership_since(&s, started));
+        std::future::poll_fn(|cx| {
+            assert!(waiting.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+
+        earlier.await.unwrap();
+        std::future::poll_fn(|cx| {
+            assert!(waiting.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        // The earlier completion neither admits the request nor causes a spurious 503.
+        drop(authors);
+        tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
+            .await
+            .expect("the request must check once the lock is available")
+            .unwrap();
     }
 }

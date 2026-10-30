@@ -768,13 +768,17 @@ installation reconciles before admitting scheduled work and on reconnection.
 The same reconciliation drops the account access to agents of every ended
 membership, so a new invitation starts without any agent. Accepting an invitation
 also requests it, and before a member's access entry lets them direct an agent, the
-installation repeats it when the last check is older than 30 seconds; if the
-Beacon cannot answer, the request fails rather than trusting the entry. A member's
-list of usable agents repeats it the same way, but still answers when the Beacon
-cannot. If both reconciliation requests of a removal and new invitation are lost,
-the earlier membership's entries can therefore still allow work for up to 30
-seconds after the last check, and question notifications computed meanwhile can
-include that member. A member's scheduled task on an agent they cannot use skips its
+installation confirms memberships with a check started at or after that request's
+preflight. Concurrent requests may share a check that meets that boundary; an
+earlier cached check cannot admit a new directing write. If the Beacon cannot
+answer, directing writes return 503 even when a check within the last 30 seconds
+succeeded. Pending rollout evidence is also retried before denying a directing
+write, so an older Beacon's missing membership timestamps do not require a list
+request to recover once usable evidence becomes available. A member's list of
+usable agents refreshes when the last check is older than 30 seconds, but still
+answers when the Beacon cannot. Question notifications computed before membership
+reconciliation can still include an ended membership. A member's scheduled task
+on an agent they cannot use skips its
 occurrences, with a wait reason, until access returns. No account session or member
 list is persisted on the installation for access control; it keeps only, per agent,
 the accounts the owner allowed with the membership access identifier they were

@@ -26,6 +26,12 @@ pub struct Missions {
     observed: tokio::sync::Notify,
 }
 
+#[derive(Clone, Copy)]
+enum MembershipFreshness {
+    Within(std::time::Duration),
+    Since(std::time::Instant),
+}
+
 pub(crate) enum Actor {
     Human(InstallationIdentity),
     Public,
@@ -297,64 +303,83 @@ impl Missions {
             .await
     }
 
-    /// The next request a member's access entry allows confirms the memberships first.
+    /// The next membership-dependent read confirms the memberships first.
     #[cfg(test)]
     pub(crate) fn expire_membership_check(&self) {
         *self.verified.lock().unwrap() = None;
     }
 
     pub(crate) fn membership_verified_within(&self, age: std::time::Duration) -> bool {
+        self.membership_verified(MembershipFreshness::Within(age))
+    }
+
+    fn membership_verified(&self, freshness: MembershipFreshness) -> bool {
         self.verified
             .lock()
             .unwrap()
-            .is_some_and(|verified| verified.elapsed() < age)
+            .is_some_and(|verified| match freshness {
+                MembershipFreshness::Within(age) => verified.elapsed() < age,
+                MembershipFreshness::Since(started) => verified >= started,
+            })
     }
 
-    /// Confirms the memberships unless a check within `age` already did. Observations stay
-    /// under `authors`, consistent with grants and task saves; while another holds it (a
-    /// scheduling pass, a save), a member's request waits for that holder's own check or
-    /// for the lock, whichever comes first, and fails rather than waiting for the holder's
-    /// whole work.
+    /// Read-only lists may reuse a recent membership check.
     pub(crate) async fn verify_membership(
         &self,
         s: &Service,
         age: std::time::Duration,
     ) -> Result<()> {
+        self.verify_membership_freshness(s, MembershipFreshness::Within(age))
+            .await
+    }
+
+    /// Directing writes share only a check that began during this request's preflight.
+    pub(crate) async fn verify_membership_since(
+        &self,
+        s: &Service,
+        started: std::time::Instant,
+    ) -> Result<()> {
+        self.verify_membership_freshness(s, MembershipFreshness::Since(started))
+            .await
+    }
+
+    /// Observations stay under `authors`, consistent with grants and task saves. A request
+    /// can use the holder's check without waiting for its whole work, but an older in-flight
+    /// observation cannot authorize a fresh write. Keep its lock queue position and total
+    /// wait bound while waiting for a qualifying observation or for the lock itself.
+    async fn verify_membership_freshness(
+        &self,
+        s: &Service,
+        freshness: MembershipFreshness,
+    ) -> Result<()> {
         const HOLDER_CHECK: std::time::Duration = std::time::Duration::from_secs(10);
-        let observed = self.observed.notified();
-        tokio::pin!(observed);
-        observed.as_mut().enable();
-        if self.membership_verified_within(age) {
-            return Ok(());
-        }
-        let authors = match self.authors.try_lock() {
-            Ok(authors) => authors,
-            Err(_) => {
-                let waited = tokio::time::timeout(HOLDER_CHECK, async {
-                    tokio::select! {
-                        () = observed.as_mut() => None,
-                        authors = self.authors.lock() => Some(authors),
-                    }
-                })
-                .await;
-                match waited {
-                    Ok(Some(authors)) => authors,
-                    Ok(None) if self.membership_verified_within(age) => return Ok(()),
-                    // The holder's own check failed, or its work outlasts the wait: like an
-                    // unanswering Beacon, the membership cannot be confirmed now.
-                    _ => {
-                        return Err(Error::unavailable(
-                            "Memberships could not be confirmed right now.",
-                        ));
-                    }
+
+        let authors = tokio::time::timeout(HOLDER_CHECK, async {
+            let authors = self.authors.lock();
+            tokio::pin!(authors);
+            loop {
+                let observed = self.observed.notified();
+                tokio::pin!(observed);
+                observed.as_mut().enable();
+                if self.membership_verified(freshness) {
+                    return None;
+                }
+                tokio::select! {
+                    () = observed.as_mut() => {}
+                    authors = authors.as_mut() => return Some(authors),
                 }
             }
-        };
-        // Another request may have checked while this one waited.
-        if !self.membership_verified_within(age) {
-            self.observe(s).await?;
+        })
+        .await
+        .map_err(|_| Error::unavailable("Memberships could not be confirmed right now."))?;
+
+        if let Some(authors) = authors {
+            // Another request may have checked while this one waited.
+            if !self.membership_verified(freshness) {
+                self.observe(s).await?;
+            }
+            drop(authors);
         }
-        drop(authors);
         Ok(())
     }
 
