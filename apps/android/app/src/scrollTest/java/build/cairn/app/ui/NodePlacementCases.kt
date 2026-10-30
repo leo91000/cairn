@@ -201,13 +201,16 @@ abstract class NodePlacementCases {
                 }
                 CairnTheme { if (state.session.authenticated) NodesScreen(vm, state) }
             }
-            // The page renders before connect() finishes refreshing the workspace.
             compose.waitUntil(20000) {
                 compose
                     .onAllNodes(hasText("Passer en Natif administrateur") and isEnabled())
                     .fetchSemanticsNodes()
                     .isNotEmpty()
             }
+            // The page renders before connect() finishes refreshing the workspace, and
+            // vm.perform ignores actions until then. This control's own busy state does not
+            // reflect it.
+            compose.waitUntil(10000) { !vm.state.value.busy }
             compose
                 .onNodeWithText("Passer en Natif administrateur")
                 .performScrollTo()
