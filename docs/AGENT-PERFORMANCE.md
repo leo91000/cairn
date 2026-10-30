@@ -178,3 +178,31 @@ when streaming reaches its end.
 Host timings are in the runner/controller logs; guest timings are in the VM's
 `{vm-id}.boot.log` in runner state. Import trace IDs correlate host and guest
 measurements; invalid or absent trace IDs are recorded as `untraced`.
+
+## Conversation list and live reads
+
+Account-scoped conversation lists keep one immutable shared allocation between
+refreshes. Reading a cached list and cloning a live state no longer copy every
+conversation. A refresh replaces that account's allocation; previous responses
+keep their own snapshot. Revision coalescing, external refreshes, account read
+marks, the quarter-second rebuild interval and serialized response shapes stay
+unchanged. Sharing does not avoid rebuilding a list or serializing a changed
+state, and it does not remove the frozen run snapshot from live responses.
+
+The ignored unit benchmark exercises real Store fixtures and the live read path:
+
+```sh
+node scripts/test-backend.mjs -p cairn-installation --lib \
+  measure_conversation_reads_by_count_and_snapshot_size -- \
+  --ignored --nocapture --test-threads=1
+```
+
+It covers 1/100/300 conversations and 0/128/512 KiB of frozen agent instructions,
+reporting exact stored snapshot bytes, encoded list/state bytes, the first read
+through a new private SQLite page cache, 16 warm reads and process CPU. The host
+OS cache remains warm; these are local measurements, not network or disk-cold
+latencies. Each live-page case includes first-state serialization but excludes
+SSE framing and event serialization. Compare the same harness/profile/host on a
+reference; do not infer production savings from one trial. Use the existing
+`conversation_reads` aggregate to compare page read/queue time, list rebuilds and
+coalescing after deployment.
