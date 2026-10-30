@@ -1178,6 +1178,9 @@ mod tests {
                 if request.method() == "DELETE" {
                     return axum::http::StatusCode::NO_CONTENT.into_response();
                 }
+                if request.uri().path().ends_with("/administrative-pause") {
+                    return axum::http::StatusCode::NOT_FOUND.into_response();
+                }
                 count.fetch_add(1, Ordering::SeqCst);
                 std::future::pending::<axum::response::Response>().await
             }
