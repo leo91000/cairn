@@ -456,7 +456,17 @@ async fn requeue_pending_move(s: &Service, checkpoint: &Checkpoint, fenced: bool
         expected_fenced.process = None;
     }
     if saved.managed() && saved.completed() && saved.terminal_code() == Some(0) {
-        if fenced && run.state.status != RunStatus::Waiting {
+        // An owner can request an idle transfer after the success commit while
+        // this execution is still releasing. Leave its paid reservation for the
+        // scheduler; a move requested during the active turn is not idle.
+        let explicit_idle_move = run.boundary["moveRequest"]["idle"] == true
+            && run.boundary["moveRequest"]["automatic"] == false
+            && run.state.status == RunStatus::Queued
+            && run.state.recovery_pending
+            && !saved.settled().is_some_and(|settled| {
+                matches!(settled.status, RunStatus::Failed | RunStatus::Cancelled)
+            });
+        if fenced && run.state.status != RunStatus::Waiting && !explicit_idle_move {
             crate::nodes::moves::abort_terminal_recovery(s, run_id, Some(&expected_fenced)).await?;
         }
         return Ok(());
@@ -504,6 +514,94 @@ use crate::run_fixture::DbRunFixture;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn completed_worker_release_keeps_explicit_idle_move_and_reservation() {
+        use crate::{agent_fixture::StoreAgentFixture, node_fixture::StoreNodeFixture};
+        let root = tempfile::tempdir().unwrap();
+        let service = Service::new(crate::config::Config {
+            data_dir: root.path().join("data"),
+            home: root.path().join("home"),
+            workspace_roots: vec![root.path().into()],
+            public_url: "http://localhost:4310".into(),
+            host: "127.0.0.1".into(),
+            port: 0,
+            codex_bin: "codex".into(),
+            claude_bin: "claude".into(),
+            opencode_bin: "opencode".into(),
+            opencode_go_usage_url: crate::accounts::opencode::USAGE_URL.into(),
+            concurrency: 1,
+            logger: false,
+            worker_enabled: false,
+            runner_url: String::new(),
+        })
+        .await
+        .unwrap();
+        let (id, agent, source, destination, attempt) = (
+            crate::config::id(),
+            crate::config::id(),
+            crate::config::id(),
+            crate::config::id(),
+            crate::config::id(),
+        );
+        for node in [&source, &destination] {
+            service.store.put_node_fixture(json!({
+                "id": node, "accepting": true, "executionReady": true, "runtimeId": "development",
+                "lastSeen": now(), "capabilities": { "kvm": true },
+                "limits": { "cpu": 2, "memoryMiB": 1024, "diskMiB": 1024 },
+            })).await.unwrap();
+        }
+        let profile = service.store.put_agent_fixture(json!({
+            "id": agent, "provider": "codex", "access": { "backend": "firecracker", "nodes": [source, destination] }
+        })).await.unwrap();
+        let record = json!({
+            "id": id, "taskId": id, "status": "succeeded", "trigger": "chat",
+            "sessionId": "retained-session", "summary": "committed answer", "isolated": true,
+            "nodeId": source, "resources": { "cpu": 1, "memoryMiB": 512, "diskMiB": 128 },
+            "snapshot": { "agent": profile }, "nativeProvenanceUnknown": true,
+        });
+        service
+            .store
+            .transaction(move |db| db.add_run_fixture(&record, None).map(|_| ()))
+            .await
+            .unwrap();
+        let saved = RunCheckpoint::from_value(json!({
+            "prepared": { "backend": "firecracker", "isolated": true }, "nodeId": source,
+            "runnerId": attempt, "completed": true, "terminalCode": 0, "remainingMs": null,
+        }))
+        .unwrap();
+        saved.store(&service.store, &id).await.unwrap();
+        let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), saved);
+        crate::nodes::moves::request(
+            &service,
+            &service.store.run(&id).await.unwrap(),
+            &json!({"nodeId": destination}),
+        )
+        .await
+        .unwrap();
+        let pending = service.store.run(&id).await.unwrap();
+        assert_eq!(pending["moveRequest"]["idle"], true);
+        let reservation = pending["moveRequest"]["reservation"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        release(&service, &checkpoint, None, true).await.unwrap();
+        let after = service.store.run(&id).await.unwrap();
+        assert_eq!(after["moveRequest"]["reservation"], reservation);
+        assert_eq!(after["status"], RunStatus::Queued);
+        assert_eq!(after["recoveryPending"], true);
+        assert_eq!(after["summary"], "committed answer");
+        assert_eq!(
+            service
+                .store
+                .get("node-attempts", &reservation)
+                .await
+                .unwrap()
+                .unwrap()["released"],
+            false
+        );
+        service.shutdown.cancel();
+    }
 
     #[tokio::test]
     async fn pending_move_does_not_requeue_completed_failed_finalization() {
