@@ -901,7 +901,7 @@ pub(super) fn finish_recovery(
             db.change_run(id, patch)?;
             return Ok(false);
         }
-        if controller_budget_exhausted(checkpoint, current, &record.wire()?) {
+        if controller_budget_exhausted(checkpoint, current, &record.boundary) {
             let expired = matches!(checkpoint.remaining_ms, None | Some(Some(i64::MIN..=0)));
             let message = if expired {
                 "Run exceeded its time limit."
