@@ -185,7 +185,11 @@ async fn record_failure(
         let id = run_id.to_owned();
         checkpoint
             .decide(move |current, db| {
-                super::schedule::finish_recovery(db, &id, Some(current)).map(|_| ())
+                let may_resume = super::schedule::finish_recovery(db, &id, Some(current))?;
+                if may_resume && let Some(paid) = RunCheckpoint::load_in(db, &id)? {
+                    *current = paid;
+                }
+                Ok(())
             })
             .await?;
         return Ok(());
