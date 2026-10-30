@@ -1369,6 +1369,43 @@ mod tests {
         }
     }
 
+    /// Regression fixture: queued provider retry written by e1dac before fencing.
+    #[tokio::test]
+    async fn legacy_paid_provider_retry_survives_recovery_and_restart() {
+        let (_root, service, _chat, run, _workspace) = fixture().await;
+        for count in [0, 3] {
+            for recovery_pending in [true, false] {
+                let id = run.clone();
+                service.store.transaction(move |db| {
+                    let cause = crate::run_retry::Cause::classify(&json!({"code":"server_error", "message":"Provider unavailable"})).unwrap();
+                    let retry = crate::run_retry::Retry::next(None, cause.clone(), now()).unwrap();
+                    let saved = RunCheckpoint::from_value(json!({
+                        "prepared":{"backend":"native","isolated":true}, "runnerId":"old-attempt",
+                        "remainingMs":null, "completed":false, "terminalCode":null,
+                        "providerFailed":true, "lastError":"Provider unavailable",
+                        "retryCause":cause, "controllerRecoveries":count
+                    }))?;
+                    db.change_run(&id, crate::runs::RunChanges {
+                        status:Some(RunStatus::Queued), session_id:Some(Some("session".into())),
+                        retry:Some(Some(retry.clone())), recovery_pending:Some(recovery_pending),
+                        cancel_requested_at:Some(None), ..Default::default()
+                    })?;
+                    saved.store_in(db, &id)?;
+                    for _ in 0..2 {
+                        let before = RunCheckpoint::load_in(db, &id)?.unwrap();
+                        assert!(finish_recovery(db, &id, Some(&before))?, "legacy paid retry must survive");
+                        let after = RunCheckpoint::load_in(db, &id)?.unwrap();
+                        assert_eq!(after.provider_retry_reservation.as_deref(), Some("old-attempt"));
+                        assert_eq!(after.controller_recoveries(), count);
+                        assert_eq!(db.run_state(&id)?.unwrap().retry, Some(retry.clone()));
+                    }
+                    Ok(())
+                }).await.unwrap();
+            }
+        }
+        service.shutdown.cancel();
+    }
+
     #[tokio::test]
     async fn restart_provider_failure_reserves_each_retry_once_and_keeps_its_ceiling() {
         let (_root, service, _chat, run, _workspace) = fixture().await;
