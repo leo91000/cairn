@@ -2817,48 +2817,95 @@ async fn interrupted_controller_output_after_healthy_exit_never_replays_the_turn
         let run = fixture.enqueue("Test interrupted controller output").await;
         let run_id = text(&run, "id").to_owned();
         let wait_returned = Arc::new(AtomicBool::new(false));
-        let app = Router::new().fallback(any({
-            let store = fixture.service.store.clone();
-            let id = run_id.clone();
-            let wait_returned = wait_returned.clone();
-            move |state: State<Arc<Controller>>, request: Request| {
-                let store = store.clone();
-                let id = id.clone();
+        let app = Router::new()
+            .fallback(any({
+                let store = fixture.service.store.clone();
+                let id = run_id.clone();
                 let wait_returned = wait_returned.clone();
-                async move {
-                    if request.uri().path().ends_with("/wait") {
-                        wait_returned.store(true, Ordering::SeqCst);
-                        return Json(json!({ "StatusCode": 0 })).into_response();
-                    }
-                    if request.uri().path().ends_with("/logs") {
-                        let mut output = String::from("{\"type\":\"thread.started\",\"thread_id\":\"fixture-session\"}\n");
-                        if completed {
-                            output.push_str("{\"type\":\"item.completed\",\"item\":{\"id\":\"reply\",\"type\":\"agent_message\",\"text\":\"committed answer\"}}\n{\"type\":\"turn.completed\",\"usage\":{}}\n");
+                move |state: State<Arc<Controller>>, request: Request| {
+                    let store = store.clone();
+                    let id = id.clone();
+                    let wait_returned = wait_returned.clone();
+                    async move {
+                        if request.uri().path().ends_with("/wait") {
+                            wait_returned.store(true, Ordering::SeqCst);
+                            return Json(json!({ "StatusCode": 0 })).into_response();
                         }
-                        let frame = format!("{}\n", json!({ "type": "output", "stderr": false, "data": STANDARD.encode(output) }));
-                        let stream = futures_util::stream::unfold((0, store, id, wait_returned, frame), move |(stage, store, id, wait_returned, frame)| async move {
-                            if stage == 0 {
-                                return Some((Ok::<_, std::io::Error>(axum::body::Bytes::from(frame.clone())), (1, store, id, wait_returned, frame)));
+                        if request.uri().path().ends_with("/logs") {
+                            let mut output = format!(
+                                "{}\n",
+                                json!({
+                                    "type": "thread.started",
+                                    "thread_id": "fixture-session",
+                                })
+                            );
+                            if completed {
+                                output.push_str(&format!(
+                                    "{}\n{}\n",
+                                    json!({
+                                        "type": "item.completed",
+                                        "item": {
+                                            "id": "reply",
+                                            "type": "agent_message",
+                                            "text": "committed answer",
+                                        },
+                                    }),
+                                    json!({ "type": "turn.completed", "usage": {} })
+                                ));
                             }
-                            if stage == 1 && truncated {
-                                while !wait_returned.load(Ordering::SeqCst)
-                                    || (completed && store.checkpoint_boundary(&id).await.unwrap().is_none_or(|saved| saved["completed"] != true))
-                                {
-                                    tokio::time::sleep(Duration::from_millis(10)).await;
-                                }
-                                return Some((Ok(axum::body::Bytes::from_static(b"{\"type\":")), (2, store, id, wait_returned, frame)));
-                            }
-                            if stage == 1 {
-                                return std::future::pending().await;
-                            }
-                            None
-                        });
-                        return Body::from_stream(stream).into_response();
+                            let frame = format!(
+                                "{}\n",
+                                json!({
+                                    "type": "output",
+                                    "stderr": false,
+                                    "data": STANDARD.encode(output),
+                                })
+                            );
+                            let stream = futures_util::stream::unfold(
+                                (0, store, id, wait_returned, frame),
+                                move |(stage, store, id, wait_returned, frame)| async move {
+                                    if stage == 0 {
+                                        let bytes = axum::body::Bytes::from(frame.clone());
+                                        return Some((
+                                            Ok::<_, std::io::Error>(bytes),
+                                            (1, store, id, wait_returned, frame),
+                                        ));
+                                    }
+                                    if stage == 1 && truncated {
+                                        loop {
+                                            let completion_committed = !completed
+                                                || store
+                                                    .checkpoint_boundary(&id)
+                                                    .await
+                                                    .unwrap()
+                                                    .is_some_and(|saved| {
+                                                        saved["completed"] == true
+                                                    });
+                                            if wait_returned.load(Ordering::SeqCst)
+                                                && completion_committed
+                                            {
+                                                break;
+                                            }
+                                            tokio::time::sleep(Duration::from_millis(10)).await;
+                                        }
+                                        return Some((
+                                            Ok(axum::body::Bytes::from_static(b"{\"type\":")),
+                                            (2, store, id, wait_returned, frame),
+                                        ));
+                                    }
+                                    if stage == 1 {
+                                        return std::future::pending().await;
+                                    }
+                                    None
+                                },
+                            );
+                            return Body::from_stream(stream).into_response();
+                        }
+                        serve_controller(state, request).await
                     }
-                    serve_controller(state, request).await
                 }
-            }
-        })).with_state(controller.clone());
+            }))
+            .with_state(controller.clone());
         let (listener, address) = common::bind().await;
         common::reconfigure(&mut fixture.service, |config| {
             config.runner_url = format!("http://{address}");
