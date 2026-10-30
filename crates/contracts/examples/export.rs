@@ -95,6 +95,7 @@ fn main() {
     export::<ChatQuestionInput>(root, &mut generator, Contract::Deserialize);
     export::<AnswerChatQuestionInput>(root, &mut generator, Contract::Deserialize);
     export::<ListChatQuestionsOutput>(root, &mut generator, Contract::Deserialize);
+    export::<WaitForOutput>(root, &mut generator, Contract::Deserialize);
     export::<ChatWakeup>(root, &mut generator, Contract::Deserialize);
     export::<WaitExternalCondition>(root, &mut generator, Contract::Deserialize);
     export::<WaitResult>(root, &mut generator, Contract::Deserialize);

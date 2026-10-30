@@ -10660,6 +10660,38 @@
         }
       ]
     },
+    "WaitForOutput": {
+      "description": "The common workspace response; extension data stays in the typed observation.",
+      "properties": {
+        "deferred": {
+          "type": "boolean"
+        },
+        "observation": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WaitObservation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "wakeup": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ChatWakeup"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "deferred"
+      ],
+      "type": "object"
+    },
     "WaitMemberProgress": {
       "properties": {
         "display": {

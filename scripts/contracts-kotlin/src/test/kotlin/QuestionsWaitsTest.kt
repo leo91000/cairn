@@ -58,6 +58,10 @@ class QuestionsWaitsTest {
                         .long,
                 )
         }
+        corpus.getValue("waitOutputs").jsonArray.forEach {
+            val output = json.decodeFromJsonElement<WaitForOutput>(it)
+            assertEquals(it, json.encodeToJsonElement(output))
+        }
         corpus.getValue("delegates").jsonArray.forEach {
             val command = json.decodeFromJsonElement<DelegateTaskInput>(it)
             assertEquals(it, json.encodeToJsonElement(command))

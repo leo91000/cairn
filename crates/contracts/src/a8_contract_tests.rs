@@ -51,6 +51,10 @@ fn questions_waits_and_delegation_share_the_wire_corpus() {
             );
         }
     }
+    for value in corpus["waitOutputs"].as_array().unwrap() {
+        let output: WaitForOutput = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(output).unwrap(), *value);
+    }
     for value in corpus["delegates"].as_array().unwrap() {
         let command: DelegateTaskInput = serde_json::from_value(value.clone()).unwrap();
         command.validate().unwrap();

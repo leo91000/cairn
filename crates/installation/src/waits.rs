@@ -114,6 +114,7 @@ pub fn tool(plugin_conditions: &[Value], delegates: bool) -> Value {
     conditions.extend(plugin_conditions.iter().cloned());
     json!({
         "name": "wait_for",
+        "outputSchema": cairn_contracts::schema_for::<cairn_contracts::WaitForOutput>(cairn_contracts::Contract::Serialize),
         "description": "Wait durably for a duration (delay), a date (at), an authorized Cairn run \
             to finish, a task this conversation delegated to finish (task_finished), or a condition \
             provided by a plugin granted to this agent. List one condition, \
@@ -125,7 +126,7 @@ pub fn tool(plugin_conditions: &[Value], delegates: bool) -> Value {
             can be released. Cairn checks the conditions without waking the LLM and resumes this \
             conversation or mission when the time or result arrives or the timeout expires, subject to capacity. \
             A time reached is completed, not timed_out. External completion includes failure and \
-            cancellation; a group result lists each condition with its result, or null when it has none yet. \
+            cancellation; a group result lists each condition with its result, or null when it has none yet. Plugin-owned result fields are preserved in pluginResult. \
             Inspect the results before acting. Never use this for local background \
             processes that need this execution. Run dependencies require installation access; delegated \
             tasks require delegation; plugin \
@@ -687,7 +688,9 @@ pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
         })
         .await?;
     if same_request(owner.wakeup.as_ref(), &run, &request) {
-        return Ok(json!({"deferred":true,"wakeup":owner.wakeup}));
+        return Ok(serde_json::to_value(
+            cairn_contracts::WaitForOutput::waiting(owner.wakeup.unwrap()),
+        )?);
     }
     let grouped = matches!(request.condition, Some(WaitCondition::Group { .. }));
     let members = request.condition.as_ref().map(sources).unwrap_or_default();
@@ -727,7 +730,7 @@ pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
     let result=s.store.transaction(move|db| {
         let (run,mut owner)=registering(db,&token,&request)?;
         if input_revision(db,&run,owner.conversation.as_ref())?!=revision {return Err(Error::conflict("User input changed while the condition was checked. Handle it before registering a wait."));}
-        if same_request(owner.wakeup.as_ref(),&run,&request) {return Ok(json!({"deferred":true,"wakeup":owner.wakeup}));}
+        if same_request(owner.wakeup.as_ref(),&run,&request) {return Ok(serde_json::to_value(cairn_contracts::WaitForOutput::waiting(owner.wakeup.unwrap()))?);}
         let created=now();
         let deadline=match &request.time {
             Some(TimeCondition::At {date})=>date_millis(&json!({"date":date}))?,
@@ -756,7 +759,7 @@ pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
             announced["reason"]=request.reason.into();
             announced["immediate"]=true.into();
             db.event(text(&run,"id"),&EventKind::from_adapter(owner.event("wait_ready")),"Wait condition already completed",Some(&announced))?;
-            return Ok(json!({"deferred":false,"observation":observed}));
+            return Ok(serde_json::to_value(cairn_contracts::WaitForOutput::ready(observed))?);
         }
         let wakeup=ChatWakeup {
             id:id(),message_id:execution_id(&run).as_str().map(str::to_owned),reason:request.reason,seconds:(deadline-created+999)/1000,created_at:created,wake_at:deadline,
@@ -767,7 +770,7 @@ pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
         owner.touch(created);
         owner.save(db)?;
         db.event(text(&run,"id"),&EventKind::from_adapter(owner.event("wait")),&wakeup.reason,Some(&serde_json::to_value(&wakeup)?))?;
-        Ok(json!({"deferred":true,"wakeup":wakeup}))
+        Ok(serde_json::to_value(cairn_contracts::WaitForOutput::waiting(wakeup))?)
     }).await?;
     s.worker.notify();
     Ok(result)

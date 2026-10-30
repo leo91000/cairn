@@ -360,5 +360,135 @@
       "task": "Review",
       "model": "bad;command"
     }
+  ],
+  "waitOutputs": [
+    {
+      "deferred": true,
+      "wakeup": {
+        "id": "00000000-0000-4000-8000-000000000001",
+        "messageId": "00000000-0000-4000-8000-000000000001",
+        "reason": "Reprendre après CI",
+        "seconds": 3600,
+        "createdAt": 123,
+        "wakeAt": 3600123,
+        "condition": {
+          "type": "group",
+          "mode": "any",
+          "conditions": [
+            {
+              "type": "plugin",
+              "pluginId": "github",
+              "conditionType": "github_workflow",
+              "projectId": "00000000-0000-4000-8000-000000000001",
+              "input": {
+                "runId": 40972562294,
+                "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "future": {
+                  "new": []
+                }
+              }
+            },
+            {
+              "type": "run_finished",
+              "runId": "00000000-0000-4000-8000-000000000001"
+            }
+          ]
+        },
+        "members": [
+          {
+            "observation": {
+              "state": "completed",
+              "type": "github_workflow",
+              "pluginResult": {
+                "pluginId": "github",
+                "runId": 40972562294,
+                "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "conclusion": "failure",
+                "nested": {
+                  "new": []
+                }
+              },
+              "display": {
+                "tone": "error",
+                "title": "Workflow failed",
+                "detail": ""
+              }
+            }
+          },
+          {
+            "nextCheckAt": 123,
+            "lastError": "Temporary error"
+          }
+        ],
+        "observation": {
+          "state": "completed",
+          "type": "group",
+          "mode": "any",
+          "members": [
+            {
+              "condition": {
+                "type": "plugin",
+                "pluginId": "github",
+                "conditionType": "github_workflow",
+                "projectId": "00000000-0000-4000-8000-000000000001",
+                "input": {
+                  "runId": 40972562294,
+                  "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "future": {
+                    "new": []
+                  }
+                }
+              },
+              "result": {
+                "state": "completed",
+                "type": "github_workflow",
+                "pluginResult": {
+                  "pluginId": "github",
+                  "runId": 40972562294,
+                  "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "conclusion": "failure",
+                  "nested": {
+                    "new": []
+                  }
+                },
+                "display": {
+                  "tone": "error",
+                  "title": "Workflow failed",
+                  "detail": ""
+                }
+              }
+            },
+            {
+              "condition": {
+                "type": "run_finished",
+                "runId": "00000000-0000-4000-8000-000000000001"
+              },
+              "result": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "deferred": false,
+      "observation": {
+        "state": "completed",
+        "type": "github_workflow",
+        "pluginResult": {
+          "pluginId": "github",
+          "runId": 40972562294,
+          "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "conclusion": "failure",
+          "nested": {
+            "new": []
+          }
+        },
+        "display": {
+          "tone": "error",
+          "title": "Workflow failed",
+          "detail": ""
+        }
+      }
+    }
   ]
 }

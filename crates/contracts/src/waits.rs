@@ -175,3 +175,33 @@ pub struct ChatWakeup {
     #[serde(flatten)]
     pub progress: WaitMemberProgress,
 }
+
+/// The common workspace response; extension data stays in the typed observation.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+pub struct WaitForOutput {
+    pub deferred: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub wakeup: Option<ChatWakeup>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub observation: Option<WaitObservation>,
+}
+
+impl WaitForOutput {
+    pub fn waiting(wakeup: ChatWakeup) -> Self {
+        Self {
+            deferred: true,
+            wakeup: Some(wakeup),
+            observation: None,
+        }
+    }
+
+    pub fn ready(observation: WaitObservation) -> Self {
+        Self {
+            deferred: false,
+            wakeup: None,
+            observation: Some(observation),
+        }
+    }
+}
