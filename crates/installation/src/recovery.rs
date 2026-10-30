@@ -89,7 +89,6 @@ pub(crate) enum ObservationAction {
 
 pub(crate) async fn terminal_code<F, Fut>(
     s: &Service,
-    run_id: &str,
     attempt: &str,
     node: Option<&str>,
     cancel: &tokio_util::sync::CancellationToken,

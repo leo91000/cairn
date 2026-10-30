@@ -114,7 +114,6 @@ pub(super) async fn reconcile(
         .map_or(5000, |deadline| deadline.saturating_sub(now()).max(0));
     recovery::terminal_code(
         s,
-        &checkpoint.id,
         attempt,
         saved.node_id.as_ref().and_then(|node| node.as_deref()),
         cancel,
