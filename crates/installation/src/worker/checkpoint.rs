@@ -629,6 +629,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn checkpoint_budget_includes_time_waiting_for_the_store() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                db.add_run_fixture(
+                    &json!({ "id": "deadline-fixture", "taskId": "deadline", "status": "running" }),
+                    None,
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let checkpoint = std::sync::Arc::new(Checkpoint::new(
+            store.clone(),
+            "deadline-fixture".into(),
+            RunCheckpoint::fresh(Some(100)),
+        ));
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let blocking_store = store.clone();
+        let blocker = tokio::spawn(async move {
+            blocking_store
+                .transaction(move |_| {
+                    let _ = entered_tx.send(());
+                    release_rx.recv().unwrap();
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        });
+        entered_rx.await.unwrap();
+        let writer = checkpoint.clone();
+        let update = tokio::spawn(async move {
+            writer
+                .update(|saved| saved.terminal_code = Some(Some(0)))
+                .await
+                .unwrap();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        release_tx.send(()).unwrap();
+        blocker.await.unwrap();
+        update.await.unwrap();
+        let saved = RunCheckpoint::load(&store, "deadline-fixture")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.terminal_code(), Some(0));
+        assert_eq!(saved.remaining_ms, Some(Some(0)));
+        assert!(checkpoint.expired());
+    }
+
+    #[tokio::test]
     async fn pause_credit_is_monotonic_per_attempt_and_survives_checkpoint_recovery() {
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(root.path()).unwrap();
