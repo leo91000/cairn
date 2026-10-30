@@ -450,11 +450,15 @@ constructor(
         }
     }
 
-    fun perform(block: suspend CairnViewModel.() -> Unit) =
+    fun perform(block: suspend CairnViewModel.() -> Unit) {
+        perform(userAction = true, block = block)
+    }
+
+    fun tryPerform(block: suspend CairnViewModel.() -> Unit): Boolean =
         perform(userAction = true, block = block)
 
-    private fun perform(userAction: Boolean, block: suspend CairnViewModel.() -> Unit) {
-        if (mutable.value.busy) return
+    private fun perform(userAction: Boolean, block: suspend CairnViewModel.() -> Unit): Boolean {
+        if (mutable.value.busy) return false
         mutable.update { it.copy(busy = true, error = if (userAction) null else it.error) }
         viewModelScope.launch {
             try {
@@ -468,6 +472,7 @@ constructor(
                 mutable.update { it.copy(busy = false, ready = true) }
             }
         }
+        return true
     }
 
     // The shipped app supplies only BuildConfig.BEACON_SERVICE_ORIGIN. Tests inject an HTTP

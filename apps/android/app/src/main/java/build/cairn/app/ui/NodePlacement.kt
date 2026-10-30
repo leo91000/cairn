@@ -7,6 +7,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import build.cairn.app.data.*
 import kotlinx.coroutines.delay
 import kotlinx.serialization.Serializable
@@ -44,7 +45,8 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
     var mode by remember(run.id) { mutableStateOf("automatic") }
     var selected by remember(run.id) { mutableStateOf(run.nodeId.orEmpty()) }
     var destination by remember(run.id) { mutableStateOf("") }
-    var busy by remember(run.id) { mutableStateOf(false) }
+    val workspace by vm.state.collectAsStateWithLifecycle()
+    val busy = workspace.busy
     var error by remember(run.id) { mutableStateOf<String?>(null) }
     var saved by remember(run.id) { mutableStateOf<String?>(null) }
     var privilegeError by remember(run.id) { mutableStateOf(false) }
@@ -107,19 +109,19 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
         currentNode?.name
             ?: if (run.nodeId == LOCAL_NODE_ID) "Runner du master" else "Node inconnue"
     fun request(block: suspend CairnViewModel.() -> Unit, done: String) {
-        busy = true
         error = null
         saved = null
-        vm.perform {
-            try {
-                block()
-                saved = done
-            } catch (e: Exception) {
-                error = e.message
-            } finally {
-                busy = false
+        if (
+            !vm.tryPerform {
+                try {
+                    block()
+                    saved = done
+                } catch (e: Exception) {
+                    error = e.message
+                }
             }
-        }
+        )
+            error = "Une autre opération est en cours. Réessayez."
     }
     val dirty = run.storage?.dirtyBytes ?: 0L
     val failed =
