@@ -1925,8 +1925,38 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for PanicPeerStart {
     }
 }
 
+#[test]
+fn a_panicking_peer_task_releases_its_authorization_and_preserves_other_peers() {
+    // A real panic runs its backtrace hook before the peer can unwind. Keep
+    // that expected diagnostic off the enclosing suite's shared capture sink,
+    // so a slow reader cannot stall this fixture's live peer and cleanup.
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "panicking_peer_task_child",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("RUST_BACKTRACE", "1")
+        .output()
+        .expect("run the isolated real-panic fixture");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "real-panic fixture failed: {}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        output.status
+    );
+    assert!(
+        stderr.contains("fixture peer task failure") && stderr.contains("stack backtrace:"),
+        "the child must retain its real expected panic and enabled backtrace\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
+
 #[tokio::test]
-async fn a_panicking_peer_task_releases_its_authorization_and_preserves_other_peers() {
+#[ignore = "isolated real panic; exercised by the enclosing parent test"]
+async fn panicking_peer_task_child() {
     use tracing_subscriber::prelude::*;
     let panic_next = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let subscriber = tracing_subscriber::registry().with(PanicPeerStart(panic_next.clone()));
