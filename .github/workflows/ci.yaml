@@ -12,16 +12,11 @@ on:
         type: string
         required: true
         default: 92442d4b0e266a1f12db9d13145e29589cbf73f7
-      android_run:
-        description: Immutable repaired instrumentation APK run
-        type: string
-        required: true
-        default: "41053729853"
       android_sha:
-        description: Expected Android source SHA
+        description: Pinned Android source revision to build
         type: string
         required: true
-        default: 95583beec3105c18b0e224915157986188329b58
+        default: 1563bcddfa07c3fda7800d1d2f45f217dcb4f5ba
 permissions:
   contents: read
   actions: read
@@ -29,8 +24,53 @@ concurrency:
   group: android-composition-${{ github.run_id }}
   cancel-in-progress: false
 jobs:
+  android-direct-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ inputs.android_sha }}
+      - name: Verify pinned Android source
+        env:
+          ANDROID_SHA: ${{ inputs.android_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$ANDROID_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$ANDROID_SHA"
+      - uses: ./.github/actions/setup-pnpm
+        with:
+          install: false
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - uses: gradle/actions/setup-gradle@v5
+      - run: sdkmanager 'platforms;android-37.0' 'build-tools;36.0.0'
+      - name: Build the native client and instrumented tests
+        working-directory: apps/android
+        run: ./gradlew assembleDebug assembleDebugAndroidTest --no-daemon --stacktrace
+      - name: Record built Android source revision
+        run: |
+          git diff --exit-code
+          git rev-parse HEAD > apps/android/app/build/outputs/apk/source-revision.txt
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: android-direct-apks
+          path: |
+            apps/android/app/build/outputs/apk/debug/app-debug.apk
+            apps/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+
+            apps/android/app/build/outputs/apk/source-revision.txt
+          if-no-files-found: error
+          retention-days: 1
   android-direct:
     name: Composed Android transport (${{ matrix.scenario }})
+    needs:
+      - android-direct-build
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -56,21 +96,19 @@ jobs:
       CAIRN_BEACON_TEST_DATABASE_URL: postgres://cairn:test-only@127.0.0.1:5432/cairn_beacon_test
     steps:
       - uses: actions/checkout@v7.0.1
-      - name: Verify immutable component source revisions
+      - name: Verify immutable backend revision
         env:
           GH_TOKEN: ${{ github.token }}
           BACKEND_RUN: ${{ inputs.backend_run }}
           BACKEND_SHA: ${{ inputs.backend_sha }}
-          ANDROID_RUN: ${{ inputs.android_run }}
           ANDROID_SHA: ${{ inputs.android_sha }}
         run: |
           set -euo pipefail
-          [[ "$BACKEND_RUN" =~ ^[0-9]+$ && "$ANDROID_RUN" =~ ^[0-9]+$ ]]
+          [[ "$BACKEND_RUN" =~ ^[0-9]+$ ]]
           [[ "$BACKEND_SHA" =~ ^[0-9a-f]{40}$ && "$ANDROID_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BACKEND_RUN" --jq .head_sha)" = "$BACKEND_SHA"
-          test "$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ANDROID_RUN" --jq .head_sha)" = "$ANDROID_SHA"
           mkdir -p test-results/android-direct
-          python3 -c 'import json,os; print(json.dumps({k:os.environ[k] for k in ["BACKEND_RUN","BACKEND_SHA","ANDROID_RUN","ANDROID_SHA"]}))' > test-results/android-direct/components.json
+          python3 -c 'import json,os; print(json.dumps({k:os.environ[k] for k in ["BACKEND_RUN","BACKEND_SHA","ANDROID_SHA"]}))' > test-results/android-direct/components.json
       - uses: ./.github/actions/setup-pnpm
         with:
           cache: true
@@ -93,8 +131,14 @@ jobs:
         with:
           name: android-direct-apks
           path: apps/android/app/build/outputs/apk/
-          run-id: ${{ inputs.android_run }}
-          github-token: ${{ github.token }}
+      - name: Verify instrumented APK source manifest
+        env:
+          ANDROID_SHA: ${{ inputs.android_sha }}
+          APK_PATH: apps/android/app/build/outputs/apk/
+        run: |
+          set -euo pipefail
+          test "$(cat "$APK_PATH/source-revision.txt")" = "$ANDROID_SHA"
+          cp "$APK_PATH/source-revision.txt" test-results/android-direct/android-source-revision.txt
       - uses: android-actions/setup-android@v3
         with:
           packages: platform-tools
