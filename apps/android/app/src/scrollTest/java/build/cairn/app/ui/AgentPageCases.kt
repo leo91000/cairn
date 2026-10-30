@@ -280,7 +280,7 @@ abstract class AgentPageCases {
                                 .setBody("""{"error":"Beacon indisponible"}""")
                         else
                             response.setBody(
-                                """{"members":[{"id":"member-ada","email":"ada@example.test"},{"id":"member-bo","email":"bo@example.test"}],"invitations":[]}"""
+                                """{"members":[{"id":"member-ada","email":"ada@example.test"},{"id":"member-bo","email":"bo@example.test"}],"invitations":[{"id":"invite-cy","email":"cy@example.test"}]}"""
                             )
                     if (request.method == "POST" && path == "/agents") {
                         val body = wireJson.parseToJsonElement(text).jsonObject
@@ -585,6 +585,8 @@ abstract class AgentPageCases {
             compose.onNodeWithText("Vous · propriétaire").assertExists()
             compose.onNodeWithText("owner@example.test").assertExists()
             compose.onNodeWithText("🔒 Toujours").assertExists()
+            // An invitation shows, without a switch until it is accepted.
+            compose.onNodeWithTag("agent-invited-invite-cy").assertExists()
             compose.onNodeWithTag("agent-people-installation").assertDoesNotExist()
             compose.onNodeWithContentDescription(ada).assertIsOff().performClick()
             compose.waitUntil(15000) { fixture.accessChanges.isNotEmpty() }

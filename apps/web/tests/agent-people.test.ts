@@ -50,8 +50,27 @@ it('says every member uses the agent when the installation predates account acce
   expect(people.outdated.value).toBe(true)
   expect(people.error.value).toBe('')
 
+  // A deleted agent is an error, not an older installation.
+  request.mockRejectedValue(new ApiError('Agent not found', 404))
+  await people.load()
+  expect(people.outdated.value).toBe(false)
+  expect(people.error.value).toBe('Agent not found')
+
   request.mockRejectedValue(new ApiError('Beacon unavailable', 503))
   await people.load()
   expect(people.outdated.value).toBe(false)
   expect(people.error.value).toBe('Beacon unavailable')
+})
+
+it('lists pending invitations apart from the members who may get access', async () => {
+  vi.stubGlobal('fetch', async () => new Response(JSON.stringify({
+    members: [{ id: 'ada', email: 'ada@example.test' }],
+    invitations: [{ id: 'invite-bo', email: 'bo@example.test' }],
+  })))
+  request.mockResolvedValue({ accounts: [{ accountId: 'ada', grantedAt: 0 }] })
+  const { useAgentPeople } = await import('../src/agent-people')
+  const people = useAgentPeople(ref<string | null>('reviewer'))
+  await people.load()
+  expect(people.rows.value.map(row => row.accountId)).toEqual(['ada'])
+  expect(people.invited.value).toEqual([{ id: 'invite-bo', email: 'bo@example.test' }])
 })

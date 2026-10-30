@@ -9,19 +9,21 @@ import { api, ApiError, state } from './api'
 
 // Members come from the Beacon, which owns the installation's sharing; the installation
 // keeps which of them may use each agent. Only the owner reads and changes both.
-async function members(): Promise<Member[]> {
+async function sharing(): Promise<{ members: Member[], invitations: Member[] }> {
   const response = await fetch(`/api/installations/${encodeURIComponent(state.installationId)}/sharing`, {
     headers: { 'X-CSRF-Token': state.csrf },
   })
   const value = await response.json().catch(() => ({}))
   if (!response.ok)
     throw new Error(value?.error || 'Members could not be loaded.')
-  return value.members ?? []
+  return { members: value.members ?? [], invitations: value.invitations ?? [] }
 }
 
 /** Who may use one agent, changed one member at a time with immediate effect. */
 export function useAgentPeople(agentId: Ref<string | null>) {
   const people = ref<Member[]>([])
+  // Invited people get a switch once they join.
+  const invited = ref<Member[]>([])
   const allowed = ref<string[]>([])
   const loading = ref(false)
   const loaded = ref(false)
@@ -42,6 +44,7 @@ export function useAgentPeople(agentId: Ref<string | null>) {
     // Another agent's rows never show while this one loads.
     if (agent !== shown) {
       people.value = []
+      invited.value = []
       allowed.value = []
       loaded.value = false
       outdated.value = false
@@ -54,10 +57,11 @@ export function useAgentPeople(agentId: Ref<string | null>) {
     loading.value = true
     error.value = ''
     try {
-      const [listed, accounts] = await Promise.all([members(), listAgentAccounts(api, { agentId: agent })])
+      const [listed, accounts] = await Promise.all([sharing(), listAgentAccounts(api, { agentId: agent })])
       if (current !== generation)
         return
-      people.value = listed
+      people.value = listed.members
+      invited.value = listed.invitations
       allowed.value = accounts.accounts.map(account => account.accountId)
       outdated.value = false
       loaded.value = true
@@ -65,7 +69,8 @@ export function useAgentPeople(agentId: Ref<string | null>) {
     catch (cause) {
       if (current !== generation)
         return
-      outdated.value = cause instanceof ApiError && cause.status === 404
+      // Only the route itself missing: a deleted agent answers « Agent not found ».
+      outdated.value = cause instanceof ApiError && cause.status === 404 && cause.message === 'Not found'
       if (!outdated.value)
         error.value = cause instanceof Error ? cause.message : 'Members could not be loaded.'
     }
@@ -101,6 +106,7 @@ export function useAgentPeople(agentId: Ref<string | null>) {
   const count = computed(() => rows.value.filter(row => row.known && row.allowed).length)
   return {
     rows,
+    invited,
     count,
     loading,
     loaded,

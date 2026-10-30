@@ -8,7 +8,12 @@ import kotlinx.serialization.Serializable
 /** A member of the installation, as the Beacon lists them to its owner. */
 @Serializable data class InstallationMember(val id: String, val email: String = "")
 
-@Serializable data class InstallationSharing(val members: List<InstallationMember> = emptyList())
+@Serializable
+data class InstallationSharing(
+    val members: List<InstallationMember> = emptyList(),
+    /** Pending invitations: access is chosen once they join. */
+    val invitations: List<InstallationMember> = emptyList(),
+)
 
 fun canUseAgent(usable: List<String>?, agentId: String?): Boolean =
     usable == null || (agentId != null && agentId in usable)

@@ -24,6 +24,8 @@ const props = defineProps<{
   // The agent manages the whole installation: using it reaches every other agent.
   installation: boolean
   rows: AccessRow[]
+  // Pending invitations: access is chosen once they join.
+  invited: Array<{ id: string, email: string }>
   loading: boolean
   loaded: boolean
   error: string
@@ -148,9 +150,20 @@ const reason = computed(() => props.error === 'Members could not be loaded.' ? '
           </p>
         </li>
 
-        <li v-if="loaded && !members.length && !leftovers.length" class="flex items-start gap-3.5 px-4.5 py-4 text-sm text-muted phone:px-4">
+        <li v-for="invitation in invited" :key="`invited-${invitation.id}`" class="flex min-h-16 items-center gap-3.5 px-4.5 py-3 phone:px-4">
+          <PersonAvatar :name="invitation.email" :identity="invitation.email" :size="34" />
+          <span class="min-w-0 flex-1">
+            <span class="block truncate text-sm font-medium">{{ invitation.email }}</span>
+            <span class="block truncate text-xs text-muted">Choose their access once they join</span>
+          </span>
+          <AccessChip tone="none">
+            Invited
+          </AccessChip>
+        </li>
+
+        <li v-if="loaded && !members.length && !leftovers.length && !invited.length" class="flex items-start gap-3.5 px-4.5 py-4 text-sm text-muted phone:px-4">
           <Icon :name="Users" :size="18" class="mt-0.5 shrink-0" />
-          <span>No members yet. Invite people with <span class="font-medium text-ink">Share installation</span>, then choose here who can use {{ name }}.</span>
+          <span>No members yet. Invite people from <span class="font-medium text-ink">Members &amp; invitations</span> in the installation's settings, then choose here who can use {{ name }}.</span>
         </li>
       </ul>
 

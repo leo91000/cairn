@@ -357,7 +357,8 @@ fn gate(
                 None => require_run(db, identity, id),
             }
         }
-        ("POST", ["runs", id, "resume" | "chat"]) => require_run(db, identity, id),
+        // Cleaning up a run's workspace ends its « continue in chat », like a deletion.
+        ("POST", ["runs", id, "resume" | "chat" | "cleanup"]) => require_run(db, identity, id),
         // A missing agent is left to the command's own validation.
         ("POST", ["tasks"]) => match body["settings"]["agentId"].as_str() {
             Some(agent) => require_agent(db, identity, agent),

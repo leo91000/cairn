@@ -38,6 +38,7 @@ private const val MEMBERS_NOT_LOADED = "Les membres n’ont pas pu être chargé
  */
 internal class AgentPeople {
     var members by mutableStateOf<List<InstallationMember>>(emptyList())
+    var invited by mutableStateOf<List<InstallationMember>>(emptyList())
     var allowed by mutableStateOf<List<String>>(emptyList())
     var loading by mutableStateOf(false)
     var loaded by mutableStateOf(false)
@@ -55,17 +56,27 @@ internal class AgentPeople {
         error = null
         try {
             coroutineScope {
-                val listed = async { vm.installationMembers() }
-                val accounts = async { vm.api.listAgentAccounts(AgentInput(agentId)) }
-                members = listed.await()
-                allowed = accounts.await().accounts.map { it.accountId }
+                val listed = async { vm.installationSharing() }
+                // Only the route itself missing: a deleted agent answers « Agent not found ».
+                val accounts = async {
+                    try {
+                        vm.api.listAgentAccounts(AgentInput(agentId))
+                    } catch (e: ApiException) {
+                        if (e.status == 404 && e.message == "Not found") null else throw e
+                    }
+                }
+                val sharing = listed.await()
+                members = sharing.members
+                invited = sharing.invitations
+                val listedAccounts = accounts.await()
+                outdated = listedAccounts == null
+                allowed = listedAccounts?.accounts.orEmpty().map { it.accountId }
             }
-            outdated = false
-            loaded = true
+            loaded = !outdated
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            outdated = e is ApiException && e.status == 404
-            if (!outdated) error = e.message ?: MEMBERS_NOT_LOADED
+            outdated = false
+            error = e.message ?: MEMBERS_NOT_LOADED
         } finally {
             loading = false
         }
@@ -293,10 +304,22 @@ internal fun PeopleSection(
                         color = MaterialTheme.colorScheme.error,
                     )
                 }
-            if (people.loaded && people.rows.isEmpty()) {
+            people.invited.forEach { invitation ->
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                PersonRow(
+                    invitation.email,
+                    invitation.email,
+                    invitation.email,
+                    "Vous choisirez son accès une fois l’invitation acceptée",
+                    modifier = Modifier.testTag("agent-invited-${invitation.id}"),
+                ) {
+                    ToneChip(PluginBadge("En attente", PluginTone.MUTED))
+                }
+            }
+            if (people.loaded && people.rows.isEmpty() && people.invited.isEmpty()) {
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 Text(
-                    "Aucun membre pour l’instant. Invitez des personnes depuis le partage de l’installation sur le web, puis choisissez ici qui peut utiliser $name.",
+                    "Aucun membre pour l’instant. Invitez des personnes depuis « Membres et invitations » dans les réglages de l’installation sur le web, puis choisissez ici qui peut utiliser $name.",
                     Modifier.padding(16.dp),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,

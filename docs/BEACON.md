@@ -341,11 +341,12 @@ A new agent is the owner's alone; at rollout, the members of the first membershi
 check after the upgrade kept the existing agents (someone invited before that check,
 which only a Beacon outage can delay, counts as an existing member). Starting,
 continuing, steering, answering, launching by hand, deleting or restoring a
-conversation and creating or editing a task require access to its agent; every member
-still sees every conversation and can pause, archive or stop any work. Renaming a
-conversation, removing a message still waiting in its queue and cleaning up a
-task run's workspace stay open to every member too: none of them makes the agent
-work. Access is checked when a message is sent or queued: a message a member queued
+conversation and cleaning up a task run's workspace require access to its agent;
+creating or editing a task requires access to the agent it is saved on, so an author
+can move a suspended task to an agent they may use. Every member still sees every
+conversation and can pause, archive or stop any work. Renaming a conversation and
+removing a message still waiting in its queue stay open to every member too: neither
+makes the agent work. Access is checked when a message is sent or queued: a message a member queued
 while they had access is still delivered after the owner removes it, unless someone
 removes it from the queue first; their scheduled tasks on that agent are suspended.
 A delegated task's title is still shown to its requesting agent, as every

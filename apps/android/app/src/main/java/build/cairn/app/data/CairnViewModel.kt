@@ -857,10 +857,9 @@ constructor(
     }
 
     /** The installation's members, which the Beacon lists to its owner only. */
-    suspend fun installationMembers(): List<InstallationMember> {
+    suspend fun installationSharing(): InstallationSharing {
         val installation = checkNotNull(state.value.installation) { "Aucune installation ouverte." }
         return api.get<InstallationSharing>("/installations/${segment(installation.id)}/sharing")
-            .members
     }
 
     suspend fun refreshSkills() {

@@ -243,6 +243,7 @@ async fn every_route_that_directs_an_agent_needs_access_to_it() {
         ),
         ("POST", format!("/api/runs/{run}/resume"), json!({})),
         ("POST", format!("/api/runs/{run}/chat"), json!({})),
+        ("POST", format!("/api/runs/{run}/cleanup"), json!({})),
         ("POST", format!("/api/runs/{chat_run}/retry"), json!({})),
         ("POST", format!("/api/runs/{earlier_run}/retry"), json!({})),
         ("POST", format!("/api/chats/{chat}/restore"), json!({})),

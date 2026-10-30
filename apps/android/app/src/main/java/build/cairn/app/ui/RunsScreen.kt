@@ -574,8 +574,10 @@ fun RunScreen(
                                     ?: if (current.workspaceCleanedAt != null) "Worktree nettoyé"
                                     else "Pas encore préparé"
                             )
+                            // Cleaning up needs access to the run's agent (ADR-0075).
                             if (
                                 !current.active &&
+                                    canUseAgent(state.usableAgents, current.snapshot?.agent?.id) &&
                                     current.workspace != null &&
                                     !current.isolated &&
                                     (current.snapshot?.task?.worktree == true)

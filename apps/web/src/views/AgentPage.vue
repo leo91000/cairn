@@ -1029,6 +1029,7 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
               :is-new="isNew"
               :installation="saved.access.installation || access.installation"
               :rows="people.rows.value"
+              :invited="people.invited.value"
               :loading="people.loading.value"
               :loaded="people.loaded.value"
               :error="people.error.value"
