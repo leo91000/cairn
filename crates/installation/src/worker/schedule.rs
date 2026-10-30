@@ -466,7 +466,7 @@ fn controller_budget_exhausted(saved: &RunCheckpoint, state: &RunState, run: &Va
         .is_some_and(|prepared| prepared["backend"] == "native")
         && run["nativeModeInterruption"].is_string())
         || run["moveRequest"].is_object();
-    if exception {
+    if exception && saved.has_controller_recovery_reservation() {
         return false;
     }
     !(count == super::execution::MAX_CONTROLLER_RECOVERIES
