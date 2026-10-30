@@ -702,8 +702,8 @@ owning domain adapters until A10/A11/A18. These adapters read the typed SQL writ
 never `records`, and do not accept another persisted format.
 
 SQLite v15 upgrades version 14 atomically at startup; see
-[the preserving migration](migrations/0015-typed-conversations.md); v17 adds the
-message and question plan flags ([migration](migrations/0017-plan-requests.md)). Fresh installs use `conversations`, `chat_messages`, `message_attachments`,
+[the preserving migration](migrations/0015-typed-conversations.md); v18 adds the
+message and question plan flags ([migration](migrations/0018-plan-requests.md)). Fresh installs use `conversations`, `chat_messages`, `message_attachments`,
 `conversation_engine_switches` and the singleton `conversation_retention` policy.
 Conversation and message revisions rotate with writes. Slugs are unique and never
 change on rename. The unique partial run index replaces `chat_for_run`'s collection
@@ -782,3 +782,20 @@ continuations, numeric plugin IDs and explicit project choices. Cross-field boun
 duplicate IDs, selection membership and the total encoded questionnaire limit are
 server invariants, with form feedback in both apps. No old dynamic question schema
 or separate client data class remains.
+
+## Attachment reservations (D2)
+
+The generated A7 `ChatAttachment` remains the single wire model for uploads and
+message snapshots. `UploadChatAttachmentInput` replaces the dynamic upload MCP
+schema in the existing conversation capability registry; manage scope and current
+installation grants are preserved. HTTP's existing binary upload adapter and
+Discord/Gmail imports call the same domain reservation/publication path. No UI
+presentation, file/message/count limit or sandbox input format changes.
+
+SQLite 16 → 17 imports uploaded metadata and quotas atomically; see
+[migration 0017](migrations/0017-attachment-reservations.md). Indexed constrained
+attachment rows and per-conversation quota/reservation counters replace KV scans.
+Service assembles the domain without exposing an upload mutex. Unique speculative
+filenames and reservation tokens fence crash recovery, cancellation and purge;
+committed old files stay at their existing paths. Measurements extend the existing
+A1/A2 `project_measurement` harness; raw results stay outside Git.

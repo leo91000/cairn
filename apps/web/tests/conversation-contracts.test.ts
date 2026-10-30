@@ -7,6 +7,7 @@ import { deleteChat } from '../../../packages/contracts/generated/deleteChat'
 import { editChatMessage } from '../../../packages/contracts/generated/editChatMessage'
 import editSchema from '../../../packages/contracts/generated/EditChatMessageInput.json'
 import { sendChatMessage } from '../../../packages/contracts/generated/sendChatMessage'
+import uploadSchema from '../../../packages/contracts/generated/UploadChatAttachmentInput.json'
 import corpus from '../../../tests/fixtures/conversation-contracts.json'
 
 it('qualifies conversation lifecycle, message selection, attachments and wire dates', () => {
@@ -14,6 +15,11 @@ it('qualifies conversation lifecycle, message selection, attachments and wire da
   addFormats(ajv)
   const message = ajv.compile(messageSchema)
   const chat = ajv.compile(chatSchema)
+  const upload = ajv.compile(uploadSchema)
+  for (const value of corpus.uploads)
+    expect(upload(structuredClone(value)), JSON.stringify(upload.errors)).toBe(true)
+  for (const value of corpus.invalidUploads)
+    expect(upload(structuredClone(value)), JSON.stringify(value)).toBe(false)
   for (const value of corpus.messages)
     expect(message(structuredClone(value)), JSON.stringify(message.errors)).toBe(true)
   for (const value of corpus.invalidMessages)

@@ -130,6 +130,7 @@ fn main() {
     export::<RenameChatInput>(root, &mut generator, Contract::Deserialize);
     export::<SetChatPausedInput>(root, &mut generator, Contract::Deserialize);
     export::<ConfirmChatInput>(root, &mut generator, Contract::Deserialize);
+    export::<UploadChatAttachmentInput>(root, &mut generator, Contract::Deserialize);
     export::<ChatAttachment>(root, &mut generator, Contract::Deserialize);
     export::<ChatMessage>(root, &mut generator, Contract::Deserialize);
     export::<Chat>(root, &mut generator, Contract::Deserialize);

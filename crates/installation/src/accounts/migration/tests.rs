@@ -142,7 +142,7 @@ async fn real_version13_database_preserves_accounts_usage_secrets_and_references
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        16
+        18
     );
     assert_eq!(
         db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
@@ -291,7 +291,7 @@ async fn real_version12_database_completes_both_atomic_upgrades() {
     assert_eq!(
         db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        16
+        18
     );
     assert_eq!(direct_metadata(&db), vec![Vec::<String>::new(); 7]);
 }

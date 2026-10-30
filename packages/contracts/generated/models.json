@@ -10507,6 +10507,35 @@
       ],
       "type": "object"
     },
+    "UploadChatAttachmentInput": {
+      "additionalProperties": false,
+      "properties": {
+        "attachmentId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "chatId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "data": {
+          "maxLength": 13981016,
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 180,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "chatId",
+        "attachmentId",
+        "name",
+        "data"
+      ],
+      "type": "object"
+    },
     "WaitCondition": {
       "oneOf": [
         {
