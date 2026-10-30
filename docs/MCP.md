@@ -293,6 +293,16 @@ come from verified authority, never command JSON. `get_task`, `list_tasks`,
 `preview_schedule` and `list_task_activity` use the read scope; `list_tasks` returns
 `{tasks: [...]}`. These definitions are shared with HTTP and `cairn_installation`.
 
+`get_installation_settings`, `get_installation_overview`, `list_audit` and
+`get_storage_settings` use the read scope; storage views never contain credentials.
+`check_storage` uses manage. `save_storage_settings` is listed with manage but only
+the human owner can save storage credentials, in the apps: tools receive an explicit
+refusal without an OAuth challenge. `mark_read` and `set_outcome_aside` use manage and
+change the read marks and set-aside outcomes of the Cairn account that authorized the
+connection; `list_chats` and `list_task_activity` report `unread`, `preview` and
+`dismissal` for that account. Executions (`cairn_installation`) have no account
+delegation: their personal writes are refused and their listings carry none.
+
 A run or event too large for a page is returned as a preview with `truncated: true`
 and `totalBytes`. The stored content is unchanged. Use `read_run_content` with
 `runId` and `offset: 0` to read the full run record; also pass `eventId` to read one

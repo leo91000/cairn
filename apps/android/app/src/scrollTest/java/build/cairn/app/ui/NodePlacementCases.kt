@@ -201,9 +201,10 @@ abstract class NodePlacementCases {
                 }
                 CairnTheme { if (state.session.authenticated) NodesScreen(vm, state) }
             }
+            // The page renders before connect() finishes refreshing the workspace.
             compose.waitUntil(20000) {
                 compose
-                    .onAllNodesWithText("Passer en Natif administrateur")
+                    .onAllNodes(hasText("Passer en Natif administrateur") and isEnabled())
                     .fetchSemanticsNodes()
                     .isNotEmpty()
             }
@@ -766,6 +767,12 @@ abstract class NodePlacementCases {
             compose.onNodeWithText("Ouvrir l’exécution").performScrollTo().performClick()
             assertEquals(listOf("owner-run"), opened.toList())
             capture("exclusive-reservation")
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(hasText("Libérer la réservation") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
             compose.onNodeWithText("Libérer la réservation").performScrollTo().performClick()
             compose.waitUntil(10000) {
                 releases.size == 1 &&

@@ -307,7 +307,8 @@ replacement, restrictive state changes, restart and launch; revocation still use
 the live native policy. `list_task_activity`
 returns the existing run-summary shape until the run conversion; its input and policy
 are registered here. Its personal read state follows B4 below: the calling account's
-in the apps and through a public grant, none for an execution, never the owner's. No historical format, fallback reader or migration is included.
+in the apps and through a public grant, none for an execution, never the owner's. A4
+itself added no historical format, fallback reader or migration.
 
 `tests/fixtures/mission-contracts.json` qualifies defaults, null/empty skill selections,
 creation identities, command bounds and wire output in Rust, TypeScript and Kotlin.
