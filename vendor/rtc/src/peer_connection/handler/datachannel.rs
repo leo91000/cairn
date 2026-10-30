@@ -98,8 +98,10 @@ impl<'a> DataChannelHandler<'a> {
             if defer_close {
                 if let RTCEventInternal::SCTPStreamClosed(_, id) = &event.event
                     && let Some(channel) = self.data_channels.get_by_stream_mut(id)
-                    && channel.ready_state != RTCDataChannelState::Closed
+                    && channel.ready_state == RTCDataChannelState::Open
                 {
+                    // A queued ACK must still promote Connecting to Open before
+                    // its buffered messages can be delivered. Closed is terminal.
                     channel.ready_state = RTCDataChannelState::Closing;
                 }
                 self.ctx.pending_sctp_events.push_back(event);
@@ -932,8 +934,73 @@ mod tests {
         );
     }
 
-    /// A straggler `DATA_CHANNEL_ACK` on a channel that has already been closed
-    /// must be ignored: it must not flip state or emit an open event.
+    #[test]
+    fn a_deferred_close_preserves_open_before_buffered_data() {
+        let now = Instant::now();
+        let mut ctx = DataChannelHandlerContext::new(now);
+        let (mut channels, handles) = registry(vec![in_band_channel(1)]);
+        let mut stats = RTCStatsAccumulator::new();
+        let mut handler = DataChannelHandler::new(
+            &mut ctx,
+            &mut channels,
+            &mut stats,
+            None,
+            RTCDtlsRole::Server,
+            None,
+        );
+        handler
+            .handle_event(TaggedRTCEventInternal {
+                now,
+                event: RTCEventInternal::SCTPHandshakeComplete(0),
+            })
+            .unwrap();
+        handler
+            .handle_read(TaggedRTCMessageInternal {
+                now,
+                transport: TransportContext::default(),
+                message: RTCMessageInternal::Dtls(DTLSMessage::Sctp(data_message(0, 1, b"final"))),
+            })
+            .unwrap();
+        assert!(
+            handler.poll_read().is_none(),
+            "pre-open data stays buffered"
+        );
+
+        handler
+            .ctx
+            .pending_sctp_events
+            .push_back(TaggedRTCEventInternal {
+                now,
+                event: RTCEventInternal::SCTPStreamClosed(0, 1),
+            });
+        handler
+            .handle_read(TaggedRTCMessageInternal {
+                now,
+                transport: TransportContext::default(),
+                message: RTCMessageInternal::Dtls(DTLSMessage::Sctp(ack(0, 1))),
+            })
+            .unwrap();
+        let received = message_events(handler.ctx);
+        assert!(
+            matches!(received.as_slice(), [DataChannelEvent::Open, DataChannelEvent::Message(message)] if message.data.as_ref() == b"final")
+        );
+
+        // The final close remains after the established open/message sequence.
+        while handler.poll_read().is_some() {}
+        let mut lifecycle = vec![];
+        while let Some(event) = handler.poll_event() {
+            if let RTCEventInternal::RTCPeerConnectionEvent(
+                RTCPeerConnectionEvent::OnDataChannel(event),
+            ) = event.event
+            {
+                lifecycle.push(event);
+            }
+        }
+        assert!(
+            matches!(lifecycle.as_slice(), [RTCDataChannelEvent::OnClose(close)] if *close == handles[0])
+        );
+    }
+
     #[test]
     fn a_deferred_final_close_keeps_an_already_closed_channel_terminal() {
         let now = Instant::now();
@@ -969,6 +1036,8 @@ mod tests {
         );
     }
 
+    /// A straggler `DATA_CHANNEL_ACK` on a channel that has already been closed
+    /// must be ignored: it must not flip state or emit an open event.
     #[test]
     fn ack_on_closed_channel_is_ignored() {
         let now = Instant::now();

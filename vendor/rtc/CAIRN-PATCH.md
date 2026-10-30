@@ -51,6 +51,7 @@ including while a final close event waits behind received messages. Previously
 received messages still drain before OnClose, without an early public OnClosing
 event. Already closed channels remain terminal when a late close is deferred.
 Association shutdown also prevents new writes before SHUTDOWN-COMPLETE arrives.
+Deferred close preserves a connecting channel's queued ACK and Open-before-Message ordering.
 
 The regular workspace regression uses the same multithreaded Tokio runtime as
 the gateway and repeatedly opens/closes eight concurrent HTTP connections,
