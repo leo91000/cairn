@@ -93,7 +93,7 @@ test('installation subdomains preserve browser drafts and canonical account acce
       page.setDefaultTimeout(10000)
     }
 
-    fixture.beacon(isolated.toString(), {
+    const beacon = fixture.beacon(isolated.toString(), {
       CAIRN_BEACON_ORIGIN: origin,
       CAIRN_BEACON_INSTALLATION_SUBDOMAINS: 'true',
       CAIRN_BEACON_GOOGLE_CLIENT_ID: 'fixture-google',
@@ -102,7 +102,7 @@ test('installation subdomains preserve browser drafts and canonical account acce
       CAIRN_BEACON_GOOGLE_TOKEN_URL: `http://127.0.0.1:${frontPort}/test/provider/token`,
       CAIRN_BEACON_GOOGLE_USERINFO_URL: `http://127.0.0.1:${frontPort}/test/provider/userinfo`,
     })
-    await expect.poll(() => fetch(`${fixture.url}/health`).then(response => response.ok).catch(() => false)).toBe(true)
+    await fixture.waitForBeacon(beacon, 7000)
     await page.goto(origin)
     await page.getByLabel('Email address').fill('subdomain-owner@example.test')
     await page.getByRole('button', { name: 'Send code', exact: true }).click()
