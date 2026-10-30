@@ -421,7 +421,7 @@ def android_crash_summary(logcat, exit_info, native_log=""):
             lines.extend(group)
     result = {"targetProcessObserved": bool(lines), "exceptions": [], "signals": [],
               "javaFrames": [], "nativeFrames": [], "nativeAssertions": [],
-              "abortCategories": [], "unexpectedOpcodes": [], "exitReasons": []}
+              "abortCategories": [], "unexpectedOpcodes": [], "runtimeAssertions": [], "exitReasons": []}
     exception_types = {
         "java.lang.OutOfMemoryError", "java.lang.IllegalStateException", "java.lang.IllegalArgumentException",
         "java.lang.NullPointerException", "java.lang.AssertionError", "java.lang.RuntimeException",
@@ -440,6 +440,9 @@ def android_crash_summary(logcat, exit_info, native_log=""):
                       "java_types.cc", "peer_connection.cc", "peer_connection_factory.cc",
                       "peer_connection_factory_jni.cc", "data_channel.cc", "sctp_data_channel.cc",
                       "data_channel_controller.cc"}
+    runtime_sources = {"thread.cc", "thread_list.cc", "runtime.cc", "art_method.cc",
+                       "interpreter_common.cc", "jni_internal.cc", "jni_env_ext.cc",
+                       "indirect_reference_table.cc", "heap.cc", "verifier.cc"}
     signals = {"SIGABRT", "SIGSEGV", "SIGBUS", "SIGILL", "SIGFPE", "SIGTRAP", "SIGKILL", "SIGTERM"}
 
     def retain(key, value, limit=32):
@@ -491,6 +494,11 @@ def android_crash_summary(logcat, exit_info, native_log=""):
             continue
         if record[1] == "F":
             abort_details(record[4])
+            # ART fatal lines carry source coordinates before the assertion text.
+            # Keep only approved basenames and line numbers, never paths/messages.
+            source = re.match(r"(?:[A-Za-z0-9_./-]{1,512}/)?([A-Za-z0-9_]+\.(?:cc|h)):(\d{1,10})\] ", record[4])
+            if source and source[1] in runtime_sources:
+                retain("runtimeAssertions", {"source": source[1], "line": int(source[2])}, 8)
         if record[1] != "E" or record[2].strip() != "rtc":
             continue
         fatal = re.search(r"# Fatal error in: (?:[^,\r\n]{0,1024}/)?([^/,\r\n]{1,128}), line (\d{1,10})(?!\d)", record[4])

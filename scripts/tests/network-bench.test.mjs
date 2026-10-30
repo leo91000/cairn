@@ -191,6 +191,34 @@ assert 'private' not in json.dumps(bounded), bounded
 `], { stdio: 'pipe' })
 })
 
+it('android runtime fatal evidence keeps approved source coordinates without assertion text', () => {
+  execFileSync('python3', ['-B', '-c', `
+import importlib.util
+import json
+spec = importlib.util.spec_from_file_location("network_bench", "tests/network-bench.py")
+bench = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(bench)
+crash = '''F/DEBUG(321): Cmdline: build.cairn.app
+F/DEBUG(321): pid: 123, tid: 124, name: private-thread >>> build.cairn.app <<<
+'''
+main = '''F/build.cairn.app(123): art/runtime/thread.cc:1234] private-fixture-cookie
+F/art(123): interpreter_common.cc:201] Unexpected instruction: private-fixture-cookie
+F/art(123): thread.cc:1234] private-fixture-cookie
+F/art(999): runtime.cc:999] private-fixture-cookie
+E/art(123): runtime.cc:998] private-fixture-cookie
+F/art(123): private-file.cc:42] private-fixture-cookie
+F/art(123): runtime.cc:12345678901] private-fixture-cookie
+F/art(123): private-prefix thread.cc:123] private-fixture-cookie
+'''
+evidence = bench.android_crash_summary(crash, '', main)
+assert evidence['runtimeAssertions'] == [{'source': 'thread.cc', 'line': 1234}, {'source': 'interpreter_common.cc', 'line': 201}], evidence
+assert 'private' not in json.dumps(evidence), evidence
+assert bench.android_crash_summary('', '', main)['runtimeAssertions'] == []
+many = ''.join('F/art(123): thread.cc:%d] private-fixture-cookie\\n' % line for line in range(100))
+assert len(bench.android_crash_summary(crash, '', many)['runtimeAssertions']) == 8
+`], { stdio: 'pipe' })
+})
+
 it('diagnostic artifact write failures never replace the initial instrumentation failure', () => {
   execFileSync('python3', ['-B', '-c', `
 import importlib.util
