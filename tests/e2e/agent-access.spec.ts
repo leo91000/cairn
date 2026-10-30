@@ -475,8 +475,11 @@ test('exclusive reservation is granted per node from the agent page once the age
   await expect(page.getByRole('button', { name: /^Exclusive reservation gpu-box/ })).toBeVisible()
   // The node only shows who holds the grant.
   await page.goto(workspacePath('/nodes'))
-  const card = page.getByRole('article').filter({ has: page.getByRole('heading', { name: 'gpu-box' }) })
-  await expect(card).toContainText('1 can reserve it exclusively: Release engineer')
+  await page.getByRole('list', { name: 'Machines' }).getByRole('button', { name: /^gpu-box,/ }).click()
+  const card = page.getByRole('dialog', { name: /^gpu-box/ })
+  await card.getByRole('group', { name: 'Node sections' }).getByRole('button', { name: 'Access', exact: true }).click()
+  await expect(card.getByRole('region', { name: 'Agents on gpu-box' })).toContainText('Can reserve it exclusively')
+  await expect(card.getByRole('region', { name: 'Agents on gpu-box' })).toContainText('Release engineer')
   await expect(card.getByRole('link', { name: 'Manage access from the agents ›' })).toBeVisible()
 })
 
