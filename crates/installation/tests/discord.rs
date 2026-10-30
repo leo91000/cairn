@@ -365,6 +365,67 @@ async fn receive(socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::Tcp
     }
 }
 
+async fn receive_op(
+    socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    op: u64,
+) -> Value {
+    loop {
+        let payload = receive(socket).await;
+        // Discord permits heartbeats before Identify or Resume. Acknowledge them
+        // while waiting, so the client does not treat this gateway as a zombie.
+        if payload["op"] == 1 && op != 1 {
+            send(socket, json!({ "op": 11 })).await;
+            continue;
+        }
+
+        assert_eq!(payload["op"], op, "unexpected gateway payload: {payload}");
+        return payload;
+    }
+}
+
+#[tokio::test]
+async fn gateway_expectations_acknowledge_heartbeats_before_authentication() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream = async {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+
+        for op in [2, 6] {
+            let payload = receive_op(&mut socket, op).await;
+            assert_eq!(
+                payload,
+                json!({ "op": op, "d": { "token": "synthetic_discord_token" } })
+            );
+        }
+    };
+    let client = async {
+        let stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        let (mut socket, _) = tokio_tungstenite::client_async("ws://localhost", stream)
+            .await
+            .unwrap();
+
+        for op in [2, 6] {
+            for sequence in [Value::Null, json!(3)] {
+                send(&mut socket, json!({ "op": 1, "d": sequence })).await;
+                assert_eq!(receive(&mut socket).await, json!({ "op": 11 }));
+            }
+
+            send(
+                &mut socket,
+                json!({ "op": op, "d": { "token": "synthetic_discord_token" } }),
+            )
+            .await;
+        }
+    };
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(upstream, client);
+    })
+    .await
+    .unwrap();
+}
+
 fn mention(sequence: u64) -> Value {
     json!({
         "op": 0, "s": sequence, "t": "MESSAGE_CREATE",
@@ -396,7 +457,7 @@ async fn gateway_identifies_heartbeats_admits_mentions_and_resumes_in_luau() {
             json!({ "op": 10, "d": { "heartbeat_interval": 300 } }),
         )
         .await;
-        let identify = receive(&mut socket).await;
+        let identify = receive_op(&mut socket, 2).await;
         assert_eq!(identify["op"], 2);
         assert_eq!(identify["d"]["intents"], 513);
         // The host put the token where the script wrote {{secret}}.
@@ -432,7 +493,7 @@ async fn gateway_identifies_heartbeats_admits_mentions_and_resumes_in_luau() {
             json!({ "op": 10, "d": { "heartbeat_interval": 300 } }),
         )
         .await;
-        let resume = receive(&mut socket).await;
+        let resume = receive_op(&mut socket, 6).await;
         assert_eq!(resume["op"], 6);
         assert_eq!(
             resume["d"],
@@ -915,7 +976,7 @@ async fn oversized_gateway_payloads_keep_threads_without_blocking_on_rest() {
             json!({ "op": 10, "d": { "heartbeat_interval": 30000 } }),
         )
         .await;
-        assert_eq!(receive(&mut socket).await["op"], 2);
+        assert_eq!(receive_op(&mut socket, 2).await["op"], 2);
         send(
             &mut socket,
             json!({ "op": 0, "s": 1, "t": "READY", "d": {
