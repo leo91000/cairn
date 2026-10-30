@@ -1181,6 +1181,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn clean_controller_exit_without_provider_completion_fails_on_restart() {
+        let (_root, service, _chat, run, _workspace) = fixture().await;
+        for backend in ["native", "firecracker"] {
+            for completed in [false, true] {
+                let id = run.clone();
+                service
+                    .store
+                    .transaction(move |db| {
+                        db.change_run(
+                            &id,
+                            crate::runs::RunChanges {
+                                status: Some(RunStatus::Queued),
+                                cancel_requested_at: Some(None),
+                                ..Default::default()
+                            },
+                        )?;
+                        let saved = RunCheckpoint::from_value(json!({
+                            "prepared": { "backend": backend, "isolated": true },
+                            "runnerId": "attempt", "completed": completed,
+                            "terminalCode": 0, "remainingMs": null,
+                        }))?;
+                        assert!(!finish_recovery(db, &id, Some(&saved))?);
+                        let state = db.run_state(&id)?.unwrap();
+                        assert_eq!(
+                            state.status,
+                            if completed {
+                                RunStatus::Succeeded
+                            } else {
+                                RunStatus::Failed
+                            }
+                        );
+                        if !completed {
+                            assert!(state.error.unwrap().contains("completion was recorded"));
+                        }
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+            }
+        }
+        service.shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn recovery_reservation_is_paid_once_and_bound_to_attempt() {
+        let (_root, service, _chat, run, _workspace) = fixture().await;
+        for count in 0..=3 {
+            let id = run.clone();
+            service
+                .store
+                .transaction(move |db| {
+                    db.change_run(
+                        &id,
+                        crate::runs::RunChanges {
+                            status: Some(RunStatus::Queued),
+                            cancel_requested_at: Some(None),
+                            ..Default::default()
+                        },
+                    )?;
+                    let saved = RunCheckpoint::from_value(json!({
+                        "prepared": { "backend": "native", "isolated": true },
+                        "runnerId": "attempt", "completed": false,
+                        "terminalCode": 75, "remainingMs": null,
+                        "controllerRecoveries": count,
+                    }))?;
+                    saved.store_in(db, &id)?;
+                    let allowed = finish_recovery(db, &id, Some(&saved))?;
+                    assert_eq!(allowed, count < 3);
+                    if allowed {
+                        let paid = RunCheckpoint::load_in(db, &id)?.unwrap();
+                        assert_eq!(paid.controller_recoveries(), count + 1);
+                        assert!(paid.has_controller_recovery_reservation());
+                        assert!(finish_recovery(db, &id, Some(&paid))?);
+                        let paid_again = RunCheckpoint::load_in(db, &id)?.unwrap();
+                        assert_eq!(paid_again.controller_recoveries(), count + 1);
+                        let mut replacement = paid_again;
+                        replacement.runner_id = Some(Some("replacement".into()));
+                        assert!(!replacement.has_controller_recovery_reservation());
+                        if count == 2 {
+                            assert!(!finish_recovery(db, &id, Some(&replacement))?);
+                        }
+                    }
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+        service.shutdown.cancel();
+    }
+
+    #[tokio::test]
     async fn recovered_output_loss_fails_only_when_completion_is_missing() {
         let (_root, service, _chat, run, _workspace) = fixture().await;
         for completed in [false, true] {
