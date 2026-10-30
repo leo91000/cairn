@@ -1568,8 +1568,10 @@ mod tests {
         let (_root, service, _chat, run, _workspace) =
             fixture_with_runner(format!("http://{address}")).await;
         let original = RunCheckpoint::from_value(json!({
-            "prepared": { "backend": "native", "isolated": true }, "runnerId": "old-attempt", "remainingMs": null,
-        })).unwrap();
+            "prepared": { "backend": "native", "isolated": true }, "runnerId": "old-attempt",
+            "completed": true, "terminalCode": 0, "remainingMs": null,
+        }))
+        .unwrap();
         let mut replacement = original.clone();
         replacement.runner_id = Some(Some("new-attempt".into()));
         replacement.process = Some(Some(crate::recovery::ProcessIdentity {
@@ -1587,9 +1589,7 @@ mod tests {
         assert_eq!(deletes.load(Ordering::SeqCst), 0);
         original.store(&service.store, &run).await.unwrap();
         let s = service.clone();
-        let task = tokio::spawn(async move {
-            recovery::fence_attempt(&s, &run_value, Some("old-attempt")).await
-        });
+        let task = tokio::spawn(async move { recover(&s, &run_value).await });
         entered.notified().await;
         replacement.store(&service.store, &run).await.unwrap();
         release.add_permits(1);
