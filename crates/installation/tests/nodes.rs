@@ -4307,17 +4307,61 @@ async fn connect_running_source(
             }
         }));
     let controller_task = common::serve(controller, app);
+    // Use the manager's real node transport with a synthetic node poller. This
+    // avoids staging a workspace in the host's node data directory.
     let stop = stop.clone();
+    let transport = owner.service.node_transport.clone();
+    let node = node.to_owned();
     let relay_task = tokio::spawn(async move {
-        relay::run(
-            format!("http://{master}").parse().unwrap(),
-            token,
-            format!("http://{address}"),
-            "controller-fixture".into(),
-            stop,
-        )
-        .await
-        .unwrap();
+        let client = reqwest::Client::new();
+        loop {
+            let command = tokio::select! {
+                () = stop.cancelled() => break,
+                command = transport.poll(&node) => command.unwrap(),
+            };
+            if command.is_null() {
+                continue;
+            }
+            let (transport, node, client) = (transport.clone(), node.clone(), client.clone());
+            tokio::spawn(async move {
+                let path = text(&command, "path");
+                let method = text(&command, "method");
+                let (status, content_type, bytes) = if path.starts_with("/prepare/") {
+                    (200, "application/json".to_owned(), b"{}".to_vec())
+                } else {
+                    let method = reqwest::Method::from_bytes(method.as_bytes()).unwrap();
+                    let body = STANDARD.decode(text(&command, "body")).unwrap();
+                    let response = client
+                        .request(method, format!("http://{address}{path}"))
+                        .bearer_auth("controller-fixture")
+                        .body(body)
+                        .send()
+                        .await
+                        .unwrap();
+                    let status = response.status().as_u16();
+                    let kind = response
+                        .headers()
+                        .get("content-type")
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or("application/octet-stream")
+                        .to_owned();
+                    (status, kind, response.bytes().await.unwrap().to_vec())
+                };
+                let id = &command["id"];
+                transport
+                    .reply(
+                        &node,
+                        json!({ "id": id, "sequence": 0, "status": status,
+                    "length": bytes.len(), "contentType": content_type, "done": bytes.is_empty() }),
+                    )
+                    .await
+                    .unwrap();
+                for (index, chunk) in bytes.chunks(65_536).enumerate() {
+                    transport.reply(&node, json!({ "id": id, "sequence": index + 1,
+                        "data": STANDARD.encode(chunk), "done": (index + 1) * 65_536 >= bytes.len() })).await.unwrap();
+                }
+            });
+        }
     });
     [controller_task, relay_task]
 }
