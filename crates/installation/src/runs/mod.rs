@@ -269,6 +269,25 @@ impl Db<'_> {
             .optional()?)
     }
 
+    /// Conversation cards need lifecycle/display fields, never the frozen prompt,
+    /// skill sources or other execution inputs in the snapshot.
+    pub(crate) fn conversation_run(&self, id: &str) -> Result<Option<Value>> {
+        Ok(self.json_rows(
+            "SELECT json_object(
+                'id',id, 'status',status, 'finishedAt',finished_at,
+                'sessionId',session_id, 'workspaceCleanedAt',workspace_cleaned_at,
+                'recoveryPending',json(CASE WHEN recovery_pending THEN 'true' ELSE 'false' END),
+                'accountWaitReason',account_wait_reason, 'accountRequired',account_required,
+                'snapshot',json_object('agent',json_object('provider',provider)),
+                'contextUsage',json(boundary -> '$.contextUsage'),
+                'suspendedByExclusive',json(boundary -> '$.suspendedByExclusive'),
+                'restoredAt',json(boundary -> '$.restoredAt'),
+                'chatExecution',json_object('operation',json_extract(boundary,'$.chatExecution.operation'))
+             ) FROM runs WHERE id=?",
+            [id],
+        )?.pop())
+    }
+
     pub(crate) fn queued_run_records(&self) -> Result<Vec<RunRecord>> {
         let mut query = self.0.prepare_cached(&format!("SELECT {STATE_COLUMNS},snapshot,boundary FROM runs WHERE status='queued' ORDER BY created_at"))?;
         Ok(query
