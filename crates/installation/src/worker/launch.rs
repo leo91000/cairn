@@ -996,6 +996,7 @@ impl Execution<'_> {
         self.checkpoint
             .update(|c| {
                 c.process = Some(identity);
+                c.turn_pending = None;
                 c.launched = Some(true);
                 c.start_rejected = Some(false);
                 c.output_interrupted = None;
