@@ -133,16 +133,17 @@ impl SettingsOperation {
                         "Only the installation owner can configure storage credentials, in the Cairn apps.",
                     ));
                 }
+                // Boxed: the S3 SDK futures would otherwise enlarge every
+                // dispatcher that can reach this capability.
                 Ok(serde_json::to_value(
-                    crate::object_storage::save_settings(s, decode(input)?).await?,
+                    Box::pin(crate::object_storage::save_settings(s, decode(input)?)).await?,
                 )?)
             }
             "check_storage" => {
                 let _: CheckStorageInput = decode(input)?;
                 // Network I/O never runs inside a database transaction.
-                crate::object_storage::Storage::configured(s)?
-                    .probe()
-                    .await?;
+                let storage = crate::object_storage::Storage::configured(s)?;
+                Box::pin(storage.probe()).await?;
                 Ok(serde_json::to_value(StorageCheck { ok: true })?)
             }
             name => {
