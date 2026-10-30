@@ -892,7 +892,9 @@ test('nested sequence backgrounds paint the inner highlight above the outer one 
   try {
     await page.goto(`${address}scripts/fixtures/chat-rendering.html`, { waitUntil: 'domcontentloaded' })
     await page.waitForFunction(() => window.chatRendering)
-    await page.evaluate(source => window.chatRendering.markdown(source), '```mermaid\nsequenceDiagram\nparticipant A\nrect rgb(255,0,0)\nrect rgb(0,255,0)\nA->>A: Hi\nend\nend\n```')
+    // A short label can keep identical geometry with the CI image's fallback font.
+    const label = `${'l'.repeat(100)} Łódź`
+    await page.evaluate(source => window.chatRendering.markdown(source), `\`\`\`mermaid\nsequenceDiagram\nparticipant A\nrect rgb(255,0,0)\nrect rgb(0,255,0)\nA->>A: ${label}\nend\nend\n\`\`\``)
     const svg = page.locator('#app figure.diagram svg')
     await expect(svg).toBeVisible()
     const original = await svg.elementHandle()
@@ -908,7 +910,7 @@ test('nested sequence backgrounds paint the inner highlight above the outer one 
     expect(await page.evaluate(() => [...document.fonts].some(face => face.family.includes('DM Sans') && face.status === 'loaded'))).toBe(true)
     // Chromium's changed font metrics replace this SVG; WebKit can retain identical HTML.
     if (browserName === 'chromium')
-      expect(await original!.evaluate(element => element.isConnected)).toBe(false)
+      await expect.poll(() => original!.evaluate(element => element.isConnected)).toBe(false)
 
     const point = await svg.evaluate((svg) => {
       const area = svg.getBoundingClientRect()
