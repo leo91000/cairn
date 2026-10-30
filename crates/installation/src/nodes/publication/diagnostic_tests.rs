@@ -370,6 +370,29 @@ impl std::io::Write for LogWriter {
 
 #[tokio::test]
 async fn default_logging_filter_correlates_pretransfer_failure_and_cancelled_summary() {
+    isolated_logging_test("nodes::publication::diagnostic_tests::default_logging_filter_child")
+        .await;
+}
+
+async fn isolated_logging_test(name: &str) {
+    // Tracing callsite interest is process-global. Other publication tests emit
+    // the same events without a subscriber, racing these scoped log assertions.
+    let output = tokio::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", name, "--ignored"])
+        .output()
+        .await
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("1 passed; 0 failed;"),
+        "{stdout}\n{stderr}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "isolated process-global tracing callsite child"]
+async fn default_logging_filter_child() {
     use tracing::instrument::WithSubscriber;
     let root = tempfile::tempdir().unwrap();
     let s = service(root.path()).await;
@@ -427,6 +450,15 @@ async fn default_logging_filter_correlates_pretransfer_failure_and_cancelled_sum
 
 #[tokio::test]
 async fn converted_publications_have_distinct_attempt_summaries_on_success_and_failure() {
+    isolated_logging_test(
+        "nodes::publication::diagnostic_tests::converted_publication_summaries_child",
+    )
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "isolated process-global tracing callsite child"]
+async fn converted_publication_summaries_child() {
     use tracing::instrument::WithSubscriber;
     let root = tempfile::tempdir().unwrap();
     let s = service(root.path()).await;
