@@ -1291,7 +1291,7 @@ mod tests {
         let started = std::time::Instant::now();
         let app = Router::new().fallback(any(move |request: Request| async move {
             if request.uri().path().ends_with("/administrative-pause") {
-                let paused_ms = started.elapsed().as_millis().min(500) as u64;
+                let paused_ms = started.elapsed().as_millis() as u64;
                 return axum::Json(json!({ "administrativePausedMs": paused_ms })).into_response();
             }
             if request.uri().path().ends_with("/wait") {
