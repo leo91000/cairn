@@ -14,6 +14,167 @@ fn state(id: &str, task: &str) -> RunState {
 }
 
 #[tokio::test]
+async fn unchanged_lifecycle_assignments_do_not_wake_subscribers() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(root.path()).unwrap();
+    let expected = state("run", "mission");
+    store
+        .transaction(|db| {
+            db.admit_run(&state("run", "mission"), None, &json!({}), None)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let changes = store.subscribe();
+    let revision = store.revision();
+    for change in [
+        RunChanges::default(),
+        RunChanges {
+            summary: Some(String::new()),
+            ..Default::default()
+        },
+        RunChanges {
+            status: Some(RunStatus::Queued),
+            ..Default::default()
+        },
+        RunChanges {
+            resume_count: Some(0),
+            ..Default::default()
+        },
+    ] {
+        assert_eq!(store.change_run("run", change).await.unwrap(), expected);
+        assert_eq!(store.revision(), revision);
+        assert!(!changes.has_changed().unwrap());
+    }
+}
+
+#[tokio::test]
+async fn unchanged_boundary_patches_preserve_null_presence_without_notifications() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(root.path()).unwrap();
+    store
+        .transaction(|db| {
+            db.admit_run(
+                &state("run", "mission"),
+                None,
+                &json!({ "storage": { "mode": "on-demand", "dirtyBytes": 0 } }),
+                None,
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let mut changes = store.subscribe();
+    let revision = store.revision();
+    for patch in [
+        json!({}),
+        json!({ "storage": { "mode": "on-demand", "dirtyBytes": 0 } }),
+    ] {
+        let result = store.update_run_boundary("run", patch).await.unwrap();
+        assert_eq!(result["storage"]["dirtyBytes"], 0);
+        assert_eq!(store.revision(), revision);
+        assert!(!changes.has_changed().unwrap());
+    }
+
+    let result = store
+        .update_run_boundary("run", json!({ "nodeState": null }))
+        .await
+        .unwrap();
+    assert!(result.as_object().unwrap().contains_key("nodeState"));
+    assert!(changes.has_changed().unwrap());
+    changes.borrow_and_update();
+    let revision = store.revision();
+    let repeated = store
+        .update_run_boundary("run", json!({ "nodeState": null }))
+        .await
+        .unwrap();
+    assert_eq!(repeated, result);
+    assert_eq!(store.revision(), revision);
+    assert!(!changes.has_changed().unwrap());
+
+    // Boundary patches replace whole root fields, including nested objects.
+    let replaced = store
+        .update_run_boundary("run", json!({ "storage": { "dirtyBytes": 0 } }))
+        .await
+        .unwrap();
+    assert!(replaced["storage"].get("mode").is_none());
+    assert_eq!(replaced["storage"]["dirtyBytes"], 0);
+    assert!(changes.has_changed().unwrap());
+}
+
+#[tokio::test]
+async fn domain_changes_still_commit_when_lifecycle_fields_are_unchanged() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(root.path()).unwrap();
+    store
+        .transaction(|db| {
+            db.admit_run(&state("run", "mission"), None, &json!({}), None)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let mut changes = store.subscribe();
+    let wakeup = serde_json::from_value(json!({
+        "id": "wait", "messageId": null, "reason": "Synthetic wait",
+        "seconds": 60, "createdAt": 0, "wakeAt": 60000,
+    }))
+    .unwrap();
+    store
+        .change_run(
+            "run",
+            RunChanges {
+                wakeup: Some(Some(wakeup)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        store
+            .read(|db| db.wakeup(false, "run"))
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(changes.has_changed().unwrap());
+    changes.borrow_and_update();
+
+    store
+        .change_run(
+            "run",
+            RunChanges {
+                wakeup: Some(None),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        store
+            .read(|db| db.wakeup(false, "run"))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(changes.has_changed().unwrap());
+    changes.borrow_and_update();
+
+    let lifecycle = store
+        .change_run(
+            "run",
+            RunChanges {
+                boundary: Some(json!({ "storage": { "mode": "on-demand", "dirtyBytes": 0 } })),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(lifecycle, state("run", "mission"));
+    assert_eq!(store.run("run").await.unwrap()["storage"]["dirtyBytes"], 0);
+    assert!(changes.has_changed().unwrap());
+}
+
+#[tokio::test]
 async fn admission_uniqueness_and_dedupe_survive_terminal_transitions() {
     let root = tempfile::tempdir().unwrap();
     let store = Store::open(root.path()).unwrap();

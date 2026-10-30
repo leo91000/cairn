@@ -17,6 +17,14 @@ use tokio::sync::Mutex;
 /// Absent (`None`), explicitly `null` (`Some(None)`) or set (`Some(Some(_))`).
 type Nullable<T> = Option<Option<T>>;
 
+/// The checkpoint identities needed to verify node storage ownership.
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct NodeOwnership {
+    pub node_id: Option<String>,
+    pub runner_id: Option<String>,
+}
+
 /// Restart state persisted once in `run_checkpoints`, serialized from this type.
 ///
 /// Unconverted chat/node boundaries still serialize these named fields. Nullable
@@ -747,6 +755,21 @@ mod nullable {
 // Temporary JSON adapters are owned by the unconverted node/chat domains. They
 // cannot persist arbitrary checkpoint fields or create a second source of truth.
 impl Db<'_> {
+    /// Storage eligibility never needs the prepared workspace or tool sources.
+    /// Decode the projected JSON so arrays, objects and numbers remain invalid
+    /// identities, just as they are in the full checkpoint contract.
+    pub(crate) fn checkpoint_node_ownership(&self, run_id: &str) -> Result<Option<NodeOwnership>> {
+        Ok(self
+            .json_rows_as(
+                "SELECT json_object(
+                    'nodeId',json(state -> '$.nodeId'),
+                    'runnerId',json(state -> '$.runnerId')
+                 ) FROM run_checkpoints WHERE run_id=?",
+                [run_id],
+            )?
+            .pop())
+    }
+
     pub fn checkpoint_boundary(&self, run_id: &str) -> Result<Option<Value>> {
         RunCheckpoint::load_in(self, run_id)?
             .map(|state| state.to_value())
@@ -785,6 +808,35 @@ mod tests {
     use super::*;
     use crate::run_fixture::DbRunFixture;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn node_ownership_reads_nullable_ids_without_prepared_execution_data() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        store.transaction(|db| {
+            for (id, state) in [
+                ("absent", json!({})),
+                ("null", json!({ "nodeId": null, "runnerId": null })),
+                ("set", json!({ "nodeId": "node", "runnerId": "attempt", "prepared": { "instructions": "private".repeat(16384) } })),
+            ] {
+                db.add_run_fixture(&json!({ "id": id, "taskId": id, "status": "succeeded" }), None)?;
+                db.save_checkpoint_boundary(id, &state)?;
+                let compact = db.checkpoint_node_ownership(id)?.unwrap();
+                assert_eq!(compact.node_id.as_deref(), state["nodeId"].as_str());
+                assert_eq!(compact.runner_id.as_deref(), state["runnerId"].as_str());
+            }
+            assert!(db.checkpoint_node_ownership("missing")?.is_none());
+            for state in [
+                json!({ "nodeId": 42 }), json!({ "runnerId": 42 }),
+                json!({ "nodeId": {} }), json!({ "runnerId": [] }),
+                json!({ "nodeId": true }), json!({ "runnerId": 1.5 }),
+            ] {
+                db.0.execute("UPDATE run_checkpoints SET state=? WHERE run_id='set'", [state.to_string()])?;
+                assert!(db.checkpoint_node_ownership("set").is_err());
+            }
+            Ok(())
+        }).await.unwrap();
+    }
 
     #[test]
     fn round_trips_named_checkpoint_fields_and_preserves_null_versus_absent() {

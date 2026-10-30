@@ -45,6 +45,49 @@ acknowledgement measurements. Host and guest run the same application build.
 | `agent_activity` | Turn start/end, first item, first nonempty assistant message, item start/end and periodic activity summary |
 | `agent_output` | Worker pipe-to-consumer queue delays of at least 100 ms |
 | `agent_wait` | Awaits lasting at least 100 ms: stdout writing/flushing, credential-redaction refresh and output persistence |
+| `database_actor` | Per SQLite actor: admission/queue wait, execution wall time, completed jobs, errors and replies abandoned by their caller |
+
+`database_actor` aggregates locally in each SQLite actor and emits at most once
+every 30 seconds, after a job completes. `lane=write` includes both individual
+writes and transactions; `lane=read` covers the four reader actors. `actor` is a
+fixed index within its lane, starting at zero. Compare the same process lifetime.
+The interval can include idle time; an idle or blocked actor does not emit a timer
+record. These records describe completed jobs, not current queue depth or work
+still blocked. Existing `agent_wait` records cover long output-persistence waits.
+
+`queue_us` measures from submission to the actor beginning the closure, including
+bounded-channel admission and scheduling. `execution_us` measures the closure,
+including Rust decoding and transaction commit where applicable. Neither is CPU
+time. Totals and maxima cover every completed job, including errors and work whose
+caller stopped waiting (`abandoned_replies`). Reader execution times can overlap;
+do not sum them as elapsed wall time. SQL, parameters, errors and conversation or
+account identifiers are never included. Aggregation performs no database write.
+
+An explicit local metadata-write benchmark exercises the real `Store` on synthetic
+0/128/512 KiB frozen snapshots:
+
+```sh
+CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
+  node scripts/test-backend.mjs -p cairn-installation --test run_write_performance \
+  -- --ignored --nocapture --test-threads=1
+```
+
+It reports individual warm-operation wall times, process CPU (including SQLite
+actors), snapshot bytes, WAL bytes and subscriber revisions for 32 changed or
+unchanged boundary/state writes. Setup and WAL truncation are outside timing;
+automatic checkpointing is disabled only on this disposable writer to expose
+write amplification. This is a warm local metadata workload, without network,
+agent processes or storage-object I/O. WAL bytes are not physical disk-write
+bytes. Cold reads and object compression are outside its scope. Keep results and
+reference/candidate SHAs in the PR description or temporary evidence, not here.
+
+Repeated lifecycle assignments and boundary patches skip unchanged SQL writes,
+so they do not wake live subscribers. Explicitly adding a null boundary field
+still differs from leaving it absent. Snapshot and durable-wakeup changes remain
+independent of lifecycle equality and commit atomically with their transition.
+The benchmark's unchanged cases expose both WAL bytes and subscriber revisions;
+`database_actor.completed` counts jobs, including these no-op transactions, not
+changed rows or physical writes.
 
 `agent_activity` emits a heartbeat every 30 seconds while its receive loop is
 waiting. If output writing or persistence itself blocks, `agent_wait` instead
@@ -144,6 +187,49 @@ Durations use monotonic clocks within each process. Do not subtract wall-clock
 timestamps from different nodes to infer network delay. Logging remains
 observational; it does not send test messages or resume production conversations.
 
+## Node inventory reads
+
+The `node_inventory` operation measures the inventory shared by the web/Android
+node list, public MCP and authorized agent tools. A fresh random operation UUID
+correlates its phases; it is not a node, account or conversation identifier.
+
+- `database_queue`: waiting for a SQLite reader, including queue admission.
+- `records`: loading attempts, volumes and agent grants in one read snapshot.
+- `stale_disks`: checking active executions, moves and checkpoint ownership.
+- `describe`: reading nodes and deriving slots, grants and stale-disk totals.
+- `disk_accounting`: calculating native storage usage and reclaimable bytes.
+
+Each completion records `phase_ms` and `total_ms`; failures or dropped work record
+`incomplete`. These timings include local scheduling and database work. They
+exclude the caller's authentication, local-runner refresh, network and UI rendering.
+Logs contain fixed phase names and durations, never stored prompts, checkpoints,
+paths or request bodies. No diagnostic rows are written to SQLite.
+
+Run the synthetic inventory benchmark with:
+
+```sh
+pnpm test:backend -p cairn-installation --test node_inventory_performance -- --ignored --nocapture --test-threads=1
+```
+
+It varies saved snapshots and checkpoints across 300 materialized volumes and
+checks stale-disk and unsynchronized-byte results. Measurements are local reads
+through the shipped inventory function, not production HTTP or disk-transfer
+measurements. Keep raw measurements outside tracked files and include the
+reference comparison and host conditions in the PR description.
+
+To qualify native storage accounting with retained workspaces, run:
+
+```sh
+pnpm test:backend -p cairn-installation --test native_inventory_performance -- --ignored --nocapture --test-threads=1
+```
+
+This fixture reports 100 clean retained native caches with acknowledged S3
+publication metadata and released execution leases. It checks the actual
+`reclaimableBytes` result while varying frozen snapshots and prepared checkpoints.
+The ordinary regression also checks active work, pending recovery, moves,
+changed checkpoint ownership, dirty bytes, requested publications and clean
+queued resumes. No workspace is opened, uploaded or evicted by these tests.
+
 ## VM import timings
 
 VM imports emit structured records under the existing `cairn_performance` target.
@@ -178,3 +264,31 @@ when streaming reaches its end.
 Host timings are in the runner/controller logs; guest timings are in the VM's
 `{vm-id}.boot.log` in runner state. Import trace IDs correlate host and guest
 measurements; invalid or absent trace IDs are recorded as `untraced`.
+
+## Conversation list and live reads
+
+Account-scoped conversation lists keep one immutable shared allocation between
+refreshes. Reading a cached list and cloning a live state no longer copy every
+conversation. A refresh replaces that account's allocation; previous responses
+keep their own snapshot. Revision coalescing, external refreshes, account read
+marks, the quarter-second rebuild interval and serialized response shapes stay
+unchanged. Sharing does not avoid rebuilding a list or serializing a changed
+state, and it does not remove the frozen run snapshot from live responses.
+
+The ignored unit benchmark exercises real Store fixtures and the live read path:
+
+```sh
+node scripts/test-backend.mjs -p cairn-installation --lib \
+  measure_conversation_reads_by_count_and_snapshot_size -- \
+  --ignored --nocapture --test-threads=1
+```
+
+It covers 1/100/300 conversations and 0/128/512 KiB of frozen agent instructions,
+reporting exact stored snapshot bytes, encoded list/state bytes, the first read
+through a new private SQLite page cache, 16 warm reads and process CPU. The host
+OS cache remains warm; these are local measurements, not network or disk-cold
+latencies. Each live-page case includes first-state serialization but excludes
+SSE framing and event serialization. Compare the same harness/profile/host on a
+reference; do not infer production savings from one trial. Use the existing
+`conversation_reads` aggregate to compare page read/queue time, list rebuilds and
+coalescing after deployment.
