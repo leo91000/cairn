@@ -730,10 +730,31 @@ test('recent history loads older pages without moving the reader and survives a 
     trigger: 'history-fixture',
   })
 
-  for (let i = 0; i < 350; i++) {
+  const previousEventId = workspace.service.store.events(original.id).at(-1)?.id ?? 0
+  const events = Array.from({ length: 350 }, (_, i) => {
     const text = `Paged line ${String(i).padStart(3, '0')}. A paragraph to retain a stable reading position.`
-    workspace.service.store.event(run.id, 'item.completed', text, { item: { id: `page-${i}`, type: 'agent_message', text } })
-  }
+    return { type: 'item.completed', text, payload: { item: { id: `page-${i}`, type: 'agent_message', text } } }
+  })
+  workspace.service.store.seedEvents(run.id, events)
+
+  const savedEvents = workspace.service.store.events(run.id)
+  expect(savedEvents).toHaveLength(350)
+  expect(savedEvents.map(({
+    runId,
+    type,
+    text,
+    payload,
+  }) => ({
+    runId,
+    type,
+    text,
+    payload,
+  }))).toEqual(
+    events.map(event => ({ runId: run.id, ...event })),
+  )
+  expect(savedEvents[0].id).toBeGreaterThan(previousEventId)
+  expect(new Set(savedEvents.map(event => event.id)).size).toBe(350)
+  expect(savedEvents.every((event, index) => index === 0 || event.id > savedEvents[index - 1].id)).toBe(true)
 
   await page.goto(workspacePath(`${workspace.url}/runs/${run.id}`))
   await authenticateWorkspace(page)
