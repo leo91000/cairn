@@ -587,14 +587,14 @@ pub(super) fn finish_recovery(
         if matches!(checkpoint.remaining_ms, Some(Some(i64::MIN..=0))) {
             let settled = Settled::failure(RunStatus::Failed, "Run exceeded its time limit.");
             let mut patch = settled.run_changes();
-            patch.boundary = Some(json!({ "wakeup": null }));
+            patch.wakeup = Some(None);
             db.change_run(id, patch)?;
             return Ok(false);
         }
         if let Some(error) = checkpoint.finalization_error() {
             let settled = Settled::failure(RunStatus::Failed, error);
             let mut patch = settled.run_changes();
-            patch.boundary = Some(json!({ "wakeup": null }));
+            patch.wakeup = Some(None);
             db.change_run(id, patch)?;
             return Ok(false);
         }
@@ -656,7 +656,7 @@ pub(super) fn finish_recovery(
             };
             let settled = Settled::failure(RunStatus::Failed, message);
             let mut patch = settled.run_changes();
-            patch.boundary = Some(json!({ "wakeup": null }));
+            patch.wakeup = Some(None);
             db.change_run(id, patch)?;
             return Ok(false);
         }
@@ -1083,7 +1083,14 @@ mod tests {
                                 crate::runs::RunChanges {
                                     status: Some(RunStatus::Queued),
                                     cancel_requested_at: Some(cancel.then(now)),
-                                    boundary: Some(json!({ "wakeup": { "id": "old" } })),
+                                    wakeup: Some(Some(serde_json::from_value(json!({
+                                        "id": "old",
+                                        "messageId": null,
+                                        "reason": "Waiting",
+                                        "seconds": 3600,
+                                        "createdAt": now(),
+                                        "wakeAt": now() + 3_600_000,
+                                    }))?)),
                                     ..Default::default()
                                 },
                             )?;
@@ -1138,6 +1145,46 @@ mod tests {
                 saved.runner_id = Some(Some("replacement".into()));
                 assert!(!finish_recovery(db, &run, Some(&saved))?);
                 assert_eq!(db.run_state(&run)?.unwrap().status, RunStatus::Failed);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        service.shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn failed_finalization_removes_typed_mission_wakeup() {
+        let (_root, service, _chat, run, _workspace) = fixture().await;
+        service
+            .store
+            .transaction(move |db| {
+                let wakeup = serde_json::from_value(json!({
+                    "id": "wake",
+                    "messageId": null,
+                    "reason": "Waiting",
+                    "seconds": 3600,
+                    "createdAt": now(),
+                    "wakeAt": now() + 3_600_000,
+                }))?;
+                db.change_run(
+                    &run,
+                    crate::runs::RunChanges {
+                        status: Some(RunStatus::Queued),
+                        trigger: Some("manual".into()),
+                        wakeup: Some(Some(wakeup)),
+                        ..Default::default()
+                    },
+                )?;
+                let saved = RunCheckpoint::from_value(json!({
+                    "prepared": { "backend": "native", "isolated": true },
+                    "completed": true,
+                    "terminalCode": 70,
+                    "remainingMs": null,
+                }))?;
+                assert!(!finish_recovery(db, &run, Some(&saved))?);
+                let record = db.run_record(&run)?.unwrap();
+                assert_eq!(record.state.status, RunStatus::Failed);
+                assert!(record.wakeup.is_none());
                 Ok(())
             })
             .await
