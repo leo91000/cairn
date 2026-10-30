@@ -670,8 +670,24 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
     // requeued because its first fencing attempt failed. Placement and possible
     // disk relocation belong to admission after its wakeup.
     let cannot_replay = recovery_cannot_replay(checkpoint.as_ref(), recovery_deadline);
+    // A move requested after a conversation has already succeeded is a disk
+    // transfer, not admission of another turn. Its idle marker is recorded by
+    // the public request while the run is succeeded; active-turn moves lack it.
+    let finished_idle_move = run["moveRequest"]["idle"] == true
+        && run["moveRequest"]["automatic"] == false
+        && state.cancel_requested_at.is_none()
+        && checkpoint.as_ref().is_some_and(|saved| {
+            saved.managed()
+                && saved.completed()
+                && saved.terminal_code() == Some(0)
+                && saved.finalization_error().is_none()
+                && saved.output_error().is_none()
+                && !saved.settled().is_some_and(|settled| {
+                    matches!(settled.status, RunStatus::Failed | RunStatus::Cancelled)
+                })
+        });
     if !parked
-        && !cannot_replay
+        && (!cannot_replay || finished_idle_move)
         && !crate::nodes::moves::advance_for_attempt(s, run, expected_checkpoint.as_ref()).await?
     {
         return Ok(false);
@@ -1426,10 +1442,16 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let (_root, service, _chat, run, _workspace) =
             fixture_with_runner(format!("http://{address}")).await;
-        for cancelled in [false, true] {
+        for (terminal_code, idle, cancelled) in [
+            (70, false, false),
+            (70, true, false),
+            (0, false, false),
+            (70, true, true),
+            (0, true, true),
+        ] {
             let saved = RunCheckpoint::from_value(json!({
                 "prepared": { "backend": "native", "isolated": true },
-                "runnerId": "old-attempt", "completed": true, "terminalCode": 70,
+                "runnerId": "old-attempt", "completed": true, "terminalCode": terminal_code,
                 "controllerRecoveries": 3, "remainingMs": null,
             }))
             .unwrap();
@@ -1441,7 +1463,7 @@ mod tests {
                     crate::runs::RunChanges {
                         status: Some(RunStatus::Queued),
                         cancel_requested_at: Some(cancelled.then(now)),
-                        boundary: Some(json!({ "moveRequest": { "nodeId": "destination" } })),
+                        boundary: Some(json!({ "moveRequest": { "nodeId": "destination", "idle": idle, "automatic": false } })),
                         ..Default::default()
                     },
                 )
@@ -1457,6 +1479,8 @@ mod tests {
                 state.status,
                 if cancelled {
                     RunStatus::Cancelled
+                } else if terminal_code == 0 {
+                    RunStatus::Succeeded
                 } else {
                     RunStatus::Failed
                 }
@@ -1466,7 +1490,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert!(current.completed());
-            assert_eq!(current.terminal_code(), Some(70));
+            assert_eq!(current.terminal_code(), Some(terminal_code));
         }
         service.shutdown.cancel();
         server.abort();

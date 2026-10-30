@@ -4197,12 +4197,11 @@ async fn seed_source_disk(owner: &Owner, state: &Path, record: &Value, node: &st
 /// Requests a move of `run` to `target` and lets it settle.
 async fn move_to(owner: &Owner, run: &str, _resources: &Value, target: &str) {
     let args = json!({ "nodeId": target });
-    moves::request(&owner.service, &owner.run(run).await, &args)
-        .await
-        .unwrap();
-    moves::advance(&owner.service, &owner.run(run).await)
-        .await
-        .unwrap();
+    let (status, body) = owner
+        .send("POST", &format!("/api/nodes/placement/{run}/move"), args)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    owner.service.worker.tick(&owner.service).await.unwrap();
 }
 
 /// Prepares the runtime of `node`, enrolls it, and connects its fixture
@@ -4292,6 +4291,7 @@ async fn idle_conversations_move_twice_through_outbound_relays_and_failed_moves_
     let mut record = run_record(&run, RunStatus::Succeeded);
     record["isolated"] = true.into();
     record["sessionId"] = "retained-session".into();
+    record["summary"] = "the committed answer".into();
     record["nodeId"] = source.clone().into();
     record["resources"] = resources.clone();
     record["snapshot"] = json!({ "agent": { "id": agent } });
@@ -4303,6 +4303,8 @@ async fn idle_conversations_move_twice_through_outbound_relays_and_failed_moves_
                 "nodeId": source,
                 "runnerId": attempt,
                 "completed": true,
+                "terminalCode": 0,
+                "remainingMs": null,
                 "prepared": { "backend": "firecracker", "isolated": true },
             }),
         )
@@ -4319,16 +4321,28 @@ async fn idle_conversations_move_twice_through_outbound_relays_and_failed_moves_
     }
     tasks.push(owner.serve(listener));
     for target in [&destination, &source] {
-        let current = owner.run(&run).await;
         let args = json!({ "nodeId": target });
-        moves::request(&owner.service, &current, &args)
-            .await
-            .unwrap();
+        let (status, body) = owner
+            .send("POST", &format!("/api/nodes/placement/{run}/move"), args)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
         let pending = owner.run(&run).await;
         assert_eq!(pending["status"], RunStatus::Queued);
         assert_eq!(pending["moveRequest"]["idle"], true);
-        moves::advance(&owner.service, &pending).await.unwrap();
+        owner.service.worker.tick(&owner.service).await.unwrap();
         assert_moved_with_its_disk(&owner, &run, target).await;
+        let finished = owner.run(&run).await;
+        assert_eq!(finished["summary"], "the committed answer");
+        let checkpoint = owner
+            .service
+            .store
+            .checkpoint_boundary(&run)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(checkpoint["runnerId"], attempt);
+        assert_eq!(checkpoint["terminalCode"], 0);
+        assert_eq!(checkpoint["completed"], true);
     }
     faults.failed.store(true, Ordering::SeqCst);
     move_to(&owner, &run, &resources, &destination).await;
@@ -4340,6 +4354,7 @@ async fn idle_conversations_move_twice_through_outbound_relays_and_failed_moves_
         "Unable to capture a coherent VM snapshot."
     );
     assert_eq!(settled["nodeId"], source);
+    assert_eq!(settled["summary"], "the committed answer");
     faults.cancel_during_capture.store(true, Ordering::SeqCst);
     move_to(&owner, &run, &resources, &destination).await;
     let cancelled = owner.run(&run).await;
