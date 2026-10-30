@@ -498,7 +498,15 @@ impl Checkpoint {
         let (saved, value) = self
             .store
             .transaction(move |db| {
-                let mut saved = RunCheckpoint::load_in(db, &id)?.unwrap_or(fallback);
+                let current = RunCheckpoint::load_in(db, &id)?;
+                if current.is_none()
+                    && (expected.runner_id().is_some() || expected.process().is_some())
+                {
+                    return Err(crate::error::Error::conflict(
+                        "Execution checkpoint disappeared during settlement.",
+                    ));
+                }
+                let mut saved = current.unwrap_or(fallback);
                 if !crate::recovery::same_execution(Some(&saved), Some(&expected)) {
                     return Err(crate::error::Error::conflict(
                         "Execution attempt changed during settlement.",
