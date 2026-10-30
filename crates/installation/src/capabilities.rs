@@ -481,6 +481,8 @@ impl AgentOperation {
             }
             "list_agent_accounts" => {
                 let input: AgentInput = decode(input)?;
+                // The owner sees who may use the agent now, not an ended membership's entry.
+                crate::agent_access::confirm_memberships(s).await;
                 s.store
                     .read(move |db| {
                         let tx = rusqlite::Transaction::new_unchecked(

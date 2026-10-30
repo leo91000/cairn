@@ -998,12 +998,14 @@ private fun AgentOverview(
             AgentSection.People,
             when {
                 creating -> agentAccessOverview(emptyList())
+                people.outdated -> "Mettez l’installation à jour pour choisir qui peut l’utiliser"
                 people.error != null -> NOT_LOADED
                 !people.loaded -> "Vérification des membres qui peuvent l’utiliser…"
                 else -> agentAccessOverview(people.rows)
             },
             chips = {
                 when {
+                    people.outdated -> ToneChip(PluginBadge("Tous les membres", PluginTone.OK))
                     people.error != null ->
                         ToneChip(PluginBadge("Indisponible", PluginTone.WARNING))
                     creating || (people.loaded && allowed == 0) ->

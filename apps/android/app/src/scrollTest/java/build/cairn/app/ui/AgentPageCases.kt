@@ -220,6 +220,8 @@ abstract class AgentPageCases {
         val accessChanges: CopyOnWriteArrayList<String> = CopyOnWriteArrayList(),
         /** The Beacon cannot list the installation's members. */
         val failMembers: AtomicBoolean = AtomicBoolean(false),
+        /** An installation older than account access: it has no `/agents/{id}/accounts`. */
+        val accountsMissing: AtomicBoolean = AtomicBoolean(false),
         /** Holds access changes until released, as a slow installation would. */
         val heldAccess: AtomicReference<java.util.concurrent.CountDownLatch?> =
             AtomicReference(null),
@@ -239,6 +241,7 @@ abstract class AgentPageCases {
         val allowed = AtomicReference<List<String>>(emptyList())
         val accessChanges = CopyOnWriteArrayList<String>()
         val failMembers = AtomicBoolean(false)
+        val accountsMissing = AtomicBoolean(false)
         val heldAccess = AtomicReference<java.util.concurrent.CountDownLatch?>(null)
         val server = MockWebServer()
         server.dispatcher =
@@ -253,6 +256,10 @@ abstract class AgentPageCases {
                     // Like the installation: members allowed to use one agent, changed one by one.
                     Regex("^/agents/([^/]+)/accounts(?:/([^/]+))?$").find(path)?.let { match ->
                         val (agent, account) = match.destructured
+                        if (accountsMissing.get())
+                            return response
+                                .setResponseCode(404)
+                                .setBody("""{"error":"Not found"}""")
                         if (request.method != "GET")
                             heldAccess.get()?.await(15, java.util.concurrent.TimeUnit.SECONDS)
                         when (request.method) {
@@ -451,6 +458,7 @@ abstract class AgentPageCases {
             allowed,
             accessChanges,
             failMembers,
+            accountsMissing,
             heldAccess,
         )
     }
@@ -638,6 +646,18 @@ abstract class AgentPageCases {
             waitForDescription("Autoriser bo@example.test à utiliser Release engineer")
             compose.onNodeWithText("Réessayer").assertDoesNotExist()
             capture("agent-people-installation")
+        }
+    }
+
+    @Test
+    fun anOlderInstallationSaysEveryMemberCanUseTheAgent() {
+        journey(release.id, prepare = { fixture -> fixture.accountsMissing.set(true) }) {
+            waitForText("Tous les membres")
+            compose.onNodeWithText(NOT_LOADED).assertDoesNotExist()
+            open(AgentSection.People)
+            compose.onNodeWithTag("agent-people-outdated").assertExists()
+            compose.onNodeWithText("Réessayer").assertDoesNotExist()
+            capture("agent-people-outdated")
         }
     }
 

@@ -293,13 +293,21 @@ pub(crate) async fn usable_now(
     s: &Service,
     identity: InstallationIdentity,
 ) -> Result<Vec<AgentId>> {
-    if member(&identity)
-        && !s.missions.membership_verified_within(MEMBERSHIP_AGE)
+    if member(&identity) {
+        confirm_memberships(s).await;
+    }
+    s.store.read(move |db| usable(db, &identity)).await
+}
+
+/// Confirms memberships when the last check is too old, dropping ended memberships' entries
+/// and those of an earlier membership of a re-invited member. When the Beacon cannot answer,
+/// the entries stay as they are.
+pub(crate) async fn confirm_memberships(s: &Service) {
+    if !s.missions.membership_verified_within(MEMBERSHIP_AGE)
         && let Err(error) = s.missions.verify_membership(s, MEMBERSHIP_AGE).await
     {
         tracing::warn!(status = error.status, "Agent access could not be confirmed");
     }
-    s.store.read(move |db| usable(db, &identity)).await
 }
 
 /// How long a membership check vouches for a member's entries.
@@ -800,6 +808,53 @@ mod tests {
         s.grant_agent_account(Some(&owner), reviewer, MEMBER)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_owner_never_sees_an_earlier_membership_s_entry_as_access() {
+        let root = tempfile::tempdir().unwrap();
+        let s = service(&root).await;
+        relay_fixture::claimed(&s).await.unwrap();
+        let reviewer = s
+            .agent_fixture(json!({ "name": "Reviewer" }), None)
+            .await
+            .unwrap();
+        let reviewer = text(&reviewer, "id").to_owned();
+        relay_fixture::allow_member(&s, MEMBER, &reviewer).await;
+        let listed = || {
+            let (s, reviewer) = (s.clone(), reviewer.clone());
+            async move {
+                let output = Box::pin(crate::api::dispatch(
+                    &s,
+                    &crate::http::Input {
+                        method: "GET".into(),
+                        path: format!("/api/agents/{reviewer}/accounts"),
+                        query: std::collections::HashMap::default(),
+                        headers: axum::http::HeaderMap::default(),
+                        body: Value::Null,
+                        identity: Some(InstallationIdentity::trusted(
+                            InstallationRole::Owner,
+                            "fixture-owner",
+                        )),
+                    },
+                ))
+                .await
+                .unwrap();
+                output["accounts"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|account| text(account, "accountId").to_owned())
+                    .collect::<Vec<_>>()
+            }
+        };
+        assert_eq!(listed().await, vec![MEMBER.to_owned()]);
+
+        // Removed and invited again: the entry belonged to the earlier membership.
+        relay_fixture::remove_member(&s, MEMBER).await;
+        relay_fixture::add_member(&s, MEMBER, "membership-2").await;
+        s.missions.expire_membership_check();
+        assert!(listed().await.is_empty());
     }
 
     #[tokio::test]

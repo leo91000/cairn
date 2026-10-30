@@ -27,6 +27,8 @@ const props = defineProps<{
   loading: boolean
   loaded: boolean
   error: string
+  // The installation predates account access: every member can use every agent.
+  outdated: boolean
   saving: string[]
   failure: { accountId: string, message: string } | null
 }>()
@@ -43,7 +45,7 @@ const reason = computed(() => props.error === 'Members could not be loaded.' ? '
 <template>
   <div class="grid min-w-0 gap-5">
     <p class="max-w-160 text-sm leading-relaxed text-muted">
-      People you add here can start conversations with {{ name }}, continue and steer them, answer its questions and schedule its tasks. Everyone in the installation still sees every conversation and can pause or stop work.
+      People you allow here can start conversations with {{ name }}, continue and steer them, answer its questions and schedule its tasks. Everyone in the installation still sees every conversation and can pause or stop work.
     </p>
 
     <div class="flex items-start gap-3 rounded-xl bg-soft px-4.5 py-3.5 text-xs leading-relaxed">
@@ -64,6 +66,14 @@ const reason = computed(() => props.error === 'Members could not be loaded.' ? '
 
     <p v-if="isNew" class="rounded-xl border border-dashed border-line px-5 py-4 text-sm text-muted">
       Only you can use a new agent. Create it first, then choose who else can use it here.
+    </p>
+
+    <p v-else-if="outdated" class="flex items-start gap-3 rounded-xl border border-line bg-surface px-5 py-4 text-sm" role="note">
+      <Icon :name="Users" :size="18" class="mt-0.5 shrink-0 text-muted" />
+      <span>
+        Every member can use {{ name }} on this version of the installation.
+        <span class="text-muted">Update the installation to choose who can use it.</span>
+      </span>
     </p>
 
     <template v-else>
@@ -116,8 +126,8 @@ const reason = computed(() => props.error === 'Members could not be loaded.' ? '
             <PersonAvatar :name="row.known ? row.email : '?'" :identity="row.accountId" :size="34" />
             <span class="min-w-0 flex-1">
               <span class="block truncate text-sm" :class="row.known ? 'font-medium' : 'italic text-muted'">{{ row.email }}</span>
-              <span class="block truncate text-xs" :class="row.allowed ? 'text-success' : 'text-muted'">
-                {{ row.allowed ? 'Can use this agent' : 'No access' }}
+              <span class="block truncate text-xs" :class="row.known && row.allowed ? 'text-success' : 'text-muted'">
+                {{ !row.known ? 'Access ends at the next membership check' : row.allowed ? 'Can use this agent' : 'No access' }}
               </span>
             </span>
             <Icon
@@ -149,7 +159,7 @@ const reason = computed(() => props.error === 'Members could not be loaded.' ? '
       </UiAlert>
 
       <p v-if="!error" class="text-xs leading-relaxed text-muted">
-        Changes apply right away. A member without access keeps reading conversations; their scheduled tasks on this agent are suspended until access returns.
+        Changes apply right away; messages a member already queued are still sent unless removed from the queue. A member without access keeps reading conversations; their scheduled tasks on this agent are suspended until access returns.
       </p>
     </template>
   </div>

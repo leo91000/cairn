@@ -5,7 +5,7 @@ import { grantAgentAccount } from '../../../packages/contracts/generated/grantAg
 import { listAgentAccounts } from '../../../packages/contracts/generated/listAgentAccounts'
 import { revokeAgentAccount } from '../../../packages/contracts/generated/revokeAgentAccount'
 import { accessRows, withAccess } from './agent-use'
-import { api, state } from './api'
+import { api, ApiError, state } from './api'
 
 // Members come from the Beacon, which owns the installation's sharing; the installation
 // keeps which of them may use each agent. Only the owner reads and changes both.
@@ -26,6 +26,8 @@ export function useAgentPeople(agentId: Ref<string | null>) {
   const loading = ref(false)
   const loaded = ref(false)
   const error = ref('')
+  // An installation older than account access has no such list: every member uses every agent.
+  const outdated = ref(false)
   // Changes in flight, per agent: the page is reused across agents, and one agent's pending
   // change or refusal never shows on another's rows.
   const pending = ref<Array<{ agent: string, accountId: string }>>([])
@@ -42,6 +44,7 @@ export function useAgentPeople(agentId: Ref<string | null>) {
       people.value = []
       allowed.value = []
       loaded.value = false
+      outdated.value = false
       failure.value = null
       shown = agent
     }
@@ -56,10 +59,14 @@ export function useAgentPeople(agentId: Ref<string | null>) {
         return
       people.value = listed
       allowed.value = accounts.accounts.map(account => account.accountId)
+      outdated.value = false
       loaded.value = true
     }
     catch (cause) {
-      if (current === generation)
+      if (current !== generation)
+        return
+      outdated.value = cause instanceof ApiError && cause.status === 404
+      if (!outdated.value)
         error.value = cause instanceof Error ? cause.message : 'Members could not be loaded.'
     }
     finally {
@@ -98,6 +105,7 @@ export function useAgentPeople(agentId: Ref<string | null>) {
     loading,
     loaded,
     error,
+    outdated,
     saving,
     failure,
     load,

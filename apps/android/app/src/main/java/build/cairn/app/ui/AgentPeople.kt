@@ -42,6 +42,8 @@ internal class AgentPeople {
     var loading by mutableStateOf(false)
     var loaded by mutableStateOf(false)
     var error by mutableStateOf<String?>(null)
+    // An installation older than account access has no such list: every member uses every agent.
+    var outdated by mutableStateOf(false)
     var saving by mutableStateOf(emptySet<String>())
     var failure by mutableStateOf<Pair<String, String>?>(null)
 
@@ -58,10 +60,12 @@ internal class AgentPeople {
                 members = listed.await()
                 allowed = accounts.await().accounts.map { it.accountId }
             }
+            outdated = false
             loaded = true
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            error = e.message ?: MEMBERS_NOT_LOADED
+            outdated = e is ApiException && e.status == 404
+            if (!outdated) error = e.message ?: MEMBERS_NOT_LOADED
         } finally {
             loading = false
         }
@@ -101,7 +105,7 @@ internal fun PeopleSection(
 ) {
     val name = agentName.ifBlank { "cet agent" }
     Text(
-        "Les personnes que vous ajoutez ici peuvent démarrer des conversations avec $name, les poursuivre et les orienter, répondre à ses questions et planifier ses missions. Tout le monde dans l’installation voit toujours chaque conversation et peut mettre en pause ou arrêter le travail.",
+        "Les personnes que vous autorisez ici peuvent démarrer des conversations avec $name, les poursuivre et les orienter, répondre à ses questions et planifier ses missions. Tout le monde dans l’installation voit toujours chaque conversation et peut mettre en pause ou arrêter le travail.",
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
@@ -152,6 +156,19 @@ internal fun PeopleSection(
                 .clip(RoundedCornerShape(14.dp))
                 .background(MaterialTheme.colorScheme.surfaceVariant)
                 .padding(14.dp),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        return
+    }
+    if (people.outdated) {
+        Text(
+            "Tous les membres peuvent utiliser $name sur cette version de l’installation. Mettez l’installation à jour pour choisir qui peut l’utiliser.",
+            Modifier.fillMaxWidth()
+                .clip(RoundedCornerShape(14.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant)
+                .padding(14.dp)
+                .testTag("agent-people-outdated"),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -227,9 +244,13 @@ internal fun PeopleSection(
                     if (row.known) row.email else "?",
                     row.accountId,
                     row.email,
-                    if (row.allowed) "Peut utiliser cet agent" else "Pas d’accès",
+                    when {
+                        !row.known -> "L’accès prend fin à la prochaine vérification des membres"
+                        row.allowed -> "Peut utiliser cet agent"
+                        else -> "Pas d’accès"
+                    },
                     detailColor =
-                        if (row.allowed) signal.success
+                        if (row.known && row.allowed) signal.success
                         else MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier =
                         Modifier.toggleable(
@@ -284,7 +305,7 @@ internal fun PeopleSection(
         }
     }
     Text(
-        "Les changements s’appliquent tout de suite. Un membre sans accès continue de lire les conversations ; ses missions planifiées sur cet agent sont suspendues jusqu’au retour de l’accès.",
+        "Les changements s’appliquent tout de suite ; les messages qu’un membre a déjà mis en file partent quand même, sauf s’ils en sont retirés. Un membre sans accès continue de lire les conversations ; ses missions planifiées sur cet agent sont suspendues jusqu’au retour de l’accès.",
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )

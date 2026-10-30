@@ -155,14 +155,16 @@ const heading = ref<HTMLElement>()
 // Account access applies immediately and never joins the unsaved profile draft.
 const people = useAgentPeople(computed(() => isNew.value || notFound.value ? null : id.value))
 // Until access loads, the overview neither claims the agent is private nor shared.
-const peopleLoading = computed(() => !isNew.value && !people.error.value && !people.loaded.value)
+const peopleLoading = computed(() => !isNew.value && !people.error.value && !people.outdated.value && !people.loaded.value)
 const peopleSummary = computed(() => isNew.value
   ? { short: 'Only you', long: 'Only you' }
-  : people.error.value
-    ? { short: 'Unavailable', long: 'Not loaded' }
-    : !people.loaded.value
-        ? { short: '', long: 'Loading…' }
-        : accessSummary(people.count.value))
+  : people.outdated.value
+    ? { short: 'Everyone', long: 'Every member' }
+    : people.error.value
+      ? { short: 'Unavailable', long: 'Not loaded' }
+      : !people.loaded.value
+          ? { short: '', long: 'Loading…' }
+          : accessSummary(people.count.value))
 
 const context = computed<Context>(() => ({
   agentId: agent.value?.id,
@@ -376,16 +378,20 @@ const overview = computed(() => [
         summary: peopleSummary.value.long,
         detail: peopleLoading.value
           ? 'Checking which members can use it'
+          : people.outdated.value
+            ? 'Update the installation to choose who can use it'
+            : people.error.value
+              ? 'Who can use it could not be loaded'
+              : people.count.value
+                ? names(people.rows.value.filter(row => row.known && row.allowed).map(row => row.email), email => email)
+                : 'Members cannot start or continue its conversations',
+        chip: people.outdated.value
+          ? { tone: 'granted' as const, label: 'Everyone' }
           : people.error.value
-            ? 'Who can use it could not be loaded'
-            : people.count.value
-              ? names(people.rows.value.filter(row => row.known && row.allowed).map(row => row.email), email => email)
-              : 'Members cannot start or continue its conversations',
-        chip: people.error.value
-          ? { tone: 'unavailable' as const, label: 'Unavailable' }
-          : peopleLoading.value
-            ? undefined
-            : people.count.value ? { tone: 'granted' as const, label: 'Shared' } : { tone: 'none' as const, label: 'Only you' },
+            ? { tone: 'unavailable' as const, label: 'Unavailable' }
+            : peopleLoading.value
+              ? undefined
+              : people.count.value ? { tone: 'granted' as const, label: 'Shared' } : { tone: 'none' as const, label: 'Only you' },
         action: 'Manage',
       },
     ],
@@ -1026,6 +1032,7 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
               :loading="people.loading.value"
               :loaded="people.loaded.value"
               :error="people.error.value"
+              :outdated="people.outdated.value"
               :saving="people.saving.value"
               :failure="people.failure.value"
               @retry="people.load"
