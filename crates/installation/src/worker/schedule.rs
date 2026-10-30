@@ -514,6 +514,10 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
                                     }
                                 }
                             }
+                            if let Some(deadline) = recovery_deadline {
+                                current.remaining_ms =
+                                    Some(Some(deadline.saturating_sub(now()).max(0)));
+                            }
                             current.store_in(db, &id)?;
                             Ok(reserved)
                         })
