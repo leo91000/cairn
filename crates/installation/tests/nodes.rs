@@ -4355,6 +4355,26 @@ async fn idle_conversations_move_twice_through_outbound_relays_and_failed_moves_
     );
     assert_eq!(settled["nodeId"], source);
     assert_eq!(settled["summary"], "the committed answer");
+    assert_eq!(settled["sessionId"], "retained-session");
+    let checkpoint = owner
+        .service
+        .store
+        .checkpoint_boundary(&run)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(checkpoint["runnerId"], attempt);
+    assert_eq!(checkpoint["terminalCode"], 0);
+    assert!(
+        owner
+            .service
+            .store
+            .list("node-attempts")
+            .await
+            .unwrap()
+            .iter()
+            .all(|attempt| attempt["released"] == true)
+    );
     faults.cancel_during_capture.store(true, Ordering::SeqCst);
     move_to(&owner, &run, &resources, &destination).await;
     let cancelled = owner.run(&run).await;
