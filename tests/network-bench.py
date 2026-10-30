@@ -396,6 +396,73 @@ def main():
                 args.output.write_text(json.dumps({**saved, "lossCounters": counts}) + "\n")
 
 
+def android_crash_summary(logcat, exit_info):
+    """Keep crash categories and stack metadata, never exception/abort messages."""
+    groups = {}
+    for line in logcat[-65536:].splitlines():
+        record = re.fullmatch(r"[A-Z]/[^\r\n(]+\(\s*(\d+)\):\s?(.*)", line)
+        if record:
+            groups.setdefault(record[1], []).append(record[2])
+    lines = []
+    for group in groups.values():
+        if any(re.search(r"(?:Process:|Cmdline:) build\.cairn\.app(?:,|$)|>>> build\.cairn\.app <<<", line) for line in group):
+            lines.extend(group)
+    result = {"targetProcessObserved": bool(lines), "exceptions": [], "signals": [],
+              "javaFrames": [], "nativeFrames": [], "exitReasons": []}
+
+    def retain(key, value, limit=32):
+        if value not in result[key] and len(result[key]) < limit:
+            result[key].append(value)
+
+    for line in lines:
+        exception = re.match(r"(?:Caused by: )?([A-Za-z_$][\w.$]*(?:Exception|Error))(?::|$)", line.strip())
+        if exception:
+            retain("exceptions", exception[1])
+        signal_name = re.search(r"\bsignal \d+ \((SIG[A-Z0-9]+)\)", line)
+        if signal_name:
+            retain("signals", signal_name[1])
+        frame = re.fullmatch(r"\s*at ([\w.$]+\((?:[\w.$]+\.(?:java|kt):\d+|Native Method|Unknown Source)\))", line)
+        if frame:
+            retain("javaFrames", frame[1])
+        native = re.match(r"\s*#\d+ pc ([0-9a-f]+) (?:\S*/)?([\w.!-]+)(?: \(([\w:$<>+., *&()-]{1,200})\))?", line)
+        if native:
+            retain("nativeFrames", {"pc": native[1], "library": native[2], "symbol": native[3]})
+    for reason, category, status in re.findall(r"\breason=(\d+) \(([A-Z_]{1,40})\) status=(-?\d+)\b", exit_info[-16384:]):
+        retain("exitReasons", {"reason": int(reason), "category": category, "status": int(status)}, 8)
+    return result
+
+
+def android_failure_evidence(adb, output):
+    values = []
+    errors = []
+    for category, arguments in [
+            ("crash-log", ("logcat", "-b", "crash", "-d", "-t", "256", "-v", "brief")),
+            ("exit-info", ("shell", "dumpsys", "activity", "exit-info", "build.cairn.app"))]:
+        try:
+            values.append(adb(*arguments, text=True, timeout=5).stdout)
+        except (OSError, subprocess.SubprocessError):
+            values.append("")
+            errors.append(category + "-unavailable")
+    evidence = android_crash_summary(*values)
+    evidence["collectionErrors"] = errors
+    output.with_suffix(".crash.json").write_text(json.dumps(evidence) + "\n")
+
+
+def android_instrumentation(adb, scenario, output):
+    try:
+        # This dedicated test emulator must not attribute a previous run's crash.
+        adb("logcat", "-b", "crash", "-c")
+        result = adb("shell", "am", "instrument", "-w", "-e", "class", "build.cairn.app.data.DirectTransportDeviceTest",
+                     "-e", "cairnDirectScenario", scenario, "build.cairn.app.test/androidx.test.runner.AndroidJUnitRunner", text=True, timeout=360)
+    except (OSError, subprocess.SubprocessError):
+        android_failure_evidence(adb, output)
+        raise
+    output.with_suffix(".instrumentation.txt").write_text(result.stdout)
+    if "OK (1 test)" not in result.stdout:
+        android_failure_evidence(adb, output)
+        raise RuntimeError("Native Android transport scenario failed; see instrumentation result")
+
+
 def android(network, directory, args, report):
     if not os.environ.get("CAIRN_BEACON_TEST_DATABASE_URL"):
         raise RuntimeError("Set CAIRN_BEACON_TEST_DATABASE_URL to a disposable Postgres database")
@@ -447,11 +514,7 @@ def android(network, directory, args, report):
     adb("shell", "run-as", "build.cairn.app", "mkdir", "-p", "files")
     try:
         adb("shell", "run-as", "build.cairn.app", "sh", "-c", "'cat > files/direct-fixture.json'", input=private.read_bytes())
-        result = adb("shell", "am", "instrument", "-w", "-e", "class", "build.cairn.app.data.DirectTransportDeviceTest",
-                     "-e", "cairnDirectScenario", args.scenario, "build.cairn.app.test/androidx.test.runner.AndroidJUnitRunner", text=True, timeout=360)
-        args.output.with_suffix(".instrumentation.txt").write_text(result.stdout)
-        if "OK (1 test)" not in result.stdout:
-            raise RuntimeError("Native Android transport scenario failed; see instrumentation result")
+        android_instrumentation(adb, args.scenario, args.output)
         evidence = json.loads(adb("exec-out", "run-as", "build.cairn.app", "cat", "files/direct-evidence.json", text=True).stdout)
         expected = "relay" if args.scenario == "udp-blocked" else "direct"
         if evidence["route"] != expected:
