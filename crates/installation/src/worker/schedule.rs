@@ -2088,12 +2088,21 @@ mod tests {
         use axum::{Router, extract::Request, response::IntoResponse, routing::any};
         use std::sync::atomic::{AtomicUsize, Ordering};
         let reads = Arc::new(AtomicUsize::new(0));
+        let pause_reads = Arc::new(AtomicUsize::new(0));
         let count = reads.clone();
+        let pause_count = pause_reads.clone();
         let app = Router::new().fallback(any(move |request: Request| {
             let count = count.clone();
+            let pause_count = pause_count.clone();
             async move {
                 if request.method() == "DELETE" {
                     return axum::http::StatusCode::NO_CONTENT.into_response();
+                }
+                if request.method() == "GET"
+                    && request.uri().path() == "/runs/old-attempt/administrative-pause"
+                {
+                    pause_count.fetch_add(1, Ordering::SeqCst);
+                    return axum::http::StatusCode::NOT_FOUND.into_response();
                 }
                 count.fetch_add(1, Ordering::SeqCst);
                 std::future::pending::<axum::response::Response>().await
@@ -2116,6 +2125,7 @@ mod tests {
                 .await
                 .unwrap()
         );
+        assert!(pause_reads.load(Ordering::SeqCst) > 0);
         assert_eq!(reads.load(Ordering::SeqCst), 0);
         let state = service.store.run_state(&run).await.unwrap();
         assert_eq!(state.status, RunStatus::Failed);
