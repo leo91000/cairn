@@ -375,11 +375,21 @@ async fn default_logging_filter_correlates_pretransfer_failure_and_cancelled_sum
     let s = service(root.path()).await;
     let bytes = Arc::new(std::sync::Mutex::new(Vec::new()));
     let output = bytes.clone();
+    // Keep callsite interest independent of registration on unsubscribed threads.
+    let _callsite_registration =
+        tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
     let subscriber = tracing_subscriber::fmt()
         .json()
         .with_env_filter("warn,cairn_performance=info")
         .with_writer(move || LogWriter(output.clone()))
         .finish();
+    let subscriber = tracing::Dispatch::new(subscriber);
+    // A different test can register these callsites without a scoped subscriber.
+    std::thread::spawn(|| {
+        let _operation = crate::performance::Operation::new("probe", "probe", "probe");
+    })
+    .join()
+    .unwrap();
     async {
         assert!(
             capture_owned(&s, &json!({ "id": id() }), CaptureProtocol::Direct)
@@ -468,6 +478,9 @@ async fn converted_publications_have_distinct_attempt_summaries_on_success_and_f
     .unwrap();
     let bytes = Arc::new(std::sync::Mutex::new(Vec::new()));
     let output = bytes.clone();
+    // Keep callsite interest independent of registration on unsubscribed threads.
+    let _callsite_registration =
+        tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
     let subscriber = tracing_subscriber::fmt()
         .json()
         .with_env_filter("warn,cairn_performance=info")
