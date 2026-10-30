@@ -85,6 +85,37 @@ class SubagentsTest {
     }
 
     @Test
+    fun `child proposals remain activity rather than conversation approval`() {
+        fun proposal(parent: String?) =
+            item("item.completed") {
+                put("id", "plan")
+                put("type", "proposed_plan")
+                put("text", if (parent == null) "Parent approach" else "Partial child approach")
+                if (parent != null) put("parent_id", parent)
+            }
+        for (childLast in listOf(false, true)) {
+            val own = proposal(null)
+            val child = proposal("Research")
+            val timeline =
+                timelineEntries(
+                    listOf(
+                        subagent("item.started", "Research"),
+                        if (childLast) own else child,
+                        if (childLast) child else own,
+                    ),
+                    chat = true,
+                )
+            assertEquals(listOf(own), timeline.filter { it.proposal }.flatMap { it.events })
+            val step = timeline.flatMap { it.agents }.single().steps.single() as SubagentStep.Action
+            assertEquals("Partial child approach", step.activity.output)
+            // Pagination may omit the spawning event, but cannot promote a child.
+            val orphan = timelineEntries(listOf(child), chat = true)
+            assertFalse(orphan.any { it.proposal })
+            assertEquals("Partial child approach", presentActivity(child).output)
+        }
+    }
+
+    @Test
     fun `groups subagents started together and keeps their steps and messages out of the reply`() {
         val timeline =
             timelineEntries(

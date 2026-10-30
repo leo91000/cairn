@@ -1070,7 +1070,10 @@ internal fun timelineEntries(
                 }
                 continue
             }
-            if (event.item().string("type") == "proposed_plan") {
+            if (
+                event.item().string("type") == "proposed_plan" &&
+                    event.item().string("parent_id").isBlank()
+            ) {
                 flushActivity()
                 result.add(
                     TimelineEntry("proposal:${event.id}", listOf(event), false, proposal = true)

@@ -12,7 +12,8 @@ const INITIAL_REQUEST_CHARS: usize = 8000;
 /// Latest visible user messages, final agent answers and proposed plans, newest
 /// first. A private answer keeps its redacted event text; streamed agent drafts
 /// are superseded. A plan-only answer has no agent message: without its proposal
-/// a fresh session could not implement it.
+/// a fresh session could not implement it. Child proposals are subagent activity,
+/// not the conversation approach the user approved.
 const TRANSCRIPT: &str = "
 SELECT e.type,
   CASE WHEN e.type='chat.user' AND e.text!='Answered a private question.'
@@ -39,10 +40,12 @@ WHERE e.run_id=? AND (
   ) OR (
     e.type='item.completed'
     AND json_extract(e.payload,'$.item.type')='proposed_plan'
+    AND COALESCE(json_extract(e.payload,'$.item.parent_id'),'')=''
     AND NOT EXISTS (
       SELECT 1 FROM events n
       WHERE n.run_id=e.run_id AND n.id>e.id
         AND n.type='item.completed' AND json_extract(n.payload,'$.item.type')='proposed_plan'
+        AND COALESCE(json_extract(n.payload,'$.item.parent_id'),'')=''
         AND json_extract(n.payload,'$.item.id')=json_extract(e.payload,'$.item.id')
     )
   )
@@ -345,6 +348,22 @@ mod tests {
             )
             .unwrap();
         }
+        // A later child may reuse the same native item id. It neither replaces
+        // the conversation proposal nor becomes an unqualified handoff answer.
+        db.event(
+            "run",
+            &EventKind::ItemCompleted,
+            "",
+            Some(&json!({
+                "item": {
+                    "id": "plan",
+                    "type": "proposed_plan",
+                    "parent_id": "child",
+                    "text": "Partial child approach"
+                }
+            })),
+        )
+        .unwrap();
         db.event(
             "run",
             &EventKind::ChatUser,
@@ -355,6 +374,7 @@ mod tests {
         let history = handoff_context(&db, "run").unwrap();
         assert_eq!(history.matches("Add the Plan chip").count(), 1);
         assert!(!history.contains("1. Draft"));
+        assert!(!history.contains("Partial child approach"));
         let request = history.find("Plan the new composer").unwrap();
         let proposed = history
             .find("Assistant (proposed plan):\n1. Read the composer")

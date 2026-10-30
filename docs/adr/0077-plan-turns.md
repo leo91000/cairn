@@ -96,6 +96,9 @@ le transport et le stockage du manager sans l’aperçu de 16 Kio des outils (se
 masqué comme une réponse), et l’historique transmis à une nouvelle session (autre
 moteur, nouvelle session, environnement expiré) l’inclut, borné comme les réponses.
 Implémenter après un changement de moteur reçoit donc le plan à appliquer.
+Les propositions des sous-agents restent leurs étapes attribuées : elles ne
+remplacent pas le plan principal, ne portent pas son bouton d’implémentation et
+ne sont pas transmises comme propositions de l’agent principal au nouveau moteur.
 
 ## Qualification
 

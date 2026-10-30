@@ -722,7 +722,7 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       continue
     }
 
-    if (type === 'proposed_plan') {
+    if (type === 'proposed_plan' && !text(item.parent_id)) {
       const content = text(item.text)
       const existing = proposals.get(id)
       if (existing) {
@@ -881,6 +881,12 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       artifact.title = collaborationTitles[text(item.tool)] ?? 'Worked with a subagent'
       artifact.subtitle = text(item.prompt).split('\n')[0] ?? ''
       block('Prompt', item.prompt)
+    }
+    else if (type === 'proposed_plan') {
+      // A child proposal is its activity, never the conversation's approval target.
+      artifact.kind = 'tool'
+      artifact.title = 'Subagent proposed plan'
+      block('Plan', item.text, 'markdown')
     }
     else if (type === 'subagent_message') {
       // Its subagent is outside the loaded history.

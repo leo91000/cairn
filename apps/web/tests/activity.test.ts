@@ -326,6 +326,42 @@ describe('conversation activity', () => {
     // Older events and ordinary requests carry no plan marker.
     expect(entries[3]).not.toHaveProperty('plan')
   })
+  it.each([false, true])('keeps subagent proposals attributed when they follow the parent proposal=%s', (childLast) => {
+    const event = (id: number, item: Record<string, unknown>): RunEvent => ({
+      id,
+      runId: 'chat',
+      createdAt: id,
+      type: 'item.completed',
+      text: '',
+      payload: { item },
+    })
+    const parent = { id: 'plan', type: 'proposed_plan', text: 'Parent approach' }
+    const child = {
+      id: 'plan',
+      type: 'proposed_plan',
+      parent_id: 'child',
+      text: 'Partial child approach',
+    }
+    const entries = activityEntries([
+      event(1, {
+        id: 'child',
+        type: 'subagent',
+        name: 'Research',
+        status: 'completed',
+      }),
+      event(2, childLast ? parent : child),
+      event(3, childLast ? child : parent),
+    ], true)
+    expect(entries.filter(entry => entry.kind === 'proposal')).toMatchObject([{ text: 'Parent approach' }])
+    const team = entries.find(entry => entry.kind === 'team')
+    expect(team?.kind === 'team' && team.agents[0]?.subagent?.steps).toMatchObject([
+      { title: 'Subagent proposed plan', blocks: [{ code: 'Partial child approach' }] },
+    ])
+    // A paginated window may omit the spawning event; it still must not grant approval.
+    const orphan = activityEntries([event(4, child)], true)
+    expect(orphan.some(entry => entry.kind === 'proposal')).toBe(false)
+    expect(JSON.stringify(orphan)).toContain('Partial child approach')
+  })
   it('shows the message submission time with a fallback for older events', () => {
     const message = {
       id: 1,

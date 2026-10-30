@@ -743,6 +743,29 @@ test('a plan turn proposes without changes and Implement continues the same chat
   await expect(page.locator('.user-bubble').filter({ hasText: 'fixture:plan-turn' }).getByText('Plan', { exact: true })).toBeVisible()
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 30000 }).toBe('succeeded')
   expect((await workspace.api(`/api/chats/${chat.id}`)).run.chatExecution.plan).toBe(true)
+  // A later native child proposal is activity, never a second approval target.
+  workspace.service.store.event(conversation, 'item.completed', '', {
+    item: {
+      id: 'plan-child',
+      type: 'subagent',
+      name: 'Research',
+      status: 'completed',
+    },
+  })
+  workspace.service.store.event(conversation, 'item.completed', '', {
+    item: {
+      id: 'child-plan',
+      parent_id: 'plan-child',
+      type: 'proposed_plan',
+      text: 'Partial child approach',
+    },
+  })
+  await page.reload()
+  await page.getByTestId('subagent-team').getByRole('button', { name: /1 subagent/ }).click()
+  await expect(page.getByTestId('subagent-team')).toContainText('Research')
+  await expect(proposal).toHaveCount(1)
+  await expect(proposal).toContainText('Change main.rs')
+  await expect(proposal).not.toContainText('Partial child approach')
   await page.screenshot({ path: testInfo.outputPath('plan-turn-web.png'), animations: 'disabled' })
 
   // Leaving plan mode is an ordinary message in the same chat, with the agent's usual access.
