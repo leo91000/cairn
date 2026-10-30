@@ -772,7 +772,13 @@ mod tests {
                     }
                 );
                 if !cancelled {
-                    assert!(settled.summary.contains("time limit"));
+                    assert!(
+                        settled
+                            .summary
+                            .as_deref()
+                            .unwrap_or_default()
+                            .contains("time limit")
+                    );
                 }
                 assert!(!persisted.has_controller_recovery_reservation());
                 assert_eq!(
