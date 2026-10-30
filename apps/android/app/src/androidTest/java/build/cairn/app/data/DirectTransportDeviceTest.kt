@@ -598,14 +598,40 @@ class DirectTransportDeviceTest {
                         }
                     withContext(Dispatchers.Main) { selectedVm = vm }
                     diagnostics.record("startup", "show ViewModel")
-                    compose.waitUntil(30000) {
-                        recordWorkspace()
-                        diagnostics.record("header", headerCategory())
-                        compose
-                            .onAllNodes(installationHeader(state = "En ligne · Direct"))
-                            .fetchSemanticsNodes()
-                            .isNotEmpty()
+                    // Startup reads finish on relay before startDirect(). Peer readiness does
+                    // not change the observed route: drive a real workspace read through this
+                    // selected VM rather than relying on incidental live/poll traffic.
+                    duringPhase("selected-installation direct UI", 30000) {
+                        var refreshes = 0
+                        var observedDirect = false
+                        while (true) {
+                            recordWorkspace()
+                            val state = vm.state.value
+                            if (
+                                state.ready &&
+                                    !state.busy &&
+                                    state.session.authenticated &&
+                                    state.installation?.id == expectedInstallation &&
+                                    state.installation.online
+                            ) {
+                                diagnostics.record("selected VM refresh", "started ${++refreshes}")
+                                withContext(Dispatchers.Main) { vm.refresh() }
+                                diagnostics.record("selected VM refresh", "completed $refreshes")
+                                observedDirect = vm.api.transport.route.value == "direct"
+                                diagnostics.record(
+                                    "selected VM response route",
+                                    if (observedDirect) "direct" else "relay",
+                                )
+                            }
+                            recordWorkspace()
+                            val header = headerCategory()
+                            diagnostics.record("header", header)
+                            if (observedDirect && header == "direct") break
+                            delay(200)
+                        }
                     }
+                    assertEquals(expectedInstallation, vm.state.value.installation?.id)
+                    assertEquals("direct", vm.api.transport.route.value)
                     compose
                         .onNode(installationHeader(state = "En ligne · Direct"))
                         .assertIsDisplayed()
