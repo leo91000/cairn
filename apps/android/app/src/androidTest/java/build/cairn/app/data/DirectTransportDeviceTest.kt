@@ -40,6 +40,7 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class DirectTransportDeviceTest {
     @get:Rule val compose = createComposeRule()
+    private val diagnostics = DirectBenchDiagnostics()
 
     private suspend fun <T> duringPhase(
         name: String,
@@ -47,7 +48,8 @@ class DirectTransportDeviceTest {
         block: suspend CoroutineScope.() -> T,
     ): T =
         try {
-            withTimeout(timeoutMillis, block)
+            diagnostics.record("phase start", name)
+            withTimeout(timeoutMillis, block).also { diagnostics.record("phase completed", name) }
         } catch (error: TimeoutCancellationException) {
             throw AssertionError("Direct bench timed out during $name", error)
         }
@@ -77,6 +79,20 @@ class DirectTransportDeviceTest {
         val refusedCandidates = AtomicInteger()
         val client =
             OkHttpClient.Builder()
+                .addInterceptor { chain ->
+                    diagnostics.primaryRequests.incrementAndGet()
+                    try {
+                        chain.proceed(chain.request()).also { response ->
+                            diagnostics.primaryResponses.incrementAndGet()
+                            if (response.request.tag(DirectChannel::class.java) != null)
+                                diagnostics.primaryDirectResponses.incrementAndGet()
+                        }
+                    } catch (error: Throwable) {
+                        diagnostics.primaryFailures.incrementAndGet()
+                        diagnostics.record("primary failure", error.javaClass.simpleName)
+                        throw error
+                    }
+                }
                 .addInterceptor { chain ->
                     val request = chain.request()
                     if (scenario == "same-lan" && request.url.encodedPath.endsWith("/signal")) {
@@ -171,6 +187,27 @@ class DirectTransportDeviceTest {
         val started = System.nanoTime()
         lateinit var activity: Activity
         var selectedVm by mutableStateOf<CairnViewModel?>(null)
+        val expectedInstallation = configuration["installation"]!!.jsonPrimitive.content
+        fun recordWorkspace() =
+            diagnostics.workspace(
+                selectedVm,
+                expectedInstallation,
+                runCatching { activity }.getOrNull(),
+            )
+        fun headerCategory(): String {
+            val headers = compose.onAllNodes(installationHeader()).fetchSemanticsNodes()
+            if (headers.isEmpty()) return "absent"
+            for ((label, category) in
+                listOf(
+                    "En ligne · Direct" to "direct",
+                    "En ligne · Relais" to "relay",
+                    "Hors ligne" to "offline",
+                    "Mise à jour requise" to "update-required",
+                )) {
+                if (headers.any { installationHeader(state = label).matches(it) }) return category
+            }
+            return "other"
+        }
         compose.setContent {
             activity = checkNotNull(LocalActivity.current)
             selectedVm?.let { vm -> CairnTheme { CairnApp(vm = vm) } }
@@ -198,6 +235,7 @@ class DirectTransportDeviceTest {
             }
         }
         try {
+            diagnostics.record("startup", "primary read")
             read()
             assertEquals("relay", api.transport.route.value)
             api.startDirect(context)
@@ -549,6 +587,7 @@ class DirectTransportDeviceTest {
                     assertEquals("direct", api.transport.route.value)
 
                     // Real selected-installation UI exercises the asynchronous startup/indicator.
+                    diagnostics.record("startup", "construct ViewModel")
                     val vm =
                         withContext(Dispatchers.Main) {
                             CairnViewModel(
@@ -558,7 +597,10 @@ class DirectTransportDeviceTest {
                             )
                         }
                     withContext(Dispatchers.Main) { selectedVm = vm }
+                    diagnostics.record("startup", "show ViewModel")
                     compose.waitUntil(30000) {
+                        recordWorkspace()
+                        diagnostics.record("header", headerCategory())
                         compose
                             .onAllNodes(installationHeader(state = "En ligne · Direct"))
                             .fetchSemanticsNodes()
@@ -567,6 +609,7 @@ class DirectTransportDeviceTest {
                     compose
                         .onNode(installationHeader(state = "En ligne · Direct"))
                         .assertIsDisplayed()
+                    diagnostics.record("startup", "real Direct header displayed")
                     vm.api.closeStreams()
                     ui = true
 
@@ -625,12 +668,21 @@ class DirectTransportDeviceTest {
                         put("foregroundBackoff", foregroundBackoff)
                         put("unavailableRenewal", unavailableRenewal)
                         put("refusedCandidates", refusedCandidates.get())
+                        put("phaseEvidence", diagnostics.summary())
                         put("sdk", Build.VERSION.SDK_INT)
                         put("abi", Build.SUPPORTED_ABIS.first())
                         put("elapsedMs", (System.nanoTime() - started) / 1000000)
                     }
                         .toString()
                 )
+        } catch (error: Throwable) {
+            runCatching {
+                recordWorkspace()
+                diagnostics.record("header", headerCategory())
+            }
+                .onFailure { diagnostics.record("snapshot failure", it.javaClass.simpleName) }
+            error.addSuppressed(AssertionError(diagnostics.summary()))
+            throw error
         } finally {
             api.closeStreams()
             if (scenario == "network-change") shell("svc wifi enable")
