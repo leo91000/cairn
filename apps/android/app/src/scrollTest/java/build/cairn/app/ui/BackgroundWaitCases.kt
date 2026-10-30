@@ -804,7 +804,8 @@ abstract class BackgroundWaitCases {
                                     )
                                 "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1" ->
                                     wireJson.encodeToString(chat)
-                                "/api/installations/fixture/api/overview" -> "{}"
+                                "/api/installations/fixture/api/overview" ->
+                                    installationOverviewFixture()
                                 "/api/installations/fixture/api/runs/$SAVED_RUN_ID/resume" ->
                                     wireJson.encodeToString(
                                         build.cairn.contracts.ResumeRunOutput(SAVED_RUN_ID)

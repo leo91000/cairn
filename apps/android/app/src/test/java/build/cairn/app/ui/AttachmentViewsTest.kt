@@ -116,7 +116,7 @@ class AttachmentViewsTest {
                             when {
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
                                 path == "/api/installations" -> beaconInstallationsFixture()
-                                path.endsWith("/overview") -> "{}"
+                                path.endsWith("/overview") -> installationOverviewFixture()
                                 path.endsWith("/models") -> """{"models":[]}"""
                                 else ->
                                     if (
@@ -326,7 +326,7 @@ class AttachmentViewsTest {
                                         path == "/api/account/session" ->
                                             beaconAccountFixture("fixture")
                                         path == "/api/installations" -> beaconInstallationsFixture()
-                                        path.endsWith("/overview") -> "{}"
+                                        path.endsWith("/overview") -> installationOverviewFixture()
                                         path.endsWith("/models") -> """{"models":[]}"""
                                         else ->
                                             if (

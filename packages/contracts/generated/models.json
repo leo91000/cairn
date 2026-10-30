@@ -1012,6 +1012,37 @@
       ],
       "type": "object"
     },
+    "AuditEntry": {
+      "additionalProperties": false,
+      "description": "One recorded installation change; `detail` is the JSON recorded with it.",
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "createdAt": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "id": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "createdAt",
+        "action",
+        "detail"
+      ],
+      "type": "object"
+    },
     "AvatarConfiguration": {
       "additionalProperties": false,
       "properties": {
@@ -2157,6 +2188,10 @@
         "createdAt",
         "wakeAt"
       ],
+      "type": "object"
+    },
+    "CheckStorageInput": {
+      "additionalProperties": false,
       "type": "object"
     },
     "CleanupRunOutput": {
@@ -3629,6 +3664,14 @@
       "additionalProperties": false,
       "type": "object"
     },
+    "GetInstallationOverviewInput": {
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "GetInstallationSettingsInput": {
+      "additionalProperties": false,
+      "type": "object"
+    },
     "GetRunInput": {
       "additionalProperties": false,
       "properties": {
@@ -3649,6 +3692,10 @@
         "runId",
         "after"
       ],
+      "type": "object"
+    },
+    "GetStorageSettingsInput": {
+      "additionalProperties": false,
       "type": "object"
     },
     "HistoryPage": {
@@ -3702,6 +3749,93 @@
         "manifestFormat",
         "source",
         "modules"
+      ],
+      "type": "object"
+    },
+    "InstallationOverview": {
+      "additionalProperties": false,
+      "properties": {
+        "agents": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "concurrency": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "missions": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "projects": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runsByStatus": {
+          "additionalProperties": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "description": "Retained runs by status.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "runsByStatus",
+        "agents",
+        "projects",
+        "missions",
+        "concurrency"
+      ],
+      "type": "object"
+    },
+    "InstallationSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "commit": {
+          "type": "string"
+        },
+        "concurrency": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "home": {
+          "type": "string"
+        },
+        "mcpUrl": {
+          "type": "string"
+        },
+        "protocol": {
+          "type": "string"
+        },
+        "publicUrl": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "workspaceRoots": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "publicUrl",
+        "mcpUrl",
+        "workspaceRoots",
+        "home",
+        "concurrency",
+        "version",
+        "commit",
+        "protocol"
       ],
       "type": "object"
     },
@@ -3760,6 +3894,26 @@
       },
       "required": [
         "agents"
+      ],
+      "type": "object"
+    },
+    "ListAuditInput": {
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "ListAuditOutput": {
+      "additionalProperties": false,
+      "description": "The 100 most recent entries, newest first.",
+      "properties": {
+        "entries": {
+          "items": {
+            "$ref": "#/definitions/AuditEntry"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "entries"
       ],
       "type": "object"
     },
@@ -4636,6 +4790,45 @@
           "type": "object"
         }
       ]
+    },
+    "MarkReadInput": {
+      "additionalProperties": false,
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/definitions/ReadMark"
+          },
+          "maxItems": 200,
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "type": "object"
+    },
+    "MarkReadOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "read": {
+          "format": "uint32",
+          "maximum": 200,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "readAt": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "read",
+        "readAt"
+      ],
+      "type": "object"
     },
     "McpConnectionStatus": {
       "properties": {
@@ -6365,6 +6558,91 @@
           "type": "object"
         }
       ]
+    },
+    "OutcomeAsideAction": {
+      "description": "How an account sets a blocked mission outcome aside. Each applies until the\nmission finishes again; input the agent asked for can only be snoozed.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "finishedAt": {
+              "format": "int64",
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "dismiss",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "finishedAt"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "finishedAt": {
+              "format": "int64",
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "snooze",
+              "type": "string"
+            },
+            "until": {
+              "description": "At most 30 days ahead.",
+              "format": "int64",
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "finishedAt",
+            "until"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "restore",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "OutcomeDismissal": {
+      "additionalProperties": false,
+      "description": "An outcome set aside by the calling account: dismissed (`until` null) or snoozed.",
+      "properties": {
+        "until": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "until"
+      ],
+      "type": "object"
     },
     "PackageVersion": {
       "additionalProperties": false,
@@ -8637,6 +8915,26 @@
       ],
       "type": "object"
     },
+    "ReadMark": {
+      "additionalProperties": false,
+      "properties": {
+        "finishedAt": {
+          "description": "When the work the account saw finished. Later work stays unread.",
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "target": {
+          "$ref": "#/definitions/ReadTarget"
+        }
+      },
+      "required": [
+        "target",
+        "finishedAt"
+      ],
+      "type": "object"
+    },
     "ReadRunContentInput": {
       "additionalProperties": false,
       "properties": {
@@ -8704,6 +9002,47 @@
         "history"
       ],
       "type": "object"
+    },
+    "ReadTarget": {
+      "description": "Work an account can read: a conversation's latest turn or a mission's latest run.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "chatId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "kind": {
+              "const": "chat",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "chatId"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "mission",
+              "type": "string"
+            },
+            "taskId": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "taskId"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "ReasoningOption": {
       "properties": {
@@ -9085,13 +9424,15 @@
           "type": "integer"
         },
         "dismissal": {
-          "additionalProperties": true,
-          "default": null,
-          "type": [
-            "object",
-            "null"
+          "anyOf": [
+            {
+              "$ref": "#/definitions/OutcomeDismissal"
+            },
+            {
+              "type": "null"
+            }
           ],
-          "x-kotlin-type": "OutcomeDismissal"
+          "default": null
         },
         "error": {
           "default": null,
@@ -10223,6 +10564,53 @@
       ],
       "type": "object"
     },
+    "SaveStorageSettingsInput": {
+      "additionalProperties": false,
+      "description": "Credentials are written to the installation's private storage file only.",
+      "properties": {
+        "accessKeyId": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "bucket": {
+          "maxLength": 63,
+          "minLength": 1,
+          "pattern": "^[a-z0-9.-]+$",
+          "type": "string"
+        },
+        "endpoint": {
+          "maxLength": 2048,
+          "minLength": 9,
+          "pattern": "^https://",
+          "type": "string"
+        },
+        "privateBucketConfirmed": {
+          "default": false,
+          "description": "Required for Cloudflare R2: public domains and bucket locks are disabled.",
+          "type": "boolean"
+        },
+        "region": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "secretAccessKey": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "bucket",
+        "endpoint",
+        "region",
+        "accessKeyId",
+        "secretAccessKey",
+        "privateBucketConfirmed"
+      ],
+      "type": "object"
+    },
     "ScheduleFailure": {
       "additionalProperties": false,
       "properties": {
@@ -10358,6 +10746,47 @@
       "required": [
         "chatId",
         "paused"
+      ],
+      "type": "object"
+    },
+    "SetOutcomeAsideInput": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "$ref": "#/definitions/OutcomeAsideAction"
+        },
+        "taskId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "taskId",
+        "action"
+      ],
+      "type": "object"
+    },
+    "SetOutcomeAsideOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "dismissal": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/OutcomeDismissal"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "taskId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "taskId",
+        "dismissal"
       ],
       "type": "object"
     },
@@ -10541,6 +10970,52 @@
       "required": [
         "count",
         "diskMiB"
+      ],
+      "type": "object"
+    },
+    "StorageCheck": {
+      "additionalProperties": false,
+      "description": "A completed write, read and deletion of a probe object. Failures are errors.",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ok"
+      ],
+      "type": "object"
+    },
+    "StorageSettings": {
+      "additionalProperties": false,
+      "description": "The default S3 storage for new disks, without its credentials.",
+      "properties": {
+        "bucket": {
+          "type": "string"
+        },
+        "configured": {
+          "type": "boolean"
+        },
+        "endpoint": {
+          "type": "string"
+        },
+        "environmentManaged": {
+          "type": "boolean"
+        },
+        "integrated": {
+          "type": "boolean"
+        },
+        "region": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "configured",
+        "integrated",
+        "environmentManaged",
+        "bucket",
+        "endpoint",
+        "region"
       ],
       "type": "object"
     },

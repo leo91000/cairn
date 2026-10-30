@@ -202,7 +202,8 @@ class ContextCompactionJourneyTest {
                                 "/api/installations/fixture/api/tasks/activity",
                                 "/api/installations/fixture/api/skills" -> "[]"
                                 "/api/installations/fixture/api/mcps" -> """{"mcps":[]}"""
-                                "/api/installations/fixture/api/overview" -> "{}"
+                                "/api/installations/fixture/api/overview" ->
+                                    installationOverviewFixture()
                                 "/api/installations/fixture/api/chats/stream" ->
                                     return stream(LiveState(chats = listOf(chat)))
                                 "/api/installations/fixture/api/chats/$chatId/stream" ->

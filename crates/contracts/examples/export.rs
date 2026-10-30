@@ -924,6 +924,41 @@ fn main() {
         serde_json::to_string_pretty(&descriptor).unwrap() + "\n",
     )
     .unwrap();
+    export::<ReadTarget>(root, &mut generator, Contract::Deserialize);
+    export::<ReadMark>(root, &mut generator, Contract::Deserialize);
+    export::<MarkReadInput>(root, &mut generator, Contract::Deserialize);
+    export::<MarkReadOutput>(root, &mut generator, Contract::Serialize);
+    export::<OutcomeAsideAction>(root, &mut generator, Contract::Deserialize);
+    export::<SetOutcomeAsideInput>(root, &mut generator, Contract::Deserialize);
+    export::<OutcomeDismissal>(root, &mut generator, Contract::Serialize);
+    export::<SetOutcomeAsideOutput>(root, &mut generator, Contract::Serialize);
+    export::<GetInstallationSettingsInput>(root, &mut generator, Contract::Deserialize);
+    export::<InstallationSettings>(root, &mut generator, Contract::Serialize);
+    export::<GetInstallationOverviewInput>(root, &mut generator, Contract::Deserialize);
+    export::<InstallationOverview>(root, &mut generator, Contract::Serialize);
+    export::<ListAuditInput>(root, &mut generator, Contract::Deserialize);
+    export::<AuditEntry>(root, &mut generator, Contract::Serialize);
+    export::<ListAuditOutput>(root, &mut generator, Contract::Serialize);
+    export::<GetStorageSettingsInput>(root, &mut generator, Contract::Deserialize);
+    export::<StorageSettings>(root, &mut generator, Contract::Serialize);
+    export::<SaveStorageSettingsInput>(root, &mut generator, Contract::Deserialize);
+    export::<CheckStorageInput>(root, &mut generator, Contract::Deserialize);
+    export::<StorageCheck>(root, &mut generator, Contract::Serialize);
+    let settings_clients = serde_json::json!([
+        { "name": "markRead", "input": "MarkReadInput", "output": "MarkReadOutput", "method": "POST", "path": "/reads" },
+        { "name": "setOutcomeAside", "input": "SetOutcomeAsideInput", "output": "SetOutcomeAsideOutput", "method": "POST", "path": "/dismissals" },
+        { "name": "getInstallationSettings", "input": "GetInstallationSettingsInput", "output": "InstallationSettings", "method": "GET", "path": "/settings" },
+        { "name": "getInstallationOverview", "input": "GetInstallationOverviewInput", "output": "InstallationOverview", "method": "GET", "path": "/overview" },
+        { "name": "listAudit", "input": "ListAuditInput", "output": "ListAuditOutput", "method": "GET", "path": "/audit" },
+        { "name": "getStorageSettings", "input": "GetStorageSettingsInput", "output": "StorageSettings", "method": "GET", "path": "/settings/storage" },
+        { "name": "saveStorageSettings", "input": "SaveStorageSettingsInput", "output": "StorageSettings", "method": "PUT", "path": "/settings/storage" },
+        { "name": "checkStorage", "input": "CheckStorageInput", "output": "StorageCheck", "method": "POST", "path": "/settings/storage/check" }
+    ]);
+    fs::write(
+        root.join("settings-clients.json"),
+        serde_json::to_string_pretty(&settings_clients).unwrap() + "\n",
+    )
+    .unwrap();
     let mut definitions = generator.take_definitions(true);
     // Kotlin consumes run views as well as emitting commands. Honor Rust's
     // deserialization defaults (notably absent nullable timestamps in summaries).

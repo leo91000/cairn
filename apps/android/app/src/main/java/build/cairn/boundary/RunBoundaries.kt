@@ -16,8 +16,6 @@ data class TaskOutcome(
     val waitingOn: String? = null,
 )
 
-@Serializable data class OutcomeDismissal(val until: Long? = null)
-
 typealias ChatExecution = build.cairn.contracts.ChatExecution
 
 @Serializable
