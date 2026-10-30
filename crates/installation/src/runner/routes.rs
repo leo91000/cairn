@@ -639,7 +639,13 @@ fn wait(broker: Broker, id: String) -> Response {
             if released
                 && let Ok(code) = tokio::fs::read_to_string(broker.state_file(&id, "exit")).await
             {
-                let status = json!({ "StatusCode": code.parse::<i32>().unwrap_or(1) });
+                let status = match code.parse::<i32>() {
+                    Ok(code) => json!({ "StatusCode": code }),
+                    Err(_) => match serde_json::from_str::<Value>(&code) {
+                        Ok(value) => value,
+                        Err(_) => json!({ "StatusCode": 1 }),
+                    },
+                };
                 return Some((
                     Ok::<_, std::io::Error>(Bytes::from(status.to_string())),
                     (broker, id, true),

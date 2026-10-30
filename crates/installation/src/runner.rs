@@ -8,7 +8,7 @@ mod routes;
 
 pub(crate) use broker::validate as validate_plan;
 pub use client::client;
-pub(crate) use client::wait_for_exit;
+pub(crate) use client::{ControllerResult, wait_for_exit};
 
 use crate::{
     error::{Error, Result},
@@ -25,6 +25,8 @@ pub const CONTROLLER_INTERRUPTED: i32 = 75;
 /// disk is kept; the manager retries a bounded number of times, even on remote
 /// nodes, because such a failure may be deterministic.
 pub const CONTROLLER_FAILED: i32 = 70;
+/// Internal guest result outside the valid provider exit-code range.
+pub(crate) const FINALIZATION_FAILED_SENTINEL: i32 = -1;
 
 fn router(broker: Broker) -> Router {
     Router::new()

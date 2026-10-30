@@ -635,6 +635,7 @@ impl Execution<'_> {
             ));
         }
         if saved.output_error().is_some()
+            || saved.finalization_error().is_some()
             || (managed && saved.completed() && saved.terminal_code() != Some(0))
         {
             // A provider completion cannot repair EIO/EROFS or an unknown flush.
@@ -1003,6 +1004,7 @@ impl Execution<'_> {
                 c.start_rejected = Some(false);
                 c.output_interrupted = None;
                 c.provider_failure_attempt = None;
+                c.finalization_failure_attempt = None;
                 c.retry_cause = Some(None);
                 c.completed = Some(false);
                 c.terminal_code = None;
@@ -1234,6 +1236,7 @@ impl Execution<'_> {
             && !exit.timed_out
             && !self.checkpoint.expired()
             && saved.output_error().is_none()
+            && saved.finalization_error().is_none()
             && !self.stopping()
             && !saved.completed()
             && let Some(cause) = saved.retry_cause.as_ref().and_then(Option::as_ref)

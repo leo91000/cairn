@@ -121,6 +121,7 @@ pub(super) async fn reconcile(
         |action| {
             let attempt = attempt.to_owned();
             let shutdown = s.shutdown.clone();
+            let id = checkpoint.id.clone();
             async move {
                 checkpoint
                     .decide(move |current, _db| {
@@ -149,7 +150,7 @@ pub(super) async fn reconcile(
                                     && current.settled().is_none()
                                     && (!shutdown.is_cancelled() || code.is_some())
                                 {
-                                    current.terminal_code = Some(code);
+                                    current.record_controller_result(_db, &id, &attempt, code)?;
                                 }
                             }
                         }

@@ -441,6 +441,7 @@ impl Controller {
                     crate::runner::CONTROLLER_FAILED
                 }
             };
+            let mut finalization_failed = false;
             // Deliver the result path consumed by the node connector.
             let result = root.join("data/output/result.md");
             if let Ok(file) = crate::artifacts::file::open_export(&result, &root.join("data")).await
@@ -479,6 +480,7 @@ impl Controller {
                             Ok(completion) => {
                                 code = completion.exit_code(code);
                                 if completion == block::Completion::FailedFlush {
+                                    finalization_failed = true;
                                     let _ = controller.append(&id, true, b"Native filesystem could not be flushed; the durable crash prefix was retained.\n").await;
                                 }
                                 break;
@@ -515,7 +517,12 @@ impl Controller {
             }
             // The active marker must survive until suspension accounting is
             // finalized, so recovery can close it after any controller crash.
-            let _ = atomic_write(&controller.file(&id, "exit"), code.to_string().as_bytes()).await;
+            let exit = if finalization_failed {
+                json!({ "StatusCode": code, "FinalizationFailed": true }).to_string()
+            } else {
+                code.to_string()
+            };
+            let _ = atomic_write(&controller.file(&id, "exit"), exit.as_bytes()).await;
             let _ = tokio::fs::remove_file(controller.file(&id, "active")).await;
             controller.active.lock().await.remove(&id);
             controller.capacity.lock().await.attempts.remove(&id);
@@ -1355,10 +1362,12 @@ impl Controller {
                 if released
                     && let Ok(code) = tokio::fs::read_to_string(controller.file(&id, "exit")).await
                 {
-                    let result = code
-                        .parse::<i32>()
-                        .map(|code| Bytes::from(json!({ "StatusCode": code }).to_string()))
-                        .map_err(std::io::Error::other);
+                    let result = match code.parse::<i32>() {
+                        Ok(code) => Ok(Bytes::from(json!({ "StatusCode": code }).to_string())),
+                        Err(_) => serde_json::from_str::<Value>(&code)
+                            .map(|value| Bytes::from(value.to_string()))
+                            .map_err(std::io::Error::other),
+                    };
                     return Some((result, (controller, id, true)));
                 }
                 tokio::time::sleep(Duration::from_secs(1)).await;

@@ -673,7 +673,11 @@ async fn stream_agent(
         complete = usage.complete,
     );
     timing.next("sync_disk");
-    sync_disk("/usr/bin/sync").await?;
+    if let Err(error) = sync_disk("/usr/bin/sync").await {
+        tracing::error!(%error, "Guest filesystem finalization failed");
+        wire::write(write, &Event::FinalizationFailed).await?;
+        return Ok(());
+    }
     timing.next("send_exit");
     let exit = Event::Exit {
         code: Some(code.into()),

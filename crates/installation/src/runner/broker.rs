@@ -395,8 +395,18 @@ impl Execution {
         if let Err(error) = &result {
             log_failure(broker, id, &error.message).await;
         }
-        let code = exit_code(result, lease_expired.load(Ordering::SeqCst));
-        let exit = atomic_write(&broker.state_file(id, "exit"), code.to_string().as_bytes()).await;
+        let finalization_failed = matches!(result, Ok(crate::runner::FINALIZATION_FAILED_SENTINEL));
+        let code = if finalization_failed {
+            CONTROLLER_FAILED
+        } else {
+            exit_code(result, lease_expired.load(Ordering::SeqCst))
+        };
+        let outcome = if finalization_failed {
+            serde_json::json!({ "StatusCode": code, "FinalizationFailed": true }).to_string()
+        } else {
+            code.to_string()
+        };
+        let exit = atomic_write(&broker.state_file(id, "exit"), outcome.as_bytes()).await;
         if let Err(error) = exit {
             tracing::warn!(attempt = %id, message = %error.message, "Could not record VM exit");
         }

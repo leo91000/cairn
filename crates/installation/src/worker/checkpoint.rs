@@ -74,6 +74,9 @@ pub struct RunCheckpoint {
     /// A classified turn.failed durably recorded for this exact managed attempt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_failure_attempt: Option<String>,
+    /// Controller-confirmed storage finalization failure for the same attempt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finalization_failure_attempt: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -321,6 +324,13 @@ impl RunCheckpoint {
     }
 
     pub fn finalization_error(&self) -> Option<&str> {
+        if self.runner_id().is_some()
+            && self.runner_id() == self.finalization_failure_attempt.as_deref()
+        {
+            return Some(
+                "The filesystem could not be flushed. Working files were preserved; automatic replay was stopped.",
+            );
+        }
         if !self.managed() || !self.completed() || self.terminal_code() == Some(0) {
             return None;
         }
@@ -329,6 +339,24 @@ impl RunCheckpoint {
         } else {
             self.last_error()
         })
+    }
+
+    /// Commit the controller's typed finalization evidence with its status.
+    pub fn record_controller_result(
+        &mut self,
+        db: &Db<'_>,
+        id: &str,
+        attempt: &str,
+        result: Option<crate::runner::ControllerResult>,
+    ) -> Result<()> {
+        self.terminal_code = Some(result.map(|result| result.code));
+        if result.is_some_and(|result| result.finalization_failed)
+            && self.finalization_failure_attempt.as_deref() != Some(attempt)
+        {
+            self.finalization_failure_attempt = Some(attempt.to_owned());
+            db.event(id, &cairn_contracts::EventKind::Error, "The filesystem could not be flushed. Working files were preserved; automatic replay was stopped.", None)?;
+        }
+        Ok(())
     }
 
     /// The prepared execution, when the workspace has been prepared.
@@ -396,6 +424,7 @@ impl RunCheckpoint {
         }
         self.runner_id = Some(Some(runner.to_owned()));
         self.provider_failure_attempt = None;
+        self.finalization_failure_attempt = None;
         self.controller_recovery_reservation = None;
         self.move_recovery_reservation = None;
         self.provider_retry_reservation = None;

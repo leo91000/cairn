@@ -912,6 +912,7 @@ async fn run(socket: &Path, plan: &Plan, state: &Path, mut timing: Operation) ->
                 }
                 return Ok(code as i32);
             }
+            Event::FinalizationFailed => return Ok(crate::runner::FINALIZATION_FAILED_SENTINEL),
             Event::Heartbeat | Event::Unknown => return Err(Error::bad("Unknown guest event.")),
         }
     }

@@ -678,7 +678,8 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
                                         && current.terminal_code.is_none()
                                         && (!shutdown.is_cancelled() || code.is_some())
                                     {
-                                        current.terminal_code = Some(code);
+                                        current
+                                            .record_controller_result(db, &id, &attempt, code)?;
                                     }
                                 }
                             }

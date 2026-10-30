@@ -3240,6 +3240,81 @@ async fn confirmed_provider_failure_survives_later_output_truncation_and_restart
     }
 }
 
+#[tokio::test]
+async fn native_failed_flush_after_provider_failure_never_replays_with_intact_logs() {
+    use std::sync::atomic::AtomicBool;
+    let mut fixture = Fixture::new().await;
+    fixture.stop(false).await;
+    let controller = Arc::new(Controller {
+        data: fixture.service.config.data_dir.clone(),
+        plans: tokio::sync::Mutex::new(Vec::new()),
+        failures: 0,
+        slots: 4,
+        hold: AtomicBool::new(false),
+    });
+    let app = Router::new().fallback(any(move |state: State<Arc<Controller>>, request: Request| async move {
+        let path = request.uri().path();
+        if path.ends_with("/wait") { return Json(json!({ "StatusCode": 70, "FinalizationFailed": true })).into_response(); }
+        if path.ends_with("/logs") {
+            let output = format!("{}\n{}\n", json!({ "type": "thread.started", "thread_id": "fixture-session" }), json!({ "type": "turn.failed", "error": { "code": "server_overloaded", "message": "Provider busy" } }));
+            return Body::from(format!("{}\n", json!({ "type": "output", "stderr": false, "data": STANDARD.encode(output) }))).into_response();
+        }
+        serve_controller(state, request).await
+    })).with_state(controller.clone());
+    let (listener, address) = common::bind().await;
+    common::reconfigure(&mut fixture.service, |config| {
+        config.runner_url = format!("http://{address}");
+    })
+    .await;
+    let server = common::serve(listener, app);
+    let home = fixture.service.config.home.join(".codex");
+    tokio::fs::create_dir_all(&home).await.unwrap();
+    tokio::fs::write(home.join("auth.json"), "{}")
+        .await
+        .unwrap();
+    tokio::fs::write(
+        fixture.service.config.data_dir.join("storage-s3.json"),
+        json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
+    )
+    .await
+    .unwrap();
+    fixture.start().await;
+    let chat = fixture
+        .start_chat(message("Do not replay a failed flush"))
+        .await;
+    let id = fixture.chat_run(&chat).await;
+    let result = fixture
+        .until(&id, |run| {
+            finished(run)
+                || controller
+                    .plans
+                    .try_lock()
+                    .is_ok_and(|plans| plans.len() > 1)
+        })
+        .await;
+    assert_eq!(result["status"], RunStatus::Failed, "{result}");
+    assert_eq!(controller.plans.lock().await.len(), 1);
+    assert!(text(&result, "error").contains("flush"), "{result}");
+    let saved = fixture.checkpoint(&id).await;
+    assert!(saved["outputInterrupted"].is_null());
+    assert_eq!(saved["finalizationFailureAttempt"], saved["runnerId"]);
+    let events = fixture
+        .service
+        .store
+        .read(move |db| db.events_fixture(&id, 0, 1000))
+        .await
+        .unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| text(event, "text").contains("filesystem could not be flushed"))
+            .count(),
+        1
+    );
+    fixture.stop(false).await;
+    server.abort();
+}
+
 /// Exercises the real manager -> runner client -> disposable HTTP controller.
 /// Even at the replay ceiling a read of the same attempt is permitted.
 #[tokio::test]
