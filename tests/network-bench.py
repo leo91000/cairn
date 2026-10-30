@@ -399,7 +399,9 @@ def main():
 def android_crash_summary(logcat, exit_info):
     """Keep crash categories and stack metadata, never exception/abort messages."""
     groups = {}
-    for line in logcat[-65536:].splitlines():
+    # The crash buffer was cleared before this test. Keep the beginning of its
+    # dump: native tombstones put attribution and frames before memory maps.
+    for line in logcat[:65536].splitlines():
         record = re.fullmatch(r"[A-Z]/[^\r\n(]+\(\s*(\d+)\):\s?(.*)", line)
         if record:
             groups.setdefault(record[1], []).append(record[2])
@@ -473,7 +475,7 @@ def android_failure_evidence(adb, output):
     values = []
     errors = []
     for category, arguments in [
-            ("crash-log", ("logcat", "-b", "crash", "-d", "-t", "256", "-v", "brief")),
+            ("crash-log", ("logcat", "-b", "crash", "-d", "-m", "256", "-v", "brief")),
             ("exit-info", ("shell", "dumpsys", "activity", "exit-info", "build.cairn.app"))]:
         try:
             values.append(adb(*arguments, text=True, errors="replace", timeout=5).stdout)

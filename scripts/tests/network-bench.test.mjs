@@ -71,6 +71,7 @@ def adb(*args, **options):
     if args[:3] == ('shell', 'am', 'instrument'):
         return SimpleNamespace(stdout=first)
     if args[:3] == ('logcat', '-b', 'crash') and '-d' in args:
+        assert '-m' in args and '-t' not in args, args
         return SimpleNamespace(stdout='E/AndroidRuntime(1): Process: build.cairn.app, PID: 1\\nE/AndroidRuntime(1): java.lang.IllegalStateException: secret')
     if 'exit-info' in args:
         raise subprocess.TimeoutExpired('adb', 5)
@@ -99,6 +100,27 @@ with tempfile.TemporaryDirectory() as directory:
         raise AssertionError('ADB failure must propagate')
     evidence = json.loads(output.with_suffix('.crash.json').read_text())
     assert evidence['collectionErrors'] == ['crash-log-unavailable', 'exit-info-unavailable'], evidence
+`], { stdio: 'pipe' })
+})
+
+it('android crash evidence preserves the attribution and first frames of a long native dump', () => {
+  execFileSync('python3', ['-B', '-c', `
+import importlib.util
+spec = importlib.util.spec_from_file_location("network_bench", "tests/network-bench.py")
+bench = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(bench)
+header = '''F/DEBUG(321): Cmdline: build.cairn.app
+F/DEBUG(321): signal 6 (SIGABRT), code -1 (SI_QUEUE)
+F/DEBUG(321): #00 pc 0000000000052450 /data/app/private/libjingle_peerconnection_so.so (private-symbol)
+'''
+raw = header + 'F/DEBUG(321): private-memory-map-padding\\n' * 2200
+assert len(raw) > 65536
+evidence = bench.android_crash_summary(raw, '')
+assert evidence['targetProcessObserved'], evidence
+assert evidence['signals'] == ['SIGABRT'], evidence
+assert evidence['nativeFrames'] == [{'pc': 0x52450, 'library': 'libjingle_peerconnection_so.so'}], evidence
+import json
+assert 'private' not in json.dumps(evidence), evidence
 `], { stdio: 'pipe' })
 })
 
