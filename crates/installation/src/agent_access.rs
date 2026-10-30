@@ -37,10 +37,8 @@ CREATE TABLE agent_account_access(
 CREATE INDEX agent_account_access_account ON agent_account_access(account_id);
 ";
 
-/// Agents that existed before account access: the members of the first membership check
-/// after the upgrade keep using them. The installation keeps no list of members, so someone
-/// invited between the upgrade and that check, which only a Beacon outage can delay before
-/// any member reaches the installation again, counts as an existing member.
+/// Existing agents and the upgrade boundary: only memberships that began before this
+/// boundary retain access, even if a Beacon outage delays the first observation.
 const ROLLOUT: &str = "agent-access-rollout";
 
 /// Shown on a scheduled task whose author cannot use its agent; it runs again once they can.
@@ -50,7 +48,7 @@ pub(crate) const SUSPENDED: &str =
 const DENIED: &str =
     "You don't have access to this agent. Ask the installation owner to give you access.";
 
-/// Version 18 to 19. Members at the first membership check keep the existing agents.
+/// Version 18 to 19. Existing memberships keep the existing agents.
 pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     // Recheck under the write lock: another startup may have completed the upgrade.
@@ -69,7 +67,11 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
         .prepare("SELECT id FROM agents ORDER BY id")?
         .query_map([], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Db(&tx).set(ROLLOUT, &json!({ "agentIds": agents }), None)?;
+    Db(&tx).set(
+        ROLLOUT,
+        &json!({ "agentIds": agents, "upgradedAt": crate::config::now() }),
+        None,
+    )?;
     tx.pragma_update(None, "user_version", 19)?;
     tx.commit()?;
     Ok(())
@@ -495,6 +497,20 @@ pub(crate) fn reconcile(db: &Db<'_>, policy: Option<&TaskAuthorPolicy>) -> Resul
     }
 
     if let Some(rollout) = db.kv(ROLLOUT)? {
+        // A legacy pending rollout without its original boundary cannot prove which
+        // memberships existed then. Never replace it with the time of observation.
+        let Some(upgraded_at) = rollout["upgradedAt"]
+            .as_i64()
+            .filter(|time| (0..=9_007_199_254_740_991).contains(time))
+        else {
+            db.delete(ROLLOUT)?;
+            return mark_suspensions(db, None, Some(policy));
+        };
+        let known_joined_at = |member: &cairn_protocol::TaskAuthorGrant| {
+            member
+                .joined_at
+                .filter(|time| (0..=9_007_199_254_740_991).contains(time))
+        };
         for agent in rollout["agentIds"].as_array().into_iter().flatten() {
             let Some(agent) = agent.as_str() else {
                 continue;
@@ -503,6 +519,17 @@ pub(crate) fn reconcile(db: &Db<'_>, policy: Option<&TaskAuthorPolicy>) -> Resul
                 continue;
             }
             for member in &policy.members {
+                if !known_joined_at(member).is_some_and(|joined| joined < upgraded_at) {
+                    continue;
+                }
+                let excluded = rollout["excluded"].as_array().is_some_and(|entries| {
+                    entries.iter().any(|entry| {
+                        entry["agentId"] == agent && entry["accountId"] == member.account_id
+                    })
+                });
+                if excluded {
+                    continue;
+                }
                 db.0.execute(
                     "INSERT OR IGNORE INTO agent_account_access VALUES(?1,?2,?3,?4)",
                     params![
@@ -514,8 +541,16 @@ pub(crate) fn reconcile(db: &Db<'_>, policy: Option<&TaskAuthorPolicy>) -> Resul
                 )?;
             }
         }
-        db.delete(ROLLOUT)?;
-        db.audit("agent.account_access_rollout", &json!({}))?;
+        // A mixed-version Beacon can confirm scheduling eligibility without this
+        // evidence. Keep the original boundary until it can supply every membership.
+        if policy
+            .members
+            .iter()
+            .all(|member| known_joined_at(member).is_some())
+        {
+            db.delete(ROLLOUT)?;
+            db.audit("agent.account_access_rollout", &json!({}))?;
+        }
     }
     mark_suspensions(db, None, Some(policy))
 }
@@ -634,6 +669,17 @@ impl Service {
             .transaction(move |db| {
                 let id = agent.to_string();
                 required(db.agent(&id)?, "Agent not found")?;
+                if let Some(mut rollout) = db.kv(ROLLOUT)? {
+                    // An explicit owner decision wins over automatic retention, even
+                    // when an older Beacon has not yet supplied membership times.
+                    let mut excluded = rollout["excluded"].as_array().cloned().unwrap_or_default();
+                    let entry = json!({ "agentId": id, "accountId": account });
+                    if !excluded.contains(&entry) {
+                        excluded.push(entry);
+                        rollout["excluded"] = json!(excluded);
+                        db.set(ROLLOUT, &rollout, None)?;
+                    }
+                }
                 let removed = db.0.execute(
                     "DELETE FROM agent_account_access WHERE agent_id=?1 AND account_id=?2",
                     params![id, account],
@@ -657,6 +703,34 @@ mod tests {
     use crate::{agent_fixture::AgentFixture, relay_fixture};
 
     const MEMBER: &str = "member-account";
+
+    #[tokio::test]
+    async fn reopening_an_upgraded_database_preserves_its_original_rollout_boundary() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE agents(id TEXT PRIMARY KEY);
+             INSERT INTO agents VALUES('existing');
+             CREATE TABLE kv(key TEXT PRIMARY KEY,data TEXT NOT NULL,expires INTEGER);
+             PRAGMA user_version=18;",
+            )
+            .unwrap();
+        let time = Arc::new(std::sync::atomic::AtomicI64::new(1000));
+        crate::config::TEST_NOW
+            .scope(time.clone(), async {
+                upgrade(&mut connection).unwrap();
+                let initial = Db(&connection).kv(ROLLOUT).unwrap().unwrap();
+                assert_eq!(
+                    initial,
+                    json!({ "agentIds": ["existing"], "upgradedAt": 1000 })
+                );
+
+                time.store(2000, std::sync::atomic::Ordering::SeqCst);
+                upgrade(&mut connection).unwrap();
+                assert_eq!(Db(&connection).kv(ROLLOUT).unwrap(), Some(initial));
+            })
+            .await;
+    }
 
     /// A member's request straight to the installation API, without the fixture relay's
     /// own membership refresh, so only the installation decides when to confirm them.

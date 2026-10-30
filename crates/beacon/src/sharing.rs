@@ -38,20 +38,24 @@ pub(super) async fn task_authors(
             "Invalid installation identity",
         ));
     };
-    let members: Vec<(String, String)> = query_as(
-        "SELECT account_id, access_id FROM installation_members WHERE installation_id = $1 ORDER BY account_id",
+    let members: Vec<(String, String, i64)> = query_as(
+        "SELECT account_id, access_id, ceil(extract(epoch FROM joined_at) * 1000)::bigint FROM installation_members WHERE installation_id = $1 ORDER BY account_id",
     ).bind(&installation).fetch_all(&mut *transaction).await?;
     let policy = cairn_protocol::TaskAuthorPolicy {
         owner: cairn_protocol::TaskAuthorGrant {
             access_id: format!("owner:{installation}:{owner}"),
             account_id: owner,
+            joined_at: None,
         },
         members: members
             .into_iter()
-            .map(|(account_id, access_id)| cairn_protocol::TaskAuthorGrant {
-                account_id,
-                access_id,
-            })
+            .map(
+                |(account_id, access_id, joined_at)| cairn_protocol::TaskAuthorGrant {
+                    account_id,
+                    access_id,
+                    joined_at: Some(joined_at),
+                },
+            )
             .collect(),
     };
     transaction.commit().await?;
@@ -341,7 +345,9 @@ pub(super) async fn accept(
             "Invitation not found or expired",
         ));
     }
-    query("INSERT INTO installation_members (installation_id, account_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
+    // A lock wait must not backdate a new membership to the transaction's start:
+    // installations use this evidence to retain only pre-upgrade memberships.
+    query("INSERT INTO installation_members (installation_id, account_id, joined_at) VALUES ($1, $2, clock_timestamp()) ON CONFLICT DO NOTHING")
         .bind(&installation).bind(&account).execute(&mut *transaction).await?;
     super::audit::record(
         &mut transaction,

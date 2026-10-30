@@ -37,6 +37,10 @@ pub enum Role {
 pub struct TaskAuthorGrant {
     pub account_id: String,
     pub access_id: String,
+    /// Unix milliseconds at which this membership began. Older Beacons omit it;
+    /// scheduling still uses access_id, but an automatic access rollout needs it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub joined_at: Option<i64>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

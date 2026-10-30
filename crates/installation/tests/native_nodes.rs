@@ -3215,12 +3215,14 @@ async fn mission_authority(f: &Fixture) -> tokio::task::JoinHandle<()> {
         owner: cairn_protocol::TaskAuthorGrant {
             account_id: TRUSTED.into(),
             access_id: "one".into(),
+            joined_at: None,
         },
         members: [(OTHER, "two"), ("fixture-owner", "fixture-owner")]
             .into_iter()
             .map(|(account, access)| cairn_protocol::TaskAuthorGrant {
                 account_id: account.into(),
                 access_id: access.into(),
+                joined_at: None,
             })
             .collect(),
     })

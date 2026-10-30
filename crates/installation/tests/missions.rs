@@ -429,6 +429,7 @@ async fn a_mission_prepared_before_installation_grant_revocation_cannot_commit()
                         owner: cairn_protocol::TaskAuthorGrant {
                             account_id: "fixture-owner".into(),
                             access_id: "fixture-owner".into(),
+                            joined_at: None,
                         },
                         members: Vec::new(),
                     })

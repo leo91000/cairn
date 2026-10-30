@@ -140,8 +140,19 @@ const MEMBERS: &str = "test-relay-members";
 
 /// Make the account a current member of the fixture installation, with this membership.
 pub async fn add_member(service: &Service, account: &str, access: &str) {
+    add_member_at(
+        service,
+        account,
+        access,
+        Some(cairn_installation::config::now()),
+    )
+    .await;
+}
+
+/// Explicit membership evidence, including an older Beacon that cannot supply it.
+pub async fn add_member_at(service: &Service, account: &str, access: &str, joined_at: Option<i64>) {
     let mut members = service.store.kv(MEMBERS).await.unwrap().unwrap_or_default();
-    members[account] = access.into();
+    members[account] = json!({ "accessId": access, "joinedAt": joined_at });
     service.store.set(MEMBERS, members, None).await.unwrap();
 }
 
@@ -206,6 +217,7 @@ async fn fixture_task_authors(
         owner: TaskAuthorGrant {
             account_id: "fixture-owner".to_owned(),
             access_id: "fixture-owner".to_owned(),
+            joined_at: None,
         },
         members: members
             .as_object()
@@ -213,7 +225,8 @@ async fn fixture_task_authors(
             .flatten()
             .map(|(account, access)| TaskAuthorGrant {
                 account_id: account.clone(),
-                access_id: access.as_str().unwrap_or_default().to_owned(),
+                access_id: access["accessId"].as_str().unwrap_or_default().to_owned(),
+                joined_at: access["joinedAt"].as_i64(),
             })
             .collect(),
     }))

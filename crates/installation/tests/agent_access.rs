@@ -575,6 +575,8 @@ async fn existing_members_keep_existing_agents_at_rollout_only() {
     let root = tempfile::tempdir().unwrap();
     let existing = {
         let s = service(root.path()).await;
+        relay_fixture::add_member_at(&s, MEMBER, "membership-1", Some(0)).await;
+        relay_fixture::add_member_at(&s, "reinvited-member", "membership-old", Some(0)).await;
         agent(&s, "Existing").await
     };
 
@@ -585,7 +587,14 @@ async fn existing_members_keep_existing_agents_at_rollout_only() {
     drop(db);
 
     let s = Service::new(common::config(root.path())).await.unwrap();
-    relay_fixture::add_member(&s, MEMBER, "membership-1").await;
+    let rollout = s.store.kv("agent-access-rollout").await.unwrap().unwrap();
+    let cutoff = rollout["upgradedAt"].as_i64().unwrap();
+    // An outage can delay the first observation until these memberships have changed.
+    relay_fixture::add_member_at(&s, "new-member", "membership-new", Some(cutoff + 1)).await;
+    relay_fixture::remove_member(&s, "reinvited-member").await;
+    relay_fixture::add_member_at(&s, "reinvited-member", "membership-again", Some(cutoff + 1))
+        .await;
+    relay_fixture::add_member_at(&s, "boundary-member", "membership-boundary", Some(cutoff)).await;
     relay_fixture::claimed(&s).await.unwrap();
     s.synchronize_task_authors().await.unwrap();
     let mut kept = usable(&s).await.as_array().unwrap().clone();
@@ -593,6 +602,11 @@ async fn existing_members_keep_existing_agents_at_rollout_only() {
     let mut expected = vec![json!(existing), json!(MAIN_AGENT_ID)];
     expected.sort_by_key(|id| id.as_str().unwrap().to_owned());
     assert_eq!(kept, expected);
+    for account in ["new-member", "reinvited-member", "boundary-member"] {
+        let (_, usable) = call(&s, Some(account), "GET", "/api/usable-agents", Value::Null).await;
+        assert_eq!(usable["agentIds"], json!([]), "{account}");
+    }
+    assert!(s.store.kv("agent-access-rollout").await.unwrap().is_none());
 
     // Later agents and later members start without access.
     let later = agent(&s, "Later").await;
@@ -611,6 +625,71 @@ async fn existing_members_keep_existing_agents_at_rollout_only() {
 }
 
 #[tokio::test]
+async fn rollout_waits_for_membership_evidence_and_never_overrides_owner_decisions() {
+    let root = tempfile::tempdir().unwrap();
+    let existing = {
+        let s = service(root.path()).await;
+        relay_fixture::add_member_at(&s, MEMBER, "membership-1", None).await;
+        relay_fixture::add_member_at(&s, "invalid-member", "membership-invalid", Some(-1)).await;
+        agent(&s, "Existing").await
+    };
+    let db = rusqlite::Connection::open(root.path().join("data/manager.db")).unwrap();
+    db.execute_batch("DROP TABLE agent_account_access; PRAGMA user_version=18;")
+        .unwrap();
+    drop(db);
+
+    let s = Service::new(common::config(root.path())).await.unwrap();
+    let boundary = s.store.kv("agent-access-rollout").await.unwrap().unwrap();
+    relay_fixture::claimed(&s).await.unwrap();
+    assert_eq!(usable(&s).await, json!([]));
+    assert_eq!(
+        s.store.kv("agent-access-rollout").await.unwrap(),
+        Some(boundary.clone())
+    );
+
+    // An owner can grant on an older Beacon, and revoke before any automatic grant.
+    let main = format!("/api/agents/{MAIN_AGENT_ID}/accounts/{MEMBER}");
+    assert_eq!(owner(&s, "PUT", &main, json!({})).await.0, StatusCode::OK);
+    let denied = format!("/api/agents/{existing}/accounts/{MEMBER}");
+    assert_eq!(
+        owner(&s, "DELETE", &denied, Value::Null).await.0,
+        StatusCode::OK
+    );
+
+    relay_fixture::add_member_at(&s, MEMBER, "membership-1", Some(0)).await;
+    relay_fixture::add_member_at(&s, "invalid-member", "membership-invalid", Some(0)).await;
+    s.synchronize_task_authors().await.unwrap();
+    assert_eq!(usable(&s).await, json!([MAIN_AGENT_ID]));
+    assert!(s.store.kv("agent-access-rollout").await.unwrap().is_none());
+
+    // Completion cannot later repeat or restore another explicit revocation.
+    assert_eq!(
+        owner(&s, "DELETE", &main, Value::Null).await.0,
+        StatusCode::OK
+    );
+    s.synchronize_task_authors().await.unwrap();
+    assert_eq!(usable(&s).await, json!([]));
+}
+
+#[tokio::test]
+async fn a_legacy_pending_rollout_without_a_boundary_never_infers_access() {
+    let root = tempfile::tempdir().unwrap();
+    let s = service(root.path()).await;
+    relay_fixture::add_member_at(&s, MEMBER, "membership-1", Some(0)).await;
+    s.store
+        .set(
+            "agent-access-rollout",
+            json!({ "agentIds": [MAIN_AGENT_ID] }),
+            None,
+        )
+        .await
+        .unwrap();
+    s.synchronize_task_authors().await.unwrap();
+    assert_eq!(usable(&s).await, json!([]));
+    assert!(s.store.kv("agent-access-rollout").await.unwrap().is_none());
+}
+
+#[tokio::test]
 async fn a_members_scheduled_task_keeps_running_after_the_rollout() {
     let root = tempfile::tempdir().unwrap();
     let task = {
@@ -626,6 +705,7 @@ async fn a_members_scheduled_task_keeps_running_after_the_rollout() {
         let (status, task) =
             member(&s, "POST", "/api/tasks", json!({ "settings": settings })).await;
         assert_eq!(status, StatusCode::OK, "{task}");
+        relay_fixture::add_member_at(&s, MEMBER, &format!("membership-{MEMBER}"), Some(0)).await;
         task["id"].as_str().unwrap().to_owned()
     };
 
