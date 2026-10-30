@@ -1746,6 +1746,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_retry_authorization_is_bound_to_attempt_and_confirmed_cause() {
+        let (_root, service, _chat, run, _workspace) = fixture().await;
+        let cause = crate::run_retry::Cause::classify(&json!({
+            "code": "server_overloaded", "message": "Provider busy"
+        }))
+        .unwrap();
+        for (same_attempt, same_cause, pending_turn, cancelled, expired) in [
+            (true, true, false, false, false),
+            (false, true, false, false, false),
+            (true, false, false, false, false),
+            (true, true, true, false, false),
+            (true, true, false, true, false),
+            (true, true, false, false, true),
+        ] {
+            let (id, cause) = (run.clone(), cause.clone());
+            service
+                .store
+                .transaction(move |db| {
+                    let retry = crate::run_retry::Retry::next(None, cause.clone(), now()).unwrap();
+                    db.change_run(
+                        &id,
+                        crate::runs::RunChanges {
+                            status: Some(RunStatus::Queued),
+                            retry: Some(Some(retry)),
+                            cancel_requested_at: Some(cancelled.then(now)),
+                            boundary: Some(
+                                json!({ "nativeModeInterruption": null, "moveRequest": null }),
+                            ),
+                            ..Default::default()
+                        },
+                    )?;
+                    let mut saved = RunCheckpoint::from_value(json!({
+                        "prepared": { "backend": "firecracker", "isolated": true },
+                        "runnerId": if same_attempt { "old" } else { "replacement" },
+                        "completed": false, "terminalCode": 1,
+                        "remainingMs": if expired { Some(0) } else { None },
+                        "controllerRecoveries": 3, "providerRetryReservation": "old",
+                        "turnPending": pending_turn,
+                    }))?;
+                    saved.retry_cause = Some(if same_cause { Some(cause) } else { None });
+                    saved.store_in(db, &id)?;
+                    let may_launch = finish_recovery(db, &id, Some(&saved))?;
+                    assert_eq!(
+                        may_launch,
+                        same_attempt && same_cause && !pending_turn && !cancelled && !expired
+                    );
+                    if may_launch {
+                        let durable = RunCheckpoint::load_in(db, &id)?.unwrap();
+                        assert_eq!(durable.controller_recoveries(), 3);
+                        assert!(durable.has_provider_retry_reservation());
+                        assert!(finish_recovery(db, &id, Some(&durable))?);
+                        assert_eq!(
+                            RunCheckpoint::load_in(db, &id)?
+                                .unwrap()
+                                .controller_recoveries(),
+                            3
+                        );
+                    }
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+        service.shutdown.cancel();
+    }
+
+    #[tokio::test]
     async fn paid_native_mode_recovery_can_settle_at_and_above_controller_ceiling() {
         let (_root, service, _chat, run, _workspace) = fixture().await;
         for count in [3, 4, 5] {
