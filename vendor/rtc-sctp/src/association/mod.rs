@@ -118,6 +118,13 @@ struct StreamReset {
     outgoing_acknowledged: bool,
 }
 
+struct OutgoingReset {
+    chunk: ChunkReconfig,
+    // An In Progress reply makes retransmissions probes of application drain,
+    // rather than unanswered requests charged against the path failure budget.
+    unanswered_expirations: Option<usize>,
+}
+
 ///Association represents an SCTP association
 //13.2.  Parameters Necessary per Association (i.e., the TCB)
 //Peer : Tag value to be sent in every packet and is received
@@ -166,7 +173,7 @@ pub struct Association {
 
     // Reconfig
     my_next_rsn: u32,
-    reconfigs: HashMap<u32, ChunkReconfig>,
+    reconfigs: HashMap<u32, OutgoingReset>,
     reconfig_requests: HashMap<u32, ParamOutgoingResetRequest>,
     // Last completed incoming reset per wire stream, retained across reuse.
     // StreamId is u16, so history is bounded by the protocol's stream space.
@@ -508,12 +515,23 @@ impl Association {
     /// no-op and therefore are safe.
     pub fn handle_timeout(&mut self, now: Instant) {
         for &timer in &Timer::VALUES {
-            let (expired, failure, n_rtos) = self.timers.is_expired(timer, now);
+            let (expired, mut failure, n_rtos) = self.timers.is_expired(timer, now);
             if !expired {
                 continue;
             }
             self.timers.set(timer, None);
             //trace!("{:?} timeout", timer);
+
+            if timer == Timer::Reconfig {
+                let limit = self.timers.max_retrans(timer);
+                failure = false;
+                for request in self.reconfigs.values_mut() {
+                    if let Some(errors) = &mut request.unanswered_expirations {
+                        *errors = errors.saturating_add(1);
+                        failure |= *errors > limit;
+                    }
+                }
+            }
 
             if timer == Timer::Ack {
                 self.on_ack_timeout();
@@ -1759,7 +1777,16 @@ impl Association {
                 ReconfigResult::SuccessNop | ReconfigResult::SuccessPerformed => {
                     self.acknowledge_stream_reset(p.reconfig_response_sequence_number);
                 }
-                ReconfigResult::InProgress => {}
+                ReconfigResult::InProgress => {
+                    if let Some(request) = self.reconfigs.get_mut(&p.reconfig_response_sequence_number) {
+                        request.unanswered_expirations = None;
+                    }
+                    // Restart the drain-probe timer on the next timed poll.
+                    // An unanswered request keeps its existing deadline.
+                    if self.reconfigs.values().all(|request| request.unanswered_expirations.is_none()) {
+                        self.timers.stop(Timer::Reconfig);
+                    }
+                }
                 _ => {
                     // A rejected reset cannot safely release its wire stream.
                     // End the unusable association and notify all its channels.
@@ -2083,7 +2110,7 @@ impl Association {
         let Some(request) = self.reconfigs.remove(&sequence) else {
             return;
         };
-        let streams: Vec<_> = [request.param_a, request.param_b]
+        let streams: Vec<_> = [request.chunk.param_a, request.chunk.param_b]
             .into_iter()
             .flatten()
             .filter_map(|parameter| {
@@ -2159,6 +2186,7 @@ impl Association {
     ) -> Result<()> {
         let mut result = ReconfigResult::SuccessPerformed;
         let mut sis_to_reset = vec![];
+        let mut sis_to_queue = vec![];
 
         if sna32lte(p.sender_last_tsn, self.peer_last_tsn) {
             debug!(
@@ -2179,7 +2207,11 @@ impl Association {
                     let reset = self.stream_resets.entry(*id).or_default();
                     reset.incoming_complete = true;
                     if reset.outgoing_sequence.is_none() && !reset.outgoing_queued {
-                        sis_to_reset.push(*id);
+                        if self.pending_queue.contains_stream(*id) {
+                            sis_to_queue.push(*id);
+                        } else {
+                            sis_to_reset.push(*id);
+                        }
                     }
                     self.complete_stream_reset(*id);
                 }
@@ -2203,6 +2235,13 @@ impl Association {
             result = ReconfigResult::InProgress;
         }
 
+        // A peer may close while our response is still waiting for send credit.
+        // Queue its reciprocal reset after DATA, just like a local close, so
+        // acknowledgement cannot release the wire ID ahead of the old payload.
+        for id in sis_to_queue {
+            self.queue_reset_request(None, id);
+        }
+
         // Answer incoming reset requests with the same reset request, but with
         // reconfig_response_sequence_number.
         if !sis_to_reset.is_empty() {
@@ -2220,7 +2259,10 @@ impl Association {
                 ..Default::default()
             };
 
-            self.reconfigs.insert(rsn, c.clone()); // store in the map for retransmission
+            self.reconfigs.insert(rsn, OutgoingReset {
+                chunk: c.clone(),
+                unanswered_expirations: Some(0),
+            });
 
             let p = self.create_packet(vec![Box::new(c)]);
             reply.push(p);
@@ -2425,8 +2467,8 @@ impl Association {
                     self.side,
                     self.reconfigs.len()
                 );
-                for c in self.reconfigs.values() {
-                    let p = self.create_packet(vec![Box::new(c.clone())]);
+                for request in self.reconfigs.values() {
+                    let p = self.create_packet(vec![Box::new(request.chunk.clone())]);
                     if let Ok(raw) = p.marshal() {
                         raw_packets.push(raw);
                     } else {
@@ -2459,7 +2501,10 @@ impl Association {
                     })),
                     ..Default::default()
                 };
-                self.reconfigs.insert(rsn, c.clone()); // store in the map for retransmission
+                self.reconfigs.insert(rsn, OutgoingReset {
+                    chunk: c.clone(),
+                    unanswered_expirations: Some(0),
+                });
 
                 let p = self.create_packet(vec![Box::new(c)]);
                 if let Ok(raw) = p.marshal() {
@@ -3284,10 +3329,15 @@ impl Association {
             return Err(Error::ErrResetPacketInStateNotExist);
         }
 
+        self.queue_reset_request(Some(now), stream_identifier);
+        Ok(())
+    }
+
+    fn queue_reset_request(&mut self, created_at: Option<Instant>, stream_identifier: StreamId) {
         // Create DATA chunk which only contains valid stream identifier with
         // nil userData and use it as a EOS from the stream.
         let c = ChunkPayloadData {
-            created_at: Some(now),
+            created_at,
             stream_identifier,
             beginning_fragment: true,
             ending_fragment: true,
@@ -3301,8 +3351,6 @@ impl Association {
             .or_default()
             .outgoing_queued = true;
         self.awake_write_loop();
-
-        Ok(())
     }
 
     /// send_payload_data sends the data chunks.

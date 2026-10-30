@@ -93,6 +93,10 @@ impl TimerTable {
         self.data[timer as usize]
     }
 
+    pub fn max_retrans(&self, timer: Timer) -> usize {
+        self.max_retrans[timer as usize]
+    }
+
     pub fn next_timeout(&self) -> Option<Instant> {
         self.data.iter().filter_map(|&x| x).min()
     }

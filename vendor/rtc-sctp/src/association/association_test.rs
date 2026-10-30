@@ -1007,6 +1007,72 @@ fn terminal_reset_rejection_ends_the_association_without_reuse() -> Result<()> {
 }
 
 #[test]
+fn reset_in_progress_does_not_exhaust_a_healthy_peers_retry_budget() -> Result<()> {
+    let mut association = create_association(TransportConfig::default());
+    association.set_state(AssociationState::Established);
+    association.handshake_completed = true;
+    association.open_stream(2, PayloadProtocolIdentifier::Binary)?;
+    association.handle_reconfig_param(&reset_request(7, vec![2]), &mut vec![])?;
+    let mut now = Instant::now();
+    while association.poll_transmit(now).is_some() {}
+    let sequence = *association.reconfigs.keys().next().unwrap();
+
+    for _ in 0..=crate::TimerConfig::default().max_reconfig_retrans {
+        acknowledge_reset(&mut association, sequence, ReconfigResult::InProgress)?;
+        while association.poll_transmit(now).is_some() {}
+        let deadline = association.timers.get(Timer::Reconfig).unwrap();
+        association.handle_timeout(deadline);
+        while association.poll_transmit(deadline).is_some() {}
+        assert_eq!(association.state(), AssociationState::Established);
+        now = deadline;
+    }
+    acknowledge_reset(&mut association, sequence, ReconfigResult::SuccessPerformed)?;
+    assert!(association.reconfigs.is_empty());
+    Ok(())
+}
+
+#[test]
+fn a_progressing_reset_does_not_hide_an_unanswered_reset() -> Result<()> {
+    let mut association = create_association(TransportConfig::default());
+    association.set_state(AssociationState::Established);
+    association.handshake_completed = true;
+    association.open_stream(2, PayloadProtocolIdentifier::Binary)?;
+    association.open_stream(4, PayloadProtocolIdentifier::Binary)?;
+    association.handle_reconfig_param(&reset_request(7, vec![2]), &mut vec![])?;
+    let mut now = Instant::now();
+    while association.poll_transmit(now).is_some() {}
+    let progressing = *association.reconfigs.keys().next().unwrap();
+    acknowledge_reset(&mut association, progressing, ReconfigResult::InProgress)?;
+
+    // Progress probes are not failures, even when later probe replies are lost.
+    for _ in 0..=crate::TimerConfig::default().max_reconfig_retrans {
+        while association.poll_transmit(now).is_some() {}
+        now = association.timers.get(Timer::Reconfig).unwrap();
+        association.handle_timeout(now);
+        while association.poll_transmit(now).is_some() {}
+        assert_eq!(association.state(), AssociationState::Established);
+    }
+
+    association.handle_reconfig_param(&reset_request(8, vec![4]), &mut vec![])?;
+    assert_eq!(association.reconfigs.len(), 2);
+    for _ in 0..crate::TimerConfig::default().max_reconfig_retrans {
+        acknowledge_reset(&mut association, progressing, ReconfigResult::InProgress)?;
+        let deadline = association.timers.get(Timer::Reconfig).unwrap();
+        while association.poll_transmit(now).is_some() {}
+        assert_eq!(association.timers.get(Timer::Reconfig), Some(deadline));
+        now = deadline;
+        association.handle_timeout(now);
+        while association.poll_transmit(now).is_some() {}
+        assert_eq!(association.state(), AssociationState::Established);
+    }
+    now = association.timers.get(Timer::Reconfig).unwrap();
+    association.handle_timeout(now);
+    assert_eq!(association.state(), AssociationState::Closed);
+    assert!(association.reconfigs.is_empty());
+    Ok(())
+}
+
+#[test]
 fn exhausted_reset_retries_end_the_unusable_association() -> Result<()> {
     let mut association = create_association(TransportConfig::default());
     association.set_state(AssociationState::Established);
@@ -1047,6 +1113,77 @@ fn exhausted_reset_retries_end_the_unusable_association() -> Result<()> {
             .open_stream(2, PayloadProtocolIdentifier::Binary)
             .is_err()
     );
+    Ok(())
+}
+
+#[test]
+fn a_remote_reset_cannot_release_a_stream_with_unsent_response_data() -> Result<()> {
+    let mut association = create_association(TransportConfig::default());
+    association.set_state(AssociationState::Established);
+    association.rwnd = 0;
+    association.cwnd = 0;
+    association.open_stream(2, PayloadProtocolIdentifier::Binary)?;
+    association.open_stream(4, PayloadProtocolIdentifier::Binary)?;
+    let now = Instant::now();
+    association.stream(2)?.write_sctp(
+        now,
+        &Bytes::from(vec![42; 3000]),
+        PayloadProtocolIdentifier::Binary,
+    )?;
+    association.stream(4)?.write_sctp(
+        now,
+        &Bytes::from_static(b"unrelated response"),
+        PayloadProtocolIdentifier::Binary,
+    )?;
+    assert!(association.pending_queue.len() > 1);
+
+    association.handle_reconfig_param(&reset_request(7, vec![2]), &mut vec![])?;
+    acknowledge_pending_resets(&mut association)?;
+    assert!(
+        association
+            .open_stream(2, PayloadProtocolIdentifier::Binary)
+            .is_err(),
+        "a remote reset must reserve the ID while old-generation DATA remains queued"
+    );
+
+    association.rwnd = 65536;
+    association.cwnd = 65536;
+    let mut response = vec![];
+    let mut unrelated = vec![];
+    let mut resets = 0;
+    while let Some(transmit) = association.poll_transmit(now) {
+        if let Payload::RawEncode(packets) = transmit.message {
+            for packet in packets {
+                let packet = crate::packet::PartialDecode::unmarshal(&packet)?.finish()?;
+                for chunk in packet.chunks {
+                    if let Some(data) = chunk.as_any().downcast_ref::<ChunkPayloadData>() {
+                        match data.stream_identifier {
+                            2 => response.extend_from_slice(&data.user_data),
+                            4 => unrelated.extend_from_slice(&data.user_data),
+                            id => panic!("unexpected stream {id}"),
+                        }
+                    }
+                    if let Some(reset) = chunk.as_any().downcast_ref::<ChunkReconfig>() {
+                        for parameter in [&reset.param_a, &reset.param_b].into_iter().flatten() {
+                            if let Some(request) = parameter
+                                .as_any()
+                                .downcast_ref::<ParamOutgoingResetRequest>()
+                            {
+                                resets += usize::from(request.stream_identifiers.contains(&2));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(response, vec![42; 3000]);
+    assert_eq!(unrelated, b"unrelated response");
+    assert_eq!(resets, 1);
+    acknowledge_pending_resets(&mut association)?;
+    association.open_stream(2, PayloadProtocolIdentifier::Binary)?;
+    assert!(association.poll_transmit(now).is_none());
+    assert!(association.stream(2)?.is_writable());
     Ok(())
 }
 

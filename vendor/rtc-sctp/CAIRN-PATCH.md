@@ -8,7 +8,8 @@ recorded in Cairn's lockfile before this patch. Upstream revision:
 
 Compared with the archive, this directory patches only
 `src/association/mod.rs`, `src/association/stream.rs`,
-`src/association/association_test.rs` and `src/endpoint/endpoint_test.rs`, adds the
+`src/association/association_test.rs`, `src/endpoint/endpoint_test.rs` and
+`src/queue/pending_queue.rs`, and `src/association/timer.rs`, adds the
 MIT/Apache licenses from the same upstream revision, this file and `.gitignore`,
 and omits packaging metadata (`.cargo*`) and the archive's `Cargo.lock`.
 All other files are byte-identical to the archive. Cairn's root lockfile pins
@@ -30,6 +31,9 @@ local and reciprocal closure share one outgoing request instead of issuing a
 second reset against the same stream. A local close still queued behind DATA
 keeps the wire ID reserved until that marker is transmitted and acknowledged;
 a reciprocal request cannot leave an old marker targeting a replacement.
+When the peer closes before the application has queued its own close, a
+reciprocal reset also waits behind that stream's queued DATA. The old response
+and unrelated streams remain intact before the wire ID becomes available.
 Replacement DATA arriving before the final ACK is not acknowledged against the
 old generation; reliable SCTP retransmits it after teardown completes instead of
 losing its DCEP message.
@@ -37,6 +41,10 @@ losing its DCEP message.
 A terminal reset refusal or exhausted reset-retry budget ends the unusable SCTP
 association and notifies its channels, rather than retrying a rejected request,
 reserving a stream forever or reusing an unsafe ID.
+An In Progress response marks that request's later retransmissions as probes of
+application drain, without charging its failure budget (RFC 6525 section 5.2.7).
+Every unanswered request retains its own budget and deadline, so one progressing
+reset cannot conceal another reset that receives no response.
 Already established closed associations reject new streams and late packets.
 Cancelling a stream's read half releases unread receive data and acknowledges
 later old-generation DATA without retaining it, so an abandoned local HTTP
