@@ -495,7 +495,10 @@ impl Controller {
                             Ok(completion) => {
                                 (code, finalization_failed) = completion_status(code, completion);
                                 if finalization_failed {
-                                    let _ = controller.append(&id, true, b"Native filesystem could not be flushed; the durable crash prefix was retained.\n").await;
+                                    tracing::error!(
+                                        attempt = id,
+                                        "Native filesystem could not be flushed; the durable crash prefix was retained"
+                                    );
                                 }
                                 break;
                             }
