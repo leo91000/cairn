@@ -1525,7 +1525,8 @@ mod tests {
                 }
                 saved.store_in(db, &run)?;
                 let before = saved.to_value()?;
-                assert!(migrate_legacy_provider_retry_in(db, &run, Some(&expected))?.is_none(), "{case}");
+                let expected = if case == "unfenced_release" { &saved } else { &expected };
+                assert!(migrate_legacy_provider_retry_in(db, &run, Some(expected))?.is_none(), "{case}");
                 assert_eq!(RunCheckpoint::load_in(db, &run)?.unwrap().to_value()?, before, "{case}");
             }
             Ok(())
@@ -1540,7 +1541,8 @@ mod tests {
             &json!({"code":"server_error", "message":"Provider unavailable"}),
         )
         .unwrap();
-        let retry = crate::run_retry::Retry::next(None, cause.clone(), now()).unwrap();
+        let mut retry = crate::run_retry::Retry::next(None, cause.clone(), now()).unwrap();
+        retry.next_attempt_at = Some(now() + 60_000);
         let saved = RunCheckpoint::from_value(json!({
             "prepared":{"backend":"native","isolated":true}, "runnerId":"old-attempt",
             "remainingMs":null, "completed":false, "terminalCode":null,
