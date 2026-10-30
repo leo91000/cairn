@@ -44,7 +44,19 @@ class ChatWaitTest {
                 createdAt = it * 60_000,
                 type = type,
                 text = text,
-                payload = (payload)?.let { kotlinx.serialization.json.JsonObject(it) },
+                payload =
+                    when {
+                        type.endsWith("wait_ready") -> waitResultFixture(payload)
+                        type.endsWith("wakeup") && payload["observation"] is JsonObject ->
+                            JsonObject(
+                                payload +
+                                    ("observation" to
+                                        waitResultFixture(
+                                            payload.getValue("observation").jsonObject
+                                        ))
+                            )
+                        else -> payload
+                    },
             )
         }
 

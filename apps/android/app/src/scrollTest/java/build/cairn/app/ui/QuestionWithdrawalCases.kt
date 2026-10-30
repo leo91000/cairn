@@ -39,7 +39,7 @@ abstract class QuestionWithdrawalCases {
             val question =
                 questionFixture(
                     "question",
-                    "chat",
+                    "00000000-0000-4000-8000-000000000088",
                     blocking = true,
                     fields =
                         if (legacy)
@@ -58,7 +58,10 @@ abstract class QuestionWithdrawalCases {
                                 return MockResponse()
                                     .setResponseCode(409)
                                     .setBody("""{"error":"Réessayez le retrait."}""")
-                            return MockResponse().setBody("""{"status":"cancelled"}""")
+                            return MockResponse()
+                                .setBody(
+                                    wireJson.encodeToString(question.copy(status = "cancelled"))
+                                )
                         }
                         val body =
                             when {
@@ -162,7 +165,7 @@ abstract class QuestionWithdrawalCases {
                 assertTrue(
                     writes.all {
                         it.first ==
-                            "/api/installations/fixture/api/chats/chat/questions/question/cancel"
+                            "/api/installations/fixture/api/chats/00000000-0000-4000-8000-000000000088/questions/question/cancel"
                     }
                 )
                 assertTrue(writes.all { !it.second.contains("answers") })
@@ -180,7 +183,7 @@ abstract class QuestionWithdrawalCases {
             val question =
                 questionFixture(
                     "question",
-                    "chat",
+                    "00000000-0000-4000-8000-000000000088",
                     fields =
                         listOf(
                             fieldFixture(
@@ -209,7 +212,10 @@ abstract class QuestionWithdrawalCases {
                         if (request.method == "POST" && path.endsWith("/answer")) {
                             writes +=
                                 wireJson.parseToJsonElement(request.body.readUtf8()).jsonObject
-                            return MockResponse().setBody("{}")
+                            return MockResponse()
+                                .setBody(
+                                    wireJson.encodeToString(question.copy(status = "answering"))
+                                )
                         }
                         val body =
                             when {

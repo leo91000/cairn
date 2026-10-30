@@ -827,7 +827,7 @@ internal fun timelineEntries(
                 // The condition completed: right away (the agent never waited) or while it waited.
                 "chat.wait_ready",
                 "run.wait_ready" -> {
-                    val observation = event.activityData()
+                    val observation = event.activityData()?.let(::presentWaitObservation)
                     // Right away, the agent never waited, and this call replaced any wait.
                     val immediate = observation?.get("immediate") == JsonPrimitive(true)
                     if (immediate) {
@@ -844,7 +844,9 @@ internal fun timelineEntries(
                             }
                             .firstOrNull {
                                 it.type in listOf("chat.wakeup", "run.wakeup") &&
-                                    it.payload?.get("observation") == observation
+                                    (it.payload?.get("observation") as? JsonObject)?.let(
+                                        ::presentWaitObservation
+                                    ) == observation
                             }
                             ?.wakeupPayload()
                     val open =

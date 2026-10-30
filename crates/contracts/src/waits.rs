@@ -48,6 +48,7 @@ pub enum TimeCondition {
 pub struct WaitDisplay {
     pub title: String,
     pub short: String,
+    #[serde(default)]
     pub details: Vec<String>,
 }
 

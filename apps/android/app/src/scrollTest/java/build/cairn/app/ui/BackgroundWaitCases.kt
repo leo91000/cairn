@@ -461,6 +461,7 @@ abstract class BackgroundWaitCases {
                     buildJsonObject {
                         put("title", "Waiting for required checks on PR #1")
                         put("short", "PR #1 checks")
+                        putJsonArray("details") {}
                     },
             )
         // The plugin words its result; the app shows it as given.

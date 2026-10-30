@@ -389,8 +389,8 @@ pub async fn poll_once(s: &Service) -> Result<()> {
     let groups=s.store.read(|db| {
         let mut groups=BTreeMap::<String,Vec<Watch>>::new();
         let mut owners=Vec::new();
-        for record in db.conversations_boundary()? {owners.push(crate::waits::Owner::new(db,true,record)?);}
-        for record in db.active()?.into_iter().filter(|r|r["status"]=="waiting") {owners.push(crate::waits::Owner::new(db,false,record)?);}
+        for record in db.conversations()? {owners.push(crate::waits::Owner::conversation(record));}
+        for record in db.waiting_run_records()? {owners.push(crate::waits::Owner::mission(record));}
         for owner in owners {
             let Some(run)=db.run(owner.run_id())? else {continue;};
             let owner=Arc::new(owner);
@@ -509,7 +509,7 @@ fn record(db: &Db<'_>, group: Vec<Watch>, observed: &Result<Observed>) -> Result
                 Some(&serde_json::to_value(result)?),
             )?;
         }
-        owner.record["updatedAt"] = now().into();
+        owner.touch(now());
         owner.save(db)?;
     }
     Ok(())
@@ -566,22 +566,20 @@ mod tests {
                 let chat = db.save_conversation_boundary(&json!({
                         "id": "chat", "agentId": "00000000-0000-4000-8000-000000000011", "runId": "run",
                         "wakeup": {
-                            "messageId": "message", "wakeAt": now() + 60_000,
-                            "condition": { "type": "fixture_ready", "pluginId": "fixture" },
+                            "id":"fixture-wait", "messageId": "message", "wakeAt": now() + 60_000,
+                            "reason":"Fixture", "seconds":60,"createdAt":now(),
+                            "condition": { "type": "plugin", "conditionType":"fixture_ready", "pluginId": "fixture", "input":{} },
                         },
                     }),
                 )?;
                 let current_run = { db.0.execute("UPDATE runs SET snapshot=json_set(snapshot, '$.agent', json(?)) WHERE id='run'", [target.to_string()])?; db.run("run")?.unwrap() };
                 let stale_denial =
-                    crate::waits::access(db, &captured_run, &chat["wakeup"]["condition"])
+                    crate::waits::access(db, &captured_run, &crate::waits::condition_wire(db.wakeup(true,"chat")?.unwrap().condition.as_ref().unwrap()))
                         .unwrap_err();
                 record(
                     db,
                     vec![(
-                        crate::waits::Owner {
-                            chat: true,
-                            record: chat.clone(),
-                        }
+                        crate::waits::Owner::conversation(db.conversation("chat")?.unwrap())
                         .into(),
                         captured_run.into(),
                         None,
@@ -599,10 +597,7 @@ mod tests {
                 record(
                     db,
                     vec![(
-                        crate::waits::Owner {
-                            chat: true,
-                            record: chat,
-                        }
+                        crate::waits::Owner::conversation(db.conversation("chat")?.unwrap())
                         .into(),
                         current_run.into(),
                         None,

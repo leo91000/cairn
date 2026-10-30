@@ -25,7 +25,7 @@ const selected = ref('')
 const question = computed(() => pending.value.find(question => question.id === selected.value) ?? pending.value[0])
 const fields = computed(() => {
   const fields = question.value?.fields
-  if (!fields?.length || fields.some(field => !['single', 'multiple'].includes(field.mode) || new Set(field.options.map(option => option.id)).size !== field.options.length))
+  if (!fields?.length || fields.some(field => !['single', 'multiple'].includes(field.mode) || !Array.isArray(field.options) || field.options.some(option => !option.id) || new Set(field.options.map(option => option.id)).size !== field.options.length))
     return null
   return fields
 })

@@ -1,11 +1,10 @@
 //! Durable waits shared by conversations and missions, independent of execution resources.
 //! Cairn provides time waits and run dependencies; plugins granted to the agent add
 //! theirs (see `plugins::conditions`).
-use crate::chats::{chat_for_run, continuation};
+use crate::chats::continuation;
 use crate::worker::checkpoint::RunCheckpoint;
 use crate::{
     config::{id, now},
-    conversation_lifecycle::require_active,
     error::{Error, Result},
     plugins::conditions,
     run_status::RunStatus,
@@ -310,7 +309,7 @@ use cairn_contracts::{
 /// The only dynamic input boundary is the extensible plugin protocol. Native
 /// conditions and durable state become named values before any decision is made.
 pub(crate) fn condition_from_wire(value: &Value) -> Result<WaitCondition> {
-    if value["pluginId"].is_string() && value["type"] != "plugin" {
+    if value["pluginId"].is_string() {
         let mut input = value
             .as_object()
             .cloned()
@@ -484,7 +483,11 @@ pub(crate) fn observed_from_wire(value: &Value) -> Result<WaitObservation> {
     Ok(serde_json::from_value(raw)?)
 }
 
-fn input_revision(db: &Db<'_>, run: &Value, chat: &Value) -> Result<(i64, Vec<String>)> {
+fn input_revision(
+    db: &Db<'_>,
+    run: &Value,
+    chat: Option<&crate::chats::Conversation>,
+) -> Result<(i64, Vec<String>)> {
     if run["trigger"] != "chat" {
         return Ok((0, Vec::new()));
     }
@@ -495,7 +498,12 @@ fn input_revision(db: &Db<'_>, run: &Value, chat: &Value) -> Result<(i64, Vec<St
     )?;
     let submitted =
         db.0.prepare("SELECT id FROM chat_messages WHERE chat_id=? ORDER BY id")?
-            .query_map([text(chat, "id")], |r| r.get(0))?
+            .query_map(
+                [&chat
+                    .ok_or_else(|| Error::conflict("The conversation no longer exists."))?
+                    .id],
+                |r| r.get(0),
+            )?
             .collect::<rusqlite::Result<Vec<String>>>()?;
     Ok((acknowledged, submitted))
 }
@@ -509,8 +517,11 @@ fn registering(db: &Db<'_>, bearer: &str, request: &Request) -> Result<(Value, O
         ));
     }
     if owner.chat {
-        require_active(&owner.record)?;
-        if owner.record["paused"] == true || continuation::has_unhandled_input(db, &owner.record)? {
+        let chat = owner.conversation.as_ref().unwrap();
+        if chat.lifecycle != cairn_contracts::ConversationLifecycle::Active {
+            return Err(Error::conflict("This conversation is no longer active."));
+        }
+        if chat.paused || continuation::has_unhandled_input(db, chat)? {
             return Err(Error::conflict(
                 "Handle pending user input before registering a wait.",
             ));
@@ -612,8 +623,8 @@ fn access_typed(db: &Db<'_>, run: &Value, condition: &WaitCondition) -> Result<(
             db.run(run_id)?
                 .ok_or_else(|| Error::not_found("The target run no longer exists."))?;
         }
-        WaitCondition::TaskFinished { .. } => {
-            crate::delegation::wait_access(db, run, &condition_wire(condition))?
+        WaitCondition::TaskFinished { chat_id } => {
+            crate::delegation::wait_access(db, run, chat_id)?
         }
         WaitCondition::Plugin { .. } => conditions::access(db, run, &condition_wire(condition))?,
     }
@@ -629,12 +640,7 @@ fn is_native(condition: &WaitCondition) -> bool {
 
 fn native_result(db: &Db<'_>, condition: &WaitCondition) -> Result<Option<WaitObservation>> {
     match condition {
-        WaitCondition::TaskFinished { .. } => {
-            crate::delegation::wait_result(db, &condition_wire(condition))?
-                .as_ref()
-                .map(observed_from_wire)
-                .transpose()
-        }
+        WaitCondition::TaskFinished { chat_id } => crate::delegation::wait_result(db, chat_id),
         WaitCondition::RunFinished { run_id } => {
             let target = db
                 .run(run_id)?
@@ -643,8 +649,8 @@ fn native_result(db: &Db<'_>, condition: &WaitCondition) -> Result<Option<WaitOb
                 .ok_or_else(|| Error::bad_gateway("Unknown target run state."))?;
             if status == RunStatus::Succeeded
                 && target["trigger"] == "chat"
-                && let Some(chat) = chat_for_run(db, run_id)?
-                && (chat["wakeup"].is_object() || continuation::has_pending_input(db, &chat)?)
+                && let Some(chat) = db.conversation_for_run(run_id)?
+                && (chat.wakeup.is_some() || continuation::has_pending_input(db, &chat)?)
             {
                 return Ok(None);
             }
@@ -676,7 +682,7 @@ pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
         .store
         .transaction(move |db| {
             let (run, owner) = registering(db, &token, &prepared)?;
-            let revision = input_revision(db, &run, &owner.record)?;
+            let revision = input_revision(db, &run, owner.conversation.as_ref())?;
             Ok((run, owner, revision))
         })
         .await?;
@@ -720,7 +726,7 @@ pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
     let token = bearer.to_owned();
     let result=s.store.transaction(move|db| {
         let (run,mut owner)=registering(db,&token,&request)?;
-        if input_revision(db,&run,&owner.record)?!=revision {return Err(Error::conflict("User input changed while the condition was checked. Handle it before registering a wait."));}
+        if input_revision(db,&run,owner.conversation.as_ref())?!=revision {return Err(Error::conflict("User input changed while the condition was checked. Handle it before registering a wait."));}
         if same_request(owner.wakeup.as_ref(),&run,&request) {return Ok(json!({"deferred":true,"wakeup":owner.wakeup}));}
         let created=now();
         let deadline=match &request.time {
@@ -758,7 +764,7 @@ pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
         };
         owner.wakeup=Some(wakeup.clone());
         crate::nodes::exclusive::release_before_wait(db,text(&run,"id"))?;
-        owner.record["updatedAt"]=created.into();
+        owner.touch(created);
         owner.save(db)?;
         db.event(text(&run,"id"),&EventKind::from_adapter(owner.event("wait")),&wakeup.reason,Some(&serde_json::to_value(&wakeup)?))?;
         Ok(json!({"deferred":true,"wakeup":wakeup}))
@@ -928,11 +934,11 @@ fn current_observation(
 
 pub(crate) fn observation(
     db: &Db<'_>,
-    chat: &Value,
+    owner_id: &str,
     run: &Value,
     time: i64,
 ) -> Result<Option<Value>> {
-    let Some(wakeup) = db.wakeup(run["trigger"] == "chat", text(chat, "id"))? else {
+    let Some(wakeup) = db.wakeup(run["trigger"] == "chat", owner_id)? else {
         return Ok(None);
     };
     current_observation(db, run, &wakeup, time)?
@@ -951,47 +957,68 @@ pub(crate) fn execution_id(run: &Value) -> &Value {
 #[derive(Clone)]
 pub(crate) struct Owner {
     pub(crate) chat: bool,
-    pub(crate) record: Value,
+    conversation: Option<crate::chats::Conversation>,
+    owner_id: String,
+    run_id: String,
     pub(crate) wakeup: Option<ChatWakeup>,
 }
 
 impl Owner {
-    pub(crate) fn new(db: &Db<'_>, chat: bool, record: Value) -> Result<Self> {
-        let wakeup = db.wakeup(chat, text(&record, "id"))?;
-        Ok(Self {
-            chat,
-            record,
-            wakeup,
-        })
+    pub(crate) fn conversation(record: crate::chats::Conversation) -> Self {
+        Self {
+            chat: true,
+            owner_id: record.id.clone(),
+            run_id: record.run_id.clone().unwrap_or_default(),
+            wakeup: record.wakeup.clone(),
+            conversation: Some(record),
+        }
+    }
+
+    pub(crate) fn mission(record: crate::runs::RunRecord) -> Self {
+        Self {
+            chat: false,
+            owner_id: record.state.id.clone(),
+            run_id: record.state.id,
+            wakeup: record.wakeup,
+            conversation: None,
+        }
     }
 
     pub(crate) fn for_run(db: &Db<'_>, run: &Value) -> Result<Self> {
-        let chat = run["trigger"] == "chat";
-        let record = if chat {
-            chat_for_run(db, text(run, "id"))?
-                .ok_or_else(|| Error::conflict("The conversation no longer exists."))?
+        if run["trigger"] == "chat" {
+            Ok(Self::conversation(
+                db.conversation_for_run(text(run, "id"))?
+                    .ok_or_else(|| Error::conflict("The conversation no longer exists."))?,
+            ))
         } else {
-            run.clone()
-        };
-        Self::new(db, chat, record)
+            Ok(Self::mission(
+                db.run_record(text(run, "id"))?
+                    .ok_or_else(|| Error::not_found("Run not found"))?,
+            ))
+        }
     }
 
     pub(crate) fn reload(&self, db: &Db<'_>) -> Result<Option<Self>> {
-        let record = if self.chat {
-            db.conversation_boundary(text(&self.record, "id"))?
+        Ok(if self.chat {
+            db.conversation(&self.owner_id)?.map(Self::conversation)
         } else {
-            db.run(text(&self.record, "id"))?
-        };
-        record.map(|r| Self::new(db, self.chat, r)).transpose()
+            db.run_record(&self.owner_id)?.map(Self::mission)
+        })
     }
 
     pub(crate) fn run_id(&self) -> &str {
-        text(&self.record, if self.chat { "runId" } else { "id" })
+        &self.run_id
+    }
+
+    pub(crate) fn touch(&mut self, time: i64) {
+        if let Some(chat) = &mut self.conversation {
+            chat.updated_at = time;
+        }
     }
 
     pub(crate) fn resumable(&self, run: &Value) -> bool {
-        if self.chat {
-            continuation::resumable(&self.record, Some(run))
+        if let Some(chat) = &self.conversation {
+            continuation::resumable(chat, Some(run))
         } else {
             run["status"] == RunStatus::Waiting
                 && self
@@ -1005,13 +1032,13 @@ impl Owner {
     }
 
     pub(crate) fn save(&self, db: &Db<'_>) -> Result<()> {
-        let mut record = self.record.clone();
-        record["wakeup"] = serde_json::to_value(&self.wakeup)?;
-        if self.chat {
-            db.save_conversation_boundary(&record)?;
+        if let Some(chat) = &self.conversation {
+            let mut chat = chat.clone();
+            chat.wakeup = self.wakeup.clone();
+            db.save_conversation(&chat)?;
         } else {
             db.change_run(
-                text(&record, "id"),
+                &self.owner_id,
                 crate::runs::RunChanges {
                     wakeup: Some(self.wakeup.clone()),
                     ..Default::default()
@@ -1036,15 +1063,11 @@ pub async fn tick_groups(s: &Service, active: &HashSet<String>) -> Result<()> {
         .store
         .read(|db| {
             let mut owners = Vec::new();
-            for record in db.conversations_boundary()? {
-                owners.push(Owner::new(db, true, record)?);
+            for record in db.conversations()? {
+                owners.push(Owner::conversation(record));
             }
-            for record in db
-                .active()?
-                .into_iter()
-                .filter(|r| r["status"] == RunStatus::Waiting)
-            {
-                owners.push(Owner::new(db, false, record)?);
+            for record in db.waiting_run_records()? {
+                owners.push(Owner::mission(record));
             }
             let mut changed = Vec::new();
             for owner in owners {
@@ -1089,7 +1112,7 @@ pub async fn tick_groups(s: &Service, active: &HashSet<String>) -> Result<()> {
                 if !owner.resumable(&run) || !record_members(db, &mut owner, &run)? {
                     return Ok(());
                 }
-                owner.record["updatedAt"] = now().into();
+                owner.touch(now());
                 owner.save(db)
             })
             .await?;
@@ -1115,7 +1138,7 @@ pub(crate) async fn tick_missions(s: &Service, active: &HashSet<String>) -> Resu
                     if owner.chat || !owner.resumable(&run) {
                         return None;
                     }
-                    match observation(db, &run, &run, now()) {
+                    match observation(db, text(&run, "id"), &run, now()) {
                         Ok(Some(_)) => Some(Ok(run)),
                         Ok(None) => None,
                         Err(error) => Some(Err(error)),
@@ -1138,7 +1161,7 @@ pub(crate) async fn tick_missions(s: &Service, active: &HashSet<String>) -> Resu
                 if owner.chat || !owner.resumable(&run) {
                     return Ok(());
                 }
-                let Some(observed) = observation(db, &run, &run, now())? else {
+                let Some(observed) = observation(db, text(&run,"id"), &run, now())? else {
                     return Ok(());
                 };
                             let mut checkpoint = RunCheckpoint::load_in(db, &run_id)?

@@ -2,19 +2,21 @@
 //! another coding agent and model, then reads its result. The delegated conversation is an
 //! ordinary one that remembers its requester; it runs with its own agent's access, which the
 //! requester's agent must cover. See docs/adr/0059-delegated-tasks.md.
+use crate::chats::Conversation;
 use crate::{
     chats,
     config::id,
-    conversation_lifecycle::{is_active, require_active},
     error::{Error, Result, required},
     native::policy::Origin,
     provider::Provider,
-    run_status::RunStatus,
     service::{Service, covers, policy},
     store::Db,
     validation::{text, uuid},
 };
-use cairn_contracts::{DelegateTaskInput, EventKind, TaskCancelInput};
+use cairn_contracts::{
+    Chat, ConversationLifecycle, ConversationRequester, DelegateTaskInput, DelegatedTask,
+    EventKind, TaskCancelInput, WaitObservation,
+};
 use serde_json::{Value, json};
 
 /// Delegated conversations of one requester that may work at the same time.
@@ -134,7 +136,7 @@ pub async fn models(s: &Service, bearer: &str, input: &Value) -> Result<Value> {
 
 /// The calling conversation turn, when its agent may delegate. Delegated conversations cannot
 /// delegate further, so every task reports to a conversation a person directs.
-pub(crate) fn requester(db: &Db<'_>, bearer: &str) -> Result<(Value, Value)> {
+pub(crate) fn requester(db: &Db<'_>, bearer: &str) -> Result<(Value, Conversation)> {
     let run = crate::project_workspaces::authorize_in(db, bearer)?;
     if policy(&run["snapshot"]["agent"])["delegation"] != true {
         return Err(Error::forbidden(
@@ -144,10 +146,13 @@ pub(crate) fn requester(db: &Db<'_>, bearer: &str) -> Result<(Value, Value)> {
     if run["trigger"] != "chat" {
         return Err(Error::forbidden("Only conversations can delegate tasks."));
     }
-    let chat = chats::chat_for_run(db, text(&run, "id"))?
+    let chat = db
+        .conversation_for_run(text(&run, "id"))?
         .ok_or_else(|| Error::conflict("The conversation no longer exists."))?;
-    require_active(&chat)?;
-    if chat["requestedBy"].is_object() {
+    if chat.lifecycle != ConversationLifecycle::Active {
+        return Err(Error::conflict("This conversation is no longer active."));
+    }
+    if chat.requested_by.is_some() {
         return Err(Error::forbidden(
             "A delegated conversation cannot delegate further.",
         ));
@@ -160,37 +165,37 @@ pub(crate) fn offered(db: &Db<'_>, bearer: &str) -> bool {
     requester(db, bearer).is_ok()
 }
 
-fn requested_by(chat: &Value, requester: &Value) -> bool {
-    chat["requestedBy"]["chatId"] == requester["id"]
-}
-
 /// A task this conversation delegated, whatever its lifecycle.
-fn delegated(db: &Db<'_>, requester: &Value, chat_id: &str) -> Result<Value> {
+fn delegated(db: &Db<'_>, requester: &Conversation, chat_id: &str) -> Result<Conversation> {
     uuid(chat_id)?;
-    db.conversation_boundary(chat_id)?
-        .filter(|chat| requested_by(chat, requester))
+    db.conversation(chat_id)?
+        .filter(|chat| {
+            chat.requested_by
+                .as_ref()
+                .is_some_and(|parent| parent.chat_id == requester.id)
+        })
         .ok_or_else(|| Error::not_found("This conversation did not delegate that task."))
 }
 
-fn children(db: &Db<'_>, requester: &Value) -> Result<Vec<Value>> {
-    db.delegated_conversations(text(requester, "id"))?
-        .into_iter()
-        .map(|c| Ok(serde_json::to_value(c)?))
-        .collect()
+fn children(db: &Db<'_>, requester: &Conversation) -> Result<Vec<Conversation>> {
+    db.delegated_conversations(&requester.id)
 }
 
-/// Working, or about to: a queued first message counts before its run exists. A paused
-/// conversation (stopped, failed or held by a person) is not working.
-fn working(db: &Db<'_>, chat: &Value) -> Result<bool> {
-    if !is_active(chat) || chat["paused"] == true {
+/// Paused conversations are not working; queued input and durable waits are.
+fn working(db: &Db<'_>, chat: &Conversation) -> Result<bool> {
+    if chat.lifecycle != ConversationLifecycle::Active || chat.paused {
         return Ok(false);
     }
-    match db.run(text(chat, "runId"))? {
-        Some(run) => Ok(RunStatus::of(&run).is_some_and(RunStatus::is_active)
-            || chat["wakeup"].is_object()
-            || chats::continuation::has_pending_input(db, chat)?),
-        None => chats::continuation::has_pending_input(db, chat),
-    }
+    let pending = chats::continuation::has_pending_input(db, chat)?;
+    Ok(chat.wakeup.is_some()
+        || pending
+        || chat
+            .run_id
+            .as_deref()
+            .map(|id| db.run_state(id))
+            .transpose()?
+            .flatten()
+            .is_some_and(|run| run.status.is_active()))
 }
 
 /// The target agent, which must not reach anything the requester's agent cannot.
@@ -257,18 +262,30 @@ fn task_message(input: &DelegateTaskInput) -> Result<Value> {
     }))
 }
 
-fn repeated(db: &Db<'_>, requesting: &Value, input: &DelegateTaskInput) -> Result<Option<Value>> {
+fn repeated(
+    db: &Db<'_>,
+    requesting: &Conversation,
+    input: &DelegateTaskInput,
+) -> Result<Option<DelegatedTask>> {
     if let Some(request_id) = input.request_id.as_deref()
-        && let Some(existing) = children(db, requesting)?
-            .into_iter()
-            .find(|chat| chat["requestedBy"]["requestId"] == request_id)
+        && let Some(existing) = children(db, requesting)?.into_iter().find(|chat| {
+            chat.requested_by
+                .as_ref()
+                .and_then(|r| r.request_id.as_deref())
+                == Some(request_id)
+        })
     {
         return Ok(Some(summary(db, &existing, false)?));
     }
     Ok(None)
 }
 
-fn create(db: &Db<'_>, bearer: &str, input: &DelegateTaskInput, checked: &Value) -> Result<Value> {
+fn create(
+    db: &Db<'_>,
+    bearer: &str,
+    input: &DelegateTaskInput,
+    checked: &Value,
+) -> Result<DelegatedTask> {
     let (run, requesting) = requester(db, bearer)?;
     let request_id = input.request_id.as_deref();
     // A retried call returns the task it already created.
@@ -301,7 +318,9 @@ fn create(db: &Db<'_>, bearer: &str, input: &DelegateTaskInput, checked: &Value)
         Some(cairn_contracts::DelegationProject::Selected { project_id }) => {
             serde_json::to_value(project_id)?
         }
-        None | Some(cairn_contracts::DelegationProject::Inherit) => requesting["projectId"].clone(),
+        None | Some(cairn_contracts::DelegationProject::Inherit) => {
+            serde_json::to_value(&requesting.project_id)?
+        }
     };
 
     // The requester's run is the origin: delegated work keeps its callers' native bounds.
@@ -312,22 +331,22 @@ fn create(db: &Db<'_>, bearer: &str, input: &DelegateTaskInput, checked: &Value)
         &origin,
     )?;
     let chat_id = text(&created, "id").to_owned();
-    let mut chat = required(db.conversation_boundary(&chat_id)?, "Chat not found")?;
-    chat["requestedBy"] = json!({
-        "runId": run["id"],
-        "chatId": requesting["id"],
-        "requestId": request_id,
+    let mut chat = required(db.conversation(&chat_id)?, "Chat not found")?;
+    chat.requested_by = Some(ConversationRequester {
+        run_id: text(&run, "id").into(),
+        chat_id: requesting.id.clone(),
+        request_id: request_id.map(str::to_owned),
     });
-    db.save_conversation_boundary(&chat)?;
+    db.save_conversation(&chat)?;
     chats::send(db, &chat_id, message, None, &origin)?;
     if let Some(title) = input.title.as_deref() {
-        let mut chat = required(db.conversation_boundary(&chat_id)?, "Chat not found")?;
-        chat["title"] = title.trim().into();
-        db.save_conversation_boundary(&chat)?;
+        let mut chat = required(db.conversation(&chat_id)?, "Chat not found")?;
+        chat.title = title.trim().into();
+        db.save_conversation(&chat)?;
     }
     let delegated = summary(
         db,
-        &required(db.conversation_boundary(&chat_id)?, "Chat not found")?,
+        &required(db.conversation(&chat_id)?, "Chat not found")?,
         false,
     )?;
     // The requester's history shows the task where it was delegated; clients follow its
@@ -335,14 +354,14 @@ fn create(db: &Db<'_>, bearer: &str, input: &DelegateTaskInput, checked: &Value)
     db.event(
         text(&run, "id"),
         &EventKind::ChatDelegated,
-        text(&delegated, "title"),
+        &delegated.title,
         Some(&json!({
             "chatId": chat_id,
-            "title": delegated["title"],
-            "agentId": delegated["agentId"],
-            "agentName": delegated["agentName"],
-            "provider": delegated["provider"],
-            "model": delegated["model"],
+            "title": delegated.title,
+            "agentId": delegated.agent_id,
+            "agentName": delegated.agent_name,
+            "provider": delegated.provider,
+            "model": delegated.model,
             "task": input.task,
         })),
     )?;
@@ -350,7 +369,7 @@ fn create(db: &Db<'_>, bearer: &str, input: &DelegateTaskInput, checked: &Value)
         "chat.delegated",
         &json!({
             "chatId": chat_id,
-            "requesterChatId": requesting["id"],
+            "requesterChatId": requesting.id,
             "requesterRunId": run["id"],
             "agentId": agent["id"],
         }),
@@ -377,7 +396,7 @@ pub async fn delegate(s: &Service, bearer: &str, input: &Value) -> Result<Value>
         })
         .await?;
     if let Some(existing) = existing {
-        return Ok(existing);
+        return Ok(serde_json::to_value(existing)?);
     }
     if Provider::of_agent(&engine)? == Provider::Opencode {
         let catalog = s.opencode.models(s).await?;
@@ -406,7 +425,7 @@ pub async fn delegate(s: &Service, bearer: &str, input: &Value) -> Result<Value>
         .transaction(move |db| create(db, &bearer, &input, &engine))
         .await?;
     s.worker.notify();
-    Ok(result)
+    Ok(serde_json::to_value(result)?)
 }
 
 fn truncated(reply: &str) -> String {
@@ -419,94 +438,90 @@ fn truncated(reply: &str) -> String {
 }
 
 /// A stopped preparation error or the current run's error, hidden when the task is deleted.
-fn task_error(db: &Db<'_>, chat: &Value, run: Option<&Value>) -> Result<Value> {
-    if !is_active(chat) {
-        return Ok(Value::Null);
+fn task_error(db: &Db<'_>, chat: &Conversation, run: Option<&Value>) -> Result<Option<String>> {
+    if chat.lifecycle != ConversationLifecycle::Active {
+        return Ok(None);
     }
-    if chat["paused"] == true
-        && let Some(error) = db.kv(&format!("chat-error:{}", text(chat, "id")))?
+    if chat.paused
+        && let Some(error) = db.kv(&format!("chat-error:{}", chat.id))?
     {
-        return Ok(error);
+        return Ok(serde_json::from_value(error)?);
     }
-    Ok(run.map_or(Value::Null, |run| run["error"].clone()))
+    Ok(run.and_then(|run| run["error"].as_str()).map(str::to_owned))
 }
 
-/// What the requester sees of a delegated task. `finished` follows the task_finished condition.
-fn summary(db: &Db<'_>, chat: &Value, report: bool) -> Result<Value> {
-    let view = chats::view(db, chat.clone())?;
-    // Deletion withdraws access to content immediately, even while purge is pending.
-    let active = is_active(chat);
+fn summary(db: &Db<'_>, chat: &Conversation, report: bool) -> Result<DelegatedTask> {
+    let view: Chat = serde_json::from_value(chats::view(db, serde_json::to_value(chat)?)?)?;
+    let active = chat.lifecycle == ConversationLifecycle::Active;
     let (run, first) = if active {
         (
-            db.run(text(chat, "runId"))?,
-            db.messages(text(chat, "id"))?.into_iter().next(),
+            chat.run_id
+                .as_deref()
+                .map(|id| db.run(id))
+                .transpose()?
+                .flatten(),
+            db.conversation_messages(&chat.id)?.into_iter().next(),
         )
     } else {
         (None, None)
     };
-    let engine = |key: &str| match &run {
-        Some(run) => run["snapshot"]["agent"][key].clone(),
-        None => first
-            .as_ref()
-            .map_or(Value::Null, |message| message[key].clone()),
-    };
-    let finished = !working(db, chat)?;
+    let provider = run
+        .as_ref()
+        .and_then(|run| run["snapshot"]["agent"]["provider"].as_str())
+        .or_else(|| first.as_ref().map(|message| message.provider.as_str()))
+        .filter(|p| !p.is_empty());
+    let provider = provider
+        .map(|provider| serde_json::from_value(Value::String(provider.into())))
+        .transpose()?;
+    let model = run
+        .as_ref()
+        .and_then(|run| run["snapshot"]["agent"]["model"].as_str())
+        .or_else(|| first.as_ref().map(|message| message.model.as_str()))
+        .map(str::to_owned);
     let reply = run.as_ref().map_or("", |run| text(run, "summary"));
-    let pending_questions = if active {
-        view["pendingQuestions"].clone()
-    } else {
-        0.into()
-    };
-    let mut result = json!({
-        "chatId": chat["id"],
-        "title": view["title"],
-        "agentId": view["agentId"],
-        "agentName": view["agentName"],
-        "projectId": view["projectId"],
-        "provider": engine("provider"),
-        "model": engine("model"),
-        "status": view["status"],
-        "lifecycle": view["lifecycle"],
-        "finished": finished,
-        "paused": chat["paused"] == true,
-        "error": task_error(db, chat, run.as_ref())?,
-        "pendingQuestions": pending_questions,
-        "outcome": run.as_ref().map_or(Value::Null, |run| run["outcome"].clone()),
-        "runId": chat["runId"],
-        "finishedAt": view["finishedAt"],
-    });
-    if report {
-        result["report"] = truncated(reply).into();
-    } else {
-        result["preview"] = crate::reads::preview(reply).into();
-    }
-    Ok(serde_json::to_value(serde_json::from_value::<
-        cairn_contracts::DelegatedTask,
-    >(result)?)?)
+    Ok(DelegatedTask {
+        chat_id: chat.id.clone(),
+        title: view.title,
+        agent_id: view.agent_id,
+        agent_name: view.agent_name,
+        project_id: view.project_id,
+        provider,
+        model,
+        status: view.status,
+        lifecycle: view.lifecycle,
+        finished: !working(db, chat)?,
+        paused: chat.paused,
+        error: task_error(db, chat, run.as_ref())?,
+        pending_questions: if active { view.pending_questions } else { 0 },
+        outcome: run
+            .as_ref()
+            .and_then(|run| run.get("outcome"))
+            .filter(|o| !o.is_null())
+            .cloned(),
+        run_id: chat.run_id.clone(),
+        finished_at: view.finished_at,
+        report: report.then(|| truncated(reply)),
+        preview: (!report).then(|| crate::reads::preview(reply)),
+    })
 }
 
 pub async fn status(s: &Service, bearer: &str, input: &Value) -> Result<Value> {
     let command: cairn_contracts::TaskStatusInput = serde_json::from_value(input.clone())
         .map_err(|_| Error::bad("Provide the chatId of a delegated task, or nothing."))?;
-    let input = &serde_json::to_value(command)?;
-    let (bearer, input) = (bearer.to_owned(), input.clone());
+    let bearer = bearer.to_owned();
     s.store
         .read(move |db| {
             let (_, requesting) = requester(db, &bearer)?;
-            if let Some(chat_id) = input["chatId"].as_str() {
-                let task = summary(db, &delegated(db, &requesting, chat_id)?, true)?;
+            if let Some(chat_id) = command.chat_id {
+                let task = summary(db, &delegated(db, &requesting, &chat_id.to_string())?, true)?;
                 return Ok(serde_json::to_value(cairn_contracts::TaskStatusOutput {
-                    tasks: vec![serde_json::from_value(task)?],
+                    tasks: vec![task],
                 })?);
             }
             let tasks = children(db, &requesting)?
                 .iter()
                 .map(|chat| summary(db, chat, false))
                 .collect::<Result<Vec<_>>>()?;
-            let tasks = tasks
-                .into_iter()
-                .map(serde_json::from_value)
-                .collect::<std::result::Result<Vec<cairn_contracts::DelegatedTask>, _>>()?;
             Ok(serde_json::to_value(cairn_contracts::TaskStatusOutput {
                 tasks,
             })?)
@@ -530,51 +545,66 @@ pub async fn cancel(s: &Service, bearer: &str, input: &Value) -> Result<Value> {
     s.store
         .read(move |db| {
             let (_, requesting) = requester(db, &token)?;
-            summary(db, &delegated(db, &requesting, &chat_id)?, false)
+            Ok(serde_json::to_value(summary(
+                db,
+                &delegated(db, &requesting, &chat_id)?,
+                false,
+            )?)?)
         })
         .await
 }
 
 /// Rechecks a task_finished wait: the waiting conversation still delegates and owns the task.
-pub(crate) fn wait_access(db: &Db<'_>, run: &Value, condition: &Value) -> Result<()> {
+pub(crate) fn wait_access(db: &Db<'_>, run: &Value, chat_id: &str) -> Result<()> {
     if policy(&run["snapshot"]["agent"])["delegation"] != true {
         return Err(Error::forbidden(
             "Waiting for a delegated task requires delegation.",
         ));
     }
-    let requesting = chats::chat_for_run(db, text(run, "id"))?
+    let requesting = db
+        .conversation_for_run(text(run, "id"))?
         .ok_or_else(|| Error::conflict("The conversation no longer exists."))?;
-    delegated(db, &requesting, text(condition, "chatId")).map(|_| ())
+    delegated(db, &requesting, chat_id).map(|_| ())
 }
 
 /// A finished delegated task, as observed by its requester's wait.
-pub(crate) fn wait_result(db: &Db<'_>, condition: &Value) -> Result<Option<Value>> {
-    let chat_id = text(condition, "chatId");
+pub(crate) fn wait_result(db: &Db<'_>, chat_id: &str) -> Result<Option<WaitObservation>> {
     let chat = db
-        .conversation_boundary(chat_id)?
+        .conversation(chat_id)?
         .ok_or_else(|| Error::not_found("The delegated task no longer exists."))?;
-    let result = |status: Value, run: Option<&Value>, error: Value| {
-        json!({
-            "state": "completed",
-            "type": "task_finished",
-            "chatId": chat_id,
-            "runId": chat["runId"],
-            "status": status,
-            "paused": chat["paused"] == true,
-            "error": error,
-            "outcomeStatus": run.map_or(Value::Null, |run| run["outcome"]["status"].clone()),
-            "waitingOn": run.map_or(Value::Null, |run| run["outcome"]["waitingOn"].clone()),
-            "finishedAt": run.map_or(Value::Null, |run| run["finishedAt"].clone()),
-        })
+    let result = |status: String, run: Option<&Value>, error: Option<String>| WaitObservation {
+        state: "completed".into(),
+        kind: Some("task_finished".into()),
+        chat_id: Some(chat_id.into()),
+        run_id: chat.run_id.clone(),
+        status: Some(status),
+        paused: Some(chat.paused),
+        error,
+        outcome_status: run
+            .and_then(|run| run["outcome"]["status"].as_str())
+            .map(str::to_owned),
+        waiting_on: run
+            .and_then(|run| run["outcome"]["waitingOn"].as_str())
+            .map(str::to_owned),
+        finished_at: run.and_then(|run| run["finishedAt"].as_i64()),
+        ..Default::default()
     };
-    if !is_active(&chat) {
-        return Ok(Some(result("deleted".into(), None, Value::Null)));
+    if chat.lifecycle != ConversationLifecycle::Active {
+        return Ok(Some(result("deleted".into(), None, None)));
     }
     if working(db, &chat)? {
         return Ok(None);
     }
-    let run = db.run(text(&chat, "runId"))?;
-    let status = chats::view(db, chat.clone())?["status"].clone();
-    let error = task_error(db, &chat, run.as_ref())?;
-    Ok(Some(result(status, run.as_ref(), error)))
+    let run = chat
+        .run_id
+        .as_deref()
+        .map(|id| db.run(id))
+        .transpose()?
+        .flatten();
+    let view: Chat = serde_json::from_value(chats::view(db, serde_json::to_value(&chat)?)?)?;
+    Ok(Some(result(
+        view.status.as_str().into(),
+        run.as_ref(),
+        task_error(db, &chat, run.as_ref())?,
+    )))
 }

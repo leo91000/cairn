@@ -1945,6 +1945,7 @@
     "WaitDisplay": {
       "properties": {
         "details": {
+          "default": [],
           "items": {
             "type": "string"
           },

@@ -77,16 +77,45 @@ private fun normalizedCondition(value: JsonObject): JsonObject {
     return value
 }
 
-private fun normalizedResult(value: JsonObject): JsonObject {
-    if (value["pluginId"] != null)
+fun waitResultFixture(value: JsonObject): JsonObject {
+    if (value["type"]?.jsonPrimitive?.content == "group")
+        return JsonObject(
+            value +
+                ("members" to
+                    JsonArray(
+                        value.getValue("members").jsonArray.map { item ->
+                            val member = item.jsonObject
+                            JsonObject(
+                                member.mapValues { (key, field) ->
+                                    when {
+                                        key == "condition" && field is JsonObject ->
+                                            normalizedCondition(field)
+                                        key == "result" && field is JsonObject ->
+                                            waitResultFixture(field)
+                                        else -> field
+                                    }
+                                }
+                            )
+                        }
+                    ))
+        )
+    if (value["pluginResult"] != null) return value
+    if (
+        value["pluginId"] != null ||
+            value["type"]?.jsonPrimitive?.content?.startsWith("github_") == true
+    )
         return buildJsonObject {
             value
-                .filterKeys { it in setOf("state", "type", "message", "display") }
+                .filterKeys {
+                    it in setOf("state", "type", "message", "display", "reason", "immediate")
+                }
                 .forEach { (key, field) -> put(key, field) }
             put(
                 "pluginResult",
                 JsonObject(
-                    value.filterKeys { it !in setOf("state", "type", "message", "display") }
+                    value.filterKeys {
+                        it !in setOf("state", "type", "message", "display", "reason", "immediate")
+                    }
                 ),
             )
         }
@@ -117,8 +146,24 @@ fun wakeupFixture(
         wakeAt = wakeAt,
         condition = condition?.let { wireJson.decodeFromJsonElement(normalizedCondition(it)) },
         display = display?.let { wireJson.decodeFromJsonElement(it) },
-        observation = observation?.let { wireJson.decodeFromJsonElement(normalizedResult(it)) },
-        members = members?.let { wireJson.decodeFromJsonElement(it) },
+        observation = observation?.let { wireJson.decodeFromJsonElement(waitResultFixture(it)) },
+        members =
+            members?.let { value ->
+                wireJson.decodeFromJsonElement(
+                    JsonArray(
+                        value.map { item ->
+                            val member = item.jsonObject
+                            JsonObject(
+                                member.mapValues { (key, field) ->
+                                    if (key == "observation" && field is JsonObject)
+                                        waitResultFixture(field)
+                                    else field
+                                }
+                            )
+                        }
+                    )
+                )
+            },
         timeCondition = timeCondition?.let { wireJson.decodeFromJsonElement(it) },
         nextCheckAt = nextCheckAt,
         lastError = lastError,

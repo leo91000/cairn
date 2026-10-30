@@ -375,7 +375,7 @@ abstract class ConnectionLostCases {
             val question =
                 questionFixture(
                     "question",
-                    "chat",
+                    "00000000-0000-4000-8000-000000000088",
                     fields = listOf(fieldFixture("answer", "Votre choix")),
                 )
             val vm =

@@ -182,7 +182,8 @@
           "comment": "Les deux"
         },
         "secret": {
-          "comment": "synthetic private"
+          "comment": "synthetic private",
+          "selected": []
         }
       }
     }

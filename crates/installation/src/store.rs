@@ -594,6 +594,15 @@ impl Db<'_> {
     }
 
     pub fn active(&self) -> Result<Vec<Value>> {
+        if self.0.is_autocommit() {
+            let tx = rusqlite::Transaction::new_unchecked(
+                self.0,
+                rusqlite::TransactionBehavior::Deferred,
+            )?;
+            let result = Db(&tx).active()?;
+            tx.commit()?;
+            return Ok(result);
+        }
         let mut rows=self.json_rows(
             "SELECT data FROM runs WHERE status IN ('queued','running','waiting') ORDER BY created_at",
             [],
@@ -610,6 +619,15 @@ impl Db<'_> {
         offset: i64,
         full: bool,
     ) -> Result<Vec<Value>> {
+        if self.0.is_autocommit() {
+            let tx = rusqlite::Transaction::new_unchecked(
+                self.0,
+                rusqlite::TransactionBehavior::Deferred,
+            )?;
+            let result = Db(&tx).runs(status, task, limit, offset, full)?;
+            tx.commit()?;
+            return Ok(result);
+        }
         let (query, values) = Self::run_query(status, task, limit, offset, full);
         let mut rows = self.json_rows(&query, rusqlite::params_from_iter(values))?;
         self.hydrate_run_wakeups(&mut rows)?;
@@ -623,6 +641,15 @@ impl Db<'_> {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<Box<serde_json::value::RawValue>>> {
+        if self.0.is_autocommit() {
+            let tx = rusqlite::Transaction::new_unchecked(
+                self.0,
+                rusqlite::TransactionBehavior::Deferred,
+            )?;
+            let result = Db(&tx).run_page(status, task, limit, offset)?;
+            tx.commit()?;
+            return Ok(result);
+        }
         let (query, values) = Self::run_query(status, task, limit, offset, false);
         let query = query.replacen("SELECT ", "SELECT runs.id,", 1);
         let mut wakeups = self.wakeups(false, None)?;

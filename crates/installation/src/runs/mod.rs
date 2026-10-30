@@ -306,7 +306,24 @@ impl Db<'_> {
     }
 
     pub(crate) fn queued_run_records(&self) -> Result<Vec<RunRecord>> {
-        let mut records=self.0.prepare_cached(&format!("SELECT {STATE_COLUMNS},snapshot,boundary FROM runs WHERE status='queued' ORDER BY created_at"))?.query_map([],record_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        self.run_records(RunStatus::Queued)
+    }
+
+    pub(crate) fn waiting_run_records(&self) -> Result<Vec<RunRecord>> {
+        self.run_records(RunStatus::Waiting)
+    }
+
+    fn run_records(&self, status: RunStatus) -> Result<Vec<RunRecord>> {
+        if self.0.is_autocommit() {
+            let tx = rusqlite::Transaction::new_unchecked(
+                self.0,
+                rusqlite::TransactionBehavior::Deferred,
+            )?;
+            let result = Db(&tx).run_records(status)?;
+            tx.commit()?;
+            return Ok(result);
+        }
+        let mut records=self.0.prepare_cached(&format!("SELECT {STATE_COLUMNS},snapshot,boundary FROM runs WHERE status=? ORDER BY created_at"))?.query_map([status.as_str()],record_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
         let mut wakeups = self.wakeups(false, None)?;
         for record in &mut records {
             record.wakeup = wakeups.remove(&record.state.id);

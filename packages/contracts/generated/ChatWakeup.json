@@ -135,6 +135,7 @@
     "WaitDisplay": {
       "properties": {
         "details": {
+          "default": [],
           "items": {
             "type": "string"
           },
@@ -149,8 +150,7 @@
       },
       "required": [
         "title",
-        "short",
-        "details"
+        "short"
       ],
       "type": "object"
     },

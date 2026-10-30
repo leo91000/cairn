@@ -56,7 +56,10 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
                 for key in ["id", "title", "secret", "mode", "minChoices", "maxChoices"] {
                     field.as_object_mut().ok_or_else(invalid)?.remove(key);
                 }
-                if let Some(options) = field["options"].as_array_mut() {
+                if let Some(options) = field
+                    .get_mut("options")
+                    .and_then(serde_json::Value::as_array_mut)
+                {
                     for option in options {
                         for key in ["id", "label", "description", "recommended"] {
                             option.as_object_mut().ok_or_else(invalid)?.remove(key);
@@ -132,7 +135,10 @@ fn observation(value: &mut serde_json::Value) -> Result<()> {
         )?;
     }
     if value["type"] == "group" {
-        let members = value["members"].as_array_mut().ok_or_else(invalid)?;
+        let members = value
+            .get_mut("members")
+            .and_then(serde_json::Value::as_array_mut)
+            .ok_or_else(invalid)?;
         for member in members {
             member["condition"] = serde_json::to_value(
                 crate::waits::condition_from_wire(&member["condition"]).map_err(|_| invalid())?,
@@ -154,7 +160,10 @@ fn wakeup_snapshot(value: &mut serde_json::Value) -> Result<()> {
     if value["observation"].is_object() {
         observation(&mut value["observation"])?;
     }
-    if let Some(members) = value["members"].as_array_mut() {
+    if let Some(members) = value
+        .get_mut("members")
+        .and_then(serde_json::Value::as_array_mut)
+    {
         for member in members {
             if member["observation"].is_object() {
                 observation(&mut member["observation"])?;

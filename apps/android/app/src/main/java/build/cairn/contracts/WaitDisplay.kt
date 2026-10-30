@@ -6,7 +6,7 @@ import kotlinx.serialization.Serializable
 @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
 data class WaitDisplay(
-    val details: List<String>,
+    val details: List<String> = listOf(),
     val short: String,
     val title: String,
 ) {

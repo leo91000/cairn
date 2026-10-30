@@ -1129,15 +1129,14 @@ fn launch_turn(
         return Ok(());
     }
     let waking = message["wakeup"].is_object();
-    let chat_boundary = serde_json::to_value(&chat)?;
     let unchanged = if waking {
         let current = db.run(chat.run_id.as_deref().unwrap_or(""))?;
-        continuation::ready(db, &serde_json::to_value(&chat)?, current.as_ref(), now())?
+        continuation::ready(db, &chat, current.as_ref(), now())?
             && serde_json::to_value(&chat.wakeup)? == message["wakeup"]
             && current.as_ref().map(|run| &run["id"]) == run.as_ref().map(|run| &run["id"])
             && (!message["wakeup"]["condition"].is_object()
                 || current.as_ref().is_some_and(|run| {
-                    wait_for::observation(db, &chat_boundary, run, now())
+                    wait_for::observation(db, &chat.id, run, now())
                         .is_ok_and(|observation| observation.as_ref() == message.get("observation"))
                 }))
     } else {
@@ -1558,13 +1557,7 @@ impl Service {
             let (waiting_chat, waiting_run) = (chat.clone(), run.clone());
             let waiting = self
                 .store
-                .read(move |db| {
-                    continuation::holds_queue(
-                        db,
-                        &serde_json::to_value(&waiting_chat)?,
-                        waiting_run.as_ref(),
-                    )
-                })
+                .read(move |db| continuation::holds_queue(db, &waiting_chat, waiting_run.as_ref()))
                 .await?;
             let chat_id = id.clone();
             let message = if waiting {
@@ -1584,14 +1577,7 @@ impl Service {
                     let run = run.clone();
                     let Some(message) = self
                         .store
-                        .read(move |db| {
-                            continuation::message(
-                                db,
-                                &serde_json::to_value(&chat)?,
-                                run.as_ref(),
-                                now(),
-                            )
-                        })
+                        .read(move |db| continuation::message(db, &chat, run.as_ref(), now()))
                         .await?
                     else {
                         continue;

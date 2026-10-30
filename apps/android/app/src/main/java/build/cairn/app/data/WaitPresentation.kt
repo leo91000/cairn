@@ -31,8 +31,13 @@ private fun presentResult(value: JsonElement): JsonElement =
     when (value) {
         is JsonArray -> JsonArray(value.map(::presentResult))
         is JsonObject -> {
-            val extra = value["pluginResult"] as? JsonObject
-            JsonObject((extra.orEmpty() + value).mapValues { (_, field) -> presentResult(field) })
+            val fields = (value["pluginResult"] as? JsonObject).orEmpty().toMutableMap()
+            fields.putAll(value.filterKeys { it != "pluginResult" })
+            (fields["condition"] as? JsonObject)?.let { fields["condition"] = presentCondition(it) }
+            for (key in listOf("observation", "result", "members")) {
+                fields[key]?.let { fields[key] = presentResult(it) }
+            }
+            JsonObject(fields)
         }
         else -> value
     }
@@ -48,3 +53,6 @@ val ChatWakeup.observationJson: JsonObject?
 
 val ChatWakeup.displayJson: JsonObject?
     get() = display?.let { wireJson.encodeToJsonElement(it).jsonObject }
+
+/** Translate owned wait fields at the existing presentation seam. */
+fun presentWaitObservation(value: JsonObject): JsonObject = presentResult(value).jsonObject

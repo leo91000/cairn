@@ -1860,7 +1860,10 @@ async fn native_stop_controls_remain_available_without_host_admission() {
                 )
                 .await
                 .unwrap();
-            chat["wakeup"] = json!({ "at": now() + 60_000, "reason": "Saved continuation" });
+            chat["wakeup"] = serde_json::to_value(common::run_fixture::complete_wakeup_fixture(
+                &json!({"id":"saved-wait","wakeAt":now()+60_000,"reason":"Saved continuation"}),
+            ))
+            .unwrap();
             f.service
                 .store
                 .save_conversation_boundary(chat)
