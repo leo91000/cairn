@@ -3089,137 +3089,155 @@ async fn managed_provider_retries_do_not_spend_controller_recoveries() {
 #[tokio::test]
 async fn confirmed_provider_failure_survives_later_output_truncation_and_restart() {
     use std::sync::atomic::AtomicBool;
-    let mut fixture = Fixture::new().await;
-    fixture.stop(false).await;
-    let controller = Arc::new(Controller {
-        data: fixture.service.config.data_dir.clone(),
-        plans: tokio::sync::Mutex::new(Vec::new()),
-        failures: 0,
-        slots: 4,
-        hold: AtomicBool::new(false),
-    });
-    let app = Router::new().fallback(any(move |state: State<Arc<Controller>>, request: Request| async move {
+    for terminal in [1, 70] {
+        let mut fixture = Fixture::new().await;
+        fixture.stop(false).await;
+        let controller = Arc::new(Controller {
+            data: fixture.service.config.data_dir.clone(),
+            plans: tokio::sync::Mutex::new(Vec::new()),
+            failures: 0,
+            slots: 4,
+            hold: AtomicBool::new(false),
+        });
+        let app = Router::new().fallback(any(move |state: State<Arc<Controller>>, request: Request| async move {
         let path = request.uri().path().to_owned();
         if path.ends_with("/logs") || path.ends_with("/wait") {
             let attempt = path.split('/').nth(2).unwrap();
             if state.attempt_index(attempt).await == 0 {
                 if path.ends_with("/wait") {
-                    return Json(json!({ "StatusCode": 1 })).into_response();
+                    return Json(json!({ "StatusCode": terminal })).into_response();
                 }
-                let output = format!("{}\n{}\n",
+                let mut output = format!("{}\n{}\n",
                     json!({ "type": "thread.started", "thread_id": "fixture-session" }),
                     json!({ "type": "turn.failed", "error": { "code": "server_overloaded", "message": "Provider busy" } }));
+                if terminal == 70 {
+                    output.push_str(&format!("{}\n", json!({ "type": "runner.failed", "error": { "message": "Finalization failed: EIO/EROFS" } })));
+                }
                 let frame = json!({ "type": "output", "stderr": false, "data": STANDARD.encode(output) });
                 return Body::from(format!("{frame}\n{{\"type\":" )).into_response();
             }
         }
         serve_controller(state, request).await
     })).with_state(controller.clone());
-    let (listener, address) = common::bind().await;
-    common::reconfigure(&mut fixture.service, |config| {
-        config.runner_url = format!("http://{address}");
-    })
-    .await;
-    let server = common::serve(listener, app);
-    let home = fixture.service.config.home.join(".codex");
-    tokio::fs::create_dir_all(&home).await.unwrap();
-    tokio::fs::write(home.join("auth.json"), "{}")
-        .await
-        .unwrap();
-    tokio::fs::write(
-        fixture.service.config.data_dir.join("storage-s3.json"),
-        json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
-    )
-    .await
-    .unwrap();
-    fixture.start().await;
-    let chat = fixture
-        .start_chat(message("Retry after a confirmed provider failure"))
-        .await;
-    let run_id = fixture.chat_run(&chat).await;
-    let waiting = fixture
-        .until(&run_id, |run| {
-            finished(run) || (run["status"] == RunStatus::Queued && run["retry"]["attempt"] == 1)
+        let (listener, address) = common::bind().await;
+        common::reconfigure(&mut fixture.service, |config| {
+            config.runner_url = format!("http://{address}");
         })
         .await;
-    assert_eq!(waiting["status"], RunStatus::Queued, "{waiting}");
-    assert_eq!(waiting["retry"]["cause"]["message"], "Provider busy");
-    fixture.stop(false).await;
-    let mut saved = fixture.checkpoint(&run_id).await;
-    assert_eq!(saved["outputInterrupted"], true);
-    assert_eq!(saved["retryCause"]["message"], "Provider busy");
-    assert_eq!(saved["providerRetryReservation"], saved["runnerId"]);
-    assert_eq!(saved["controllerRecoveries"].as_u64().unwrap_or(0), 0);
-    // Model a crash after the observed failure and broken output were committed,
-    // but before record_failure paid for the retry. Recovery must fence and pay it.
-    saved
-        .as_object_mut()
-        .unwrap()
-        .remove("providerRetryReservation");
-    fixture
-        .service
-        .store
-        .save_checkpoint_boundary(&run_id, saved)
-        .await
-        .unwrap();
-    fixture
-        .service
-        .store
-        .change_run(
-            &run_id,
-            cairn_installation::runs::RunChanges {
-                retry: Some(None),
-                recovery_pending: Some(true),
-                ..Default::default()
-            },
+        let server = common::serve(listener, app);
+        let home = fixture.service.config.home.join(".codex");
+        tokio::fs::create_dir_all(&home).await.unwrap();
+        tokio::fs::write(home.join("auth.json"), "{}")
+            .await
+            .unwrap();
+        tokio::fs::write(
+            fixture.service.config.data_dir.join("storage-s3.json"),
+            json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
         )
         .await
         .unwrap();
-    fixture.start().await;
-    let waiting = fixture
-        .until(&run_id, |run| {
-            finished(run) || (run["status"] == RunStatus::Queued && run["retry"]["attempt"] == 1)
-        })
-        .await;
-    assert_eq!(waiting["status"], RunStatus::Queued, "{waiting}");
-    fixture.stop(false).await;
-    let recovered = fixture.checkpoint(&run_id).await;
-    assert_eq!(recovered["providerRetryReservation"], recovered["runnerId"]);
-    assert_eq!(recovered["controllerRecoveries"].as_u64().unwrap_or(0), 0);
-    let mut retry = waiting["retry"].clone();
-    retry["nextAttemptAt"] = now().into();
-    fixture
-        .service
-        .store
-        .change_run(
-            &run_id,
-            cairn_installation::runs::RunChanges {
-                retry: Some(Some(serde_json::from_value(retry).unwrap())),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    fixture.start().await;
-    let result = fixture.until_finished(&run_id).await;
-    assert_eq!(result["status"], RunStatus::Succeeded, "{result}");
-    assert_eq!(controller.plans.lock().await.len(), 2);
-    let id = run_id.clone();
-    let events = fixture
-        .service
-        .store
-        .read(move |db| db.events_fixture(&id, 0, 1000))
-        .await
-        .unwrap();
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| text(event, "text").contains("Execution output was interrupted"))
-            .count(),
-        1
-    );
-    fixture.stop(false).await;
-    server.abort();
+        fixture.start().await;
+        let chat = fixture
+            .start_chat(message("Retry after a confirmed provider failure"))
+            .await;
+        let run_id = fixture.chat_run(&chat).await;
+        let waiting = fixture
+            .until(&run_id, |run| {
+                finished(run)
+                    || (run["status"] == RunStatus::Queued && run["retry"]["attempt"] == 1)
+            })
+            .await;
+        if terminal == 70 {
+            assert_eq!(waiting["status"], RunStatus::Failed, "{waiting}");
+            assert!(waiting["retry"].is_null());
+            assert_eq!(controller.plans.lock().await.len(), 1);
+            let saved = fixture.checkpoint(&run_id).await;
+            assert_eq!(saved["terminalCode"], 70);
+            assert_eq!(saved["outputInterrupted"], true);
+            fixture.stop(false).await;
+            server.abort();
+            continue;
+        }
+        assert_eq!(waiting["status"], RunStatus::Queued, "{waiting}");
+        assert_eq!(waiting["retry"]["cause"]["message"], "Provider busy");
+        fixture.stop(false).await;
+        let mut saved = fixture.checkpoint(&run_id).await;
+        assert_eq!(saved["outputInterrupted"], true);
+        assert_eq!(saved["retryCause"]["message"], "Provider busy");
+        assert_eq!(saved["providerRetryReservation"], saved["runnerId"]);
+        assert_eq!(saved["controllerRecoveries"].as_u64().unwrap_or(0), 0);
+        // Model a crash after the observed failure and broken output were committed,
+        // but before record_failure paid for the retry. Recovery must fence and pay it.
+        saved
+            .as_object_mut()
+            .unwrap()
+            .remove("providerRetryReservation");
+        fixture
+            .service
+            .store
+            .save_checkpoint_boundary(&run_id, saved)
+            .await
+            .unwrap();
+        fixture
+            .service
+            .store
+            .change_run(
+                &run_id,
+                cairn_installation::runs::RunChanges {
+                    retry: Some(None),
+                    recovery_pending: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        fixture.start().await;
+        let waiting = fixture
+            .until(&run_id, |run| {
+                finished(run)
+                    || (run["status"] == RunStatus::Queued && run["retry"]["attempt"] == 1)
+            })
+            .await;
+        assert_eq!(waiting["status"], RunStatus::Queued, "{waiting}");
+        fixture.stop(false).await;
+        let recovered = fixture.checkpoint(&run_id).await;
+        assert_eq!(recovered["providerRetryReservation"], recovered["runnerId"]);
+        assert_eq!(recovered["controllerRecoveries"].as_u64().unwrap_or(0), 0);
+        let mut retry = waiting["retry"].clone();
+        retry["nextAttemptAt"] = now().into();
+        fixture
+            .service
+            .store
+            .change_run(
+                &run_id,
+                cairn_installation::runs::RunChanges {
+                    retry: Some(Some(serde_json::from_value(retry).unwrap())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        fixture.start().await;
+        let result = fixture.until_finished(&run_id).await;
+        assert_eq!(result["status"], RunStatus::Succeeded, "{result}");
+        assert_eq!(controller.plans.lock().await.len(), 2);
+        let id = run_id.clone();
+        let events = fixture
+            .service
+            .store
+            .read(move |db| db.events_fixture(&id, 0, 1000))
+            .await
+            .unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| text(event, "text").contains("Execution output was interrupted"))
+                .count(),
+            1
+        );
+        fixture.stop(false).await;
+        server.abort();
+    }
 }
 
 /// Exercises the real manager -> runner client -> disposable HTTP controller.
