@@ -874,7 +874,7 @@ for (const manual of [false, true]) {
   })
 }
 
-test('nested sequence backgrounds paint the inner highlight above the outer one after delayed fonts load', async ({ browser }) => {
+test('nested sequence backgrounds paint the inner highlight above the outer one after delayed fonts load', async ({ browser, browserName }) => {
   const page = await browser.newPage()
   const held: Array<import('@playwright/test').Route> = []
   let released = false
@@ -900,7 +900,9 @@ test('nested sequence backgrounds paint the inner highlight above the outer one 
       await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
     })
     expect(await page.evaluate(() => [...document.fonts].some(face => face.family.includes('DM Sans') && face.status === 'loaded'))).toBe(true)
-    expect(await original!.evaluate(element => element.isConnected)).toBe(false)
+    // Chromium's changed font metrics replace this SVG; WebKit can retain identical HTML.
+    if (browserName === 'chromium')
+      expect(await original!.evaluate(element => element.isConnected)).toBe(false)
 
     const point = await svg.evaluate((svg) => {
       const area = svg.getBoundingClientRect()
