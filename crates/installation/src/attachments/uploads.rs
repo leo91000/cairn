@@ -267,8 +267,8 @@ async fn wait_at(
     if let Some(gate) = gate {
         gate.reached.notify_one();
         tokio::select! {
-            _ = gate.resume.notified() => {},
-            _ = cancelled.cancelled() => return Err(Error::conflict("Attachment upload cancelled.")),
+            () = gate.resume.notified() => {},
+            () = cancelled.cancelled() => return Err(Error::conflict("Attachment upload cancelled.")),
         }
     }
     Ok(())
