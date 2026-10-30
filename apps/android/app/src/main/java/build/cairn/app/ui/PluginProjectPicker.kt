@@ -25,6 +25,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
+import build.cairn.contracts.ListSourceProjectsInput
+import build.cairn.contracts.listSourceProjects
 import java.time.Duration
 import java.time.Instant
 import kotlinx.coroutines.CancellationException
@@ -64,8 +66,14 @@ fun PluginProjectPicker(
         error = null
         try {
             val result =
-                api.get<PluginProjectPage>(
-                    pluginProjectsPath(source.entry.id, source.source.name, instance, page)
+                api.listSourceProjects(
+                    ListSourceProjectsInput(
+                        pluginId = source.entry.id,
+                        source = source.source.name,
+                        instance = instance,
+                        page = page,
+                        query = "",
+                    )
                 )
             projects = (projects + result.items).distinctBy { it.id }
             nextPage = result.nextPage

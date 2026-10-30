@@ -7,13 +7,15 @@ use super::{
     run_credentials,
     scope::{self, Scope},
 };
+use crate::skills::lifecycle::Authority;
 use crate::{
     error::{Error, Result},
-    http::Input,
     service::Service,
-    validation::{text, uuid},
+    validation::uuid,
 };
-use cairn_contracts::{CreateProjectInput, Project, ProjectSettings, ProjectSource};
+use cairn_contracts::{
+    ImportProjectInput, ListSourceProjectsInput, Project, ProjectId, ProjectSettings, ProjectSource,
+};
 use serde_json::{Value, json};
 
 const MAX_ITEMS: usize = 200;
@@ -93,15 +95,25 @@ fn item(raw: &Value, projects: &[Project], plugin: &str) -> Option<Value> {
 }
 
 /// `GET /api/plugins/{id}/projects?source=&instance=&page=&query=`.
-pub async fn list(s: &Service, plugin_id: &str, input: &Input) -> Result<Value> {
+pub(crate) async fn list(
+    s: &Service,
+    input: &ListSourceProjectsInput,
+    authority: Authority,
+) -> Result<Value> {
+    let plugin_id = input.plugin_id.as_str();
     let package = registry::active(s, plugin_id).await?;
-    let query = |key: &str| input.query.get(key).cloned().unwrap_or_default();
-    let source = query("source");
-    let connection = instance(s, &package, &source, &query("instance")).await?;
-    let page = input.number("page", 1, 1, 10_000)?;
-    let search = query("query");
-    if search.chars().count() > 200 || search.chars().any(char::is_control) {
-        return Err(Error::bad("Search for at most 200 characters."));
+    let source = input.source.as_str();
+    let connection = instance(s, &package, source, &input.instance).await?;
+    let authority = authority.instance(s, &connection, &package).await?;
+    let page = input.page;
+    let search = &input.query;
+    if !(1..=10000).contains(&page)
+        || search.chars().count() > 200
+        || search.chars().any(char::is_control)
+    {
+        return Err(Error::bad(
+            "Use a page from 1 to 10000 and a search of at most 200 characters.",
+        ));
     }
     let scope = Scope::Instance(Box::new(connection));
     let payload = json!({
@@ -112,6 +124,7 @@ pub async fn list(s: &Service, plugin_id: &str, input: &Input) -> Result<Value> 
         "instance": scope.instances()[0],
     });
     let result = scope::invoke(s, &package, "projects", payload, &scope).await?;
+    authority.recheck(s).await?;
     let projects = s.store.projects().await?;
     let raw = result["items"]
         .as_array()
@@ -123,20 +136,30 @@ pub async fn list(s: &Service, plugin_id: &str, input: &Input) -> Result<Value> 
         .collect::<Vec<_>>();
     let next_page = result["nextPage"]
         .as_i64()
-        .filter(|next| *next > page && *next <= 10_000);
+        .filter(|next| *next > i64::from(page) && *next <= 10_000);
     Ok(json!({ "items": items, "nextPage": next_page }))
 }
 
 /// `POST /api/projects/import`:
 /// `{ pluginId, source, instance, id, name?, description?, baseBranch? }`.
-pub async fn import(s: &Service, input: &Value) -> Result<Value> {
-    let plugin_id = text(input, "pluginId");
+pub(crate) async fn import(
+    s: &Service,
+    command: &ImportProjectInput,
+    authority: Authority,
+) -> Result<Value> {
+    let _import = s
+        .projects
+        .import
+        .try_lock()
+        .map_err(|_| Error::conflict("A project import is already running. Retry shortly."))?;
+    let plugin_id = command.plugin_id.as_str();
     let package = registry::active(s, plugin_id).await?;
-    let source = text(input, "source");
-    let instance_id = text(input, "instance");
+    let source = command.source.as_str();
+    let instance_id = command.instance.as_str();
     uuid(instance_id)?;
     let connection = instance(s, &package, source, instance_id).await?;
-    let item_id = plain(&input["id"], 200)
+    let authority = authority.instance(s, &connection, &package).await?;
+    let item_id = plain(&Value::String(command.id.clone()), 200)
         .filter(|id| !id.is_empty())
         .ok_or_else(|| Error::bad("Choose a project to import."))?;
     let projects = s.store.projects().await?;
@@ -147,7 +170,10 @@ pub async fn import(s: &Service, input: &Value) -> Result<Value> {
             .as_ref()
             .is_some_and(|source| source.plugin_id == plugin_id && source.id == item_id)
     }) {
-        return Ok(serde_json::to_value(project)?);
+        authority.recheck(s).await?;
+        if let Some(current) = s.store.project(&project.id.to_string()).await? {
+            return Ok(serde_json::to_value(current)?);
+        }
     }
     let scope = Scope::Instance(Box::new(connection.clone()));
     let payload = json!({
@@ -171,14 +197,19 @@ pub async fn import(s: &Service, input: &Value) -> Result<Value> {
             "The plugin resolved a remote outside its declared hosts.",
         ));
     }
-    if let Some(project) = projects
+    authority.recheck(s).await?;
+    if let Some(project) = s
+        .store
+        .projects()
+        .await?
         .iter()
         .find(|project| same_remote(&project.origin, &origin))
     {
         return Ok(serde_json::to_value(project)?);
     }
-    let branch = input["baseBranch"]
-        .as_str()
+    let branch = command
+        .base_branch
+        .as_deref()
         .filter(|branch| !branch.is_empty())
         .map(str::to_owned)
         .or_else(|| plain(&resolved["defaultBranch"], 200))
@@ -190,16 +221,16 @@ pub async fn import(s: &Service, input: &Value) -> Result<Value> {
         .first()
         .ok_or_else(|| Error::bad("No workspace root is configured."))?;
     let root = crate::skills::workspace(root, &s.config.workspace_roots).await?;
-    let name = input
-        .get("name")
-        .filter(|name| name.as_str().is_some_and(|name| !name.trim().is_empty()))
+    let name = command
+        .name
+        .as_ref()
+        .filter(|name| !name.trim().is_empty())
         .cloned()
-        .or_else(|| plain(&resolved["name"], 100).map(Value::from))
-        .unwrap_or_else(|| item_id.clone().into());
-    let description = input
-        .get("description")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
+        .or_else(|| plain(&resolved["name"], 100))
+        .unwrap_or_else(|| item_id.clone());
+    let description = command
+        .description
+        .clone()
         .or_else(|| plain(&resolved["description"], 500))
         .unwrap_or_default();
     let mut settings: ProjectSettings = serde_json::from_value(json!({
@@ -212,6 +243,7 @@ pub async fn import(s: &Service, input: &Value) -> Result<Value> {
         .prefix(&format!("{plugin_id}-"))
         .tempdir_in(&root)?;
     let path = directory.path().join("repository");
+    authority.recheck(s).await?;
     let credentials = run_credentials::for_instance(s, &package, &connection).await?;
     crate::project_git::import(&s.config, &credentials, &origin, &path, &branch).await?;
     settings.path = path.to_string_lossy().into_owned();
@@ -221,18 +253,25 @@ pub async fn import(s: &Service, input: &Value) -> Result<Value> {
         instance: connection.id.clone(),
         id: item_id,
     };
+    authority.recheck(s).await?;
+    let project = Project {
+        id: ProjectId(uuid::Uuid::new_v4()),
+        settings,
+        origin: crate::service::normalize_origin(&origin),
+        source: Some(source),
+        revision: crate::config::id(),
+        created_at: crate::config::now(),
+    };
+    // The queued writer owns the clone even if the HTTP/tool future is dropped.
     let saved = s
-        .create_project(
-            CreateProjectInput {
-                creation_id: None,
-                settings,
-            },
-            Some(source),
-            |_| Ok(()),
-        )
+        .store
+        .transaction(move |db| {
+            authority.authorize(db)?;
+            let saved = db.save_project(&project, None)?;
+            let _ = directory.keep();
+            Ok(saved)
+        })
         .await?;
-    // The registered project now owns the clone.
-    let _ = directory.keep();
     Ok(serde_json::to_value(saved)?)
 }
 

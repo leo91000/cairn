@@ -17,6 +17,7 @@ import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
 import { createProject } from '../../../../packages/contracts/generated/createProject'
 import { deleteAgent } from '../../../../packages/contracts/generated/deleteAgent'
 import { deleteProject } from '../../../../packages/contracts/generated/deleteProject'
+import { importProject } from '../../../../packages/contracts/generated/importProject'
 import { listPluginPackages } from '../../../../packages/contracts/generated/listPluginPackages'
 import { replaceProject } from '../../../../packages/contracts/generated/replaceProject'
 import { accessSummary } from '../agent-access'
@@ -43,6 +44,7 @@ import {
   ShieldCheck,
   Trash2,
 } from '../icons'
+import { pluginRequest } from '../plugin-operations'
 import { pluginSources } from '../plugin-sources'
 import { instanceNoun } from '../plugins'
 import { useResourceSave } from '../resourceSave'
@@ -170,9 +172,14 @@ function edit(item?: Project) {
 }
 
 async function projectRequest<T>(path: string, options: RequestInit): Promise<T> {
-  if (path === '/projects/import')
-    return api<T>(path, options)
   const payload = JSON.parse(options.body as string)
+  if (path === '/projects/import') {
+    // Imports recover by their source identity; the generic form's creation ID
+    // belongs only to locally registered projects.
+    delete payload.creationId
+    return await importProject(pluginRequest, payload) as T
+  }
+
   const saved = options.method === 'PUT'
     ? await replaceProject(api, { projectId: editing.value!, revision: revision.value, settings: form.value })
     : await createProject(api, {

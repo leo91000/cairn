@@ -1,0 +1,128 @@
+[
+  {
+    "array": true,
+    "input": "ListSkillsInput",
+    "method": "GET",
+    "name": "listSkills",
+    "optionalQuery": [
+      "scope"
+    ],
+    "output": "Skill",
+    "path": "/skills",
+    "query": [
+      "scope"
+    ]
+  },
+  {
+    "input": "SkillInput",
+    "method": "GET",
+    "name": "readSkillBundle",
+    "output": "SkillBundle",
+    "path": "/skills/{scope}/{name}/bundle"
+  },
+  {
+    "input": "ReadSkillFileInput",
+    "method": "GET",
+    "name": "readSkillFile",
+    "output": "SkillFileContent",
+    "path": "/skills/{scope}/{name}/file",
+    "query": [
+      "path"
+    ]
+  },
+  {
+    "input": "EditSkillFilesInput",
+    "method": "POST",
+    "name": "editSkillFiles",
+    "output": "SkillBundle",
+    "path": "/skills/{scope}/{name}/bundle"
+  },
+  {
+    "input": "SaveSkillInput",
+    "method": "PUT",
+    "name": "saveSkill",
+    "output": "SkillMetadata",
+    "path": "/skills/{scope}/{name}"
+  },
+  {
+    "deferred": true,
+    "input": "ImportSkillInput",
+    "method": "POST",
+    "name": "importSkill",
+    "output": "SkillImport",
+    "path": "/skills/import"
+  },
+  {
+    "input": "SkillInput",
+    "method": "DELETE",
+    "name": "deleteSkill",
+    "output": "DeleteSkillOutput",
+    "path": "/skills/{scope}/{name}"
+  },
+  {
+    "input": "ExportSkillArchiveInput",
+    "method": "GET",
+    "name": "exportSkillArchive",
+    "optionalQuery": [
+      "revision"
+    ],
+    "output": "SkillArchiveChunk",
+    "path": "/skills/{scope}/{name}/archive",
+    "query": [
+      "offset",
+      "revision"
+    ]
+  },
+  {
+    "deferred": true,
+    "input": "SkillInput",
+    "method": "GET",
+    "name": "getSkillSourceStatus",
+    "output": "SkillSourceStatus",
+    "path": "/skills/{scope}/{name}/source"
+  },
+  {
+    "deferred": true,
+    "input": "UpdateSkillSourceInput",
+    "method": "POST",
+    "name": "updateSkillSource",
+    "output": "SkillBundle",
+    "path": "/skills/{scope}/{name}/source/update"
+  },
+  {
+    "input": "SkillInput",
+    "method": "DELETE",
+    "name": "forgetSkillSource",
+    "output": "ForgetSkillSourceOutput",
+    "path": "/skills/{scope}/{name}/source"
+  },
+  {
+    "input": "StageSkillUploadInput",
+    "method": "POST",
+    "name": "stageSkillUpload",
+    "output": "SkillUpload",
+    "path": "/skills/stage"
+  },
+  {
+    "deferred": true,
+    "input": "ImportProjectInput",
+    "method": "POST",
+    "name": "importProject",
+    "output": "Project",
+    "path": "/projects/import"
+  },
+  {
+    "deferred": true,
+    "input": "ListSourceProjectsInput",
+    "method": "GET",
+    "name": "listSourceProjects",
+    "output": "PluginProjectPage",
+    "path": "/plugins/{pluginId}/projects",
+    "query": [
+      "source",
+      "instance",
+      "page",
+      "query"
+    ]
+  }
+]

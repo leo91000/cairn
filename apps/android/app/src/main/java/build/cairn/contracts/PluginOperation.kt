@@ -7,11 +7,14 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class PluginOperation(
     val error: String?,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val errorStatus: Int? = null,
     val id: String,
     val result: PluginOperationResult?,
     val state: String,
 ) {
     init {
+        errorStatus?.let { require(it in 0..65535) }
         require(Regex("^(running|completed|failed|cancelled)\$").containsMatchIn(state))
     }
 }
