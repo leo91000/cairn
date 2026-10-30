@@ -238,6 +238,16 @@ abstract class NodePlacementCases {
             compose.onNodeWithText("Tâche nocturne").performScrollTo().assertExists()
             compose.runOnIdle { assertEquals(1, writes.size) }
             capture("native-administrator-review")
+            compose.waitUntil(10000) { !vm.state.value.busy }
+            val confirmationRefresh = CompletableDeferred<Unit>()
+            compose.runOnUiThread { vm.perform { confirmationRefresh.await() } }
+            compose.waitUntil(10000) { vm.state.value.busy }
+            compose
+                .onNodeWithText("Confirmer l’accès et relancer les exécutions")
+                .assertIsNotEnabled()
+            assertEquals(1, writes.size)
+            confirmationRefresh.complete(Unit)
+            compose.waitUntil(10000) { !vm.state.value.busy }
             compose
                 .onNodeWithText("Confirmer l’accès et relancer les exécutions")
                 .performScrollTo()
@@ -1108,12 +1118,22 @@ abstract class NodePlacementCases {
     fun ownerCanPreferOrPinAnAuthorizedNodeAndSeeSynchronizationAge() {
         MockWebServer().use { server ->
             val saved = CopyOnWriteArrayList<JsonObject>()
+            val moves = CopyOnWriteArrayList<JsonObject>()
+            var hasSession by mutableStateOf(false)
             server.dispatcher =
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path!!.substringBefore('?')
                         val body =
                             when {
+                                path == "/api/installations/fixture/api/nodes/placement/run/move" &&
+                                    request.method == "POST" -> {
+                                    moves +=
+                                        wireJson
+                                            .parseToJsonElement(request.body.readUtf8())
+                                            .jsonObject
+                                    "{}"
+                                }
                                 path == "/api/installations/fixture/api/nodes/placement/run" &&
                                     request.method == "PUT" -> {
                                     saved +=
@@ -1185,6 +1205,7 @@ abstract class NodePlacementCases {
                                 vm,
                                 Run(
                                     id = "run",
+                                    sessionId = if (hasSession) "session" else null,
                                     status = "succeeded",
                                     nodeId = "b40903f9-0487-53d0-a309-c589f0cae405",
                                     resources =
@@ -1266,6 +1287,21 @@ abstract class NodePlacementCases {
             // Without a recorded provider session there is nothing to resume elsewhere yet.
             compose.onNodeWithText("Déplacer…").performScrollTo().performClick()
             compose.onNodeWithText("Déplacer maintenant").performScrollTo().assertIsNotEnabled()
+            compose.runOnIdle { hasSession = true }
+            compose.onNodeWithText("Déplacer maintenant").assertIsEnabled()
+            val movementRefresh = CompletableDeferred<Unit>()
+            compose.runOnUiThread { vm.perform { movementRefresh.await() } }
+            compose.waitUntil(10000) { vm.state.value.busy }
+            compose.onNodeWithText("Déplacer maintenant").assertIsNotEnabled()
+            assertTrue(moves.isEmpty())
+            movementRefresh.complete(Unit)
+            compose.waitUntil(10000) { !vm.state.value.busy }
+            compose.onNodeWithText("Déplacer maintenant").assertIsEnabled().performClick()
+            compose.waitUntil(10000) { moves.isNotEmpty() }
+            assertEquals(
+                "824f3da3-b37b-5713-9c61-06e3f54a7ff8",
+                moves.single()["nodeId"]?.jsonPrimitive?.content,
+            )
         }
     }
 
