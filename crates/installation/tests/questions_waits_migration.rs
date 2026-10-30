@@ -434,3 +434,270 @@ fn malformed_v15_answer_lists_roll_back_all_data_and_retry_without_private_diagn
         drop(Store::open(root.path()).unwrap());
     }
 }
+
+#[test]
+fn migrates_retained_native_github_wait_without_reactivating_it() {
+    use serde_json::{Value as Json, json};
+
+    let root = tempfile::tempdir().unwrap();
+    let db = previous(root.path());
+    let run: String = db
+        .query_row("SELECT id FROM runs LIMIT 1", [], |row| row.get(0))
+        .unwrap();
+    let payload = json!({
+        "id": "historical-wait",
+        "messageId": "historical-turn",
+        "reason": "Synthetic workflow completion",
+        "seconds": 600,
+        "createdAt": 123,
+        "wakeAt": 600123,
+        "condition": {
+            "type": "github_workflow",
+            "projectId": "00000000-0000-4000-8000-000000000099",
+            "runId": 40972562294u64,
+            "headSha": "a".repeat(40),
+        },
+    });
+    db.execute(
+        "INSERT INTO events(run_id,created_at,type,text,payload) VALUES(?,123,'chat.wait','historical wait',?)",
+        rusqlite::params![run, payload.to_string()],
+    )
+    .unwrap();
+    let event = db.last_insert_rowid();
+    let before = snapshot(&db);
+
+    let store = Store::open(root.path()).unwrap();
+    let migrated: Json = serde_json::from_str(
+        &db.query_row("SELECT payload FROM events WHERE id=?", [event], |row| {
+            row.get::<_, String>(0)
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let mut expected = payload;
+    expected["condition"] = json!({
+        "type": "plugin",
+        "pluginId": "github",
+        "conditionType": "github_workflow",
+        "projectId": "00000000-0000-4000-8000-000000000099",
+        "input": { "runId": 40972562294u64, "headSha": "a".repeat(40) },
+    });
+    assert_eq!(migrated, expected);
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM durable_wakeups WHERE id='historical-wait'",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    let after = snapshot(&db);
+    for table in ["agents", "plugin_instances", "plugin_approvals", "records"] {
+        assert_eq!(after[table], before[table]);
+    }
+    let stable = snapshot(&db);
+    drop(store);
+    drop(Store::open(root.path()).unwrap());
+    assert_eq!(snapshot(&db), stable);
+}
+
+#[test]
+fn migrates_native_github_group_results_and_continuation_snapshots() {
+    use serde_json::{Value as Json, json};
+
+    let root = tempfile::tempdir().unwrap();
+    let db = previous(root.path());
+    let run: String = db
+        .query_row("SELECT id FROM runs LIMIT 1", [], |row| row.get(0))
+        .unwrap();
+    let workflow = json!({
+        "type": "github_workflow",
+        "projectId": "00000000-0000-4000-8000-000000000099",
+        "runId": 40972562294u64,
+        "headSha": "a".repeat(40),
+    });
+    let checks = json!({
+        "type": "github_pr_checks",
+        "projectId": "00000000-0000-4000-8000-000000000099",
+        "prNumber": 42,
+        "headSha": "b".repeat(40),
+    });
+    let result = json!({
+        "state": "completed",
+        "type": "github_workflow",
+        "runId": 40972562294u64,
+        "conclusion": "success",
+        "future": { "nested": [1, 2] },
+    });
+    let group = json!({
+        "state": "completed",
+        "type": "group",
+        "mode": "all",
+        "members": [
+            { "condition": workflow.clone(), "result": result },
+            { "condition": checks.clone(), "result": null },
+        ],
+        "reason": "Historical group result",
+        "immediate": true,
+    });
+    db.execute(
+        "INSERT INTO events(run_id,created_at,type,text,payload) VALUES(?,123,'run.wait_ready','historical group',?)",
+        rusqlite::params![run, group.to_string()],
+    ).unwrap();
+    let event = db.last_insert_rowid();
+    let continuation = json!({
+        "condition": { "type": "group", "mode": "all", "conditions": [workflow, checks] },
+        "observation": group,
+    });
+    db.execute(
+        "UPDATE runs SET boundary=json_set(boundary,'$.waitContinuation',json(?1),'$.chatExecution.wakeup',json(?1)) WHERE id=?2",
+        rusqlite::params![continuation.to_string(), run],
+    ).unwrap();
+
+    let store = Store::open(root.path()).unwrap();
+    let migrated: Json = serde_json::from_str(
+        &db.query_row("SELECT payload FROM events WHERE id=?", [event], |row| {
+            row.get::<_, String>(0)
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(migrated["reason"], "Historical group result");
+    assert_eq!(migrated["immediate"], true);
+    let members = &migrated["members"];
+    assert_eq!(members[0]["condition"]["pluginId"], "github");
+    assert_eq!(members[0]["condition"]["conditionType"], "github_workflow");
+    assert_eq!(members[0]["condition"]["input"]["runId"], 40972562294u64);
+    assert_eq!(members[1]["condition"]["conditionType"], "github_pr_checks");
+    assert_eq!(members[1]["condition"]["input"]["prNumber"], 42);
+    assert_eq!(members[1]["result"], Json::Null);
+    assert_eq!(
+        members[0]["result"]["pluginResult"]["runId"],
+        40972562294u64
+    );
+    assert_eq!(
+        members[0]["result"]["pluginResult"]["future"],
+        json!({ "nested": [1, 2] })
+    );
+    let boundary: Json = serde_json::from_str(
+        &db.query_row("SELECT boundary FROM runs WHERE id=?", [&run], |row| {
+            row.get::<_, String>(0)
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        boundary["waitContinuation"],
+        boundary["chatExecution"]["wakeup"]
+    );
+    assert_eq!(
+        boundary["waitContinuation"]["condition"]["conditions"][1],
+        members[1]["condition"]
+    );
+    assert_eq!(
+        boundary["waitContinuation"]["observation"]["members"],
+        *members
+    );
+    drop(store);
+}
+
+#[test]
+fn unsupported_or_explicitly_invalid_historical_condition_rolls_back() {
+    use serde_json::json;
+
+    let valid = json!({
+        "type": "github_workflow",
+        "projectId": "00000000-0000-4000-8000-000000000099",
+        "runId": 40972562294u64,
+        "headSha": "a".repeat(40),
+    });
+    let mut malformed = vec![
+        json!({ "type": "github_workflow" }),
+        json!({ "type": "unrecognized_legacy_condition" }),
+        json!({ "type": "github_workflow", "pluginId": null }),
+    ];
+    for (key, values) in [
+        (
+            "projectId",
+            vec![json!(null), json!(123), json!("invalid-project")],
+        ),
+        (
+            "runId",
+            vec![
+                json!(null),
+                json!("40972562294"),
+                json!(0),
+                json!(-1),
+                json!(9007199254740992u64),
+            ],
+        ),
+        (
+            "headSha",
+            vec![
+                json!(null),
+                json!(123),
+                json!("a".repeat(39)),
+                json!("z".repeat(40)),
+            ],
+        ),
+    ] {
+        let mut missing = valid.clone();
+        missing.as_object_mut().unwrap().remove(key);
+        malformed.push(missing);
+        for value in values {
+            let mut condition = valid.clone();
+            condition[key] = value;
+            malformed.push(condition);
+        }
+    }
+    for number in [
+        json!(null),
+        json!("42"),
+        json!(0),
+        json!(-1),
+        json!(2147483648u64),
+    ] {
+        let mut condition = valid.clone();
+        condition["type"] = "github_pr_checks".into();
+        condition.as_object_mut().unwrap().remove("runId");
+        condition["prNumber"] = number;
+        malformed.push(condition);
+    }
+    for (kind, identity, extra) in [
+        ("github_workflow", "runId", "prNumber"),
+        ("github_pr_checks", "prNumber", "runId"),
+    ] {
+        let mut condition = valid.clone();
+        condition["type"] = kind.into();
+        condition.as_object_mut().unwrap().remove("runId");
+        condition[identity] = 42.into();
+        condition[extra] = 99.into();
+        malformed.push(condition);
+    }
+    for condition in malformed {
+        let root = tempfile::tempdir().unwrap();
+        let db = previous(root.path());
+        let run: String = db
+            .query_row("SELECT id FROM runs LIMIT 1", [], |row| row.get(0))
+            .unwrap();
+        db.execute(
+            "INSERT INTO events(run_id,created_at,type,text,payload) VALUES(?,123,'chat.wait','invalid history',?)",
+            rusqlite::params![run, json!({ "condition": condition }).to_string()],
+        ).unwrap();
+        let before = snapshot(&db);
+        let Err(error) = Store::open(root.path()) else {
+            panic!("unsupported historical condition must fail");
+        };
+        assert_eq!(
+            error.message,
+            "Cannot upgrade version 15 questions and waits; original database retained."
+        );
+        assert_eq!(snapshot(&db), before);
+        assert_eq!(
+            db.pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .unwrap(),
+            15
+        );
+    }
+}
