@@ -212,6 +212,7 @@ fn request_cancel(db: &Db<'_>, id: &str, is_active: bool) -> Result<()> {
     // its in-memory slot; cancellation must settle this wait even in that gap.
     // Executing or recovering runs are settled by their worker once stopped.
     if (!is_active || run.status == RunStatus::Waiting) && !run.recovery_pending {
+        crate::nodes::moves::release_terminal_destination_in(db, id)?;
         let patch = crate::runs::RunChanges {
             status: Some(RunStatus::Cancelled),
             finished_at: Some(Some(now())),
@@ -286,8 +287,16 @@ fn requeue(db: &Db<'_>, id: &str) -> Result<Value> {
     crate::chats::continuation::cancel_for_run(db, id)?;
     if let Some(mut checkpoint) = checkpoint {
         checkpoint.remaining_ms = Some(crate::run_limits::budget_ms(&run["snapshot"]["agent"]));
+        checkpoint.controller_recoveries = None;
+        checkpoint.controller_recovery_reservation = None;
+        checkpoint.controller_observation = None;
+        checkpoint.turn_pending = Some(true);
+        checkpoint.recovery_deadline_ms = None;
+        checkpoint.output_interrupted = None;
+        checkpoint.provider_failed = None;
         if !before_launch {
             checkpoint.completed = Some(false);
+            checkpoint.terminal_code = Some(None);
         }
         checkpoint.settled = None;
         // A confirmed pre-turn failure may have no session yet. Its safety
@@ -457,10 +466,12 @@ mod tests {
                     "waitContinuation": { "observation": { "state": "completed" } },
                 }), None)?;
                     db.save_checkpoint_boundary("mission", &json!({
-                    "completed": completed, "launched": true, "prepared": { "cwd": "/workspace" },
+                    "completed": completed, "outputInterrupted": true, "launched": true, "prepared": { "cwd": "/workspace" },
                 }))?;
                     let resumed = requeue(db, "mission")?;
                     assert_eq!(resumed["status"], "queued");
+                    let checkpoint = db.checkpoint_boundary("mission")?.unwrap();
+                    assert!(checkpoint["outputInterrupted"].is_null());
                     if completed {
                         assert_ne!(resumed["missionTurnId"], "previous-turn");
                         assert!(resumed["waitContinuation"].is_null());

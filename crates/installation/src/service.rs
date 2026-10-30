@@ -19,6 +19,7 @@ pub struct Service {
     pub node_lease_deadlines:
         Arc<tokio::sync::Mutex<std::collections::HashMap<String, tokio::time::Instant>>>,
     pub started: tokio::time::Instant,
+    pub(crate) native_authority_refresh: Arc<tokio::sync::Mutex<()>>,
     pub node_backup_operation: Arc<crate::nodes::coordination::Coordination>,
     pub node_publication_notify: Arc<tokio::sync::Notify>,
     pub node_backup_lock: Arc<tokio::sync::Mutex<()>>,
@@ -64,6 +65,7 @@ impl Service {
             node_maintenance_tasks: Arc::default(),
             node_lease_deadlines: Arc::default(),
             started: tokio::time::Instant::now(),
+            native_authority_refresh: Arc::default(),
             node_backup_operation: Arc::default(),
             node_publication_notify: Arc::default(),
             node_backup_lock: Arc::default(),

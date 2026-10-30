@@ -17,6 +17,14 @@ use tokio::sync::Mutex;
 /// Absent (`None`), explicitly `null` (`Some(None)`) or set (`Some(Some(_))`).
 type Nullable<T> = Option<Option<T>>;
 
+/// The checkpoint identities needed to verify node storage ownership.
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct NodeOwnership {
+    pub node_id: Option<String>,
+    pub runner_id: Option<String>,
+}
+
 /// Restart state persisted once in `run_checkpoints`, serialized from this type.
 ///
 /// Unconverted chat/node boundaries still serialize these named fields. Nullable
@@ -32,6 +40,15 @@ pub struct RunCheckpoint {
     /// Explicit controller rejection of this attempt; absent is not proof of rejection.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub start_rejected: Option<bool>,
+    /// Output was truncated for this attempt; completion may be missing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_interrupted: Option<bool>,
+    /// A new explicit turn is queued but has not yet acquired an attempt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_pending: Option<bool>,
+    /// Absolute deadline while fencing an interrupted attempt, retained across crashes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_deadline_ms: Option<i64>,
     /// `null` means the run has no time limit; absent means its budget is spent.
     #[serde(default, with = "nullable", skip_serializing_if = "Option::is_none")]
     pub remaining_ms: Nullable<i64>,
@@ -49,6 +66,18 @@ pub struct RunCheckpoint {
     pub process: Nullable<ProcessIdentity>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completed: Option<bool>,
+    /// The adapter confirmed failure, independently of controller transport/exit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_failed: Option<bool>,
+    /// Controller result for runner_id, distinct from the provider turn and logs.
+    /// Absent: an attempt may need observation. Null: observation was exhausted
+    /// or a new turn invalidated the old result; recovery must only fence it.
+    /// Neither absent nor null proves success.
+    #[serde(default, with = "nullable", skip_serializing_if = "Option::is_none")]
+    pub terminal_code: Nullable<i32>,
+    /// Durable reservations for reads of one controller attempt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub controller_observation: Option<ControllerObservation>,
     #[serde(default, with = "nullable", skip_serializing_if = "Option::is_none")]
     pub last_error: Nullable<String>,
     #[serde(default, with = "nullable", skip_serializing_if = "Option::is_none")]
@@ -57,6 +86,9 @@ pub struct RunCheckpoint {
     pub last_message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub controller_recoveries: Option<u64>,
+    /// A recovery already charged to the budget, bound to the stopped attempt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub controller_recovery_reservation: Option<String>,
     /// A controller's capacity refusal delays admission without consuming a recovery attempt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capacity_retry_at: Option<i64>,
@@ -69,6 +101,15 @@ pub struct RunCheckpoint {
     pub resources: Option<crate::nodes::Resources>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub administrative_pause_observation: Option<AdministrativePauseObservation>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControllerObservation {
+    pub attempt: String,
+    pub requests: u8,
+    #[serde(default)]
+    pub in_flight: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -125,6 +166,43 @@ impl Settled {
 }
 
 impl RunCheckpoint {
+    pub fn reserve_observation(&mut self, attempt: &str) -> bool {
+        if self.runner_id() != Some(attempt)
+            || self.terminal_code.is_some()
+            || self.settled().is_some()
+        {
+            return false;
+        }
+        let observation =
+            self.controller_observation
+                .get_or_insert_with(|| ControllerObservation {
+                    attempt: attempt.to_owned(),
+                    requests: 0,
+                    in_flight: false,
+                });
+        if observation.attempt != attempt {
+            *observation = ControllerObservation {
+                attempt: attempt.to_owned(),
+                requests: 0,
+                in_flight: false,
+            };
+        }
+        if observation.requests >= 3 || observation.in_flight {
+            return false;
+        }
+        observation.requests += 1;
+        observation.in_flight = true;
+        true
+    }
+
+    pub fn release_observation(&mut self, attempt: &str) {
+        if let Some(observation) = &mut self.controller_observation
+            && observation.attempt == attempt
+        {
+            observation.in_flight = false;
+        }
+    }
+
     pub fn fresh(budget_ms: Option<i64>) -> Self {
         Self {
             launched: Some(false),
@@ -196,6 +274,47 @@ impl RunCheckpoint {
         self.completed == Some(true)
     }
 
+    pub fn provider_failed(&self) -> bool {
+        self.provider_failed == Some(true)
+    }
+
+    pub fn terminal_code(&self) -> Option<i32> {
+        self.terminal_code.flatten()
+    }
+
+    /// A healthy controller exit cannot prove that the provider finished its turn.
+    pub fn output_error(&self) -> Option<&'static str> {
+        let confirmed_provider_failure = self
+            .retry_cause
+            .as_ref()
+            .and_then(Option::as_ref)
+            .is_some_and(|cause| cause.message == self.last_error());
+        if !self.managed()
+            || self.completed()
+            || self.provider_failed()
+            || (confirmed_provider_failure && self.terminal_code() != Some(0))
+        {
+            return None;
+        }
+        if self.output_interrupted == Some(true) {
+            return Some(
+                "Execution output was interrupted before the agent's completion was recorded. The response may be incomplete; automatic replay was stopped.",
+            );
+        }
+        (self.terminal_code() == Some(0)).then_some("Execution ended before the agent's completion was recorded. The response may be incomplete; automatic replay was stopped.")
+    }
+
+    pub fn finalization_error(&self) -> Option<&str> {
+        if !self.managed() || !self.completed() || self.terminal_code() == Some(0) {
+            return None;
+        }
+        Some(if self.last_error().is_empty() {
+            "Agent turn completed, but execution finalization was not confirmed healthy. Working files were preserved; automatic replay was stopped."
+        } else {
+            self.last_error()
+        })
+    }
+
     /// The prepared execution, when the workspace has been prepared.
     pub fn prepared(&self) -> Option<&Value> {
         self.prepared.as_ref()?.as_ref().filter(|p| p.is_object())
@@ -231,6 +350,11 @@ impl RunCheckpoint {
 
     pub fn controller_recoveries(&self) -> u64 {
         self.controller_recoveries.unwrap_or(0)
+    }
+
+    pub fn has_controller_recovery_reservation(&self) -> bool {
+        self.runner_id()
+            .is_some_and(|id| self.controller_recovery_reservation.as_deref() == Some(id))
     }
 
     pub fn settled(&self) -> Option<&Settled> {
@@ -341,21 +465,41 @@ impl Checkpoint {
         change: impl FnOnce(&mut RunCheckpoint),
         publish: impl FnOnce(&mut Db<'_>) -> Result<()> + Send + 'static,
     ) -> Result<()> {
+        self.update_and_publish_if(
+            move |saved| {
+                change(saved);
+                true
+            },
+            publish,
+        )
+        .await
+    }
+
+    /// Commits an event only when its checkpoint transition is new.
+    pub async fn update_and_publish_if(
+        &self,
+        change: impl FnOnce(&mut RunCheckpoint) -> bool,
+        publish: impl FnOnce(&mut Db<'_>) -> Result<()> + Send + 'static,
+    ) -> Result<()> {
         let mut state = self.state.lock().await;
         let mut saved = state.clone();
-        change(&mut saved);
+        if !change(&mut saved) {
+            return Ok(());
+        }
         {
             let previous = self.pause_observation.lock().unwrap();
             saved.administrative_pause_observation = Some(AdministrativePauseObservation {
                 attempt: previous.0.clone(),
                 total_ms: previous.1,
             });
-            saved.remaining_ms = Some(self.deadline().map(|deadline| (deadline - now()).max(0)));
         }
+        let deadline = self.deadline();
         let id = self.id.clone();
         let saved = self
             .store
             .transaction(move |db| {
+                saved.remaining_ms =
+                    Some(deadline.map(|deadline| deadline.saturating_sub(now()).max(0)));
                 saved.store_in(db, &id)?;
                 publish(db)?;
                 Ok(saved)
@@ -363,6 +507,44 @@ impl Checkpoint {
             .await?;
         *state = saved;
         Ok(())
+    }
+
+    /// Decide a run transition and its checkpoint under the same store transaction.
+    pub async fn decide<T: Send + 'static>(
+        &self,
+        decision: impl FnOnce(&mut RunCheckpoint, &mut Db<'_>) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let mut state = self.state.lock().await;
+        let expected = state.clone();
+        let fallback = expected.clone();
+        let id = self.id.clone();
+        let deadline = self.deadline();
+        let (saved, value) = self
+            .store
+            .transaction(move |db| {
+                let current = RunCheckpoint::load_in(db, &id)?;
+                if current.is_none()
+                    && (expected.runner_id().is_some() || expected.process().is_some())
+                {
+                    return Err(crate::error::Error::conflict(
+                        "Execution checkpoint disappeared during settlement.",
+                    ));
+                }
+                let mut saved = current.unwrap_or(fallback);
+                if !crate::recovery::same_execution(Some(&saved), Some(&expected)) {
+                    return Err(crate::error::Error::conflict(
+                        "Execution attempt changed during settlement.",
+                    ));
+                }
+                saved.remaining_ms =
+                    Some(deadline.map(|deadline| deadline.saturating_sub(now()).max(0)));
+                let value = decision(&mut saved, db)?;
+                saved.store_in(db, &id)?;
+                Ok((saved, value))
+            })
+            .await?;
+        *state = saved;
+        Ok(value)
     }
 
     /// Publishes engine state, its checkpoint and the event in one commit. A
@@ -376,7 +558,9 @@ impl Checkpoint {
         changes: EventChanges,
     ) -> Result<()> {
         let mut state = self.state.lock().await;
-        let failure = changes.failure.filter(|_| state.last_error().is_empty());
+        let failure = changes.failure.filter(|(_, _, provider)| {
+            state.last_error().is_empty() || (*provider && !state.provider_failed())
+        });
         let persist = changes.completed || failure.is_some();
         let mut last_message = changes.last_message;
         let mut saved = persist.then(|| state.clone());
@@ -385,7 +569,9 @@ impl Checkpoint {
                 saved.last_error = Some(Some(message));
                 saved.retry_cause = Some(cause);
                 if provider_failure {
+                    saved.provider_failed = Some(true);
                     saved.completed = Some(false);
+                    saved.terminal_code = Some(None);
                 }
             }
             if let Some(message) = last_message.take() {
@@ -393,18 +579,23 @@ impl Checkpoint {
             }
             if changes.completed {
                 saved.completed = Some(true);
+                saved.provider_failed = None;
             }
             let previous = self.pause_observation.lock().unwrap();
             saved.administrative_pause_observation = Some(AdministrativePauseObservation {
                 attempt: previous.0.clone(),
                 total_ms: previous.1,
             });
-            saved.remaining_ms = Some(self.deadline().map(|deadline| (deadline - now()).max(0)));
         }
+        let deadline = self.deadline();
         let id = self.id.clone();
         let saved = self
             .store
             .transaction(move |db| {
+                if let Some(saved) = &mut saved {
+                    saved.remaining_ms =
+                        Some(deadline.map(|deadline| deadline.saturating_sub(now()).max(0)));
+                }
                 if let Some(changes) = changes.run {
                     db.change_run(&id, changes)?;
                 }
@@ -460,6 +651,21 @@ mod nullable {
 // Temporary JSON adapters are owned by the unconverted node/chat domains. They
 // cannot persist arbitrary checkpoint fields or create a second source of truth.
 impl Db<'_> {
+    /// Storage eligibility never needs the prepared workspace or tool sources.
+    /// Decode the projected JSON so arrays, objects and numbers remain invalid
+    /// identities, just as they are in the full checkpoint contract.
+    pub(crate) fn checkpoint_node_ownership(&self, run_id: &str) -> Result<Option<NodeOwnership>> {
+        Ok(self
+            .json_rows_as(
+                "SELECT json_object(
+                    'nodeId',json(state -> '$.nodeId'),
+                    'runnerId',json(state -> '$.runnerId')
+                 ) FROM run_checkpoints WHERE run_id=?",
+                [run_id],
+            )?
+            .pop())
+    }
+
     pub fn checkpoint_boundary(&self, run_id: &str) -> Result<Option<Value>> {
         RunCheckpoint::load_in(self, run_id)?
             .map(|state| state.to_value())
@@ -499,6 +705,35 @@ mod tests {
     use crate::run_fixture::DbRunFixture;
     use serde_json::json;
 
+    #[tokio::test]
+    async fn node_ownership_reads_nullable_ids_without_prepared_execution_data() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        store.transaction(|db| {
+            for (id, state) in [
+                ("absent", json!({})),
+                ("null", json!({ "nodeId": null, "runnerId": null })),
+                ("set", json!({ "nodeId": "node", "runnerId": "attempt", "prepared": { "instructions": "private".repeat(16384) } })),
+            ] {
+                db.add_run_fixture(&json!({ "id": id, "taskId": id, "status": "succeeded" }), None)?;
+                db.save_checkpoint_boundary(id, &state)?;
+                let compact = db.checkpoint_node_ownership(id)?.unwrap();
+                assert_eq!(compact.node_id.as_deref(), state["nodeId"].as_str());
+                assert_eq!(compact.runner_id.as_deref(), state["runnerId"].as_str());
+            }
+            assert!(db.checkpoint_node_ownership("missing")?.is_none());
+            for state in [
+                json!({ "nodeId": 42 }), json!({ "runnerId": 42 }),
+                json!({ "nodeId": {} }), json!({ "runnerId": [] }),
+                json!({ "nodeId": true }), json!({ "runnerId": 1.5 }),
+            ] {
+                db.0.execute("UPDATE run_checkpoints SET state=? WHERE run_id='set'", [state.to_string()])?;
+                assert!(db.checkpoint_node_ownership("set").is_err());
+            }
+            Ok(())
+        }).await.unwrap();
+    }
+
     #[test]
     fn round_trips_named_checkpoint_fields_and_preserves_null_versus_absent() {
         let stored = json!({
@@ -531,6 +766,73 @@ mod tests {
         assert!(RunCheckpoint::from_value(json!({ "unknownDecision": true })).is_err());
         assert!(RunCheckpoint::from_value(json!({ "launched": "yes" })).is_err());
         assert!(RunCheckpoint::from_value(json!({ "remainingMs": 1.5 })).is_err());
+    }
+
+    #[tokio::test]
+    async fn checkpoint_budget_includes_time_waiting_for_the_store() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                db.add_run_fixture(
+                    &json!({ "id": "deadline-fixture", "taskId": "deadline", "status": "running" }),
+                    None,
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let checkpoint = std::sync::Arc::new(Checkpoint::new(
+            store.clone(),
+            "deadline-fixture".into(),
+            RunCheckpoint::fresh(Some(100)),
+        ));
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let blocking_store = store.clone();
+        let blocker = tokio::spawn(async move {
+            blocking_store
+                .transaction(move |_| {
+                    let _ = entered_tx.send(());
+                    release_rx.recv().unwrap();
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        });
+        entered_rx.await.unwrap();
+        let writer = checkpoint.clone();
+        let update = tokio::spawn(async move {
+            writer
+                .update(|saved| saved.terminal_code = Some(Some(0)))
+                .await
+                .unwrap();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        release_tx.send(()).unwrap();
+        blocker.await.unwrap();
+        update.await.unwrap();
+        let saved = RunCheckpoint::load(&store, "deadline-fixture")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.terminal_code(), Some(0));
+        assert_eq!(saved.remaining_ms, Some(Some(0)));
+        assert!(checkpoint.expired());
+        store
+            .transaction(move |db| {
+                assert!(!super::super::schedule::finish_recovery(
+                    db,
+                    "deadline-fixture",
+                    Some(&saved)
+                )?);
+                let state = db.run_state("deadline-fixture")?.unwrap();
+                assert_eq!(state.status, RunStatus::Failed);
+                assert_eq!(state.error.as_deref(), Some("Run exceeded its time limit."));
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
