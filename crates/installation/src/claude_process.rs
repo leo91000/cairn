@@ -782,8 +782,15 @@ impl Turn<'_> {
                 }))
                 .await;
         }
+        // A synthetic answer is Claude Code's own explanation, such as a tool it refused.
+        let explanation = text(answer, "response")
+            .trim()
+            .trim_start_matches('(')
+            .trim_end_matches(')');
         let error = if response["subtype"] == "error" && !text(response, "error").is_empty() {
             text(response, "error")
+        } else if answer["synthetic"] == true && !explanation.is_empty() {
+            explanation
         } else {
             "Claude Code could not answer this side question."
         };

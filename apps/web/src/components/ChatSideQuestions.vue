@@ -102,6 +102,16 @@ function show(item = '') {
   markSeen()
 }
 
+/** Each question's status, shown while it waits or was withdrawn and always read out. */
+function spoken(question: ChatSideQuestion) {
+  return {
+    pending: 'Answering…',
+    answered: 'Answered',
+    failed: 'Not answered',
+    cancelled: 'Withdrawn',
+  }[question.status]
+}
+
 function key(event: KeyboardEvent) {
   if (event.shiftKey || event.isComposing)
     return
@@ -154,6 +164,9 @@ defineExpose({ ask, show })
 </script>
 
 <template>
+  <p class="sr-only" role="status">
+    {{ pending.length || unread.length ? `Side ${pending.length + unread.length > 1 ? 'questions' : 'question'} · ${status}` : '' }}
+  </p>
   <div v-if="pending.length || unread.length" class="mb-3 flex items-center gap-3 rounded-xl border border-line bg-surface px-3 py-2.5">
     <span class="grid size-8 shrink-0 place-items-center rounded-lg bg-accent/10 text-accent"><Icon :name="MessageSquareQuote" :size="16" /></span>
     <button class="min-w-0 flex-1 text-left" @click="show()">
@@ -225,15 +238,16 @@ defineExpose({ ask, show })
             {{ question.text }}
           </p>
           <div class="mt-2.5 text-sm">
-            <p v-if="question.status === 'pending'" class="flex items-center gap-2 text-xs text-muted" role="status">
-              <span class="size-1.5 animate-pulse rounded-full bg-accent" />Answering…
+            <!-- One persistent status per question, read out when the answer arrives. -->
+            <p
+              :class="question.status === 'pending' || question.status === 'cancelled' ? 'flex items-center gap-2 text-xs text-muted' : 'sr-only'"
+              role="status"
+            >
+              <span v-if="question.status === 'pending'" class="size-1.5 animate-pulse rounded-full bg-accent" />{{ spoken(question) }}
             </p>
-            <Markdown v-else-if="question.status === 'answered'" :content="question.answer ?? ''" />
+            <Markdown v-if="question.status === 'answered'" :content="question.answer ?? ''" />
             <p v-else-if="question.status === 'failed'" class="text-xs text-danger">
               {{ question.error }}
-            </p>
-            <p v-else class="text-xs text-muted">
-              Withdrawn
             </p>
           </div>
           <div class="mt-2.5 flex items-center justify-between gap-3 text-xs text-muted">

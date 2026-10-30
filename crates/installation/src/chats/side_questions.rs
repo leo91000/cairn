@@ -43,7 +43,27 @@ const OPEN: &str = "chat-side-question-open:";
 #[serde(rename_all = "camelCase")]
 struct Open {
     run_id: String,
+    /// The turn asked about: its run continues with other turns under the same identifier.
+    #[serde(default)]
+    turn: String,
     status: SideQuestionStatus,
+}
+
+/// The turn a run is working on.
+fn turn(run: &Value) -> &str {
+    text(&run["chatExecution"], "messageId")
+}
+
+/// Whether `run` is still the turn an open question was asked during. A queued run that
+/// recovers this turn keeps it; one that waits, stopped or moved on does not.
+fn answers(run: Option<&Value>, open: &Open) -> bool {
+    run.is_some_and(|run| {
+        matches!(
+            RunStatus::of(run),
+            Some(RunStatus::Running | RunStatus::Queued)
+        ) && text(run, "id") == open.run_id
+            && turn(run) == open.turn
+    })
 }
 
 fn side_question_prefix(chat: &str) -> String {
@@ -96,22 +116,32 @@ fn find(db: &Db<'_>, chat: &str, id: &str) -> Result<Option<ChatSideQuestion>> {
 }
 
 fn save(db: &Db<'_>, question: &ChatSideQuestion) -> Result<()> {
+    save_in_turn(db, question, None)
+}
+
+/// Saves the question, and its open marker while the reply may still receive it. The
+/// marker keeps the turn it was asked during unless `turn` names it.
+fn save_in_turn(db: &Db<'_>, question: &ChatSideQuestion, turn: Option<&str>) -> Result<()> {
     db.set_as(&key(&question.chat_id, &question.id), question, None)?;
     let open_key = open_key(&question.chat_id, &question.id);
     match question.status {
         SideQuestionStatus::Pending | SideQuestionStatus::Cancelled => {
+            let turn = match turn {
+                Some(turn) => turn.to_owned(),
+                None => db
+                    .kv_as::<Open>(&open_key)?
+                    .map(|open| open.turn)
+                    .unwrap_or_default(),
+            };
             let open = Open {
                 run_id: question.run_id.clone(),
+                turn,
                 status: question.status,
             };
             db.set_as(&open_key, &open, None)
         }
         _ => db.delete(&open_key),
     }
-}
-
-fn run_is_active(run: &Value) -> bool {
-    RunStatus::of(run).is_some_and(RunStatus::is_active)
 }
 
 /// Why the chat's current reply cannot take a side question, if it cannot.
@@ -140,6 +170,9 @@ pub(crate) fn unavailable(run: Option<&Value>) -> Option<&'static str> {
                 "This agent cannot answer side questions in Cairn. Ask in the conversation instead.",
             );
         }
+    }
+    if !run["cancelRequestedAt"].is_null() {
+        return Some("The reply is stopping. Ask in the conversation once it continues.");
     }
     if is_compaction(run) {
         return Some("The conversation is compacting its context. Try again once it finishes.");
@@ -177,9 +210,14 @@ fn same_question(existing: &ChatSideQuestion, input: &SideQuestionInput) -> bool
 fn prune(db: &Db<'_>, chat_id: &str) -> Result<()> {
     let questions = side_questions(db, chat_id)?;
     let excess = questions.len().saturating_sub(MAX_KEPT);
+    // A withdrawal the reply has not received yet stays until it does.
+    let open = open(db, chat_id)?
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect::<HashSet<_>>();
     let settled = questions
         .iter()
-        .filter(|question| question.status != SideQuestionStatus::Pending)
+        .filter(|question| !open.contains(&question.id))
         .take(excess);
     for question in settled {
         db.delete(&key(chat_id, &question.id))?;
@@ -246,7 +284,7 @@ fn ask(
         created_at: now(),
         settled_at: None,
     };
-    save(db, &question)?;
+    save_in_turn(db, &question, Some(turn(&run)))?;
     prune(db, chat_id)?;
     Ok(question)
 }
@@ -275,10 +313,9 @@ pub(crate) fn deliveries(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<Vec<
     if !announced {
         return Ok(Vec::new());
     }
-    let run_id = text(run, "id");
     let mut questions = Vec::new();
     for (id, open) in open(db, chat_id)? {
-        if open.run_id != run_id {
+        if !answers(Some(run), &open) {
             continue;
         }
         if let Some(question) = find(db, chat_id, &id)? {
@@ -352,17 +389,13 @@ pub(crate) fn open_chats(db: &Db<'_>) -> Result<HashSet<String>> {
         .collect())
 }
 
-/// Side questions the chat's reply can no longer answer or withdraw, once it is
-/// not running.
+/// Side questions the chat's reply can no longer answer or withdraw: the turn they were
+/// asked during is not running any more.
 pub(crate) fn expire(db: &Db<'_>, chat_id: &str) -> Result<()> {
     let chat = conversation(db, chat_id)?;
     let run = db.run(chat.run_id.as_deref().unwrap_or(""))?;
-    let running = run.as_ref().is_some_and(run_is_active);
     for (id, open) in open(db, chat_id)? {
-        let current = run
-            .as_ref()
-            .is_some_and(|run| run["id"] == open.run_id.as_str());
-        if running && current {
+        if answers(run.as_ref(), &open) {
             continue;
         }
         let question = find(db, chat_id, &id)?;
@@ -394,6 +427,28 @@ pub(crate) fn view(
     chat.can_ask_side_question = reason.is_none();
     chat.side_question_reason = reason.map(str::to_owned);
     Ok(())
+}
+
+/// Removes side questions from a run's inbox before another execution reads it: only an
+/// execution that announced it can answer them, and it receives them again then.
+pub(crate) async fn forget_deliveries(run_directory: &std::path::Path) -> Result<()> {
+    let inbox = run_directory.join("chat-input").join("messages.json");
+    let Ok(bytes) = tokio::fs::read(&inbox).await else {
+        return Ok(());
+    };
+    let Ok(Value::Array(entries)) = serde_json::from_slice::<Value>(&bytes) else {
+        return Ok(());
+    };
+    let kept = entries
+        .iter()
+        .filter(|entry| {
+            !entry["sideQuestion"].is_object() && entry["sideQuestionCancelled"] != true
+        })
+        .collect::<Vec<_>>();
+    if kept.len() == entries.len() {
+        return Ok(());
+    }
+    crate::skills::atomic_write(&inbox, &serde_json::to_vec(&kept)?).await
 }
 
 impl Service {
@@ -579,6 +634,44 @@ mod tests {
         assert_eq!(expired.status, SideQuestionStatus::Failed);
         assert_eq!(expired.error.as_deref(), Some(EXPIRED));
         assert_eq!(after, (HashSet::new(), 3));
+    }
+
+    #[tokio::test]
+    async fn a_new_execution_reads_no_side_question_left_in_the_inbox() {
+        let root = tempfile::tempdir().unwrap();
+        let inbox = root.path().join("chat-input");
+        std::fs::create_dir(&inbox).unwrap();
+        let entries = json!([
+            { "id": "message-1", "text": "Steer" },
+            { "id": "side-question:a", "sideQuestion": { "id": "a", "text": "Why?" } },
+            { "id": "withdraw-side-question:b", "sideQuestionId": "b", "sideQuestionCancelled": true },
+        ]);
+        std::fs::write(inbox.join("messages.json"), entries.to_string()).unwrap();
+        forget_deliveries(root.path()).await.unwrap();
+        let kept: Value =
+            serde_json::from_slice(&std::fs::read(inbox.join("messages.json")).unwrap()).unwrap();
+        assert_eq!(kept, json!([{ "id": "message-1", "text": "Steer" }]));
+        // A run without an inbox yet has nothing to forget.
+        forget_deliveries(&root.path().join("missing"))
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn an_open_question_belongs_to_the_turn_it_was_asked_during() {
+        let open = Open {
+            run_id: "run".into(),
+            turn: "message-1".into(),
+            status: SideQuestionStatus::Pending,
+        };
+        let run = |status: &str, turn: &str| json!({ "id": "run", "status": status, "chatExecution": { "messageId": turn } });
+        assert!(answers(Some(&run("running", "message-1")), &open));
+        // Recovering the same turn keeps it; waiting, finishing or another turn does not.
+        assert!(answers(Some(&run("queued", "message-1")), &open));
+        assert!(!answers(Some(&run("waiting", "message-1")), &open));
+        assert!(!answers(Some(&run("succeeded", "message-1")), &open));
+        assert!(!answers(Some(&run("running", "message-2")), &open));
+        assert!(!answers(None, &open));
     }
 
     /// Local side-question record measurement against the conversation list

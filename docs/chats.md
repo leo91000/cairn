@@ -124,9 +124,11 @@ withdrawn; withdrawal does not affect the reply. Up to five can wait at once.
 | Codex | Unavailable. Its side conversations (`thread/fork`) keep tools Cairn cannot remove before the model runs, such as code-mode shell commands and subagents, and stopping a fork once a tool starts does not undo its effect ([ADR-0078](adr/0078-native-side-questions.md)). |
 | OpenCode | Unavailable: it has no side mechanism. |
 
-Codex and OpenCode conversations explain why instead of offering the action. No
-second coding agent with write access is started, and the conversation's own
-transcript never contains the side question.
+Codex and OpenCode conversations never offer the action, nor does a Claude reply
+that is starting, stopping or compacting, or a conversation between replies. The
+side-question panel, when its earlier questions open it, and the API and tools
+(`sideQuestionReason`) say why. No second coding agent with write access is started,
+and the conversation's own transcript never contains the side question.
 
 The adapter of the running turn announces when its native session can answer a
 side question. Before that (while starting, and again after a resume, retry or

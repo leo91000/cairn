@@ -294,7 +294,8 @@ impl Execution<'_> {
                 },
             )
             .await?;
-        private_dir(&self.directory).await
+        private_dir(&self.directory).await?;
+        crate::chats::side_questions::forget_deliveries(&self.directory).await
     }
 
     /// Refuses grants reduced since the run was queued. The run keeps the grants it

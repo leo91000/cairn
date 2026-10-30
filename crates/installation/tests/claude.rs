@@ -1251,6 +1251,10 @@ async fn a_finished_turn_withdraws_the_side_questions_it_is_still_answering() {
                         "a1b2c3d4-0000-4000-8000-000000000003",
                         "fixture:side-fail explain"
                     ),
+                    side_question(
+                        "a1b2c3d4-0000-4000-8000-000000000005",
+                        "fixture:side-tool run it"
+                    ),
                 ]),
             );
         }
@@ -1275,6 +1279,12 @@ async fn a_finished_turn_withdraws_the_side_questions_it_is_still_answering() {
     assert_eq!(
         events[failed]["error"],
         "Claude Code could not answer this side question."
+    );
+    // A tool Claude Code refused comes back as its own explanation.
+    let refused = outcome("a1b2c3d4-0000-4000-8000-000000000005");
+    assert_eq!(
+        events[refused]["error"],
+        "The model tried to call Bash instead of answering directly. Try rephrasing or ask in the main conversation."
     );
     assert!(
         !events

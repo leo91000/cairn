@@ -1535,6 +1535,12 @@ impl Service {
             {
                 continue;
             }
+            if side_open.contains(&chat.id) {
+                let chat_id = chat.id.clone();
+                self.store
+                    .transaction(move |db| side_questions::expire(db, &chat_id))
+                    .await?;
+            }
             let run = match chat.run_id.as_deref() {
                 Some(run) => Some(self.store.run(run).await?),
                 None => None,
@@ -1545,12 +1551,6 @@ impl Service {
                     self.publish_steering(&chat, run).await?;
                 }
                 continue;
-            }
-            if side_open.contains(&chat.id) {
-                let chat_id = chat.id.clone();
-                self.store
-                    .transaction(move |db| side_questions::expire(db, &chat_id))
-                    .await?;
             }
             let busy = run.as_ref().is_some_and(|run| {
                 active.contains(text(run, "id")) || run["recoveryPending"] == true

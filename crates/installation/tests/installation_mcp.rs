@@ -5481,10 +5481,77 @@ async fn side_questions_are_asked_withdrawn_and_answered_beside_the_running_repl
         .await
         .unwrap();
 
+    // A reply that is stopping, or switching coding agent, takes no new one.
+    s.store
+        .change_run(
+            &run_id,
+            cairn_installation::runs::RunChanges {
+                cancel_requested_at: Some(Some(1)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let stopping = call(
+        &s,
+        &configuration,
+        "ask_chat_side_question",
+        ask("Stopping?"),
+    )
+    .await;
+    assert!(stopping.to_string().contains("is stopping"), "{stopping}");
+    s.store
+        .change_run(
+            &run_id,
+            cairn_installation::runs::RunChanges {
+                cancel_requested_at: Some(None),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
     // Side questions never join the queue or the conversation.
     let detail = call(&s, &configuration, "get_chat", json!({ "chatId": chat_id })).await;
     assert_eq!(result(&detail)["messages"], json!([]));
     assert_eq!(result(&detail)["chat"]["pendingSideQuestions"], 0);
+
+    // The next turn of the same run never answers a question about the previous one.
+    let earlier = call(
+        &s,
+        &configuration,
+        "ask_chat_side_question",
+        ask("Earlier turn?"),
+    )
+    .await;
+    let earlier_id = result(&earlier)["id"].clone();
+    s.store
+        .update_run_boundary(
+            &run_id,
+            json!({ "chatExecution": { "messageId": "next-turn" } }),
+        )
+        .await
+        .unwrap();
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let inbox = std::fs::read_to_string(&inbox_path).unwrap();
+    assert!(!inbox.contains(earlier_id.as_str().unwrap()), "{inbox}");
+    let listed = call(
+        &s,
+        &configuration,
+        "list_chat_side_questions",
+        json!({ "chatId": chat_id }),
+    )
+    .await;
+    let earlier = result(&listed)["sideQuestions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|question| question["id"] == earlier_id)
+        .unwrap()
+        .clone();
+    assert_eq!(earlier["status"], "failed", "{earlier}");
 
     // Once the reply ends, a question it never answered says so.
     let third = call(

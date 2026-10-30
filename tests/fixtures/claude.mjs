@@ -176,9 +176,12 @@ else {
       const delay = asked.includes('fixture:side-slow') ? 3000 : 200
       sides.set(value.request_id, setTimeout(() => {
         sides.delete(value.request_id)
+        // Claude Code 2.1.308 denies tools and returns its own explanation as a synthetic answer.
         const response = asked.includes('fixture:side-fail')
           ? { response: null, synthetic: false }
-          : { response: `Side answer: ${asked}`, synthetic: false }
+          : asked.includes('fixture:side-tool')
+            ? { response: '(The model tried to call Bash instead of answering directly. Try rephrasing or ask in the main conversation.)', synthetic: true }
+            : { response: `Side answer: ${asked}`, synthetic: false }
         out({ type: 'control_response', response: { subtype: 'success', request_id: value.request_id, response } })
       }, delay))
       return

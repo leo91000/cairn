@@ -12,6 +12,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -157,6 +160,8 @@ internal fun SideQuestionCard(chat: Chat, side: SideQuestionState) {
                         unread.any { it.status == "answered" } -> "Question à côté · Réponse prête"
                         else -> "Question à côté · Sans réponse"
                     },
+                    // Announced when the answer arrives.
+                    Modifier.semantics { liveRegion = LiveRegionMode.Polite },
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.primary,
                 )
@@ -270,6 +275,8 @@ internal fun ColumnScope.SideQuestionPanel(
                         "Codex ne peut pas répondre aux questions à côté dans Cairn : ses conversations à côté peuvent encore utiliser des outils. Posez-la dans la conversation."
                     chat.provider == "opencode" ->
                         "OpenCode ne peut pas encore répondre aux questions à côté dans Cairn. Posez-la dans la conversation."
+                    chat.run?.cancelRequestedAt != null ->
+                        "La réponse s’arrête. Posez-la dans la conversation quand elle reprend."
                     chat.compaction?.running == true ->
                         "La conversation compacte son contexte. Réessayez une fois la compaction terminée."
                     else -> "Claude Code démarre encore sa réponse. Réessayez dans un instant."
@@ -329,37 +336,40 @@ private fun SideQuestionRow(
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.Medium,
             )
-            when (question.status) {
-                "pending" ->
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            Modifier.size(6.dp)
-                                .clip(CircleShape)
-                                .background(MaterialTheme.colorScheme.primary)
-                        )
-                        Spacer(Modifier.width(8.dp))
+            // The answer or failure is announced when it replaces « Réponse en cours… ».
+            Box(Modifier.semantics { liveRegion = LiveRegionMode.Polite }) {
+                when (question.status) {
+                    "pending" ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                Modifier.size(6.dp)
+                                    .clip(CircleShape)
+                                    .background(MaterialTheme.colorScheme.primary)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                "Réponse en cours…",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    "answered" ->
+                        Box(Modifier.testTag("side-question-answer")) {
+                            Markdown(question.answer.orEmpty())
+                        }
+                    "failed" ->
                         Text(
-                            "Réponse en cours…",
+                            question.error.orEmpty(),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    else ->
+                        Text(
+                            "Retirée",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
-                    }
-                "answered" ->
-                    Box(Modifier.testTag("side-question-answer")) {
-                        Markdown(question.answer.orEmpty())
-                    }
-                "failed" ->
-                    Text(
-                        question.error.orEmpty(),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                else ->
-                    Text(
-                        "Retirée",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                }
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 if (question.itemId.isNotEmpty())
