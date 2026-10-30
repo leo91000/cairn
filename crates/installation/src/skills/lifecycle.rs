@@ -158,7 +158,8 @@ pub(crate) async fn remove(
 ) -> Result<()> {
     super::name(name)?;
     let _mutation = s.skills.mutations.lock().await;
-    let _files = super::bundle::ACCESS.write().await;
+    let root = s.skills.root(project).await?;
+    let _files = super::bundle::access(&root).await.write_owned().await;
     let directory = s.skills.directory(name, project).await?;
     authority.recheck(s).await?;
     let key = format!("{scope}/{name}");
