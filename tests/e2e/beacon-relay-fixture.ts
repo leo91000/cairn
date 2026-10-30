@@ -1,3 +1,4 @@
+import type { Buffer } from 'node:buffer'
 import type { ChildProcess } from 'node:child_process'
 import { execFileSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
@@ -7,6 +8,7 @@ import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import process from 'node:process'
+import { setTimeout as delay } from 'node:timers/promises'
 import { NativeFixture } from './native-fixture'
 
 // Shared by journeys-beacon-relay and the network bench: real processes, fake mail only.
@@ -42,7 +44,7 @@ export async function beaconRelayFixture(port = 4395, listen = '127.0.0.1', dire
   }
 
   async function stop(child: ChildProcess) {
-    if (child.exitCode !== null || child.signalCode !== null)
+    if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null)
       return
     const exited = once(child, 'exit')
     child.kill('SIGTERM')
@@ -56,7 +58,7 @@ export async function beaconRelayFixture(port = 4395, listen = '127.0.0.1', dire
   }
 
   function beacon(databaseUrl = process.env.CAIRN_BEACON_TEST_DATABASE_URL, overrides: NodeJS.ProcessEnv = {}) {
-    return start('target/debug/cairn-beacon', {
+    const env = {
       CAIRN_BEACON_DATABASE_URL: databaseUrl,
       CAIRN_BEACON_ORIGIN: url,
       CAIRN_BEACON_LISTEN: `${listen}:${port}`,
@@ -64,7 +66,59 @@ export async function beaconRelayFixture(port = 4395, listen = '127.0.0.1', dire
       CAIRN_BEACON_EMAIL_KEY: 'fixture-only',
       CAIRN_BEACON_EMAIL_FROM: 'cairn@example.test',
       ...overrides,
-    })
+    }
+    const childEnv = { ...process.env, ...env }
+    const child = spawn('target/debug/cairn-beacon', [], { env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] })
+    children.push(child)
+    let output = ''
+    let listening = false
+    const retain = (chunk: Buffer) => {
+      output = (output + chunk.toString()).slice(-16384)
+      listening ||= output.includes('Beacon listening')
+    }
+
+    child.stdout.on('data', retain)
+    child.stderr.on('data', retain)
+    let spawnError: Error | undefined
+    child.on('error', error => spawnError = error)
+    const closed = new Promise<void>(resolve => child.once('close', () => resolve()))
+    const diagnostics = () => {
+      let safeOutput = output.replaceAll(/(https?:\/\/|postgres(?:ql)?:\/\/)[^\s/@][^\s/:@]*:[^\s/@]+@/gi, '$1<REDACTED>@')
+      for (const [key, value] of Object.entries(childEnv)) {
+        if (value && value.length >= 4 && /password|secret|token|credential|api.?key/i.test(key))
+          safeOutput = safeOutput.replaceAll(value, '<REDACTED>')
+      }
+
+      return { output: safeOutput, spawnError, listening }
+    }
+
+    return Object.assign(child, { diagnostics, closed })
+  }
+
+  async function waitForBeacon(child: ReturnType<typeof beacon>, timeoutMs = 60000) {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      if (child.exitCode !== null || child.signalCode !== null || child.diagnostics().spawnError) {
+        await child.closed
+        const { output, spawnError } = child.diagnostics()
+        throw new Error(`Beacon exited (code ${child.exitCode}, signal ${child.signalCode}): ${spawnError?.message ?? ''}\n${output}`)
+      }
+
+      // A healthy response from a different process must not establish readiness.
+      const { listening } = child.diagnostics()
+      const remainingMs = deadline - Date.now()
+      if (remainingMs <= 0)
+        break
+      const ready = listening && await fetch(`${url}/health`, { signal: AbortSignal.timeout(Math.min(1000, remainingMs)) }).then(response => response.ok).catch(() => false)
+      if (ready && Date.now() < deadline && child.exitCode === null && child.signalCode === null && !child.diagnostics().spawnError)
+        return
+
+      const waitMs = Math.min(100, deadline - Date.now())
+      if (waitMs > 0)
+        await delay(waitMs)
+    }
+
+    throw new Error(`Beacon did not become ready within ${timeoutMs}ms.\n${child.diagnostics().output}`)
   }
 
   async function close() {
@@ -81,6 +135,7 @@ export async function beaconRelayFixture(port = 4395, listen = '127.0.0.1', dire
     start,
     stop,
     beacon,
+    waitForBeacon,
     close,
   }
 }
