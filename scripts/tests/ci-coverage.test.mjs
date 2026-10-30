@@ -113,6 +113,22 @@ describe('parallel CI coverage', () => {
     expect(job['timeout-minutes'] * 60).toBeGreaterThan(requiredSeconds)
   })
 
+  it('downloads the published image outside the runtime smoke deadline', () => {
+    const steps = quality.jobs.image.steps
+    const smokeIndex = steps.findIndex(step => step.run?.includes('node tests/container-smoke.mjs'))
+    const pullIndex = steps.findIndex(step => step.run?.includes('docker --context default pull "$SMOKE_IMAGE"'))
+    expect(pullIndex).toBeGreaterThan(-1)
+    expect(pullIndex).toBeLessThan(smokeIndex)
+
+    const pull = steps[pullIndex]
+    // Locally built PR candidates already have the exact image and must not pull.
+    expect(pull.if).toBe('steps.target.outputs.local == \'\'')
+    expect(Number.isInteger(pull['timeout-minutes'])).toBe(true)
+    // Run 41110883520 spent the complete three-minute docker-run budget pulling.
+    expect(pull['timeout-minutes']).toBeGreaterThan(3)
+    expect(pull['timeout-minutes']).toBeLessThanOrEqual(10)
+  })
+
   it('keeps Android unit tests, lint and all device shards as publication prerequisites', () => {
     expect(android.jobs.check.strategy.matrix.task).toEqual(['testDebugUnitTest', 'lintDebug'])
     expect(android.jobs.device.strategy.matrix.shard).toContain('[1, 2, 3, 4]')
