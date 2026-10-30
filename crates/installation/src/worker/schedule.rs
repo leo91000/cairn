@@ -457,10 +457,6 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
         .as_ref()
         .is_some_and(|saved| saved.turn_pending == Some(true));
     let expected_checkpoint = checkpoint.clone();
-    let expected_attempt = checkpoint
-        .as_ref()
-        .and_then(RunCheckpoint::runner_id)
-        .map(str::to_owned);
     let recovery_deadline = if !parked && !new_turn {
         let id = run_id.to_owned();
         let expected = expected_checkpoint.clone();
