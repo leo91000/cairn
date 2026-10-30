@@ -248,6 +248,38 @@ async fn partial_guest_stdout_cannot_hide_controller_failure_after_exhausted_log
 }
 
 #[tokio::test]
+async fn interrupted_output_after_completion_records_one_safe_diagnostic() {
+    let mut fixture = Fixture::new().await;
+    fixture
+        .event(json!({ "type": "turn.completed", "usage": {} }))
+        .await;
+    fixture
+        .event(
+            json!({ "type": "runner.output_interrupted", "message": "sensitive-tool-credential" }),
+        )
+        .await;
+    fixture
+        .event(json!({ "type": "runner.output_interrupted" }))
+        .await;
+    let saved = fixture.checkpoint.snapshot().await;
+    assert!(saved.completed());
+    assert_eq!(saved.output_interrupted, Some(true));
+    let id = fixture.id.clone();
+    let events = fixture
+        .service
+        .store
+        .read(move |db| db.events_fixture(&id, 0, 1000))
+        .await
+        .unwrap();
+    let notices = events
+        .iter()
+        .filter(|event| text(event, "text").contains("Execution output was interrupted"))
+        .collect::<Vec<_>>();
+    assert_eq!(notices.len(), 1);
+    assert!(!notices[0].to_string().contains("sensitive-tool-credential"));
+}
+
+#[tokio::test]
 async fn controller_cleanup_does_not_replace_a_provider_failure_or_its_retry() {
     let mut fixture = Fixture::new().await;
     fixture

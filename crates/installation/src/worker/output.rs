@@ -286,8 +286,25 @@ pub(super) async fn record(
         return Ok(false);
     }
     if event["type"] == "runner.output_interrupted" {
+        if checkpoint
+            .read(|c| c.output_interrupted == Some(true))
+            .await
+        {
+            return Ok(false);
+        }
+        let id = id.to_owned();
         checkpoint
-            .update(|c| c.output_interrupted = Some(true))
+            .update_and_publish(
+                |c| c.output_interrupted = Some(true),
+                move |db| {
+                    db.event(
+                        &id,
+                        &EventKind::Status,
+                        "Execution output was interrupted; some activity may be missing.",
+                        None,
+                    )
+                },
+            )
             .await?;
         return Ok(false);
     }
