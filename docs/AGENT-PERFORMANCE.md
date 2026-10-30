@@ -174,6 +174,19 @@ through the shipped inventory function, not production HTTP or disk-transfer
 measurements. Keep raw measurements outside tracked files and include the
 reference comparison and host conditions in the PR description.
 
+To qualify native storage accounting with retained workspaces, run:
+
+```sh
+pnpm test:backend -p cairn-installation --test native_inventory_performance -- --ignored --nocapture --test-threads=1
+```
+
+This fixture reports 100 clean retained native caches with acknowledged S3
+publication metadata and released execution leases. It checks the actual
+`reclaimableBytes` result while varying frozen snapshots and prepared checkpoints.
+The ordinary regression also checks active work, pending recovery, moves,
+changed checkpoint ownership, dirty bytes, requested publications and clean
+queued resumes. No workspace is opened, uploaded or evicted by these tests.
+
 ## VM import timings
 
 VM imports emit structured records under the existing `cairn_performance` target.
