@@ -1,0 +1,42 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "AgentAccount": {
+      "additionalProperties": false,
+      "description": "A member account the owner allowed to use an agent (ADR-0075). The owner can use\nevery agent and is never listed. Entries belong to one membership.",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "grantedAt": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "accountId",
+        "grantedAt"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "accounts": {
+      "items": {
+        "$ref": "#/definitions/AgentAccount"
+      },
+      "type": "array"
+    },
+    "agentId": {
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "required": [
+    "agentId",
+    "accounts"
+  ],
+  "title": "ListAgentAccountsOutput",
+  "type": "object"
+}

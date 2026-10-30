@@ -99,10 +99,11 @@ async fn real_version13_database_preserves_accounts_usage_secrets_and_references
         assert!(uuid::Uuid::parse_str(&account.revision).is_ok());
     }
     assert_eq!(store.coding_accounts().await.unwrap().len(), 3);
+    // The later account access upgrade only adds the rollout of the existing agents.
     assert_eq!(
         rows(
             &db,
-            "SELECT json_array(key,data,expires) FROM kv ORDER BY key"
+            "SELECT json_array(key,data,expires) FROM kv WHERE key<>'agent-access-rollout' ORDER BY key"
         ),
         kv
     );
@@ -142,7 +143,7 @@ async fn real_version13_database_preserves_accounts_usage_secrets_and_references
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        18
+        19
     );
     assert_eq!(
         db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
@@ -291,7 +292,7 @@ async fn real_version12_database_completes_both_atomic_upgrades() {
     assert_eq!(
         db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        18
+        19
     );
     assert_eq!(direct_metadata(&db), vec![Vec::<String>::new(); 7]);
 }

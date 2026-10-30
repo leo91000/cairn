@@ -542,6 +542,32 @@ async fn converting_a_mission_retains_native_authority_and_rejects_unauthorized_
     assert_eq!(chat["nativeProvenanceUnknown"], false);
 }
 
+/// These members may use every agent: native authority is checked on its own, after
+/// account access to agents (ADR-0075), with the memberships of the native evidence.
+async fn members_use_every_agent(service: &Service) {
+    members_use_agents(service, &[(TRUSTED, "one"), (OTHER, "two")]).await;
+}
+
+async fn members_use_agents(service: &Service, members: &[(&str, &'static str)]) {
+    for agent in service.store.agents().await.unwrap() {
+        for &(account, access) in members {
+            common::relay_fixture::add_member(service, account, access).await;
+            let (agent, account) = (agent.id.to_string(), account.to_owned());
+            service
+                .store
+                .transaction(move |db| {
+                    db.0.execute(
+                        "INSERT OR IGNORE INTO agent_account_access VALUES(?1,?2,?3,0)",
+                        [agent, account, access.to_owned()],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+    }
+}
+
 struct Fixture {
     _root: tempfile::TempDir,
     service: Arc<Service>,
@@ -1149,19 +1175,48 @@ async fn native_authority_outage_preserves_automatic_vm_admission_and_vm_continu
             .await
             .unwrap();
         let (listener, address) = common::bind().await;
-        let requests = Arc::new(AtomicUsize::new(0));
-        let observed = requests.clone();
+        let native_requests = Arc::new(AtomicUsize::new(0));
+        let observed_native = native_requests.clone();
+        let membership_requests = Arc::new(AtomicUsize::new(0));
+        let observed_membership = membership_requests.clone();
+        let memberships = cairn_protocol::TaskAuthorPolicy {
+            owner: cairn_protocol::TaskAuthorGrant {
+                account_id: "fixture-owner".into(),
+                access_id: "fixture-owner".into(),
+                joined_at: None,
+            },
+            members: [(TRUSTED, "one"), (OTHER, "two")]
+                .into_iter()
+                .map(|(account, access)| cairn_protocol::TaskAuthorGrant {
+                    account_id: account.into(),
+                    access_id: access.into(),
+                    joined_at: Some(0),
+                })
+                .collect(),
+        };
         let server = tokio::spawn(async move {
             axum::serve(
                 listener,
-                Router::new().fallback(move || {
-                    observed.fetch_add(1, Ordering::SeqCst);
-                    async { StatusCode::SERVICE_UNAVAILABLE }
-                }),
+                Router::new()
+                    .route(
+                        "/api/relay/{installation}/task-authors",
+                        axum::routing::get(move || {
+                            observed_membership.fetch_add(1, Ordering::SeqCst);
+                            let memberships = memberships.clone();
+                            async move { axum::Json(memberships) }
+                        }),
+                    )
+                    .fallback(move || {
+                        observed_native.fetch_add(1, Ordering::SeqCst);
+                        async { StatusCode::SERVICE_UNAVAILABLE }
+                    }),
             )
             .await
             .unwrap();
         });
+        // Directing writes still confirm current memberships; only native authority
+        // is unavailable, independently of the account-access verification.
+        members_use_every_agent(&f.service).await;
         let identity_dir = f.service.config.data_dir.join("installation-relay");
         std::fs::create_dir_all(&identity_dir).unwrap();
         let identity = identity_dir.join("identity.json");
@@ -1170,18 +1225,20 @@ async fn native_authority_outage_preserves_automatic_vm_admission_and_vm_continu
         f.service.store.set("native-authority", json!({ "observedAt": now() - 30_000, "accounts": { TRUSTED: { "email": "trusted@example.test", "accessId": "one" } } }), None).await.unwrap();
 
         let (chat, run) = f.conversation().await;
-        assert_eq!(requests.load(Ordering::SeqCst) > 0, mixed);
+        assert!(membership_requests.load(Ordering::SeqCst) > 0);
+        assert_eq!(native_requests.load(Ordering::SeqCst) > 0, mixed);
         let placement = placement::reserve(&f.service, &run, &id()).await.unwrap();
         assert_eq!(placement["nodeId"], vm["id"]);
-        let before = requests.load(Ordering::SeqCst);
+        let before = native_requests.load(Ordering::SeqCst);
         policy::refresh_chat(&f.service, text(&chat, "id"))
             .await
             .unwrap();
         assert_eq!(
-            requests.load(Ordering::SeqCst),
+            native_requests.load(Ordering::SeqCst),
             before,
             "A concrete VM never requires native authority"
         );
+        let membership_before = membership_requests.load(Ordering::SeqCst);
         let (status, body) = f
             .call(
                 &f.trusted,
@@ -1191,7 +1248,8 @@ async fn native_authority_outage_preserves_automatic_vm_admission_and_vm_continu
             )
             .await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(requests.load(Ordering::SeqCst), before);
+        assert!(membership_requests.load(Ordering::SeqCst) > membership_before);
+        assert_eq!(native_requests.load(Ordering::SeqCst), before);
 
         let mut saved = f.service.store.run(text(&run, "id")).await.unwrap();
         saved["snapshot"]["agent"]["access"]["backend"] = "native".into();
@@ -1212,7 +1270,7 @@ async fn native_authority_outage_preserves_automatic_vm_admission_and_vm_continu
                 .is_err(),
             "A concrete native environment still requires fresh authority"
         );
-        assert!(requests.load(Ordering::SeqCst) > before);
+        assert!(native_requests.load(Ordering::SeqCst) > before);
         server.abort();
     }
 }
@@ -1387,6 +1445,7 @@ impl Fixture {
         body: Value,
         owner: bool,
     ) -> (StatusCode, Value) {
+        members_use_every_agent(&self.service).await;
         let mut request = session
             .authorize(
                 Request::builder()
@@ -3184,12 +3243,14 @@ async fn mission_authority(f: &Fixture) -> tokio::task::JoinHandle<()> {
         owner: cairn_protocol::TaskAuthorGrant {
             account_id: TRUSTED.into(),
             access_id: "one".into(),
+            joined_at: None,
         },
         members: [(OTHER, "two"), ("fixture-owner", "fixture-owner")]
             .into_iter()
             .map(|(account, access)| cairn_protocol::TaskAuthorGrant {
                 account_id: account.into(),
                 access_id: access.into(),
+                joined_at: None,
             })
             .collect(),
     })
@@ -3224,6 +3285,7 @@ async fn editing_a_vm_task_cannot_replace_its_authors_with_a_native_trusted_edit
         .agent_fixture(json!({ "name": "VM task agent" }), None)
         .await
         .unwrap();
+    members_use_agents(&f.service, &[(OTHER, "two")]).await;
     let task = f
         .service
         .task_as_fixture(
@@ -3283,6 +3345,7 @@ async fn native_tasks_retain_previous_directing_editors_and_current_author_right
     let author =
         auth::InstallationIdentity::trusted(auth::InstallationRole::Member, "fixture-owner");
     let editor = auth::InstallationIdentity::trusted(auth::InstallationRole::Owner, TRUSTED);
+    members_use_agents(&f.service, &[("fixture-owner", "fixture-owner")]).await;
     let task = f
         .service
         .task_as_fixture(

@@ -21,6 +21,64 @@ test.beforeAll(async () => {
 test.afterAll(async () => server?.close())
 test.setTimeout(60_000)
 
+for (const highlighted of [false, true]) {
+  test(`revoking access dismisses ${highlighted ? 'a highlighted' : 'an opened'} question until a fresh action`, async ({ page }) => {
+    const mutations: string[] = []
+    await page.route('**/api/chats/chat/questions/question/{answer,cancel}', async (route) => {
+      mutations.push(new URL(route.request().url()).pathname.split('/').at(-1)!)
+      await route.fulfill({ json: { status: 'answering' } })
+    })
+    await page.goto(`${address}scripts/fixtures/questionnaire.html`)
+    await page.waitForFunction(() => window.questionnaire)
+    await page.evaluate((highlighted) => {
+      window.questionnaire([{ id: 'plan', title: 'Which plan?' }])
+      if (highlighted)
+        window.questionnaireHighlight('question')
+    }, highlighted)
+    if (!highlighted)
+      await page.getByRole('button', { name: 'Answer', exact: true }).click()
+
+    const dialog = page.getByRole('dialog', { name: 'Your input', exact: true })
+    await expect(dialog).toBeVisible()
+    await dialog.getByRole('textbox', { name: 'Your answer', exact: true }).fill('Ship it')
+    await expect(dialog.getByRole('button', { name: 'Send answer', exact: true })).toBeEnabled()
+
+    await page.evaluate(() => window.questionnaireAccess(true))
+    await expect(dialog).toHaveCount(0)
+    await expect(page.getByRole('status')).toContainText('Waiting for someone with access to this agent')
+    await expect(page.getByRole('button', { name: 'Answer', exact: true })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Send answer', exact: true })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'No longer needed', exact: true })).toHaveCount(0)
+    // A refreshed pending question must not revive the old highlighted dialog.
+    await page.evaluate(() => window.questionnaire([{ id: 'plan', title: 'Which plan?' }]))
+    await expect(dialog).toHaveCount(0)
+    expect(mutations).toEqual([])
+
+    await page.evaluate(() => window.questionnaireAccess(false))
+    await expect(page.getByRole('button', { name: 'Answer', exact: true })).toBeVisible()
+    await expect(dialog).toHaveCount(0)
+    await page.evaluate(() => window.questionnaire([{ id: 'plan', title: 'Which plan?' }]))
+    await expect(dialog).toHaveCount(0)
+    expect(mutations).toEqual([])
+
+    if (highlighted) {
+      await page.evaluate(() => window.questionnaireHighlight())
+      await page.evaluate(() => window.questionnaireHighlight('question'))
+    }
+    else {
+      await page.getByRole('button', { name: 'Answer', exact: true }).click()
+    }
+
+    await expect(dialog).toBeVisible()
+    if (highlighted)
+      await dialog.getByRole('button', { name: 'Send answer', exact: true }).click()
+    else
+      await dialog.getByRole('button', { name: 'No longer needed', exact: true }).click()
+    await expect(dialog).toHaveCount(0)
+    expect(mutations).toEqual([highlighted ? 'answer' : 'cancel'])
+  })
+}
+
 for (const width of [1440, 390]) {
   test(`multiple choices keep their comment and enforce the complete group at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 844 })

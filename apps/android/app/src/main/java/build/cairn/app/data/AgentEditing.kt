@@ -28,6 +28,7 @@ enum class AgentSection(val title: String) {
     Identity("Identité & instructions"),
     Engine("Moteur & modèle"),
     Advanced("Avancé"),
+    People("Qui peut l’utiliser"),
 }
 
 /** Sections the server fixes for the main agent: always everything, including future ones. */

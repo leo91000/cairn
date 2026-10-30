@@ -162,6 +162,16 @@ fun RunScreen(
             ?.finishedAt
             ?.let { "task:${run.taskId}" to it },
     )
+    // Members direct only runs whose agent they may use; a conversation's run follows its
+    // conversation, including a delegated task's requester (ADR-0075).
+    val chats = LocalFilSnapshot.current?.conversations?.state?.chats.orEmpty()
+    val directable =
+        run?.let { current ->
+            chats
+                .find { it.id == current.taskId }
+                ?.let { canDirectChat(state.usableAgents, it, chats) }
+                ?: canUseAgent(state.usableAgents, current.snapshot?.agent?.id)
+        } ?: true
     val events = live.events
     val more = live.catchingUp
     val timelineKeys = remember(id) { TimelineKeys() }
@@ -266,10 +276,17 @@ fun RunScreen(
                                     details = true
                                 },
                             )
+                            // A retry starts the task again on its current agent (ADR-0075).
+                            val retryable =
+                                state.tasks
+                                    .find { it.id == current.taskId }
+                                    ?.let { canUseAgent(state.usableAgents, it.agentId) }
+                                    ?: directable
                             if (
                                 !current.active &&
                                     current.resumeAvailable &&
-                                    current.trigger != "chat"
+                                    current.trigger != "chat" &&
+                                    directable
                             )
                                 DropdownMenuItem(
                                     text = { Text("Reprendre") },
@@ -279,7 +296,7 @@ fun RunScreen(
                                         vm.perform { api.resumeRun(ResumeRunInput(id)) }
                                     },
                                 )
-                            if (!current.active && current.trigger != "chat")
+                            if (!current.active && current.trigger != "chat" && retryable)
                                 DropdownMenuItem(
                                     text = { Text("Relancer") },
                                     enabled = !state.busy,
@@ -301,6 +318,7 @@ fun RunScreen(
                                 )
                             if (
                                 current.trigger != "chat" &&
+                                    directable &&
                                     current.status == "succeeded" &&
                                     current.sessionId != null &&
                                     current.workspaceCleanedAt == null
@@ -563,8 +581,10 @@ fun RunScreen(
                                     ?: if (current.workspaceCleanedAt != null) "Worktree nettoyé"
                                     else "Pas encore préparé"
                             )
+                            // Cleaning up needs access to the run's agent (ADR-0075).
                             if (
                                 !current.active &&
+                                    directable &&
                                     current.workspace != null &&
                                     !current.isolated &&
                                     (current.snapshot?.task?.worktree == true)

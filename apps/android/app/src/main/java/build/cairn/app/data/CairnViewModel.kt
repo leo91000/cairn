@@ -21,6 +21,7 @@ import build.cairn.contracts.listMcps
 import build.cairn.contracts.listMissions
 import build.cairn.contracts.listModels
 import build.cairn.contracts.listProjects
+import build.cairn.contracts.listUsableAgents
 import build.cairn.contracts.markRead
 import build.cairn.contracts.setOutcomeAside
 import java.io.IOException
@@ -62,6 +63,8 @@ data class Workspace(
     /** The workspace could not be reached; cleared on its own once a request succeeds again. */
     val connectionLost: Boolean = false,
     val agents: List<Agent> = emptyList(),
+    /** Agents a member may use; null for the owner, who uses every agent (ADR-0075). */
+    val usableAgents: List<String>? = null,
     val projects: List<Project> = emptyList(),
     val tasks: List<Task> = emptyList(),
     val skills: List<Skill> = emptyList(),
@@ -200,6 +203,9 @@ constructor(
         } else {
             mutable.update { it.copy(error = error.message ?: "Connexion impossible. Réessayez.") }
             val source = connection
+            // A refusal may come from agent access the owner just removed: show what remains.
+            if (error is ApiException && error.status == 403 && source != null)
+                viewModelScope.launch { refreshUsableAgents() }
             if (error is ApiException && error.status in setOf(403, 404) && source != null) {
                 viewModelScope.launch {
                     state.first { !it.busy }
@@ -781,6 +787,18 @@ constructor(
         val mcps = async {
             if (owner) target.listMcps(build.cairn.contracts.ListMcpsInput()).mcps else emptyList()
         }
+        // An older installation without the route offers every agent: the server decides.
+        // Any other failure fails the refresh like the other lists, offering nothing more.
+        val usable = async {
+            if (owner) null
+            else
+                try {
+                    target.listUsableAgents(build.cairn.contracts.ListAgentsInput()).agentIds
+                } catch (e: ApiException) {
+                    if (e.status != 404) throw e
+                    null
+                }
+        }
         val catalogs = codingAgents.associate { agent ->
             agent.provider to
                 async {
@@ -805,6 +823,7 @@ constructor(
                 tasks = tasks.await(),
                 skills = skills.await(),
                 mcps = mcps.await(),
+                usableAgents = usable.await(),
                 modelCatalogs = catalogs.mapValues { (_, catalog) -> catalog.await() },
             )
         if (connection === target && state.value.session.authenticated)
@@ -815,9 +834,32 @@ constructor(
                     tasks = updated.tasks,
                     skills = updated.skills,
                     mcps = updated.mcps,
+                    usableAgents = updated.usableAgents,
                     modelCatalogs = updated.modelCatalogs,
                 )
             }
+    }
+
+    /** A member's usable agents change whenever the owner gives or removes access (ADR-0075). */
+    suspend fun refreshUsableAgents() {
+        val target = connection ?: return
+        if (state.value.isOwner || !state.value.session.authenticated) return
+        val usable =
+            try {
+                target.listUsableAgents(build.cairn.contracts.ListAgentsInput()).agentIds
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                // The last known list stays; the server still decides.
+                return
+            }
+        if (connection === target && state.value.session.authenticated)
+            mutable.update { it.copy(usableAgents = usable) }
+    }
+
+    /** The installation's members, which the Beacon lists to its owner only. */
+    suspend fun installationSharing(): InstallationSharing {
+        val installation = checkNotNull(state.value.installation) { "Aucune installation ouverte." }
+        return api.get<InstallationSharing>("/installations/${segment(installation.id)}/sharing")
     }
 
     suspend fun refreshSkills() {

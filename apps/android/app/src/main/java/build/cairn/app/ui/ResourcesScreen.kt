@@ -78,11 +78,13 @@ fun ResourcesScreen(
                                     Modifier.weight(1f),
                                     style = MaterialTheme.typography.titleMedium,
                                 )
-                                ActionIcon(
-                                    "Discuter avec cet agent",
-                                    CairnIcons.Chat,
-                                    onClick = { chat(agent.id, "") },
-                                )
+                                // Members start conversations only with agents they may use.
+                                if (canUseAgent(state.usableAgents, agent.id))
+                                    ActionIcon(
+                                        "Discuter avec cet agent",
+                                        CairnIcons.Chat,
+                                        onClick = { chat(agent.id, "") },
+                                    )
                             }
                             if (agent.description.isNotBlank()) Text(agent.description)
                             Text(
@@ -114,7 +116,9 @@ fun ResourcesScreen(
                             ActionIcon(
                                 "Démarrer une conversation",
                                 CairnIcons.Chat,
-                                onClick = { chat(MAIN_AGENT_ID, project.id) },
+                                onClick = {
+                                    chat(defaultAgent(state.usableAgents, state.agents), project.id)
+                                },
                             )
                             if (state.isOwner) {
                                 ActionIcon(

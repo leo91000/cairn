@@ -27,7 +27,11 @@ profile, its defaults, credentials and portrait remain unchanged. Future task
 runs use the destination's defaults; existing conversations keep their last
 engine and model unless the user chooses another one. Subsequent turns use the
 destination's current access and preapproved live grants. The source profile,
-portrait and redundant live grants are removed. An `agent.merged` audit entry
+portrait and redundant live grants are removed, and so is the source's account
+access ([ADR-0075](adr/0075-plugin-hooks-rules-and-scoped-grants.md)): it never
+passes to the destination. A member who could use only the source no longer
+directs the moved conversations, and their moved scheduled tasks are suspended
+until the owner lets them use the destination. An `agent.merged` audit entry
 records the source, destination and transferred task/chat/run counts.
 
 The operation requires two existing, different profiles. Main can only be the

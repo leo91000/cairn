@@ -35,7 +35,7 @@ struct Pool {
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-const DATABASE_VERSION: i64 = 18;
+const DATABASE_VERSION: i64 = 19;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -70,7 +70,7 @@ impl Store {
         let fresh = !file.exists();
         let mut writer = Connection::open(&file)?;
         let mut version: i64 = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if !fresh && !matches!(version, 11 | 12 | 13 | 14 | 15 | 16 | 17 | DATABASE_VERSION) {
+        if !fresh && !matches!(version, 11..=DATABASE_VERSION) {
             return Err(Error::bad(
                 "Unsupported installation database version; use a compatible release or an explicit migration.",
             ));
@@ -83,7 +83,7 @@ impl Store {
             version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
             // Another startup can finish later atomic steps while this one
             // waits for the inventory migration's immediate transaction.
-            if !matches!(version, 12 | 13 | 14 | 15 | 16 | 17 | DATABASE_VERSION) {
+            if !matches!(version, 12..=DATABASE_VERSION) {
                 upgraded?;
             }
         }
@@ -97,7 +97,7 @@ impl Store {
                 tx.execute_batch("CREATE TABLE direct_read_authorizations(grant_id TEXT NOT NULL,object TEXT NOT NULL,hash TEXT NOT NULL,run_id TEXT NOT NULL,PRIMARY KEY(grant_id,object));CREATE INDEX direct_read_authorizations_object ON direct_read_authorizations(object);")?;
                 tx.execute_batch(crate::nodes::journal_acknowledgements::SCHEMA)?;
                 tx.pragma_update(None, "user_version", 13)?;
-            } else if !matches!(current, 13 | 14 | 15 | 16 | 17 | DATABASE_VERSION) {
+            } else if !matches!(current, 13..=DATABASE_VERSION) {
                 return Err(Error::bad(
                     "Unexpected installation database version during direct storage upgrade.",
                 ));
@@ -123,6 +123,10 @@ impl Store {
         }
         if !fresh && version == 17 {
             crate::reads::migration::upgrade(&mut writer)?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        }
+        if !fresh && version == 18 {
+            crate::agent_access::upgrade(&mut writer)?;
         }
         if fresh {
             let tx = writer.transaction()?;
@@ -162,6 +166,7 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
             tx.execute_batch(crate::reads::sql::SCHEMA)?;
             tx.execute_batch(crate::waits::sql::SCHEMA)?;
             tx.execute_batch(crate::chats::engine_switch::SCHEMA)?;
+            tx.execute_batch(crate::agent_access::SCHEMA)?;
             tx.commit()?;
         }
         // total_changes also counts rows undone by a transition savepoint. Keep
@@ -1211,7 +1216,7 @@ mod schema_tests {
 
     #[test]
     fn existing_other_versions_fail_without_changing_the_database() {
-        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 19, 99] {
+        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 99] {
             let root = tempfile::tempdir().unwrap();
             let db = Connection::open(root.path().join("manager.db")).unwrap();
             db.pragma_update(None, "user_version", version).unwrap();

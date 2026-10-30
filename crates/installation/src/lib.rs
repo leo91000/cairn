@@ -1,4 +1,5 @@
 pub mod accounts;
+pub(crate) mod agent_access;
 pub mod agent_avatars;
 pub mod agent_grants;
 mod agent_merge;
@@ -102,3 +103,8 @@ pub(crate) mod node_fixture;
 #[cfg(test)]
 #[path = "../tests/common/account_fixture.rs"]
 pub(crate) mod account_fixture;
+
+#[cfg(test)]
+#[path = "../tests/common/relay_fixture.rs"]
+#[allow(dead_code)]
+pub(crate) mod relay_fixture;

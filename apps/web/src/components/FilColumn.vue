@@ -12,6 +12,7 @@ import {
 import { useRouter } from 'vue-router'
 import { runMission as queueMission } from '../../../../packages/contracts/generated/runMission'
 import { setMissionState } from '../../../../packages/contracts/generated/setMissionState'
+import { canDirectChat, canUseAgent } from '../agent-use'
 import {
   api,
   notify,
@@ -68,7 +69,7 @@ const now = ref(Date.now())
 const clock = setInterval(() => now.value = Date.now(), 30000)
 onBeforeUnmount(() => clearInterval(clock))
 
-const fil = computed(() => filOf(props.chats, state.tasks, runs.value, localReads, now.value))
+const fil = computed(() => filOf(props.chats, state.tasks, runs.value, localReads, now.value, state.usableAgents))
 const opened = (item: FilItem) => (item.chatId && item.chatId === props.selected) || (item.runId && item.runId === props.selectedRun)
 
 // Finished work opened from For you stays there, read, while it is open: it moves to Recent once
@@ -166,7 +167,10 @@ function tone(item: FilItem) {
 }
 
 function action(item: FilItem) {
-  return item.kind === 'question' ? 'Answer' : item.kind === 'failed' ? 'Resume' : isUnread(item) && !read(item) ? 'Read' : 'Open'
+  // A delegated task may also be directed through its requesting conversation's agent.
+  const chat = item.chatId ? props.chats.find(chat => chat.id === item.chatId) : undefined
+  const usable = chat ? canDirectChat(state.usableAgents, chat, props.chats) : canUseAgent(state.usableAgents, item.agentKey)
+  return item.kind === 'question' ? (usable ? 'Answer' : 'Open') : item.kind === 'failed' ? (usable ? 'Resume' : 'Open') : isUnread(item) && !read(item) ? 'Read' : 'Open'
 }
 
 function open(item: FilItem) {
@@ -371,7 +375,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
                 </button>
                 <div class="flex gap-1.5 px-4 pb-3.5 pl-[62px]">
                   <button
-                    v-if="item.kind === 'failed-mission'"
+                    v-if="item.kind === 'failed-mission' && canUseAgent(state.usableAgents, item.agentKey)"
                     type="button"
                     :aria-label="`Run “${item.title}” again`"
                     class="press flex h-8 items-center gap-1.5 rounded-full bg-coral-soft px-3 text-[12.5px] font-semibold text-coral"
@@ -429,6 +433,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
                         <Icon :name="Clock" :size="16" />Remind me tomorrow
                       </button>
                       <button
+                        v-if="canUseAgent(state.usableAgents, item.agentKey)"
                         type="button"
                         role="menuitem"
                         tabindex="-1"

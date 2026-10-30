@@ -11,6 +11,7 @@ import { listAgents } from '../../../packages/contracts/generated/listAgents'
 import { listMcps } from '../../../packages/contracts/generated/listMcps'
 import { listMissions } from '../../../packages/contracts/generated/listMissions'
 import { listProjects } from '../../../packages/contracts/generated/listProjects'
+import { listUsableAgents } from '../../../packages/contracts/generated/listUsableAgents'
 import { beaconOrigin, installationHost } from './beacon-location'
 import { clientPerformance } from './client-performance'
 import { ProtocolMismatch } from './direct-channel'
@@ -37,6 +38,8 @@ export const state = reactive({
   accountId: '',
   installationRole: 'owner' as 'owner' | 'member',
   agents: [] as Agent[],
+  // Agents a member may use; null for the owner, who uses every agent (ADR-0075).
+  usableAgents: null as string[] | null,
   projects: [] as Project[],
   tasks: [] as Task[],
   skills: [] as Skill[],
@@ -287,6 +290,10 @@ async function requestOnce<T = any>(
   if (!response.ok) {
     if (response.status === 401)
       state.authenticated = false
+    // A refused change may come from access the owner just removed: show what remains.
+    const method = (options.method || 'GET').toUpperCase()
+    if (response.status === 403 && method !== 'GET' && method !== 'HEAD')
+      void refreshUsableAgents()
     const message = typeof data?.error === 'string' ? data.error : ''
     const failure = new ApiError(message || 'Request failed. Please try again.', response.status)
     if (response.status >= 502 && response.status <= 504 && (!message || relayUnavailable.has(message.replace(/\.$/, ''))))
@@ -441,14 +448,24 @@ export async function refreshSkills() {
 
 export async function refresh() {
   const scope = connectionScope()
-  let lists: [Agent[], Project[], Task[], Skill[], McpView[]]
+  let lists: [Agent[], Project[], Task[], Skill[], McpView[], string[] | null]
   try {
+    const owner = state.installationRole === 'owner'
     lists = await Promise.all([
       listAgents(api, {}).then(output => output.agents),
       listProjects(api, {}).then(output => output.projects),
       listMissions(api, {}).then(output => output.tasks),
       api<Skill[]>('/skills'),
-      state.installationRole === 'owner' ? listMcps(api, {}).then(result => result.mcps) : Promise.resolve([]),
+      owner ? listMcps(api, {}).then(result => result.mcps) : Promise.resolve([]),
+      // An older installation without the route offers every agent: the server decides.
+      // Any other failure fails the refresh like the other lists, offering nothing more.
+      owner
+        ? Promise.resolve(null)
+        : listUsableAgents(api, {}).then(output => output.agentIds, (error) => {
+            if (error instanceof ApiError && error.status === 404)
+              return null
+            throw error
+          }),
     ])
   }
   catch (error) {
@@ -459,15 +476,38 @@ export async function refresh() {
 
   if (connectionScope() !== scope || !state.authenticated || state.signingOut)
     return
-  const [agents, projects, tasks, skills, mcps] = lists
+  const [agents, projects, tasks, skills, mcps, usableAgents] = lists
   Object.assign(state, {
     agents,
     projects,
     tasks,
     skills,
     mcps,
+    usableAgents,
     workspaceLoaded: true,
   })
+}
+
+let usableRefresh: Promise<void> | null = null
+
+/** A member's usable agents change whenever the owner gives or removes access (ADR-0075). */
+export function refreshUsableAgents() {
+  if (state.installationRole !== 'member' || !state.authenticated || state.signingOut)
+    return Promise.resolve()
+  usableRefresh ??= (async () => {
+    const scope = connectionScope()
+    try {
+      const output = await listUsableAgents(api, {})
+      if (connectionScope() === scope && state.authenticated && !state.signingOut)
+        state.usableAgents = output.agentIds
+    }
+    // The last known list stays; the server still decides.
+    catch {}
+    finally {
+      usableRefresh = null
+    }
+  })()
+  return usableRefresh
 }
 
 export function date(value: number | null | undefined) {

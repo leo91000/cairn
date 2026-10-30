@@ -214,17 +214,24 @@ async fn member_identity_cannot_manage_installation_resources() {
 
 #[tokio::test]
 async fn member_identity_can_create_and_stream_conversations_without_a_local_session() {
-    let (_root, app, _service) = app().await;
-    let mut create = json_request("POST", "/api/chats")
-        .body(Body::from("{}"))
-        .unwrap();
-    create
-        .extensions_mut()
-        .insert(InstallationIdentity::trusted(
-            InstallationRole::Member,
-            "member-account",
-        ));
-    let response = send(&app, create).await;
+    let (_root, app, service) = app().await;
+    let create = || {
+        let mut create = json_request("POST", "/api/chats")
+            .body(Body::from("{}"))
+            .unwrap();
+        create
+            .extensions_mut()
+            .insert(InstallationIdentity::trusted(
+                InstallationRole::Member,
+                "member-account",
+            ));
+        create
+    };
+
+    // Members start conversations only with the agents the owner lets them use.
+    assert_eq!(send(&app, create()).await.status(), StatusCode::FORBIDDEN);
+    common::relay_fixture::allow_member(&service, "member-account", MAIN_AGENT_ID).await;
+    let response = send(&app, create()).await;
     assert_eq!(response.status(), StatusCode::OK);
     let chat = read_json(response).await;
 

@@ -56,6 +56,8 @@ import {
   skillKey,
   skillLabel,
 } from '../agent-access'
+import { useAgentPeople } from '../agent-people'
+import { accessSummary } from '../agent-use'
 import {
   api,
   ApiError,
@@ -68,6 +70,7 @@ import AgentAvatar from '../components/AgentAvatar.vue'
 import AgentMcpSection from '../components/AgentMcpSection.vue'
 import AgentNodesSection from '../components/AgentNodesSection.vue'
 import AgentOverview from '../components/AgentOverview.vue'
+import AgentPeopleSection from '../components/AgentPeopleSection.vue'
 import AgentPluginsSection from '../components/AgentPluginsSection.vue'
 import AgentPortraitEditor from '../components/AgentPortraitEditor.vue'
 import AgentReview from '../components/AgentReview.vue'
@@ -100,6 +103,7 @@ const isMain = computed(() => id.value === MAIN_AGENT_ID)
 const titles: Record<SectionId, string> = {
   identity: 'Identity & instructions',
   model: 'Coding agent & model',
+  people: 'Who can use it',
   projects: 'Projects',
   skills: 'Skills',
   mcps: 'MCP & tools',
@@ -111,6 +115,7 @@ const titles: Record<SectionId, string> = {
 }
 const navGroups: { title: string, items: SectionId[] }[] = [
   { title: 'Profile', items: ['identity', 'model'] },
+  { title: 'People', items: ['people'] },
   { title: 'Resource access', items: ['projects', 'skills', 'mcps', 'plugins'] },
   { title: 'Execution', items: ['nodes', 'sandbox'] },
   { title: 'Elevated rights', items: ['powers'] },
@@ -147,6 +152,19 @@ const leaving = ref(false)
 const pendingLeave = ref<string | null>(null)
 const deleting = ref(false)
 const heading = ref<HTMLElement>()
+// Account access applies immediately and never joins the unsaved profile draft.
+const people = useAgentPeople(computed(() => isNew.value || notFound.value ? null : id.value))
+// Until access loads, the overview neither claims the agent is private nor shared.
+const peopleLoading = computed(() => !isNew.value && !people.error.value && !people.outdated.value && !people.loaded.value)
+const peopleSummary = computed(() => isNew.value
+  ? { short: 'Only you', long: 'Only you' }
+  : people.outdated.value
+    ? { short: 'Everyone', long: 'Every member' }
+    : people.error.value
+      ? { short: 'Unavailable', long: 'Not loaded' }
+      : !people.loaded.value
+          ? { short: '', long: 'Loading…' }
+          : accessSummary(people.count.value))
 
 const context = computed<Context>(() => ({
   agentId: agent.value?.id,
@@ -231,6 +249,7 @@ const disabledMcps = computed(() => state.mcps.filter(connection => !connection.
 const summaries = computed<Record<SectionId, { short: string, long: string }>>(() => ({
   identity: { short: '', long: draft.value.description || 'Name, description, portrait and instructions' },
   model: { short: provider.value.label, long: [provider.value.label, draft.value.model || 'Default model'].join(' · ') },
+  people: peopleSummary.value,
   projects: !isMain.value && !state.workspaceLoaded ? { short: 'Unavailable', long: 'Not loaded' } : { short: isMain.value ? 'Fixed' : short(access.value.projects, state.projects.length), long: isMain.value ? 'All, including future' : selectionSummary(access.value.projects, state.projects.length) },
   skills: !isMain.value && !state.workspaceLoaded ? { short: 'Unavailable', long: 'Not loaded' } : { short: isMain.value ? 'Fixed' : short(access.value.skills, permittedSkills.value.length), long: isMain.value ? 'All, including future' : selectionSummary(access.value.skills, permittedSkills.value.length) },
   mcps: !isMain.value && !state.workspaceLoaded ? { short: 'Unavailable', long: 'Not loaded' } : { short: isMain.value ? 'Fixed' : short(access.value.mcps, state.mcps.length), long: isMain.value ? 'All, including future' : `${selectionSummary(access.value.mcps, state.mcps.length)}${limitedMcps.value.length ? ` · tools limited on ${limitedMcps.value.length}` : ''}${disabledMcps.value.length ? ` · ${disabledMcps.value.length} disabled` : ''}` },
@@ -346,6 +365,34 @@ const overview = computed(() => [
         summary: 'Conversation tools',
         detail: alwaysAvailable,
         action: 'View',
+      },
+    ],
+  },
+  {
+    title: 'Who can use it',
+    cards: [
+      {
+        id: 'people',
+        section: 'people' as const,
+        title: 'People',
+        summary: peopleSummary.value.long,
+        detail: peopleLoading.value
+          ? 'Checking which members can use it'
+          : people.outdated.value
+            ? 'Update the installation to choose who can use it'
+            : people.error.value
+              ? 'Who can use it could not be loaded'
+              : people.count.value
+                ? names(people.rows.value.filter(row => row.known && row.allowed).map(row => row.email), email => email)
+                : 'Members cannot start or continue its conversations',
+        chip: people.outdated.value
+          ? { tone: 'granted' as const, label: 'Everyone' }
+          : people.error.value
+            ? { tone: 'unavailable' as const, label: 'Unavailable' }
+            : peopleLoading.value
+              ? undefined
+              : people.count.value ? { tone: 'granted' as const, label: 'Shared' } : { tone: 'none' as const, label: 'Only you' },
+        action: 'Manage',
       },
     ],
   },
@@ -488,6 +535,7 @@ async function load() {
 
       apply(found)
       void loadSuspension()
+      void people.load()
     }
   }
   catch (e) {
@@ -973,6 +1021,24 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
             <p class="flex items-start gap-2 rounded-xl bg-soft px-4 py-3 text-xs leading-relaxed">
               <Icon :name="Info" :size="15" class="mt-px shrink-0" />Uses the shared {{ provider.label }} account pool from Connections. Choosing a model grants no permission.
             </p>
+          </template>
+
+          <template v-else-if="section === 'people'">
+            <AgentPeopleSection
+              :agent-name="saved.name"
+              :is-new="isNew"
+              :installation="saved.access.installation || access.installation"
+              :rows="people.rows.value"
+              :invited="people.invited.value"
+              :loading="people.loading.value"
+              :loaded="people.loaded.value"
+              :error="people.error.value"
+              :outdated="people.outdated.value"
+              :saving="people.saving.value"
+              :failure="people.failure.value"
+              @retry="people.load"
+              @change="people.setAccess"
+            />
           </template>
 
           <template v-else-if="isMain && mainLockedSections.includes(section)">

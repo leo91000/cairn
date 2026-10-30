@@ -1,8 +1,9 @@
 //! Notification events remain on the installation; only the Beacon owns devices and sends push.
 use crate::{
+    auth::{InstallationIdentity, InstallationRole},
     chats::{Question, QuestionStatus},
     config::now,
-    error::Result,
+    error::{Error, Result},
     service::Service,
     store::Db,
     validation::text,
@@ -21,6 +22,7 @@ fn enqueue_event(db: &Db<'_>, event: &NotificationEvent) -> Result<()> {
     Ok(())
 }
 
+/// A question reaches only the people who may answer it (ADR-0075).
 pub fn enqueue(db: &Db<'_>, question: &Question) -> Result<()> {
     enqueue_event(
         db,
@@ -30,6 +32,8 @@ pub fn enqueue(db: &Db<'_>, question: &Question) -> Result<()> {
             kind: NotificationKind::Question {
                 question_id: question.id.clone(),
             },
+            // A field-aware older Beacon must not trust an account-only snapshot.
+            members: Some(Vec::new()),
         },
     )
 }
@@ -45,6 +49,7 @@ pub fn enqueue_alert(db: &Db<'_>, alert: &Value) -> Result<()> {
                 title: text(alert, "title").chars().take(120).collect(),
                 body: text(alert, "body").chars().take(300).collect(),
             },
+            members: None,
         },
     )
 }
@@ -73,7 +78,7 @@ pub async fn pending(
 
             for (key, value) in pending {
                 // Old local deliveries are not registrations on the Beacon.
-                let Ok(event) = serde_json::from_value::<NotificationEvent>(value) else {
+                let Ok(mut event) = serde_json::from_value::<NotificationEvent>(value) else {
                     db.delete(&key)?;
                     continue;
                 };
@@ -90,6 +95,8 @@ pub async fn pending(
                         db.delete(&key)?;
                         continue;
                     }
+                    // Also restrict persisted events from before the recipient lookup.
+                    event.members = Some(Vec::new());
                 }
                 events.push(event);
                 if events.len() == limit {
@@ -97,6 +104,43 @@ pub async fn pending(
                 }
             }
             Ok(events)
+        })
+        .await
+}
+
+/// Internal Beacon maintenance lookup, never an account UI or agent capability.
+/// Beacon checks these entries against its current memberships under the sharing lock.
+pub(crate) async fn recipients(
+    service: &Service,
+    identity: Option<&InstallationIdentity>,
+    chat: &str,
+    question: &str,
+) -> Result<cairn_protocol::NotificationRecipients> {
+    if !identity.is_some_and(|identity| {
+        identity.role == InstallationRole::Owner
+            && identity.account_id.is_empty()
+            && identity.mcp_scopes.is_none()
+    }) {
+        return Err(Error::forbidden(
+            "Notification recipients require Beacon maintenance authority.",
+        ));
+    }
+    let (chat, question) = (chat.to_owned(), question.to_owned());
+    service
+        .store
+        .read(move |db| {
+            let pending = db
+                .question(&chat, &question)?
+                .is_some_and(|question| question.status == QuestionStatus::Pending);
+            let members = if pending {
+                match db.conversation(&chat)? {
+                    Some(chat) => crate::agent_access::chat_members(db, &chat)?,
+                    None => Vec::new(),
+                }
+            } else {
+                Vec::new()
+            };
+            Ok(cairn_protocol::NotificationRecipients { members })
         })
         .await
 }

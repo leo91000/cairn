@@ -335,10 +335,35 @@ installation's runs and other accounts remain unaffected. The installation
 receives the beacon account and role through its existing trusted identity.
 
 Members can read agents, projects and skills, and create conversations and work
-with agents. The installation refuses management of agents, projects, skills,
-nodes, coding-agent accounts, connections, secrets and settings. The web hides
-these actions and owner-only pages, skips owner-only requests in shared views,
-and offers skills for reading only.
+with the agents the owner lets them use: each agent page has an owner-only **Who can
+use it** section on web and Android ([ADR-0075](adr/0075-plugin-hooks-rules-and-scoped-grants.md)).
+A new agent is the owner's alone. At rollout, members retain access to existing
+agents only when their current membership's Beacon `joined_at` is strictly earlier
+than the stored upgrade cutoff (`upgradedAt`); later invitations and re-invitations
+receive no automatic access. Missing timestamp evidence from an older Beacon leaves
+the rollout pending with its original cutoff. A legacy pending rollout without a
+usable cutoff grants no automatic access; see [migration 0019](migrations/0019-agent-account-access.md).
+
+Starting,
+continuing (sending or editing a queued message, attaching files, resuming a paused
+queue, retrying or resuming a run, a fresh session, compacting, switching the coding
+agent), steering, answering or cancelling an agent's question, launching by hand,
+deleting or restoring a conversation and cleaning up a task run's workspace require
+access to its agent; creating or editing a task requires access to the agent it is
+saved on, so an author can move a suspended task to an agent they may use. Every
+member still sees every conversation and why it stopped, and can pause or stop any
+conversation or run and pause or archive any task. Renaming a conversation and
+removing a message still waiting in its queue stay open to every member too: neither
+makes the agent work. Access is checked when a message is sent or queued: a message a member queued
+while they had access is still delivered after the owner removes it, unless someone
+removes it from the queue first; their scheduled tasks on that agent are suspended.
+A delegated task's title is still shown to its requesting agent, as every
+title is to an agent with installation access. A delegated
+task can be directed with access to its requesting conversation's agent. The
+installation refuses management of agents, projects, skills, nodes, coding-agent
+accounts, connections, secrets and settings. The web hides these actions and
+owner-only pages, skips owner-only requests in shared views, and offers skills for
+reading only.
 
 ## Public deliverables and MCP access
 
@@ -600,6 +625,27 @@ transient failures or tunnel loss retry without interrupting agent execution.
 Delivery is at least once: interruption after a provider accepted a push can
 repeat it. Notification tags include the installation and event identifiers.
 Question payloads contain generic text and identifiers, never question fields.
+Question pushes reach the owner and the current memberships allowed to answer,
+through the conversation's agent or its active requesting conversation's agent
+([ADR-0075](adr/0075-plugin-hooks-rules-and-scoped-grants.md)). Immediately before
+each member device's provider attempt, Beacon asks the installation for the pending
+question's current eligible account and membership identifiers through its internal
+maintenance relay. This lookup reads local grants only. Beacon matches the returned
+membership identifier against its current membership under the sharing lock. A
+queued event therefore cannot preserve a revoked agent grant or an ended membership,
+including while delivery waits on another device or database lock. A provider
+attempt already admitted may finish. Owner notifications bypass the lookup, and
+alerts retain their existing owner-and-members audience.
+
+Transient recipient lookup failures keep member deliveries retryable. A missing,
+unsupported or incomplete lookup supplies no member eligibility: the question goes
+only to the owner. Current installations also send an empty legacy member list for
+questions, including persisted outbox events, so older Beacons that honor this list
+send only to the owner. Strict member question targeting requires an updated Beacon
+and installation; update Beacon first. Ancient Beacons that ignore the member list
+cannot acquire this guarantee from an additive change. Their historical delivery
+behavior is not covered by the current guarantee. Relay signatures and protocol
+frames are unchanged; the narrow maintenance response adds membership evidence.
 
 Successful deliveries are remembered per event and current device registration
 in process memory, across tunnel reconnects. An unavailable device therefore
@@ -735,8 +781,23 @@ restores commitments from an earlier membership of the same account.
 Removal, leaving and member account deletion request task reconciliation on the
 live relay after committing the access change. If that request is lost, the
 installation reconciles before admitting scheduled work and on reconnection.
-No account session or member list is persisted on the installation for access
-control. See [ADR-0029](adr/0029-sharing-whole-installations.md) for authorship,
+The same reconciliation drops the account access to agents of every ended
+membership, so a new invitation starts without any agent. Accepting an invitation
+also requests it, and before a member's access entry lets them direct an agent, the
+installation confirms memberships with a check started at or after that request's
+preflight. Concurrent requests may share a check that meets that boundary; an
+earlier cached check cannot admit a new directing write. If the Beacon cannot
+answer, directing writes return 503 even when a check within the last 30 seconds
+succeeded. Pending rollout evidence is also retried before denying a directing
+write, so an older Beacon's missing membership timestamps do not require a list
+request to recover once usable evidence becomes available. A member's list of
+usable agents refreshes when the last check is older than 30 seconds, but still
+answers when the Beacon cannot. A member's scheduled task
+on an agent they cannot use skips its
+occurrences, with a wait reason, until access returns. No account session or member
+list is persisted on the installation for access control; it keeps only, per agent,
+the accounts the owner allowed with the membership access identifier they were
+allowed in. See [ADR-0029](adr/0029-sharing-whole-installations.md) for authorship,
 manual work and public-link decisions.
 
 ## Installation subdomains

@@ -8,6 +8,8 @@ import UiButton from './UiButton.vue'
 defineProps<{
   quota: ChatQuota
   canManage: boolean
+  // Someone who cannot use the conversation's agent sees why it stopped, without its actions.
+  readOnly?: boolean
   busy?: boolean
   loading?: boolean
   choices?: { provider: Provider, label: string }[]
@@ -40,7 +42,7 @@ const emit = defineEmits<{ resume: [], switch: [provider: Provider], cancelSwitc
           </p>
         </div>
       </div>
-      <div v-if="!switching" class="flex flex-wrap items-center gap-2 phone:ml-[18px] phone:w-full">
+      <div v-if="!readOnly && !switching" class="flex flex-wrap items-center gap-2 phone:ml-[18px] phone:w-full">
         <UiButton
           v-for="choice in choices"
           :key="choice.provider"
@@ -65,7 +67,7 @@ const emit = defineEmits<{ resume: [], switch: [provider: Provider], cancelSwitc
         </UiButton>
       </div>
       <UiButton
-        v-else
+        v-else-if="!readOnly"
         size="small"
         :disabled="busy"
         @click="emit('cancelSwitch')"
@@ -89,7 +91,7 @@ const emit = defineEmits<{ resume: [], switch: [provider: Provider], cancelSwitc
     <p v-if="switchError" class="mt-2! mb-0! ml-[18px] text-xs text-warning" role="alert">
       {{ switchError }}
     </p>
-    <p v-if="!canManage && !choices?.length && !switching && !loading && !switchError" class="mt-2! mb-0! ml-[18px] text-xs text-muted">
+    <p v-if="!readOnly && !canManage && !choices?.length && !switching && !loading && !switchError" class="mt-2! mb-0! ml-[18px] text-xs text-muted">
       Ask the installation owner to check the accounts.
     </p>
   </section>

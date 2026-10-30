@@ -190,6 +190,7 @@ impl Fixture {
                 owner: cairn_protocol::TaskAuthorGrant {
                     account_id: "fixture-owner".into(),
                     access_id: "replacement-access".into(),
+                    joined_at: None,
                 },
                 members: Vec::new(),
             })

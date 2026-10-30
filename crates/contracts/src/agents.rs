@@ -396,6 +396,38 @@ pub struct MergeAgentsOutput {
     pub deleted: bool,
 }
 
+/// A member account the owner allowed to use an agent (ADR-0075). The owner can use
+/// every agent and is never listed. Entries belong to one membership.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentAccount {
+    pub account_id: String,
+    pub granted_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ListAgentAccountsOutput {
+    pub agent_id: AgentId,
+    pub accounts: Vec<AgentAccount>,
+}
+
+/// Owner-only, from the web and Android apps: never a public MCP or agent tool.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentAccountInput {
+    pub agent_id: AgentId,
+    #[schemars(length(min = 1, max = 100))]
+    pub account_id: String,
+}
+
+/// The agents the calling account may use: every agent for the owner.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UsableAgentsOutput {
+    pub agent_ids: Vec<AgentId>,
+}
+
 fn agent_creation_id<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<AgentId>, D::Error> {

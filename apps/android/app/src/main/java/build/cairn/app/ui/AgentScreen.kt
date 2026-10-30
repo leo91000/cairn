@@ -140,6 +140,12 @@ private fun AgentPage(
     val scope = rememberCoroutineScope()
     val agentId = baseline.id
     val main = agentId == MAIN_AGENT_ID
+    // Account access applies at once and never joins the profile draft.
+    val people = remember(agentId) { AgentPeople() }
+    var peopleAttempt by remember { mutableIntStateOf(0) }
+    LaunchedEffect(agentId, peopleAttempt, creating) {
+        if (!creating) people.load(vm, agentId)
+    }
 
     LaunchedEffect(agentId, nodesAttempt) {
         try {
@@ -420,6 +426,7 @@ private fun AgentPage(
                             errors.keys + listOfNotNull(errorSection),
                             changes.toSet(),
                             state.modelCatalog("codex").models,
+                            people,
                         ) {
                             section = it.name
                         }
@@ -492,6 +499,20 @@ private fun AgentPage(
                             draft = draft.copy(timeout = it)
                             saveError = null
                         }
+                    AgentSection.People ->
+                        PeopleSection(
+                            vm,
+                            state,
+                            people,
+                            agentId,
+                            baseline.name,
+                            creating,
+                            // Access applies at once to the saved agent: warn for either state.
+                            baseline.access.installation || draft.agent.access.installation,
+                            powerColors(),
+                            scope,
+                            retry = { peopleAttempt++ },
+                        )
                 }
             }
         }
@@ -803,6 +824,7 @@ private fun AgentOverview(
     changed: Set<AgentSection>,
     /** Codex's catalog, to name the agent's speed as its model runs it. */
     codexModels: List<CodingAgentModel>,
+    people: AgentPeople,
     open: (AgentSection) -> Unit,
 ) {
     val agent = draft.agent
@@ -969,6 +991,30 @@ private fun AgentOverview(
             changed = AgentSection.Advanced in changed,
         ) {
             open(AgentSection.Advanced)
+        }
+        Eyebrow("Personnes", Modifier.padding(start = 16.dp, top = 16.dp, bottom = 6.dp))
+        val allowed = people.rows.count { it.known && it.allowed }
+        OverviewRow(
+            AgentSection.People,
+            when {
+                creating -> agentAccessOverview(emptyList())
+                people.outdated -> "Mettez l’installation à jour pour choisir qui peut l’utiliser"
+                people.error != null -> NOT_LOADED
+                !people.loaded -> "Vérification des membres qui peuvent l’utiliser…"
+                else -> agentAccessOverview(people.rows)
+            },
+            chips = {
+                when {
+                    people.outdated -> ToneChip(PluginBadge("Tous les membres", PluginTone.OK))
+                    people.error != null ->
+                        ToneChip(PluginBadge("Indisponible", PluginTone.WARNING))
+                    creating || (people.loaded && allowed == 0) ->
+                        ToneChip(PluginBadge("Vous seul", PluginTone.MUTED))
+                    people.loaded -> ToneChip(PluginBadge("Partagé", PluginTone.OK))
+                }
+            },
+        ) {
+            open(AgentSection.People)
         }
     }
 }

@@ -201,6 +201,8 @@ internal fun ChatQuotaCard(
     switch: (String) -> Unit = {},
     cancelSwitch: () -> Unit = {},
     loading: Boolean = false,
+    // Someone who cannot use the conversation's agent sees why it stopped, without its actions.
+    readOnly: Boolean = false,
 ) {
     var expanded by rememberSaveable(quota.message) { mutableStateOf(false) }
     Surface(
@@ -257,7 +259,9 @@ internal fun ChatQuotaCard(
                         }
                 }
             }
-            if (switching != null) {
+            if (readOnly) {
+                // No actions: switching or resuming directs the agent.
+            } else if (switching != null) {
                 TextButton(onClick = cancelSwitch, enabled = !busy) {
                     Text("Annuler le changement")
                 }
@@ -309,7 +313,8 @@ internal fun ChatQuotaCard(
                 Text(it, color = signal.warning, style = MaterialTheme.typography.bodySmall)
             }
             if (
-                !canManage &&
+                !readOnly &&
+                    !canManage &&
                     choices.isEmpty() &&
                     switching == null &&
                     !loading &&
@@ -335,6 +340,7 @@ internal fun ChatQuotaRecovery(
     openConnections: () -> Unit,
     resume: () -> Unit,
     followConversation: () -> Unit,
+    readOnly: Boolean = false,
 ) {
     var options by remember(chat.id) { mutableStateOf<CodingAgentOptions?>(null) }
     var pending by remember(chat.id) { mutableStateOf<String?>(null) }
@@ -404,6 +410,7 @@ internal fun ChatQuotaRecovery(
         resume,
         choices = options?.choices.orEmpty(),
         loading = loading,
+        readOnly = readOnly,
         switching = switching?.let { codingAgent(it).label },
         switchError = failure ?: readFailure ?: options?.switching?.error,
         switch = { provider ->

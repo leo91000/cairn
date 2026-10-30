@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import process from 'node:process'
 import { chromium, expect, test } from '@playwright/test'
+import { MAIN_AGENT_ID } from '../../packages/contracts/constants'
 import { beaconRelayFixture, executeBeaconSql } from './beacon-relay-fixture'
 
 test('a member mutation refused behind another member upload succeeds exactly once through relay', async () => {
@@ -68,6 +69,14 @@ test('a member mutation refused behind another member upload succeeds exactly on
       await signIn(page, email)
       await page.getByRole('button', { name: 'Accept invitation', exact: true }).click()
       await expect(page).toHaveURL(installationUrl)
+      // Members use only the agents the owner lets them use (ADR-0075).
+      const joined = await (await page.request.get(`${url}/api/account/session`)).json()
+      const allowed = await owner.request.put(`${url}/api/installations/${installationId}/api/agents/${MAIN_AGENT_ID}/accounts/${joined.account.id}`, {
+        headers: { 'origin': url, 'x-csrf-token': session.csrf },
+        data: {},
+      })
+      expect(allowed.status()).toBe(200)
+      await page.reload()
     }
 
     // Capture the holder's actual authorized channel. No signaling, response or

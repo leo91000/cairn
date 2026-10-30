@@ -19,7 +19,17 @@ pub(crate) use storage::SCHEMA;
 
 #[derive(Default)]
 pub struct Missions {
-    authors: tokio::sync::Mutex<()>,
+    pub(crate) authors: tokio::sync::Mutex<()>,
+    /// When the Beacon last confirmed the memberships, reconciled with account access.
+    verified: std::sync::Mutex<Option<std::time::Instant>>,
+    /// Wakes requests waiting for a confirmation made by the holder of `authors`.
+    observed: tokio::sync::Notify,
+}
+
+#[derive(Clone, Copy)]
+enum MembershipFreshness {
+    Within(std::time::Duration),
+    Since(std::time::Instant),
 }
 
 pub(crate) enum Actor {
@@ -198,6 +208,13 @@ impl Missions {
                     mission.author_access_id = current.author_access_id.clone();
                     mission.author_removed = current.author_removed;
                     mission.created_at = current.created_at;
+                    // Pausing or archiving keeps showing that its author lost the agent.
+                    if reduces
+                        && current.schedule_wait_reason.as_deref()
+                            == Some(crate::agent_access::SUSPENDED)
+                    {
+                        mission.schedule_wait_reason = current.schedule_wait_reason.clone();
+                    }
                 } else {
                     if let Some(current) = current.as_ref() {
                         if creation {
@@ -233,6 +250,12 @@ impl Missions {
                     crate::native::policy::task_grant(db, &wire, previous_wire.as_ref(), &origin)?
                 };
                 apply_native(&mut mission, grant)?;
+                if let Some(policy) = &policy
+                    && mission.settings.cron.is_some()
+                    && crate::agent_access::suspended(db, &mission, policy)?
+                {
+                    mission.schedule_wait_reason = Some(crate::agent_access::SUSPENDED.to_owned());
+                }
                 if mission.settings.scheduled() {
                     if mission.author_removed {
                         return Err(Error::conflict(
@@ -280,17 +303,100 @@ impl Missions {
             .await
     }
 
-    async fn observe(&self, s: &Service) -> Result<Option<TaskAuthorPolicy>> {
+    /// The next membership-dependent read confirms the memberships first.
+    #[cfg(test)]
+    pub(crate) fn expire_membership_check(&self) {
+        *self.verified.lock().unwrap() = None;
+    }
+
+    pub(crate) fn membership_verified_within(&self, age: std::time::Duration) -> bool {
+        self.membership_verified(MembershipFreshness::Within(age))
+    }
+
+    fn membership_verified(&self, freshness: MembershipFreshness) -> bool {
+        self.verified
+            .lock()
+            .unwrap()
+            .is_some_and(|verified| match freshness {
+                MembershipFreshness::Within(age) => verified.elapsed() < age,
+                MembershipFreshness::Since(started) => verified >= started,
+            })
+    }
+
+    /// Read-only lists may reuse a recent membership check.
+    pub(crate) async fn verify_membership(
+        &self,
+        s: &Service,
+        age: std::time::Duration,
+    ) -> Result<()> {
+        self.verify_membership_freshness(s, MembershipFreshness::Within(age))
+            .await
+    }
+
+    /// Directing writes share only a check that began during this request's preflight.
+    pub(crate) async fn verify_membership_since(
+        &self,
+        s: &Service,
+        started: std::time::Instant,
+    ) -> Result<()> {
+        self.verify_membership_freshness(s, MembershipFreshness::Since(started))
+            .await
+    }
+
+    /// Observations stay under `authors`, consistent with grants and task saves. A request
+    /// can use the holder's check without waiting for its whole work, but an older in-flight
+    /// observation cannot authorize a fresh write. Keep its lock queue position and total
+    /// wait bound while waiting for a qualifying observation or for the lock itself.
+    async fn verify_membership_freshness(
+        &self,
+        s: &Service,
+        freshness: MembershipFreshness,
+    ) -> Result<()> {
+        const HOLDER_CHECK: std::time::Duration = std::time::Duration::from_secs(10);
+
+        let authors = tokio::time::timeout(HOLDER_CHECK, async {
+            let authors = self.authors.lock();
+            tokio::pin!(authors);
+            loop {
+                let observed = self.observed.notified();
+                tokio::pin!(observed);
+                observed.as_mut().enable();
+                if self.membership_verified(freshness) {
+                    return None;
+                }
+                tokio::select! {
+                    () = observed.as_mut() => {}
+                    authors = authors.as_mut() => return Some(authors),
+                }
+            }
+        })
+        .await
+        .map_err(|_| Error::unavailable("Memberships could not be confirmed right now."))?;
+
+        if let Some(authors) = authors {
+            // Another request may have checked while this one waited.
+            if !self.membership_verified(freshness) {
+                self.observe(s).await?;
+            }
+            drop(authors);
+        }
+        Ok(())
+    }
+
+    /// Callers hold `authors`.
+    pub(crate) async fn observe(&self, s: &Service) -> Result<Option<TaskAuthorPolicy>> {
+        let checked = std::time::Instant::now();
         let policy = crate::relay::task_author_policy(s).await?;
-        if let Some(policy) = &policy {
-            let grants: std::collections::HashMap<_, _> = policy
-                .members
-                .iter()
-                .chain(std::iter::once(&policy.owner))
-                .map(|g| (g.account_id.clone(), g.access_id.clone()))
-                .collect();
-            s.store
-                .transaction(move |db| {
+        let observed = policy.clone();
+        s.store
+            .transaction(move |db| {
+                if let Some(policy) = &observed {
+                    let grants: std::collections::HashMap<_, _> = policy
+                        .members
+                        .iter()
+                        .chain(std::iter::once(&policy.owner))
+                        .map(|g| (g.account_id.clone(), g.access_id.clone()))
+                        .collect();
                     for mut mission in db.missions()? {
                         let eligible = mission
                             .author_id
@@ -311,14 +417,18 @@ impl Missions {
                             db.audit("task.author_reconciled", &json!({"taskId":mission.id}))?;
                         }
                     }
-                    Ok(())
-                })
-                .await?;
-        }
+                }
+
+                // Account access to agents follows the same memberships.
+                crate::agent_access::reconcile(db, observed.as_ref())
+            })
+            .await?;
+        *self.verified.lock().unwrap() = Some(checked);
+        self.observed.notify_waiters();
         Ok(policy)
     }
 
-    async fn require_author(&self, s: &Service, mission: &Mission) -> Result<()> {
+    async fn require_author(&self, s: &Service, mission: &Mission) -> Result<TaskAuthorPolicy> {
         let policy = self.observe(s).await?.ok_or_else(|| {
             Error::unauthorized(
                 "Installation is not claimed. Run cairn claim before scheduling work.",
@@ -332,7 +442,20 @@ impl Missions {
         if !eligible || mission.author_removed {
             return Err(Error::conflict("The task author's access ended."));
         }
-        Ok(())
+        Ok(policy)
+    }
+
+    /// Whether the author may no longer use the task's agent; the task then waits for access.
+    async fn suspended(
+        &self,
+        s: &Service,
+        mission: &Mission,
+        policy: TaskAuthorPolicy,
+    ) -> Result<bool> {
+        let mission = mission.clone();
+        s.store
+            .read(move |db| crate::agent_access::suspended(db, &mission, &policy))
+            .await
     }
 
     pub(crate) async fn enqueue_scheduled(
@@ -343,7 +466,10 @@ impl Missions {
     ) -> Result<Value> {
         let _authors = self.authors.lock().await;
         let mission: Mission = serde_json::from_value(run["snapshot"]["task"].clone())?;
-        self.require_author(s, &mission).await?;
+        let policy = self.require_author(s, &mission).await?;
+        if self.suspended(s, &mission, policy).await? {
+            return Err(Error::conflict(crate::agent_access::SUSPENDED));
+        }
         s.queue_run(run, dedupe, None).await
     }
 
@@ -373,6 +499,16 @@ impl Missions {
             })
             .await?;
         s.worker.notify();
+        drop(active);
+
+        // Moved tasks show at once whether their authors may use the receiving agent;
+        // their admission checks it again regardless.
+        if let Err(error) = self.observe(s).await {
+            tracing::warn!(
+                status = error.status,
+                "Task suspensions await the next membership check after a merge"
+            );
+        }
         Ok(result)
     }
 }
@@ -415,35 +551,59 @@ impl Service {
         if self.store.due_missions(now()).await?.is_empty() {
             return Ok(());
         }
-        let wait = match self.missions.observe(self).await {
-            Ok(Some(_)) => None,
-            Ok(None) => Some(
+        let observed = match self.missions.observe(self).await {
+            Ok(Some(policy)) => Ok(policy),
+            Ok(None) => Err(
                 "Installation is not claimed. Run cairn claim before scheduling work.".to_owned(),
             ),
-            Err(error) => Some(error.message),
+            Err(error) => Err(error.message),
         };
-        if let Some(reason) = wait {
-            for mission in self.store.due_missions(now()).await? {
-                self.schedule_wait(&mission, Some(reason.clone())).await?;
+        let observed = match observed {
+            Ok(policy) => policy,
+            Err(reason) => {
+                for mission in self.store.due_missions(now()).await? {
+                    self.schedule_wait(&mission, Some(reason.clone())).await?;
+                }
+                return Ok(());
             }
-            return Ok(());
-        }
+        };
         for mission in self.store.due_missions(now()).await? {
-            let prepared = self.prepare_run(&mission.id.to_string(), "schedule").await;
+            // A suspended task skips this occurrence without being prepared or failing.
+            let suspended = self
+                .missions
+                .suspended(self, &mission, observed.clone())
+                .await?;
+            let prepared = if suspended {
+                Err(Error::conflict(crate::agent_access::SUSPENDED))
+            } else {
+                self.prepare_run(&mission.id.to_string(), "schedule").await
+            };
             let admission = match prepared {
                 Ok(run) => {
-                    if let Err(error) = self.missions.require_author(self, &mission).await {
-                        if error.status != 409 {
-                            self.schedule_wait(&mission, Some(error.message)).await?;
+                    let policy = match self.missions.require_author(self, &mission).await {
+                        Ok(policy) => policy,
+                        Err(error) => {
+                            if error.status != 409 {
+                                self.schedule_wait(&mission, Some(error.message)).await?;
+                            }
+                            continue;
                         }
-                        continue;
+                    };
+
+                    // A suspended task skips this occurrence without recording a failure.
+                    if self.missions.suspended(self, &mission, policy).await? {
+                        let reason = crate::agent_access::SUSPENDED.to_owned();
+                        self.schedule_wait(&mission, Some(reason)).await?;
+                        Err(Error::conflict(crate::agent_access::SUSPENDED))
+                    } else {
+                        self.schedule_wait(&mission, None).await?;
+                        let dedupe = Some(format!("{}:{}", mission.id, mission.next_run.unwrap()));
+                        self.queue_run(run, dedupe, None).await
                     }
-                    self.schedule_wait(&mission, None).await?;
-                    let dedupe = Some(format!("{}:{}", mission.id, mission.next_run.unwrap()));
-                    self.queue_run(run, dedupe, None).await
                 }
                 Err(error) => {
-                    self.schedule_wait(&mission, None).await?;
+                    let reason = suspended.then(|| crate::agent_access::SUSPENDED.to_owned());
+                    self.schedule_wait(&mission, reason).await?;
                     Err(error)
                 }
             };

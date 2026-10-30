@@ -1227,6 +1227,7 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "merge_agents",
         "delete_agent",
         "get_agent_avatar_configuration",
+        "list_agent_accounts",
         "generate_agent_avatar",
         "list_tasks",
         "get_task",
@@ -3926,6 +3927,7 @@ async fn resume_run_is_one_capability_on_http_public_and_installation() {
     let owner = common::RelayContext::new(&common::relay_fixture::context(&s).await);
     let member =
         common::RelayContext::new(&common::relay_fixture::member_context(&s, "other-member").await);
+    common::relay_fixture::allow_member(&s, "other-member", MAIN_AGENT_ID).await;
     let agent_token = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN");
     for surface in ["owner", "member", "public", "installation"] {
         let before = saved_mission(&s, &main).await;

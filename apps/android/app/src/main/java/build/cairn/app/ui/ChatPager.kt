@@ -148,11 +148,16 @@ private fun FilPager(
             }
         }
         val filKeys =
-            remember(conversations.state?.chats, activity, state.tasks) {
+            remember(conversations.state?.chats, activity, state.tasks, state.usableAgents) {
                 val chats = conversations.state?.chats
                 if (chats == null || activity == null) null
                 else
-                    buildFeed(chats.filter { it.lifecycle == "active" }, activity, state.tasks)
+                    buildFeed(
+                            chats.filter { it.lifecycle == "active" },
+                            activity,
+                            state.tasks,
+                            usable = state.usableAgents,
+                        )
                         .keys()
             }
         LaunchedEffect(filKeys) {

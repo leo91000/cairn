@@ -10,7 +10,9 @@ import {
   watch,
 } from 'vue'
 import { useRouter } from 'vue-router'
+import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
 import { runMission as queueMission } from '../../../../packages/contracts/generated/runMission'
+import { canUseAgent, defaultAgent } from '../agent-use'
 import { api, notify, state } from '../api'
 import { chatList } from '../chat-list'
 import {
@@ -173,7 +175,7 @@ const commands = computed<Command[]>(() => {
     }
   }
 
-  const fil = filOf(chatList.value, state.tasks, runs.value, localReads)
+  const fil = filOf(chatList.value, state.tasks, runs.value, localReads, undefined, state.usableAgents)
   for (const item of fil.forYou) {
     items.push({
       id: `need-${item.key}`,
@@ -200,6 +202,7 @@ const commands = computed<Command[]>(() => {
   }
 
   for (const task of state.tasks.filter(task => !task.archived)) {
+    const usable = canUseAgent(state.usableAgents, task.agentId)
     items.push({
       id: `task-${task.id}`,
       group: 'Missions',
@@ -209,16 +212,19 @@ const commands = computed<Command[]>(() => {
       keywords: task.prompt.slice(0, 400),
       run: go(`/tasks?task=${task.id}`),
     })
-    items.push({
-      id: `run-${task.id}`,
-      group: 'Missions',
-      label: `Run “${task.name}” now`,
-      icon: Play,
-      run: () => runMission(task.id, task.name),
-    })
+    if (usable) {
+      items.push({
+        id: `run-${task.id}`,
+        group: 'Missions',
+        label: `Run “${task.name}” now`,
+        icon: Play,
+        run: () => runMission(task.id, task.name),
+      })
+    }
   }
 
-  for (const agent of state.agents) {
+  // Members start conversations only with the agents they may use.
+  for (const agent of state.agents.filter(agent => canUseAgent(state.usableAgents, agent.id))) {
     items.push({
       id: `agent-${agent.id}`,
       group: 'Agents',
@@ -278,12 +284,16 @@ const results = computed(() => {
   }
 
   const ranked = commands.value.map(item => ({ item, value: score(item, text) })).filter(entry => entry.value > 0).sort((a, b) => b.value - a.value).slice(0, 14).map(entry => entry.item)
+  // The conversation starts with the agent the composer would choose, if any is usable.
+  const starting = defaultAgent(state.usableAgents, state.agents)
+  if (!starting)
+    return ranked
   const ask: Command = {
     id: 'ask',
     group: 'Ask',
     label: `Start a conversation: “${query.value.trim()}”`,
     icon: Plus,
-    hint: 'With the main agent',
+    hint: starting === MAIN_AGENT_ID ? 'With the main agent' : `With ${state.agents.find(agent => agent.id === starting)?.name ?? 'your agent'}`,
     run: () => router.push({ path: '/chats', query: { draft: query.value.trim() } }),
   }
   return [...ranked, ask]

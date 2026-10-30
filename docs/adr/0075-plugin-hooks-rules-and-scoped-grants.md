@@ -133,6 +133,9 @@ accessible qu’à lui. À la mise en place, les membres gardent l’accès aux 
 existants. Ces accès appartiennent à une adhésion : réinviter un membre ne les rend
 pas.
 
+L’accès est vérifié à l’acceptation d’un message : retirer l’accès à un agent
+n’annule pas les messages déjà en attente, qui restent livrés.
+
 Les personnes externes (un auteur Discord) n’ont ni identité ni droit dans Cairn :
 elles ne sont qu’une donnée de la payload, que les conditions d’une règle examinent.
 

@@ -25,6 +25,8 @@ const props = withDefaults(defineProps<{
   busy: boolean
   /** Codex's catalog, to name a queued message's speed as its model runs it. */
   models?: CodingAgentModel[]
+  // Without access to the agent: pausing and removing only (ADR-0075).
+  readOnly?: boolean
 }>(), { models: () => [] })
 const emit = defineEmits<{
   steer: [message: ChatMessage]
@@ -36,7 +38,7 @@ const expanded = ref(false)
 const selected = ref<string | null>(null)
 const headline = computed(() => props.paused ? 'Queue paused · nothing is sent' : props.working ? 'Sent when the agent finishes' : 'Waiting to send')
 const chosen = computed(() => props.pending.find(message => message.id === selected.value))
-const steerable = (message: ChatMessage) => props.working && message.status === 'queued' && !message.questionId && message.mode !== 'steer'
+const steerable = (message: ChatMessage) => !props.readOnly && props.working && message.status === 'queued' && !message.questionId && message.mode !== 'steer'
 const preview = (message: ChatMessage) => message.text || message.attachments?.map(file => file.name).join(', ') || 'Attachments'
 
 function note(message: ChatMessage) {
@@ -65,7 +67,7 @@ function then(action: (message: ChatMessage) => void) {
       <Icon :name="Clock" :size="14" />
       <span class="min-w-0 flex-1 truncate" role="status">{{ headline }}{{ pending.length > 1 ? ` · ${pending.length}` : '' }}</span>
       <button
-        v-if="paused"
+        v-if="paused && !readOnly"
         type="button"
         class="inline-flex min-h-8 items-center gap-1 rounded-md px-2 font-semibold text-accent hover:bg-hover"
         :disabled="busy"
@@ -147,7 +149,7 @@ function then(action: (message: ChatMessage) => void) {
         <Icon :name="Zap" :size="20" /><span><strong>Send now</strong><small>The agent reads it without waiting for the end of its task</small></span>
       </button>
       <button
-        v-if="chosen.status === 'queued' && !chosen.questionId"
+        v-if="chosen.status === 'queued' && !chosen.questionId && !readOnly"
         type="button"
         class="queue-action"
         :disabled="busy"
@@ -156,6 +158,7 @@ function then(action: (message: ChatMessage) => void) {
         <Icon :name="Pencil" :size="20" /><span><strong>Edit</strong></span>
       </button>
       <button
+        v-if="!paused || !readOnly"
         type="button"
         class="queue-action"
         :disabled="busy"

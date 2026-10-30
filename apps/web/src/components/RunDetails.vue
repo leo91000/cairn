@@ -3,7 +3,8 @@ import type { Run } from '../../../../packages/contracts/contracts'
 import { duration } from '../api'
 import UiButton from './UiButton.vue'
 
-defineProps<{ run: Run, active: boolean }>()
+// Cleaning up needs access to the run's agent, like directing it (ADR-0075).
+defineProps<{ run: Run, active: boolean, directable: boolean }>()
 const emit = defineEmits<{ cleanup: [] }>()
 </script>
 
@@ -23,7 +24,7 @@ const emit = defineEmits<{ cleanup: [] }>()
       Starting commit <code :title="entry.revision || undefined">{{ entry.revision?.slice(0, 12) }}</code>
     </p>
     <UiButton
-      v-if="!active && run.workspace && run.snapshot.task.worktree && !run.isolated"
+      v-if="directable && !active && run.workspace && run.snapshot.task.worktree && !run.isolated"
       size="small"
       @click="emit('cleanup')"
     >

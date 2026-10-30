@@ -215,6 +215,16 @@ abstract class AgentPageCases {
         val failPlugins: AtomicBoolean = AtomicBoolean(false),
         /** The installation's MCP connections, as `GET /mcps` returns them. */
         val mcps: AtomicReference<String> = AtomicReference("[]"),
+        /** Members allowed to use the agent, and the access changes the page sent. */
+        val allowed: AtomicReference<List<String>> = AtomicReference(emptyList()),
+        val accessChanges: CopyOnWriteArrayList<String> = CopyOnWriteArrayList(),
+        /** The Beacon cannot list the installation's members. */
+        val failMembers: AtomicBoolean = AtomicBoolean(false),
+        /** An installation older than account access: it has no `/agents/{id}/accounts`. */
+        val accountsMissing: AtomicBoolean = AtomicBoolean(false),
+        /** Holds access changes until released, as a slow installation would. */
+        val heldAccess: AtomicReference<java.util.concurrent.CountDownLatch?> =
+            AtomicReference(null),
     )
 
     private fun fixture(): Fixture {
@@ -228,6 +238,11 @@ abstract class AgentPageCases {
         val failNodes = AtomicBoolean(false)
         val failPlugins = AtomicBoolean(false)
         val mcps = AtomicReference("[]")
+        val allowed = AtomicReference<List<String>>(emptyList())
+        val accessChanges = CopyOnWriteArrayList<String>()
+        val failMembers = AtomicBoolean(false)
+        val accountsMissing = AtomicBoolean(false)
+        val heldAccess = AtomicReference<java.util.concurrent.CountDownLatch?>(null)
         val server = MockWebServer()
         server.dispatcher =
             object : Dispatcher() {
@@ -238,6 +253,35 @@ abstract class AgentPageCases {
                             .removePrefix("/api/installations/fixture/api")
                     val text = request.body.readUtf8()
                     val response = MockResponse().setHeader("Content-Type", "application/json")
+                    // Like the installation: members allowed to use one agent, changed one by one.
+                    Regex("^/agents/([^/]+)/accounts(?:/([^/]+))?$").find(path)?.let { match ->
+                        val (agent, account) = match.destructured
+                        if (accountsMissing.get())
+                            return response
+                                .setResponseCode(404)
+                                .setBody("""{"error":"Not found"}""")
+                        if (request.method != "GET")
+                            heldAccess.get()?.await(15, java.util.concurrent.TimeUnit.SECONDS)
+                        when (request.method) {
+                            "PUT" -> allowed.set((allowed.get() + account).distinct())
+                            "DELETE" -> allowed.set(allowed.get() - account)
+                        }
+                        if (request.method != "GET") accessChanges += "${request.method} $path"
+                        val accounts =
+                            allowed.get().joinToString(",") {
+                                """{"accountId":"$it","grantedAt":0}"""
+                            }
+                        return response.setBody("""{"agentId":"$agent","accounts":[$accounts]}""")
+                    }
+                    if (path == "/api/installations/fixture/sharing")
+                        return if (failMembers.get())
+                            response
+                                .setResponseCode(503)
+                                .setBody("""{"error":"Beacon indisponible"}""")
+                        else
+                            response.setBody(
+                                """{"members":[{"id":"member-ada","email":"ada@example.test"},{"id":"member-bo","email":"bo@example.test"}],"invitations":[{"id":"invite-cy","email":"cy@example.test"}]}"""
+                            )
                     if (request.method == "POST" && path == "/agents") {
                         val body = wireJson.parseToJsonElement(text).jsonObject
                         saved += path to body
@@ -411,6 +455,11 @@ abstract class AgentPageCases {
             failNodes,
             failPlugins,
             mcps,
+            allowed,
+            accessChanges,
+            failMembers,
+            accountsMissing,
+            heldAccess,
         )
     }
 
@@ -521,6 +570,97 @@ abstract class AgentPageCases {
         compose
             .onNode(hasText("Enregistrer") and hasAnyAncestor(hasTestTag("agent-review")))
             .performClick()
+    }
+
+    @Test
+    fun ownerChoosesWhoCanUseTheAgentWithSwitchesThatApplyAtOnce() {
+        journey(release.id) { fixture ->
+            waitForText("Vous seul")
+            compose.onNodeWithTag("agent-section-People").performScrollTo()
+            capture("agent-people-overview")
+            open(AgentSection.People)
+            val ada = "Autoriser ada@example.test à utiliser Release engineer"
+            waitForDescription(ada)
+            compose.onNodeWithText("L’agent agit comme un rôle").assertExists()
+            compose.onNodeWithText("Vous · propriétaire").assertExists()
+            compose.onNodeWithText("owner@example.test").assertExists()
+            compose.onNodeWithText("🔒 Toujours").assertExists()
+            // An invitation shows, without a switch until it is accepted.
+            compose.onNodeWithTag("agent-invited-invite-cy").assertExists()
+            compose.onNodeWithTag("agent-people-installation").assertDoesNotExist()
+            compose.onNodeWithContentDescription(ada).assertIsOff().performClick()
+            compose.waitUntil(15000) { fixture.accessChanges.isNotEmpty() }
+            assertEquals(
+                listOf("PUT /agents/${release.id}/accounts/member-ada"),
+                fixture.accessChanges.toList(),
+            )
+            compose.waitUntil(15000) {
+                compose
+                    .onAllNodes(hasContentDescription(ada) and isOn())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Peut utiliser cet agent").assertExists()
+            // Access applies at once: nothing joins the unsaved profile changes.
+            compose.onNodeWithText("Enregistrer").assertDoesNotExist()
+            capture("agent-people")
+            back()
+            waitForText("Vous et 1 membre · ada@example.test")
+            compose.onNodeWithText("Partagé").assertExists()
+
+            open(AgentSection.People)
+            waitForDescription(ada)
+            // Leaving the section before the answer still shows the change that applied.
+            val held = java.util.concurrent.CountDownLatch(1)
+            fixture.heldAccess.set(held)
+            compose.onNodeWithContentDescription(ada).assertIsOn().performClick()
+            back()
+            held.countDown()
+            compose.waitUntil(15000) { fixture.accessChanges.size == 2 }
+            assertEquals(
+                "DELETE /agents/${release.id}/accounts/member-ada",
+                fixture.accessChanges.last(),
+            )
+            waitForText("Vous seul")
+            assertTrue(fixture.saved.isEmpty())
+        }
+    }
+
+    @Test
+    fun peopleWarnAboutInstallationManagersAndRecoverFromAnUnavailableBeacon() {
+        journey(
+            release.id,
+            prepare = { fixture ->
+                fixture.failMembers.set(true)
+                fixture.agents.set(
+                    listOf(main, release.copy(access = release.access.copy(installation = true)))
+                )
+            },
+        ) { fixture ->
+            waitForText(NOT_LOADED)
+            open(AgentSection.People)
+            compose.onNodeWithTag("agent-people-installation").assertExists()
+            waitForText("Réessayer")
+            compose.onNodeWithText("Beacon indisponible", substring = true).assertExists()
+            capture("agent-people-unavailable")
+            fixture.failMembers.set(false)
+            compose.onNodeWithText("Réessayer").performClick()
+            waitForDescription("Autoriser bo@example.test à utiliser Release engineer")
+            compose.onNodeWithText("Réessayer").assertDoesNotExist()
+            capture("agent-people-installation")
+        }
+    }
+
+    @Test
+    fun anOlderInstallationSaysEveryMemberCanUseTheAgent() {
+        journey(release.id, prepare = { fixture -> fixture.accountsMissing.set(true) }) {
+            waitForText("Tous les membres")
+            compose.onNodeWithText(NOT_LOADED).assertDoesNotExist()
+            open(AgentSection.People)
+            compose.onNodeWithTag("agent-people-outdated").assertExists()
+            compose.onNodeWithText("Réessayer").assertDoesNotExist()
+            capture("agent-people-outdated")
+        }
     }
 
     @Test
@@ -1160,7 +1300,6 @@ abstract class AgentPageCases {
             waitForText("⚠ 1 point à vérifier")
             open(AgentSection.Plugins)
             waitForDescription("Retirer #support")
-            compose.onNodeWithText("Indisponible").assertExists()
             compose
                 .onNodeWithText("Ce plugin ne donne plus d’accès aux agents", substring = true)
                 .performScrollTo()

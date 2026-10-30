@@ -68,5 +68,33 @@
     "name": "generateAgentAvatar",
     "output": "Agent",
     "path": "/agents/{agentId}/avatar/generate"
+  },
+  {
+    "input": "AgentInput",
+    "method": "GET",
+    "name": "listAgentAccounts",
+    "output": "ListAgentAccountsOutput",
+    "path": "/agents/{agentId}/accounts"
+  },
+  {
+    "input": "AgentAccountInput",
+    "method": "PUT",
+    "name": "grantAgentAccount",
+    "output": "ListAgentAccountsOutput",
+    "path": "/agents/{agentId}/accounts/{accountId}"
+  },
+  {
+    "input": "AgentAccountInput",
+    "method": "DELETE",
+    "name": "revokeAgentAccount",
+    "output": "ListAgentAccountsOutput",
+    "path": "/agents/{agentId}/accounts/{accountId}"
+  },
+  {
+    "input": "ListAgentsInput",
+    "method": "GET",
+    "name": "listUsableAgents",
+    "output": "UsableAgentsOutput",
+    "path": "/usable-agents"
   }
 ]

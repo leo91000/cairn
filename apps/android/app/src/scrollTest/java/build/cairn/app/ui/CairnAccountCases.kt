@@ -170,6 +170,8 @@ abstract class CairnAccountCases {
                                         "/codex/models",
                                         "/claude/models" -> "{}"
                                         "/accounts" -> """{"accounts":[]}"""
+                                        "/usable-agents" ->
+                                            """{"agentIds":["30e39606-47c3-5441-b913-01ef3e934e2d"]}"""
                                         "/chats/stream" ->
                                             return MockResponse()
                                                 .setHeader("Content-Type", "text/event-stream")
@@ -441,6 +443,8 @@ abstract class CairnAccountCases {
                                         "/codex/models",
                                         "/claude/models" -> "{}"
                                         "/accounts" -> """{"accounts":[]}"""
+                                        "/usable-agents" ->
+                                            """{"agentIds":["30e39606-47c3-5441-b913-01ef3e934e2d"]}"""
                                         "/chats/stream" ->
                                             return MockResponse()
                                                 .setHeader("Content-Type", "text/event-stream")

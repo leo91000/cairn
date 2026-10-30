@@ -87,6 +87,21 @@ async fn invited_new_account_accepts_and_uses_the_shared_installation() {
     .unwrap();
     assert_eq!(session["installations"][0]["role"], "member");
     assert_eq!(session["installations"][0]["id"], id);
+
+    // A new member uses no agent until the owner gives access.
+    let denied = request(
+        &relay,
+        &cookie,
+        &session,
+        Method::POST,
+        &format!("/api/installations/{id}/api/chats"),
+    )
+    .json(&json!({}))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    allow_main(&relay, &session).await;
     let response = request(
         &relay,
         &cookie,
@@ -119,6 +134,27 @@ async fn invited_new_account_accepts_and_uses_the_shared_installation() {
     assert_eq!(sharing["members"][0]["email"], "member@example.test");
     assert_eq!(sharing["invitations"], json!([]));
     relay.close().await;
+}
+
+/// The owner lets a member use the main agent, from the apps' owner-only route (ADR-0075).
+async fn allow_main(relay: &RelayedInstallation, member: &Value) {
+    let id = relay.session["installations"][0]["id"].as_str().unwrap();
+    let account = member["account"]["id"].as_str().unwrap();
+    let response = request(
+        relay,
+        &relay.cookie,
+        &relay.session,
+        Method::PUT,
+        &format!(
+            "/api/installations/{id}/api/agents/{}/accounts/{account}",
+            cairn_installation::config::MAIN_AGENT_ID
+        ),
+    )
+    .json(&json!({}))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 async fn member(relay: &RelayedInstallation, email: &str) -> (String, Value) {
@@ -155,6 +191,7 @@ async fn member(relay: &RelayedInstallation, email: &str) -> (String, Value) {
         .status(),
         StatusCode::NO_CONTENT
     );
+    allow_main(relay, &session).await;
     (cookie, session)
 }
 
@@ -1483,7 +1520,11 @@ async fn offline_removal_and_reinvitation_do_not_revive_old_task_commitments() {
     assert_eq!(retired["enabled"], false);
     assert_eq!(retired["authorRemoved"], true);
     assert_eq!(retired["nextRun"], Value::Null);
-    for (actor_cookie, actor_session) in [(&cookie, &session), (&relay.cookie, &relay.session)] {
+    // Account access to agents belonged to the earlier membership as well.
+    for (actor_cookie, actor_session, refused) in [
+        (&cookie, &session, StatusCode::FORBIDDEN),
+        (&relay.cookie, &relay.session, StatusCode::CONFLICT),
+    ] {
         assert_eq!(
             request(&relay, actor_cookie, actor_session, Method::PUT, &task_path)
                 .json(&mission_replacement(&task, &input))
@@ -1491,9 +1532,19 @@ async fn offline_removal_and_reinvitation_do_not_revive_old_task_commitments() {
                 .await
                 .unwrap()
                 .status(),
-            StatusCode::CONFLICT
+            refused
         );
     }
+    allow_main(&relay, &session).await;
+    assert_eq!(
+        request(&relay, &cookie, &session, Method::PUT, &task_path)
+            .json(&mission_replacement(&task, &input))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
     let replacement: Value = request(&relay, &cookie, &session, Method::POST, &tasks)
         .json(&json!({"settings": input}))
         .send()
@@ -2310,6 +2361,80 @@ async fn temporary_authority_outage_defers_schedules_without_disabling_them() {
 }
 
 #[tokio::test]
+async fn membership_evidence_uses_insertion_time_after_a_blocked_acceptance() {
+    use sqlx_core::{query::query, query_as::query_as};
+    use std::time::Duration;
+
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let id = relay.session["installations"][0]["id"].as_str().unwrap();
+    let invitation: Value = request(
+        &relay,
+        &relay.cookie,
+        &relay.session,
+        Method::POST,
+        &format!("/api/installations/{id}/sharing/invitations"),
+    )
+    .json(&json!({ "email": "blocked-member@example.test" }))
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let (cookie, session) = login(&relay.app, "blocked-member@example.test").await;
+    let account = session["account"]["id"].as_str().unwrap();
+
+    let mut lock = relay.app.pool.begin().await.unwrap();
+    query("SELECT id FROM installations WHERE id=$1 FOR UPDATE")
+        .bind(id)
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    let (blocking_pid,): (i32,) = query_as("SELECT pg_backend_pid()")
+        .fetch_one(&mut *lock)
+        .await
+        .unwrap();
+    let acceptance = request(
+        &relay,
+        &cookie,
+        &session,
+        Method::POST,
+        &format!(
+            "/api/account/invitations/{}/accept",
+            invitation["id"].as_str().unwrap()
+        ),
+    );
+    let accepting = tokio::spawn(async move { acceptance.send().await.unwrap() });
+
+    // Observe the real wait, and a cutoff strictly later than its transaction start.
+    // This avoids scheduling assumptions or a fixed sleep between request and release.
+    let cutoff = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let boundary: Option<(i64,)> = query_as(
+                "SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)) AND ceil(extract(epoch FROM xact_start) * 1000) < floor(extract(epoch FROM clock_timestamp()) * 1000) LIMIT 1",
+            )
+            .bind(blocking_pid).fetch_optional(&relay.app.pool).await.unwrap();
+            if let Some((cutoff,)) = boundary {
+                break cutoff;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("invitation acceptance did not wait on the installation lock");
+    lock.commit().await.unwrap();
+    assert_eq!(accepting.await.unwrap().status(), StatusCode::NO_CONTENT);
+
+    let (joined_at,): (i64,) = query_as(
+        "SELECT ceil(extract(epoch FROM joined_at) * 1000)::bigint FROM installation_members WHERE installation_id=$1 AND account_id=$2",
+    )
+    .bind(id).bind(account).fetch_one(&relay.app.pool).await.unwrap();
+    assert!(
+        joined_at >= cutoff,
+        "a membership accepted after the cutoff must not predate it"
+    );
+    relay.close().await;
+}
+
+#[tokio::test]
 async fn author_policy_requires_the_current_machine_identity_and_never_browser_cookies() {
     let relay = RelayedInstallation::new(axum::Router::new()).await;
     let identity: Value = serde_json::from_slice(
@@ -2366,6 +2491,39 @@ async fn author_policy_requires_the_current_machine_identity_and_never_browser_c
         relay.session["account"]["id"]
     );
     assert_eq!(policy["members"], json!([]));
+
+    let (_, session) = member(&relay, "rollout-evidence@example.test").await;
+    let account = session["account"]["id"].as_str().unwrap();
+    // Round upward so precision lost at the millisecond boundary cannot admit a
+    // membership that began after the installation's cutoff within that millisecond.
+    sqlx_core::query::query(
+        "UPDATE installation_members SET joined_at='1970-01-01T00:00:01.000001Z' WHERE installation_id=$1 AND account_id=$2",
+    )
+    .bind(id)
+    .bind(account)
+    .execute(&relay.app.pool)
+    .await
+    .unwrap();
+    let policy: Value = relay
+        .app
+        .client
+        .get(&endpoint)
+        .bearer_auth(identity["token"].as_str().unwrap())
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(policy["members"][0]["account_id"], account);
+    assert_eq!(policy["members"][0]["joined_at"], 1001);
+    assert!(
+        !policy["members"][0]["access_id"]
+            .as_str()
+            .unwrap()
+            .is_empty()
+    );
+
     assert_eq!(
         request(
             &relay,

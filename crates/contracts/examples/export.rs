@@ -365,6 +365,9 @@ fn main() {
     export::<AgentPreview>(root, &mut generator, Contract::Serialize);
     export::<MergeAgentsInput>(root, &mut generator, Contract::Deserialize);
     export::<MergeAgentsOutput>(root, &mut generator, Contract::Serialize);
+    export::<AgentAccountInput>(root, &mut generator, Contract::Deserialize);
+    export::<ListAgentAccountsOutput>(root, &mut generator, Contract::Serialize);
+    export::<UsableAgentsOutput>(root, &mut generator, Contract::Serialize);
     export::<CreateMissionInput>(root, &mut generator, Contract::Deserialize);
     export::<ReplaceMissionInput>(root, &mut generator, Contract::Deserialize);
     export::<MissionStateInput>(root, &mut generator, Contract::Deserialize);
@@ -782,6 +785,34 @@ fn main() {
             "output": "Agent",
             "method": "POST",
             "path": "/agents/{agentId}/avatar/generate"
+        },
+        {
+            "name": "listAgentAccounts",
+            "input": "AgentInput",
+            "output": "ListAgentAccountsOutput",
+            "method": "GET",
+            "path": "/agents/{agentId}/accounts"
+        },
+        {
+            "name": "grantAgentAccount",
+            "input": "AgentAccountInput",
+            "output": "ListAgentAccountsOutput",
+            "method": "PUT",
+            "path": "/agents/{agentId}/accounts/{accountId}"
+        },
+        {
+            "name": "revokeAgentAccount",
+            "input": "AgentAccountInput",
+            "output": "ListAgentAccountsOutput",
+            "method": "DELETE",
+            "path": "/agents/{agentId}/accounts/{accountId}"
+        },
+        {
+            "name": "listUsableAgents",
+            "input": "ListAgentsInput",
+            "output": "UsableAgentsOutput",
+            "method": "GET",
+            "path": "/usable-agents"
         },
     ]);
     fs::write(

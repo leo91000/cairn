@@ -45,6 +45,20 @@ class SignalPresentationTest {
     }
 
     @Test
+    fun `questions a member cannot answer wait for someone with access`() {
+        val question = Chat(id = "question", agentId = MAIN_AGENT_ID, pendingQuestions = 1)
+        val member = buildFeed(listOf(question), emptyList(), emptyList(), usable = emptyList())
+        assertTrue(member.forYou.isEmpty())
+        assertEquals(
+            listOf("En attente d’une personne ayant accès à l’agent"),
+            member.waiting.map { it.subtitle },
+        )
+        val allowed =
+            buildFeed(listOf(question), emptyList(), emptyList(), usable = listOf(MAIN_AGENT_ID))
+        assertEquals(listOf(FeedKind.QUESTION), allowed.forYou.map { it.kind })
+    }
+
+    @Test
     fun `automatic quota waits follow dated resumptions and preserve attention and suspension`() {
         val quota =
             Chat(
@@ -851,6 +865,11 @@ class SignalPresentationTest {
         assertEquals("Chaque lundi · 09:00", hits.first { it.kind == SearchKind.MISSION }.detail)
         assertEquals("Revue de code", hits.first { it.kind == SearchKind.CHAT }.avatar)
         assertTrue(searchWorkspace("   ", chats, state).isEmpty())
+
+        // Members find only the agents they may start a conversation with.
+        val member = searchWorkspace("revue", chats, state.copy(usableAgents = emptyList()))
+        assertTrue(member.none { it.kind == SearchKind.AGENT })
+        assertTrue(member.any { it.kind == SearchKind.MISSION })
     }
 
     @Test

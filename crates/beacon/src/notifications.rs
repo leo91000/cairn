@@ -476,7 +476,7 @@ pub(super) async fn deliver(
     for (id,) in devices {
         let mut transaction = service.push_pool.begin().await?;
         let current: Option<(String,)> = query_as(
-            "SELECT id FROM installations
+            "SELECT owner_id FROM installations
              WHERE id = $1 AND token_digest = $2 AND owner_id IS NOT NULL
              FOR SHARE",
         )
@@ -484,9 +484,9 @@ pub(super) async fn deliver(
         .bind(token_digest)
         .fetch_optional(&mut *transaction)
         .await?;
-        if current.is_none() {
+        let Some((owner,)) = current else {
             return Ok(true);
-        }
+        };
 
         let device: Option<(String, String, String, String)> = query_as(&device_query)
             .bind(installation)
@@ -497,6 +497,49 @@ pub(super) async fn deliver(
         let Some((account, endpoint, p256dh, auth)) = device else {
             continue;
         };
+        if account != owner {
+            match &event.kind {
+                cairn_protocol::NotificationKind::Question { question_id } => {
+                    // A job may have waited on another device or database lock since
+                    // enqueue. Read current agent access at this provider admission.
+                    let recipients = match super::relay::notification_recipients(
+                        service,
+                        installation,
+                        &event.chat_id,
+                        question_id,
+                    )
+                    .await
+                    {
+                        Ok(Some(recipients)) => recipients,
+                        Ok(None) => continue,
+                        Err(_) => {
+                            complete = false;
+                            continue;
+                        }
+                    };
+                    let membership: Option<(String,)> = query_as(
+                        "SELECT access_id FROM installation_members WHERE installation_id=$1 AND account_id=$2",
+                    ).bind(installation).bind(&account).fetch_optional(&mut *transaction).await?;
+                    let allowed = membership.is_some_and(|(access,)| {
+                        recipients.members.iter().any(|member| {
+                            member.account_id == account && member.access_id == access
+                        })
+                    });
+                    if !allowed {
+                        continue;
+                    }
+                }
+                cairn_protocol::NotificationKind::Alert { .. } => {
+                    if event
+                        .members
+                        .as_ref()
+                        .is_some_and(|members| !members.contains(&account))
+                    {
+                        continue;
+                    }
+                }
+            }
+        }
 
         let subscription = PushSubscription {
             endpoint,

@@ -19,6 +19,7 @@ fn under(path: &str, prefix: &str) -> bool {
 }
 
 pub async fn dispatch(s: &Arc<Service>, input: &Input) -> Result<Value> {
+    crate::agent_access::authorize_request(s, input).await?;
     crate::native::policy::authorize_request(s, input).await?;
     let caller = input
         .identity
@@ -52,6 +53,11 @@ async fn dispatch_inner(s: &Arc<Service>, input: &Input) -> Result<Value> {
         .split('/')
         .collect::<Vec<_>>();
     let route = (input.method.as_str(), segments.as_slice());
+    if let ("GET", ["notification-recipients", chat, question]) = route {
+        let recipients =
+            crate::notifications::recipients(s, input.identity.as_ref(), chat, question).await?;
+        return Ok(serde_json::to_value(recipients)?);
+    }
     if let Some(result) = record_routes(s, input, route).await? {
         return Ok(result);
     }
@@ -97,6 +103,9 @@ async fn record_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Res
         }
         ("DELETE", ["agents", id]) => Some(("delete_agent", json!({ "agentId": id }))),
         ("GET", ["agent-avatars"]) => Some(("get_agent_avatar_configuration", json!({}))),
+        ("GET", ["agents", id, "accounts"]) => {
+            Some(("list_agent_accounts", json!({ "agentId": id })))
+        }
         ("POST", ["agents", id, "avatar", "upload"]) => {
             if input.body["agentId"] != *id {
                 return Err(Error::bad("Agent identity does not match the path."));
@@ -116,6 +125,34 @@ async fn record_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Res
                 .invoke(s, body, context)
                 .await?,
         ));
+    }
+    // Giving and removing access to agents stays in the apps (ADR-0075).
+    let account_access = match route {
+        ("PUT", ["agents", id, "accounts", account]) => Some((true, *id, *account)),
+        ("DELETE", ["agents", id, "accounts", account]) => Some((false, *id, *account)),
+        _ => None,
+    };
+    if let Some((grant, agent, account)) = account_access {
+        let agent = cairn_contracts::AgentId(
+            uuid::Uuid::parse_str(agent).map_err(|_| Error::bad("Invalid agent identity."))?,
+        );
+        let identity = input.identity.as_ref();
+        let output = if grant {
+            s.grant_agent_account(identity, agent, account).await?
+        } else {
+            s.revoke_agent_account(identity, agent, account).await?
+        };
+        return Ok(Some(serde_json::to_value(output)?));
+    }
+    if let ("GET", ["usable-agents"]) = route {
+        let identity = input
+            .identity
+            .clone()
+            .ok_or_else(|| Error::unauthorized("A verified identity is required."))?;
+        let agent_ids = crate::agent_access::usable_now(s, identity).await?;
+        return Ok(Some(serde_json::to_value(
+            cairn_contracts::UsableAgentsOutput { agent_ids },
+        )?));
     }
     let project_command = match route {
         ("GET", ["projects"]) => Some(("list_projects", json!({}))),

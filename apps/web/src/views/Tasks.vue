@@ -11,6 +11,7 @@ import {
 } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { listMissions } from '../../../../packages/contracts/generated/listMissions'
+import { canUseAgent } from '../agent-use'
 import { api, state } from '../api'
 import AgentAvatar from '../components/AgentAvatar.vue'
 import Empty from '../components/Empty.vue'
@@ -266,7 +267,7 @@ const runColor = (status: RunListItem['status']) => status === 'succeeded' ? 'bg
               class="relative grid size-13 shrink-0 place-items-center rounded-full disabled:opacity-40"
               :class="quiet(task) ? 'border border-line text-muted' : 'bg-ink text-canvas hover:opacity-90'"
               :aria-label="`Run ${task.name}`"
-              :disabled="!!busy || task.archived"
+              :disabled="!!busy || task.archived || !canUseAgent(state.usableAgents, task.agentId)"
               @click="run(task)"
             >
               <Icon :name="Play" :size="18" />

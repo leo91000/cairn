@@ -34,6 +34,12 @@ import { setChatPaused } from '../../../../packages/contracts/generated/setChatP
 import { stopChat } from '../../../../packages/contracts/generated/stopChat'
 import { failureReason, sameReason, stopEcho } from '../activity'
 import {
+  canDirectChat,
+  canUseAgent,
+  defaultAgent,
+  readOnlyNotice,
+} from '../agent-use'
+import {
   api,
   apiUpload,
   refreshSkills,
@@ -91,6 +97,7 @@ import {
   KeyRound,
   Layers,
   LoaderCircle,
+  Lock,
   Maximize2,
   Menu,
   MoreHorizontal,
@@ -248,6 +255,8 @@ function switcherAnchor() {
   return [historyButton.value, tabletHistoryButton.value, detailsButton.value].find(button => button?.getClientRects().length)
 }
 
+// A member without access to the conversation's agent reads it but cannot direct it.
+const readOnly = computed(() => !!detail.value && !canDirectChat(state.usableAgents, detail.value, chats.value))
 const error = ref('')
 const dismissedError = ref(false)
 const quota = computed(() => chatQuota(detail.value?.run, events.value))
@@ -258,7 +267,7 @@ const visibleError = computed(() => {
   if (quota.value && (!chatError || isQuotaMessage(chatError) || chatError === quota.value.message))
     return ''
   const failedRun = detail.value?.run?.status === 'failed' ? detail.value.run : null
-  return chatError || (failedRun ? failedRun.error || 'The response stopped before finishing. Resume the conversation to continue.' : '')
+  return chatError || (failedRun ? failedRun.error || (readOnly.value ? 'The response stopped before finishing.' : 'The response stopped before finishing. Resume the conversation to continue.') : '')
 })
 const openCodeRegionBlocked = computed(() => visibleError.value.startsWith('OpenCode Go requires Global regions for this model.'))
 // The conversation already shows a failed run's reason as its failure card.
@@ -277,7 +286,14 @@ watch(() => [visibleError.value, detail.value?.id, detail.value?.run?.finishedAt
 const busy = ref(false)
 const submitting = ref(false)
 const editing = ref<string | null>(null)
-const agentId = ref(typeof route.query.agent === 'string' ? route.query.agent : MAIN_AGENT_ID)
+
+// A link may name an agent the member cannot use: start on one they can.
+function requestedAgent() {
+  const requested = typeof route.query.agent === 'string' ? route.query.agent : ''
+  return requested && canUseAgent(state.usableAgents, requested) ? requested : defaultAgent(state.usableAgents, state.agents)
+}
+
+const agentId = ref(requestedAgent())
 const projectId = ref(typeof route.query.project === 'string' ? route.query.project : '')
 const attachments = ref<ChatAttachment[]>([])
 const previews = ref<Record<string, string>>({})
@@ -289,7 +305,9 @@ const dragging = ref(0)
 const hasDraft = computed(() => !!draft.value.trim() || attachments.value.length > 0)
 // Rejected files must be removed before sending; nothing is sent while a file uploads.
 const attachmentsBlocked = computed(() => Object.values(attachmentStates.value).some(item => item.status === 'rejected' || item.status === 'uploading'))
-const canSend = computed(() => !inactive.value && (!route.params.id || (detail.value?.id === route.params.id || detail.value?.slug === route.params.id)) && !live.error.value && (!!draft.value.trim() || attachments.value.length > 0) && !attachmentsBlocked.value)
+// A member the owner has not yet given any agent cannot start a conversation.
+const noAgent = computed(() => !route.params.id && state.usableAgents !== null && !state.usableAgents.length)
+const canSend = computed(() => !readOnly.value && !noAgent.value && !inactive.value && (!route.params.id || (detail.value?.id === route.params.id || detail.value?.slug === route.params.id)) && !live.error.value && (!!draft.value.trim() || attachments.value.length > 0) && !attachmentsBlocked.value)
 
 function removeAttachment(id: string) {
   if (previews.value[id])
@@ -307,7 +325,8 @@ function clearAttachments() {
 }
 
 function addFiles(selected: File[]) {
-  if (busy.value)
+  // Files only go with a message, which needs access to the agent.
+  if (busy.value || readOnly.value || noAgent.value)
     return
   const selection = validateSelection(attachments.value.map(attachment => ({ size: attachment.size, rejected: attachmentStates.value[attachment.id]?.status === 'rejected' })), selected)
   if (selection.error) {
@@ -447,12 +466,18 @@ watch(events, (items) => {
     outgoing.value = null
 })
 const selectedAgent = computed(() => state.agents.find(agent => agent.id === (detail.value?.agentId || agentId.value)))
-const agents = computed(() => state.agents.map(agent => ({
+const readOnlyText = computed(() => detail.value ? readOnlyNotice({ ...detail.value, agentName: detail.value.agentName || selectedAgent.value?.name || '' }, chats.value) : '')
+// Members only start conversations with the agents the owner lets them use.
+const agents = computed(() => state.agents.filter(agent => canUseAgent(state.usableAgents, agent.id)).map(agent => ({
   value: agent.id,
   label: agent.name,
   icon: Bot,
   description: agent.id === MAIN_AGENT_ID ? 'Full access' : agent.description,
 })))
+watch(() => state.usableAgents, (usable) => {
+  if (!route.params.id && !canUseAgent(usable, agentId.value))
+    agentId.value = defaultAgent(usable, state.agents)
+})
 const currentProvider = computed(() => detail.value?.run?.snapshot.agent.provider || selectedAgent.value?.provider || 'codex')
 const chosenProvider = computed({
   get: () => provider.value || currentProvider.value,
@@ -545,7 +570,7 @@ function newConversation() {
   model.value = ''
   reasoning.value = ''
   speed.value = ''
-  agentId.value = MAIN_AGENT_ID
+  agentId.value = defaultAgent(state.usableAgents, state.agents)
   projectId.value = ''
   createdChat = undefined
   submission = undefined
@@ -761,7 +786,7 @@ watch(chatId, (id) => {
   if (outgoing.value?.chatId !== destinationId)
     outgoing.value = null
   if (!id) {
-    agentId.value = typeof route.query.agent === 'string' ? route.query.agent : MAIN_AGENT_ID
+    agentId.value = requestedAgent()
     projectId.value = typeof route.query.project === 'string' ? route.query.project : ''
   }
 
@@ -853,7 +878,7 @@ function key(event: KeyboardEvent) {
       >
         <Icon :name="FileText" :size="18" />Files <span class="ml-auto text-muted">{{ fileCount }}</span>
       </button>
-      <template v-if="detail?.compaction?.supported && !inactive">
+      <template v-if="detail?.compaction?.supported && !inactive && !readOnly">
         <button
           class="chat-detail-action"
           aria-haspopup="dialog"
@@ -885,7 +910,7 @@ function key(event: KeyboardEvent) {
         </button>
       </template>
       <button
-        v-if="detail && !inactive"
+        v-if="detail && !inactive && canUseAgent(state.usableAgents, detail.agentId)"
         class="chat-detail-action text-danger!"
         aria-haspopup="dialog"
         @click="detailAction(() => { deletingConversation = detail! })"
@@ -1087,14 +1112,18 @@ function key(event: KeyboardEvent) {
             <UiAlert v-if="error || detail?.lifecycleError" class="mb-4">
               {{ error || detail?.lifecycleError }}
             </UiAlert>
+            <!-- Restoring, like deleting, needs access to the conversation's own agent. -->
             <UiButton
-              v-if="recoverable"
+              v-if="recoverable && canUseAgent(state.usableAgents, detail?.agentId)"
               :disabled="busy"
               variant="primary"
               @click="action('restore')"
             >
               Restore conversation
             </UiButton>
+            <p v-else-if="recoverable" class="text-sm text-muted" role="note">
+              Only people with access to {{ detail?.agentName || 'its agent' }} can restore it.
+            </p>
           </div>
           <div v-else-if="!detail?.run && !delivery.sending.length" class="flex min-h-0 flex-1 flex-col items-center justify-center overflow-auto px-6 pb-[8vh] pt-8 text-center phone:px-2 phone:py-5">
             <AgentAvatar
@@ -1128,6 +1157,7 @@ function key(event: KeyboardEvent) {
             :outcome="detail?.run?.status === 'succeeded' ? detail.run.outcome : null"
             :sending="delivery.sending"
             :events="events"
+            :read-only="readOnly"
             :quota="quota"
             :chat-id="detail?.id"
             :coding-agent-switch="detail?.codingAgentSwitch"
@@ -1176,7 +1206,32 @@ function key(event: KeyboardEvent) {
               :active="active"
               :suspended="suspended"
               :highlighted="typeof route.query.question === 'string' ? route.query.question : undefined"
+              :read-only="readOnly"
             />
+            <UiNotice
+              v-if="noAgent"
+              role="note"
+              class="mb-3"
+              tone="info"
+              :icon="Lock"
+              title="No agent available to you yet"
+            >
+              <p>
+                You can read every conversation in this installation. To start one, ask the installation owner to give you access to an agent.
+              </p>
+            </UiNotice>
+            <UiNotice
+              v-if="readOnly"
+              role="note"
+              class="mb-3"
+              tone="info"
+              :icon="Lock"
+              title="You can follow this conversation"
+            >
+              <p>
+                {{ readOnlyText }}
+              </p>
+            </UiNotice>
             <section
               v-if="openCodeRegionBlocked && !dismissedError"
               role="alert"
@@ -1210,11 +1265,16 @@ function key(event: KeyboardEvent) {
                   rel="noopener noreferrer"
                   class="inline-flex min-h-9 items-center gap-1.5 rounded-lg bg-accent px-3 text-xs font-semibold text-surface"
                 >OpenCode settings<Icon :name="ArrowUpRight" :size="14" /></a>
-                <UiButton size="small" :disabled="busy" @click="action('pause', { paused: false })">
+                <UiButton
+                  v-if="!readOnly"
+                  size="small"
+                  :disabled="busy"
+                  @click="action('pause', { paused: false })"
+                >
                   Retry response
                 </UiButton>
               </div>
-              <p class="mt-2.5 text-2xs text-muted">
+              <p v-if="!readOnly" class="mt-2.5 text-2xs text-muted">
                 To keep your current Privacy settings, <RouterLink :to="{ path: '/chats', query: { agent: detail?.agentId, project: detail?.projectId || undefined } }" class="font-medium text-accent underline">
                   choose another model in a new conversation
                 </RouterLink>. This conversation and its files stay saved.
@@ -1259,13 +1319,13 @@ function key(event: KeyboardEvent) {
                 Open Connections
               </RouterLink>
             </UiNotice>
-            <div v-if="detail?.canRequestNewSession" class="mb-3 rounded-lg border border-line p-3 text-sm">
+            <div v-if="detail?.canRequestNewSession && !readOnly" class="mb-3 rounded-lg border border-line p-3 text-sm">
               <p>If the restored native session is incompatible, start a fresh session using the preserved history and files.</p>
               <UiButton :disabled="busy" @click="newSession = true">
                 Start a fresh agent session
               </UiButton>
             </div>
-            <p v-if="detail?.sessionRestartRequested" class="mb-3 text-sm text-muted">
+            <p v-if="detail?.sessionRestartRequested && !readOnly" class="mb-3 text-sm text-muted">
               Ready for a fresh session. Write a new message, then resume the queue.
             </p>
             <details v-if="detail?.messages.some(message => message.status === 'cancelled')" class="mb-3 rounded-lg border border-line p-3 text-xs">
@@ -1277,7 +1337,7 @@ function key(event: KeyboardEvent) {
                   {{ message.text }}
                 </p>
                 <MessageAttachments v-if="message.attachments?.length" :attachments="message.attachments" class="mt-2 items-start!" />
-                <button class="mt-2 text-accent" @click="draft = message.text; textarea?.focus()">
+                <button v-if="!readOnly" class="mt-2 text-accent" @click="draft = message.text; textarea?.focus()">
                   Copy to message
                 </button>
               </div>
@@ -1302,6 +1362,7 @@ function key(event: KeyboardEvent) {
               <!-- Queued follow-ups open the composer itself, sharing its border and corners, as on Android. -->
               <template v-if="pending.length || detail?.paused">
                 <QueueStrip
+                  :read-only="readOnly"
                   :pending="pending"
                   :models="codexModels"
                   :paused="!!detail?.paused"
@@ -1315,7 +1376,7 @@ function key(event: KeyboardEvent) {
                 <hr class="mx-3 border-line">
               </template>
               <div class="px-3 pt-2 pb-2">
-                <div v-if="dragging" class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center gap-2 rounded-xl border-2 border-dashed border-accent bg-surface/95 text-sm font-semibold text-accent">
+                <div v-if="dragging && !readOnly && !noAgent" class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center gap-2 rounded-xl border-2 border-dashed border-accent bg-surface/95 text-sm font-semibold text-accent">
                   <Icon :name="Paperclip" :size="20" />Drop files here
                 </div>
                 <!-- A new conversation chooses its agent and project; one still opening does not. -->
@@ -1361,7 +1422,8 @@ function key(event: KeyboardEvent) {
                   v-model="draft"
                   :skills="skills"
                   aria-label="Message"
-                  :placeholder="liveWait?.wakeup ? (detail?.paused ? 'Add to the queue — this cancels the wait' : 'Reply now — this cancels the wait') : responding ? 'Add a follow-up…' : skills.length ? 'Message your agent… Type $ for skills' : 'Message your agent…'"
+                  :disabled="readOnly || noAgent"
+                  :placeholder="readOnly || noAgent ? 'Only people with access to this agent can write here' : liveWait?.wakeup ? (detail?.paused ? 'Add to the queue — this cancels the wait' : 'Reply now — this cancels the wait') : responding ? 'Add a follow-up…' : skills.length ? 'Message your agent… Type $ for skills' : 'Message your agent…'"
                   rows="2"
                   maxlength="50000"
                   @keydown="key"
@@ -1371,7 +1433,7 @@ function key(event: KeyboardEvent) {
                   <div class="flex min-w-0 flex-1 items-center gap-1">
                     <AttachMenu
                       :trigger-class="iconButton"
-                      :disabled="busy || attachments.length >= MAX_ATTACHMENTS"
+                      :disabled="busy || readOnly || noAgent || attachments.length >= MAX_ATTACHMENTS"
                       @files="addFiles"
                     />
                     <AssistantPicker
@@ -1385,13 +1447,14 @@ function key(event: KeyboardEvent) {
                       :default-speed="inheritedAssistant?.speed || ''"
                       :default-source="inheritConversation ? 'conversation' : 'agent'"
                       :switching="switchingProvider"
-                      :disabled="busy"
+                      :disabled="busy || readOnly || noAgent"
                     />
                   </div>
-                  <!-- As on Android: steer while typing during a reply, stop when the field is empty, otherwise send. -->
+                  <!-- As on Android: steer while typing during a reply, stop when the field is empty, otherwise send.
+                       Without access a leftover draft cannot be sent, so stopping stays offered. -->
                   <div class="flex shrink-0 items-center gap-1">
                     <button
-                      v-if="active && !editing && hasDraft"
+                      v-if="active && !editing && hasDraft && !readOnly"
                       type="button"
                       class="round-action bg-soft text-accent"
                       aria-label="Steer now"
@@ -1402,7 +1465,7 @@ function key(event: KeyboardEvent) {
                       <Icon :name="Zap" :size="16" />
                     </button>
                     <button
-                      v-if="(active || detail?.wakeup) && !editing && !hasDraft"
+                      v-if="(active || detail?.wakeup) && !editing && (!hasDraft || readOnly)"
                       type="button"
                       class="round-action border border-line text-coral"
                       :aria-label="scheduled ? 'Cancel scheduled wait' : 'Stop response'"

@@ -2,6 +2,8 @@ import type { Provider } from '../../../packages/contracts/accounts'
 import type { ChatView } from '../../../packages/contracts/chats'
 import type { RunEvent, RunListItem, Task } from '../../../packages/contracts/contracts'
 import type { ActivityEntry } from './activity'
+import type { UsableAgents } from './agent-use'
+import { canDirectChat } from './agent-use'
 import { isQuotaWait } from './chat-quota'
 import { waitTarget } from './chat-wait'
 import { exclusiveSuspensionLabel, isExclusivelySuspended } from './run-status'
@@ -93,7 +95,7 @@ export const isUnread = (item: FilItem) => item.kind === 'unread'
  * started it or on an outside system, or one the user dismissed, sits in Recent. A snoozed one
  * waits until `now` reaches its time.
  */
-export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], read: Record<string, number> = {}, now = Date.now()): Fil {
+export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], read: Record<string, number> = {}, now = Date.now(), usable: UsableAgents = null): Fil {
   const unreadNow = (key: string, finishedAt: number | null | undefined) => !(read[key] >= (finishedAt ?? 0))
   const forYou: FilItem[] = []
   const live: FilItem[] = []
@@ -115,7 +117,11 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
       // A delegated conversation names the conversation that delegated it.
       requester: chat.requester ? { title: chat.requester.title || 'New conversation', to: chatPath({ id: chat.requester.chatId }) } : undefined,
     }
-    if (chat.pendingQuestions > 0) {
+    // A question only those with access to its agent may answer waits for them.
+    if (chat.pendingQuestions > 0 && !canDirectChat(usable, chat, chats)) {
+      waiting.push({ ...base, kind: 'waiting', subtitle: 'Waiting for someone with access' })
+    }
+    else if (chat.pendingQuestions > 0) {
       forYou.push({ ...base, kind: 'question', subtitle: chat.pendingQuestions > 1 ? `${chat.pendingQuestions} questions need your answer` : 'Needs your answer' })
     }
     else if (chat.status === 'failed' || chat.status === 'interrupted') {

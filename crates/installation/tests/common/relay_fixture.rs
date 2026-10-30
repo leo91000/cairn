@@ -135,7 +135,72 @@ async fn transport(
     next.run(request).await
 }
 
-async fn fixture_task_authors(headers: HeaderMap) -> Result<Json<TaskAuthorPolicy>> {
+/// The fixture Beacon's members: each holds one membership until it is removed.
+const MEMBERS: &str = "test-relay-members";
+
+/// Make the account a current member of the fixture installation, with this membership.
+pub async fn add_member(service: &Service, account: &str, access: &str) {
+    add_member_at(
+        service,
+        account,
+        access,
+        Some(cairn_installation::config::now()),
+    )
+    .await;
+}
+
+/// Explicit membership evidence, including an older Beacon that cannot supply it.
+pub async fn add_member_at(service: &Service, account: &str, access: &str, joined_at: Option<i64>) {
+    let mut members = service.store.kv(MEMBERS).await.unwrap().unwrap_or_default();
+    members[account] = json!({ "accessId": access, "joinedAt": joined_at });
+    service.store.set(MEMBERS, members, None).await.unwrap();
+}
+
+pub async fn remove_member(service: &Service, account: &str) {
+    let mut members = service.store.kv(MEMBERS).await.unwrap().unwrap_or_default();
+    if let Some(members) = members.as_object_mut() {
+        members.remove(account);
+    }
+    service.store.set(MEMBERS, members, None).await.unwrap();
+}
+
+/// Make the fixture Beacon's membership endpoint fail, or answer again.
+pub async fn authority_unavailable(service: &Service, unavailable: bool) {
+    if unavailable {
+        service
+            .store
+            .set(AUTHORITY_DOWN, json!(true), None)
+            .await
+            .unwrap();
+    } else {
+        service.store.delete(AUTHORITY_DOWN).await.unwrap();
+    }
+}
+
+const AUTHORITY_DOWN: &str = "test-relay-authority-down";
+
+/// A member who may use the agent, as if the owner gave the access from the apps.
+pub async fn allow_member(service: &Service, account: &str, agent: &str) {
+    let access = format!("membership-{account}");
+    add_member(service, account, &access).await;
+    let (agent, account) = (agent.to_owned(), account.to_owned());
+    service
+        .store
+        .transaction(move |db| {
+            db.0.execute(
+                "INSERT OR IGNORE INTO agent_account_access VALUES(?1,?2,?3,0)",
+                [agent, account, access],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+async fn fixture_task_authors(
+    State(service): State<Arc<Service>>,
+    headers: HeaderMap,
+) -> Result<Json<TaskAuthorPolicy>> {
     if headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -144,12 +209,26 @@ async fn fixture_task_authors(headers: HeaderMap) -> Result<Json<TaskAuthorPolic
         return Err(Error::unauthorized("Incorrect fixture installation token."));
     }
 
+    if service.store.kv(AUTHORITY_DOWN).await?.is_some() {
+        return Err(Error::unavailable("Synthetic membership outage."));
+    }
+    let members = service.store.kv(MEMBERS).await?.unwrap_or_default();
     Ok(Json(TaskAuthorPolicy {
         owner: TaskAuthorGrant {
             account_id: "fixture-owner".to_owned(),
             access_id: "fixture-owner".to_owned(),
+            joined_at: None,
         },
-        members: Vec::new(),
+        members: members
+            .as_object()
+            .into_iter()
+            .flatten()
+            .map(|(account, access)| TaskAuthorGrant {
+                account_id: account.clone(),
+                access_id: access["accessId"].as_str().unwrap_or_default().to_owned(),
+                joined_at: access["joinedAt"].as_i64(),
+            })
+            .collect(),
     }))
 }
 
@@ -211,7 +290,7 @@ pub async fn claimed(service: &Service) -> Result<()> {
         .await?
         .route(
             "/api/relay/00000000-0000-4000-8000-000000000055/task-authors",
-            get(fixture_task_authors),
+            get(fixture_task_authors).with_state(Arc::new(service.clone())),
         )
         .route(
             "/api/relay/00000000-0000-4000-8000-000000000055/plugin-mcp-authorization",
