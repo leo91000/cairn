@@ -15,6 +15,7 @@ E/AndroidRuntime(123):     at org.webrtc.PeerConnection.dispose(PeerConnection.j
 E/AndroidRuntime(123): Caused by: java.lang.ExceptionInInitializerError: private-fixture-cookie
 E/AndroidRuntime(123):     at org.webrtc.PeerConnection.<clinit>(PeerConnection.java:44)
 E/AndroidRuntime(123):     at org.webrtc.PeerConnection.<init>(PeerConnection.java:45)
+E/AndroidRuntime(123): Caused by: java.lang.Throwable: private-fixture-cookie
 F/DEBUG(321): Cmdline: build.cairn.app
 F/DEBUG(321): signal 6 (SIGABRT), code -1 (SI_QUEUE)
 F/DEBUG(321): Abort message: 'private-fixture-cookie SDP=secret'
@@ -31,7 +32,7 @@ ApplicationExitInfo #1:
  status=0
 '''
 evidence = bench.android_crash_summary(raw, exit_info)
-assert evidence['exceptions'] == ['java.lang.IllegalStateException', 'java.lang.ExceptionInInitializerError'], evidence
+assert evidence['exceptions'] == ['java.lang.IllegalStateException', 'java.lang.ExceptionInInitializerError', 'java.lang.Throwable'], evidence
 assert evidence['javaFrames'] == ['org.webrtc.PeerConnection.dispose(PeerConnection.java:546)', 'org.webrtc.PeerConnection.<clinit>(PeerConnection.java:44)', 'org.webrtc.PeerConnection.<init>(PeerConnection.java:45)'], evidence
 assert evidence['signals'] == ['SIGABRT'], evidence
 assert evidence['nativeFrames'] == [{'pc': '0000000000052450', 'library': 'libc.so', 'symbol': 'abort+152'}, {'pc': '0000000000052451', 'library': 'base.apk', 'symbol': 'webrtc::Dispose()+42'}], evidence
@@ -132,6 +133,24 @@ with tempfile.TemporaryDirectory() as directory, patch.object(Path, 'write_text'
         assert str(error) == 'Native Android transport scenario failed; see instrumentation result'
     else:
         raise AssertionError('The original process crash must fail the qualification')
+    storage_error = OSError('synthetic evidence disk full')
+    with patch.object(Path, 'write_text', side_effect=storage_error), patch.object(bench, 'android_failure_evidence', wraps=bench.android_failure_evidence) as collect:
+        try:
+            bench.android_instrumentation(crashed, 'same-lan', output)
+        except RuntimeError as error:
+            assert str(error) == 'Native Android transport scenario failed; see instrumentation result'
+        else:
+            raise AssertionError('Transcript failure must not replace the process crash')
+        collect.assert_called_once()
+        def passed(*args, **options):
+            return SimpleNamespace(stdout='OK (1 test)')
+        try:
+            bench.android_instrumentation(passed, 'same-lan', output)
+        except OSError as error:
+            assert error is storage_error
+        else:
+            raise AssertionError('Missing success evidence must still fail qualification')
+        collect.assert_called_once()
 `], { stdio: 'pipe' })
 })
 

@@ -415,7 +415,7 @@ def android_crash_summary(logcat, exit_info):
             result[key].append(value)
 
     for line in lines:
-        exception = re.match(r"(?:Caused by: )?([A-Za-z_$][\w.$]*(?:Exception|Error))(?::|$)", line.strip())
+        exception = re.match(r"(?:Caused by: )?([A-Za-z_$][\w.$]*(?:Exception|Error|Throwable))(?::|$)", line.strip())
         if exception:
             retain("exceptions", exception[1])
         signal_name = re.search(r"\bsignal \d+ \((SIG[A-Z0-9]+)\)", line)
@@ -477,8 +477,13 @@ def android_instrumentation(adb, scenario, output):
     except (OSError, subprocess.SubprocessError):
         android_failure_evidence(adb, output)
         raise
-    output.with_suffix(".instrumentation.txt").write_text(result.stdout)
-    if "OK (1 test)" not in result.stdout:
+    passed = "OK (1 test)" in result.stdout
+    try:
+        output.with_suffix(".instrumentation.txt").write_text(result.stdout)
+    except OSError:
+        if passed:
+            raise
+    if not passed:
         android_failure_evidence(adb, output)
         raise RuntimeError("Native Android transport scenario failed; see instrumentation result")
 
