@@ -232,6 +232,11 @@ impl Execution<'_> {
         self.checkpoint
             .update(|checkpoint| {
                 checkpoint.runner_id = Some(Some(saved_runner));
+                checkpoint.controller_recovery_reservation = None;
+                checkpoint.turn_pending = None;
+                checkpoint.recovery_deadline_ms = None;
+                checkpoint.terminal_code = None;
+                checkpoint.provider_failed = None;
                 checkpoint.node_id = Some(node);
                 checkpoint.runtime_id = Some(Some(runtime));
             })
@@ -276,7 +281,10 @@ impl Execution<'_> {
             .map(|name| format!("Using {} account: {name}", self.provider.label()));
         self.checkpoint
             .update_and_publish(
-                |state| state.capacity_retry_at = None,
+                |state| {
+                    state.capacity_retry_at = None;
+                    state.provider_failed = None;
+                },
                 move |db| {
                     db.change_run(&id, patch)?;
                     if let Some(message) = account_message {
@@ -480,6 +488,8 @@ impl Execution<'_> {
                         .update_and_publish(
                             |saved| {
                                 saved.completed = Some(false);
+                                saved.provider_failed = Some(true);
+                                saved.terminal_code = Some(None);
                                 saved.last_error = Some(Some(error.message.clone()));
                                 saved.retry_cause = Some(cause);
                             },
@@ -577,12 +587,39 @@ impl Execution<'_> {
             self.prepare_runner(workspace, resume, chat, &mut launch)
                 .await?;
         }
-        let exit = self.supervise(workspace, launch, log_total).await?;
+        let mut exit = self.supervise(workspace, launch, log_total).await?;
+        self.checkpoint
+            .update(|c| {
+                c.process = Some(None);
+                // The runner client can return zero only after parsing a healthy
+                // controller result. Nonzero process statuses are ambiguous: local
+                // errors, panics, signals and worker stops share the same channel.
+                // Only a read of this attempt can establish their provenance.
+                c.terminal_code = (exit.code == Some(0)).then_some(Some(0));
+            })
+            .await?;
+        if exit.code != Some(0) && !exit.timed_out {
+            super::execution::reconcile(s, self.checkpoint, self.cancel).await?;
+            if let Some(code) = self.checkpoint.snapshot().await.terminal_code() {
+                exit.code = Some(if code == STOPPED && !self.cancel.is_cancelled() {
+                    crate::runner::CONTROLLER_INTERRUPTED
+                } else {
+                    code
+                });
+            }
+        }
         drop(auth_broker);
         drop(mcp_channel);
-        self.checkpoint.update(|c| c.process = Some(None)).await?;
         let saved = self.checkpoint.snapshot().await;
-        if s.shutdown.is_cancelled() && !self.cancel.is_cancelled() && !saved.completed() {
+        let observation_pending = saved.managed() && saved.terminal_code.is_none();
+        if s.shutdown.is_cancelled()
+            && !self.cancel.is_cancelled()
+            && !exit.timed_out
+            && (!saved.completed() || observation_pending)
+        {
+            // Shutdown may stop the local client before /wait responds. Keep
+            // that same attempt readable after restart rather than settling
+            // incomplete transport observations as failed finalization.
             return Err(Error::conflict("Worker is restarting"));
         }
         let session = s.store.run(&self.id).await?["sessionId"]
@@ -602,8 +639,17 @@ impl Execution<'_> {
                 "Native node mode changed. Managed executions stopped; saved files and conversation history are retained for restart.",
             ));
         }
+        if saved.output_error().is_some()
+            || (managed && saved.completed() && saved.terminal_code() != Some(0))
+        {
+            // A provider completion cannot repair EIO/EROFS or an unknown flush.
+            // Existing execution cleanup fences it before releasing its resources.
+            self.finish(workspace, &exit, &saved, session.is_some())
+                .await?;
+            return Ok(Attempt::Finished);
+        }
         let interrupted = exit.code == Some(crate::runner::CONTROLLER_INTERRUPTED);
-        if managed && stopped_by_controller && interrupted {
+        if managed && stopped_by_controller && interrupted && !saved.provider_failed() {
             if saved.start_rejected == Some(true) {
                 return Err(Error::unavailable(format!(
                     "{} Working files were preserved; retry when the controller is available.",
@@ -635,15 +681,12 @@ impl Execution<'_> {
             )));
         }
 
-        // Preserve the controller's outcome before cleanup can fail. Failed
-        // attempts are fenced by execution::execute before release or recovery.
-        if workspace.isolated() {
-            recovery::fence(s, &s.store.run(&self.id).await?).await?;
-        }
-
         if let Some(session) = session.as_ref()
             && self.may_switch_account(&exit)
         {
+            if workspace.isolated() {
+                recovery::fence(s, &s.store.run(&self.id).await?).await?;
+            }
             self.switch_account(workspace).await?;
             return Ok(Attempt::Resume(session.clone()));
         }
@@ -773,6 +816,11 @@ impl Execution<'_> {
         self.checkpoint
             .update(|c| {
                 c.runner_id = Some(Some(runner.clone()));
+                c.controller_recovery_reservation = None;
+                c.turn_pending = None;
+                c.recovery_deadline_ms = None;
+                c.terminal_code = None;
+                c.provider_failed = None;
                 c.node_id = Some(node_id);
                 c.runtime_id = Some(Some(runtime_id));
             })
@@ -955,10 +1003,14 @@ impl Execution<'_> {
         self.checkpoint
             .update(|c| {
                 c.process = Some(identity);
+                c.turn_pending = None;
+                c.recovery_deadline_ms = None;
                 c.launched = Some(true);
                 c.start_rejected = Some(false);
+                c.output_interrupted = None;
                 c.retry_cause = Some(None);
                 c.completed = Some(false);
+                c.terminal_code = None;
                 c.last_error = Some(None);
             })
             .await?;
@@ -1174,16 +1226,25 @@ impl Execution<'_> {
             .unwrap_or_default();
         let status = if self.cancel.is_cancelled() {
             RunStatus::Cancelled
-        } else if exit.timed_out {
+        } else if exit.timed_out
+            || self.checkpoint.expired()
+            || saved.output_error().is_some()
+            || saved.provider_failed()
+        {
             RunStatus::Failed
-        } else if exit.code == Some(0) || (s.shutdown.is_cancelled() && saved.completed()) {
+        } else if exit.code == Some(0)
+            || (s.shutdown.is_cancelled() && saved.completed() && !saved.managed())
+        {
             RunStatus::Succeeded
         } else {
             RunStatus::Failed
         };
         if status == RunStatus::Failed
             && !exit.timed_out
+            && !self.checkpoint.expired()
+            && saved.output_error().is_none()
             && !self.stopping()
+            && !saved.completed()
             && let Some(cause) = saved.retry_cause.as_ref().and_then(Option::as_ref)
             && (has_session || cause.startup)
         {
@@ -1224,10 +1285,18 @@ impl Execution<'_> {
             patch.retry = Some(None);
         }
         let id = self.id.clone();
+        let deadline = self.checkpoint.deadline();
         s.store.transaction(move |db| {
             let current = db.run(&id)?.ok_or_else(|| Error::not_found("Run not found"))?;
+            let expired = deadline.is_some_and(|deadline| now() >= deadline);
             let status = if !current["cancelRequestedAt"].is_null() {
                 RunStatus::Cancelled
+            } else if expired {
+                let message = "Run exceeded its time limit.";
+                patch.error = Some(Some(message.into()));
+                patch.summary = Some(message.into());
+                patch.wakeup = Some(None);
+                RunStatus::Failed
             } else if status == RunStatus::Succeeded && current["trigger"] != "chat" && current["wakeup"].is_object() {
                 if !has_session {
                     return Err(Error::conflict("Cannot wait without a saved agent session. Working files were preserved."));
@@ -1246,7 +1315,11 @@ impl Execution<'_> {
                 patch.wakeup = Some(None);
             }
             db.change_run(&id, patch)?;
-            let details = details.filter(|_| status == RunStatus::Failed);
+            let details = if status == RunStatus::Failed && expired {
+                Some(json!({ "error": { "message": "Run exceeded its time limit." } }))
+            } else {
+                details.filter(|_| status == RunStatus::Failed)
+            };
             db.event(&id, &EventKind::Status, status.as_str(), details.as_ref())
         }).await
     }
@@ -1255,11 +1328,17 @@ impl Execution<'_> {
         if self.cancel.is_cancelled() {
             return "Run stopped. You can resume this conversation.".into();
         }
-        if exit.timed_out {
+        if exit.timed_out || self.checkpoint.expired() {
             return "Run exceeded its time limit.".into();
+        }
+        if let Some(error) = saved.output_error() {
+            return error.to_owned();
         }
         if status == RunStatus::Succeeded {
             return String::new();
+        }
+        if let Some(error) = saved.finalization_error() {
+            return error.to_owned();
         }
         if !saved.last_error().is_empty() {
             return saved.last_error().to_owned();
@@ -1294,6 +1373,97 @@ fn current_exe() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn active_clean_exit_requires_managed_provider_completion() {
+        use crate::run_fixture::DbRunFixture;
+        let root = tempfile::tempdir().unwrap();
+        let service = Service::new(crate::config::Config {
+            data_dir: root.path().join("data"),
+            home: root.path().join("home"),
+            workspace_roots: vec![root.path().into()],
+            public_url: "http://localhost:4310".into(),
+            host: "127.0.0.1".into(),
+            port: 0,
+            codex_bin: "codex".into(),
+            claude_bin: "claude".into(),
+            opencode_bin: "opencode".into(),
+            opencode_go_usage_url: crate::accounts::opencode::USAGE_URL.into(),
+            concurrency: 1,
+            logger: false,
+            worker_enabled: false,
+            runner_url: String::new(),
+        })
+        .await
+        .unwrap();
+        for backend in ["native", "firecracker", "shared"] {
+            for completed in [false, true] {
+                let id = crate::config::id();
+                let run_fixture = json!({ "id": id, "taskId": id, "status": "running" });
+                service
+                    .store
+                    .transaction(move |db| db.add_run_fixture(&run_fixture, None).map(|_| ()))
+                    .await
+                    .unwrap();
+                let saved = RunCheckpoint::from_value(json!({
+                    "prepared": { "backend": backend, "isolated": backend != "shared" },
+                    "completed": completed, "terminalCode": 0, "remainingMs": null,
+                }))
+                .unwrap();
+                let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), saved.clone());
+                let mut run = service.store.run(&id).await.unwrap();
+                let mut account = None;
+                let cancel = CancellationToken::new();
+                let mut sensitive = Vec::new();
+                let execution = Execution {
+                    s: &service,
+                    id: id.clone(),
+                    run: &mut run,
+                    account: &mut account,
+                    preparation: None,
+                    cancel: &cancel,
+                    checkpoint: &checkpoint,
+                    sensitive: &mut sensitive,
+                    provider: Provider::Codex,
+                    directory: root.path().into(),
+                    attempt_id: String::new(),
+                    reservation: None,
+                };
+                let workspace = Workspace {
+                    prepared: json!({ "output": root.path().join("missing-result").to_string_lossy() }),
+                    state_home: root.path().into(),
+                    env: Environment::new(),
+                    mcp: json!({}),
+                };
+                execution
+                    .finish(
+                        &workspace,
+                        &Exit {
+                            code: Some(0),
+                            ..Default::default()
+                        },
+                        &saved,
+                        false,
+                    )
+                    .await
+                    .unwrap();
+                let state = service.store.run_state(&id).await.unwrap();
+                let expected = if completed || backend == "shared" {
+                    RunStatus::Succeeded
+                } else {
+                    RunStatus::Failed
+                };
+                assert_eq!(
+                    state.status, expected,
+                    "backend={backend}, completed={completed}"
+                );
+                if expected == RunStatus::Failed {
+                    assert!(state.error.unwrap().contains("completion was recorded"));
+                }
+            }
+        }
+        service.shutdown.cancel();
+    }
 
     #[test]
     fn controller_messages_follow_the_execution_backend() {
