@@ -103,6 +103,8 @@ pub struct RunCheckpoint {
 pub struct PaidAdmission {
     pub attempt: String,
     pub controller: bool,
+    #[serde(default)]
+    pub capacity_refused: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_cause: Option<crate::run_retry::Cause>,
 }
@@ -358,6 +360,7 @@ impl RunCheckpoint {
                 (controller || provider_cause.is_some()).then(|| PaidAdmission {
                     attempt: runner.to_owned(),
                     controller,
+                    capacity_refused: false,
                     provider_cause,
                 });
         }

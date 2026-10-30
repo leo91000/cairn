@@ -214,19 +214,24 @@ async fn record_failure(
             let expired = matches!(saved.remaining_ms, Some(Some(i64::MIN..=0)));
             if capacity && !cancelled && !expired && !shutdown.is_cancelled() {
                 if saved.start_rejected == Some(true)
-                    && let Some(paid) = saved.pending_paid_admission.take()
+                    && let Some(mut paid) = saved.pending_paid_admission.take()
                     && saved.runner_id() == Some(paid.attempt.as_str())
                 {
-                    if paid.controller {
+                    if paid.controller && saved.controller_recoveries() > 0 {
                         saved.controller_recovery_reservation = Some(paid.attempt.clone());
+                        paid.capacity_refused = true;
                     }
-                    if let Some(cause) = paid.provider_cause
+                    if let Some(cause) = paid.provider_cause.as_ref()
                         && run.state.retry.as_ref().is_some_and(|retry| {
-                            retry.next_attempt_at.is_some() && retry.cause == cause
+                            retry.next_attempt_at.is_some() && &retry.cause == cause
                         })
                     {
-                        saved.retry_cause = Some(Some(cause));
-                        saved.provider_retry_reservation = Some(paid.attempt);
+                        saved.retry_cause = Some(Some(cause.clone()));
+                        saved.provider_retry_reservation = Some(paid.attempt.clone());
+                        paid.capacity_refused = true;
+                    }
+                    if paid.capacity_refused {
+                        saved.pending_paid_admission = Some(paid);
                     }
                 }
                 saved.capacity_retry_at = Some(now() + CONTROLLER_CAPACITY_RETRY_MS);

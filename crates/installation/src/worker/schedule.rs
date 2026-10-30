@@ -461,6 +461,16 @@ fn controller_budget_exhausted(saved: &RunCheckpoint, state: &RunState, run: &Va
     if count < super::execution::MAX_CONTROLLER_RECOVERIES {
         return false;
     }
+    let refunded_capacity = saved.start_rejected == Some(true)
+        && saved.has_controller_recovery_reservation()
+        && saved.pending_paid_admission.as_ref().is_some_and(|paid| {
+            paid.controller
+                && paid.capacity_refused
+                && saved.runner_id() == Some(paid.attempt.as_str())
+        });
+    if refunded_capacity {
+        return false;
+    }
     let exception = (saved
         .prepared()
         .is_some_and(|prepared| prepared["backend"] == "native")
