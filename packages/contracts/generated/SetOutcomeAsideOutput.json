@@ -1,0 +1,47 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "OutcomeDismissal": {
+      "additionalProperties": false,
+      "description": "An outcome set aside by the calling account: dismissed (`until` null) or snoozed.",
+      "properties": {
+        "until": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "until"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "dismissal": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/OutcomeDismissal"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "taskId": {
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "required": [
+    "taskId",
+    "dismissal"
+  ],
+  "title": "SetOutcomeAsideOutput",
+  "type": "object"
+}

@@ -204,3 +204,11 @@ pub use delegated_tasks::*;
 
 #[cfg(test)]
 mod a8_contract_tests;
+
+mod personal;
+
+pub use personal::*;
+
+mod installation_settings;
+
+pub use installation_settings::*;
