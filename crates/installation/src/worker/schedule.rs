@@ -1052,13 +1052,27 @@ mod tests {
         }))
         .unwrap();
         saved.store(&service.store, &run).await.unwrap();
-        for _ in 0..2 {
+        let mut previous = 350;
+        for index in 0..2 {
             assert!(
                 recover(&service, &service.store.run(&run).await.unwrap())
                     .await
                     .is_err()
             );
+            let saved = RunCheckpoint::load(&service.store, &run)
+                .await
+                .unwrap()
+                .unwrap();
+            let remaining = saved.remaining_ms.flatten().unwrap();
+            assert!(remaining <= previous && (index != 0 || remaining < previous));
+            assert!(saved.recovery_deadline_ms.is_some());
+            assert_eq!(
+                service.store.run_state(&run).await.unwrap().status,
+                RunStatus::Queued
+            );
+            previous = remaining;
         }
+        assert_eq!(previous, 0);
         allow.store(true, Ordering::SeqCst);
         assert!(
             !recover(&service, &service.store.run(&run).await.unwrap())
