@@ -19,6 +19,7 @@ import build.cairn.app.data.*
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.*
 import okhttp3.mockwebserver.*
@@ -216,9 +217,12 @@ abstract class NodePlacementCases {
                     .fetchSemanticsNodes()
                     .isNotEmpty()
             }
-            // The page renders before connect() finishes refreshing the workspace, and
-            // vm.perform ignores actions until then. This control's own busy state does not
-            // reflect it.
+            val refresh = CompletableDeferred<Unit>()
+            compose.runOnUiThread { vm.perform { refresh.await() } }
+            compose.waitUntil(10000) { vm.state.value.busy }
+            compose.onNodeWithText("Passer en Natif administrateur").assertIsNotEnabled()
+            assertTrue(writes.isEmpty())
+            refresh.complete(Unit)
             compose.waitUntil(10000) { !vm.state.value.busy }
             compose
                 .onNodeWithText("Passer en Natif administrateur")
@@ -1220,9 +1224,14 @@ abstract class NodePlacementCases {
                 .assertExists()
             capture("execution-sheet")
             compose.onNodeWithText("Enregistrer").performScrollTo().assertIsNotEnabled()
+            compose.waitUntil(10000) { !vm.state.value.busy }
             compose.onNodeWithText("Préférer").performClick()
-            // The sheet renders before connect() finishes refreshing the workspace, and
-            // vm.perform ignores actions until then.
+            val refresh = CompletableDeferred<Unit>()
+            compose.runOnUiThread { vm.perform { refresh.await() } }
+            compose.waitUntil(10000) { vm.state.value.busy }
+            compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+            assertTrue(saved.isEmpty())
+            refresh.complete(Unit)
             compose.waitUntil(10000) { !vm.state.value.busy }
             compose.onNodeWithText("Enregistrer").performScrollTo().performClick()
             // Receipt by the server precedes the response and its UI confirmation.
@@ -1359,6 +1368,7 @@ abstract class NodePlacementCases {
                     .fetchSemanticsNodes()
                     .isNotEmpty()
             }
+            compose.waitUntil(10000) { !vm.state.value.busy }
             compose.onNodeWithText("Migrer cette conversation…").performScrollTo().performClick()
             compose
                 .onNodeWithText("Le prochain message ouvre une nouvelle session", substring = true)
@@ -1379,10 +1389,14 @@ abstract class NodePlacementCases {
             }
             assertTrue(submitted.isEmpty())
             capture("backend-migration-confirm")
-            // The migration renders before connect() finishes refreshing the workspace, and
-            // vm.perform ignores actions until then.
+            val refresh = CompletableDeferred<Unit>()
+            compose.runOnUiThread { vm.perform { refresh.await() } }
+            compose.waitUntil(10000) { vm.state.value.busy }
+            compose.onNodeWithText("Confirmer").assertIsNotEnabled()
+            assertTrue(submitted.isEmpty())
+            refresh.complete(Unit)
             compose.waitUntil(10000) { !vm.state.value.busy }
-            compose.onNodeWithText("Confirmer").performClick()
+            compose.onNodeWithText("Confirmer").assertIsEnabled().performClick()
             compose.waitUntil(10000) { submitted.isNotEmpty() }
             assertEquals("native", submitted[0]["backend"]?.jsonPrimitive?.content)
             assertEquals(
