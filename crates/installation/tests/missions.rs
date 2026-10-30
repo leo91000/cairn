@@ -255,6 +255,85 @@ fn result(response: &Value) -> &Value {
 }
 
 #[tokio::test]
+async fn mission_activity_keeps_durable_waits_on_http_and_both_mcp_surfaces() {
+    use cairn_contracts::{ChatWakeup, RunStatus};
+    use cairn_installation::runs::RunChanges;
+    use common::MissionFixture;
+
+    let root = tempfile::tempdir().unwrap();
+    let s = Service::new(common::config(root.path())).await.unwrap();
+    std::fs::create_dir_all(&s.config.home).unwrap();
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
+    let token = installation_token(&s).await;
+    let public = common::relay_fixture::grant(&s, &["read"]).await;
+    let mission = s
+        .task_fixture(
+            json!({"name":"Waiting mission","prompt":"Watch CI","agentId":MAIN_AGENT_ID}),
+            None,
+        )
+        .await
+        .unwrap();
+    let run = s
+        .enqueue(mission["id"].as_str().unwrap(), "manual", None)
+        .await
+        .unwrap();
+    let run_id = run["id"].as_str().unwrap();
+    let wakeup: ChatWakeup = serde_json::from_value(json!({
+        "id": "mission-wait",
+        "messageId": null,
+        "reason": "Wait for mission CI",
+        "seconds": 420,
+        "createdAt": 1000,
+        "wakeAt": 421000,
+    }))
+    .unwrap();
+
+    // Read the persisted timer, its replacement and its removal through every
+    // activity surface, without exposing the frozen execution snapshot.
+    for next in [
+        Some(wakeup.clone()),
+        Some(ChatWakeup {
+            reason: "Wait for replacement CI".into(),
+            wake_at: 841000,
+            ..wakeup
+        }),
+        None,
+    ] {
+        let status = if next.is_some() {
+            RunStatus::Waiting
+        } else {
+            RunStatus::Cancelled
+        };
+        s.store
+            .change_run(
+                run_id,
+                RunChanges {
+                    status: Some(status),
+                    wakeup: Some(next.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let (status, http) = request(&s, "GET", "/api/tasks/activity", Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "{http}");
+        let mut responses = vec![http];
+        for (endpoint, bearer) in [("/mcp", &public), ("/mcp-installation", &token)] {
+            let activity = tool(&app, endpoint, bearer, "list_task_activity", json!({})).await;
+            responses.push(result(&activity).clone());
+        }
+        for activity in responses {
+            let runs = activity.as_array().unwrap();
+            let current = runs.iter().find(|run| run["id"] == run_id).unwrap();
+            assert_eq!(current["wakeup"], serde_json::to_value(&next).unwrap());
+            assert!(current.get("snapshot").is_none());
+            let caller = runs.iter().find(|run| run["id"] != run_id).unwrap();
+            assert_eq!(caller["wakeup"], Value::Null);
+        }
+    }
+}
+
+#[tokio::test]
 async fn mission_management_preview_and_activity_match_both_mcp_surfaces() {
     let root = tempfile::tempdir().unwrap();
     let s = Service::new(common::config(root.path())).await.unwrap();

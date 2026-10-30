@@ -1,0 +1,31 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "attachmentId": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "chatId": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "data": {
+      "maxLength": 13981016,
+      "type": "string"
+    },
+    "name": {
+      "maxLength": 180,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "chatId",
+    "attachmentId",
+    "name",
+    "data"
+  ],
+  "title": "UploadChatAttachmentInput",
+  "type": "object"
+}

@@ -33,7 +33,7 @@ struct Pool {
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-const DATABASE_VERSION: i64 = 16;
+const DATABASE_VERSION: i64 = 17;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -66,7 +66,7 @@ impl Store {
         let fresh = !file.exists();
         let mut writer = Connection::open(&file)?;
         let mut version: i64 = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if !fresh && !matches!(version, 11 | 12 | 13 | 14 | 15 | DATABASE_VERSION) {
+        if !fresh && !matches!(version, 11 | 12 | 13 | 14 | 15 | 16 | DATABASE_VERSION) {
             return Err(Error::bad(
                 "Unsupported installation database version; use a compatible release or an explicit migration.",
             ));
@@ -79,7 +79,7 @@ impl Store {
             version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
             // Another startup can finish later atomic steps while this one
             // waits for the inventory migration's immediate transaction.
-            if !matches!(version, 12 | 13 | 14 | 15 | DATABASE_VERSION) {
+            if !matches!(version, 12 | 13 | 14 | 15 | 16 | DATABASE_VERSION) {
                 upgraded?;
             }
         }
@@ -93,7 +93,7 @@ impl Store {
                 tx.execute_batch("CREATE TABLE direct_read_authorizations(grant_id TEXT NOT NULL,object TEXT NOT NULL,hash TEXT NOT NULL,run_id TEXT NOT NULL,PRIMARY KEY(grant_id,object));CREATE INDEX direct_read_authorizations_object ON direct_read_authorizations(object);")?;
                 tx.execute_batch(crate::nodes::journal_acknowledgements::SCHEMA)?;
                 tx.pragma_update(None, "user_version", 13)?;
-            } else if !matches!(current, 13 | 14 | 15 | DATABASE_VERSION) {
+            } else if !matches!(current, 13 | 14 | 15 | 16 | DATABASE_VERSION) {
                 return Err(Error::bad(
                     "Unexpected installation database version during direct storage upgrade.",
                 ));
@@ -111,6 +111,10 @@ impl Store {
         }
         if !fresh && version == 15 {
             crate::chats::question_migration::upgrade(&mut writer)?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        }
+        if !fresh && version == 16 {
+            crate::attachments::migration::upgrade(&mut writer)?;
         }
         if fresh {
             let tx = writer.transaction()?;
@@ -121,7 +125,7 @@ CREATE INDEX IF NOT EXISTS records_node_backups_run ON records(json_extract(data
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,created_at INTEGER NOT NULL CHECK(created_at BETWEEN 0 AND 9007199254740991),type TEXT NOT NULL CHECK(length(type)>0),text TEXT NOT NULL,payload TEXT CHECK(payload IS NULL OR json_valid(payload)));
 CREATE TABLE run_checkpoints(run_id TEXT PRIMARY KEY NOT NULL REFERENCES runs(id) ON DELETE CASCADE,state TEXT NOT NULL CHECK(json_valid(state) AND json_type(state)='object'));
 CREATE INDEX IF NOT EXISTS events_run ON events(run_id,id);
-CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY CHECK(key NOT LIKE 'run-checkpoint:%' AND key NOT LIKE 'chat-coding-agent:%' AND key NOT LIKE 'chat-coding-agent-request:%' AND key NOT LIKE 'chat-question:%' AND key!='conversation-expiration'),data TEXT NOT NULL,expires INTEGER);
+CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY CHECK(key NOT LIKE 'run-checkpoint:%' AND key NOT LIKE 'chat-coding-agent:%' AND key NOT LIKE 'chat-coding-agent-request:%' AND key NOT LIKE 'chat-question:%' AND key NOT LIKE 'chat-attachment:%' AND key!='conversation-expiration'),data TEXT NOT NULL,expires INTEGER);
 CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT,created_at INTEGER NOT NULL,action TEXT NOT NULL,detail TEXT NOT NULL);",
         )?;
             tx.pragma_update(None, "user_version", DATABASE_VERSION)?;
@@ -146,6 +150,7 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
             tx.execute_batch(crate::missions::SCHEMA)?;
             tx.execute_batch(crate::chats::storage::SCHEMA)?;
             tx.execute_batch(crate::chats::question_storage::SCHEMA)?;
+            tx.execute_batch(crate::attachments::sql::SCHEMA)?;
             tx.execute_batch(crate::waits::sql::SCHEMA)?;
             tx.execute_batch(crate::chats::engine_switch::SCHEMA)?;
             tx.commit()?;
@@ -584,7 +589,7 @@ impl Db<'_> {
             .transpose()
     }
 
-    fn hydrate_run_wakeups(&self, rows: &mut [Value]) -> Result<()> {
+    pub(crate) fn hydrate_run_wakeups(&self, rows: &mut [Value]) -> Result<()> {
         let mut wakeups = self.wakeups(false, None)?;
         for row in rows {
             row["wakeup"] =
@@ -1197,7 +1202,7 @@ mod schema_tests {
 
     #[test]
     fn existing_other_versions_fail_without_changing_the_database() {
-        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 17, 99] {
+        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 18, 99] {
             let root = tempfile::tempdir().unwrap();
             let db = Connection::open(root.path().join("manager.db")).unwrap();
             db.pragma_update(None, "user_version", version).unwrap();

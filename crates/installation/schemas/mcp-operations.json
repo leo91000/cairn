@@ -314,42 +314,6 @@
     }
   },
   {
-    "name": "upload_chat_attachment",
-    "description": "Upload a file to a conversation as base64 data (up to 10 MiB decoded, subject to transport request limits). Supply a fresh UUID attachmentId; identical retries are safe. Include its ID in message.attachmentIds to send it.",
-    "scope": "manage",
-    "destructive": false,
-    "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "type": "object",
-      "properties": {
-        "chatId": {
-          "type": "string",
-          "format": "uuid"
-        },
-        "attachmentId": {
-          "type": "string",
-          "format": "uuid"
-        },
-        "name": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 180
-        },
-        "data": {
-          "type": "string",
-          "maxLength": 13981016
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "chatId",
-        "attachmentId",
-        "name",
-        "data"
-      ]
-    }
-  },
-  {
     "name": "get_chat_backend_migration",
     "description": "Inspect a conversation whose agent execution backend changed. Returns its current and configured backend, authorized destination nodes, pending migration and errors. Migration preserves the same chat and files and starts a fresh engine session. environmentExpired reports that the old environment was already deleted; explicit confirmation selects an empty destination environment while retaining history, uploads and published artifacts.",
     "scope": "read",

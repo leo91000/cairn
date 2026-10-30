@@ -233,13 +233,13 @@ async fn files(s: &Service, chat: &Value) -> Result<()> {
     if !run.is_empty() {
         remove(&s.config.data_dir.join("runs").join(run)).await?;
     }
-    remove(
-        &s.config
-            .data_dir
-            .join("chat-attachments")
-            .join(text(chat, "id")),
-    )
-    .await?;
+    s.attachments
+        .purge(
+            &s.store,
+            &s.config.data_dir.join("chat-attachments"),
+            text(chat, "id"),
+        )
+        .await?;
     for (_, artifact) in s.store.keys(&format!("artifact:{run}:")).await? {
         let id = text(&artifact, "id");
         crate::validation::uuid(id)?;
@@ -252,10 +252,7 @@ async fn files(s: &Service, chat: &Value) -> Result<()> {
 
 /// Deletes every record of a conversation and its run, including share tokens.
 fn forget(db: &Db<'_>, cid: &str, run: &str) -> Result<()> {
-    for prefix in [
-        format!("artifact:{run}:"),
-        format!("chat-attachment:{cid}:"),
-    ] {
+    for prefix in [format!("artifact:{run}:")] {
         for (key, value) in db.keys(&prefix)? {
             if let Some(token) = value["publicToken"].as_str() {
                 db.delete(&format!("artifact-share:{token}"))?;
