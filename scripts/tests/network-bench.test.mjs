@@ -193,6 +193,41 @@ assert len(calls) == 3, calls
 `], { stdio: 'pipe' })
 })
 
+it('malformed native log bytes do not replace the instrumentation failure or skip OS exit evidence', () => {
+  execFileSync('python3', ['-B', '-c', `
+import importlib.util
+import json
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from types import SimpleNamespace
+spec = importlib.util.spec_from_file_location("network_bench", "tests/network-bench.py")
+bench = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(bench)
+primary = subprocess.TimeoutExpired('instrumentation', 360)
+def adb(*args, **options):
+    if args[:3] == ('shell', 'am', 'instrument'):
+        raise primary
+    if args[:3] == ('logcat', '-b', 'crash') and '-d' in args:
+        return subprocess.run([sys.executable, '-c', 'import sys; sys.stdout.buffer.write(bytes([255]))'], capture_output=True, check=True, **options)
+    if 'exit-info' in args:
+        return SimpleNamespace(stdout='ApplicationExitInfo #0: reason=5 (APP CRASH(NATIVE)) subreason=0 (UNKNOWN) status=6')
+    return SimpleNamespace(stdout='')
+with tempfile.TemporaryDirectory() as directory:
+    output = Path(directory) / 'same-lan.json'
+    try:
+        bench.android_instrumentation(adb, 'same-lan', output)
+    except BaseException as error:
+        assert error is primary, type(error)
+    else:
+        raise AssertionError('Malformed diagnostics must not replace the original failure')
+    evidence = json.loads(output.with_suffix('.crash.json').read_text())
+    assert evidence['exitReasons'] == [{'reason': 5, 'category': 'CRASH_NATIVE', 'status': 6}], evidence
+    assert evidence['collectionErrors'] == [], evidence
+`], { stdio: 'pipe' })
+})
+
 it('network bench stops its writers before removing their temporary directory, including on failure', () => {
   execFileSync('python3', ['-B', '-c', `
 import importlib.util

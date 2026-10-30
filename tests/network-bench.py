@@ -476,8 +476,8 @@ def android_failure_evidence(adb, output):
             ("crash-log", ("logcat", "-b", "crash", "-d", "-t", "256", "-v", "brief")),
             ("exit-info", ("shell", "dumpsys", "activity", "exit-info", "build.cairn.app"))]:
         try:
-            values.append(adb(*arguments, text=True, timeout=5).stdout)
-        except (OSError, subprocess.SubprocessError):
+            values.append(adb(*arguments, text=True, errors="replace", timeout=5).stdout)
+        except (OSError, subprocess.SubprocessError, UnicodeError):
             values.append("")
             errors.append(category + "-unavailable")
     evidence = android_crash_summary(*values)
@@ -495,7 +495,7 @@ def android_instrumentation(adb, scenario, output):
         adb("logcat", "-b", "crash", "-c", timeout=5)
         result = adb("shell", "am", "instrument", "-w", "-e", "class", "build.cairn.app.data.DirectTransportDeviceTest",
                      "-e", "cairnDirectScenario", scenario, "build.cairn.app.test/androidx.test.runner.AndroidJUnitRunner", text=True, timeout=360)
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError, UnicodeError):
         android_failure_evidence(adb, output)
         raise
     passed = "OK (1 test)" in result.stdout
