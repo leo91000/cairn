@@ -2944,6 +2944,24 @@ async fn interrupted_controller_output_after_healthy_exit_never_replays_the_turn
             assert_eq!(saved["outputInterrupted"], true);
         }
         assert_eq!(saved["completed"], completed);
+        if completed && !clean_eof {
+            let id = run_id.clone();
+            let events = fixture
+                .service
+                .store
+                .read(move |db| db.events_fixture(&id, 0, 1000))
+                .await
+                .unwrap();
+            let notices = events
+                .iter()
+                .filter(|event| text(event, "text").contains("Execution output was interrupted"))
+                .count();
+            assert_eq!(notices, 1, "{events:?}");
+            assert!(
+                text(&result, "summary").contains("committed answer"),
+                "{result}"
+            );
+        }
         if !completed {
             let expected_error = if clean_eof {
                 "completion was recorded"
