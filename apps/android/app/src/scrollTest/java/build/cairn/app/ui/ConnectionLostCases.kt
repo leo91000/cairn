@@ -61,11 +61,13 @@ abstract class ConnectionLostCases {
                             return MockResponse()
                                 .setResponseCode(503)
                                 .setBody("""{"error":"Installation unavailable"}""")
+                        // Probes read the overview; workspace reloads read agents.
+                        if (path.endsWith("/overview") || path.endsWith("/agents"))
+                            overviews.incrementAndGet()
                         if (path.endsWith("/agents") && holdReload.get()) {
                             reloadStarted.countDown()
                             releaseReload.await(20, TimeUnit.SECONDS)
                         }
-                        if (path.endsWith("/overview")) overviews.incrementAndGet()
                         val response =
                             when {
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
@@ -193,7 +195,8 @@ abstract class ConnectionLostCases {
                             return unavailable()
                         }
                         if (path.startsWith("/api/installations/second/")) {
-                            if (path.endsWith("/overview")) secondOverviews.incrementAndGet()
+                            if (path.endsWith("/overview") || path.endsWith("/agents"))
+                                secondOverviews.incrementAndGet()
                             if (secondDown.get()) return unavailable()
                         }
                         val body =
@@ -269,7 +272,8 @@ abstract class ConnectionLostCases {
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path!!.substringBefore('?')
-                        if (path.endsWith("/overview")) overviews.incrementAndGet()
+                        if (path.endsWith("/overview") || path.endsWith("/agents"))
+                            overviews.incrementAndGet()
                         val body =
                             when {
                                 path == "/api/account/session" -> beaconAccountFixture()

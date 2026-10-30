@@ -200,7 +200,7 @@ class FilUnreadJourneyTest {
                                 stream(LiveState(chats = chats))
                             path == "/api/installations/fixture/api/reads" -> {
                                 reads += request.body.readUtf8()
-                                json("{\"read\":1}")
+                                json("{\"read\":1,\"readAt\":1}")
                             }
                             path == "/api/installations/fixture/api/overview" ||
                                 path.endsWith("/models") ||
@@ -285,7 +285,7 @@ class FilUnreadJourneyTest {
                     reads.isNotEmpty()
                 }
                 assertEquals(
-                    "{\"items\":[{\"key\":\"chat:${chats.first().id}\",\"finishedAt\":${chats.first().finishedAt}}]}",
+                    "{\"items\":[{\"finishedAt\":${chats.first().finishedAt},\"target\":{\"kind\":\"chat\",\"chatId\":\"${chats.first().id}\"}}]}",
                     reads.first(),
                 )
                 compose.waitUntil(10000) {
@@ -305,7 +305,7 @@ class FilUnreadJourneyTest {
                     reads.size == 2
                 }
                 assertEquals(
-                    "{\"items\":[{\"key\":\"task:348988cc-0279-5ed4-801b-ac44d6987c6e\",\"finishedAt\":${activity.first().finishedAt}}]}",
+                    "{\"items\":[{\"finishedAt\":${activity.first().finishedAt},\"target\":{\"kind\":\"mission\",\"taskId\":\"348988cc-0279-5ed4-801b-ac44d6987c6e\"}}]}",
                     reads[1],
                 )
                 compose.waitUntil(10000) {
@@ -340,7 +340,7 @@ class FilUnreadJourneyTest {
                                         return MockResponse()
                                             .setResponseCode(503)
                                             .setBody("{\"error\":\"Offline\"}")
-                                    "{\"read\":1}"
+                                    "{\"read\":1,\"readAt\":1}"
                                 }
                                 path.endsWith("/overview") || path.endsWith("/models") -> "{}"
                                 else ->
@@ -393,7 +393,11 @@ class FilUnreadJourneyTest {
                 }
             try {
                 waitFor { vm.state.value.installation != null && !vm.state.value.busy }
-                compose.runOnIdle { vm.markRead((0..200).map { "chat:$it" to (now - 1000) }) }
+                compose.runOnIdle {
+                    vm.markRead(
+                        (0..200).map { "chat:${java.util.UUID(0, it.toLong())}" to (now - 1000) }
+                    )
+                }
                 waitFor { reads.size == 2 && vm.state.value.error == "Offline" }
                 val batches = reads.map {
                     wireJson.parseToJsonElement(it).jsonObject["items"]!!.jsonArray
@@ -401,16 +405,17 @@ class FilUnreadJourneyTest {
                 assertEquals(listOf(200, 1), batches.map { it.size })
                 compose.runOnIdle {
                     assertEquals(200, vm.localReads.size)
-                    assertEquals(null, vm.localReads["chat:200"])
+                    assertEquals(null, vm.localReads["chat:${java.util.UUID(0, 200)}"])
                     vm.report(ApiException(401, "Expired"))
                     assertEquals(0, vm.localReads.size)
                 }
                 account.set("member")
                 compose.runOnIdle { vm.perform { connect(origin) } }
                 waitFor { vm.state.value.session.account?.id == "member" && !vm.state.value.busy }
-                compose.runOnIdle { vm.markRead(listOf("chat:0" to (now - 1000))) }
+                val first = "chat:${java.util.UUID(0, 0)}"
+                compose.runOnIdle { vm.markRead(listOf(first to (now - 1000))) }
                 waitFor { reads.size == 3 }
-                compose.runOnIdle { assertEquals(now - 1000, vm.localReads["chat:0"]) }
+                compose.runOnIdle { assertEquals(now - 1000, vm.localReads[first]) }
             } finally {
                 vm.api.closeStreams()
             }
@@ -447,7 +452,7 @@ class FilUnreadJourneyTest {
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path.endsWith("/reads") -> {
                                     reads += request.body.readUtf8()
-                                    "{\"read\":1}"
+                                    "{\"read\":1,\"readAt\":1}"
                                 }
                                 path.endsWith("/overview") || path.endsWith("/models") -> "{}"
                                 else ->
@@ -523,7 +528,7 @@ class FilUnreadJourneyTest {
                     reads.isNotEmpty()
                 }
                 assertEquals(
-                    "{\"items\":[{\"key\":\"chat:${chats.first().id}\",\"finishedAt\":${chats.first().finishedAt}}]}",
+                    "{\"items\":[{\"finishedAt\":${chats.first().finishedAt},\"target\":{\"kind\":\"chat\",\"chatId\":\"${chats.first().id}\"}}]}",
                     reads.first(),
                 )
             } finally {
@@ -571,7 +576,7 @@ class FilUnreadJourneyTest {
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path.endsWith("/reads") -> {
                                     reads += request.body.readUtf8()
-                                    "{\"read\":1}"
+                                    "{\"read\":1,\"readAt\":1}"
                                 }
                                 path.endsWith("/overview") || path.endsWith("/models") -> "{}"
                                 else ->
@@ -639,7 +644,7 @@ class FilUnreadJourneyTest {
                     reads.isNotEmpty()
                 }
                 assertEquals(
-                    "{\"items\":[{\"key\":\"task:348988cc-0279-5ed4-801b-ac44d6987c6e\",\"finishedAt\":${finished.finishedAt}}]}",
+                    "{\"items\":[{\"finishedAt\":${finished.finishedAt},\"target\":{\"kind\":\"mission\",\"taskId\":\"348988cc-0279-5ed4-801b-ac44d6987c6e\"}}]}",
                     reads.single(),
                 )
             } finally {

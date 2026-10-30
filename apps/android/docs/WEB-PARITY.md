@@ -416,3 +416,18 @@ model, binary upload endpoint, previews, retries and existing presentation. Limi
 remain 10 MiB/file, 40 MiB/message, 200 MiB/conversation and eight files/message.
 No platform difference or client error mapping changes; HTTP, both management
 tools and plugin imports share the reservation writer.
+
+Personal read state and installation settings (B4, #419): both apps mark Fil items
+read and set blocked mission outcomes aside with the generated `markRead` and
+`setOutcomeAside` calls; read marks keep the finish of the work seen and each account
+keeps its own state. Settings and the audit list use `getInstallationSettings` and
+`listAudit`. Android now shows the owner's conversation storage section (S3 status,
+« Configurer un S3 externe », « Vérifier le stockage ») with the same redacted view,
+R2 privacy confirmation and save/check commands as the web; credentials are entered
+once, kept out of saved state and never displayed. Web keeps English copy and Android
+French Material controls; the web audit list shows 20 actions while Android shows
+the 100 returned entries with their details, as before. Public MCP and
+`cairn_installation` expose the same commands: personal state follows the account
+that authorized a public grant, executions without an account delegation are refused
+and see no personal state, and storage credentials can only be saved by the human
+owner in the apps.

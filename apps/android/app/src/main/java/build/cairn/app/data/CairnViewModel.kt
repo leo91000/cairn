@@ -308,9 +308,10 @@ constructor(
             runId,
             OutcomeDismissal(until),
             SetOutcomeAsideInput(
-                taskId,
-                if (until == null) OutcomeAsideAction.A(finishedAt)
-                else OutcomeAsideAction.B(finishedAt, until),
+                taskId = taskId,
+                action =
+                    if (until == null) OutcomeAsideAction.A(finishedAt = finishedAt)
+                    else OutcomeAsideAction.B(finishedAt = finishedAt, until = until),
             ),
             if (until == null) "Écartée jusqu’au prochain résultat de la mission"
             else "Rappel demain à 9 h",
@@ -321,7 +322,7 @@ constructor(
         dismissal(
             runId,
             null,
-            SetOutcomeAsideInput(taskId, OutcomeAsideAction.C()),
+            SetOutcomeAsideInput(taskId = taskId, action = OutcomeAsideAction.C()),
             "De retour dans Pour vous",
         )
 
@@ -360,8 +361,10 @@ constructor(
     private fun readMark(key: String, at: Long): ReadMark {
         val id = key.substringAfter(':')
         return ReadMark(
-            if (key.startsWith("chat:")) ReadTarget.A(id) else ReadTarget.B(id),
-            at,
+            target =
+                if (key.startsWith("chat:")) ReadTarget.A(chatId = id)
+                else ReadTarget.B(taskId = id),
+            finishedAt = at,
         )
     }
 
