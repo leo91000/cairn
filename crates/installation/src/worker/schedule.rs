@@ -1496,8 +1496,8 @@ mod tests {
         service.store.transaction(move |db| {
             let cause = crate::run_retry::Cause::classify(&json!({"code":"server_error", "message":"Provider unavailable"})).unwrap();
             for case in ["cancel", "expired", "cause", "provider", "unknown_terminal", "finalization", "replacement_runner", "replacement_node", "replacement_process", "new_failure", "new_admission", "new_turn", "unfenced_release", "already_reserved"] {
-                let mut retry = crate::run_retry::Retry::next(None, cause.clone(), now()).unwrap();
-                if case == "expired" { retry.deadline_at = Some(now() - 1); }
+                let started_at = if case == "expired" { now() - crate::run_retry::MAX_RECOVERY_MS - 1 } else { now() };
+                let mut retry = crate::run_retry::Retry::next(None, cause.clone(), started_at).unwrap();
                 if case == "cause" { retry.cause.message = "Different failure".into(); }
                 db.change_run(&run, crate::runs::RunChanges {
                     status:Some(RunStatus::Queued), session_id:Some(Some("session".into())),
