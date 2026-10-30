@@ -270,6 +270,7 @@ test('selects installations, remembers the last one and honours deep workspace U
     await page.getByRole('textbox', { name: 'Message', exact: true }).fill('A file in my home installation')
     await page.getByLabel('Attach files').setInputFiles({ name: 'hello.txt', mimeType: 'text/plain', buffer: Buffer.from('A relayed file') })
     await page.getByRole('button', { name: 'Send', exact: true }).click()
+    await expect(page).toHaveURL(/\/installations\/[^/]+\/chats\/[^/]+$/)
     await page.getByRole('button', { name: 'More actions for hello.txt', exact: true }).first().click()
     const download = page.getByRole('menu', { name: 'Actions for hello.txt' }).getByRole('menuitem', { name: 'Download' })
     await expect(download).toHaveAttribute('href', /\/api\/installations\/[^/]+\/api\/chats\/[^/]+\/attachments\//)
