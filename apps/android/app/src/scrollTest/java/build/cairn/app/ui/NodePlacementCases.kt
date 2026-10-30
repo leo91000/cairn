@@ -247,6 +247,7 @@ abstract class NodePlacementCases {
     fun nativeNodeEditorRequiresExplicitPeopleAndSupportsSixExecutionSlots() {
         var saved: NodeConfiguration? = null
         var keyboard: androidx.compose.ui.platform.SoftwareKeyboardController? = null
+        var focus: androidx.compose.ui.focus.FocusManager? = null
         val node =
             ExecutionNode(
                 id = "beac7d45-75ca-544c-a4f6-a61c1e5787f2",
@@ -271,6 +272,7 @@ abstract class NodePlacementCases {
             )
         compose.setContent {
             keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
+            focus = androidx.compose.ui.platform.LocalFocusManager.current
             CairnTheme {
                 NodeEditor(
                     node,
@@ -287,7 +289,12 @@ abstract class NodePlacementCases {
             }
         }
         compose.onNodeWithText("Slots d’exécution").assertIsEnabled().performTextReplacement("6")
-        compose.runOnIdle { keyboard?.hide() }
+        // A focused field keeps reopening the keyboard on devices, and its panel can take the
+        // toggle's tap: release focus first.
+        compose.runOnIdle {
+            focus?.clearFocus()
+            keyboard?.hide()
+        }
         compose.waitForIdle()
         compose
             .onNodeWithText("Tous les slots partagent ces budgets.", substring = true)
@@ -1449,6 +1456,8 @@ abstract class NodePlacementCases {
                     substring = true,
                 )
                 .assertExists()
+            // The fleet summary counts connected machines and slots in use.
+            compose.onNodeWithText("1/1 connectée · ", substring = true).assertExists()
             capture("nodes")
             compose.onNodeWithText("Stockage").performScrollTo().performClick()
             compose.onNodeWithText("Cache mémoire partagé (Mio)").performTextReplacement("1024")

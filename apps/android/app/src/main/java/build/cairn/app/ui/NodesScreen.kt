@@ -31,6 +31,11 @@ fun NodesScreen(
     openAgents: () -> Unit = {},
 ) {
     var nodes by remember { mutableStateOf<List<ExecutionNode>>(emptyList()) }
+    // When the built-in runner's contact last changed, as seen by this device: an unchanged
+    // contact means it went stale.
+    var runner by remember { mutableStateOf<RunnerObservation?>(null) }
+    // How long each machine has stayed unready without a reported error, across listings.
+    var unready by remember { mutableStateOf<Map<String, UnreadyObservation>>(emptyMap()) }
     var adding by remember { mutableStateOf(false) }
     var storage by remember { mutableStateOf<ExecutionNode?>(null) }
     var name by remember { mutableStateOf("") }
@@ -65,10 +70,27 @@ fun NodesScreen(
     var cleaning by remember { mutableStateOf<ExecutionNode?>(null) }
     var advanced by remember { mutableStateOf(false) }
     var showRevoked by remember { mutableStateOf(false) }
+    // Polls and post-action refreshes can overlap: an answer older than one already applied is
+    // dropped; slow answers still apply when nothing newer arrived first.
+    val started = remember { java.util.concurrent.atomic.AtomicInteger() }
+    val applied = remember { java.util.concurrent.atomic.AtomicInteger() }
     suspend fun load() {
-        nodes = vm.api.get("/nodes")
+        val request = started.incrementAndGet()
+        val listed: List<ExecutionNode> = vm.api.get("/nodes")
+        if (applied.accumulateAndGet(request) { last, next -> maxOf(last, next) } != request) return
+        nodes = listed
+        runner = observeRunner(nodes, runner)
+        unready = observeUnready(nodes, unready, clock = fleetClock(nodes, runner), runner = runner)
+        // Trusted people load separately: their failure is reported without blocking enrollment
+        // detection, as on the web.
         if (nodes.any { it.capabilities.backend == "native" })
-            nativeCallers = vm.api.get("/nodes/native-callers")
+            try {
+                nativeCallers = vm.api.get("/nodes/native-callers")
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                vm.report(e)
+            }
         val invitation = enrollment ?: return
         nodes
             .firstOrNull {
@@ -104,9 +126,13 @@ fun NodesScreen(
             "Nodes",
             "Gérez vos machines et leur capacité. L’accès des agents se règle sur leur fiche.",
         )
+        val clock = fleetClock(nodes, runner)
+        val summary = fleetSummary(nodes, clock = clock, runner = runner, unready = unready)
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(
-                nodes.count { !it.revoked }.let { if (it == 1) "1 machine" else "$it machines" },
+                "${summary.connected}/${summary.machines} connectée${if (summary.connected > 1) "s" else ""} · " +
+                    "${summary.usedSlots}/${summary.totalSlots} slots utilisés" +
+                    if (summary.attention > 0) " · ${summary.attention} à vérifier" else "",
                 Modifier.weight(1f),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -123,22 +149,37 @@ fun NodesScreen(
             .filter { showRevoked || !it.revoked }
             .forEach { node ->
                 Panel {
-                    Text(node.name, style = MaterialTheme.typography.titleMedium)
+                    val health = nodeHealth(node, clock = clock, runner = runner, unready = unready)
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            node.name,
+                            Modifier.weight(1f, fill = false),
+                            style = MaterialTheme.typography.titleMedium,
+                        )
+                        NodeHealthPill(health)
+                    }
                     Text(
-                        if (node.capabilities.backend == "native")
-                            "Processus natif · GPU partagé · personnes de confiance"
-                        else "VM Firecracker",
+                        (if (node.local) "Runner du master · " else "") +
+                            if (node.capabilities.backend == "native")
+                                "Processus natif · GPU partagé · personnes de confiance"
+                            else "VM Firecracker",
                         style = MaterialTheme.typography.bodySmall,
                     )
-                    Text(
-                        when (node.status) {
-                            "online" -> "Connectée"
-                            "offline" -> "Déconnectée"
-                            "revoked" -> "Révoquée"
-                            "local" -> "Runner du master"
-                            else -> node.status
-                        }
-                    )
+                    if (!node.revoked)
+                        Text(
+                            health.detail,
+                            color =
+                                if (
+                                    health.state == NodeHealthState.OFFLINE ||
+                                        health.state == NodeHealthState.ATTENTION
+                                )
+                                    signal.attention
+                                else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     if (node.revoked) {
                         Text(
                             "Cette machine n’a plus accès. Réinscrivez-la avec un nouveau code pour la reconnecter."
@@ -172,7 +213,7 @@ fun NodesScreen(
                         )
                     }
                     Text(
-                        "${node.availableSlots} slots libres sur ${node.slots} · ${node.occupiedSlots} occupés"
+                        "${freeSlots(node)} slots libres sur ${slotCapacity(node)} · ${node.occupiedSlots} occupés"
                     )
                     node.diskAccounting?.let { disk ->
                         Text("Capacité disque", style = MaterialTheme.typography.titleSmall)
@@ -260,7 +301,7 @@ fun NodesScreen(
                             Text(message, color = MaterialTheme.colorScheme.error)
                         }
                     }
-                    nodeDiagnostics(node).forEach {
+                    nodeDiagnostics(node, clock = clock, runner = runner).forEach {
                         Text("• $it", color = MaterialTheme.colorScheme.error)
                     }
                     if (node.tags.isNotEmpty()) Text(node.tags.joinToString(" · "))
@@ -625,6 +666,23 @@ fun NodesScreen(
             }
         }
     }
+}
+
+/** A node's health: green when it takes work, amber when it waits, coral when it needs you. */
+@Composable
+private fun NodeHealthPill(health: NodeHealth) {
+    val (container, content) =
+        when (health.state) {
+            NodeHealthState.READY -> signal.success.copy(alpha = 0.14f) to signal.success
+            NodeHealthState.OFFLINE,
+            NodeHealthState.ATTENTION -> signal.attentionSoft to signal.attention
+            NodeHealthState.PAUSED,
+            NodeHealthState.REVOKED ->
+                MaterialTheme.colorScheme.surfaceVariant to
+                    MaterialTheme.colorScheme.onSurfaceVariant
+            else -> signal.warningSoft to signal.warning
+        }
+    Pill(health.label, container, content)
 }
 
 /** The last step of a guided backend switch: revoke the previous node, or keep both for now. */
