@@ -136,7 +136,9 @@ never contains side questions they could mistake for steering. Side questions ne
 delay the reply: when it ends, questions still being answered are withdrawn and,
 like those still pending, marked unanswered with an explanation. Retried submissions
 are idempotent by their UUID. The answer uses the subscription of the account running
-the turn, and secrets masked in the conversation are masked in it too.
+the turn, and secrets masked in the conversation are masked in it too. A conversation
+keeps its 30 latest side questions, at most 5 waiting at once, with answers of up to
+20,000 characters.
 
 ## Notifications
 

@@ -71,7 +71,13 @@ internal class SideQuestionState {
         open = true
     }
 
+    /** Opens the sheet, on the side questions about one reply when [itemId] is given. */
     fun show(itemId: String = "") {
+        // Questions asked from a reply's sheet are about that reply.
+        if (itemId.isNotEmpty() && itemId != this.itemId) {
+            this.itemId = itemId
+            quote = ""
+        }
         focus = itemId
         open = true
     }
@@ -101,9 +107,12 @@ internal class SideQuestionState {
         return submission
     }
 
-    /** Asked: the same question asked again later is a new one. */
+    /** Asked: the same question asked again later is a new one, about no reply yet. */
     fun submitted() {
         submissionKey = ""
+        text = ""
+        quote = ""
+        itemId = ""
     }
 }
 
@@ -143,8 +152,11 @@ internal fun SideQuestionCard(chat: Chat, side: SideQuestionState) {
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
                 Text(
-                    if (pending.isNotEmpty()) "Question à côté · ${engine(chat.provider)} répond"
-                    else "Question à côté · Réponse prête",
+                    when {
+                        pending.isNotEmpty() -> "Question à côté · ${engine(chat.provider)} répond"
+                        unread.any { it.status == "answered" } -> "Question à côté · Réponse prête"
+                        else -> "Question à côté · Sans réponse"
+                    },
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.primary,
                 )
@@ -241,8 +253,6 @@ internal fun ColumnScope.SideQuestionPanel(
                             )
                         )
                         side.submitted()
-                        side.text = ""
-                        side.quote = ""
                     }
                 },
                 enabled = !state.busy && side.text.isNotBlank(),
@@ -254,12 +264,12 @@ internal fun ColumnScope.SideQuestionPanel(
             Notice(
                 // The same cases as the server's `sideQuestionReason`, in French.
                 when {
+                    chat.status != "running" ->
+                        "Les questions à côté sont possibles pendant que Claude Code travaille sur une réponse. Envoyez plutôt un message."
                     chat.provider == "codex" ->
                         "Codex ne peut pas répondre aux questions à côté dans Cairn : ses conversations à côté peuvent encore utiliser des outils. Posez-la dans la conversation."
                     chat.provider == "opencode" ->
                         "OpenCode ne peut pas encore répondre aux questions à côté dans Cairn. Posez-la dans la conversation."
-                    chat.status != "running" ->
-                        "Les questions à côté sont possibles pendant que Claude Code travaille sur une réponse. Envoyez plutôt un message."
                     chat.compaction?.running == true ->
                         "La conversation compacte son contexte. Réessayez une fois la compaction terminée."
                     else -> "Claude Code démarre encore sa réponse. Réessayez dans un instant."

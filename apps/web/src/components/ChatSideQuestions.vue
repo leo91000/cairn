@@ -3,7 +3,6 @@ import type { Provider } from '../../../../packages/contracts/accounts'
 import type { ChatSideQuestion } from '../../../../packages/contracts/chats'
 import {
   computed,
-  nextTick,
   ref,
   watch,
 } from 'vue'
@@ -41,7 +40,8 @@ const itemId = ref('')
 const focus = ref('')
 const busy = ref(false)
 const error = ref('')
-const field = ref<HTMLTextAreaElement>()
+/** The dialog focuses the question field when it opens to ask. */
+const asking = ref(false)
 let submission: { id: string, serialized: string } | undefined
 
 // Answers that arrived while the panel was closed show above the composer until read.
@@ -72,21 +72,44 @@ const pending = computed(() => props.questions.filter(question => question.statu
 const unread = computed(() => props.questions.filter(question => question.status !== 'pending' && question.status !== 'cancelled' && !seen.value.has(question.id)))
 const shown = computed(() => props.questions.filter(question => !focus.value || question.itemId === focus.value).toReversed())
 const engine = computed(() => props.provider ? providers[props.provider].label : 'The agent')
+const status = computed(() => {
+  if (pending.value.length)
+    return `${engine.value} is answering`
+  return unread.value.some(question => question.status === 'answered') ? 'Answer ready' : 'Not answered'
+})
 
-async function ask(about: { itemId: string, quote: string }) {
+function ask(about: { itemId: string, quote: string }) {
   itemId.value = about.itemId
   quote.value = about.quote
-  focus.value = ''
   error.value = ''
-  show()
-  await nextTick()
-  field.value?.focus()
+  open.value = true
+  asking.value = true
+  focus.value = ''
+  markSeen()
 }
 
+/** Opens the panel, on the side questions about one reply when `item` is given. */
 function show(item = '') {
+  // Questions asked from a reply's panel are about that reply.
+  if (item && item !== itemId.value) {
+    itemId.value = item
+    quote.value = ''
+  }
+
   focus.value = item
   open.value = true
+  asking.value = false
   markSeen()
+}
+
+function key(event: KeyboardEvent) {
+  if (event.shiftKey || event.isComposing)
+    return
+  // Touch keyboards keep Enter for newlines, as in the conversation composer.
+  if (window.matchMedia('(pointer: coarse)').matches && !event.ctrlKey && !event.metaKey)
+    return
+  event.preventDefault()
+  void send()
 }
 
 async function send() {
@@ -102,8 +125,11 @@ async function send() {
       submission = { id: crypto.randomUUID(), serialized }
     await askChatSideQuestion(api, { chatId: props.chatId, question: { id: submission.id, ...body } })
     submission = undefined
-    text.value = ''
+    // Keeps what was typed meanwhile.
+    if (text.value.trim() === question)
+      text.value = ''
     quote.value = ''
+    itemId.value = ''
   }
   catch (e) { error.value = (e as Error).message }
   finally { busy.value = false }
@@ -128,10 +154,10 @@ defineExpose({ ask, show })
 </script>
 
 <template>
-  <div v-if="pending.length || unread.length" class="mb-3 flex items-center gap-3 rounded-xl border border-line bg-surface px-3 py-2.5" role="status">
+  <div v-if="pending.length || unread.length" class="mb-3 flex items-center gap-3 rounded-xl border border-line bg-surface px-3 py-2.5">
     <span class="grid size-8 shrink-0 place-items-center rounded-lg bg-accent/10 text-accent"><Icon :name="MessageSquareQuote" :size="16" /></span>
-    <button class="min-w-0 flex-1 text-left" aria-label="Open side questions" @click="show()">
-      <span class="mb-0.5 block text-[10px] font-semibold text-accent">Side {{ pending.length + unread.length > 1 ? 'questions' : 'question' }} · {{ pending.length ? `${engine} is answering` : 'Answer ready' }}</span>
+    <button class="min-w-0 flex-1 text-left" @click="show()">
+      <span class="mb-0.5 block text-[10px] font-semibold text-accent">Side {{ pending.length + unread.length > 1 ? 'questions' : 'question' }} · {{ status }}</span>
       <span class="block truncate text-xs font-medium">{{ (pending[0] ?? unread[0])!.text }}</span>
     </button>
     <UiButton size="small" @click="show()">
@@ -163,13 +189,13 @@ defineExpose({ ask, show })
         <label class="block text-xs text-muted">
           {{ quote ? 'Your question about this passage' : itemId ? 'Your question about this reply' : 'Your question' }}
           <textarea
-            ref="field"
             v-model="text"
             rows="3"
             maxlength="4000"
             class="mt-2! max-h-48 resize-y"
             placeholder="Why did you choose this approach?"
-            @keydown.enter.exact.prevent="send"
+            :autofocus="asking"
+            @keydown.enter="key"
           />
         </label>
         <div class="flex justify-end">

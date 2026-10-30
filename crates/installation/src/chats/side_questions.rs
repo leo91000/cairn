@@ -28,9 +28,10 @@ use std::collections::HashSet;
 /// Unanswered side questions a conversation can hold at once.
 const MAX_PENDING: usize = 5;
 /// Side questions kept per conversation; the oldest settled ones are forgotten first.
-const MAX_KEPT: usize = 100;
+/// Conversation views carry them all, with their answers.
+const MAX_KEPT: usize = 30;
 /// Answers longer than this are cut, as no explanation needs more.
-const MAX_ANSWER: usize = 100_000;
+const MAX_ANSWER: usize = 20_000;
 const MAX_ERROR: usize = 1_000;
 
 pub(crate) const EXPIRED: &str = "The reply finished before this side question was answered. Ask it again during a reply, or ask in the conversation.";
@@ -129,9 +130,14 @@ pub(crate) fn unavailable(run: Option<&Value>) -> Option<&'static str> {
                 "Codex cannot answer side questions in Cairn: its side conversations can still use tools. Ask in the conversation instead.",
             );
         }
-        _ => {
+        Ok(Provider::Opencode) => {
             return Some(
                 "OpenCode cannot answer side questions in Cairn yet. Ask in the conversation instead.",
+            );
+        }
+        Err(_) => {
+            return Some(
+                "This agent cannot answer side questions in Cairn. Ask in the conversation instead.",
             );
         }
     }
@@ -270,27 +276,34 @@ pub(crate) fn deliveries(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<Vec<
         return Ok(Vec::new());
     }
     let run_id = text(run, "id");
-    let mut entries = Vec::new();
+    let mut questions = Vec::new();
     for (id, open) in open(db, chat_id)? {
         if open.run_id != run_id {
             continue;
         }
-        match open.status {
-            SideQuestionStatus::Pending => {
-                let Some(question) = find(db, chat_id, &id)? else {
-                    continue;
-                };
-                entries.push(json!({
-                    "id": format!("side-question:{id}"),
-                    "sideQuestion": {
-                        "id": id,
-                        "text": wire_text(&question),
-                    },
-                }));
-            }
+        if let Some(question) = find(db, chat_id, &id)? {
+            questions.push(question);
+        }
+    }
+    // In the order they were asked.
+    questions.sort_by(|a, b| {
+        a.created_at
+            .cmp(&b.created_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    let mut entries = Vec::new();
+    for question in questions {
+        match question.status {
+            SideQuestionStatus::Pending => entries.push(json!({
+                "id": format!("side-question:{}", question.id),
+                "sideQuestion": {
+                    "id": question.id,
+                    "text": wire_text(&question),
+                },
+            })),
             SideQuestionStatus::Cancelled => entries.push(json!({
-                "id": format!("withdraw-side-question:{id}"),
-                "sideQuestionId": id,
+                "id": format!("withdraw-side-question:{}", question.id),
+                "sideQuestionId": question.id,
                 "sideQuestionCancelled": true,
             })),
             _ => {}
@@ -515,6 +528,9 @@ mod tests {
         // even if an adapter announced it.
         assert!(unavailable(Some(&running("codex", true))).is_some());
         assert!(unavailable(Some(&running("claude", true))).is_none());
+        // A run whose engine cannot be read is refused without naming another engine.
+        let unknown = unavailable(Some(&running("", true))).unwrap();
+        assert!(unknown.starts_with("This agent"), "{unknown}");
     }
 
     #[tokio::test]
@@ -669,6 +685,33 @@ mod tests {
         }
         let read_cpu = (cpu_ms() - cpu) / 400.0;
 
+        // The largest view: every kept question, each with the longest two-byte answer.
+        let heaviest = chat_id(CHATS - 1);
+        let filled = heaviest.clone();
+        store
+            .transaction(move |db| {
+                for index in 0..MAX_KEPT {
+                    let mut question = typical(CHATS - 1, index + 1);
+                    question.chat_id = filled.clone();
+                    question.answer = Some("é".repeat(MAX_ANSWER));
+                    save(db, &question)?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let mut views = Vec::new();
+        let mut view_bytes = 0;
+        for _ in 0..50 {
+            let chat = heaviest.clone();
+            let started = Instant::now();
+            view_bytes = store
+                .read(move |db| Ok(serde_json::to_vec(&side_questions(db, &chat)?)?.len()))
+                .await
+                .unwrap();
+            views.push(started.elapsed().as_secs_f64() * 1000.0);
+        }
+
         let result = json!({
             "encodedBytes": {
                 "typicalRecord": encoded(&typical(0, 0)),
@@ -686,6 +729,11 @@ mod tests {
                 "tickOpenScan": distribution(tick_scans),
                 "cpuMsPerRead": read_cpu,
                 "records": CHATS,
+            },
+            "largestView": {
+                "questions": MAX_KEPT,
+                "encodedBytes": view_bytes,
+                "readAndEncode": distribution(views),
             },
         });
         println!("{}", serde_json::to_string_pretty(&result).unwrap());

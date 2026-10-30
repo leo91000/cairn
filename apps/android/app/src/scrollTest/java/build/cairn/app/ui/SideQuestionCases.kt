@@ -243,6 +243,48 @@ abstract class SideQuestionCases {
     }
 
     @Test
+    fun aQuestionIsAboutTheReplyWhoseSheetAsksIt() {
+        val side = SideQuestionState().apply { ask("reply-1", "le passage") }
+        side.text = "Pourquoi ?"
+        side.submitted()
+        assertEquals(listOf("", "", ""), listOf(side.itemId, side.quote, side.text))
+        // Opened from another reply's count, the next question is about that reply.
+        side.show("reply-2")
+        assertEquals("reply-2", side.itemId)
+        assertEquals("reply-2", side.focus)
+        // Opened from the card, a draft keeps the reply it is about.
+        side.show()
+        assertEquals("reply-2", side.itemId)
+        side.ask("reply-1", "autre passage")
+        side.show("reply-2")
+        assertEquals(listOf("reply-2", ""), listOf(side.itemId, side.quote))
+    }
+
+    @Test
+    fun theCardSaysWhenAQuestionWasNotAnswered() {
+        val failed =
+            answered.copy(
+                id = "a1b2c3d4-0000-4000-8000-000000000009",
+                status = "failed",
+                answer = null,
+                error = "La réponse s’est terminée avant.",
+            )
+        val side = SideQuestionState().apply { observe(emptyList()) }
+        var questions by mutableStateOf(listOf(failed))
+        compose.setContent {
+            CairnTheme {
+                SideQuestionCard(
+                    chat(canAsk = true).copy(status = "idle", sideQuestions = questions),
+                    side,
+                )
+            }
+        }
+        compose.onNodeWithText("Question à côté · Sans réponse").assertExists()
+        questions = listOf(failed, answered)
+        compose.onNodeWithText("Question à côté · Réponse prête").assertExists()
+    }
+
+    @Test
     fun aReplyOffersItsSideQuestionsOnlyWhileTheAgentCanAnswer() {
         val asked = mutableListOf<Pair<String, String>>()
         val shown = mutableListOf<String>()

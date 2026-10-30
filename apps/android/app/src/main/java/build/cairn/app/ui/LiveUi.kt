@@ -9,6 +9,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.hideFromAccessibility
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
@@ -1405,8 +1406,17 @@ fun EventRow(vm: CairnViewModel, event: RunEvent, agent: String = "Cairn") {
                                     // never change the line's height, so the history does not move.
                                     if (side != null && itemId.isNotEmpty() && asked > 0)
                                         Box(Modifier.withoutLineHeight()) {
+                                            val label =
+                                                if (asked == 1)
+                                                    "Voir 1 question à côté sur cette réponse"
+                                                else
+                                                    "Voir $asked questions à côté sur cette réponse"
                                             TextButton(
                                                 onClick = { side.show(itemId) },
+                                                modifier =
+                                                    Modifier.semantics {
+                                                        contentDescription = label
+                                                    },
                                                 contentPadding = PaddingValues(horizontal = 8.dp),
                                             ) {
                                                 Icon(

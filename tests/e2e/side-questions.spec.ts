@@ -31,6 +31,7 @@ test('asks side questions about a running reply without steering, queuing or rec
   await message.getByRole('button', { name: 'Ask about this reply' }).click()
   const panel = page.getByRole('dialog', { name: 'Side questions' })
   await expect(panel.getByText('Claude Code answers from the conversation so far, without tools')).toBeVisible()
+  await expect(panel.getByRole('textbox', { name: 'Your question about this reply' })).toBeFocused()
   await panel.getByRole('textbox', { name: 'Your question about this reply' }).fill('Why trace the boundaries first?')
   await page.screenshot({ path: test.info().outputPath('side-question-desktop-light.png'), animations: 'disabled' })
   await panel.getByRole('button', { name: 'Ask', exact: true }).click()
@@ -102,8 +103,8 @@ test('a pending side question can be withdrawn while the reply continues', async
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto(workspacePath(`/chats/${chat.id}`))
   await authenticateWorkspace(page)
-  await expect(page.getByText('Side question · Claude Code is answering')).toBeVisible()
-  await page.getByRole('button', { name: 'Open side questions' }).click()
+  // The card's button is named by its visible text.
+  await page.getByRole('button', { name: /^Side question · Claude Code is answering/ }).click()
   const panel = page.getByRole('dialog', { name: 'Side questions' })
   await expect(panel.getByText('Answering…')).toBeVisible()
   await panel.getByRole('button', { name: 'Withdraw' }).click()

@@ -27,8 +27,6 @@ const STOPPED: &str = "Claude execution stopped.";
 const MAX_LINE: usize = 32_000_000;
 const MAX_IMAGE: usize = 10_000_000;
 
-/// Side questions never hold a reply: those still answered when it ends are withdrawn.
-const SIDE_UNANSWERED: &str = "The reply finished before this side question was answered. Ask it again during a reply, or ask in the conversation.";
 /// Prefix of the context usage requests this adapter sends Claude Code.
 const CONTEXT_REQUEST: &str = "cairn-context-";
 
@@ -748,7 +746,8 @@ impl Turn<'_> {
         for (request, question) in std::mem::take(&mut self.sides) {
             let cancel = json!({ "type": "control_cancel_request", "request_id": request });
             send(&mut self.stdin, cancel).await?;
-            self.side_failed(&question, SIDE_UNANSWERED).await?;
+            self.side_failed(&question, crate::chats::side_questions::EXPIRED)
+                .await?;
         }
         Ok(())
     }
