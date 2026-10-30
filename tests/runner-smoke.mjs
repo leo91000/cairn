@@ -166,6 +166,7 @@ if(mode==='cancel'||mode==='crash') {
   if(mode==='cancel') {
     const deadline=Date.now()+30000;
     while(!fs.readFileSync('/run/cairn-chat/messages.json','utf8').includes('capture-update')){assert.ok(Date.now()<deadline,'capture update request');await new Promise(r=>setTimeout(r,100));}
+    console.log('probe.update-received');
     fs.writeFileSync(root+'/workspace/capture-update',Buffer.alloc(4*1024*1024,91));
     execFileSync('sync');
     console.log('probe.updated');
@@ -338,6 +339,7 @@ console.log('probe.done');
                 const captureStarted = Date.now()
                 const point = await (await api(`/runs/${id}/snapshot`, 'POST', { consistency: 'filesystem' })).json()
                 const firstCaptureMs = Date.now() - captureStarted
+                process.stdout.write(`${JSON.stringify({ diagnostic: 'active-capture-returned', firstCaptureMs })}\n`)
                 assert.ok(point.manifest.size > 0)
                 assert.equal(point.manifest.onDemand, true)
                 const block = point.manifest.blocks.find(block => block.hash)
@@ -346,7 +348,23 @@ console.log('probe.done');
                 assert.equal(blockDigest(bytes, block.hash), block.hash)
                 // New writes enter the next journal generation; the sealed one stays readable.
                 await writeFile(path.join(source, 'chat-input/messages.json'), '[{"text":"capture-update"}]')
-                await until(() => docker('exec', name, 'cat', `/runner-state/${id}.log`).split('\n').filter(Boolean).some(line => Buffer.from(JSON.parse(line).data || '', 'base64').toString().includes('probe.updated')))
+                process.stdout.write(`${JSON.stringify({ diagnostic: 'capture-update-written', elapsedMs: Date.now() - captureStarted })}\n`)
+                await until(() => {
+                  const records = docker('exec', name, 'cat', `/runner-state/${id}.log`).split('\n').filter(Boolean).map(line => JSON.parse(line))
+                  const text = records.map(row => Buffer.from(row.data || '', 'base64').toString()).join('')
+                  if (text.includes('probe.updated'))
+                    return true
+                  try {
+                    const exit = docker('exec', name, 'cat', `/runner-state/${id}.exit`)
+                    throw new Error(`Active capture guest exited ${exit}: ${text}`)
+                  }
+                  catch (error) {
+                    if (!error.status)
+                      throw error
+                  }
+
+                  return false
+                })
                 const original = Buffer.from(await (await api(`/snapshots/${point.id}/${block.hash}`)).arrayBuffer())
                 assert.deepEqual(original, bytes, 'The sealed capture stays immutable while the guest writes')
                 // Starting the next capture retires the previous capture handle.
@@ -665,6 +683,7 @@ console.log('probe.done');
     try {
       console.error(docker('logs', name))
       console.error(docker('exec', name, 'sh', '-c', 'tail -n 60 /runner-state/*.boot.log'))
+      console.error(docker('exec', name, 'sh', '-c', 'tail -n 60 /runner-state/*.log /runner-state/*.exit'))
     }
     catch {
     }
