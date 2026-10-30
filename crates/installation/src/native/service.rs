@@ -499,6 +499,14 @@ impl Controller {
                                         attempt = id,
                                         "Native filesystem could not be flushed; the durable crash prefix was retained"
                                     );
+                                    let exit = exit_record(code, true);
+                                    while let Err(error) =
+                                        atomic_write(&controller.file(&id, "exit"), exit.as_bytes())
+                                            .await
+                                    {
+                                        tracing::error!(attempt = id, %error, "Native flush failure must be saved before releasing the attempt");
+                                        tokio::time::sleep(Duration::from_secs(2)).await;
+                                    }
                                 }
                                 break;
                             }

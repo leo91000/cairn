@@ -122,6 +122,7 @@ mod tests {
         assert!(!active.exists());
         assert_eq!(tokio::fs::read(exit).await.unwrap(), failure);
     }
+
     use super::*;
     use crate::microvm::plan::Plan;
     use axum::body::Body;

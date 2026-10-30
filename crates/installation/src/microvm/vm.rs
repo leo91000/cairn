@@ -912,7 +912,15 @@ async fn run(socket: &Path, plan: &Plan, state: &Path, mut timing: Operation) ->
                 }
                 return Ok(code as i32);
             }
-            Event::FinalizationFailed => return Ok(crate::runner::FINALIZATION_FAILED_SENTINEL),
+            Event::FinalizationFailed => {
+                let exit = state.join(format!("{}.exit", plan.id()));
+                let outcome = serde_json::json!({ "StatusCode": crate::runner::CONTROLLER_FAILED, "FinalizationFailed": true });
+                while let Err(error) = atomic_write(&exit, outcome.to_string().as_bytes()).await {
+                    tracing::error!(attempt = plan.id(), %error, "Guest flush failure must be saved before releasing the attempt");
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+                return Ok(crate::runner::FINALIZATION_FAILED_SENTINEL);
+            }
             Event::Heartbeat | Event::Unknown => return Err(Error::bad("Unknown guest event.")),
         }
     }
