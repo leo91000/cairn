@@ -453,7 +453,24 @@ async fn run_route(broker: Broker, request: Request, segments: &[&str]) -> Resul
             broker.stop(id).await?;
             json_response(json!({}))
         }
-        ("GET", ["runs", id, "logs"]) => Ok(logs(broker, (*id).to_owned())),
+        ("GET", ["runs", id, "logs"]) => {
+            if let Some(offset) = super::logs::offset(request.uri().query())? {
+                let path = broker.state_file(id, "log");
+                let id = (*id).to_owned();
+                return super::logs::response(path, offset, move || {
+                    let (broker, id) = (broker.clone(), id.clone());
+                    async move {
+                        broker.state_file(&id, "exit").exists()
+                            && broker
+                                .active
+                                .try_lock()
+                                .is_ok_and(|active| !active.contains_key(&id))
+                    }
+                })
+                .await;
+            }
+            Ok(logs(broker, (*id).to_owned()))
+        }
         ("POST", ["runs", id, "wait"]) => Ok(wait(broker, (*id).to_owned())),
         _ => Err(Error::method_not_allowed("Method not allowed.")),
     }
@@ -635,7 +652,10 @@ fn wait(broker: Broker, id: String) -> Response {
             }
             // The exit marker is durable before attempt cleanup. Do not
             // invite a resume while start() would still reject its workspace.
-            let released = !broker.active.lock().await.contains_key(&id);
+            let released = broker
+                .active
+                .try_lock()
+                .is_ok_and(|active| !active.contains_key(&id));
             if released
                 && let Ok(code) = tokio::fs::read_to_string(broker.state_file(&id, "exit")).await
             {

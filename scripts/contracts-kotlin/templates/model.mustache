@@ -3,7 +3,7 @@
 {{#properties}}{{#constValue}}@SerialName("{{&.}}")
 {{/constValue}}{{/properties}}{{#additionalPropertiesSchema}}@JvmInline
 value class {{&className}}(val value: Map<String, {{#additionalProperties}}{{>type}}{{/additionalProperties}}>) : Map<String, {{#additionalProperties}}{{>type}}{{/additionalProperties}}> by value
-{{/additionalPropertiesSchema}}{{^additionalPropertiesSchema}}{{#hasProperties}}data {{/hasProperties}}class {{&className}}(
+{{/additionalPropertiesSchema}}{{^additionalPropertiesSchema}}{{#properties}}{{#first}}{{#last}}{{^constValue}}data {{/constValue}}{{/last}}{{^last}}data {{/last}}{{/first}}{{/properties}}class {{&className}}(
 {{#properties}}{{^constValue}}{{^isRequired}}    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
 {{/isRequired}}    val {{&kotlinName}}: {{>type}}{{#defaultValue}} = {{>default_value}}{{/defaultValue}}{{^defaultValue}}{{^isRequired}} = null{{/isRequired}}{{/defaultValue}},
 {{/constValue}}{{/properties}}){{#interfaces}}{{#first}} : {{/first}}{{^first}}, {{/first}}{{&className}}{{/interfaces}} {

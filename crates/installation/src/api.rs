@@ -434,15 +434,22 @@ async fn chat_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resul
             .await?
         }
         ("POST", ["chats", id, "questions", question, "cancel"]) => {
-            s.question_cancel_authorized(
-                id,
-                question,
-                crate::native::policy::chat_authorization(id),
+            chat_command(
+                s,
+                input,
+                "cancel_chat_question",
+                json!({"chatId":id,"questionId":question}),
             )
             .await?
         }
         ("POST", ["chats", id, "questions", question, "answer"]) => {
-            s.question_answer(id, question, input.body.clone()).await?
+            chat_command(
+                s,
+                input,
+                "answer_chat_question",
+                json!({"chatId":id,"questionId":question,"answer":input.body}),
+            )
+            .await?
         }
         _ => return Ok(None),
     };

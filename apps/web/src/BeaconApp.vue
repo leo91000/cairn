@@ -28,6 +28,8 @@ import {
   sharedPreference,
   workspaceReturn,
 } from './beacon-location'
+import { clientPerformance } from './client-performance'
+import { startClientPerformance } from './client-performance-runtime'
 import AccountMenu from './components/AccountMenu.vue'
 import AccountMethods from './components/AccountMethods.vue'
 import AccountSecurity from './components/AccountSecurity.vue'
@@ -48,6 +50,9 @@ import Authorize from './views/Authorize.vue'
 
 const PrivacyPolicy = defineAsyncComponent(() => import('./views/PrivacyPolicy.vue'))
 const PluginOAuthCallback = defineAsyncComponent(() => import('./views/PluginOAuthCallback.vue'))
+const PerformanceSettings = defineAsyncComponent(() => import('./components/PerformanceSettings.vue'))
+const performanceDiagnostics = startClientPerformance(useRouter())
+onScopeDispose(() => performanceDiagnostics.stop())
 
 interface AccountSession {
   authenticated: boolean
@@ -70,6 +75,7 @@ const showSecurity = ref(false)
 const showIdentityConfirmation = ref(false)
 const confirmationTitle = ref('')
 const showNotifications = ref(false)
+const showPerformance = ref(false)
 const ready = ref(false)
 const navigationPending = ref(false)
 const email = ref('')
@@ -226,6 +232,20 @@ watch(() => state.authenticated, (authenticated) => {
 })
 
 async function accountRequest(route: string, body?: unknown) {
+  const scope = clientPerformance.capture()
+  const finish = clientPerformance.begin(body === undefined ? 'API_READ' : 'API_WRITE', scope)
+  try {
+    const value = await accountRequestOnce(route, body, scope)
+    finish?.('ok')
+    return value
+  }
+  catch (error) {
+    finish?.('error')
+    throw error
+  }
+}
+
+async function accountRequestOnce(route: string, body: unknown, scope: ReturnType<typeof clientPerformance.capture>) {
   const response = await fetch(`/api/account/${route}`, {
     method: body === undefined ? 'GET' : 'POST',
     credentials: 'same-origin',
@@ -235,7 +255,8 @@ async function accountRequest(route: string, body?: unknown) {
   if (response.status === 204)
     return
   const text = await response.text()
-  const value = text ? JSON.parse(text) : undefined
+  clientPerformance.probe('API')
+  const value = text ? clientPerformance.measure('JSON_DECODE', () => JSON.parse(text), scope) : undefined
   if (!response.ok)
     throw new Error(value?.error || 'Unable to reach Cairn. Please try again.')
   return value
@@ -859,6 +880,9 @@ onMounted(async () => {
           <NotificationSettings />
         </section>
         <div class="border-b border-line py-6">
+          <PerformanceSettings :performance="performanceDiagnostics" />
+        </div>
+        <div class="border-b border-line py-6">
           <AccountMethods
             :email="session.account?.email || ''"
             :options="options"
@@ -1160,6 +1184,9 @@ onMounted(async () => {
         <UiButton class="mb-3" :disabled="busy" @click="showNotifications = true">
           Notifications
         </UiButton>
+        <UiButton class="mb-3" :disabled="busy" @click="showPerformance = true">
+          Performance diagnostics
+        </UiButton>
         <UiButton class="mb-3" :disabled="busy" @click="openMethods">
           Sign-in methods
         </UiButton>
@@ -1225,6 +1252,11 @@ onMounted(async () => {
   <Modal v-if="session?.authenticated && showNotifications" title="Notifications" @close="showNotifications = false">
     <div class="p-6 phone:p-4">
       <NotificationSettings />
+    </div>
+  </Modal>
+  <Modal v-if="session?.authenticated && showPerformance" title="Performance diagnostics" @close="showPerformance = false">
+    <div class="p-6 phone:p-4">
+      <PerformanceSettings :performance="performanceDiagnostics" />
     </div>
   </Modal>
 </template>

@@ -12,6 +12,7 @@ import { listMissions } from '../../../packages/contracts/generated/listMissions
 import { listProjects } from '../../../packages/contracts/generated/listProjects'
 import { listUsableAgents } from '../../../packages/contracts/generated/listUsableAgents'
 import { beaconOrigin, installationHost } from './beacon-location'
+import { clientPerformance } from './client-performance'
 import { ProtocolMismatch } from './direct-channel'
 import { clearHistoryCache } from './history-cache'
 import { InstallationTransport } from './installation-transport'
@@ -251,6 +252,7 @@ function failure(status: number, data: any) {
 async function requestOnce<T = any>(
   url: string,
   options: RequestInit = {},
+  measurement = clientPerformance.capture(),
 ): Promise<T> {
   let response: Response
   let text: string
@@ -268,7 +270,8 @@ async function requestOnce<T = any>(
 
   let data: any
   try {
-    data = JSON.parse(text)
+    clientPerformance.probe('API')
+    data = clientPerformance.measure('JSON_DECODE', () => JSON.parse(text), measurement)
   }
   catch (error) {
     if (response.status >= 502 && response.status <= 504)
@@ -294,10 +297,25 @@ async function requestOnce<T = any>(
 }
 
 async function requestApi<T = any>(url: string, options: RequestInit = {}, account = false): Promise<T> {
+  const measurement = clientPerformance.capture()
+  const method = (options.method || 'GET').toUpperCase()
+  const finish = clientPerformance.begin(method === 'GET' || method === 'HEAD' ? 'API_READ' : 'API_WRITE', measurement)
+  try {
+    const result = await recoverableRequest<T>(url, options, account, measurement)
+    finish?.('ok')
+    return result
+  }
+  catch (error) {
+    finish?.(options.signal?.aborted ? 'cancelled' : 'error')
+    throw error
+  }
+}
+
+async function recoverableRequest<T = any>(url: string, options: RequestInit, account: boolean, measurement: ReturnType<typeof clientPerformance.capture>): Promise<T> {
   const scope = connectionScope()
   while (true) {
     try {
-      return await requestOnce<T>(url, options)
+      return await requestOnce<T>(url, options, measurement)
     }
     catch (error) {
       const active = !!state.installationId && connectionScope() === scope && state.authenticated && !state.signingOut

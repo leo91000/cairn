@@ -262,8 +262,22 @@ async fn serve_peer(
                     }
                     Ok(CONTROL_CHANNEL) if !control => {
                         control = true;
-                        // It carries nothing; its events are drained so none pile up.
-                        tokio::spawn(async move { while channel.poll().await.is_some() {} });
+                        // SCTP can end while ICE and DTLS still look connected.
+                        let lifetime = events.closed.clone();
+                        tokio::spawn(async move {
+                            while let Some(event) = channel.poll().await {
+                                if matches!(
+                                    event,
+                                    DataChannelEvent::OnClosing
+                                        | DataChannelEvent::OnClose
+                                        | DataChannelEvent::OnError
+                                ) {
+                                    break;
+                                }
+                            }
+
+                            lifetime.cancel();
+                        });
                     }
                     _ => {
                         let _ = channel.close().await;

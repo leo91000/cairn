@@ -1,5 +1,19 @@
 # Android 0.6.0 / web parity
 
+Performance diagnostics: web now matches Android's default-on, account-bound,
+foreground-only upload, opt-out, local refresh/reset/copy and native sharing where
+available, including without a selected installation. Personal account diagnostics
+are UI-only, outside installation MCP/agent grants. Both retain the same Beacon
+account authorization, 64 KiB request cap, six uploads/minute/account, 256 windows
+and 14-day retention. Android retains schema 1, device/heap metadata and native
+frame metrics; web uses closed schema 2, frontend source-build identity, browser
+family, API outcome/pending counts, JSON/Markdown timings and event-loop/Long Task
+observations where supported. These browser measurements do not represent GPU
+frames. Web opt-out is shared across Beacon subdomains; Android remains a phone
+preference. See ADR-0043. Coverage: model/monitor/uploader/build identity unit tests,
+Beacon telemetry integration tests, browser account/settings diagnostics journeys;
+existing Android diagnostics tests cover its unchanged native implementation.
+
 ## Mermaid diagrams in Markdown (2026-10-29)
 
 Both layouts reserve the asymmetric flag notch when sizing multiline node labels.
@@ -429,3 +443,18 @@ lancée par le propriétaire, sans URL ni code. Connexion, remplacement de clé,
 code, annulation, suppression et refresh manuel renvoient `humanRequired` aux
 agents ; les apps gardent leur preuve de propriétaire. Aucun flux de confirmation
 ponctuelle du propriétaire n'est ajouté.
+
+
+A8 (#409) : questionnaires, réponses privées, attentes simples/groupées et lineage
+utilisent les contrats Rust générés sur web et Android. Réponse et annulation de
+gestion utilisent les clients générés ; annulation de gestion et retrait workspace
+du run courant gardent leurs autorisations distinctes. Les champs secrets restent
+absents des vues publiques après envoi. Les cartes d'attente et de délégation
+gardent leur présentation native et leur rendu existant ; les adaptateurs de
+présentation lisent les observations typées sans refonte de timeline.
+
+Attachment quota reservations (D2): both apps retain the generated A7 attachment
+model, binary upload endpoint, previews, retries and existing presentation. Limits
+remain 10 MiB/file, 40 MiB/message, 200 MiB/conversation and eight files/message.
+No platform difference or client error mapping changes; HTTP, both management
+tools and plugin imports share the reservation writer.

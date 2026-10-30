@@ -96,7 +96,7 @@ class SignalPresentationTest {
                         id = "dated",
                         status = "succeeded",
                         wakeup =
-                            ChatWakeup(
+                            wakeupFixture(
                                 id = "wake",
                                 reason = "",
                                 seconds = 60,

@@ -1,5 +1,6 @@
 //! Version-14 input only; current conversations never fall back to JSON records.
-use super::{Conversation, Message};
+mod storage_v15;
+
 use crate::{
     config::id,
     error::{Error, Result},
@@ -7,12 +8,13 @@ use crate::{
 };
 use rusqlite::{Connection, TransactionBehavior, params};
 use serde::Deserialize;
+use storage_v15::{ConversationV15 as Conversation, MessageV15 as Message};
 
 pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
     // Another startup may have completed this and the later upgrades.
-    if matches!(version, 15 | 16) {
+    if matches!(version, 15..=18) {
         return Ok(());
     }
     if version != 14 {
@@ -24,7 +26,7 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
     tx.execute_batch(
         "ALTER TABLE chat_messages RENAME TO chat_messages_v14; DROP INDEX chat_messages_chat;",
     )?;
-    tx.execute_batch(super::storage::SCHEMA)?;
+    tx.execute_batch(include_str!("migration/schema-v15.sql"))?;
     tx.execute_batch(super::engine_switch::SCHEMA)?;
     let conversations = tx
         .prepare("SELECT id,data,updated_at FROM records WHERE kind='chats' ORDER BY id")?
@@ -45,7 +47,7 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
         if conversation.revision.is_empty() {
             conversation.revision = id();
         }
-        Db(&tx).save_conversation(&conversation)?;
+        storage_v15::save_conversation(&Db(&tx), &conversation)?;
         tx.execute(
             "UPDATE conversations SET slug=?,revision=?,persisted_at=? WHERE id=?",
             params![slug, conversation.revision, persisted_at, key],
@@ -72,7 +74,7 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
         if message.revision.is_empty() {
             message.revision = id();
         }
-        Db(&tx).save_message(&message)?;
+        storage_v15::save_message(&Db(&tx), &message)?;
         tx.execute(
             "UPDATE chat_messages SET revision=? WHERE id=?",
             params![message.revision, key],

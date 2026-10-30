@@ -6,15 +6,15 @@ typealias ChatAttachment = build.cairn.contracts.ChatAttachment
 
 typealias ChatMessage = build.cairn.contracts.ChatMessage
 
-typealias QuestionOption = build.cairn.boundary.QuestionOption
+typealias QuestionOption = build.cairn.contracts.QuestionOption
 
-typealias QuestionField = build.cairn.boundary.QuestionField
+typealias QuestionField = build.cairn.contracts.QuestionField
 
-typealias QuestionAnswer = build.cairn.boundary.QuestionAnswer
+typealias QuestionAnswer = build.cairn.contracts.QuestionAnswer
 
-typealias ChatQuestion = build.cairn.boundary.ChatQuestion
+typealias ChatQuestion = build.cairn.contracts.ChatQuestion
 
-typealias ChatWakeup = build.cairn.boundary.ChatWakeup
+typealias ChatWakeup = build.cairn.contracts.ChatWakeup
 
 typealias ContextUsage = build.cairn.contracts.ContextUsage
 

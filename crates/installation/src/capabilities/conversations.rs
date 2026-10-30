@@ -16,6 +16,26 @@ pub(crate) struct ChatOperation {
 
 pub(crate) const CHAT_OPERATIONS: &[ChatOperation] = &[
     ChatOperation {
+        name: "upload_chat_attachment",
+        scope: "manage",
+        description: "Upload a file to a conversation as base64 data (up to 10 MiB decoded, subject to transport request limits). Supply a fresh UUID attachmentId; identical retries are safe. Include its ID in message.attachmentIds to send it.",
+    },
+    ChatOperation {
+        name: "list_chat_questions",
+        scope: "read",
+        description: "List conversation questionnaires with pagination, including fields and delivery status; saved answers are never returned.",
+    },
+    ChatOperation {
+        name: "answer_chat_question",
+        scope: "run",
+        description: "Answer a pending questionnaire. Supply selected option IDs and a separate comment for every field, with a stable answer message UUID for retries.",
+    },
+    ChatOperation {
+        name: "cancel_chat_question",
+        scope: "run",
+        description: "Cancel a pending questionnaire without supplying an answer or granting permission. Management can cancel a question from any turn; workspace withdraw_question remains limited to its own run.",
+    },
+    ChatOperation {
         name: "get_conversation_retention",
         scope: "read",
         description: "Read the installation inactivity policy. Default 7 days; 0 disables automatic environment expiration. Conversations, uploaded attachments, published artifact versions and public links are retained.",
@@ -124,6 +144,23 @@ pub(crate) fn chat_operation(name: &str) -> Option<&'static ChatOperation> {
 impl ChatOperation {
     pub(crate) fn descriptor(&self) -> Value {
         let (input, output) = match self.name {
+            "upload_chat_attachment" => (
+                schema_for::<UploadChatAttachmentInput>(Contract::Deserialize),
+                schema_for::<ChatAttachment>(Contract::Serialize),
+            ),
+            "list_chat_questions" => (
+                schema_for::<GetChatInput>(Contract::Deserialize),
+                schema_for::<ListChatQuestionsOutput>(Contract::Serialize),
+            ),
+            "answer_chat_question" => (
+                schema_for::<AnswerChatQuestionInput>(Contract::Deserialize),
+                schema_for::<ChatQuestion>(Contract::Serialize),
+            ),
+            "cancel_chat_question" => (
+                schema_for::<ChatQuestionInput>(Contract::Deserialize),
+                schema_for::<ChatQuestion>(Contract::Serialize),
+            ),
+
             "get_conversation_retention" => (
                 schema_for::<GetConversationRetentionInput>(Contract::Deserialize),
                 schema_for::<ConversationRetention>(Contract::Serialize),
@@ -249,7 +286,53 @@ impl ChatOperation {
                 )
             }
         };
+        if self.name == "upload_chat_attachment" {
+            use base64::Engine;
+            let input: UploadChatAttachmentInput = decode(input)?;
+            if input.name.is_empty()
+                || input.name.chars().count() > 180
+                || input.data.len() > 13981016
+            {
+                return Err(Error::bad("Invalid attachment name or encoded file size."));
+            }
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(&input.data)
+                .map_err(|_| Error::bad("Expected base64 file data."))?;
+            let attachment = s
+                .store_attachment_authorized(
+                    &input.chat_id,
+                    &input.attachment_id,
+                    &input.name,
+                    &bytes,
+                    crate::installation_mcp::management_authorization(bearer.as_deref()),
+                )
+                .await?;
+            return Ok(serde_json::to_value(attachment)?);
+        }
         let args = match self.name {
+            "list_chat_questions" => {
+                let input: GetChatInput = decode(input)?;
+                if !(1..=100).contains(&input.limit) {
+                    return Err(Error::bad("Choose a limit from 1 to 100."));
+                }
+                serde_json::to_value(input)?
+            }
+            "answer_chat_question" => {
+                let mut input: AnswerChatQuestionInput = decode(input)?;
+                input.answer.validate().map_err(Error::bad)?;
+                if input.question_id.is_empty() || input.question_id.chars().count() > 200 {
+                    return Err(Error::bad("Invalid question identity."));
+                }
+                serde_json::to_value(input)?
+            }
+            "cancel_chat_question" => {
+                let input: ChatQuestionInput = decode(input)?;
+                if input.question_id.is_empty() || input.question_id.chars().count() > 200 {
+                    return Err(Error::bad("Invalid question identity."));
+                }
+                serde_json::to_value(input)?
+            }
+
             "get_conversation_retention" => {
                 let _: GetConversationRetentionInput = decode(input)?;
                 json!({})

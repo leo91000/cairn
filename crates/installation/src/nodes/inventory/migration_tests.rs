@@ -148,7 +148,7 @@ async fn version11_startup_conserves_inventory_credentials_and_references() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        16
+        18
     );
     for table in [
         "direct_storage_grants",
@@ -303,7 +303,7 @@ async fn legacy_missing_defaults_and_revocation_are_retained() {
     assert_eq!(node.storage, cairn_contracts::NodeStoragePolicy::default());
     assert!(
         migration::upgrade(&mut db).is_err(),
-        "The inventory-only helper must not rewrite version16"
+        "The inventory-only helper must not rewrite version18"
     );
 }
 
@@ -316,7 +316,7 @@ async fn empty_version11_inventory_upgrades_without_creating_a_node() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        16
+        18
     );
 }
 
@@ -340,7 +340,7 @@ async fn concurrent_startups_complete_the_version11_to16_chain_without_repeating
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        16
+        18
     );
     assert_eq!(
         db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))

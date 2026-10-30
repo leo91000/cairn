@@ -188,5 +188,19 @@ mod models;
 pub use models::*;
 
 mod conversations;
+mod questions;
+
+pub use questions::*;
 
 pub use conversations::*;
+
+mod waits;
+
+pub use waits::*;
+
+mod delegated_tasks;
+
+pub use delegated_tasks::*;
+
+#[cfg(test)]
+mod a8_contract_tests;

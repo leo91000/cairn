@@ -7,7 +7,8 @@ const CHAT: &str = "00000000-0000-4000-8000-000000000001";
 // Exact affected version-14 DDL from 57855b96, the last pre-A7 main. Other
 // domain tables retain their current schemas, matching the inventory migration's fixture.
 pub(crate) fn version14(db: &Connection) {
-    db.execute_batch("DROP TABLE agent_account_access; DROP TABLE conversation_engine_switches; DROP TABLE message_attachments; DROP TABLE chat_messages; DROP TABLE conversations; DROP TABLE conversation_retention;
+    db.execute_batch("DROP TABLE attachment_reservations; DROP TABLE attachments; DROP TABLE attachment_quotas; DROP TABLE question_legacy_answer_items; DROP TABLE question_answer_choices; DROP TABLE question_answers; DROP TABLE question_answer_deliveries; DROP TABLE question_options; DROP TABLE question_fields; DROP TABLE question_import_metadata; DROP TABLE chat_questions; DROP TABLE wait_conditions; DROP TABLE durable_wakeups; DROP TABLE conversation_lineage;
+DROP TABLE agent_account_access; DROP TABLE conversation_engine_switches; DROP TABLE message_attachments; DROP TABLE chat_messages; DROP TABLE conversations; DROP TABLE conversation_retention;
 DROP TABLE records;
 CREATE TABLE records(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind NOT IN ('agentAccounts','nodes','projects','agents','tasks','mcps','plugin-connections','plugin-packages','plugin-requests','plugin-activity','plugin-timers','plugin-events','plugin-deliveries','plugin-storage','plugin-http-receipts')),data TEXT NOT NULL,updated_at INTEGER NOT NULL);
 CREATE INDEX records_kind ON records(kind,updated_at DESC);
@@ -50,7 +51,7 @@ fn conversation() -> Value {
         "nativePrincipals":["second","first"],"nativeAuthorityNodes":["node-b","node-a"],
         "nativeParentRunId":"parent-run","nativeParentAccess":"owner-proof",
         "nativeProvenanceUnknown":false,"nativePluginGrants":[],
-        "wakeup":{"kind":"delay","privateState":"retained"},
+        "wakeup":{"id":"retained-wait","messageId":null,"reason":"Retained delay","seconds":60,"createdAt":51,"wakeAt":60051},
         "environmentState":"cleaning","environmentExpiredAt":60,"environmentRetryAfter":65,
         "environmentError":"retry"
     })
@@ -542,12 +543,20 @@ async fn broken_run_reference_aborts_and_historical_resource_ids_remain_valid() 
             let mut other = conversation();
             other["id"] = "second".into();
             other["slug"] = "second-slug".into();
+            // Two unkeyed delegations of one requester must both remain valid.
+            other["requestedBy"]["requestId"] = Value::Null;
+            db.execute(
+                "UPDATE records SET data=json_remove(data,'$.requestedBy.requestId') WHERE id=?",
+                [CHAT],
+            )
+            .unwrap();
             db.execute(
                 "INSERT INTO records VALUES('second','chats',?,124)",
                 [other.to_string()],
             )
             .unwrap();
             assert!(Store::open(root.path()).is_ok());
+            assert_eq!(db.query_row("SELECT count(*) FROM conversation_lineage WHERE requester_chat_id='parent-chat' AND request_id IS NULL", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
         } else {
             let mut invalid = conversation();
             invalid["runId"] = "missing-run".into();
@@ -569,16 +578,11 @@ async fn broken_run_reference_aborts_and_historical_resource_ids_remain_valid() 
 
 #[tokio::test]
 async fn engine_switch_retains_current_progress_and_all_receipt_lifetimes() {
-    use crate::run_fixture::DbRunFixture;
     let root = tempfile::tempdir().unwrap();
     let db = database(root.path()).await;
     seed(&db);
-    Db(&db)
-        .add_run_fixture(
-            &json!({"id":"saved-run","taskId":"chat","status":"failed","createdAt":1}),
-            None,
-        )
-        .unwrap();
+    // This scenario is a version-14 input, before the current wait tables exist.
+    db.execute("INSERT INTO runs(id,task_id,status,created_at,recovery_pending,resume_available,resume_count,boundary) VALUES('saved-run','chat','failed',1,0,0,0,'{}')", []).unwrap();
     let expires = crate::config::now() + 500_000;
     let first = json!({"chatId":CHAT,"requestId":"first","runId":"saved-run","turnId":"turn-1","provider":"codex"});
     let second = json!({"chatId":CHAT,"requestId":"second","runId":"saved-run","turnId":"turn-2","provider":"claude"});
@@ -770,7 +774,7 @@ async fn actual_version14_preserves_conversations_accounts_leases_and_credential
         assert_eq!(
             db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            16
+            18
         );
         assert_eq!(snapshot(&db), retained);
         for before in &chats {

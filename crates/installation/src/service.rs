@@ -19,6 +19,7 @@ pub struct Service {
     pub node_lease_deadlines:
         Arc<tokio::sync::Mutex<std::collections::HashMap<String, tokio::time::Instant>>>,
     pub started: tokio::time::Instant,
+    pub(crate) native_authority_refresh: Arc<tokio::sync::Mutex<()>>,
     pub node_backup_operation: Arc<crate::nodes::coordination::Coordination>,
     pub node_publication_notify: Arc<tokio::sync::Notify>,
     pub node_backup_lock: Arc<tokio::sync::Mutex<()>>,
@@ -36,7 +37,7 @@ pub struct Service {
     pub models: Arc<crate::models::Models>,
     pub opencode: Arc<crate::opencode::Catalog>,
     pub conversation_storage_lock: Arc<tokio::sync::Mutex<()>>,
-    pub attachment_upload: Arc<tokio::sync::Mutex<()>>,
+    pub attachments: Arc<crate::attachments::Attachments>,
     pub conversation_lists: Arc<crate::live::ConversationLists>,
     pub config: Config,
     pub store: Store,
@@ -64,6 +65,7 @@ impl Service {
             node_maintenance_tasks: Arc::default(),
             node_lease_deadlines: Arc::default(),
             started: tokio::time::Instant::now(),
+            native_authority_refresh: Arc::default(),
             node_backup_operation: Arc::default(),
             node_publication_notify: Arc::default(),
             node_backup_lock: Arc::default(),
@@ -81,7 +83,7 @@ impl Service {
             models: Arc::default(),
             opencode: Arc::default(),
             conversation_storage_lock: Arc::default(),
-            attachment_upload: Arc::default(),
+            attachments: Arc::default(),
             conversation_lists: Arc::default(),
             skills: Skills {
                 config: config.clone(),
@@ -107,6 +109,7 @@ impl Service {
         crate::chats::questions::retire_native(&service).await?;
         service.bootstrap_main_agent().await?;
         service.avatars.recover(&service).await?;
+        service.reconcile_attachments().await?;
         tokio::spawn(crate::artifacts::preview::recover(service.clone()));
         Ok(service)
     }

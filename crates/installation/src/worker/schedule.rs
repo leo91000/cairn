@@ -410,6 +410,12 @@ pub(super) async fn report_capacity_wait(s: &Service, run: &RunState, detail: &s
     let run_id = run_id.to_owned();
     s.store
         .transaction(move |db| {
+            let current = db
+                .run_state(&run_id)?
+                .ok_or_else(|| Error::not_found("Run not found"))?;
+            if current.cancel_requested_at.is_some() || current.status != RunStatus::Queued {
+                return Ok(());
+            }
             db.change_run(&run_id, patch)?;
             if !changed_figures {
                 db.event(&run_id, &EventKind::Status, &reason, None)?;
@@ -440,8 +446,156 @@ async fn recover_or_wait(s: &Service, run: &Value) -> Result<bool> {
 /// checkpoint or clears it for relaunch (`true`).
 async fn recover(s: &Service, run: &Value) -> Result<bool> {
     let run_id = text(run, "id");
-    let checkpoint = RunCheckpoint::load(&s.store, run_id).await?;
+    let mut checkpoint = RunCheckpoint::load(&s.store, run_id).await?;
+    let initial_state = s.store.run_state(run_id).await?;
+    let parked = initial_state.status == RunStatus::Waiting
+        || (initial_state.trigger != "chat"
+            && run["wakeup"].is_object()
+            && checkpoint.as_ref().is_some_and(RunCheckpoint::completed));
+    // A newly queued turn has not spent any of its active execution budget yet.
+    let new_turn = checkpoint
+        .as_ref()
+        .is_some_and(|saved| saved.turn_pending == Some(true));
+    let expected_checkpoint = checkpoint.clone();
+    let recovery_deadline = if !parked && !new_turn {
+        let id = run_id.to_owned();
+        let expected = expected_checkpoint.clone();
+        s.store
+            .transaction(move |db| {
+                let Some(mut saved) = RunCheckpoint::load_in(db, &id)? else {
+                    return Ok(None);
+                };
+                if !recovery::same_execution(Some(&saved), expected.as_ref()) {
+                    return Ok(None);
+                }
+                let deadline = saved
+                    .recovery_deadline_ms
+                    .or_else(|| match saved.remaining_ms {
+                        Some(Some(remaining)) => Some(now().saturating_add(remaining)),
+                        Some(None) | None => None,
+                    });
+                if saved.recovery_deadline_ms != deadline {
+                    saved.recovery_deadline_ms = deadline;
+                    saved.store_in(db, &id)?;
+                }
+                Ok(deadline)
+            })
+            .await?
+    } else {
+        None
+    };
     let state = s.store.run_state(run_id).await?;
+    if state.cancel_requested_at.is_none()
+        && let Some(saved) = checkpoint.as_mut()
+        && saved.managed()
+        && saved.start_rejected != Some(true)
+        && saved.settled().is_none()
+        && saved.terminal_code.is_none()
+        && !matches!(saved.remaining_ms, Some(Some(i64::MIN..=0)))
+        && let Some(attempt) = saved.runner_id().map(str::to_owned)
+    {
+        let cancel = CancellationToken::new();
+        let node = saved.node_id.clone().flatten();
+        let observation = recovery::terminal_code(
+            s,
+            &attempt,
+            node.as_deref(),
+            &cancel,
+            recovery_observation_limit(recovery_deadline),
+            |action| {
+                let id = run_id.to_owned();
+                let attempt = attempt.clone();
+                let expected = expected_checkpoint.clone();
+                let shutdown = s.shutdown.clone();
+                async move {
+                    s.store
+                        .transaction(move |db| {
+                            let state = db
+                                .run_state(&id)?
+                                .ok_or_else(|| Error::not_found("Run not found"))?;
+                            if state.cancel_requested_at.is_some()
+                                && matches!(action, recovery::ObservationAction::Reserve)
+                            {
+                                return Ok(false);
+                            }
+                            let Some(mut current) = RunCheckpoint::load_in(db, &id)? else {
+                                return Ok(false);
+                            };
+                            if !recovery::same_execution(Some(&current), expected.as_ref()) {
+                                return Ok(false);
+                            }
+                            let mut reserved = false;
+                            match action {
+                                recovery::ObservationAction::Reserve => {
+                                    if recovery_deadline.is_none_or(|deadline| now() < deadline) {
+                                        reserved = current.reserve_observation(&attempt);
+                                    }
+                                }
+                                recovery::ObservationAction::Release => {
+                                    current.release_observation(&attempt);
+                                }
+                                recovery::ObservationAction::Exhausted => {
+                                    if !shutdown.is_cancelled()
+                                        && current.runner_id() == Some(attempt.as_str())
+                                        && current.settled().is_none()
+                                        && current.terminal_code.is_none()
+                                    {
+                                        current.release_observation(&attempt);
+                                        current.terminal_code = Some(None);
+                                    }
+                                }
+                                recovery::ObservationAction::Record(code) => {
+                                    current.release_observation(&attempt);
+                                    if current.runner_id() == Some(attempt.as_str())
+                                        && current.settled().is_none()
+                                        && current.terminal_code.is_none()
+                                        && (!shutdown.is_cancelled() || code.is_some())
+                                    {
+                                        current.terminal_code = Some(code);
+                                    }
+                                }
+                            }
+                            if let Some(deadline) = recovery_deadline {
+                                current.remaining_ms =
+                                    Some(Some(deadline.saturating_sub(now()).max(0)));
+                            }
+                            current.store_in(db, &id)?;
+                            Ok(reserved)
+                        })
+                        .await
+                }
+            },
+        );
+        tokio::pin!(observation);
+        let cancellation = async {
+            loop {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                if s.store
+                    .run_state(run_id)
+                    .await?
+                    .cancel_requested_at
+                    .is_some()
+                {
+                    return Ok::<_, Error>(());
+                }
+            }
+        };
+        tokio::select! {
+            result = &mut observation => result?,
+            result = cancellation => {
+                cancel.cancel();
+                observation.await?;
+                result?;
+            }
+        }
+        if s.shutdown.is_cancelled() {
+            return Err(Error::unavailable("Worker is restarting."));
+        }
+        checkpoint = RunCheckpoint::load(&s.store, run_id).await?;
+    }
+    if !recovery::same_execution(checkpoint.as_ref(), expected_checkpoint.as_ref()) {
+        return Ok(false);
+    }
     let parked = state.status == RunStatus::Waiting
         || (state.trigger != "chat"
             && run["wakeup"].is_object()
@@ -449,22 +603,133 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
     // A parked turn only needs fencing/release, including a completed turn
     // requeued because its first fencing attempt failed. Placement and possible
     // disk relocation belong to admission after its wakeup.
-    if !parked && !crate::nodes::moves::advance(s, run).await? {
+    let cannot_replay = checkpoint.as_ref().is_some_and(|saved| {
+        recovery_deadline.is_some_and(|deadline| now() >= deadline)
+            || matches!(saved.remaining_ms, Some(Some(i64::MIN..=0)))
+            || saved.finalization_error().is_some()
+            || saved.output_error().is_some()
+            || terminal_provider_failure(saved, &state)
+            || (saved.managed() && saved.completed() && saved.terminal_code() == Some(0))
+            || saved.settled().is_some_and(|settled| {
+                matches!(settled.status, RunStatus::Failed | RunStatus::Cancelled)
+            })
+            || (saved.managed()
+                && !scheduled_provider_retry(saved, &state)
+                && saved.terminal_code() != Some(0)
+                && saved.controller_recoveries() >= super::execution::MAX_CONTROLLER_RECOVERIES
+                && !(saved.controller_recoveries() == super::execution::MAX_CONTROLLER_RECOVERIES
+                    && saved.has_controller_recovery_reservation()))
+    });
+    if !parked
+        && !cannot_replay
+        && !crate::nodes::moves::advance_for_attempt(s, run, expected_checkpoint.as_ref()).await?
+    {
         return Ok(false);
     }
-    recovery::fence(s, run).await?;
-    s.mcps.revoke_run(s, run_id).await?;
+    let fenced = recovery::fence_attempt(s, run, expected_checkpoint.as_ref()).await;
+    let mut expected_fenced = expected_checkpoint.clone();
+    if fenced.is_ok()
+        && let Some(saved) = &mut expected_fenced
+    {
+        saved.process = None;
+    }
+    if let Some(deadline) = recovery_deadline {
+        let id = run_id.to_owned();
+        let expected = if fenced.is_ok() {
+            expected_fenced.clone()
+        } else {
+            expected_checkpoint.clone()
+        };
+        s.store
+            .transaction(move |db| {
+                let mut current = RunCheckpoint::load_in(db, &id)?;
+                if recovery::same_execution(current.as_ref(), expected.as_ref())
+                    && let Some(saved) = &mut current
+                {
+                    saved.remaining_ms = Some(Some(deadline.saturating_sub(now()).max(0)));
+                    saved.store_in(db, &id)?;
+                }
+                Ok(())
+            })
+            .await?;
+    }
+    fenced?;
+    if cannot_replay && !parked {
+        crate::nodes::moves::abort_terminal_recovery(s, run_id, expected_fenced.as_ref()).await?;
+    }
+    let id = run_id.to_owned();
+    let expected = expected_fenced.clone();
+    let revoked = s
+        .store
+        .transaction(move |db| {
+            let current = RunCheckpoint::load_in(db, &id)?;
+            if !recovery::same_execution(current.as_ref(), expected.as_ref()) {
+                return Ok(false);
+            }
+            db.revoke_mcp_run(&id)?;
+            Ok(true)
+        })
+        .await?;
+    if !revoked {
+        return Ok(false);
+    }
+    let current = RunCheckpoint::load(&s.store, run_id).await?;
+    if !recovery::same_execution(current.as_ref(), expected_fenced.as_ref()) {
+        return Ok(false);
+    }
     s.accounts.recover_run(s, run).await?;
-    let checkpoint = RunCheckpoint::load(&s.store, run_id).await?;
     let id = run_id.to_owned();
     s.store
-        .transaction(move |db| finish_recovery(db, &id, checkpoint.as_ref()))
+        .transaction(move |db| {
+            let mut checkpoint = RunCheckpoint::load_in(db, &id)?;
+            if !recovery::same_execution(checkpoint.as_ref(), expected_fenced.as_ref()) {
+                return Ok(false);
+            }
+            if let (Some(saved), Some(deadline)) = (&mut checkpoint, recovery_deadline) {
+                saved.remaining_ms = Some(Some(deadline.saturating_sub(now()).max(0)));
+                saved.store_in(db, &id)?;
+            }
+            finish_recovery(db, &id, checkpoint.as_ref())
+        })
         .await
+}
+
+fn scheduled_provider_retry(saved: &RunCheckpoint, state: &RunState) -> bool {
+    state.retry.as_ref().is_some_and(|retry| {
+        retry.next_attempt_at.is_some()
+            && saved.retry_cause.as_ref().and_then(Option::as_ref) == Some(&retry.cause)
+    })
+}
+
+fn terminal_provider_failure(saved: &RunCheckpoint, state: &RunState) -> bool {
+    if !saved.provider_failed() {
+        return false;
+    }
+    let Some(cause) = saved.retry_cause.as_ref().and_then(Option::as_ref) else {
+        return true;
+    };
+    (state.session_id.is_none() && !cause.startup)
+        || crate::run_retry::Retry::expired(state.retry.as_ref(), now())
+        || (!scheduled_provider_retry(saved, state)
+            && state
+                .retry
+                .as_ref()
+                .is_some_and(|retry| retry.attempt >= crate::run_retry::MAX_ATTEMPTS))
+}
+
+fn recovery_observation_limit(deadline: Option<i64>) -> Duration {
+    deadline.map_or(Duration::from_secs(5), |deadline| {
+        Duration::from_millis(deadline.saturating_sub(now()).clamp(0, 5000) as u64)
+    })
 }
 
 /// Cancellation and the final recovery state commit together. In particular,
 /// a completed provider turn must never restore a wait cancellation removed.
-fn finish_recovery(db: &Db<'_>, id: &str, checkpoint: Option<&RunCheckpoint>) -> Result<bool> {
+pub(super) fn finish_recovery(
+    db: &Db<'_>,
+    id: &str,
+    checkpoint: Option<&RunCheckpoint>,
+) -> Result<bool> {
     let record = db
         .run_record(id)?
         .ok_or_else(|| Error::not_found("Run not found"))?;
@@ -483,14 +748,66 @@ fn finish_recovery(db: &Db<'_>, id: &str, checkpoint: Option<&RunCheckpoint>) ->
             db.change_run(id, patch)?;
             return Ok(false);
         }
-        if checkpoint.completed() {
+        if matches!(checkpoint.remaining_ms, Some(Some(i64::MIN..=0))) {
+            let settled = Settled::failure(RunStatus::Failed, "Run exceeded its time limit.");
+            let mut patch = settled.run_changes();
+            patch.wakeup = Some(None);
+            db.change_run(id, patch)?;
+            return Ok(false);
+        }
+        if let Some(error) = checkpoint
+            .output_error()
+            .or_else(|| checkpoint.finalization_error())
+        {
+            let settled = Settled::failure(RunStatus::Failed, error);
+            let mut patch = settled.run_changes();
+            patch.wakeup = Some(None);
+            db.change_run(id, patch)?;
+            return Ok(false);
+        }
+        if checkpoint.provider_failed() {
+            if super::retry::expire_in(db, id)? {
+                return Ok(false);
+            }
+            let cause = checkpoint.retry_cause.as_ref().and_then(Option::as_ref);
+            if !terminal_provider_failure(checkpoint, current)
+                && !scheduled_provider_retry(checkpoint, current)
+                && let Some(cause) = cause
+                && super::retry::schedule_in(db, id, cause.clone())?
+            {
+                db.change_run(
+                    id,
+                    crate::runs::RunChanges {
+                        recovery_pending: Some(false),
+                        ..Default::default()
+                    },
+                )?;
+                return Ok(false);
+            }
+            if terminal_provider_failure(checkpoint, current)
+                || !scheduled_provider_retry(checkpoint, current)
+            {
+                let message = if checkpoint.last_error().is_empty() {
+                    "Agent turn failed."
+                } else {
+                    checkpoint.last_error()
+                };
+                let mut patch = Settled::failure(RunStatus::Failed, message).run_changes();
+                patch.wakeup = Some(None);
+                db.change_run(id, patch)?;
+                return Ok(false);
+            }
+        }
+        if (checkpoint.terminal_code() == Some(0) && !checkpoint.provider_failed())
+            || checkpoint.completed()
+        {
             let summary = match checkpoint.last_message() {
                 "" => {
                     "Conversation completed before worker restart. See Activity for the recorded result."
                 }
                 message => message,
             };
-            let waiting = current.trigger != "chat" && record.boundary["wakeup"].is_object();
+            let waiting = current.trigger != "chat" && record.wakeup.is_some();
             if waiting && current.session_id.is_none() {
                 db.change_run(id,crate::runs::RunChanges {
                     status: Some(RunStatus::Failed),
@@ -498,7 +815,7 @@ fn finish_recovery(db: &Db<'_>, id: &str, checkpoint: Option<&RunCheckpoint>) ->
                     recovery_pending: Some(false),
                     account_wait_reason: Some(None),
                     error: Some(Some("Cannot wait without a saved agent session. Working files were preserved.".into())),
-                    boundary: Some(json!({"wakeup": null})),
+                    wakeup: Some(None),
                     ..Default::default()
                 })?;
                 return Ok(false);
@@ -513,6 +830,8 @@ fn finish_recovery(db: &Db<'_>, id: &str, checkpoint: Option<&RunCheckpoint>) ->
                 resume_available: Some(waiting),
                 account_wait_reason: Some(None),
                 recovery_pending: Some(false),
+                error: Some(None),
+                retry: Some(None),
                 summary: Some((summary).to_owned()),
                 boundary: Some(json!({})),
                 ..Default::default()
@@ -526,6 +845,37 @@ fn finish_recovery(db: &Db<'_>, id: &str, checkpoint: Option<&RunCheckpoint>) ->
             db.change_run(id, patch)?;
             return Ok(false);
         }
+        if checkpoint.managed()
+            && !scheduled_provider_retry(checkpoint, current)
+            && checkpoint.controller_recoveries() >= super::execution::MAX_CONTROLLER_RECOVERIES
+            && !(checkpoint.controller_recoveries() == super::execution::MAX_CONTROLLER_RECOVERIES
+                && checkpoint.has_controller_recovery_reservation())
+        {
+            let expired = matches!(checkpoint.remaining_ms, None | Some(Some(i64::MIN..=0)));
+            let message = if expired {
+                "Run exceeded its time limit."
+            } else {
+                "Execution recovery budget exhausted. Working files were preserved."
+            };
+            let settled = Settled::failure(RunStatus::Failed, message);
+            let mut patch = settled.run_changes();
+            patch.wakeup = Some(None);
+            db.change_run(id, patch)?;
+            return Ok(false);
+        }
+    }
+    if let Some(saved) = checkpoint
+        && saved.managed()
+        && !scheduled_provider_retry(saved, current)
+        && saved.start_rejected != Some(true)
+        && saved.runner_id().is_some()
+        && saved.turn_pending != Some(true)
+        && !saved.has_controller_recovery_reservation()
+    {
+        let mut paid = saved.clone();
+        paid.controller_recoveries = Some(saved.controller_recoveries() + 1);
+        paid.controller_recovery_reservation = saved.runner_id().map(str::to_owned);
+        paid.store_in(db, id)?;
     }
     db.change_run(
         id,
@@ -540,6 +890,7 @@ fn finish_recovery(db: &Db<'_>, id: &str, checkpoint: Option<&RunCheckpoint>) ->
 /// Settles a recovering run whose cancellation was requested. One waiting for an automatic
 /// retry shows the stop in its conversation; a wait's own card already shows its cancellation.
 fn cancel_recovery(db: &Db<'_>, id: &str, run: &RunState) -> Result<()> {
+    crate::nodes::moves::release_terminal_destination_in(db, id)?;
     db.change_run(
         id,
         crate::runs::RunChanges {
@@ -548,7 +899,7 @@ fn cancel_recovery(db: &Db<'_>, id: &str, run: &RunState) -> Result<()> {
             account_wait_reason: Some(None),
             recovery_pending: Some(false),
             retry: Some(None),
-            boundary: Some(json!({"wakeup": null})),
+            wakeup: Some(None),
             ..Default::default()
         },
     )?;
@@ -611,6 +962,18 @@ mod tests {
         String,
         std::path::PathBuf,
     ) {
+        fixture_with_runner(String::new()).await
+    }
+
+    async fn fixture_with_runner(
+        runner_url: String,
+    ) -> (
+        tempfile::TempDir,
+        Arc<Service>,
+        String,
+        String,
+        std::path::PathBuf,
+    ) {
         let root = tempfile::tempdir().unwrap();
         let service = Service::new(crate::config::Config {
             data_dir: root.path().join("data"),
@@ -626,7 +989,7 @@ mod tests {
             concurrency: 1,
             logger: false,
             worker_enabled: false,
-            runner_url: String::new(),
+            runner_url,
         })
         .await
         .unwrap();
@@ -659,6 +1022,1260 @@ mod tests {
             .unwrap();
 
         (root, service, chat_id, run_id, workspace)
+    }
+
+    #[tokio::test]
+    async fn shutdown_during_active_observation_keeps_pending_checkpoint() {
+        use axum::{Router, routing::any};
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let seen = entered.clone();
+        let app = Router::new().fallback(any(move || {
+            let seen = seen.clone();
+            async move {
+                seen.notify_one();
+                std::future::pending::<axum::http::StatusCode>().await
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (_root, service, _chat, run, _workspace) =
+            fixture_with_runner(format!("http://{address}")).await;
+        let saved = RunCheckpoint::from_value(json!({
+            "prepared": { "backend": "native", "isolated": true },
+            "runnerId": "old-attempt", "completed": true, "controllerRecoveries": 3,
+            "remainingMs": null,
+        }))
+        .unwrap();
+        saved.store(&service.store, &run).await.unwrap();
+        let checkpoint = Arc::new(super::super::checkpoint::Checkpoint::new(
+            service.store.clone(),
+            run.clone(),
+            saved,
+        ));
+        let (s, cp) = (service.clone(), checkpoint.clone());
+        let task = tokio::spawn(async move {
+            super::super::execution::reconcile(&s, &cp, &CancellationToken::new()).await
+        });
+        entered.notified().await;
+        service.shutdown.cancel();
+        task.await.unwrap().unwrap();
+        let saved = RunCheckpoint::load(&service.store, &run)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(saved.terminal_code.is_none());
+        let observation = saved.controller_observation.unwrap();
+        assert_eq!(observation.requests, 1);
+        assert!(!observation.in_flight);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn active_observation_cannot_overwrite_replacement() {
+        use axum::{Router, routing::any};
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let app = Router::new().fallback(any({
+            let (entered, gate) = (entered.clone(), gate.clone());
+            move || {
+                let (entered, gate) = (entered.clone(), gate.clone());
+                async move {
+                    entered.notify_one();
+                    gate.acquire().await.unwrap().forget();
+                    axum::Json(json!({ "StatusCode": 0 }))
+                }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (_root, service, _chat, run, _workspace) =
+            fixture_with_runner(format!("http://{address}")).await;
+        let original = RunCheckpoint::from_value(json!({
+            "prepared": { "backend": "native", "isolated": true },
+            "runnerId": "old-attempt", "remainingMs": null,
+        }))
+        .unwrap();
+        original.store(&service.store, &run).await.unwrap();
+        let checkpoint = Arc::new(super::super::checkpoint::Checkpoint::new(
+            service.store.clone(),
+            run.clone(),
+            original.clone(),
+        ));
+        let (s, cp) = (service.clone(), checkpoint.clone());
+        let task = tokio::spawn(async move {
+            super::super::execution::reconcile(&s, &cp, &CancellationToken::new()).await
+        });
+        entered.notified().await;
+        let mut replacement = original;
+        replacement.runner_id = Some(Some("new-attempt".into()));
+        replacement.controller_observation = None;
+        replacement.store(&service.store, &run).await.unwrap();
+        gate.add_permits(1);
+        assert!(task.await.unwrap().is_err());
+        let current = RunCheckpoint::load(&service.store, &run)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.runner_id(), Some("new-attempt"));
+        assert!(current.terminal_code.is_none());
+        assert!(current.controller_observation.is_none());
+        service.shutdown.cancel();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn terminal_recovery_releases_a_transferred_destination_reservation() {
+        let (_root, service, _chat, run, _workspace) = fixture().await;
+        let held = crate::config::id();
+        let saved =
+            RunCheckpoint::from_value(json!({"runnerId":"old-source-attempt","remainingMs":0}))
+                .unwrap();
+        saved.store(&service.store, &run).await.unwrap();
+        service
+            .store
+            .put(
+                "node-attempts",
+                json!({"id":held,"runId":run,"nodeId":"destination","released":false}),
+            )
+            .await
+            .unwrap();
+        service
+            .store
+            .change_run(
+                &run,
+                crate::runs::RunChanges {
+                    boundary: Some(
+                        json!({"moveRequest":null,"moveReservation":held,"nodeState":"resuming"}),
+                    ),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        crate::nodes::moves::abort_terminal_recovery(&service, &run, Some(&saved))
+            .await
+            .unwrap();
+        assert_eq!(
+            service
+                .store
+                .get("node-attempts", &held)
+                .await
+                .unwrap()
+                .unwrap()["released"],
+            true
+        );
+        let current = service.store.run(&run).await.unwrap();
+        assert!(current["moveReservation"].is_null());
+        assert!(current["nodeState"].is_null());
+        for cancelled in [true, false] {
+            let held = crate::config::id();
+            service
+                .store
+                .put(
+                    "node-attempts",
+                    json!({"id":held,"runId":run,"nodeId":"destination","released":false}),
+                )
+                .await
+                .unwrap();
+            let cause = crate::run_retry::Cause::classify(
+                &json!({"code":"request_timeout","message":"expired"}),
+            )
+            .unwrap();
+            let retry = crate::run_retry::Retry::next(
+                None,
+                cause,
+                now() - crate::run_retry::MAX_RECOVERY_MS - 1,
+            )
+            .unwrap();
+            service
+                .store
+                .change_run(
+                    &run,
+                    crate::runs::RunChanges {
+                        status: Some(RunStatus::Queued),
+                        cancel_requested_at: Some(None),
+                        recovery_pending: Some(false),
+                        retry: Some(Some(retry)),
+                        boundary: Some(json!({"moveReservation":held,"nodeState":"resuming"})),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            if cancelled {
+                service.worker.cancel(&service, &run).await.unwrap();
+            } else {
+                assert!(super::super::retry::expire(&service, &run).await.unwrap());
+            }
+            assert_eq!(
+                service
+                    .store
+                    .get("node-attempts", &held)
+                    .await
+                    .unwrap()
+                    .unwrap()["released"],
+                true
+            );
+            assert!(service.store.run(&run).await.unwrap()["moveReservation"].is_null());
+        }
+    }
+
+    #[tokio::test]
+    async fn restart_provider_failure_reserves_each_retry_once_and_keeps_its_ceiling() {
+        let (_root, service, _chat, run, _workspace) = fixture().await;
+        service
+            .store
+            .change_run(
+                &run,
+                crate::runs::RunChanges {
+                    session_id: Some(Some("session".into())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let cause = crate::run_retry::Cause::classify(
+            &json!({"code":"server_error","message":"Provider unavailable"}),
+        )
+        .unwrap();
+        for attempt in 1..=crate::run_retry::MAX_ATTEMPTS + 1 {
+            let id = run.clone();
+            let cause = cause.clone();
+            service
+                .store
+                .transaction(move |db| {
+                    let mut previous = db.run_state(&id)?.unwrap().retry;
+                    if let Some(retry) = &mut previous {
+                        retry.next_attempt_at = None;
+                    }
+                    db.change_run(
+                        &id,
+                        crate::runs::RunChanges {
+                            status: Some(RunStatus::Queued),
+                            retry: Some(previous),
+                            ..Default::default()
+                        },
+                    )?;
+                    let saved = RunCheckpoint::from_value(json!({
+                        "prepared": {"backend":"native","isolated":true},
+                        "runnerId":format!("attempt-{attempt}"), "remainingMs":null,
+                        "terminalCode":null, "providerFailed":true,
+                        "lastError":"Provider unavailable", "retryCause":cause
+                    }))?;
+                    saved.store_in(db, &id)?;
+                    assert!(!finish_recovery(db, &id, Some(&saved))?);
+                    let current = db.run_state(&id)?.unwrap();
+                    assert_eq!(
+                        RunCheckpoint::load_in(db, &id)?
+                            .unwrap()
+                            .controller_recoveries(),
+                        0
+                    );
+                    if attempt <= crate::run_retry::MAX_ATTEMPTS {
+                        assert_eq!(current.retry.unwrap().attempt, attempt);
+                        assert!(finish_recovery(db, &id, Some(&saved))?);
+                        assert_eq!(
+                            db.run_state(&id)?.unwrap().retry.unwrap().attempt,
+                            attempt,
+                            "repeat settlement must not reserve twice"
+                        );
+                    } else {
+                        assert_eq!(current.status, RunStatus::Failed);
+                    }
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn expired_provider_retry_during_settlement_keeps_the_expiry_outcome() {
+        let (_root, service, _chat, run, _workspace) = fixture().await;
+        service
+            .store
+            .transaction(move |db| {
+                let cause = crate::run_retry::Cause::classify(
+                    &json!({"code": "server_error", "message": "Provider unavailable"}),
+                )
+                .unwrap();
+                let retry = crate::run_retry::Retry::next(
+                    None,
+                    cause.clone(),
+                    now() - crate::run_retry::MAX_RECOVERY_MS - 1,
+                )
+                .unwrap();
+                db.change_run(
+                    &run,
+                    crate::runs::RunChanges {
+                        status: Some(RunStatus::Queued),
+                        session_id: Some(Some("session".into())),
+                        retry: Some(Some(retry)),
+                        ..Default::default()
+                    },
+                )?;
+                let saved = RunCheckpoint::from_value(json!({
+                    "prepared": {"backend": "native", "isolated": true},
+                    "runnerId": "fenced-attempt",
+                    "remainingMs": null,
+                    "providerFailed": true,
+                    "lastError": "Provider unavailable",
+                    "retryCause": cause,
+                }))?;
+                saved.store_in(db, &run)?;
+                assert!(!finish_recovery(db, &run, Some(&saved))?);
+                let current = db.run_state(&run)?.unwrap();
+                assert_eq!(current.status, RunStatus::Failed);
+                assert!(current.error.unwrap().contains("10-minute limit"));
+                assert!(current.retry.unwrap().next_attempt_at.is_none());
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn confirmed_terminal_provider_failure_never_becomes_success_from_controller_zero() {
+        let (_root, service, _chat, run, _workspace) = fixture().await;
+        for code in [None, Some(0)] {
+            let id = run.clone();
+            service
+                .store
+                .transaction(move |db| {
+                    db.change_run(
+                        &id,
+                        crate::runs::RunChanges {
+                            status: Some(RunStatus::Queued),
+                            ..Default::default()
+                        },
+                    )?;
+                    let saved = RunCheckpoint::from_value(json!({
+                        "prepared":{"backend":"native","isolated":true},"runnerId":"same-attempt",
+                        "remainingMs":null,"terminalCode":code,"providerFailed":true,
+                        "lastError":"Permission denied","retryCause":null
+                    }))?;
+                    saved.store_in(db, &id)?;
+                    assert!(!finish_recovery(db, &id, Some(&saved))?);
+                    assert_eq!(db.run_state(&id)?.unwrap().status, RunStatus::Failed);
+                    assert_eq!(
+                        RunCheckpoint::load_in(db, &id)?
+                            .unwrap()
+                            .controller_recoveries(),
+                        0
+                    );
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn interrupted_observations_keep_a_durable_per_attempt_limit() {
+        use axum::{Router, extract::Request, response::IntoResponse, routing::any};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let reads = Arc::new(AtomicUsize::new(0));
+        let (seen, count) = (entered.clone(), reads.clone());
+        let app = Router::new().fallback(any(move |request: Request| {
+            let (seen, count) = (seen.clone(), count.clone());
+            async move {
+                if request.method() == "DELETE" {
+                    return axum::http::StatusCode::NO_CONTENT.into_response();
+                }
+                count.fetch_add(1, Ordering::SeqCst);
+                seen.notify_one();
+                std::future::pending::<axum::response::Response>().await
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (_root, service, _chat, run, _workspace) =
+            fixture_with_runner(format!("http://{address}")).await;
+        let saved = RunCheckpoint::from_value(json!({
+            "prepared": { "backend": "native", "isolated": true },
+            "runnerId": "old-attempt", "completed": true, "controllerRecoveries": 3,
+            "remainingMs": null,
+        }))
+        .unwrap();
+        saved.store(&service.store, &run).await.unwrap();
+        let (s, id) = (service.clone(), run.clone());
+        let task = tokio::spawn(async move { recover(&s, &s.store.run(&id).await.unwrap()).await });
+        entered.notified().await;
+        task.abort();
+        let _ = task.await;
+        let saved = RunCheckpoint::load(&service.store, &run)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(saved.terminal_code.is_none());
+        let observation = saved.controller_observation.unwrap();
+        assert_eq!(observation.requests, 1);
+        assert!(observation.in_flight);
+        assert!(
+            !recover(&service, &service.store.run(&run).await.unwrap())
+                .await
+                .unwrap()
+        );
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            service.store.run_state(&run).await.unwrap().status,
+            RunStatus::Failed
+        );
+        service.shutdown.cancel();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn recovery_deadline_stops_further_controller_observations() {
+        use axum::{Router, extract::Request, response::IntoResponse, routing::any};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let reads = Arc::new(AtomicUsize::new(0));
+        let count = reads.clone();
+        let app = Router::new().fallback(any(move |request: Request| {
+            let count = count.clone();
+            async move {
+                if request.method() == "DELETE" {
+                    return axum::http::StatusCode::NO_CONTENT.into_response();
+                }
+                count.fetch_add(1, Ordering::SeqCst);
+                std::future::pending::<axum::response::Response>().await
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (_root, service, _chat, run, _workspace) =
+            fixture_with_runner(format!("http://{address}")).await;
+        let saved = RunCheckpoint::from_value(json!({
+            "prepared": { "backend": "native", "isolated": true }, "runnerId": "old-attempt",
+            "completed": false, "remainingMs": 200,
+        }))
+        .unwrap();
+        saved.store(&service.store, &run).await.unwrap();
+        assert!(
+            !recover(&service, &service.store.run(&run).await.unwrap())
+                .await
+                .unwrap()
+        );
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+        let state = service.store.run_state(&run).await.unwrap();
+        assert_eq!(state.status, RunStatus::Failed);
+        assert_eq!(state.error.as_deref(), Some("Run exceeded its time limit."));
+        service.shutdown.cancel();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn failed_fences_spend_the_same_durable_deadline() {
+        use axum::{Router, routing::any};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let allow = Arc::new(AtomicBool::new(false));
+        let enabled = allow.clone();
+        let app = Router::new().fallback(any(move || {
+            let enabled = enabled.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                if enabled.load(Ordering::SeqCst) {
+                    axum::http::StatusCode::NO_CONTENT
+                } else {
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE
+                }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (_root, service, _chat, run, _workspace) =
+            fixture_with_runner(format!("http://{address}")).await;
+        let saved = RunCheckpoint::from_value(json!({
+            "prepared": { "backend": "native", "isolated": true },
+            "runnerId": "old-attempt", "completed": true, "terminalCode": 0,
+            "remainingMs": 350,
+        }))
+        .unwrap();
+        saved.store(&service.store, &run).await.unwrap();
+        let mut previous = 350;
+        for index in 0..2 {
+            assert!(
+                recover(&service, &service.store.run(&run).await.unwrap())
+                    .await
+                    .is_err()
+            );
+            let saved = RunCheckpoint::load(&service.store, &run)
+                .await
+                .unwrap()
+                .unwrap();
+            let remaining = saved.remaining_ms.flatten().unwrap();
+            assert!(remaining <= previous && (index != 0 || remaining < previous));
+            assert!(saved.recovery_deadline_ms.is_some());
+            assert_eq!(
+                service.store.run_state(&run).await.unwrap().status,
+                RunStatus::Queued
+            );
+            previous = remaining;
+        }
+        assert_eq!(previous, 0);
+        allow.store(true, Ordering::SeqCst);
+        assert!(
+            !recover(&service, &service.store.run(&run).await.unwrap())
+                .await
+                .unwrap()
+        );
+        let state = service.store.run_state(&run).await.unwrap();
+        assert_eq!(state.status, RunStatus::Failed);
+        assert_eq!(state.error.as_deref(), Some("Run exceeded its time limit."));
+        service.shutdown.cancel();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn recovery_fences_completed_failed_turn_before_pending_move() {
+        use axum::{Router, routing::any};
+        let app = Router::new().fallback(any(|| async { axum::http::StatusCode::NO_CONTENT }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (_root, service, _chat, run, _workspace) =
+            fixture_with_runner(format!("http://{address}")).await;
+        for cancelled in [false, true] {
+            let saved = RunCheckpoint::from_value(json!({
+                "prepared": { "backend": "native", "isolated": true },
+                "runnerId": "old-attempt", "completed": true, "terminalCode": 70,
+                "controllerRecoveries": 3, "remainingMs": null,
+            }))
+            .unwrap();
+            saved.store(&service.store, &run).await.unwrap();
+            service
+                .store
+                .change_run(
+                    &run,
+                    crate::runs::RunChanges {
+                        status: Some(RunStatus::Queued),
+                        cancel_requested_at: Some(cancelled.then(now)),
+                        boundary: Some(json!({ "moveRequest": { "nodeId": "destination" } })),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(
+                !recover(&service, &service.store.run(&run).await.unwrap())
+                    .await
+                    .unwrap()
+            );
+            let state = service.store.run_state(&run).await.unwrap();
+            assert_eq!(
+                state.status,
+                if cancelled {
+                    RunStatus::Cancelled
+                } else {
+                    RunStatus::Failed
+                }
+            );
+            let current = RunCheckpoint::load(&service.store, &run)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(current.completed());
+            assert_eq!(current.terminal_code(), Some(70));
+        }
+        service.shutdown.cancel();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn failed_observation_commit_does_not_repeat_network_reads() {
+        use axum::{Router, extract::Request, response::IntoResponse, routing::any};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let reads = Arc::new(AtomicUsize::new(0));
+        let seen = reads.clone();
+        let app = Router::new().fallback(any(move |request: Request| {
+            let seen = seen.clone();
+            async move {
+                if request.method() == "DELETE" {
+                    return axum::http::StatusCode::NO_CONTENT.into_response();
+                }
+                seen.fetch_add(1, Ordering::SeqCst);
+                axum::Json(json!({ "StatusCode": 0 })).into_response()
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (_root, service, _chat, run, _workspace) =
+            fixture_with_runner(format!("http://{address}")).await;
+        let saved = RunCheckpoint::from_value(json!({
+            "prepared": { "backend": "native", "isolated": true },
+            "runnerId": "old-attempt", "completed": true, "controllerRecoveries": 3,
+            "remainingMs": null,
+        }))
+        .unwrap();
+        saved.store(&service.store, &run).await.unwrap();
+        service.store.write(|db| {
+            db.0.execute_batch("CREATE TRIGGER refuse_checkpoint BEFORE UPDATE ON run_checkpoints WHEN json_extract(OLD.state, '$.controllerObservation.requests') >= 1 BEGIN SELECT RAISE(ABORT, 'fixture write refused'); END")?;
+            Ok(())
+        }).await.unwrap();
+        for _ in 0..2 {
+            let _ = recover(&service, &service.store.run(&run).await.unwrap()).await;
+        }
+        service
+            .store
+            .write(|db| {
+                db.0.execute_batch("DROP TRIGGER refuse_checkpoint")?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(
+            !recover(&service, &service.store.run(&run).await.unwrap())
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            1,
+            "a refused write must stop further observations"
+        );
+        service.shutdown.cancel();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn shutdown_during_recovery_observation_preserves_pending_result() {
+        use axum::{Router, routing::any};
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let seen = entered.clone();
+        let app = Router::new().fallback(any(move || {
+            let seen = seen.clone();
+            async move {
+                seen.notify_one();
+                std::future::pending::<()>().await;
+                axum::http::StatusCode::OK
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (_root, service, _chat, run, _workspace) =
+            fixture_with_runner(format!("http://{address}")).await;
+        let saved = RunCheckpoint::from_value(json!({
+            "prepared": { "backend": "native", "isolated": true },
+            "runnerId": "old-attempt", "completed": true, "controllerRecoveries": 3,
+            "remainingMs": null,
+        }))
+        .unwrap();
+        saved.store(&service.store, &run).await.unwrap();
+        let (s, id) = (service.clone(), run.clone());
+        let task = tokio::spawn(async move { recover(&s, &s.store.run(&id).await.unwrap()).await });
+        entered.notified().await;
+        service.shutdown.cancel();
+        let _ = task.await.unwrap();
+        let saved = RunCheckpoint::load(&service.store, &run)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            saved.terminal_code.is_none(),
+            "shutdown must leave observation pending"
+        );
+        let observation = saved.controller_observation.unwrap();
+        assert_eq!(observation.attempt, "old-attempt");
+        assert_eq!(observation.requests, 1);
+        assert!(!observation.in_flight);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn scheduled_provider_retries_do_not_spend_controller_recovery_reservations() {
+        let (_root, service, _chat, run, _workspace) = fixture().await;
+        service.store.transaction(move |db| {
+            let cause = crate::run_retry::Cause::classify(&json!({"code":"request_timeout","message":"fixture provider timeout"})).unwrap();
+            let mut retry = None;
+            for attempt in 1..=crate::run_retry::MAX_ATTEMPTS {
+                retry = crate::run_retry::Retry::next(retry.as_ref(), cause.clone(), now());
+                assert_eq!(retry.as_ref().unwrap().attempt, attempt);
+                db.change_run(&run, crate::runs::RunChanges { retry: Some(retry.clone()), ..Default::default() })?;
+                let saved = RunCheckpoint::from_value(json!({
+                    "prepared": {"backend":"native","isolated":true}, "runnerId":format!("attempt-{attempt}"),
+                    "remainingMs":null,"completed":false,"terminalCode":1,"controllerRecoveries":3,
+                    "retryCause":cause,
+                }))?;
+                saved.store_in(db, &run)?;
+                assert!(finish_recovery(db, &run, Some(&saved))?);
+                let saved = RunCheckpoint::load_in(db, &run)?.unwrap();
+                assert_eq!(saved.controller_recoveries(), 3);
+                assert!(!saved.has_controller_recovery_reservation());
+            }
+            Ok(())
+        }).await.unwrap();
+    }
+
+    #[test]
+    fn recovery_observation_is_capped_by_the_remaining_execution_deadline() {
+        assert_eq!(recovery_observation_limit(None), Duration::from_secs(5));
+        assert_eq!(recovery_observation_limit(Some(now() - 1)), Duration::ZERO);
+        assert!(recovery_observation_limit(Some(now() + 100)) <= Duration::from_millis(100));
+    }
+
+    #[tokio::test]
+    async fn cancellation_interrupts_a_pending_scheduler_observation() {
+        use axum::{Router, routing::any};
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let app = Router::new().fallback(any({
+            let entered = entered.clone();
+            move || {
+                let entered = entered.clone();
+                async move {
+                    entered.notify_one();
+                    std::future::pending::<axum::http::StatusCode>().await
+                }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (_root, service, _chat, run, _workspace) =
+            fixture_with_runner(format!("http://{address}")).await;
+        RunCheckpoint::from_value(json!({
+            "prepared":{"backend":"native","isolated":true},"runnerId":"old-attempt","remainingMs":null
+        })).unwrap().store(&service.store, &run).await.unwrap();
+        let (s, id) = (service.clone(), run.clone());
+        let task = tokio::spawn(async move { recover(&s, &s.store.run(&id).await.unwrap()).await });
+        tokio::time::timeout(Duration::from_secs(3), entered.notified())
+            .await
+            .unwrap();
+        service
+            .store
+            .change_run(
+                &run,
+                crate::runs::RunChanges {
+                    cancel_requested_at: Some(Some(now())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        // Fencing may fail against this deliberately silent fake controller. We
+        // assert the pending observation itself was released promptly.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let saved = RunCheckpoint::load(&service.store, &run)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if saved
+                    .controller_observation
+                    .as_ref()
+                    .is_some_and(|observation| !observation.in_flight)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("cancellation must interrupt the read before its five-second deadline");
+        task.abort();
+        let _ = task.await;
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn recovered_interruption_respects_controller_recovery_ceiling() {
+        let (_root, service, _chat, run, _workspace) = fixture().await;
+        for recoveries in [2, 3] {
+            for code in [75, 143] {
+                for (cancel, remaining) in [(false, None), (true, None), (false, Some(0))] {
+                    let id = run.clone();
+                    service
+                        .store
+                        .transaction(move |db| {
+                            db.change_run(
+                                &id,
+                                crate::runs::RunChanges {
+                                    status: Some(RunStatus::Queued),
+                                    cancel_requested_at: Some(cancel.then(now)),
+                                    wakeup: Some(Some(serde_json::from_value(json!({
+                                        "id": "old",
+                                        "messageId": null,
+                                        "reason": "Waiting",
+                                        "seconds": 3600,
+                                        "createdAt": now(),
+                                        "wakeAt": now() + 3_600_000,
+                                    }))?)),
+                                    ..Default::default()
+                                },
+                            )?;
+                            let saved = RunCheckpoint::from_value(json!({
+                                "prepared": { "backend": "native", "isolated": true },
+                                "runnerId": "old-attempt", "completed": false,
+                                "terminalCode": code, "controllerRecoveries": recoveries,
+                                "remainingMs": remaining,
+                            }))?;
+                            saved.store_in(db, &id)?;
+                            let may_launch = finish_recovery(db, &id, Some(&saved))?;
+                            let persisted = RunCheckpoint::load_in(db, &id)?.unwrap();
+                            if cancel || remaining == Some(0) || recoveries == 3 {
+                                assert_eq!(persisted.controller_recoveries(), recoveries);
+                                assert!(!persisted.has_controller_recovery_reservation());
+                            } else {
+                                assert_eq!(persisted.controller_recoveries(), recoveries + 1);
+                                assert!(persisted.has_controller_recovery_reservation());
+                            }
+                            assert_eq!(
+                                may_launch,
+                                recoveries < 3 && !cancel && remaining.is_none(),
+                                "code {code}, recoveries {recoveries}"
+                            );
+                            let current = db.run_state(&id)?.unwrap();
+                            if cancel {
+                                assert_eq!(current.status, RunStatus::Cancelled);
+                            } else if remaining == Some(0) {
+                                assert_eq!(current.status, RunStatus::Failed);
+                                assert_eq!(
+                                    current.error.as_deref(),
+                                    Some("Run exceeded its time limit.")
+                                );
+                            }
+                            if !may_launch {
+                                assert!(db.run(&id)?.unwrap()["wakeup"].is_null());
+                            }
+                            Ok(())
+                        })
+                        .await
+                        .unwrap();
+                }
+            }
+        }
+        service.shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn clean_controller_exit_without_provider_completion_fails_on_restart() {
+        let (_root, service, _chat, run, _workspace) = fixture().await;
+        for backend in ["native", "firecracker", "shared"] {
+            for completed in [false, true] {
+                let id = run.clone();
+                service
+                    .store
+                    .transaction(move |db| {
+                        db.change_run(
+                            &id,
+                            crate::runs::RunChanges {
+                                status: Some(RunStatus::Queued),
+                                cancel_requested_at: Some(None),
+                                ..Default::default()
+                            },
+                        )?;
+                        let saved = RunCheckpoint::from_value(json!({
+                            "prepared": { "backend": backend, "isolated": true },
+                            "runnerId": "attempt", "completed": completed,
+                            "terminalCode": 0, "remainingMs": null,
+                        }))?;
+                        assert!(!finish_recovery(db, &id, Some(&saved))?);
+                        let state = db.run_state(&id)?.unwrap();
+                        assert_eq!(
+                            state.status,
+                            if completed || backend == "shared" {
+                                RunStatus::Succeeded
+                            } else {
+                                RunStatus::Failed
+                            }
+                        );
+                        if !completed && backend != "shared" {
+                            assert!(state.error.unwrap().contains("completion was recorded"));
+                        }
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+            }
+        }
+        service.shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn recovery_reservation_is_paid_once_and_bound_to_attempt() {
+        let (_root, service, _chat, run, _workspace) = fixture().await;
+        for count in 0..=3 {
+            let id = run.clone();
+            service
+                .store
+                .transaction(move |db| {
+                    db.change_run(
+                        &id,
+                        crate::runs::RunChanges {
+                            status: Some(RunStatus::Queued),
+                            cancel_requested_at: Some(None),
+                            ..Default::default()
+                        },
+                    )?;
+                    let saved = RunCheckpoint::from_value(json!({
+                        "prepared": { "backend": "native", "isolated": true },
+                        "runnerId": "attempt", "completed": false,
+                        "terminalCode": 75, "remainingMs": null,
+                        "controllerRecoveries": count,
+                    }))?;
+                    saved.store_in(db, &id)?;
+                    let allowed = finish_recovery(db, &id, Some(&saved))?;
+                    assert_eq!(allowed, count < 3);
+                    if allowed {
+                        let paid = RunCheckpoint::load_in(db, &id)?.unwrap();
+                        assert_eq!(paid.controller_recoveries(), count + 1);
+                        assert!(paid.has_controller_recovery_reservation());
+                        assert!(finish_recovery(db, &id, Some(&paid))?);
+                        let paid_again = RunCheckpoint::load_in(db, &id)?.unwrap();
+                        assert_eq!(paid_again.controller_recoveries(), count + 1);
+                        let mut replacement = paid_again;
+                        replacement.runner_id = Some(Some("replacement".into()));
+                        assert!(!replacement.has_controller_recovery_reservation());
+                        if count == 2 {
+                            assert!(!finish_recovery(db, &id, Some(&replacement))?);
+                        }
+                    }
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+        service.shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn recovered_output_loss_fails_only_when_completion_is_missing() {
+        let (_root, service, _chat, run, _workspace) = fixture().await;
+        for completed in [false, true] {
+            let id = run.clone();
+            service
+                .store
+                .transaction(move |db| {
+                    db.change_run(
+                        &id,
+                        crate::runs::RunChanges {
+                            status: Some(RunStatus::Queued),
+                            cancel_requested_at: Some(None),
+                            ..Default::default()
+                        },
+                    )?;
+                    let saved = RunCheckpoint::from_value(json!({
+                        "prepared": { "backend": "native", "isolated": true },
+                        "runnerId": "attempt", "completed": completed,
+                        "outputInterrupted": true, "terminalCode": 0, "remainingMs": null,
+                    }))?;
+                    assert!(!finish_recovery(db, &id, Some(&saved))?);
+                    let state = db.run_state(&id)?.unwrap();
+                    assert_eq!(
+                        state.status,
+                        if completed {
+                            RunStatus::Succeeded
+                        } else {
+                            RunStatus::Failed
+                        }
+                    );
+                    if !completed {
+                        assert!(state.error.unwrap().contains("output was interrupted"));
+                    }
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+        service.shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn recovery_may_spend_a_reservation_already_charged_to_the_attempt() {
+        let (_root, service, _chat, run, _workspace) = fixture().await;
+        service
+            .store
+            .transaction(move |db| {
+                let mut saved = RunCheckpoint::from_value(json!({
+                    "prepared": { "backend": "native", "isolated": true },
+                    "runnerId": "old-attempt", "completed": false, "terminalCode": 143,
+                    "controllerRecoveries": 3, "controllerRecoveryReservation": "old-attempt",
+                    "remainingMs": null,
+                }))?;
+                assert!(finish_recovery(db, &run, Some(&saved))?);
+                saved.runner_id = Some(Some("replacement".into()));
+                assert!(!finish_recovery(db, &run, Some(&saved))?);
+                assert_eq!(db.run_state(&run)?.unwrap().status, RunStatus::Failed);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        service.shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn failed_finalization_removes_typed_mission_wakeup() {
+        let (_root, service, _chat, run, _workspace) = fixture().await;
+        service
+            .store
+            .transaction(move |db| {
+                let wakeup = serde_json::from_value(json!({
+                    "id": "wake",
+                    "messageId": null,
+                    "reason": "Waiting",
+                    "seconds": 3600,
+                    "createdAt": now(),
+                    "wakeAt": now() + 3_600_000,
+                }))?;
+                db.change_run(
+                    &run,
+                    crate::runs::RunChanges {
+                        status: Some(RunStatus::Queued),
+                        trigger: Some("manual".into()),
+                        wakeup: Some(Some(wakeup)),
+                        ..Default::default()
+                    },
+                )?;
+                let saved = RunCheckpoint::from_value(json!({
+                    "prepared": { "backend": "native", "isolated": true },
+                    "completed": true,
+                    "terminalCode": 70,
+                    "remainingMs": null,
+                }))?;
+                assert!(!finish_recovery(db, &run, Some(&saved))?);
+                let record = db.run_record(&run)?.unwrap();
+                assert_eq!(record.state.status, RunStatus::Failed);
+                assert!(record.wakeup.is_none());
+                Ok(())
+            })
+            .await
+            .unwrap();
+        service.shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn managed_completed_recovery_requires_healthy_finalization_and_cancellation_wins() {
+        let (_root, service, _chat, run, _workspace) = fixture().await;
+        for backend in ["native", "firecracker"] {
+            for code in [None, Some(0), Some(70), Some(75)] {
+                for cancel in [false, true] {
+                    let run = run.clone();
+                    service.store.transaction(move |db| {
+                        let saved = RunCheckpoint::from_value(json!({
+                            "prepared": { "backend": backend, "isolated": true },
+                            "completed": true, "terminalCode": code,
+                            "lastError": if code == Some(70) { "Finalization failed: EIO/EROFS" } else { "" },
+                            "controllerRecoveries": 3,
+                        }))?;
+                        db.change_run(&run, crate::runs::RunChanges {
+                            status: Some(RunStatus::Queued), cancel_requested_at: Some(cancel.then(now)),
+                            ..Default::default()
+                        })?;
+                        assert!(!finish_recovery(db, &run, Some(&saved))?);
+                        let current = db.run_state(&run)?.unwrap();
+                        let expected = if cancel { RunStatus::Cancelled }
+                            else if code == Some(0) { RunStatus::Succeeded } else { RunStatus::Failed };
+                        assert_eq!(current.status, expected, "{backend} {code:?}");
+                        assert_eq!(saved.controller_recoveries(), 3);
+                        Ok(())
+                    }).await.unwrap();
+                }
+            }
+        }
+        service.shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn fencing_rejects_replacement_before_and_during_delete() {
+        use axum::{Router, extract::Request, response::IntoResponse, routing::any};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let deletes = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().fallback(any({
+            let (entered, release, deletes) = (entered.clone(), release.clone(), deletes.clone());
+            move |request: Request| {
+                let (entered, release, deletes) =
+                    (entered.clone(), release.clone(), deletes.clone());
+                async move {
+                    assert_eq!(request.uri().path(), "/runs/old-attempt");
+                    deletes.fetch_add(1, Ordering::SeqCst);
+                    entered.notify_one();
+                    release.acquire().await.unwrap().forget();
+                    axum::http::StatusCode::NO_CONTENT.into_response()
+                }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (_root, service, _chat, run, _workspace) =
+            fixture_with_runner(format!("http://{address}")).await;
+        let original = RunCheckpoint::from_value(json!({
+            "prepared": { "backend": "native", "isolated": true }, "runnerId": "old-attempt",
+            "completed": true, "terminalCode": 0, "remainingMs": null,
+        }))
+        .unwrap();
+        let mut replacement = original.clone();
+        replacement.runner_id = Some(Some("new-attempt".into()));
+        replacement.process = Some(Some(crate::recovery::ProcessIdentity {
+            pid: 99,
+            start: "new".into(),
+            boot: "new".into(),
+        }));
+        replacement.store(&service.store, &run).await.unwrap();
+        let run_value = service.store.run(&run).await.unwrap();
+        assert!(
+            recovery::fence_attempt(&service, &run_value, Some(&original))
+                .await
+                .is_err()
+        );
+        assert_eq!(deletes.load(Ordering::SeqCst), 0);
+        let mut changed_process = replacement.clone();
+        changed_process.runner_id = original.runner_id.clone();
+        changed_process.store(&service.store, &run).await.unwrap();
+        assert!(
+            recovery::fence_attempt(&service, &run_value, Some(&original))
+                .await
+                .is_err()
+        );
+        assert_eq!(deletes.load(Ordering::SeqCst), 0);
+        original.store(&service.store, &run).await.unwrap();
+        let s = service.clone();
+        let task = tokio::spawn(async move { recover(&s, &run_value).await });
+        entered.notified().await;
+        replacement.store(&service.store, &run).await.unwrap();
+        release.add_permits(1);
+        assert!(task.await.unwrap().is_err());
+        let current = RunCheckpoint::load(&service.store, &run)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.runner_id(), Some("new-attempt"));
+        assert_eq!(current.process(), replacement.process());
+        assert_eq!(deletes.load(Ordering::SeqCst), 1);
+        service.shutdown.cancel();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn restart_reconciliation_cannot_fence_a_replacement_and_honors_concurrent_cancel() {
+        use axum::{Router, extract::Request, response::IntoResponse, routing::any};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for replace in [true, false] {
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let deletes = Arc::new(AtomicUsize::new(0));
+            let (read, reply, stops) = (entered.clone(), release.clone(), deletes.clone());
+            let app = Router::new().fallback(any(move |request: Request| {
+                let (read, reply, stops) = (read.clone(), reply.clone(), stops.clone());
+                async move {
+                    assert!(request.uri().path().starts_with("/runs/old-attempt"));
+                    if request.method() == "DELETE" {
+                        stops.fetch_add(1, Ordering::SeqCst);
+                        return axum::http::StatusCode::NO_CONTENT.into_response();
+                    }
+                    assert_eq!(request.uri().path(), "/runs/old-attempt/wait");
+                    read.notify_one();
+                    reply.notified().await;
+                    axum::Json(json!({ "StatusCode": 0 })).into_response()
+                }
+            }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let (_root, service, _chat, run, _workspace) =
+                fixture_with_runner(format!("http://{address}")).await;
+            let saved = RunCheckpoint::from_value(json!({
+                "prepared": { "backend": "native", "isolated": true },
+                "runnerId": "old-attempt", "completed": true, "controllerRecoveries": 3,
+            }))
+            .unwrap();
+            saved.store(&service.store, &run).await.unwrap();
+            let (s, id) = (service.clone(), run.clone());
+            let recovering =
+                tokio::spawn(async move { recover(&s, &s.store.run(&id).await.unwrap()).await });
+            entered.notified().await;
+            if replace {
+                let mut replacement = saved.clone();
+                replacement.runner_id = Some(Some("new-attempt".into()));
+                replacement.completed = Some(false);
+                replacement.store(&service.store, &run).await.unwrap();
+            } else {
+                service
+                    .store
+                    .change_run(
+                        &run,
+                        crate::runs::RunChanges {
+                            cancel_requested_at: Some(Some(now())),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+            }
+            release.notify_one();
+            assert!(!recovering.await.unwrap().unwrap());
+            if replace {
+                let current = RunCheckpoint::load(&service.store, &run)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(current.runner_id(), Some("new-attempt"));
+                assert_eq!(current.terminal_code(), None);
+                assert_eq!(deletes.load(Ordering::SeqCst), 0);
+            } else {
+                assert_eq!(
+                    service.store.run_state(&run).await.unwrap().status,
+                    RunStatus::Cancelled
+                );
+                assert_eq!(deletes.load(Ordering::SeqCst), 1);
+            }
+            server.abort();
+            service.shutdown.cancel();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_new_turn_cannot_reuse_the_previous_attempts_healthy_exit() {
+        use axum::{Router, extract::Request, response::IntoResponse, routing::any};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let waits = Arc::new(AtomicUsize::new(0));
+        let count = waits.clone();
+        let app = Router::new().fallback(any(move |request: Request| {
+            let count = count.clone();
+            async move {
+                if request.method() == "DELETE" {
+                    return axum::http::StatusCode::NO_CONTENT.into_response();
+                }
+                count.fetch_add(1, Ordering::SeqCst);
+                axum::Json(json!({ "StatusCode": 0 })).into_response()
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let (_root, service, _chat, run, _workspace) =
+            fixture_with_runner(format!("http://{address}")).await;
+        let saved = RunCheckpoint::from_value(json!({
+            "prepared": { "backend": "native", "isolated": true },
+            "runnerId": "old-attempt", "completed": false, "terminalCode": null,
+        }))
+        .unwrap();
+        saved.store(&service.store, &run).await.unwrap();
+        assert!(
+            recover(&service, &service.store.run(&run).await.unwrap())
+                .await
+                .unwrap()
+        );
+        assert_eq!(waits.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            service.store.run_state(&run).await.unwrap().status,
+            RunStatus::Queued
+        );
+        server.abort();
+        service.shutdown.cancel();
     }
 
     #[tokio::test]
@@ -711,7 +2328,7 @@ mod tests {
             drop(original);
             let service = Service::new(config).await.unwrap();
             let wakeup = json!({
-                "id": "wake", "seconds": 3600,
+                "id": "wake", "messageId": null, "reason": "Waiting", "seconds": 3600,
                 "createdAt": now(), "wakeAt": now() + 3_600_000,
             });
             service
@@ -727,14 +2344,15 @@ mod tests {
                         recovery_pending: Some(queued),
                         trigger: Some(("manual").to_owned()),
                         session_id: Some(Some("saved".into())),
-                        boundary: Some(json!({"isolated": true,"wakeup": wakeup})),
+                        wakeup: Some(Some(serde_json::from_value(wakeup.clone()).unwrap())),
+                        boundary: Some(json!({"isolated": true})),
                         ..Default::default()
                     },
                 )
                 .await
                 .unwrap();
             let checkpoint = RunCheckpoint::from_value(json!({
-                "completed": true, "launched": true, "runnerId": "old-attempt",
+                "completed": true, "terminalCode": 0, "launched": true, "runnerId": "old-attempt",
                 "nodeId": node,
                 "prepared": { "isolated": true, "backend": "native" },
             }))
@@ -820,7 +2438,7 @@ mod tests {
                             status: Some(cairn_contracts::RunStatus::Queued),
                             recovery_pending: Some(true),
                             cancel_requested_at: Some(Some(now())),
-                            boundary: Some(json!({"wakeup": null})),
+                            wakeup: Some(None),
                             ..Default::default()
                         },
                     )?;

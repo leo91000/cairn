@@ -1891,7 +1891,10 @@ async fn native_stop_controls_remain_available_without_host_admission() {
                 )
                 .await
                 .unwrap();
-            chat["wakeup"] = json!({ "at": now() + 60_000, "reason": "Saved continuation" });
+            chat["wakeup"] = serde_json::to_value(common::run_fixture::complete_wakeup_fixture(
+                &json!({"id":"saved-wait","wakeAt":now()+60_000,"reason":"Saved continuation"}),
+            ))
+            .unwrap();
             f.service
                 .store
                 .save_conversation_boundary(chat)
@@ -2709,8 +2712,27 @@ async fn revoking_a_native_person_stops_lease_renewals_and_workspace_access() {
             .unwrap();
         common::send(&f.router, request)
     };
+    // The last proof remains valid while Beacon refresh is unavailable. A
+    // heartbeat may renew work, but cannot extend this proof's deadline.
+    f.service
+        .store
+        .set(
+            "native-authority",
+            json!({
+                "observedAt": now() - 30_000,
+                "accounts": { TRUSTED: {"email":"trusted@example.test","accessId":"one"} }
+            }),
+            None,
+        )
+        .await
+        .unwrap();
     let first = read_json(send(heartbeat.clone()).await).await;
     assert_eq!(first["leases"].as_array().unwrap().len(), 1);
+    let remaining = first["leases"][0]["remainingMs"].as_u64().unwrap();
+    assert!(
+        remaining > 0 && remaining <= 30_000,
+        "grant must retain the proof deadline: {first}"
+    );
     let mut node = f
         .service
         .node_boundary(f.node["id"].as_str().unwrap())
@@ -4023,4 +4045,116 @@ async fn resume_run_rechecks_grant_and_cancellation_after_native_preparation() {
             target
         );
     }
+}
+
+#[tokio::test]
+async fn enrolled_native_backend_refreshes_authority_when_health_telemetry_is_missing() {
+    use axum::routing::get;
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new().await;
+    let app = Router::new().route(
+        "/api/relay/{id}/native-authority",
+        get(|| async {
+            axum::Json(json!({TRUSTED: {"email":"trusted@example.test","accessId":"one"}}))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let directory = f.service.config.data_dir.join("installation-relay");
+    std::fs::create_dir_all(&directory).unwrap();
+    let identity = directory.join("identity.json");
+    std::fs::write(&identity,json!({"origin":format!("http://{address}"),"installationId":id(),"token":"synthetic-authority-token"}).to_string()).unwrap();
+    std::fs::set_permissions(identity, std::fs::Permissions::from_mode(0o600)).unwrap();
+    f.service
+        .store
+        .set(
+            "native-authority",
+            json!({"observedAt":now()-61_000,"accounts":{}}),
+            None,
+        )
+        .await
+        .unwrap();
+    let token = auth::token();
+    f.service
+        .store
+        .set(
+            &format!("node-token:{}", auth::digest(&token)),
+            f.node["id"].clone(),
+            None,
+        )
+        .await
+        .unwrap();
+    let mut run = f.run();
+    run["status"] = "running".into();
+    common::add_run(&f.service.store, &run).await;
+    let attempt = id();
+    common::set_checkpoint(
+        &f.service.store,
+        text(&run, "id"),
+        json!({"runnerId":attempt,"nodeId":f.node["id"]}),
+    )
+    .await;
+    f.service
+        .store
+        .put(
+            "node-attempts",
+            json!({"id":attempt,"runId":run["id"],"nodeId":f.node["id"],"released":false}),
+        )
+        .await
+        .unwrap();
+    let started = now();
+    let request = Request::builder()
+        .method("POST")
+        .uri("/internal/nodes/heartbeat")
+        .header("host", common::HOST)
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({"runtimeId":"development","nodeProtocol":2,"executionReady":false}).to_string(),
+        ))
+        .unwrap();
+    let response = common::send(&f.router, request).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let reply = read_json(response).await;
+    assert_eq!(
+        reply["leases"].as_array().unwrap().len(),
+        1,
+        "missing telemetry must retain currently authorized native work: {reply}"
+    );
+    let observed = f.service.node_boundary(text(&f.node, "id")).await.unwrap();
+    assert_eq!(
+        observed["executionReady"], false,
+        "unknown telemetry still prevents new admission"
+    );
+    let proof = f
+        .service
+        .store
+        .kv("native-authority")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(proof["observedAt"].as_i64().unwrap() >= started);
+    assert!(proof["accounts"].get(TRUSTED).is_some());
+    let mut changed = observed;
+    changed["nativeModeRequest"] = json!({"mode":"protected","generation":id()});
+    f.service.store.put_node_fixture(changed).await.unwrap();
+    let request = Request::builder()
+        .method("POST")
+        .uri("/internal/nodes/heartbeat")
+        .header("host", common::HOST)
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({"runtimeId":"development","nodeProtocol":2,"executionReady":false}).to_string(),
+        ))
+        .unwrap();
+    let reply = read_json(common::send(&f.router, request).await).await;
+    assert!(
+        reply["leases"].as_array().unwrap().is_empty(),
+        "a changed desired generation must still stop old grants"
+    );
+    server.abort();
 }

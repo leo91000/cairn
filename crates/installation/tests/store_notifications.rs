@@ -120,7 +120,11 @@ async fn an_idle_tick_does_not_lose_a_concurrently_committed_wakeup() {
                 entered.send(()).unwrap();
                 wait.recv_timeout(Duration::from_secs(10)).unwrap();
                 let mut chat = db.conversation_boundary("chat")?.unwrap();
-                chat["wakeup"] = json!({ "id": "concurrent-wakeup" });
+                chat["wakeup"] =
+                    serde_json::to_value(common::run_fixture::complete_wakeup_fixture(&json!({
+                        "id": "concurrent-wakeup", "createdAt": cairn_installation::config::now(),
+                        "wakeAt": cairn_installation::config::now() + 3600000,
+                    })))?;
                 chat["title"] = "Concurrent edit".into();
                 db.save_conversation_boundary(&chat)
             })

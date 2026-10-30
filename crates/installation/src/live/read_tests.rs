@@ -1,6 +1,158 @@
 use super::*;
 
 #[tokio::test]
+#[ignore = "explicit conversation list and live-page read measurements"]
+async fn measure_conversation_reads_by_count_and_snapshot_size() {
+    use serde_json::json;
+
+    fn cpu_micros() -> u128 {
+        let mut time = std::mem::MaybeUninit::<libc::timespec>::uninit();
+        // SAFETY: a successful clock_gettime initializes the supplied timespec.
+        assert_eq!(
+            unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, time.as_mut_ptr()) },
+            0
+        );
+        // SAFETY: the successful call above initialized every field.
+        let time = unsafe { time.assume_init() };
+        time.tv_sec as u128 * 1_000_000 + time.tv_nsec as u128 / 1_000
+    }
+
+    for count in [1, 100, 300] {
+        for kib in [0, 128, 512] {
+            let root = tempfile::tempdir().unwrap();
+            let store = crate::store::Store::open(root.path()).unwrap();
+            let snapshot = cairn_contracts::RunSnapshot {
+                task: serde_json::from_value(json!({
+                    "id": "00000000-0000-4000-8000-000000000003",
+                    "name": "Measured task", "prompt": "Measured prompt",
+                    "agentId": crate::config::MAIN_AGENT_ID,
+                }))
+                .unwrap(),
+                agent: serde_json::from_value(json!({
+                    "id": crate::config::MAIN_AGENT_ID, "name": "Measured agent",
+                    "revision": "measured", "createdAt": 0,
+                    "instructions": "x".repeat(kib * 1024),
+                    "access": cairn_contracts::AccessPolicy::default(),
+                    "exclusiveNodes": [], "plugins": [],
+                }))
+                .unwrap(),
+                project: None,
+                projects: vec![],
+                available_projects: vec![],
+                skills: vec![],
+                delegation: None,
+            };
+            store
+                .transaction(move |db| {
+                    for index in 0..count {
+                        let run = format!("run-{index}");
+                        let chat = format!("chat-{index}");
+                        let state = serde_json::from_value(json!({
+                            "id": run, "taskId": chat, "status": "running",
+                        }))?;
+                        db.admit_run(&state, Some(&snapshot), &json!({}), None)?;
+                        db.save_conversation_boundary(&json!({
+                            "id": chat, "runId": run, "title": "Measured conversation",
+                            "agentId": crate::config::MAIN_AGENT_ID,
+                        }))?;
+                        db.event(
+                            &run,
+                            &cairn_contracts::EventKind::Output,
+                            "Measured output",
+                            None,
+                        )?;
+                    }
+                    Ok(())
+                })
+                .await
+                .unwrap();
+
+            let path = root.path().join("manager.db");
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            let db = Db(&connection);
+            let snapshot_bytes: i64 = connection
+                .query_row(
+                    "SELECT length(CAST(snapshot AS BLOB)) FROM runs WHERE id='run-0'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let list_scope = Scope::new("chats", "", "measured-account");
+            let lists = ConversationLists::default();
+            let mut scope = Scope::new("chats", "chat-0", "measured-account");
+
+            for operation in ["list_rebuild", "live_page", "live_page_cached_list"] {
+                scope.with_list = operation == "live_page_cached_list";
+                lists.get(&db, &list_scope, 1).unwrap();
+                let read = |connection: &rusqlite::Connection| {
+                    let transaction = connection.unchecked_transaction().unwrap();
+                    let db = Db(&transaction);
+                    if operation == "list_rebuild" {
+                        return serde_json::to_vec(&conversations(&db, &list_scope).unwrap())
+                            .unwrap()
+                            .len();
+                    }
+                    let page = read_page(
+                        &db,
+                        &scope,
+                        Request {
+                            after: 0,
+                            expected: None,
+                            window: true,
+                            recent: false,
+                            resume: true,
+                        },
+                        &lists,
+                        1,
+                        None,
+                    )
+                    .unwrap();
+                    // Include state serialization, as on the first live response.
+                    // SSE framing and event serialization are outside this measurement.
+                    assert_eq!(page.events.len(), 1);
+                    serde_json::to_vec(&page.state).unwrap().len()
+                };
+                // A fresh private SQLite page cache; the host's OS cache stays warm.
+                let measured_connection = rusqlite::Connection::open_with_flags(
+                    &path,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                        | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
+                        | rusqlite::OpenFlags::SQLITE_OPEN_PRIVATE_CACHE,
+                )
+                .unwrap();
+                let first = Instant::now();
+                let encoded_bytes = read(&measured_connection);
+                let sqlite_cold_us = first.elapsed().as_micros();
+                let mut warm_us = Vec::new();
+                let cpu = cpu_micros();
+                for _ in 0..16 {
+                    let started = Instant::now();
+                    assert_eq!(
+                        std::hint::black_box(read(&measured_connection)),
+                        encoded_bytes
+                    );
+                    warm_us.push(started.elapsed().as_micros());
+                }
+                let warm_cpu_us = cpu_micros() - cpu;
+                warm_us.sort_unstable();
+                println!(
+                    "conversation_read_measurement {}",
+                    json!({
+                        "operation": operation, "conversations": count,
+                        "snapshot_bytes": snapshot_bytes, "encoded_state_or_list_bytes": encoded_bytes,
+                        "sqlite_cold_us": sqlite_cold_us, "warm_median_us": warm_us[8],
+                        "warm_min_us": warm_us[0], "warm_max_us": warm_us[15],
+                        "warm_cpu_us": warm_cpu_us, "samples": warm_us.len(),
+                        "database_bytes": std::fs::metadata(&path).unwrap().len(),
+                        "wal_bytes": std::fs::metadata(path.with_extension("db-wal")).map_or(0, |file| file.len()),
+                    })
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn list_cache_coalesces_revisions_and_preserves_account_and_external_refreshes() {
     let root = tempfile::tempdir().unwrap();
     let _store = crate::store::Store::open(root.path()).unwrap();
@@ -82,10 +234,14 @@ async fn a_blocked_conversation_read_does_not_block_another_tabs_events() {
     }).await.unwrap();
     let path = root.path().join("manager.db");
     let connection = rusqlite::Connection::open(&path).unwrap();
-    connection.execute_batch("ALTER TABLE chat_messages RENAME TO retained_messages;
+    connection
+        .execute_batch(
+            "ALTER TABLE chat_messages RENAME TO retained_messages;
 CREATE VIEW chat_messages AS SELECT rowid AS rowid,id,chat_id,revision,
-    body_probe(text) AS text,provider,model,reasoning,speed,mode,status,created_at,question_id,answers
-    FROM retained_messages;").unwrap();
+    body_probe(text) AS text,provider,model,reasoning,speed,mode,status,created_at,question_id
+    FROM retained_messages;",
+        )
+        .unwrap();
     let lists = Arc::new(ConversationLists::default());
     let gate = lists.gate("account");
     let permit = gate.clone().lock_owned().await;

@@ -15,6 +15,15 @@ class ConversationsTest {
                     File(root, "../../../tests/fixtures/conversation-contracts.json").readText()
                 )
                 .jsonObject
+        corpus.getValue("uploads").jsonArray.forEach {
+            val upload = json.decodeFromJsonElement<UploadChatAttachmentInput>(it)
+            assertEquals(it, json.encodeToJsonElement(upload))
+        }
+        corpus.getValue("invalidUploads").jsonArray.forEach { value ->
+            assertFails(value.toString()) {
+                json.decodeFromJsonElement<UploadChatAttachmentInput>(value)
+            }
+        }
         corpus.getValue("creates").jsonArray.forEach {
             json.decodeFromJsonElement<CreateChatInput>(it)
         }

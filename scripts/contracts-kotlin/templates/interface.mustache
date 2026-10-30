@@ -6,7 +6,8 @@ import kotlinx.serialization.SerialName
 {{#imports}}import {{&.}}
 {{/imports}}
 @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
-@kotlinx.serialization.json.JsonClassDiscriminator("kind")
+{{#nestedClasses}}{{#first}}{{#constraints}}{{#properties}}{{#constValue}}@kotlinx.serialization.json.JsonClassDiscriminator("{{&name}}")
+{{/constValue}}{{/properties}}{{/constraints}}{{/first}}{{/nestedClasses}}
 @Serializable
 sealed interface {{&className}} {
 {{#nestedClasses}}
