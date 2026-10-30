@@ -2340,7 +2340,7 @@ async fn paid_recovery_survives_confirmed_capacity_rejection_and_restart() {
         let old_attempt = text(&saved, "runnerId").to_owned();
         assert_eq!(saved["startRejected"], true);
         saved["capacityRetryAt"] = (now() - 1).into();
-        saved["controllerRecoveries"] = if provider { 2 } else { 3 }.into();
+        saved["controllerRecoveries"] = 3.into();
         if provider {
             let cause: cairn_installation::run_retry::Cause = serde_json::from_value(json!({
                 "kind": "server", "message": "Provider busy", "startup": true
@@ -2398,7 +2398,7 @@ async fn paid_recovery_survives_confirmed_capacity_rejection_and_restart() {
         fixture.stop(false).await;
         let mut saved = fixture.checkpoint(&id).await;
         assert_eq!(saved["startRejected"], true);
-        assert_eq!(saved["controllerRecoveries"], if provider { 2 } else { 3 });
+        assert_eq!(saved["controllerRecoveries"], 3);
         assert!(controller.plans.lock().await.is_empty());
         saved["capacityRetryAt"] = (now() - 1).into();
         service
@@ -2414,10 +2414,7 @@ async fn paid_recovery_survives_confirmed_capacity_rejection_and_restart() {
             RunStatus::Succeeded,
             "provider={provider}: {completed}"
         );
-        assert_eq!(
-            fixture.checkpoint(&id).await["controllerRecoveries"],
-            if provider { 2 } else { 3 }
-        );
+        assert_eq!(fixture.checkpoint(&id).await["controllerRecoveries"], 3);
         assert_eq!(controller.plans.lock().await.len(), 1);
         fixture.stop(false).await;
         server.abort();
