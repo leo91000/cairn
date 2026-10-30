@@ -64,13 +64,14 @@ test('asks side questions about a running reply without steering, queuing or rec
   // Nothing joined the queue or the conversation, and the reply keeps running.
   const detail = await workspace.api(`/api/chats/${chat.id}`)
   expect(detail.run.status).toBe('running')
-  expect(detail.messages).toHaveLength(0)
+  // Only the turn's own message, which this fixture never acknowledges as delivered.
+  expect(detail.messages.map((queued: { text: string }) => queued.text)).toEqual(['Review the layout. fixture:chat-hang'])
   expect(detail.sideQuestions.map((question: { status: string }) => question.status)).toEqual(['answered', 'answered'])
   expect(detail.sideQuestions[1].quote).toBe('trace the component boundaries')
   expect(detail.sideQuestions[0].itemId).toBe(detail.sideQuestions[1].itemId)
-  const users = workspace.service.store.events(detail.run.id, 0, 200).filter(event => event.type === 'chat.user')
-  expect(users).toHaveLength(1)
-  expect(JSON.stringify(workspace.service.store.events(detail.run.id, 0, 200))).not.toContain('Side answer')
+  const events = JSON.stringify(workspace.service.store.events(detail.run.id, 0, 200))
+  for (const side of ['Why trace the boundaries first?', 'Which boundaries?', 'Side answer'])
+    expect(events).not.toContain(side)
 
   // Steering still reaches the turn, which then finishes; side questions wait for the next reply.
   const header = message.locator('p').first()
@@ -110,6 +111,8 @@ test('a pending side question can be withdrawn while the reply continues', async
   const detail = await workspace.api(`/api/chats/${chat.id}`)
   expect(detail.sideQuestions[0]).toMatchObject({ id: asked.id, status: 'cancelled' })
   expect(detail.run.status).toBe('running')
+  // Frees the workspace's runner for the next journey.
+  await workspace.api(`/api/chats/${chat.id}/stop`, 'POST')
 })
 
 test('a Codex reply explains that it cannot take side questions', async ({ page, workspace }) => {

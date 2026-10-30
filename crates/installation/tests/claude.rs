@@ -1237,13 +1237,8 @@ async fn a_side_question_is_answered_natively_while_the_turn_continues() {
 }
 
 #[tokio::test]
-async fn a_finished_turn_waits_for_its_side_question_and_reports_failures() {
-    let receipt_before_answer = std::cell::Cell::new(false);
-    let (_root, _c, events) = with_side_questions("fixture:slow", |root, event| {
-        // The request is saved as finished while the side question is still answered.
-        if event["type"] == "chat.side.answered" {
-            receipt_before_answer.set(root.path().join("result.claude-receipt.json").exists());
-        }
+async fn a_finished_turn_withdraws_the_side_questions_it_is_still_answering() {
+    let (_root, c, events) = with_side_questions("fixture:slow", |root, event| {
         if event["type"] == "chat.side.available" {
             deliver(
                 root,
@@ -1262,22 +1257,33 @@ async fn a_finished_turn_waits_for_its_side_question_and_reports_failures() {
     })
     .await;
 
-    let answered = position(&events, "chat.side.answered");
+    // The reply ends without waiting for the slower side question, which it withdraws.
+    let completed = position(&events, "turn.completed");
+    let outcome = |id: &str| {
+        events
+            .iter()
+            .position(|event| event["type"] == "chat.side.failed" && event["sideQuestionId"] == id)
+            .unwrap_or_else(|| panic!("missing failure of {id}"))
+    };
+    let unfinished = outcome("a1b2c3d4-0000-4000-8000-000000000002");
+    assert!(unfinished < completed);
     assert_eq!(
-        events[answered]["sideQuestionId"],
-        "a1b2c3d4-0000-4000-8000-000000000002"
+        events[unfinished]["error"],
+        "The reply finished before this side question was answered. Ask it again during a reply, or ask in the conversation."
     );
-    assert!(answered < position(&events, "turn.completed"));
-    assert!(receipt_before_answer.get());
-    let failed = position(&events, "chat.side.failed");
-    assert_eq!(
-        events[failed]["sideQuestionId"],
-        "a1b2c3d4-0000-4000-8000-000000000003"
-    );
+    let failed = outcome("a1b2c3d4-0000-4000-8000-000000000003");
     assert_eq!(
         events[failed]["error"],
         "Claude Code could not answer this side question."
     );
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["type"] == "chat.side.answered")
+    );
+    let cancelled =
+        std::fs::read_to_string(c.home.join(".claude/side-cancellations.jsonl")).unwrap();
+    assert!(cancelled.contains("side-question-a1b2c3d4-0000-4000-8000-000000000002"));
 }
 
 #[tokio::test]

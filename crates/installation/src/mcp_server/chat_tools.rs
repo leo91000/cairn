@@ -50,6 +50,7 @@ fn summary(chat: &Value) -> Result<Value> {
         "canRequestNewSession",
         "pendingSideQuestions",
         "canAskSideQuestion",
+        "sideQuestionReason",
     ] {
         result[key] = chat[key].clone();
     }

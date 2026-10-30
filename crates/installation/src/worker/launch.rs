@@ -264,6 +264,8 @@ impl Execution<'_> {
                     .map(|account| account.account_id.clone()),
             ),
             account_name: Some(account_name.as_str().map(str::to_owned)),
+            // Each execution's adapter announces again whether it answers side questions.
+            boundary: Some(json!({ "sideQuestions": null })),
             ..Default::default()
         };
         if let Some(mut retry) = s.store.run_state(&self.id).await?.retry {

@@ -188,6 +188,7 @@ abstract class SideQuestionCases {
             val vm = viewModel()
             val models = ViewModelStore().apply { put("fixture", vm) }
             val side = SideQuestionState().apply { show("reply-2") }
+            var provider by mutableStateOf("codex")
             compose.setContent {
                 val state by vm.state.collectAsState()
                 LaunchedEffect(Unit) {
@@ -197,7 +198,7 @@ abstract class SideQuestionCases {
                 CairnTheme {
                     if (state.installation != null)
                         Column(Modifier.verticalScroll(rememberScrollState())) {
-                            SideQuestionPanel(vm, state, chat(canAsk = false, "codex"), side) {}
+                            SideQuestionPanel(vm, state, chat(canAsk = false, provider), side) {}
                         }
                 }
             }
@@ -216,11 +217,29 @@ abstract class SideQuestionCases {
                 compose.onNodeWithText("Pourquoi cet ordre ?").assertDoesNotExist()
                 compose.onNodeWithText("Tout afficher").performClick()
                 compose.onNodeWithText("Pourquoi cet ordre ?").assertExists()
+                // A Claude reply that has not announced side questions yet says so.
+                provider = "claude"
+                compose
+                    .onNodeWithText(
+                        "Claude Code démarre encore sa réponse. Réessayez dans un instant."
+                    )
+                    .assertExists()
+                compose.onNodeWithText("Demander").assertDoesNotExist()
                 assertTrue(writes.isEmpty())
             } finally {
                 models.clear()
             }
         }
+    }
+
+    @Test
+    fun aQuestionAskedAgainAfterItsAnswerIsANewOne() {
+        val side = SideQuestionState()
+        val first = side.submissionId("chat\u0000Pourquoi ?")
+        // A retried submission keeps its identifier until it is asked.
+        assertEquals(first, side.submissionId("chat\u0000Pourquoi ?"))
+        side.submitted()
+        assertTrue(first != side.submissionId("chat\u0000Pourquoi ?"))
     }
 
     @Test

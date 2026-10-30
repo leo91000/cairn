@@ -317,7 +317,7 @@ pub(super) async fn record(
     }
 
     activity.observe(&event);
-    if handle_chat_control(s, id, &event).await? {
+    if handle_chat_control(s, id, &event, secrets).await? {
         return Ok(false);
     }
     let exhausted = run_output::exhausted(&event);
@@ -380,7 +380,12 @@ async fn record_raw(
 }
 
 /// Handles chat protocol messages, which are not run output.
-async fn handle_chat_control(s: &Service, id: &str, event: &Value) -> Result<bool> {
+async fn handle_chat_control(
+    s: &Service,
+    id: &str,
+    event: &Value,
+    secrets: &[String],
+) -> Result<bool> {
     match text(event, "type") {
         // Only the authenticated workspace tool can create a questionnaire.
         "chat.question" => {}
@@ -393,7 +398,11 @@ async fn handle_chat_control(s: &Service, id: &str, event: &Value) -> Result<boo
             }
         }
         "chat.side.available" => s.side_questions_available(id).await?,
-        "chat.side.answered" | "chat.side.failed" => s.side_question_settle(id, event).await?,
+        // Answers come from the live context, which can hold output Cairn masks elsewhere.
+        "chat.side.answered" | "chat.side.failed" => {
+            s.side_question_settle(id, &run_output::payload(event, secrets))
+                .await?;
+        }
         _ => return Ok(false),
     }
     Ok(true)

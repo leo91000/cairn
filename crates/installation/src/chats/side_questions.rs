@@ -1,6 +1,8 @@
 //! Side questions: explanations the running agent answers from its current context,
 //! beside its reply. They never join the queue, steer the turn or enter the native
-//! session's history. Stored as `chat-side-question:{chatId}:{id}` key-value records.
+//! session's history. Stored as `chat-side-question:{chatId}:{id}` key-value records,
+//! with a small `chat-side-question-open:{chatId}:{id}` marker while the reply may still
+//! receive the question or its withdrawal, so ticks and lists never read past answers.
 //!
 //! The adapter of a running reply announces `chat.side.available` once its native
 //! session can answer one: Claude Code's `side_question` control request, which runs
@@ -19,6 +21,7 @@ use crate::{
     validation::text,
 };
 use cairn_contracts::{ChatSideQuestion, SideQuestionInput, SideQuestionStatus};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 
@@ -32,12 +35,45 @@ const MAX_ERROR: usize = 1_000;
 
 pub(crate) const EXPIRED: &str = "The reply finished before this side question was answered. Ask it again during a reply, or ask in the conversation.";
 
-pub fn side_question_prefix(chat: &str) -> String {
+const OPEN: &str = "chat-side-question-open:";
+
+/// A question the reply may still receive: pending, or withdrawn while it runs.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Open {
+    run_id: String,
+    status: SideQuestionStatus,
+}
+
+fn side_question_prefix(chat: &str) -> String {
     format!("chat-side-question:{chat}:")
+}
+
+fn open_prefix(chat: &str) -> String {
+    format!("{OPEN}{chat}:")
+}
+
+/// Key prefixes of a conversation's side-question records.
+pub fn side_question_prefixes(chat: &str) -> [String; 2] {
+    [side_question_prefix(chat), open_prefix(chat)]
 }
 
 fn key(chat: &str, id: &str) -> String {
     format!("{}{id}", side_question_prefix(chat))
+}
+
+fn open_key(chat: &str, id: &str) -> String {
+    format!("{}{id}", open_prefix(chat))
+}
+
+/// The conversation's open questions by identifier.
+fn open(db: &Db<'_>, chat: &str) -> Result<Vec<(String, Open)>> {
+    let prefix = open_prefix(chat);
+    Ok(db
+        .keys_as::<Open>(&prefix)?
+        .into_iter()
+        .map(|(key, open)| (key[prefix.len()..].to_owned(), open))
+        .collect())
 }
 
 pub(crate) fn side_questions(db: &Db<'_>, chat: &str) -> Result<Vec<ChatSideQuestion>> {
@@ -59,7 +95,18 @@ fn find(db: &Db<'_>, chat: &str, id: &str) -> Result<Option<ChatSideQuestion>> {
 }
 
 fn save(db: &Db<'_>, question: &ChatSideQuestion) -> Result<()> {
-    db.set_as(&key(&question.chat_id, &question.id), question, None)
+    db.set_as(&key(&question.chat_id, &question.id), question, None)?;
+    let open_key = open_key(&question.chat_id, &question.id);
+    match question.status {
+        SideQuestionStatus::Pending | SideQuestionStatus::Cancelled => {
+            let open = Open {
+                run_id: question.run_id.clone(),
+                status: question.status,
+            };
+            db.set_as(&open_key, &open, None)
+        }
+        _ => db.delete(&open_key),
+    }
 }
 
 fn run_is_active(run: &Value) -> bool {
@@ -68,7 +115,9 @@ fn run_is_active(run: &Value) -> bool {
 
 /// Why the chat's current reply cannot take a side question, if it cannot.
 pub(crate) fn unavailable(run: Option<&Value>) -> Option<&'static str> {
-    let Some(run) = run.filter(|run| run_is_active(run)) else {
+    // Queued and recovering runs have no adapter that announced it yet.
+    let executing = |run: &&Value| RunStatus::of(run) == Some(RunStatus::Running);
+    let Some(run) = run.filter(executing) else {
         return Some(
             "Side questions are answered while the agent works on a reply. Send a message instead.",
         );
@@ -128,6 +177,7 @@ fn prune(db: &Db<'_>, chat_id: &str) -> Result<()> {
         .take(excess);
     for question in settled {
         db.delete(&key(chat_id, &question.id))?;
+        db.delete(&open_key(chat_id, &question.id))?;
     }
     Ok(())
 }
@@ -162,9 +212,9 @@ fn ask(
         return Err(Error::conflict(reason));
     }
     let run = run.unwrap();
-    let pending = side_questions(db, chat_id)?
+    let pending = open(db, chat_id)?
         .iter()
-        .filter(|question| question.status == SideQuestionStatus::Pending)
+        .filter(|(_, open)| open.status == SideQuestionStatus::Pending)
         .count();
     if pending >= MAX_PENDING {
         return Err(Error::conflict(
@@ -213,26 +263,34 @@ fn cancel(db: &Db<'_>, chat_id: &str, id: &str) -> Result<ChatSideQuestion> {
 /// Inbox entries for the running reply: side questions to answer and withdrawals of
 /// questions it may still be answering. Adapters answer each identifier once.
 pub(crate) fn deliveries(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<Vec<Value>> {
-    if run["sideQuestions"] != true {
+    let announced = run["sideQuestions"] == true
+        && RunStatus::of(run) == Some(RunStatus::Running)
+        && matches!(Provider::of_run(run), Ok(Provider::Claude));
+    if !announced {
         return Ok(Vec::new());
     }
     let run_id = text(run, "id");
     let mut entries = Vec::new();
-    for question in side_questions(db, chat_id)? {
-        if question.run_id != run_id {
+    for (id, open) in open(db, chat_id)? {
+        if open.run_id != run_id {
             continue;
         }
-        match question.status {
-            SideQuestionStatus::Pending => entries.push(json!({
-                "id": format!("side-question:{}", question.id),
-                "sideQuestion": {
-                    "id": question.id,
-                    "text": wire_text(&question),
-                },
-            })),
+        match open.status {
+            SideQuestionStatus::Pending => {
+                let Some(question) = find(db, chat_id, &id)? else {
+                    continue;
+                };
+                entries.push(json!({
+                    "id": format!("side-question:{id}"),
+                    "sideQuestion": {
+                        "id": id,
+                        "text": wire_text(&question),
+                    },
+                }));
+            }
             SideQuestionStatus::Cancelled => entries.push(json!({
-                "id": format!("withdraw-side-question:{}", question.id),
-                "sideQuestionId": question.id,
+                "id": format!("withdraw-side-question:{id}"),
+                "sideQuestionId": id,
                 "sideQuestionCancelled": true,
             })),
             _ => {}
@@ -272,28 +330,35 @@ fn settle(
     save(db, &question)
 }
 
-/// Conversations with a side question still waiting for an answer.
-pub(crate) fn pending_chats(db: &Db<'_>) -> Result<HashSet<String>> {
+/// Conversations with a side question their reply may still receive.
+pub(crate) fn open_chats(db: &Db<'_>) -> Result<HashSet<String>> {
     Ok(db
-        .keys_as::<ChatSideQuestion>("chat-side-question:")?
+        .keys_as::<Open>(OPEN)?
         .into_iter()
-        .filter(|(_, question)| question.status == SideQuestionStatus::Pending)
-        .map(|(_, question)| question.chat_id)
+        .filter_map(|(key, _)| Some(key[OPEN.len()..].split_once(':')?.0.to_owned()))
         .collect())
 }
 
-/// Side questions the chat's reply can no longer answer, once it is not running.
+/// Side questions the chat's reply can no longer answer or withdraw, once it is
+/// not running.
 pub(crate) fn expire(db: &Db<'_>, chat_id: &str) -> Result<()> {
     let chat = conversation(db, chat_id)?;
     let run = db.run(chat.run_id.as_deref().unwrap_or(""))?;
     let running = run.as_ref().is_some_and(run_is_active);
-    for mut question in side_questions(db, chat_id)? {
+    for (id, open) in open(db, chat_id)? {
         let current = run
             .as_ref()
-            .is_some_and(|run| run["id"] == question.run_id.as_str());
-        if question.status != SideQuestionStatus::Pending || (running && current) {
+            .is_some_and(|run| run["id"] == open.run_id.as_str());
+        if running && current {
             continue;
         }
+        let question = find(db, chat_id, &id)?;
+        let Some(mut question) =
+            question.filter(|question| question.status == SideQuestionStatus::Pending)
+        else {
+            db.delete(&open_key(chat_id, &id))?;
+            continue;
+        };
         question.status = SideQuestionStatus::Failed;
         question.error = Some(EXPIRED.into());
         question.settled_at = Some(now());
@@ -308,9 +373,9 @@ pub(crate) fn view(
     chat: &mut cairn_contracts::Chat,
     run: Option<&Value>,
 ) -> Result<()> {
-    chat.pending_side_questions = side_questions(db, &chat.id)?
+    chat.pending_side_questions = open(db, &chat.id)?
         .iter()
-        .filter(|question| question.status == SideQuestionStatus::Pending)
+        .filter(|(_, open)| open.status == SideQuestionStatus::Pending)
         .count() as u32;
     let reason = unavailable(run);
     chat.can_ask_side_question = reason.is_none();
@@ -450,5 +515,179 @@ mod tests {
         // even if an adapter announced it.
         assert!(unavailable(Some(&running("codex", true))).is_some());
         assert!(unavailable(Some(&running("claude", true))).is_none());
+    }
+
+    #[tokio::test]
+    async fn only_open_questions_keep_a_marker_until_their_reply_stops() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        crate::chats::list_measurements::seed_chats(&store).await;
+        let chat = crate::chats::list_measurements::chat_id(0);
+        let other = crate::chats::list_measurements::chat_id(1);
+        let (opened, kept, expired, after) = store
+            .transaction(move |db| {
+                let ask = |id: &str, chat: &str, status| {
+                    let mut question = question("");
+                    question.id = id.into();
+                    question.chat_id = chat.into();
+                    question.status = status;
+                    save(db, &question)
+                };
+                ask("pending", &chat, SideQuestionStatus::Pending)?;
+                ask("withdrawn", &chat, SideQuestionStatus::Cancelled)?;
+                ask("answered", &chat, SideQuestionStatus::Answered)?;
+                ask("elsewhere", &other, SideQuestionStatus::Answered)?;
+                let opened = open_chats(db)?;
+                let kept = open(db, &chat)?
+                    .into_iter()
+                    .map(|(id, _)| id)
+                    .collect::<Vec<_>>();
+
+                // The chat has no running reply: nothing can receive them any more.
+                expire(db, &chat)?;
+                let expired = find(db, &chat, "pending")?.unwrap();
+                Ok((
+                    opened,
+                    kept,
+                    expired,
+                    (open_chats(db)?, side_questions(db, &chat)?.len()),
+                ))
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            opened,
+            HashSet::from([crate::chats::list_measurements::chat_id(0)])
+        );
+        assert_eq!(kept, ["pending", "withdrawn"]);
+        assert_eq!(expired.status, SideQuestionStatus::Failed);
+        assert_eq!(expired.error.as_deref(), Some(EXPIRED));
+        assert_eq!(after, (HashSet::new(), 3));
+    }
+
+    /// Local side-question record measurement against the conversation list
+    /// without them (`list_measurements` runs unchanged on the reference commit).
+    #[tokio::test]
+    #[ignore = "explicit local side-question storage measurement"]
+    async fn side_question_storage_measurements() {
+        use crate::chats::list_measurements::{CHATS, chat_id, cpu_ms, distribution, measure_list};
+        use crate::store::Store;
+        use std::time::Instant;
+
+        const PER_CHAT: usize = 5;
+        let typical = |chat: usize, index: usize| ChatSideQuestion {
+            id: format!("00000000-0000-4000-9000-{:06}{index:06}", chat),
+            chat_id: chat_id(chat),
+            run_id: format!("run-{chat}"),
+            text: "Why does the migration have to run before the new handler?".into(),
+            quote: "Run the migration first, then deploy the handler.".repeat(4),
+            item_id: format!("item-{index}"),
+            provider: Some(serde_json::from_value(json!("claude")).unwrap()),
+            status: SideQuestionStatus::Answered,
+            answer: Some("Because the handler reads the new column. ".repeat(24)),
+            error: None,
+            created_at: (chat * PER_CHAT + index) as i64,
+            settled_at: Some((chat * PER_CHAT + index) as i64 + 1),
+        };
+        let mut largest = typical(0, 0);
+        largest.answer = Some("x".repeat(MAX_ANSWER));
+        let encoded = |question: &ChatSideQuestion| serde_json::to_string(question).unwrap().len();
+
+        let without = measure_list("200 conversations, no side questions", |_| async {}).await;
+        let with = measure_list(
+            "200 conversations, 5 answered side questions each",
+            |store| async move {
+                store
+                    .transaction(move |db| {
+                        for chat in 0..CHATS {
+                            for index in 0..PER_CHAT {
+                                save(db, &typical(chat, index))?;
+                            }
+                        }
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+            },
+        )
+        .await;
+
+        // Writes as the service performs them: one transaction to ask (save, prune),
+        // one to settle with the answer.
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        crate::chats::list_measurements::seed_chats(&store).await;
+        let mut asks = Vec::new();
+        let mut settles = Vec::new();
+        let cpu = cpu_ms();
+        for chat in 0..CHATS {
+            let mut question = typical(chat, 0);
+            question.status = SideQuestionStatus::Pending;
+            question.answer = None;
+            question.settled_at = None;
+            let pending = question.clone();
+            let started = Instant::now();
+            store
+                .transaction(move |db| {
+                    save(db, &pending)?;
+                    prune(db, &pending.chat_id)
+                })
+                .await
+                .unwrap();
+            asks.push(started.elapsed().as_secs_f64() * 1000.0);
+            let answered = typical(chat, 0);
+            let started = Instant::now();
+            store
+                .transaction(move |db| {
+                    let mut question = find(db, &answered.chat_id, &answered.id)?.unwrap();
+                    question.status = SideQuestionStatus::Answered;
+                    question.answer = answered.answer;
+                    question.settled_at = answered.settled_at;
+                    save(db, &question)
+                })
+                .await
+                .unwrap();
+            settles.push(started.elapsed().as_secs_f64() * 1000.0);
+        }
+        let write_cpu = (cpu_ms() - cpu) / (CHATS * 2) as f64;
+
+        // Reads the chat tick and conversation views add.
+        let mut chat_reads = Vec::new();
+        let mut tick_scans = Vec::new();
+        let cpu = cpu_ms();
+        for round in 0..200 {
+            let chat = chat_id(round % CHATS);
+            let started = Instant::now();
+            store
+                .read(move |db| side_questions(db, &chat))
+                .await
+                .unwrap();
+            chat_reads.push(started.elapsed().as_secs_f64() * 1000.0);
+            let started = Instant::now();
+            store.read(|db| open_chats(db)).await.unwrap();
+            tick_scans.push(started.elapsed().as_secs_f64() * 1000.0);
+        }
+        let read_cpu = (cpu_ms() - cpu) / 400.0;
+
+        let result = json!({
+            "encodedBytes": {
+                "typicalRecord": encoded(&typical(0, 0)),
+                "largestAnswerRecord": encoded(&largest),
+            },
+            "listWithout": without,
+            "listWith": with,
+            "writes": {
+                "ask": distribution(asks),
+                "settle": distribution(settles),
+                "cpuMsPerWrite": write_cpu,
+            },
+            "reads": {
+                "chatSideQuestions": distribution(chat_reads),
+                "tickOpenScan": distribution(tick_scans),
+                "cpuMsPerRead": read_cpu,
+                "records": CHATS,
+            },
+        });
+        println!("{}", serde_json::to_string_pretty(&result).unwrap());
     }
 }

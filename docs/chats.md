@@ -129,13 +129,14 @@ second coding agent with write access is started, and the conversation's own
 transcript never contains the side question.
 
 The adapter of the running turn announces when its native session can answer a
-side question. Before that (while starting) and between replies, the action is
-unavailable and the API returns 409 with the reason. Adapters from earlier
-releases never announce it, so their inbox never contains side questions they
-could mistake for steering. When a turn finishes, it keeps its process for up to
-90 seconds to deliver answers in progress; later or still-pending questions are
-marked unanswered with an explanation. Retried submissions are idempotent by their
-UUID. The answer uses the subscription of the account running the turn.
+side question. Before that (while starting, and again after a resume, retry or
+recovery) and between replies, the action is unavailable and the API returns 409
+with the reason. Adapters from earlier releases never announce it, so their inbox
+never contains side questions they could mistake for steering. Side questions never
+delay the reply: when it ends, questions still being answered are withdrawn and,
+like those still pending, marked unanswered with an explanation. Retried submissions
+are idempotent by their UUID. The answer uses the subscription of the account running
+the turn, and secrets masked in the conversation are masked in it too.
 
 ## Notifications
 

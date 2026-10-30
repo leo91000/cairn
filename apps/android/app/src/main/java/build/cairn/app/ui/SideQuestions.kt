@@ -100,6 +100,11 @@ internal class SideQuestionState {
         }
         return submission
     }
+
+    /** Asked: the same question asked again later is a new one. */
+    fun submitted() {
+        submissionKey = ""
+    }
 }
 
 private fun engine(provider: String?) =
@@ -235,6 +240,7 @@ internal fun ColumnScope.SideQuestionPanel(
                                     ),
                             )
                         )
+                        side.submitted()
                         side.text = ""
                         side.quote = ""
                     }
@@ -246,13 +252,17 @@ internal fun ColumnScope.SideQuestionPanel(
             }
         } else
             Notice(
-                when (chat.provider) {
-                    "codex" ->
+                // The same cases as the server's `sideQuestionReason`, in French.
+                when {
+                    chat.provider == "codex" ->
                         "Codex ne peut pas répondre aux questions à côté dans Cairn : ses conversations à côté peuvent encore utiliser des outils. Posez-la dans la conversation."
-                    "opencode" ->
+                    chat.provider == "opencode" ->
                         "OpenCode ne peut pas encore répondre aux questions à côté dans Cairn. Posez-la dans la conversation."
-                    else ->
-                        "Les questions à côté sont possibles pendant que Claude Code travaille sur une réponse."
+                    chat.status != "running" ->
+                        "Les questions à côté sont possibles pendant que Claude Code travaille sur une réponse. Envoyez plutôt un message."
+                    chat.compaction?.running == true ->
+                        "La conversation compacte son contexte. Réessayez une fois la compaction terminée."
+                    else -> "Claude Code démarre encore sa réponse. Réessayez dans un instant."
                 },
                 icon = CairnIcons.SideQuestion,
                 maxLines = 4,

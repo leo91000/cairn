@@ -728,7 +728,7 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
           text: content,
           sourceId: `${event.runId}:${event.id}`,
           ...(via ? { via } : {}),
-          ...(itemId && type === 'agent_message' ? { itemId } : {}),
+          ...(itemId ? { itemId } : {}),
         }
         entries.push(message)
         messages.set(id, message)

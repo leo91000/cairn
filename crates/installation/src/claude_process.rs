@@ -27,8 +27,7 @@ const STOPPED: &str = "Claude execution stopped.";
 const MAX_LINE: usize = 32_000_000;
 const MAX_IMAGE: usize = 10_000_000;
 
-/// How long a finished turn waits for side questions it is still answering.
-const SIDE_GRACE: Duration = Duration::from_secs(90);
+/// Side questions never hold a reply: those still answered when it ends are withdrawn.
 const SIDE_UNANSWERED: &str = "The reply finished before this side question was answered. Ask it again during a reply, or ask in the conversation.";
 /// Prefix of the context usage requests this adapter sends Claude Code.
 const CONTEXT_REQUEST: &str = "cairn-context-";
@@ -488,8 +487,7 @@ struct Turn<'a> {
     /// The report requested at a compaction boundary, until it answers or a response measures
     /// the compacted context.
     context_pending: Option<u64>,
-    /// When the execution finished, while it still waits for [`Self::context_pending`] or
-    /// [`Self::sides`].
+    /// The execution finished and only waits for [`Self::context_pending`], until this time.
     finishing: Option<tokio::time::Instant>,
     /// The model's context window, from Claude Code's latest context usage report.
     context_window: Option<u64>,
@@ -584,7 +582,7 @@ impl Turn<'_> {
         let response = &value["response"];
         if let Some(question) = self.sides.remove(text(response, "request_id")) {
             self.on_side_answer(&question, response).await?;
-            return self.finish_after_report().await;
+            return Ok(false);
         }
         let Some(number) = text(response, "request_id")
             .strip_prefix(CONTEXT_REQUEST)
@@ -610,25 +608,14 @@ impl Turn<'_> {
         self.finish_after_report().await
     }
 
-    /// Completes a finished execution once the compaction's context report and its side
-    /// questions answered, or once waiting for them took too long. The run then keeps the last
-    /// usage it showed, and unanswered side questions fail.
+    /// Completes a finished execution once the compaction's context report answered, or once
+    /// waiting for it took too long. The run then keeps the last usage it showed.
     async fn finish_after_report(&mut self) -> Result<bool> {
-        let Some(finished) = self.finishing else {
+        let Some(deadline) = self.finishing else {
             return Ok(false);
         };
-        let waiting_report =
-            self.context_pending.is_some() && finished.elapsed() < CONTEXT_REPORT_WAIT;
-        let waiting_sides = !self.sides.is_empty() && finished.elapsed() < SIDE_GRACE;
-        if waiting_report || waiting_sides {
+        if self.context_pending.is_some() && tokio::time::Instant::now() < deadline {
             return Ok(false);
-        }
-
-        let sides = std::mem::take(&mut self.sides);
-        for (request, question) in sides {
-            let cancel = json!({ "type": "control_cancel_request", "request_id": request });
-            send(&mut self.stdin, cancel).await?;
-            self.side_failed(&question, SIDE_UNANSWERED).await?;
         }
         self.complete().await?;
         Ok(true)
@@ -719,10 +706,6 @@ impl Turn<'_> {
                 self.submitted.insert(id.into());
                 continue;
             }
-            // A finished request delivers nothing new: the next turn takes these.
-            if self.finishing.is_some() {
-                continue;
-            }
             if message["sideQuestion"].is_object() {
                 self.ask_side(&message["sideQuestion"]).await?;
                 self.submitted.insert(id.into());
@@ -756,6 +739,17 @@ impl Turn<'_> {
         });
         send(&mut self.stdin, request).await?;
         self.sides.insert(request_id, question);
+        Ok(())
+    }
+
+    /// Withdraws the side questions Claude Code is still answering when the reply ends:
+    /// they never delay it, and can be asked again during the next one.
+    async fn withdraw_sides(&mut self) -> Result<()> {
+        for (request, question) in std::mem::take(&mut self.sides) {
+            let cancel = json!({ "type": "control_cancel_request", "request_id": request });
+            send(&mut self.stdin, cancel).await?;
+            self.side_failed(&question, SIDE_UNANSWERED).await?;
+        }
         Ok(())
     }
 
@@ -1517,24 +1511,18 @@ impl Turn<'_> {
             }
             return Ok(false);
         }
-        if !self.sides.is_empty() {
-            // Keep answering side questions before the process stops with the request.
-            // The request itself is finished: a restart meanwhile must not repeat it.
-            self.save_receipt().await?;
-        }
-        if !self.sides.is_empty() || self.context_pending.is_some() {
+        self.withdraw_sides().await?;
+        if self.context_pending.is_some() {
             // Claude Code answers the compaction's context request after its result: wait
-            // briefly for it so the run shows the compacted context. Side questions get
-            // longer to finish their answer.
-            self.finishing = Some(tokio::time::Instant::now());
+            // briefly for it so the run shows the compacted context.
+            self.finishing = Some(tokio::time::Instant::now() + CONTEXT_REPORT_WAIT);
             return Ok(false);
         }
         self.complete().await?;
         Ok(true)
     }
 
-    /// Saves the finished request, so a restart replays it instead of repeating it.
-    async fn save_receipt(&self) -> Result<()> {
+    async fn complete(&self) -> Result<()> {
         // A compaction has no reply to replay: a restart compacts again instead.
         if !compacting(self.plan) {
             let receipt = Receipt {
@@ -1543,14 +1531,10 @@ impl Turn<'_> {
                 text: self.last.clone(),
                 item_id: self.last_id.clone(),
             };
+            // Save the receipt before completion so restart cannot repeat a finished request.
             atomic_write(&self.receipt, &serde_json::to_vec(&receipt)?).await?;
         }
-        atomic_write(Path::new(text(self.plan, "output")), self.last.as_bytes()).await
-    }
-
-    async fn complete(&self) -> Result<()> {
-        // Save the receipt before completion so restart cannot repeat a finished request.
-        self.save_receipt().await?;
+        atomic_write(Path::new(text(self.plan, "output")), self.last.as_bytes()).await?;
         self.emit(json!({ "type": "chat.question.closed" })).await?;
         self.emit(json!({ "type": "turn.completed" })).await
     }
@@ -1579,10 +1563,12 @@ impl Turn<'_> {
                     }
                 }
                 _ = timer.tick() => {
-                    // A finished execution only takes side question withdrawals.
-                    self.poll_inbox().await?;
                     if self.finish_after_report().await? {
                         return Ok(());
+                    }
+                    // A finished execution no longer takes messages.
+                    if self.finishing.is_none() {
+                        self.poll_inbox().await?;
                     }
                 }
                 bytes = stdout.fill_buf() => {
@@ -1595,7 +1581,7 @@ impl Turn<'_> {
                         Error::bad_gateway("Claude Code returned an invalid streaming event.")
                     })?;
                     buffer.clear();
-                    if self.handle(&value).await? || self.finish_after_report().await? {
+                    if self.handle(&value).await? {
                         return Ok(());
                     }
                 }

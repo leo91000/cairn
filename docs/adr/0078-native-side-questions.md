@@ -50,10 +50,16 @@ remove. A read-only sandbox, `approvalPolicy: never` and `mcp_servers: {}` did r
 patches and remove MCP servers in the fork, but they do not cover the tools above.
 
 Side questions travel in the existing chat inbox, so microVM and native-node transports
-carry them unchanged. Only adapters that announce `chat.side.available` receive them:
-an adapter from an earlier release, possibly on a node not yet updated, would otherwise
-deliver the question as steering. A finished turn keeps its process for up to 90 seconds
-to deliver answers in progress, after saving its receipt so a restart cannot repeat the
-request. Answers use the running turn's account. Side questions are additive key-value
-records (`chat-side-question:{chatId}:{id}`) removed with their conversation; earlier
-releases ignore them, so the installation database version is unchanged.
+carry them unchanged. Only a running Claude Code execution whose adapter announced
+`chat.side.available` receives them: an adapter from an earlier release, possibly on a
+node not yet updated, would otherwise deliver the question as steering. Each launch of
+the run clears that announcement, so a resumed, retried or recovered execution must
+announce again. Side questions never hold the reply: when it ends, Claude Code's
+requests still in progress are withdrawn and reported unanswered, and the turn completes
+exactly as without them. Answers use the running turn's account and are redacted like
+the rest of its output before they are stored. Side questions are additive key-value
+records (`chat-side-question:{chatId}:{id}`), with a small
+`chat-side-question-open:{chatId}:{id}` marker while the reply may still receive the
+question or its withdrawal, so the chat tick and conversation lists never read past
+answers. Both are removed with their conversation; earlier releases ignore them, so the
+installation database version is unchanged.

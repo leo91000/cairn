@@ -14,7 +14,7 @@ pub use crate::waits as wait_for;
 
 pub use handoff::{execution_text, with_invoked_skills};
 pub use questions::{Question, QuestionField, QuestionStatus};
-pub use side_questions::side_question_prefix;
+pub use side_questions::side_question_prefixes;
 
 use crate::{
     config::{id, now},
@@ -35,6 +35,8 @@ use std::collections::HashSet;
 pub use storage::{Conversation, Message, MessageAnswer};
 
 pub mod engine_switch;
+#[cfg(test)]
+pub(crate) mod list_measurements;
 pub(crate) mod migration;
 #[cfg(test)]
 mod read_tests;
@@ -465,6 +467,7 @@ fn detail_messages(db: &Db<'_>, id: &str, undelivered: bool) -> Result<Value> {
         result["messages"] = json!([]);
         result["run"] = Value::Null;
         result["pendingQuestions"] = 0.into();
+        result["pendingSideQuestions"] = 0.into();
         return Ok(result);
     }
     result["questions"] = serde_json::to_value(questions(db, id)?)?;
@@ -1514,7 +1517,7 @@ impl Service {
 
     pub async fn chat_tick(&self, active: &HashSet<String>) -> Result<()> {
         self.expire_attachment_uploads().await?;
-        let side_pending = self.side_question_chats().await?;
+        let side_open = self.side_question_chats().await?;
         for chat in self.store.conversations().await? {
             if chat.lifecycle != cairn_contracts::ConversationLifecycle::Active
                 || chat.environment_state == Some(EnvironmentState::Cleaning)
@@ -1543,7 +1546,7 @@ impl Service {
                 }
                 continue;
             }
-            if side_pending.contains(&chat.id) {
+            if side_open.contains(&chat.id) {
                 let chat_id = chat.id.clone();
                 self.store
                     .transaction(move |db| side_questions::expire(db, &chat_id))
@@ -1609,11 +1612,9 @@ impl Service {
         Ok(())
     }
 
-    /// Conversations with a side question still waiting for an answer.
+    /// Conversations with a side question their reply may still receive.
     async fn side_question_chats(&self) -> Result<HashSet<String>> {
-        self.store
-            .read(|db| side_questions::pending_chats(db))
-            .await
+        self.store.read(|db| side_questions::open_chats(db)).await
     }
 
     /// Writes steering messages where the running agent turn reads them.

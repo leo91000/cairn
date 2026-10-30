@@ -252,9 +252,11 @@ async fn files(s: &Service, chat: &Value) -> Result<()> {
 
 /// Deletes every record of a conversation and its run, including share tokens.
 fn forget(db: &Db<'_>, cid: &str, run: &str) -> Result<()> {
+    let [side_questions, open_side_questions] = crate::chats::side_question_prefixes(cid);
     for prefix in [
         format!("artifact:{run}:"),
-        crate::chats::side_question_prefix(cid),
+        side_questions,
+        open_side_questions,
     ] {
         for (key, value) in db.keys(&prefix)? {
             if let Some(token) = value["publicToken"].as_str() {

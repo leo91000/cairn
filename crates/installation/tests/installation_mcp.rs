@@ -5348,6 +5348,12 @@ async fn side_questions_are_asked_withdrawn_and_answered_beside_the_running_repl
     )
     .await;
     assert_eq!(result(&listed)["canAskSideQuestion"], false);
+    let summary = call(&s, &configuration, "get_chat", json!({ "chatId": chat_id })).await;
+    let reason = &result(&summary)["chat"]["sideQuestionReason"];
+    assert!(
+        reason.as_str().unwrap().contains("still starting"),
+        "{summary}"
+    );
 
     s.side_questions_available(&run_id).await.unwrap();
     let first = ask("Why this order?");
@@ -5450,6 +5456,30 @@ async fn side_questions_are_asked_withdrawn_and_answered_beside_the_running_repl
     assert_eq!(questions[1]["status"], "cancelled");
     assert!(questions[1]["answer"].is_null());
     assert_eq!(result(&listed)["canAskSideQuestion"], true);
+
+    // A run handed back to its queue has no adapter answering until it announces again.
+    s.store
+        .change_run(
+            &run_id,
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Queued),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let requeued = call(&s, &configuration, "ask_chat_side_question", ask("Queued?")).await;
+    assert_eq!(requeued["result"]["isError"], true, "{requeued}");
+    s.store
+        .change_run(
+            &run_id,
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Running),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
 
     // Side questions never join the queue or the conversation.
     let detail = call(&s, &configuration, "get_chat", json!({ "chatId": chat_id })).await;
