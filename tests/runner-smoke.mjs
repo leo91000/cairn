@@ -16,6 +16,7 @@ import process from 'node:process'
 import { setTimeout } from 'node:timers/promises'
 import { blockDigest } from './block-digest.mjs'
 import { entrypointSmoke } from './runner-entrypoint-smoke.mjs'
+import { attemptOutput, inboxContains } from './runner-probe.mjs'
 import { prepareStorageOrigin, storageSmoke } from './runner-storage-smoke.mjs'
 import { udpSmoke } from './runner-udp-smoke.mjs'
 import { ublkDeviceArguments } from './ublk-devices.mjs'
@@ -37,12 +38,13 @@ async function main() {
   let auth
   let claudeAuth
   let mcp
+  let activeAttempt
   // Agents reach run-scoped MCP inside their VM, never through the manager origin.
   const vmMcp = 'http://127.0.0.1:5202'
   const mcpToken = 'fixture-mcp-run-token'
   const mcpCalls = []
 
-  async function until(operation, timeout = 180000) {
+  async function until(operation, timeout = 180000, label = 'MicroVM test') {
     const deadline = Date.now() + timeout
     while (Date.now() < deadline) {
       const result = await operation()
@@ -51,7 +53,7 @@ async function main() {
       await setTimeout(100)
     }
 
-    throw new Error('MicroVM test timed out')
+    throw new Error(`${label} timed out after ${timeout}ms`)
   }
 
   async function api(endpoint, method = 'GET', body) {
@@ -104,6 +106,7 @@ import { execFileSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 const root=${JSON.stringify(runRoot)};
 const mode=process.argv[2];
+const inboxContains=${inboxContains.toString()};
 if(mode!=='first'){const disk=fs.statfsSync(root+'/workspace');assert.ok(disk.blocks*disk.bsize>32*1024**3,'grown workspace exceeds the old jailer file limit');}
 assert.ok(Math.abs(Date.now()-Number(process.argv[3])) < 30000,'clock repaired before execution');
 const project=root+'/workspace/'+${JSON.stringify(projectId)};
@@ -141,11 +144,11 @@ if(mode==='first') {
   fs.symlinkSync('/etc/passwd','/tmp/artifact-link');
   console.log('probe.ready');
   const deadline=Date.now()+20000;
-  while(!fs.readFileSync('/run/cairn-chat/messages.json','utf8').includes('steered')){assert.ok(Date.now()<deadline,'live inbox');await new Promise(r=>setTimeout(r,100));}
+  while(!inboxContains('/run/cairn-chat/messages.json','steered')){assert.ok(Date.now()<deadline,'live inbox');await new Promise(r=>setTimeout(r,100));}
   assert.equal(fs.readFileSync(project+'/hello','utf8'),'imported on demand');
   fs.writeFileSync(project+'/hello','guest edit');
   console.log('project.edited');
-  while(!fs.readFileSync('/run/cairn-chat/messages.json','utf8').includes('reopened')){assert.ok(Date.now()<deadline,'reopen response');await new Promise(r=>setTimeout(r,100));}
+  while(!inboxContains('/run/cairn-chat/messages.json','reopened')){assert.ok(Date.now()<deadline,'reopen response');await new Promise(r=>setTimeout(r,100));}
   assert.equal(fs.readFileSync(project+'/hello','utf8'),'guest edit','reopen must preserve edits');
   console.log(execFileSync('docker',['run','--rm','busybox:1.37','echo','nested-docker-ok'],{encoding:'utf8',timeout:120000}));
   fs.writeFileSync(root+'/workspace/compose.yaml',JSON.stringify({services:{probe:{image:'busybox:1.37',command:['echo','compose-ok']}}}));
@@ -165,7 +168,7 @@ if(mode==='cancel'||mode==='crash') {
   console.log('probe.pause');
   if(mode==='cancel') {
     const deadline=Date.now()+30000;
-    while(!fs.readFileSync('/run/cairn-chat/messages.json','utf8').includes('capture-update')){assert.ok(Date.now()<deadline,'capture update request');await new Promise(r=>setTimeout(r,100));}
+    while(!inboxContains('/run/cairn-chat/messages.json','capture-update')){assert.ok(Date.now()<deadline,'capture update request');await new Promise(r=>setTimeout(r,100));}
     fs.writeFileSync(root+'/workspace/capture-update',Buffer.alloc(4*1024*1024,91));
     execFileSync('sync');
     console.log('probe.updated');
@@ -264,6 +267,7 @@ console.log('probe.done');
     await api('/node-budget', 'POST', originalBudget)
     for (const mode of ['first', 'resume', 'cancel', 'crash', 'recover', 'managed-claude', 'codex-return']) {
       const id = randomUUID()
+      activeAttempt = id
       const plan = {
         id,
         runId,
@@ -338,6 +342,7 @@ console.log('probe.done');
                 const captureStarted = Date.now()
                 const point = await (await api(`/runs/${id}/snapshot`, 'POST', { consistency: 'filesystem' })).json()
                 const firstCaptureMs = Date.now() - captureStarted
+                process.stdout.write(`${JSON.stringify({ phase: 'active-capture-sealed', durationMs: firstCaptureMs })}\n`)
                 assert.ok(point.manifest.size > 0)
                 assert.equal(point.manifest.onDemand, true)
                 const block = point.manifest.blocks.find(block => block.hash)
@@ -346,7 +351,26 @@ console.log('probe.done');
                 assert.equal(blockDigest(bytes, block.hash), block.hash)
                 // New writes enter the next journal generation; the sealed one stays readable.
                 await writeFile(path.join(source, 'chat-input/messages.json'), '[{"text":"capture-update"}]')
-                await until(() => docker('exec', name, 'cat', `/runner-state/${id}.log`).split('\n').filter(Boolean).some(line => Buffer.from(JSON.parse(line).data || '', 'base64').toString().includes('probe.updated')))
+                process.stdout.write(`${JSON.stringify({ phase: 'capture-update-requested', elapsedMs: Date.now() - captureStarted })}\n`)
+                await until(() => {
+                  const records = docker('exec', name, 'cat', `/runner-state/${id}.log`).split('\n').filter(Boolean).map(line => JSON.parse(line))
+                  const text = attemptOutput(records)
+                  if (text.includes('probe.updated')) {
+                    process.stdout.write(`${JSON.stringify({ phase: 'capture-update-observed', elapsedMs: Date.now() - captureStarted })}\n`)
+                    return true
+                  }
+
+                  try {
+                    const exit = docker('exec', name, 'cat', `/runner-state/${id}.exit`)
+                    throw new Error(`Active capture guest exited ${exit}: ${text}`)
+                  }
+                  catch (error) {
+                    if (!error.status)
+                      throw error
+                  }
+
+                  return false
+                }, 180000, 'Active capture guest update')
                 const original = Buffer.from(await (await api(`/snapshots/${point.id}/${block.hash}`)).arrayBuffer())
                 assert.deepEqual(original, bytes, 'The sealed capture stays immutable while the guest writes')
                 // Starting the next capture retires the previous capture handle.
@@ -662,6 +686,16 @@ console.log('probe.done');
   }
   catch (error) {
     console.error(error)
+    if (activeAttempt) {
+      try {
+        const records = docker('exec', name, 'cat', `/runner-state/${activeAttempt}.log`).split('\n').filter(Boolean).map(line => JSON.parse(line))
+        console.error(`Attempt ${activeAttempt} output:\n${attemptOutput(records)}`)
+        console.error(`Attempt ${activeAttempt} exit: ${docker('exec', name, 'cat', `/runner-state/${activeAttempt}.exit`)}`)
+      }
+      catch {
+      }
+    }
+
     try {
       console.error(docker('logs', name))
       console.error(docker('exec', name, 'sh', '-c', 'tail -n 60 /runner-state/*.boot.log'))
