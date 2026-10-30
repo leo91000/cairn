@@ -3,10 +3,10 @@ on:
   workflow_dispatch:
     inputs:
       repetitions:
-        description: Independent same-LAN stress runs; stop at the first failure
+        description: Single same-LAN diagnostic execution
         type: choice
-        options: ['1', '2', '3']
-        default: '3'
+        options: ['1']
+        default: '1'
 permissions:
   contents: read
   actions: read
@@ -94,11 +94,8 @@ jobs:
           profile: pixel_6
           disable-animations: true
           script: >-
-            case "$STRESS_RUNS" in 1|2|3) ;; *) exit 2 ;; esac;
-            for sample in 1 2 3; do
-            if [ "$sample" -gt "$STRESS_RUNS" ]; then break; fi;
-            python3 tests/network-bench.py same-lan --android --output "test-results/android-native-abort/same-lan-$sample.json" || exit "$?";
-            done
+            case "$STRESS_RUNS" in 1) ;; *) exit 2 ;; esac;
+            python3 tests/network-bench.py same-lan --android --output "test-results/android-native-abort/same-lan-1.json" || exit "$?"
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
