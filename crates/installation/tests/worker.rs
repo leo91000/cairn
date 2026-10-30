@@ -2861,7 +2861,7 @@ async fn interrupted_controller_output_after_healthy_exit_never_replays_the_turn
         })).with_state(controller.clone());
         let (listener, address) = common::bind().await;
         common::reconfigure(&mut fixture.service, |config| {
-            config.runner_url = format!("http://{address}")
+            config.runner_url = format!("http://{address}");
         })
         .await;
         let server = common::serve(listener, app);
@@ -2935,7 +2935,7 @@ async fn active_observation_expiring_during_result_persistence_fails_without_rep
         .with_state(controller.clone());
     let (listener, address) = common::bind().await;
     common::reconfigure(&mut fixture.service, |config| {
-        config.runner_url = format!("http://{address}")
+        config.runner_url = format!("http://{address}");
     })
     .await;
     let server = common::serve(listener, app);
