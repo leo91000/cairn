@@ -606,6 +606,7 @@ impl Execution<'_> {
         let observation_pending = saved.managed() && saved.terminal_code.is_none();
         if s.shutdown.is_cancelled()
             && !self.cancel.is_cancelled()
+            && !exit.timed_out
             && (!saved.completed() || observation_pending)
         {
             // Shutdown may stop the local client before /wait responds. Keep
