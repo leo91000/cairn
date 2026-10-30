@@ -445,25 +445,39 @@ impl Db<'_> {
     }
 
     pub fn conversation_messages(&self, chat: &str) -> Result<Vec<Message>> {
-        self.load_messages(chat, None)
+        self.load_messages(chat, None, false)
     }
 
     pub fn conversation_message(&self, chat: &str, id: &str) -> Result<Option<Message>> {
-        Ok(self.load_messages(chat, Some(id))?.pop())
+        Ok(self.load_messages(chat, Some(id), false)?.pop())
     }
 
-    fn load_messages(&self, chat: &str, message: Option<&str>) -> Result<Vec<Message>> {
+    pub(crate) fn undelivered_messages(&self, chat: &str) -> Result<Vec<Value>> {
+        self.load_messages(chat, None, true)?
+            .into_iter()
+            .map(|message| Ok(serde_json::to_value(message)?))
+            .collect()
+    }
+
+    fn load_messages(
+        &self,
+        chat: &str,
+        message: Option<&str>,
+        undelivered: bool,
+    ) -> Result<Vec<Message>> {
         if self.0.is_autocommit() {
             let tx = rusqlite::Transaction::new_unchecked(
                 self.0,
                 rusqlite::TransactionBehavior::Deferred,
             )?;
-            let result = Db(&tx).load_messages(chat, message)?;
+            let result = Db(&tx).load_messages(chat, message, undelivered)?;
             tx.commit()?;
             return Ok(result);
         }
         let filter = if message.is_some() {
             "chat_id=?1 AND id=?2"
+        } else if undelivered {
+            "chat_id=?1 AND ?2 IS NULL AND status!='delivered'"
         } else {
             "chat_id=?1 AND ?2 IS NULL"
         };
@@ -495,6 +509,8 @@ impl Db<'_> {
         let mut attachments = std::collections::HashMap::<String, Vec<ChatAttachment>>::new();
         let attachment_filter = if message.is_some() {
             "m.chat_id=?1 AND a.message_id=?2"
+        } else if undelivered {
+            "m.chat_id=?1 AND ?2 IS NULL AND m.status!='delivered'"
         } else {
             "m.chat_id=?1 AND ?2 IS NULL"
         };

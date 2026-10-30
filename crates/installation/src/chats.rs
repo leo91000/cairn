@@ -24,6 +24,7 @@ use crate::{
 };
 use handoff::handoff_context;
 use questions::{find_question, questions, save_question};
+use rusqlite::OptionalExtension;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::HashSet;
@@ -31,6 +32,8 @@ pub use storage::{Conversation, Message};
 
 pub mod engine_switch;
 pub(crate) mod migration;
+#[cfg(test)]
+mod read_tests;
 pub(crate) mod storage;
 
 pub use cairn_contracts::{MessageMode, MessageStatus};
@@ -164,33 +167,48 @@ pub(crate) fn view(db: &Db<'_>, chat: Value) -> Result<Value> {
 }
 
 fn conversation_view(db: &Db<'_>, chat: Conversation) -> Result<cairn_contracts::Chat> {
+    let run = db.conversation_run(chat.run_id.as_deref().unwrap_or(""))?;
+    conversation_view_with_run(db, chat, run.as_ref())
+}
+
+fn conversation_view_with_run(
+    db: &Db<'_>,
+    chat: Conversation,
+    run: Option<&Value>,
+) -> Result<cairn_contracts::Chat> {
     use cairn_contracts::{Chat, ChatRequester, ConversationLifecycle, ConversationStatus};
     let active = chat.lifecycle == ConversationLifecycle::Active;
-    let run = db.run(chat.run_id.as_deref().unwrap_or(""))?;
     let pending_questions = questions(db, &chat.id)?
         .iter()
         .filter(|question| question.status == QuestionStatus::Pending)
         .count() as u32;
-    let agent_name = db.agent(&chat.agent_id)?.map_or_else(
-        || {
+    let agent_name =
+        db.0.query_row(
+            "SELECT name FROM agents WHERE id=?",
+            [&chat.agent_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .unwrap_or_else(|| {
             chat.agent_name
                 .clone()
                 .unwrap_or_else(|| "Deleted agent".into())
-        },
-        |agent| agent.settings.name,
-    );
+        });
     let project_name = chat
         .project_id
         .as_ref()
         .map(|id| {
-            Ok::<_, Error>(db.project(id)?.map_or_else(
-                || {
+            Ok::<_, Error>(
+                db.0.query_row("SELECT name FROM projects WHERE id=?", [id], |row| {
+                    row.get::<_, String>(0)
+                })
+                .optional()?
+                .unwrap_or_else(|| {
                     chat.project_name
                         .clone()
                         .unwrap_or_else(|| "Deleted project".into())
-                },
-                |project| project.settings.name,
-            ))
+                }),
+            )
         })
         .transpose()?;
     let pending_delegation = run.is_none()
@@ -224,7 +242,7 @@ fn conversation_view(db: &Db<'_>, chat: Conversation) -> Result<cairn_contracts:
         })
         .transpose()?
         .flatten();
-    let compaction = Some(compaction_state(db, &chat, run.as_ref())?);
+    let compaction = Some(compaction_state(db, &chat, run)?);
     let coding_agent_switch = coding_agent::progress(db, &chat.id)?;
     let error = if active {
         db.kv(&format!("chat-error:{}", chat.id))?
@@ -241,10 +259,7 @@ fn conversation_view(db: &Db<'_>, chat: Conversation) -> Result<cairn_contracts:
         .map(|provider| serde_json::from_value(Value::from(provider.as_str())))
         .transpose()?;
     Ok(Chat {
-        can_request_new_session: crate::conversation_lifecycle::can_request_new_session(
-            &chat,
-            run.as_ref(),
-        ),
+        can_request_new_session: crate::conversation_lifecycle::can_request_new_session(&chat, run),
         finished_at: serde_json::from_value(run_field("finishedAt"))?,
         context_usage: serde_json::from_value(run_field("contextUsage"))?,
         account_wait_reason: serde_json::from_value(run_field("accountWaitReason"))?,
@@ -357,9 +372,8 @@ fn compaction_blocker(
             "This workspace has been cleaned up. Start a new chat.".into(),
         ));
     }
-    let fresh_session = chat.session_restart_requested
-        || RunCheckpoint::load_in(db, text(run, "id"))?
-            .is_some_and(|checkpoint| checkpoint.fresh_session == Some(true));
+    let fresh_session =
+        chat.session_restart_requested || RunCheckpoint::fresh_session_in(db, text(run, "id"))?;
     if !run["sessionId"].is_string() || fresh_session {
         return Ok(Some(
             "This conversation has no saved native session to compact.".into(),
@@ -446,7 +460,13 @@ pub(crate) fn list_all(db: &Db<'_>) -> Result<Vec<Value>> {
 }
 
 pub(crate) fn detail(db: &Db<'_>, id: &str) -> Result<Value> {
-    let mut result = view(db, serde_json::to_value(conversation(db, id)?)?)?;
+    detail_messages(db, id, false)
+}
+
+fn detail_messages(db: &Db<'_>, id: &str, undelivered: bool) -> Result<Value> {
+    let chat = conversation(db, id)?;
+    let run = db.run(chat.run_id.as_deref().unwrap_or(""))?;
+    let mut result = serde_json::to_value(conversation_view_with_run(db, chat, run.as_ref())?)?;
     if !is_active(&result) {
         result["questions"] = json!([]);
         result["messages"] = json!([]);
@@ -455,22 +475,33 @@ pub(crate) fn detail(db: &Db<'_>, id: &str) -> Result<Value> {
         return Ok(result);
     }
     result["questions"] = serde_json::to_value(questions(db, id)?)?;
-    result["messages"] = db.messages(id)?.into();
-    result["run"] = db.run(text(&result, "runId"))?.unwrap_or(Value::Null);
+    result["messages"] = if undelivered {
+        db.undelivered_messages(id)?
+    } else {
+        db.messages(id)?
+    }
+    .into();
+    result["run"] = run.unwrap_or(Value::Null);
     Ok(result)
 }
 
 /// One redacted read for every transport. Answers stay in A8's delivery storage;
 /// public history uses their structured text, with private replies masked.
 pub(crate) fn public_detail(db: &Db<'_>, id: &str) -> Result<Value> {
+    public_stream_detail(db, id, false)
+}
+
+/// A window already carries delivered input in its event history. Filter it in
+/// SQL, before decoding message bodies and loading their attachments.
+pub(crate) fn public_stream_detail(db: &Db<'_>, id: &str, window: bool) -> Result<Value> {
     if db.0.is_autocommit() {
         let transaction =
             rusqlite::Transaction::new_unchecked(db.0, rusqlite::TransactionBehavior::Deferred)?;
-        let result = public_detail(&Db(&transaction), id)?;
+        let result = public_stream_detail(&Db(&transaction), id, window)?;
         transaction.commit()?;
         return Ok(result);
     }
-    let mut result = detail(db, id)?;
+    let mut result = detail_messages(db, id, window)?;
     let private = serde_json::from_value::<Vec<Question>>(result["questions"].clone())?
         .into_iter()
         .filter(Question::is_private)
