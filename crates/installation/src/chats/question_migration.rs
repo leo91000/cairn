@@ -16,7 +16,8 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
             "Unexpected installation database version during questionnaire upgrade.",
         ));
     }
-    tx.execute_batch(super::question_storage::SCHEMA)?;
+    // This historical step must create exactly v16, before later Plan columns.
+    tx.execute_batch(include_str!("migration/questions-v16.sql"))?;
     tx.execute_batch(crate::waits::sql::SCHEMA)?;
     migrate_waits_and_lineage(&tx)?;
     migrate_wait_snapshots(&tx)?;

@@ -848,6 +848,12 @@ async fn version17_messages_gain_plan_requests_without_other_changes() {
             .exists([])
             .unwrap()
     );
+    assert!(
+        !db.prepare("SELECT 1 FROM pragma_table_info('chat_questions') WHERE name='plan'")
+            .unwrap()
+            .exists([])
+            .unwrap()
+    );
     let retained = snapshot(&db);
     let rows = |db: &Connection| -> Vec<String> {
         db.prepare("SELECT json_array(id,chat_id,revision,text,provider,model,reasoning,speed,mode,status,created_at,question_id) FROM chat_messages ORDER BY rowid")

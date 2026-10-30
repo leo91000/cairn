@@ -593,7 +593,7 @@ impl Db<'_> {
             .transpose()
     }
 
-    fn hydrate_run_wakeups(&self, rows: &mut [Value]) -> Result<()> {
+    pub(crate) fn hydrate_run_wakeups(&self, rows: &mut [Value]) -> Result<()> {
         let mut wakeups = self.wakeups(false, None)?;
         for row in rows {
             row["wakeup"] =
