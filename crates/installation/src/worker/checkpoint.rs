@@ -863,6 +863,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn paid_admission_is_bound_to_one_candidate_without_authorizing_an_uncertain_start() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                db.add_run_fixture(
+                    &json!({ "id": "paid-binding", "taskId": "task", "status": "running" }),
+                    None,
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let mut state = store.run_state("paid-binding").await.unwrap();
+        let cause = crate::run_retry::Cause::classify(
+            &json!({ "code": "server_overloaded", "message": "busy" }),
+        )
+        .unwrap();
+        state.retry = Some(crate::run_retry::Retry::next(None, cause.clone(), now()).unwrap());
+        for provider in [false, true] {
+            let mut saved = RunCheckpoint::from_value(json!({
+                "prepared": { "backend": "native", "isolated": true }, "runnerId": "old",
+                "controllerRecoveries": 3,
+                "controllerRecoveryReservation": if provider { None } else { Some("old") },
+                "providerRetryReservation": if provider { Some("old") } else { None },
+            }))
+            .unwrap();
+            if provider {
+                saved.retry_cause = Some(Some(cause.clone()));
+            }
+            saved.bind_paid_admission("candidate", &state);
+            assert!(!saved.has_controller_recovery_reservation());
+            assert!(!saved.has_provider_retry_reservation());
+            let pending = saved.pending_paid_admission.as_ref().unwrap();
+            assert_eq!(pending.attempt, "candidate");
+            assert!(!pending.capacity_refused);
+            assert_eq!(pending.controller, !provider);
+            assert_eq!(pending.provider_cause.is_some(), provider);
+            saved.bind_paid_admission("candidate", &state);
+            assert!(saved.pending_paid_admission.is_some());
+            saved.bind_paid_admission("replacement", &state);
+            assert!(
+                saved.pending_paid_admission.is_none(),
+                "an uncertain candidate cannot fund another attempt"
+            );
+        }
+        let mut stale = RunCheckpoint::from_value(json!({
+            "runnerId": "replacement", "providerRetryReservation": "old", "controllerRecoveries": 3,
+        }))
+        .unwrap();
+        stale.retry_cause = Some(Some(cause));
+        stale.bind_paid_admission("candidate", &state);
+        assert!(stale.pending_paid_admission.is_none());
+    }
+
+    #[tokio::test]
     async fn decision_persists_the_pause_counter_that_extended_its_budget() {
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(root.path()).unwrap();
