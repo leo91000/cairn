@@ -288,6 +288,7 @@ fn requeue(db: &Db<'_>, id: &str) -> Result<Value> {
         checkpoint.remaining_ms = Some(crate::run_limits::budget_ms(&run["snapshot"]["agent"]));
         if !before_launch {
             checkpoint.completed = Some(false);
+            checkpoint.terminal_code = Some(None);
         }
         checkpoint.settled = None;
         // A confirmed pre-turn failure may have no session yet. Its safety

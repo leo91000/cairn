@@ -440,8 +440,41 @@ async fn recover_or_wait(s: &Service, run: &Value) -> Result<bool> {
 /// checkpoint or clears it for relaunch (`true`).
 async fn recover(s: &Service, run: &Value) -> Result<bool> {
     let run_id = text(run, "id");
-    let checkpoint = RunCheckpoint::load(&s.store, run_id).await?;
+    let mut checkpoint = RunCheckpoint::load(&s.store, run_id).await?;
+    let expected_attempt = checkpoint
+        .as_ref()
+        .and_then(RunCheckpoint::runner_id)
+        .map(str::to_owned);
     let state = s.store.run_state(run_id).await?;
+    if state.cancel_requested_at.is_none()
+        && let Some(saved) = checkpoint.as_mut()
+        && saved.managed()
+        && saved.settled().is_none()
+        && saved.terminal_code.is_none()
+        && let Some(attempt) = saved.runner_id().map(str::to_owned)
+    {
+        let code = recovery::terminal_code(s, run_id, &attempt).await.ok();
+        // Recheck identity under the store transaction: observations of an old
+        // attempt must never overwrite a replacement's checkpoint.
+        let id = run_id.to_owned();
+        checkpoint = s
+            .store
+            .transaction(move |db| {
+                let mut current = RunCheckpoint::load_in(db, &id)?;
+                if let Some(current) = current.as_mut()
+                    && current.runner_id() == Some(attempt.as_str())
+                    && current.settled().is_none()
+                {
+                    current.terminal_code = Some(code);
+                    current.store_in(db, &id)?;
+                }
+                Ok(current)
+            })
+            .await?;
+    }
+    if checkpoint.as_ref().and_then(RunCheckpoint::runner_id) != expected_attempt.as_deref() {
+        return Ok(false);
+    }
     let parked = state.status == RunStatus::Waiting
         || (state.trigger != "chat"
             && run["wakeup"].is_object()
@@ -464,7 +497,11 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
 
 /// Cancellation and the final recovery state commit together. In particular,
 /// a completed provider turn must never restore a wait cancellation removed.
-fn finish_recovery(db: &Db<'_>, id: &str, checkpoint: Option<&RunCheckpoint>) -> Result<bool> {
+pub(super) fn finish_recovery(
+    db: &Db<'_>,
+    id: &str,
+    checkpoint: Option<&RunCheckpoint>,
+) -> Result<bool> {
     let record = db
         .run_record(id)?
         .ok_or_else(|| Error::not_found("Run not found"))?;
@@ -483,7 +520,14 @@ fn finish_recovery(db: &Db<'_>, id: &str, checkpoint: Option<&RunCheckpoint>) ->
             db.change_run(id, patch)?;
             return Ok(false);
         }
-        if checkpoint.completed() {
+        if let Some(error) = checkpoint.finalization_error() {
+            let settled = Settled::failure(RunStatus::Failed, error);
+            let mut patch = settled.run_changes();
+            patch.boundary = Some(json!({ "wakeup": null }));
+            db.change_run(id, patch)?;
+            return Ok(false);
+        }
+        if checkpoint.terminal_code() == Some(0) || checkpoint.completed() {
             let summary = match checkpoint.last_message() {
                 "" => {
                     "Conversation completed before worker restart. See Activity for the recorded result."
@@ -513,6 +557,8 @@ fn finish_recovery(db: &Db<'_>, id: &str, checkpoint: Option<&RunCheckpoint>) ->
                 resume_available: Some(waiting),
                 account_wait_reason: Some(None),
                 recovery_pending: Some(false),
+                error: Some(None),
+                retry: Some(None),
                 summary: Some((summary).to_owned()),
                 boundary: Some(json!({})),
                 ..Default::default()
@@ -611,6 +657,18 @@ mod tests {
         String,
         std::path::PathBuf,
     ) {
+        fixture_with_runner(String::new()).await
+    }
+
+    async fn fixture_with_runner(
+        runner_url: String,
+    ) -> (
+        tempfile::TempDir,
+        Arc<Service>,
+        String,
+        String,
+        std::path::PathBuf,
+    ) {
         let root = tempfile::tempdir().unwrap();
         let service = Service::new(crate::config::Config {
             data_dir: root.path().join("data"),
@@ -626,7 +684,7 @@ mod tests {
             concurrency: 1,
             logger: false,
             worker_enabled: false,
-            runner_url: String::new(),
+            runner_url,
         })
         .await
         .unwrap();
@@ -659,6 +717,161 @@ mod tests {
             .unwrap();
 
         (root, service, chat_id, run_id, workspace)
+    }
+
+    #[tokio::test]
+    async fn managed_completed_recovery_requires_healthy_finalization_and_cancellation_wins() {
+        let (_root, service, _chat, run, _workspace) = fixture().await;
+        for backend in ["native", "firecracker"] {
+            for code in [None, Some(0), Some(70), Some(75)] {
+                for cancel in [false, true] {
+                    let run = run.clone();
+                    service.store.transaction(move |db| {
+                        let saved = RunCheckpoint::from_value(json!({
+                            "prepared": { "backend": backend, "isolated": true },
+                            "completed": true, "terminalCode": code,
+                            "lastError": if code == Some(70) { "Finalization failed: EIO/EROFS" } else { "" },
+                            "controllerRecoveries": 3,
+                        }))?;
+                        db.change_run(&run, crate::runs::RunChanges {
+                            status: Some(RunStatus::Queued), cancel_requested_at: Some(cancel.then(now)),
+                            ..Default::default()
+                        })?;
+                        assert!(!finish_recovery(db, &run, Some(&saved))?);
+                        let current = db.run_state(&run)?.unwrap();
+                        let expected = if cancel { RunStatus::Cancelled }
+                            else if code == Some(0) { RunStatus::Succeeded } else { RunStatus::Failed };
+                        assert_eq!(current.status, expected, "{backend} {code:?}");
+                        assert_eq!(saved.controller_recoveries(), 3);
+                        Ok(())
+                    }).await.unwrap();
+                }
+            }
+        }
+        service.shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn restart_reconciliation_cannot_fence_a_replacement_and_honors_concurrent_cancel() {
+        use axum::{Router, extract::Request, response::IntoResponse, routing::any};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for replace in [true, false] {
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let deletes = Arc::new(AtomicUsize::new(0));
+            let (read, reply, stops) = (entered.clone(), release.clone(), deletes.clone());
+            let app = Router::new().fallback(any(move |request: Request| {
+                let (read, reply, stops) = (read.clone(), reply.clone(), stops.clone());
+                async move {
+                    assert!(request.uri().path().starts_with("/runs/old-attempt"));
+                    if request.method() == "DELETE" {
+                        stops.fetch_add(1, Ordering::SeqCst);
+                        return axum::http::StatusCode::NO_CONTENT.into_response();
+                    }
+                    assert_eq!(request.uri().path(), "/runs/old-attempt/wait");
+                    read.notify_one();
+                    reply.notified().await;
+                    axum::Json(json!({ "StatusCode": 0 })).into_response()
+                }
+            }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let (_root, service, _chat, run, _workspace) =
+                fixture_with_runner(format!("http://{address}")).await;
+            let saved = RunCheckpoint::from_value(json!({
+                "prepared": { "backend": "native", "isolated": true },
+                "runnerId": "old-attempt", "completed": true, "controllerRecoveries": 3,
+            }))
+            .unwrap();
+            saved.store(&service.store, &run).await.unwrap();
+            let (s, id) = (service.clone(), run.clone());
+            let recovering =
+                tokio::spawn(async move { recover(&s, &s.store.run(&id).await.unwrap()).await });
+            entered.notified().await;
+            if replace {
+                let mut replacement = saved.clone();
+                replacement.runner_id = Some(Some("new-attempt".into()));
+                replacement.completed = Some(false);
+                replacement.store(&service.store, &run).await.unwrap();
+            } else {
+                service
+                    .store
+                    .change_run(
+                        &run,
+                        crate::runs::RunChanges {
+                            cancel_requested_at: Some(Some(now())),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+            }
+            release.notify_one();
+            assert!(!recovering.await.unwrap().unwrap());
+            if replace {
+                let current = RunCheckpoint::load(&service.store, &run)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(current.runner_id(), Some("new-attempt"));
+                assert_eq!(current.terminal_code(), None);
+                assert_eq!(deletes.load(Ordering::SeqCst), 0);
+            } else {
+                assert_eq!(
+                    service.store.run_state(&run).await.unwrap().status,
+                    RunStatus::Cancelled
+                );
+                assert_eq!(deletes.load(Ordering::SeqCst), 1);
+            }
+            server.abort();
+            service.shutdown.cancel();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_new_turn_cannot_reuse_the_previous_attempts_healthy_exit() {
+        use axum::{Router, extract::Request, response::IntoResponse, routing::any};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let waits = Arc::new(AtomicUsize::new(0));
+        let count = waits.clone();
+        let app = Router::new().fallback(any(move |request: Request| {
+            let count = count.clone();
+            async move {
+                if request.method() == "DELETE" {
+                    return axum::http::StatusCode::NO_CONTENT.into_response();
+                }
+                count.fetch_add(1, Ordering::SeqCst);
+                axum::Json(json!({ "StatusCode": 0 })).into_response()
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let (_root, service, _chat, run, _workspace) =
+            fixture_with_runner(format!("http://{address}")).await;
+        let saved = RunCheckpoint::from_value(json!({
+            "prepared": { "backend": "native", "isolated": true },
+            "runnerId": "old-attempt", "completed": false, "terminalCode": null,
+        }))
+        .unwrap();
+        saved.store(&service.store, &run).await.unwrap();
+        assert!(
+            recover(&service, &service.store.run(&run).await.unwrap())
+                .await
+                .unwrap()
+        );
+        assert_eq!(waits.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            service.store.run_state(&run).await.unwrap().status,
+            RunStatus::Queued
+        );
+        server.abort();
+        service.shutdown.cancel();
     }
 
     #[tokio::test]
@@ -734,7 +947,7 @@ mod tests {
                 .await
                 .unwrap();
             let checkpoint = RunCheckpoint::from_value(json!({
-                "completed": true, "launched": true, "runnerId": "old-attempt",
+                "completed": true, "terminalCode": 0, "launched": true, "runnerId": "old-attempt",
                 "nodeId": node,
                 "prepared": { "isolated": true, "backend": "native" },
             }))

@@ -49,6 +49,12 @@ pub struct RunCheckpoint {
     pub process: Nullable<ProcessIdentity>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completed: Option<bool>,
+    /// Controller result for runner_id, distinct from the provider turn and logs.
+    /// Absent: an attempt may need observation. Null: observation was exhausted
+    /// or a new turn invalidated the old result; recovery must only fence it.
+    /// Neither absent nor null proves success.
+    #[serde(default, with = "nullable", skip_serializing_if = "Option::is_none")]
+    pub terminal_code: Nullable<i32>,
     #[serde(default, with = "nullable", skip_serializing_if = "Option::is_none")]
     pub last_error: Nullable<String>,
     #[serde(default, with = "nullable", skip_serializing_if = "Option::is_none")]
@@ -194,6 +200,23 @@ impl RunCheckpoint {
 
     pub fn completed(&self) -> bool {
         self.completed == Some(true)
+    }
+
+    pub fn terminal_code(&self) -> Option<i32> {
+        self.terminal_code.flatten()
+    }
+
+    /// A completed turn must not be replayed to repair uncertain or failed
+    /// finalization. Only the controller can confirm its storage closed cleanly.
+    pub fn finalization_error(&self) -> Option<&str> {
+        if !self.managed() || !self.completed() || self.terminal_code() == Some(0) {
+            return None;
+        }
+        Some(if self.last_error().is_empty() {
+            "Agent turn completed, but execution finalization was not confirmed healthy. Working files were preserved; automatic replay was stopped."
+        } else {
+            self.last_error()
+        })
     }
 
     /// The prepared execution, when the workspace has been prepared.
@@ -386,6 +409,7 @@ impl Checkpoint {
                 saved.retry_cause = Some(cause);
                 if provider_failure {
                     saved.completed = Some(false);
+                    saved.terminal_code = Some(None);
                 }
             }
             if let Some(message) = last_message.take() {

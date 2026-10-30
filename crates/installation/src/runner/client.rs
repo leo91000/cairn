@@ -10,13 +10,15 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use futures_util::StreamExt;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
-use std::time::Duration;
+use std::{future::Future, time::Duration};
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio_util::sync::CancellationToken;
 
 /// Exit code reported when this client is asked to stop.
 const STOPPED: i32 = 143;
 const ERROR_BODY_LIMIT: usize = 10_000;
+/// Only recovery/draining is bounded; an intact attempt may run normally.
+pub(crate) const RECONCILE_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct Controller {
     http: reqwest::Client,
@@ -105,29 +107,23 @@ impl Controller {
     }
 
     async fn wait(&self) -> Result<i32> {
-        let response = self
-            .http
-            .post(format!("{}/wait", self.url))
-            .bearer_auth(&self.token)
-            .send()
-            .await
-            .map_err(|_| Error::unavailable("Could not wait for execution."))?;
-        let value: Value = response
-            .json()
-            .await
-            .map_err(|_| Error::unavailable("Execution completion connection was interrupted."))?;
-        value["StatusCode"]
-            .as_i64()
-            .filter(|n| (0..=255).contains(n))
-            .map(|n| n as i32)
-            .ok_or_else(|| Error::bad("Invalid execution exit status."))
+        wait_for_exit(&self.http, &self.url, &self.token).await
     }
 
     async fn run(&self) -> Result<i32> {
         self.start().await?;
-        let logs = self.logs().await?;
-        let ((), code) = tokio::try_join!(relay_output(logs), self.wait())?;
-        Ok(code)
+        let output = async { relay_output(self.logs().await?).await };
+        let (output, status) = collect_completion(output, self.wait()).await;
+        if let Err(error) = output {
+            eprintln!("{}", error.message);
+        }
+        // Preserve the last complete frames even when the next one was cut.
+        let _ = tokio::io::stdout().flush().await;
+        let _ = tokio::io::stderr().flush().await;
+        match status {
+            Ok(code) => Ok(code),
+            Err(_) => reconcile_exit(&self.http, &self.url, &self.token).await,
+        }
     }
 
     async fn stop(&self) {
@@ -139,6 +135,67 @@ impl Controller {
             .send()
             .await;
     }
+}
+
+/// Keep both observations even when one fails. Once either channel closes,
+/// allow the other a bounded drain, without reconnecting or replaying logs.
+async fn collect_completion(
+    output: impl Future<Output = Result<()>>,
+    status: impl Future<Output = Result<i32>>,
+) -> (Result<()>, Result<i32>) {
+    tokio::pin!(output, status);
+    tokio::select! {
+        output = &mut output => {
+            let status = tokio::time::timeout(RECONCILE_TIMEOUT, status).await
+                .unwrap_or_else(|_| Err(Error::unavailable("Execution completion is not confirmed.")));
+            (output, status)
+        }
+        status = &mut status => {
+            let output = tokio::time::timeout(RECONCILE_TIMEOUT, output).await
+                .unwrap_or_else(|_| Err(Error::unavailable("Execution output drain was interrupted.")));
+            (output, status)
+        }
+    }
+}
+
+/// Read only the terminal result of this exact attempt. Both controller backends
+/// publish it after finalization and physical ownership release.
+async fn wait_for_exit(http: &reqwest::Client, url: &str, token: &str) -> Result<i32> {
+    let response = http
+        .post(format!("{url}/wait"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|_| Error::unavailable("Could not wait for execution."))?;
+    if !response.status().is_success() {
+        return Err(Error::unavailable("Could not wait for execution."));
+    }
+    let value: Value = response
+        .json()
+        .await
+        .map_err(|_| Error::unavailable("Execution completion connection was interrupted."))?;
+    value["StatusCode"]
+        .as_i64()
+        .filter(|n| (0..=255).contains(n))
+        .map(|n| n as i32)
+        .ok_or_else(|| Error::bad("Invalid execution exit status."))
+}
+
+/// Bounded observation, never a new launch and never charged to the replay budget.
+/// Cancellation/lease/deadline owners may drop this read at any time.
+pub(crate) async fn reconcile_exit(http: &reqwest::Client, url: &str, token: &str) -> Result<i32> {
+    tokio::time::timeout(RECONCILE_TIMEOUT, async {
+        for attempt in 0..3 {
+            let result = wait_for_exit(http, url, token).await;
+            if result.is_ok() || attempt == 2 {
+                return result;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        unreachable!()
+    })
+    .await
+    .unwrap_or_else(|_| Err(Error::unavailable("Execution completion is not confirmed.")))
 }
 
 /// Writes attempt output to this process's stdout and stderr.
@@ -198,7 +255,11 @@ pub async fn client(id: &str, stop: CancellationToken) -> Result<i32> {
         () = stop.cancelled() => Ok(STOPPED),
         result = controller.run() => result,
     };
-    controller.stop().await;
+    // An uncertain transport result is not a request to stop the workload.
+    // The manager observes this same attempt before its existing fencing path.
+    if stop.is_cancelled() {
+        controller.stop().await;
+    }
     match result {
         Err(error) if error.is_unavailable() => {
             eprintln!("{}", error.message);
@@ -212,6 +273,135 @@ pub async fn client(id: &str, stop: CancellationToken) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn broken_output_preserves_terminal_status_in_both_orders() {
+        use axum::{
+            Router,
+            body::Body,
+            routing::{get, post},
+        };
+        for code in [0, super::super::CONTROLLER_FAILED] {
+            for logs_first in [true, false] {
+                let logs = move || async move {
+                    if !logs_first {
+                        tokio::time::sleep(Duration::from_millis(30)).await;
+                    }
+                    // A partial final frame is a real relay_output failure.
+                    Body::from("{\"type\":")
+                };
+                let wait = move || async move {
+                    if logs_first {
+                        tokio::time::sleep(Duration::from_millis(30)).await;
+                    }
+                    axum::Json(json!({ "StatusCode": code }))
+                };
+                let app = Router::new()
+                    .route("/runs/fixture", post(|| async {}))
+                    .route("/runs/fixture/logs", get(logs))
+                    .route("/runs/fixture/wait", post(wait));
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let server = tokio::spawn(async move {
+                    axum::serve(listener, app).await.unwrap();
+                });
+                let controller = Controller {
+                    http: reqwest::Client::new(),
+                    url: format!("http://{address}/runs/fixture"),
+                    token: "fixture".into(),
+                };
+                assert_eq!(
+                    controller.run().await.unwrap(),
+                    code,
+                    "logs_first={logs_first}"
+                );
+                server.abort();
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cut_before_completion_is_bounded_and_never_claims_success() {
+        let started = tokio::time::Instant::now();
+        let (output, status) = collect_completion(
+            async { Err(Error::unavailable("fixture output cut")) },
+            std::future::pending(),
+        )
+        .await;
+        assert!(output.is_err());
+        assert!(status.is_err());
+        assert_eq!(started.elapsed(), RECONCILE_TIMEOUT);
+        let (output, status) = collect_completion(std::future::pending(), async { Ok(0) }).await;
+        assert!(output.is_err());
+        assert_eq!(status.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn same_attempt_read_retries_delayed_persistence_without_start_or_log_replay() {
+        use axum::{Router, extract::Request, response::IntoResponse, routing::any};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let requests = Arc::new(AtomicUsize::new(0));
+        let count = requests.clone();
+        let app = Router::new().fallback(any(move |request: Request| {
+            let count = count.clone();
+            async move {
+                assert_eq!(request.method(), "POST");
+                assert_eq!(request.uri().path(), "/runs/same-attempt/wait");
+                if count.fetch_add(1, Ordering::SeqCst) == 0 {
+                    StatusCode::SERVICE_UNAVAILABLE.into_response()
+                } else {
+                    axum::Json(json!({ "StatusCode": 0 })).into_response()
+                }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let url = format!("http://{address}/runs/same-attempt");
+        assert_eq!(
+            reconcile_exit(&reqwest::Client::new(), &url, "fixture")
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn reconciliation_deadline_includes_a_wait_body_that_never_finishes() {
+        use axum::{
+            Router,
+            body::{Body, Bytes},
+            routing::post,
+        };
+        let app = Router::new().route(
+            "/runs/fixture/wait",
+            post(|| async {
+                Body::from_stream(futures_util::stream::pending::<
+                    std::result::Result<Bytes, std::io::Error>,
+                >())
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let url = format!("http://{address}/runs/fixture");
+        let result = tokio::time::timeout(
+            RECONCILE_TIMEOUT + Duration::from_secs(1),
+            reconcile_exit(&reqwest::Client::new(), &url, "fixture"),
+        )
+        .await;
+        assert!(result.unwrap().unwrap_err().is_unavailable());
+        server.abort();
+    }
 
     #[test]
     fn startup_rejections_are_backend_neutral_and_preserve_capacity_detection() {

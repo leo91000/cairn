@@ -77,6 +77,23 @@ pub async fn fence_process(identity: &ProcessIdentity) -> Result<()> {
     Ok(())
 }
 
+/// Observe the existing attempt before stopping it or deciding whether to replay.
+/// This never acquires a workspace, starts an agent, or replays retained output.
+pub(crate) async fn terminal_code(s: &Service, run_id: &str, attempt: &str) -> Result<i32> {
+    let runner_url = crate::nodes::transport::url(s, run_id).await?;
+    if runner_url.is_empty() {
+        return Err(Error::unavailable(
+            "Execution controller is unavailable for reconciliation.",
+        ));
+    }
+    let token = secret(&s.config.data_dir, "runner-secret").await?;
+    let url = format!("{runner_url}/runs/{attempt}");
+    tokio::select! {
+        () = s.shutdown.cancelled() => Err(Error::unavailable("Worker is restarting.")),
+        result = crate::runner::reconcile_exit(&s.http, &url, &token) => result,
+    }
+}
+
 /// Stops every trace of the run's previous execution before it may be relaunched.
 pub async fn fence(s: &Service, run: &Value) -> Result<()> {
     let run_id = text(run, "id");

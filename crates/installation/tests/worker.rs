@@ -2696,6 +2696,97 @@ async fn controller_interruptions_resume_saved_threads_and_stop_after_three_reco
     }
 }
 
+/// Exercises the real manager -> runner client -> disposable HTTP controller.
+/// Even at the replay ceiling a read of the same attempt is permitted.
+#[tokio::test]
+async fn controller_evidence_is_reconciled_before_replay_or_terminal_failure() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    for (completed, terminal, expected) in [
+        (true, 0, RunStatus::Succeeded),
+        (true, 70, RunStatus::Failed),
+        (false, 75, RunStatus::Failed),
+    ] {
+        let mut fixture = Fixture::new().await;
+        fixture.stop(false).await;
+        let controller = Arc::new(Controller {
+            data: fixture.service.config.data_dir.clone(),
+            plans: tokio::sync::Mutex::new(Vec::new()),
+            failures: if completed { 0 } else { usize::MAX },
+            slots: 4,
+            hold: std::sync::atomic::AtomicBool::new(false),
+        });
+        let waits = Arc::new(AtomicUsize::new(0));
+        let count = waits.clone();
+        let app = Router::new()
+            .fallback(any(
+                move |state: State<Arc<Controller>>, request: Request| {
+                    let count = count.clone();
+                    async move {
+                        if request.uri().path().ends_with("/wait") {
+                            let observation = count.fetch_add(1, Ordering::SeqCst);
+                            // The client's completion channel was cut; the manager can
+                            // subsequently read the already available controller exit.
+                            let code = if observation == 0 { 75 } else { terminal };
+                            return Json(json!({ "StatusCode": code })).into_response();
+                        }
+                        serve_controller(state, request).await
+                    }
+                },
+            ))
+            .with_state(controller.clone());
+        let (listener, address) = common::bind().await;
+        common::reconfigure(&mut fixture.service, |config| {
+            config.runner_url = format!("http://{address}");
+        })
+        .await;
+        let server = common::serve(listener, app);
+        let home = fixture.service.config.home.join(".codex");
+        tokio::fs::create_dir_all(&home).await.unwrap();
+        tokio::fs::write(home.join("auth.json"), "{}")
+            .await
+            .unwrap();
+        tokio::fs::write(
+            fixture.service.config.data_dir.join("storage-s3.json"),
+            json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
+        )
+        .await
+        .unwrap();
+        let run = fixture
+            .enqueue("Reconcile only this disposable controller attempt")
+            .await;
+        let run_id = text(&run, "id");
+        fixture
+            .service
+            .store
+            .transaction({
+                let run_id = run_id.to_owned();
+                move |db| {
+                    db.save_checkpoint_boundary(
+                        &run_id,
+                        &json!({ "controllerRecoveries": 3, "remainingMs": null }),
+                    )
+                }
+            })
+            .await
+            .unwrap();
+        fixture.start().await;
+        let result = fixture.until_finished(run_id).await;
+        assert_eq!(result["status"], expected, "{result}");
+        assert_eq!(
+            controller.plans.lock().await.len(),
+            1,
+            "A read must never submit another attempt"
+        );
+        assert_eq!(fixture.checkpoint(run_id).await["controllerRecoveries"], 3);
+        assert!(waits.load(Ordering::SeqCst) >= 2);
+        if completed && terminal != 0 {
+            assert!(text(&result, "error").contains("finalization"), "{result}");
+        }
+        fixture.stop(false).await;
+        server.abort();
+    }
+}
+
 #[tokio::test]
 async fn vm_chat_protocol_runs_receive_one_frame_with_plugin_instructions() {
     let mut fixture = Fixture::new().await;

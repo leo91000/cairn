@@ -88,6 +88,44 @@ async fn heartbeat(s: Arc<Service>, checkpoint: Arc<Checkpoint>, stop: Cancellat
     }
 }
 
+/// Last read of the same attempt before spending a replay or settling a failure.
+/// The active heartbeat retains existing leases; cancellation and time limits
+/// interrupt this read without opening or transferring disk ownership.
+pub(super) async fn reconcile(
+    s: &Service,
+    checkpoint: &Checkpoint,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    let saved = checkpoint.snapshot().await;
+    if !saved.managed()
+        || saved.terminal_code.is_some()
+        || saved.start_rejected == Some(true)
+        || checkpoint.expired()
+        || cancel.is_cancelled()
+        || s.shutdown.is_cancelled()
+    {
+        return Ok(());
+    }
+    let Some(attempt) = saved.runner_id() else {
+        return Ok(());
+    };
+    let remaining_ms = checkpoint
+        .deadline()
+        .map_or(5000, |deadline| deadline.saturating_sub(now()).max(0));
+    let code = tokio::select! {
+        () = cancel.cancelled() => None,
+        result = tokio::time::timeout(Duration::from_millis(remaining_ms as u64),
+            recovery::terminal_code(s, &checkpoint.id, attempt)) => result.ok().and_then(Result::ok),
+    };
+    checkpoint
+        .update(|current| {
+            if current.runner_id() == Some(attempt) {
+                current.terminal_code = Some(code);
+            }
+        })
+        .await
+}
+
 async fn record_failure(
     s: &Service,
     checkpoint: &Checkpoint,
@@ -96,6 +134,22 @@ async fn record_failure(
     sensitive: &[String],
 ) -> Result<()> {
     let run_id = checkpoint.id.as_str();
+    reconcile(s, checkpoint, cancel).await?;
+    let saved = checkpoint.snapshot().await;
+    if !cancel.is_cancelled()
+        && (saved.terminal_code() == Some(0) || saved.finalization_error().is_some())
+    {
+        // Do not let the transport error or its exhausted replay budget hide
+        // a healthy controller result, or replay a completed failed flush.
+        let id = run_id.to_owned();
+        let saved = saved.clone();
+        s.store
+            .transaction(move |db| {
+                super::schedule::finish_recovery(db, &id, Some(&saved)).map(|_| ())
+            })
+            .await?;
+        return Ok(());
+    }
     if super::retry::schedule(s, checkpoint, cancel, error).await? {
         return Ok(());
     }
@@ -166,7 +220,7 @@ async fn recovers_controller(
 ) -> Result<bool> {
     let run = s.store.run_record(&checkpoint.id).await?;
     let mode_change = run.boundary["nativeModeInterruption"].is_string();
-    if !error.is_unavailable() || !saved.managed() {
+    if !error.is_unavailable() || !saved.managed() || saved.completed() {
         return Ok(false);
     }
     let may_retry = mode_change
@@ -314,6 +368,7 @@ async fn requeue_pending_move(s: &Service, checkpoint: &Checkpoint) -> Result<()
     checkpoint
         .update(|c| {
             c.completed = Some(false);
+            c.terminal_code = Some(None);
             c.settled = Some(None);
         })
         .await?;

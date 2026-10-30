@@ -232,6 +232,7 @@ impl Execution<'_> {
         self.checkpoint
             .update(|checkpoint| {
                 checkpoint.runner_id = Some(Some(saved_runner));
+                checkpoint.terminal_code = None;
                 checkpoint.node_id = Some(node);
                 checkpoint.runtime_id = Some(Some(runtime));
             })
@@ -480,6 +481,7 @@ impl Execution<'_> {
                         .update_and_publish(
                             |saved| {
                                 saved.completed = Some(false);
+                                saved.terminal_code = Some(None);
                                 saved.last_error = Some(Some(error.message.clone()));
                                 saved.retry_cause = Some(cause);
                             },
@@ -577,10 +579,29 @@ impl Execution<'_> {
             self.prepare_runner(workspace, resume, chat, &mut launch)
                 .await?;
         }
-        let exit = self.supervise(workspace, launch, log_total).await?;
+        let mut exit = self.supervise(workspace, launch, log_total).await?;
+        self.checkpoint
+            .update(|c| {
+                c.process = Some(None);
+                // 75 from the local client may mean no controller result was read.
+                c.terminal_code = exit
+                    .code
+                    .filter(|code| *code != crate::runner::CONTROLLER_INTERRUPTED)
+                    .map(Some);
+            })
+            .await?;
+        if exit.code == Some(crate::runner::CONTROLLER_INTERRUPTED) && !exit.timed_out {
+            super::execution::reconcile(s, self.checkpoint, self.cancel).await?;
+            if let Some(code) = self.checkpoint.snapshot().await.terminal_code() {
+                exit.code = Some(if code == STOPPED && !self.cancel.is_cancelled() {
+                    crate::runner::CONTROLLER_INTERRUPTED
+                } else {
+                    code
+                });
+            }
+        }
         drop(auth_broker);
         drop(mcp_channel);
-        self.checkpoint.update(|c| c.process = Some(None)).await?;
         let saved = self.checkpoint.snapshot().await;
         if s.shutdown.is_cancelled() && !self.cancel.is_cancelled() && !saved.completed() {
             return Err(Error::conflict("Worker is restarting"));
@@ -601,6 +622,13 @@ impl Execution<'_> {
             return Err(Error::unavailable(
                 "Native node mode changed. Managed executions stopped; saved files and conversation history are retained for restart.",
             ));
+        }
+        if managed && saved.completed() && saved.terminal_code() != Some(0) {
+            // A provider completion cannot repair EIO/EROFS or an unknown flush.
+            // Existing execution cleanup fences it before releasing its resources.
+            self.finish(workspace, &exit, &saved, session.is_some())
+                .await?;
+            return Ok(Attempt::Finished);
         }
         let interrupted = exit.code == Some(crate::runner::CONTROLLER_INTERRUPTED);
         if managed && stopped_by_controller && interrupted {
@@ -635,15 +663,12 @@ impl Execution<'_> {
             )));
         }
 
-        // Preserve the controller's outcome before cleanup can fail. Failed
-        // attempts are fenced by execution::execute before release or recovery.
-        if workspace.isolated() {
-            recovery::fence(s, &s.store.run(&self.id).await?).await?;
-        }
-
         if let Some(session) = session.as_ref()
             && self.may_switch_account(&exit)
         {
+            if workspace.isolated() {
+                recovery::fence(s, &s.store.run(&self.id).await?).await?;
+            }
             self.switch_account(workspace).await?;
             return Ok(Attempt::Resume(session.clone()));
         }
@@ -774,6 +799,7 @@ impl Execution<'_> {
         self.checkpoint
             .update(|c| {
                 c.runner_id = Some(Some(runner.clone()));
+                c.terminal_code = None;
                 c.node_id = Some(node_id);
                 c.runtime_id = Some(Some(runtime_id));
             })
@@ -960,6 +986,7 @@ impl Execution<'_> {
                 c.start_rejected = Some(false);
                 c.retry_cause = Some(None);
                 c.completed = Some(false);
+                c.terminal_code = None;
                 c.last_error = Some(None);
             })
             .await?;
@@ -1177,7 +1204,9 @@ impl Execution<'_> {
             RunStatus::Cancelled
         } else if exit.timed_out {
             RunStatus::Failed
-        } else if exit.code == Some(0) || (s.shutdown.is_cancelled() && saved.completed()) {
+        } else if exit.code == Some(0)
+            || (s.shutdown.is_cancelled() && saved.completed() && !saved.managed())
+        {
             RunStatus::Succeeded
         } else {
             RunStatus::Failed
@@ -1185,6 +1214,7 @@ impl Execution<'_> {
         if status == RunStatus::Failed
             && !exit.timed_out
             && !self.stopping()
+            && !saved.completed()
             && let Some(cause) = saved.retry_cause.as_ref().and_then(Option::as_ref)
             && (has_session || cause.startup)
         {
@@ -1261,6 +1291,9 @@ impl Execution<'_> {
         }
         if status == RunStatus::Succeeded {
             return String::new();
+        }
+        if let Some(error) = saved.finalization_error() {
+            return error.to_owned();
         }
         if !saved.last_error().is_empty() {
             return saved.last_error().to_owned();
