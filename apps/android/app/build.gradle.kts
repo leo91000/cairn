@@ -173,3 +173,22 @@ tasks.withType<Test>().configureEach {
         systemProperty("cairn.screenshots.dir", it)
     }
 }
+
+val checkDebugAndroidTestDexSize by
+    tasks.registering(Exec::class) {
+        dependsOn("packageDebugAndroidTest")
+        commandLine(
+            "node",
+            rootProject.file("../../scripts/check-android-dex-size.mjs"),
+            layout.buildDirectory
+                .file("outputs/apk/androidTest/debug/app-debug-androidTest.apk")
+                .get()
+                .asFile,
+        )
+    }
+
+tasks
+    .matching { it.name == "assembleDebugAndroidTest" }
+    .configureEach {
+        dependsOn(checkDebugAndroidTestDexSize)
+    }

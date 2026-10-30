@@ -1,3 +1,4 @@
+import type { Locator } from '@playwright/test'
 import type {} from '../../scripts/fixtures/chat-rendering'
 import { Buffer } from 'node:buffer'
 import process from 'node:process'
@@ -24,6 +25,17 @@ test.beforeAll(async () => {
   address = server.resolvedUrls!.local[0]!
 })
 test.afterAll(async () => server?.close())
+
+async function diagramLabelCenter(viewer: Locator) {
+  await expect(viewer.locator('svg a text')).toBeVisible()
+  // Fonts replace the SVG, but keep the dialog. Query and measure inside one browser callback.
+  return viewer.evaluate((dialog) => {
+    const label = dialog.querySelector('svg a text')!
+    const box = label.getBoundingClientRect()
+    return { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+  })
+}
+
 test.beforeEach(async ({ page }) => {
   await page.goto(`${address}scripts/fixtures/chat-rendering.html`)
   await page.waitForFunction(() => window.chatRendering)
@@ -291,10 +303,7 @@ test('full-screen artifact nodes retain installation routing and the file viewer
   const viewer = page.getByRole('dialog', { name: 'Flowchart', exact: true })
   const link = viewer.locator('svg a')
   await expect(link).toHaveAttribute('href', `${path}/file-1`)
-  const center = () => link.locator('text').evaluate((element) => {
-    const box = element.getBoundingClientRect()
-    return { x: box.x + box.width / 2, y: box.y + box.height / 2 }
-  })
+  const center = () => diagramLabelCenter(viewer)
   let point = await center()
   await page.mouse.move(point.x, point.y)
   await page.mouse.down()
@@ -400,10 +409,7 @@ test('full-screen node links remain clickable after zoom and pan without navigat
       }
     })
   })
-  const center = () => label.evaluate((element) => {
-    const bounds = element.getBoundingClientRect()
-    return { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 }
-  })
+  const center = () => diagramLabelCenter(viewer)
   let point = await center()
   await page.mouse.click(point.x, point.y)
   await expect(page.locator('body')).toHaveAttribute('data-viewer-link', 'https://example.test/docs')
@@ -886,7 +892,9 @@ test('nested sequence backgrounds paint the inner highlight above the outer one 
   try {
     await page.goto(`${address}scripts/fixtures/chat-rendering.html`, { waitUntil: 'domcontentloaded' })
     await page.waitForFunction(() => window.chatRendering)
-    await page.evaluate(source => window.chatRendering.markdown(source), '```mermaid\nsequenceDiagram\nparticipant A\nrect rgb(255,0,0)\nrect rgb(0,255,0)\nA->>A: Hi\nend\nend\n```')
+    // A short label can keep identical geometry with the CI image's fallback font.
+    const label = `${'l'.repeat(100)} Łódź`
+    await page.evaluate(source => window.chatRendering.markdown(source), `\`\`\`mermaid\nsequenceDiagram\nparticipant A\nrect rgb(255,0,0)\nrect rgb(0,255,0)\nA->>A: ${label}\nend\nend\n\`\`\``)
     const svg = page.locator('#app figure.diagram svg')
     await expect(svg).toBeVisible()
     const original = await svg.elementHandle()
@@ -902,7 +910,7 @@ test('nested sequence backgrounds paint the inner highlight above the outer one 
     expect(await page.evaluate(() => [...document.fonts].some(face => face.family.includes('DM Sans') && face.status === 'loaded'))).toBe(true)
     // Chromium's changed font metrics replace this SVG; WebKit can retain identical HTML.
     if (browserName === 'chromium')
-      expect(await original!.evaluate(element => element.isConnected)).toBe(false)
+      await expect.poll(() => original!.evaluate(element => element.isConnected)).toBe(false)
 
     const point = await svg.evaluate((svg) => {
       const area = svg.getBoundingClientRect()
