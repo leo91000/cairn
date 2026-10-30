@@ -596,8 +596,18 @@ async fn plan_recovery(s: &Service, current: &Value) -> Result<Recovery> {
 
 /// Advances a conversation's pending move, or starts recovery from an unavailable node.
 /// Returns whether the conversation may keep executing where it is.
-pub async fn advance(s: &Service, run: &Value) -> Result<bool> {
+pub async fn advance(s: &Service, run: &Value, expected_attempt: Option<&str>) -> Result<bool> {
     let run_id = text(run, "id");
+    if crate::worker::checkpoint::RunCheckpoint::load(&s.store, run_id)
+        .await?
+        .as_ref()
+        .and_then(crate::worker::checkpoint::RunCheckpoint::runner_id)
+        != expected_attempt
+    {
+        return Err(Error::conflict(
+            "Execution attempt changed during recovery.",
+        ));
+    }
     if !run["cancelRequestedAt"].is_null() {
         release_destination(s, run).await?;
         return Ok(true);
@@ -615,11 +625,16 @@ pub async fn advance(s: &Service, run: &Value) -> Result<bool> {
             Recovery::Waiting => return Ok(false),
             Recovery::Planned(movement) => {
                 let owner = run_id.to_owned();
+                let expected = expected_attempt.map(str::to_owned);
                 let pending = movement.clone();
                 let accepted = s
                     .store
                     .transaction(move |db| {
-                        if source_mode_unconfirmed(db, &owner)?
+                        if crate::worker::checkpoint::RunCheckpoint::load_in(db, &owner)?
+                            .as_ref()
+                            .and_then(crate::worker::checkpoint::RunCheckpoint::runner_id)
+                            != expected.as_deref()
+                            || source_mode_unconfirmed(db, &owner)?
                             || db
                                 .run(&owner)?
                                 .is_none_or(|run| run["moveRequest"].is_object())
@@ -641,7 +656,17 @@ pub async fn advance(s: &Service, run: &Value) -> Result<bool> {
             }
         }
     }
-    crate::recovery::fence(s, &current).await?;
+    crate::recovery::fence_attempt(s, &current, expected_attempt).await?;
+    if crate::worker::checkpoint::RunCheckpoint::load(&s.store, run_id)
+        .await?
+        .as_ref()
+        .and_then(crate::worker::checkpoint::RunCheckpoint::runner_id)
+        != expected_attempt
+    {
+        return Err(Error::conflict(
+            "Execution attempt changed during recovery.",
+        ));
+    }
     match transfer(s, &current).await {
         Ok(backup) => resume_at_destination(s, &current, &backup).await?,
         Err(error) => fail_transfer(s, &current, &error).await?,

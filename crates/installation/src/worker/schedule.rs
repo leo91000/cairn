@@ -589,7 +589,10 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
                 && !(saved.controller_recoveries() == super::execution::MAX_CONTROLLER_RECOVERIES
                     && saved.has_controller_recovery_reservation()))
     });
-    if !parked && !cannot_replay && !crate::nodes::moves::advance(s, run).await? {
+    if !parked
+        && !cannot_replay
+        && !crate::nodes::moves::advance(s, run, expected_attempt.as_deref()).await?
+    {
         return Ok(false);
     }
     let fenced = recovery::fence_attempt(s, run, expected_attempt.as_deref()).await;
