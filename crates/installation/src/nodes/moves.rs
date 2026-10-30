@@ -597,7 +597,24 @@ async fn plan_recovery(s: &Service, current: &Value) -> Result<Recovery> {
 /// Advances a conversation's pending move, or starts recovery from an unavailable node.
 /// Returns whether the conversation may keep executing where it is.
 pub async fn advance(s: &Service, run: &Value) -> Result<bool> {
+    let checkpoint =
+        crate::worker::checkpoint::RunCheckpoint::load(&s.store, text(run, "id")).await?;
+    advance_for_attempt(s, run, checkpoint.as_ref()).await
+}
+
+pub(crate) async fn advance_for_attempt(
+    s: &Service,
+    run: &Value,
+    expected_attempt: Option<&crate::worker::checkpoint::RunCheckpoint>,
+) -> Result<bool> {
     let run_id = text(run, "id");
+    let current_checkpoint =
+        crate::worker::checkpoint::RunCheckpoint::load(&s.store, run_id).await?;
+    if !crate::recovery::same_execution(current_checkpoint.as_ref(), expected_attempt) {
+        return Err(Error::conflict(
+            "Execution attempt changed during recovery.",
+        ));
+    }
     if !run["cancelRequestedAt"].is_null() {
         release_destination(s, run).await?;
         return Ok(true);
@@ -615,11 +632,15 @@ pub async fn advance(s: &Service, run: &Value) -> Result<bool> {
             Recovery::Waiting => return Ok(false),
             Recovery::Planned(movement) => {
                 let owner = run_id.to_owned();
+                let expected = expected_attempt.cloned();
                 let pending = movement.clone();
                 let accepted = s
                     .store
                     .transaction(move |db| {
-                        if source_mode_unconfirmed(db, &owner)?
+                        let checkpoint =
+                            crate::worker::checkpoint::RunCheckpoint::load_in(db, &owner)?;
+                        if !crate::recovery::same_execution(checkpoint.as_ref(), expected.as_ref())
+                            || source_mode_unconfirmed(db, &owner)?
                             || db
                                 .run(&owner)?
                                 .is_none_or(|run| run["moveRequest"].is_object())
@@ -641,7 +662,18 @@ pub async fn advance(s: &Service, run: &Value) -> Result<bool> {
             }
         }
     }
-    crate::recovery::fence(s, &current).await?;
+    crate::recovery::fence_attempt(s, &current, expected_attempt).await?;
+    let current_checkpoint =
+        crate::worker::checkpoint::RunCheckpoint::load(&s.store, run_id).await?;
+    let mut expected_fenced = expected_attempt.cloned();
+    if let Some(saved) = &mut expected_fenced {
+        saved.process = None;
+    }
+    if !crate::recovery::same_execution(current_checkpoint.as_ref(), expected_fenced.as_ref()) {
+        return Err(Error::conflict(
+            "Execution attempt changed during recovery.",
+        ));
+    }
     match transfer(s, &current).await {
         Ok(backup) => resume_at_destination(s, &current, &backup).await?,
         Err(error) => fail_transfer(s, &current, &error).await?,
@@ -793,7 +825,6 @@ async fn resume_at_destination(s: &Service, current: &Value, backup: &Value) -> 
             checkpoint["nodeId"] = node;
             checkpoint["process"] = Value::Null;
             checkpoint["settled"] = Value::Null;
-            checkpoint["controllerRecoveries"] = 0.into();
             db.save_checkpoint_boundary(&owner, &checkpoint)?;
             db.change_run(&owner, patch)?;
             db.event(
@@ -845,5 +876,56 @@ async fn release_destination(s: &Service, run: &Value) -> Result<()> {
     {
         super::placement::release(s, reservation).await?;
     }
+    Ok(())
+}
+
+/// A terminal recovery cannot resume the interrupted turn on a destination.
+/// Release only the pending destination reservation, retaining the source and
+/// its checkpoint until fencing and finalization have been resolved.
+pub(crate) async fn abort_terminal_recovery(
+    s: &Service,
+    run_id: &str,
+    expected_attempt: Option<&crate::worker::checkpoint::RunCheckpoint>,
+) -> Result<()> {
+    let id = run_id.to_owned();
+    let expected = expected_attempt.cloned();
+    s.store
+        .transaction(move |db| {
+            let checkpoint = crate::worker::checkpoint::RunCheckpoint::load_in(db, &id)?;
+            if !crate::recovery::same_execution(checkpoint.as_ref(), expected.as_ref()) {
+                return Err(Error::conflict(
+                    "Execution attempt changed during recovery.",
+                ));
+            }
+            release_terminal_destination_in(db, &id)
+        })
+        .await
+}
+
+/// Only unclaimed destination reservations are released; retained disks and the
+/// source execution stay owned by their existing fencing/storage lifecycle.
+pub(crate) fn release_terminal_destination_in(db: &crate::store::Db<'_>, id: &str) -> Result<()> {
+    let current = db
+        .run(id)?
+        .ok_or_else(|| Error::not_found("Conversation removed."))?;
+    let movement = &current["moveRequest"];
+    if !movement.is_object() && current["moveReservation"].is_null() {
+        return Ok(());
+    }
+    for reservation in [
+        movement["reservation"].as_str(),
+        current["moveReservation"].as_str(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        super::placement::release_in(db, reservation)?;
+    }
+    db.update_run_boundary(id, &serde_json::json!({
+        "moveRequest": null,
+        "moveReservation": null,
+        "nodeState": null,
+        "movementError": "Movement stopped because the execution will not resume automatically.",
+    }))?;
     Ok(())
 }

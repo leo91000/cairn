@@ -200,6 +200,15 @@ pub async fn run(
 }
 
 fn route(method: &str, path: &str) -> Result<()> {
+    let (path, query) = path
+        .split_once('?')
+        .map_or((path, None), |(path, query)| (path, Some(query)));
+    if query.is_some() {
+        if method != "GET" || !path.ends_with("/logs") {
+            return Err(Error::bad("Unsupported execution query."));
+        }
+        crate::runner::logs::offset(query)?;
+    }
     let parts = path.trim_start_matches('/').split('/').collect::<Vec<_>>();
     let uuid = |id: &str| crate::validation::uuid(id).is_ok();
     let allowed = match parts.as_slice() {

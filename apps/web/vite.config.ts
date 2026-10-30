@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import tailwindcss from '@tailwindcss/vite'
 import vue from '@vitejs/plugin-vue'
 import { defineConfig } from 'vite'
+import { webBuildId } from './build-id'
 
 const pdfRoot = path.dirname(fileURLToPath(import.meta.resolve('pdfjs-dist/package.json')))
 const pdfVersion = JSON.parse(readFileSync(path.join(pdfRoot, 'package.json'), 'utf8')).version
@@ -11,6 +12,9 @@ const pdfAssets = ['cmaps', 'standard_fonts', 'wasm'].flatMap(directory => readd
 
 export default defineConfig({
   root: fileURLToPath(new URL('.', import.meta.url)),
+  define: {
+    __CAIRN_WEB_BUILD_ID__: JSON.stringify(webBuildId(fileURLToPath(new URL('../..', import.meta.url)))),
+  },
   plugins: [vue(), tailwindcss(), {
     name: 'local-pdf-assets',
     generateBundle() {

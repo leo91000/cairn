@@ -1219,11 +1219,18 @@ pub(crate) async fn tick_missions(s: &Service, active: &HashSet<String>) -> Resu
                     .ok_or_else(|| Error::conflict("Waiting mission has no saved checkpoint."))?;
                 // Keep remainingMs: elapsed waiting time never spends the execution budget.
                 checkpoint.completed = Some(false);
+                checkpoint.output_interrupted = None;
+                checkpoint.provider_failed = None;
+                checkpoint.turn_pending = Some(true);
+                checkpoint.recovery_deadline_ms = None;
+                checkpoint.terminal_code = Some(None);
                 checkpoint.settled = Some(None);
                 checkpoint.last_message = None;
                 checkpoint.last_error = Some(None);
                 checkpoint.retry_cause = Some(None);
                 checkpoint.controller_recoveries = None;
+                checkpoint.controller_recovery_reservation = None;
+                checkpoint.controller_observation = None;
                 checkpoint.store_in(db, &run_id)?;
                 wakeup.progress.observation = Some(observed);
                 let turn_id = wakeup.id.clone();

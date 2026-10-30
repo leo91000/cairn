@@ -503,3 +503,62 @@ async fn beacon_serves_the_node_gateway_with_its_checksum_in_the_bootstrap() {
     assert!(script.contains("does not provide the node gateway"));
     assert!(script.contains("exit 1"));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_direct_channels_keep_their_responses_when_streams_are_reused() {
+    logs();
+    let (relay, installation) = echoing_installation().await;
+
+    let pin =
+        pin(&create_enrollment(&relay, json!({ "name": "Desktop", "backend": "native" })).await);
+    let gateway = Gateway::start(&relay.app.url, &installation, &pin, true).await;
+    // Connections use Beacon until the direct connection is up.
+    let client = client();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        while gateway.carried().0 == 0 {
+            let _ = client
+                .post(format!("{}/internal/nodes/heartbeat", gateway.origin))
+                .timeout(Duration::from_secs(5))
+                .json(&json!({"runtimeId": "development", "nodeProtocol": 2}))
+                .send()
+                .await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await
+    .expect("direct connection");
+    let (_, relayed) = gateway.carried();
+
+    // A production gateway serves concurrent TCP connections. Closing each
+    // response repeatedly reuses the finite set of SCTP wire stream IDs.
+    for _ in 0..16 {
+        let mut requests = tokio::task::JoinSet::new();
+        for _ in 0..8 {
+            let address = gateway.origin.trim_start_matches("http://").to_owned();
+            requests.spawn(async move {
+                let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+                let request = b"GET /internal/nodes/../execution/health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+                tokio::io::AsyncWriteExt::write_all(&mut stream, request)
+                    .await
+                    .unwrap();
+                let mut response = String::new();
+                tokio::time::timeout(
+                    Duration::from_secs(10),
+                    tokio::io::AsyncReadExt::read_to_string(&mut stream, &mut response),
+                )
+                .await
+                .expect("a concurrent direct channel must answer")
+                .unwrap();
+                assert!(response.starts_with("HTTP/1.1 404"), "expected traversal rejection, got {response:?}");
+            });
+        }
+        while let Some(result) = requests.join_next().await {
+            result.unwrap();
+        }
+    }
+    // Every connection after that went direct: Beacon carried none.
+    assert_eq!(gateway.carried().1, relayed);
+
+    drop(gateway);
+    relay.close().await;
+}

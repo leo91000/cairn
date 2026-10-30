@@ -64,7 +64,7 @@ impl Scope {
 struct CachedList {
     revision: u64,
     built_at: Instant,
-    chats: Vec<Value>,
+    chats: Arc<Vec<Value>>,
 }
 
 struct ListMetrics {
@@ -148,7 +148,7 @@ impl ConversationLists {
         db: &Db<'_>,
         scope: &Scope,
         revision: u64,
-    ) -> Result<(Vec<Value>, Option<Instant>)> {
+    ) -> Result<(Arc<Vec<Value>>, Option<Instant>)> {
         if let Some(cached) = self.cache.lock().unwrap().get(&scope.account) {
             let refresh_at = cached.built_at + LIST_INTERVAL;
             let same_revision = cached.revision == revision;
@@ -160,7 +160,7 @@ impl ConversationLists {
             }
         }
         let started = Instant::now();
-        let chats = conversations(db, scope)?;
+        let chats = Arc::new(conversations(db, scope)?);
         let micros = started.elapsed().as_micros() as u64;
         self.cache.lock().unwrap().insert(
             scope.account.clone(),
@@ -198,8 +198,18 @@ struct State {
     chat: Value,
     artifacts: Vec<Value>,
     cache_revision: Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    chats: Option<Vec<Value>>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_chats"
+    )]
+    chats: Option<Arc<Vec<Value>>>,
+}
+
+fn serialize_chats<S: serde::Serializer>(
+    chats: &Option<Arc<Vec<Value>>>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    chats.as_deref().serialize(serializer)
 }
 
 struct Page {
