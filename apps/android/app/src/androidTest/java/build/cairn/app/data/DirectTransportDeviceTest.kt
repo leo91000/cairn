@@ -184,10 +184,7 @@ class DirectTransportDeviceTest {
             phase: String = "initial direct response",
         ) =
             duringPhase(phase, 60000) {
-                do {
-                    delay(200)
-                    read(client)
-                } while (client.transport.route.value != "direct")
+                awaitDirectBenchRead(client) { read(client) }
             }
         fun shell(command: String) {
             instrumentation.uiAutomation.executeShellCommand(command).use { descriptor ->
@@ -338,10 +335,9 @@ class DirectTransportDeviceTest {
                             capacityAttempts.get(),
                         )
                         duringPhase("capacity retry direct response", 25000) {
-                            do {
-                                delay(200)
+                            awaitDirectBenchRead(capacity) {
                                 assertEquals("[]", capacity.request("GET", "/chats"))
-                            } while (capacity.transport.route.value != "direct")
+                            }
                         }
                         assertTrue(
                             "Retry must retain its fifteen-second deadline",
