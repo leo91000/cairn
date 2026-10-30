@@ -21,6 +21,8 @@ jobs:
             image: ghcr.io/leo91000/cairn@sha256:3f117abd79e5ea47068922d9277905eaa215e6cdd98de1c6c07bc9d3020152b6
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          ref: 7e0dfb38675b92a7f7511d467d399169efe5277d
       - uses: ./.github/actions/setup-pnpm
       - uses: docker/login-action@v4.6.0
         with:
@@ -42,8 +44,10 @@ jobs:
           PROBE_IMAGE: ${{ matrix.image }}
           PROBE_REVISION: ${{ matrix.revision }}
           PROBE_SOURCE: ${{ matrix.source }}
-          CAIRN_PROBE_INBOX_POLL_MS: '0'
         run: |
+          test "$(git rev-parse HEAD)" = 7e0dfb38675b92a7f7511d467d399169efe5277d
+          test -z "$(git status --porcelain)"
+          pnpm exec vitest run scripts/tests/runner-probe.test.mjs
           docker pull "$PROBE_IMAGE"
           revision=$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$PROBE_IMAGE")
           test "$revision" = "$PROBE_REVISION"
