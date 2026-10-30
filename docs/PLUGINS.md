@@ -1236,7 +1236,9 @@ Read surfaces share these implementations:
   MCP requires `read`. Installation agents also need a current grant on the
   instance, because discovery uses its service credentials; installation access
   alone does not confer access to the service account. Authorization and instance
-  grants are checked before each host capability, after slow I/O and after the handler. Generated web/Android clients use
+  grants are checked before each host capability, after slow I/O and after the handler.
+  Installation-agent grants stay bound to the instance during OAuth refresh, including
+  credential publication and the service request. Generated web/Android clients use
   the same typed contracts; no picker UI is introduced in this ticket.
 
 Transport (`socket`) and durable `timer` handlers can emit declared hooks:

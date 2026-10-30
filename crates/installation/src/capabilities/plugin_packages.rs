@@ -283,7 +283,7 @@ impl PluginPackageOperation {
                             s,
                             decode(input)?,
                             agent,
-                            Some(management::Authority::resource_read(authority.clone())),
+                            Some(authority.clone()),
                         ))
                         .await?,
                     )?
@@ -293,7 +293,7 @@ impl PluginPackageOperation {
                             s,
                             decode(input)?,
                             agent,
-                            Some(management::Authority::resource_read(authority.clone())),
+                            Some(authority.clone()),
                         ))
                         .await?,
                     )?

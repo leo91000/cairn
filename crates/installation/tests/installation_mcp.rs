@@ -6153,3 +6153,180 @@ async fn resource_handlers_stop_service_effects_when_the_initiating_authority_is
         server.abort();
     }
 }
+
+#[tokio::test]
+async fn resource_handlers_do_not_send_after_grant_revocation_during_oauth_refresh() {
+    use axum::{
+        Json, Router,
+        routing::{get, post},
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Notify;
+
+    for operation in ["list_plugin_resources", "resolve_plugin_resource"] {
+        let root = TempDir::new().unwrap();
+        let s = service(&root).await;
+        s.plugins
+            .use_worker(std::path::PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
+        let main = enabled_main(&s).await;
+        let (_, configuration) = active_run(&s, &main).await;
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let service_calls = Arc::new(AtomicUsize::new(0));
+        let refresh_calls = Arc::new(AtomicUsize::new(0));
+        let upstream = Router::new()
+            .route(
+                "/token",
+                post({
+                    let started = started.clone();
+                    let release = release.clone();
+                    let refresh_calls = refresh_calls.clone();
+                    move || {
+                        let started = started.clone();
+                        let release = release.clone();
+                        let refresh_calls = refresh_calls.clone();
+                        async move {
+                            refresh_calls.fetch_add(1, Ordering::SeqCst);
+                            started.notify_one();
+                            release.notified().await;
+                            Json(json!({
+                                "access_token": "fixture-refreshed",
+                                "token_type": "Bearer",
+                                "expires_in": 3600,
+                            }))
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/resources",
+                get({
+                    let service_calls = service_calls.clone();
+                    move || {
+                        service_calls.fetch_add(1, Ordering::SeqCst);
+                        async { Json(json!({})) }
+                    }
+                }),
+            );
+        let (origin, server) = common::serve_locally(upstream).await;
+        s.plugins.route_http_to(Some(origin));
+        let installed = common::package_install(
+            &s,
+            &json!({
+                "manifest": {
+                    "id": "resource-refresh",
+                    "name": "Resource refresh",
+                    "version": "1",
+                    "apiVersion": 2,
+                    "capabilities": ["http"],
+                    "hosts": ["api.example.test"],
+                    "agentAccess": {},
+                    "settings": [{
+                        "key": "clientId",
+                        "title": "Client ID",
+                        "type": "string",
+                        "required": true,
+                    }],
+                    "credential": {
+                        "label": "Authorization",
+                        "header": "authorization",
+                        "prefix": "Bearer ",
+                        "oauth": {
+                            "authorizationUrl": "https://api.example.test/authorize",
+                            "tokenUrl": "https://api.example.test/token",
+                            "clientIdSetting": "clientId",
+                        },
+                    },
+                    "resources": [{ "name": "repository", "description": "Repository" }],
+                },
+                "source": r#"return {resources = function(input)
+                cairn.http.request({url = "https://api.example.test/resources", auth = true})
+                if input.op == "list" then return {items = cairn.array({})} end
+                return {resourceType = "repository", id = input.id, name = "Repository"}
+            end}"#,
+            }),
+        )
+        .await
+        .unwrap();
+        common::package_approve(&s, "resource-refresh", "1", text(&installed, "digest"))
+            .await
+            .unwrap();
+        let instance = uuid::Uuid::new_v4().to_string();
+        let saved = s
+            .store
+            .put_instance_fixture(json!({
+                "id": instance,
+                "pluginId": "resource-refresh",
+                "enabled": true,
+                "settings": { "clientId": "fixture-client" },
+            }))
+            .await
+            .unwrap();
+        s.agent_fixture(json!({ "plugins": [instance] }), Some(MAIN_AGENT_ID))
+            .await
+            .unwrap();
+        assert!(
+            s.store
+                .plugin_instance(&instance)
+                .await
+                .unwrap()
+                .unwrap()
+                .grants(MAIN_AGENT_ID)
+        );
+        let key = cairn_installation::plugins::connections::credential_key(&instance);
+        let credential = json!({
+            "token": "fixture-expired",
+            "oauth": {
+                "expiresAt": 1,
+                "refreshToken": "fixture-refresh",
+                "tokenUrl": "https://api.example.test/token",
+                "clientId": "fixture-client",
+                "scope": "",
+            },
+        });
+        s.vault.set(&key, &credential).await.unwrap();
+        let mut args = json!({
+            "pluginId": "resource-refresh",
+            "instanceId": instance,
+            "resourceType": "repository",
+        });
+        if operation == "resolve_plugin_resource" {
+            args["id"] = json!("repo");
+        }
+        let invoke = async {
+            let response = call(&s, &configuration, operation, args).await;
+            assert!(
+                refresh_calls.load(Ordering::SeqCst) > 0,
+                "Refresh was not reached: {response}"
+            );
+            response
+        };
+        let revoke = async {
+            started.notified().await;
+            s.agent_fixture(json!({ "plugins": [] }), Some(MAIN_AGENT_ID))
+                .await
+                .unwrap();
+            let current = s.store.plugin_instance(&instance).await.unwrap().unwrap();
+            assert_eq!(current.revision, saved["revision"].as_str().unwrap());
+            // Plugin grants are independent of the run's installation access.
+            let still_authorized = call(&s, &configuration, "list_plugins", json!({})).await;
+            assert_ne!(
+                still_authorized["result"]["isError"], true,
+                "{still_authorized}"
+            );
+            release.notify_one();
+        };
+        let (response, ()) = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            tokio::join!(Box::pin(invoke), Box::pin(revoke))
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            response["result"]["isError"], true,
+            "{operation}: {response}"
+        );
+        assert_eq!(service_calls.load(Ordering::SeqCst), 0, "{operation}");
+        assert!(s.vault.get(&key).await.unwrap().as_ref() == Some(&credential));
+        server.abort();
+    }
+}

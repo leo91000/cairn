@@ -21,11 +21,12 @@ pub struct Authority {
 impl Authority {
     pub(crate) fn resource_read(
         preparation: crate::capabilities::plugin_packages::Authority,
+        instance: connections::Connection,
     ) -> Self {
         Self {
             bearer: preparation.bearer.clone(),
             preparation: Some(preparation),
-            instance: None,
+            instance: Some(Box::new(instance)),
             shared: None,
         }
     }

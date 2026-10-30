@@ -4,6 +4,7 @@ use super::{
     scope::{self, Scope},
 };
 use crate::{
+    capabilities::plugin_packages::Authority,
     error::{Error, Result},
     service::Service,
 };
@@ -45,7 +46,7 @@ async fn instance(
     instance: &str,
     kind: &str,
     agent: Option<&str>,
-    authority: Option<management::Authority>,
+    authority: Option<Authority>,
 ) -> Result<(registry::Package, Scope)> {
     let package = registry::active(s, plugin).await?;
     if package.manifest.resource_type(kind).is_none() {
@@ -57,6 +58,12 @@ async fn instance(
             "Enable this instance before reading its resources.",
         ));
     }
+
+    // Refresh publication and HTTP pre-send checks also need the expected
+    // instance: revoking a plugin grant does not change its settings revision.
+    let authority = authority
+        .map(|authority| management::Authority::resource_read(authority, connection.clone()));
+
     let scope = if let Some(agent) = agent {
         if !connection.grants(agent) {
             return Err(Error::forbidden(
@@ -89,7 +96,7 @@ pub(crate) async fn list_authorized(
     s: &Service,
     input: ListPluginResourcesInput,
     agent: Option<&str>,
-    authority: Option<management::Authority>,
+    authority: Option<Authority>,
 ) -> Result<ListPluginResourcesOutput> {
     if !(1..=10_000).contains(&input.page)
         || input.query.chars().count() > 200
@@ -159,7 +166,7 @@ pub(crate) async fn resolve_authorized(
     s: &Service,
     input: ResolvePluginResourceInput,
     agent: Option<&str>,
-    authority: Option<management::Authority>,
+    authority: Option<Authority>,
 ) -> Result<ResolvePluginResourceOutput> {
     if !plain(&input.id, 200) {
         return Err(Error::bad("Choose a resource ID of at most 200 bytes."));
