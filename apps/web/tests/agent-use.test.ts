@@ -6,6 +6,7 @@ import {
   canDirectChat,
   canUseAgent,
   defaultAgent,
+  readOnlyNotice,
   withAccess,
 } from '../src/agent-use'
 
@@ -68,4 +69,13 @@ it('applies only the changed member when responses arrive out of order', () => {
   expect(withAccess(afterSecond, 'a', ['a'])).toEqual(['b', 'a'])
   expect(withAccess(['a', 'b'], 'a', ['b'])).toEqual(['b'])
   expect(withAccess(['a'], 'a', ['a'])).toEqual(['a'])
+})
+
+it('names the requesting conversation\'s agent in a delegated task\'s read-only notice while it exists', () => {
+  const delegated = { agentName: 'Writer', requestedBy: { runId: 'run', chatId: 'requesting', requestId: null } }
+  expect(readOnlyNotice(delegated, [{ id: 'requesting', agentName: 'Reviewer' }])).toBe(
+    'Only people with access to Writer or to Reviewer can continue it or answer its questions, and only people with access to Writer can delete it. You can still pause or stop its work. Ask the installation owner for access.',
+  )
+  expect(readOnlyNotice(delegated, [])).toMatch(/^Only people with access to Writer can continue it/)
+  expect(readOnlyNotice({ agentName: '', requestedBy: null }, [])).toMatch(/^Only people with access to its agent can/)
 })

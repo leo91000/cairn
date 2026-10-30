@@ -339,14 +339,15 @@ with the agents the owner lets them use: each agent page has an owner-only **Who
 use it** section on web and Android ([ADR-0075](adr/0075-plugin-hooks-rules-and-scoped-grants.md)).
 A new agent is the owner's alone; at rollout, the members of the first membership
 check after the upgrade kept the existing agents (someone invited before that check,
-which only a Beacon outage can delay, counts as an existing member). Starting, continuing, steering, answering, launching by hand, deleting or
-restoring a conversation and creating or editing a task require access to its agent; every
-member still sees every conversation and can pause, archive or stop any work. A
-delegated task can be directed with access to its requesting conversation's agent.
-The installation refuses management of agents, projects, skills,
-nodes, coding-agent accounts, connections, secrets and settings. The web hides
-these actions and owner-only pages, skips owner-only requests in shared views,
-and offers skills for reading only.
+which only a Beacon outage can delay, counts as an existing member). Starting,
+continuing, steering, answering, launching by hand, deleting or restoring a
+conversation and creating or editing a task require access to its agent; every member
+still sees every conversation and can pause, archive or stop any work. A delegated
+task can be directed with access to its requesting conversation's agent. The
+installation refuses management of agents, projects, skills, nodes, coding-agent
+accounts, connections, secrets and settings. The web hides these actions and
+owner-only pages, skips owner-only requests in shared views, and offers skills for
+reading only.
 
 ## Public deliverables and MCP access
 
@@ -757,11 +758,11 @@ list of usable agents repeats it the same way, but still answers when the Beacon
 cannot. If both reconciliation requests of a removal and new invitation are lost,
 the earlier membership's entries can therefore still allow work for up to 30
 seconds after the last check, and question notifications computed meanwhile can
-include that member. A member's scheduled
-task on an agent they cannot use skips its occurrences, with a wait reason, until
-access returns. No account session or member list is persisted on the installation
-for access control; it keeps only, per agent, the accounts the owner allowed with
-the membership access identifier they were allowed in. See [ADR-0029](adr/0029-sharing-whole-installations.md) for authorship,
+include that member. A member's scheduled task on an agent they cannot use skips its
+occurrences, with a wait reason, until access returns. No account session or member
+list is persisted on the installation for access control; it keeps only, per agent,
+the accounts the owner allowed with the membership access identifier they were
+allowed in. See [ADR-0029](adr/0029-sharing-whole-installations.md) for authorship,
 manual work and public-link decisions.
 
 ## Installation subdomains

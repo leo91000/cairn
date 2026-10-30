@@ -48,6 +48,30 @@ class AgentPeopleTest {
     }
 
     @Test
+    fun aDelegatedTaskNoticeNamesItsRequestingAgentWhileItExists() {
+        val requesting = Chat(id = "requesting", agentId = reviewer, agentName = "Relecteur")
+        val delegated =
+            Chat(
+                id = "delegated",
+                agentId = writer,
+                agentName = "Rédacteur",
+                requester = ChatRequester("requesting"),
+            )
+        assertEquals(
+            "Seules les personnes ayant accès à Rédacteur ou à Relecteur peuvent la poursuivre ou répondre à ses questions, et seules celles ayant accès à Rédacteur peuvent la supprimer. Vous pouvez toujours la mettre en pause ou l’arrêter. Demandez l’accès au propriétaire de l’installation.",
+            readOnlyNotice(delegated, listOf(requesting, delegated)),
+        )
+        assertTrue(
+            readOnlyNotice(delegated, listOf(delegated))
+                .startsWith("Seules les personnes ayant accès à Rédacteur peuvent")
+        )
+        assertTrue(
+            readOnlyNotice(Chat(id = "alone"), emptyList())
+                .startsWith("Seules les personnes ayant accès à son agent peuvent")
+        )
+    }
+
+    @Test
     fun newConversationsStartOnMainOnlyWhenItIsUsable() {
         val agents = listOf(agent(MAIN_AGENT_ID), agent(reviewer), agent(writer))
         assertEquals(MAIN_AGENT_ID, defaultAgent(null, agents))

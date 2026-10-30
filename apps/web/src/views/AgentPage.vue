@@ -154,6 +154,8 @@ const deleting = ref(false)
 const heading = ref<HTMLElement>()
 // Account access applies immediately and never joins the unsaved profile draft.
 const people = useAgentPeople(computed(() => isNew.value || notFound.value ? null : id.value))
+// Until access loads, the overview neither claims the agent is private nor shared.
+const peopleLoading = computed(() => !isNew.value && !people.error.value && !people.loaded.value)
 const peopleSummary = computed(() => isNew.value
   ? { short: 'Only you', long: 'Only you' }
   : people.error.value
@@ -372,12 +374,16 @@ const overview = computed(() => [
         section: 'people' as const,
         title: 'People',
         summary: peopleSummary.value.long,
-        detail: people.count.value
-          ? names(people.rows.value.filter(row => row.known && row.allowed).map(row => row.email), email => email)
-          : 'Members cannot start or continue its conversations',
+        detail: peopleLoading.value
+          ? 'Checking which members can use it'
+          : people.count.value
+            ? names(people.rows.value.filter(row => row.known && row.allowed).map(row => row.email), email => email)
+            : 'Members cannot start or continue its conversations',
         chip: people.error.value
           ? { tone: 'unavailable' as const, label: 'Unavailable' }
-          : people.count.value ? { tone: 'granted' as const, label: 'Shared' } : { tone: 'none' as const, label: 'Only you' },
+          : peopleLoading.value
+            ? undefined
+            : people.count.value ? { tone: 'granted' as const, label: 'Shared' } : { tone: 'none' as const, label: 'Only you' },
         action: 'Manage',
       },
     ],

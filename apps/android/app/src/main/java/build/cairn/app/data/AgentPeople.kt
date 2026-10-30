@@ -23,6 +23,20 @@ fun canDirectChat(usable: List<String>?, chat: Chat, chats: List<Chat>): Boolean
     return requesting != null && canUseAgent(usable, requesting.agentId)
 }
 
+/**
+ * Who may direct a conversation the viewer can only follow: people with access to its agent and,
+ * for a delegated task whose requesting conversation still exists, to that conversation's agent.
+ */
+fun readOnlyNotice(chat: Chat, chats: List<Chat>): String {
+    val own = chat.agentName.ifBlank { "son agent" }
+    val requesting = chat.requester?.let { requester -> chats.find { it.id == requester.chatId } }
+    val who =
+        if (requesting == null) "Seules les personnes ayant accès à $own"
+        else
+            "Seules les personnes ayant accès à $own ou à ${requesting.agentName.ifBlank { "l’agent de la conversation qui l’a déléguée" }}"
+    return "$who peuvent la poursuivre ou répondre à ses questions, et seules celles ayant accès à $own peuvent la supprimer. Vous pouvez toujours la mettre en pause ou l’arrêter. Demandez l’accès au propriétaire de l’installation."
+}
+
 /** The agent a new conversation starts with: Main when allowed, otherwise the first usable one. */
 fun defaultAgent(usable: List<String>?, agents: List<Agent>): String =
     if (canUseAgent(usable, MAIN_AGENT_ID)) MAIN_AGENT_ID

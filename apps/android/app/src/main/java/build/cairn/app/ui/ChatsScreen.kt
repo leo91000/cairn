@@ -1547,7 +1547,7 @@ internal fun ChatPage(
                             )
                         if (!fullscreen && readOnly)
                             Notice(
-                                "Seules les personnes ayant accès à ${chat?.agentName?.ifBlank { null } ?: "son agent"} peuvent la poursuivre, répondre à ses questions ou la supprimer. Vous pouvez toujours la mettre en pause ou l’arrêter. Demandez l’accès au propriétaire de l’installation.",
+                                chat?.let { readOnlyNotice(it, chats.orEmpty()) }.orEmpty(),
                                 Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
                                     .testTag("conversation-read-only"),
                                 title = "Vous pouvez suivre cette conversation",

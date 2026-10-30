@@ -21,6 +21,20 @@ export function canDirectChat(usable: UsableAgents, chat: Pick<ChatView, 'agentI
   return !!requesting && canUseAgent(usable, requesting.agentId)
 }
 
+/**
+ * Who may direct a conversation the viewer can only follow: people with access to its agent and,
+ * for a delegated task whose requesting conversation still exists, to that conversation's agent.
+ */
+export function readOnlyNotice(chat: Pick<ChatView, 'agentName' | 'requestedBy'>, chats: readonly Pick<ChatView, 'id' | 'agentName'>[]) {
+  const own = chat.agentName || 'its agent'
+  const requester = chat.requestedBy?.chatId
+  const requesting = requester ? chats.find(item => item.id === requester) : undefined
+  const who = requesting
+    ? `Only people with access to ${own} or to ${requesting.agentName || 'the agent of the conversation that delegated it'}`
+    : `Only people with access to ${own}`
+  return `${who} can continue it or answer its questions, and only people with access to ${own} can delete it. You can still pause or stop its work. Ask the installation owner for access.`
+}
+
 /** The agent a new conversation starts with: Main when allowed, otherwise the first usable one. */
 export function defaultAgent(usable: UsableAgents, agents: readonly { id: string }[]) {
   if (canUseAgent(usable, MAIN_AGENT_ID))

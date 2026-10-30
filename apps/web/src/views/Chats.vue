@@ -33,7 +33,12 @@ import { sendChatMessage } from '../../../../packages/contracts/generated/sendCh
 import { setChatPaused } from '../../../../packages/contracts/generated/setChatPaused'
 import { stopChat } from '../../../../packages/contracts/generated/stopChat'
 import { failureReason, sameReason, stopEcho } from '../activity'
-import { canDirectChat, canUseAgent, defaultAgent } from '../agent-use'
+import {
+  canDirectChat,
+  canUseAgent,
+  defaultAgent,
+  readOnlyNotice,
+} from '../agent-use'
 import {
   api,
   apiUpload,
@@ -461,6 +466,7 @@ watch(events, (items) => {
     outgoing.value = null
 })
 const selectedAgent = computed(() => state.agents.find(agent => agent.id === (detail.value?.agentId || agentId.value)))
+const readOnlyText = computed(() => detail.value ? readOnlyNotice({ ...detail.value, agentName: detail.value.agentName || selectedAgent.value?.name || '' }, chats.value) : '')
 // Members only start conversations with the agents the owner lets them use.
 const agents = computed(() => state.agents.filter(agent => canUseAgent(state.usableAgents, agent.id)).map(agent => ({
   value: agent.id,
@@ -1223,7 +1229,7 @@ function key(event: KeyboardEvent) {
               title="You can follow this conversation"
             >
               <p>
-                Only people with access to {{ selectedAgent?.name || 'its agent' }} can continue it, answer its questions or delete it. You can still pause or stop its work. Ask the installation owner for access.
+                {{ readOnlyText }}
               </p>
             </UiNotice>
             <section
