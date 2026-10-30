@@ -220,6 +220,9 @@ abstract class AgentPageCases {
         val accessChanges: CopyOnWriteArrayList<String> = CopyOnWriteArrayList(),
         /** The Beacon cannot list the installation's members. */
         val failMembers: AtomicBoolean = AtomicBoolean(false),
+        /** Holds access changes until released, as a slow installation would. */
+        val heldAccess: AtomicReference<java.util.concurrent.CountDownLatch?> =
+            AtomicReference(null),
     )
 
     private fun fixture(): Fixture {
@@ -236,6 +239,7 @@ abstract class AgentPageCases {
         val allowed = AtomicReference<List<String>>(emptyList())
         val accessChanges = CopyOnWriteArrayList<String>()
         val failMembers = AtomicBoolean(false)
+        val heldAccess = AtomicReference<java.util.concurrent.CountDownLatch?>(null)
         val server = MockWebServer()
         server.dispatcher =
             object : Dispatcher() {
@@ -249,6 +253,8 @@ abstract class AgentPageCases {
                     // Like the installation: members allowed to use one agent, changed one by one.
                     Regex("^/agents/([^/]+)/accounts(?:/([^/]+))?$").find(path)?.let { match ->
                         val (agent, account) = match.destructured
+                        if (request.method != "GET")
+                            heldAccess.get()?.await(15, java.util.concurrent.TimeUnit.SECONDS)
                         when (request.method) {
                             "PUT" -> allowed.set((allowed.get() + account).distinct())
                             "DELETE" -> allowed.set(allowed.get() - account)
@@ -445,6 +451,7 @@ abstract class AgentPageCases {
             allowed,
             accessChanges,
             failMembers,
+            heldAccess,
         )
     }
 
@@ -593,12 +600,18 @@ abstract class AgentPageCases {
 
             open(AgentSection.People)
             waitForDescription(ada)
+            // Leaving the section before the answer still shows the change that applied.
+            val held = java.util.concurrent.CountDownLatch(1)
+            fixture.heldAccess.set(held)
             compose.onNodeWithContentDescription(ada).assertIsOn().performClick()
+            back()
+            held.countDown()
             compose.waitUntil(15000) { fixture.accessChanges.size == 2 }
             assertEquals(
                 "DELETE /agents/${release.id}/accounts/member-ada",
                 fixture.accessChanges.last(),
             )
+            waitForText("Vous seul")
             assertTrue(fixture.saved.isEmpty())
         }
     }

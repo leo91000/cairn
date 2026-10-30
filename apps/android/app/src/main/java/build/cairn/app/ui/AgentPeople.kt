@@ -25,6 +25,7 @@ import build.cairn.contracts.grantAgentAccount
 import build.cairn.contracts.listAgentAccounts
 import build.cairn.contracts.revokeAgentAccount
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
@@ -92,9 +93,10 @@ internal fun PeopleSection(
     creating: Boolean,
     installation: Boolean,
     powerColors: Pair<Color, Color>,
+    // The page's scope: a change still lands when the owner leaves this section meanwhile.
+    scope: CoroutineScope,
     retry: () -> Unit,
 ) {
-    val scope = rememberCoroutineScope()
     val name = agentName.ifBlank { "cet agent" }
     Text(
         "Les personnes que vous ajoutez ici peuvent démarrer des conversations avec $name, les poursuivre et les orienter, répondre à ses questions et planifier ses missions. Tout le monde dans l’installation voit toujours chaque conversation et peut mettre en pause ou arrêter le travail.",

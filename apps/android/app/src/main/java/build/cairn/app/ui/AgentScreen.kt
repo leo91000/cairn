@@ -510,6 +510,7 @@ private fun AgentPage(
                             // Access applies at once to the saved agent: warn for either state.
                             baseline.access.installation || draft.agent.access.installation,
                             powerColors(),
+                            scope,
                             retry = { peopleAttempt++ },
                         )
                 }
