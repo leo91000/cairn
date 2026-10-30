@@ -129,6 +129,21 @@ struct Attempt {
     suspension: Arc<super::suspension::Suspension>,
 }
 
+fn completion_status(previous: i32, completion: block::Completion) -> (i32, bool) {
+    (
+        completion.exit_code(previous),
+        completion == block::Completion::FailedFlush,
+    )
+}
+
+fn exit_record(code: i32, finalization_failed: bool) -> String {
+    if finalization_failed {
+        json!({ "StatusCode": code, "FinalizationFailed": true }).to_string()
+    } else {
+        code.to_string()
+    }
+}
+
 #[derive(Clone)]
 struct Controller {
     data: PathBuf,
@@ -478,9 +493,8 @@ impl Controller {
                         .await;
                         match result {
                             Ok(completion) => {
-                                code = completion.exit_code(code);
-                                if completion == block::Completion::FailedFlush {
-                                    finalization_failed = true;
+                                (code, finalization_failed) = completion_status(code, completion);
+                                if finalization_failed {
                                     let _ = controller.append(&id, true, b"Native filesystem could not be flushed; the durable crash prefix was retained.\n").await;
                                 }
                                 break;
@@ -517,12 +531,17 @@ impl Controller {
             }
             // The active marker must survive until suspension accounting is
             // finalized, so recovery can close it after any controller crash.
-            let exit = if finalization_failed {
-                json!({ "StatusCode": code, "FinalizationFailed": true }).to_string()
-            } else {
-                code.to_string()
-            };
-            let _ = atomic_write(&controller.file(&id, "exit"), exit.as_bytes()).await;
+            let exit = exit_record(code, finalization_failed);
+            loop {
+                match atomic_write(&controller.file(&id, "exit"), exit.as_bytes()).await {
+                    Ok(()) => break,
+                    Err(error) if finalization_failed => {
+                        tracing::error!(attempt = id, %error, "Native completion must be saved before releasing the attempt");
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
+                    Err(_) => break,
+                }
+            }
             let _ = tokio::fs::remove_file(controller.file(&id, "active")).await;
             controller.active.lock().await.remove(&id);
             controller.capacity.lock().await.attempts.remove(&id);
@@ -2183,11 +2202,14 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
     }
     for (attempt, run, marker) in interrupted {
         block::recover_completed(&state, &run, &attempt).await?;
-        atomic_write(
-            &marker.with_extension("exit"),
-            crate::runner::CONTROLLER_INTERRUPTED.to_string().as_bytes(),
-        )
-        .await?;
+        let exit = marker.with_extension("exit");
+        if !exit.exists() {
+            atomic_write(
+                &exit,
+                crate::runner::CONTROLLER_INTERRUPTED.to_string().as_bytes(),
+            )
+            .await?;
+        }
         tokio::fs::remove_file(marker).await?;
     }
     recover_preparations(&data, &state).await?;
@@ -3283,6 +3305,35 @@ mod tests {
         }
         let result: Value = serde_json::from_slice(&received).unwrap();
         assert_eq!(result, json!({ "StatusCode": 17 }));
+    }
+
+    #[tokio::test]
+    async fn failed_native_flush_survives_controller_wait_reload() {
+        let (_fixture, controller) = fixture().await;
+        let attempt = crate::config::id();
+        let (code, failed) = completion_status(1, block::Completion::FailedFlush);
+        let record = exit_record(code, failed);
+        atomic_write(&controller.file(&attempt, "exit"), record.as_bytes())
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            let response = handler(
+                State(controller.clone()),
+                request(&format!("/runs/{attempt}/wait"), &json!({})),
+            )
+            .await
+            .unwrap();
+            let body = axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap();
+            let result: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                result,
+                json!({ "StatusCode": 70, "FinalizationFailed": true })
+            );
+        }
+        let (code, failed) = completion_status(1, block::Completion::Flushed);
+        assert_eq!(exit_record(code, failed), "1");
     }
 
     #[tokio::test]

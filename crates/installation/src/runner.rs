@@ -44,7 +44,10 @@ async fn fence_interrupted_attempts(state: &std::path::Path) -> Result<()> {
     let mut files = tokio::fs::read_dir(state).await?;
     while let Some(file) = files.next_entry().await? {
         if file.path().extension().is_some_and(|s| s == "active") {
-            atomic_write(&file.path().with_extension("exit"), b"143").await?;
+            let exit = file.path().with_extension("exit");
+            if !exit.exists() {
+                atomic_write(&exit, b"143").await?;
+            }
             tokio::fs::remove_file(file.path()).await?;
         }
     }
@@ -105,6 +108,20 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn interrupted_restart_preserves_committed_finalization_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let active = root.path().join("attempt.active");
+        let exit = root.path().join("attempt.exit");
+        tokio::fs::write(&active, b"run").await.unwrap();
+        let failure = br#"{"StatusCode":70,"FinalizationFailed":true}"#;
+        tokio::fs::write(&exit, failure).await.unwrap();
+        super::fence_interrupted_attempts(root.path())
+            .await
+            .unwrap();
+        assert!(!active.exists());
+        assert_eq!(tokio::fs::read(exit).await.unwrap(), failure);
+    }
     use super::*;
     use crate::microvm::plan::Plan;
     use axum::body::Body;

@@ -406,9 +406,17 @@ impl Execution {
         } else {
             code.to_string()
         };
-        let exit = atomic_write(&broker.state_file(id, "exit"), outcome.as_bytes()).await;
-        if let Err(error) = exit {
-            tracing::warn!(attempt = %id, message = %error.message, "Could not record VM exit");
+        loop {
+            match atomic_write(&broker.state_file(id, "exit"), outcome.as_bytes()).await {
+                Ok(()) => break,
+                Err(error) => {
+                    tracing::warn!(attempt = %id, message = %error.message, "Could not record VM exit before releasing the attempt");
+                    if !finalization_failed {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+            }
         }
         let _ = tokio::fs::remove_file(broker.state_file(id, "active")).await;
         broker.active.lock().await.remove(id);

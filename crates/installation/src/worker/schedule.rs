@@ -2012,6 +2012,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_flush_recovery_is_terminal_only_for_its_attempt() {
+        let (_root, service, _chat, run, _workspace) = fixture().await;
+        for (same, completed, cancelled) in [
+            (true, false, false),
+            (true, true, false),
+            (false, false, false),
+            (true, false, true),
+        ] {
+            let id = run.clone();
+            service.store.transaction(move |db| {
+                db.change_run(&id, crate::runs::RunChanges {
+                    status: Some(RunStatus::Queued), cancel_requested_at: Some(cancelled.then(now)),
+                    retry: Some(None), ..Default::default()
+                })?;
+                let saved = RunCheckpoint::from_value(json!({
+                    "prepared": { "backend": "native", "isolated": true }, "runnerId": "current",
+                    "finalizationFailureAttempt": if same { "current" } else { "old" },
+                    "completed": completed, "terminalCode": 70, "remainingMs": null,
+                    "controllerRecoveries": 0,
+                }))?;
+                saved.store_in(db, &id)?;
+                let admitted = finish_recovery(db, &id, Some(&saved))?;
+                assert_eq!(admitted, !same && !completed && !cancelled);
+                let state = db.run_state(&id)?.unwrap();
+                if same { assert_eq!(state.status, if cancelled { RunStatus::Cancelled } else { RunStatus::Failed }); }
+                Ok(())
+            }).await.unwrap();
+        }
+        service.shutdown.cancel();
+    }
+
+    #[tokio::test]
     async fn recovered_provider_failure_with_output_loss_is_paid_once_and_attempt_scoped() {
         let (_root, service, _chat, run, _workspace) = fixture().await;
         for (same, code, cancelled, expired) in [

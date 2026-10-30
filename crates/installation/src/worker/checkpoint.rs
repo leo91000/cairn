@@ -349,6 +349,11 @@ impl RunCheckpoint {
         attempt: &str,
         result: Option<crate::runner::ControllerResult>,
     ) -> Result<()> {
+        if self.runner_id() != Some(attempt) {
+            return Err(crate::error::Error::conflict(
+                "Execution attempt changed during observation.",
+            ));
+        }
         self.terminal_code = Some(result.map(|result| result.code));
         if result.is_some_and(|result| result.finalization_failed)
             && self.finalization_failure_attempt.as_deref() != Some(attempt)
