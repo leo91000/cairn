@@ -1,0 +1,906 @@
+package build.cairn.app.ui
+
+import java.io.File
+import kotlinx.serialization.json.*
+import org.junit.Assert.*
+import org.junit.Test
+
+/** Mermaid parsing and layout, on the corpus the web's diagram tests check too. */
+class DiagramCorpusTest {
+    @Test
+    fun `paints nested sequence backgrounds from parent to child`() {
+        val scene =
+            layoutDiagram(
+                parseDiagram(
+                    "sequenceDiagram\nparticipant A\nrect rgb(255,0,0)\nrect rgb(0,255,0)\nA->>A: Hi\nend\nend"
+                ),
+                measure,
+            )
+        val colors =
+            scene.items
+                .filterIsInstance<PathItem>()
+                .filter { it.opacity != null }
+                .mapNotNull { (it.fill as? DiagramPaint.Literal)?.color }
+        assertEquals(listOf("rgb(255,0,0)", "rgb(0,255,0)"), colors)
+    }
+
+    @Test
+    fun `keeps complete nested sequence frames within their parents`() {
+        val frameCases =
+            cases("parse").filter {
+                it.getValue("name").jsonPrimitive.content.startsWith("sequence-frame-bounds-")
+            }
+        assertTrue(frameCases.isNotEmpty())
+        for (case in frameCases) {
+            val name = case.getValue("name").jsonPrimitive.content
+            val diagram =
+                parseDiagram(case.getValue("source").jsonPrimitive.content) as SequenceDiagram
+            val scene = layoutDiagram(diagram, measure)
+            val frames =
+                scene.items
+                    .filterIsInstance<PathItem>()
+                    .filter {
+                        it.d.lastOrNull() == PathCommand.Close &&
+                            ((it.stroke == DiagramPaint.Tone("cluster-line") && it.width == 1.25) ||
+                                (it.opacity != null && it.fill != null))
+                    }
+                    .map { item ->
+                        val vertices = points(item)
+                        doubleArrayOf(
+                            vertices.minOf { it.first },
+                            vertices.maxOf { it.first },
+                            vertices.minOf { it.second },
+                            vertices.maxOf { it.second },
+                        )
+                    }
+                    .sortedBy { it[2] }
+            assertEquals(diagram.items.filterIsInstance<SequenceBlock>().size, frames.size)
+            for ((outer, inner) in frames.zipWithNext()) {
+                assertTrue(
+                    "$name nested frame crosses parent",
+                    inner[0] >= outer[0] + 4 &&
+                        inner[1] <= outer[1] - 4 &&
+                        inner[2] >= outer[2] + 4 &&
+                        inner[3] <= outer[3] - 4,
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `preserves group membership across ranks`() {
+        fun bounds(item: PathItem): DoubleArray {
+            val vertices = points(item)
+            return doubleArrayOf(
+                vertices.minOf { it.first },
+                vertices.maxOf { it.first },
+                vertices.minOf { it.second },
+                vertices.maxOf { it.second },
+            )
+        }
+        fun disjoint(a: DoubleArray, b: DoubleArray) =
+            a[1] <= b[0] || b[1] <= a[0] || a[3] <= b[2] || b[3] <= a[2]
+        val membershipCases =
+            cases("parse").filter {
+                it.getValue("name").jsonPrimitive.content.startsWith("group-membership-")
+            }
+        assertTrue(membershipCases.isNotEmpty())
+        for (case in membershipCases) {
+            val name = case.getValue("name").jsonPrimitive.content
+            val graph = parseDiagram(case.getValue("source").jsonPrimitive.content) as GraphDiagram
+            val scene = layoutDiagram(graph, measure)
+            val groups =
+                scene.items
+                    .filterIsInstance<PathItem>()
+                    .filter { it.fill == DiagramPaint.Tone("cluster") && it.stroke != null }
+                    .map(::bounds)
+            val nodes = scene.items.filterIsInstance<PathItem>().filter { it.shadow }.map(::bounds)
+            assertEquals(graph.clusters.size, groups.size)
+            for (cluster in graph.clusters) {
+                val title =
+                    scene.items.filterIsInstance<TextItem>().first {
+                        it.lines.firstOrNull() == cluster.label
+                    }
+                val width = title.lines.maxOf { measure.width(it, title.size, title.weight) }
+                val height = title.lines.size * lineHeight(title.size)
+                val caption =
+                    doubleArrayOf(
+                        title.x,
+                        title.x + width,
+                        title.y - height / 2,
+                        title.y + height / 2,
+                    )
+                for (node in nodes) assertTrue(
+                    "$name title ${cluster.id} overlaps a node",
+                    disjoint(caption, node),
+                )
+            }
+            for ((index, group) in groups.withIndex()) {
+                for (peer in groups.drop(index + 1)) assertTrue(
+                    "$name peer groups",
+                    disjoint(group, peer),
+                )
+                for (node in graph.nodes) {
+                    val label =
+                        scene.items.filterIsInstance<TextItem>().first {
+                            it.lines.firstOrNull() == node.label
+                        }
+                    val box = nodes.first {
+                        it[0] <= label.x && label.x <= it[1] && it[2] <= label.y && label.y <= it[3]
+                    }
+                    if (node.parent == graph.clusters[index].id) {
+                        assertTrue(
+                            "$name ${node.id} stays inside its group",
+                            box[0] >= group[0] &&
+                                box[1] <= group[1] &&
+                                box[2] >= group[2] &&
+                                box[3] <= group[3],
+                        )
+                    } else
+                        assertTrue(
+                            "$name ${node.id} stays outside ${graph.clusters[index].id}",
+                            disjoint(box, group),
+                        )
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `preserves semicolon separated sequence steps`() {
+        val compact = "sequenceDiagram; A->>B: first;B->>A: response #59;"
+        val expanded = "sequenceDiagram\nA->>B: first\nB->>A: response #59;"
+        assertEquals(
+            canonical(diagramJson(parseDiagram(expanded))),
+            canonical(diagramJson(parseDiagram(compact))),
+        )
+    }
+
+    @Test
+    fun `keeps multiline flag labels beyond the notch`() {
+        for (direction in listOf("TD", "BT", "LR", "RL")) {
+            for (lines in listOf(1, 5, 11)) {
+                val label = List(lines) { "Hello" }.joinToString("<br>")
+                val scene =
+                    layoutDiagram(parseDiagram("flowchart $direction\nA>\"$label\"]"), measure)
+                val outline = scene.items.filterIsInstance<PathItem>().first { it.shadow }
+                val text = scene.items.filterIsInstance<TextItem>().first()
+                val notch = points(outline)[4].first
+                val left =
+                    text.x - text.lines.maxOf { measure.width(it, text.size, text.weight) } / 2
+                assertTrue("$direction $lines lines: label crosses notch", left - notch >= 8)
+            }
+        }
+    }
+
+    private val corpus =
+        Json.parseToJsonElement(
+                File(requireNotNull(System.getProperty("cairn.diagramCorpus"))).readText()
+            )
+            .jsonObject
+
+    // The web's tests use the same measure, so both layouts must agree exactly.
+    private val measure = TextMeasure { text, size, _ -> text.length * size * 0.55 }
+
+    private fun cases(name: String) = corpus.getValue(name).jsonArray.map { it.jsonObject }
+
+    @Test
+    fun `parses the shared corpus like the web`() {
+        for (case in cases("parse")) {
+            val name = case.getValue("name").jsonPrimitive.content
+            val source = case.getValue("source").jsonPrimitive.content
+            assertEquals(
+                name,
+                canonical(case.getValue("diagram")),
+                canonical(diagramJson(parseDiagram(source))),
+            )
+        }
+    }
+
+    @Test
+    fun `lays out the shared corpus like the web`() {
+        for (case in cases("parse")) {
+            val name = case.getValue("name").jsonPrimitive.content
+            val scene =
+                layoutDiagram(parseDiagram(case.getValue("source").jsonPrimitive.content), measure)
+            val layout = case.getValue("layout").jsonObject
+            assertEquals(
+                name,
+                listOf("width", "height", "items").map { layout.getValue(it).jsonPrimitive.double },
+                listOf(scene.width, scene.height, scene.items.size.toDouble()),
+            )
+        }
+    }
+
+    @Test
+    fun `rejects invalid diagrams`() {
+        for (case in cases("errors")) {
+            val name = case.getValue("name").jsonPrimitive.content
+            // Parsing or layout: an empty chart parses but has nothing to draw.
+            assertThrows(name, DiagramError::class.java) {
+                layoutDiagram(parseDiagram(case.getValue("source").jsonPrimitive.content), measure)
+            }
+        }
+    }
+
+    @Test
+    fun `keeps unsupported sources as code`() {
+        for (source in corpus.getValue("unsupported").jsonArray.map { it.jsonPrimitive.content }) {
+            assertNull(source, diagramKind(source))
+            assertThrows(source, DiagramError::class.java) { parseDiagram(source) }
+        }
+    }
+
+    @Test
+    fun `keeps every drawing inside its bounds without overlapping nodes`() {
+        for (case in cases("parse")) {
+            val name = case.getValue("name").jsonPrimitive.content
+            val scene =
+                layoutDiagram(parseDiagram(case.getValue("source").jsonPrimitive.content), measure)
+            val boxes = mutableListOf<DoubleArray>()
+            for (item in scene.items) {
+                if (item is TextItem) {
+                    val width =
+                        item.lines.maxOfOrNull { measure.width(it, item.size, item.weight) } ?: 0.0
+                    val left =
+                        item.x -
+                            when (item.anchor) {
+                                TextAnchor.MIDDLE -> width / 2
+                                TextAnchor.END -> width
+                                TextAnchor.START -> 0.0
+                            }
+                    val height = item.lines.size * lineHeight(item.size)
+                    assertTrue("$name text left: $left", left >= -1)
+                    assertTrue("$name text right", left + width <= scene.width + 1)
+                    assertTrue("$name text top", item.y - height / 2 >= -1)
+                    assertTrue("$name text bottom", item.y + height / 2 <= scene.height + 1)
+                    continue
+                }
+                if (item !is PathItem) continue
+                val points = points(item)
+                for ((x, y) in points) {
+                    assertTrue("$name: $x,$y", x >= -1 && y >= -1)
+                    assertTrue("$name: $x,$y", x <= scene.width + 1 && y <= scene.height + 1)
+                }
+                if (item.shadow)
+                    boxes.add(
+                        doubleArrayOf(
+                            points.minOf { it.first },
+                            points.maxOf { it.first },
+                            points.minOf { it.second },
+                            points.maxOf { it.second },
+                        )
+                    )
+            }
+            for ((index, a) in boxes.withIndex()) {
+                for (b in boxes.drop(index + 1)) {
+                    val separate = a[1] <= b[0] || b[1] <= a[0] || a[3] <= b[2] || b[3] <= a[2]
+                    assertTrue(name, separate)
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `draws every flowchart node link and label`() {
+        val scene =
+            layoutDiagram(
+                parseDiagram("flowchart LR\n  A[One] -->|go| B{Two?}\n  B --> C((Three))"),
+                measure,
+            )
+        assertEquals(
+            listOf("go", "One", "Two?", "Three"),
+            scene.items.filterIsInstance<TextItem>().flatMap { it.lines },
+        )
+        assertEquals("Flowchart with 3 nodes", scene.label)
+    }
+
+    @Test
+    fun `keeps author colors readable and links safe`() {
+        val diagram =
+            parseDiagram(
+                "flowchart TD\n  A --> B\n  style A fill:#14365a\n  style B fill:url(#x),color:expression(alert(1))\n  click A \"javascript:alert(1)\"\n  click B \"https://example.com\""
+            )
+                as GraphDiagram
+        assertEquals(
+            listOf(DiagramStyle(fill = "#14365a") to null, null to "https://example.com/"),
+            diagram.nodes.map { it.style to it.link },
+        )
+        val label =
+            layoutDiagram(diagram, measure).items.filterIsInstance<TextItem>().first {
+                it.lines.first() == "A"
+            }
+        assertEquals(DiagramPaint.Literal("#ffffff"), label.fill)
+    }
+
+    @Test
+    fun `keeps text readable on author fills in either theme`() {
+        for (case in cases("colors")) {
+            val fill = case.getValue("fill").jsonPrimitive.content
+            val ink = case.getValue("ink").jsonPrimitive.content
+            val source = "flowchart TD\nA[Readable label]\nstyle A fill:$fill"
+            val label =
+                layoutDiagram(parseDiagram(source), measure)
+                    .items
+                    .filterIsInstance<TextItem>()
+                    .first { it.lines.first() == "Readable label" }
+            assertEquals(fill, DiagramPaint.Literal(ink), label.fill)
+        }
+    }
+
+    @Test
+    fun `preserves both self-loop arrowheads and author dash styles`() {
+        val one = layoutDiagram(parseDiagram("flowchart TD\nA --> A"), measure)
+        val both =
+            layoutDiagram(
+                parseDiagram("flowchart TD\nA <--> A\nlinkStyle 0 stroke-dasharray:4 2"),
+                measure,
+            )
+        assertEquals(one.items.size + 1, both.items.size)
+        val loop =
+            both.items.filterIsInstance<PathItem>().first { item ->
+                item.d.any { it is PathCommand.Cubic } && item.stroke == DiagramPaint.Tone("edge")
+            }
+        assertEquals(listOf(4.0, 4.0), loop.dash)
+    }
+
+    @Test
+    fun `separates multiple self-loop routes and labels in every direction`() {
+        for (direction in listOf("TD", "BT", "LR", "RL")) {
+            val scene =
+                layoutDiagram(
+                    parseDiagram(
+                        "flowchart $direction\nA -->|retry| A\nA -->|cancel<br>and stop| A"
+                    ),
+                    measure,
+                )
+            val routes =
+                scene.items.filterIsInstance<PathItem>().filter { item ->
+                    item.fill == null &&
+                        item.stroke == DiagramPaint.Tone("edge") &&
+                        item.d.any { it is PathCommand.Cubic }
+                }
+            assertEquals(direction, 2, routes.map { it.d }.distinct().size)
+            val boxes =
+                scene.items
+                    .filterIsInstance<TextItem>()
+                    .filter { it.lines.first() in listOf("retry", "cancel") }
+                    .map { item ->
+                        val halfWidth =
+                            item.lines.maxOf { measure.width(it, item.size, item.weight) } / 2
+                        val halfHeight = item.lines.size * lineHeight(item.size) / 2
+                        doubleArrayOf(
+                            item.x - halfWidth,
+                            item.x + halfWidth,
+                            item.y - halfHeight,
+                            item.y + halfHeight,
+                        )
+                    }
+            assertEquals(2, boxes.size)
+            val (a, b) = boxes
+            assertTrue(direction, a[1] <= b[0] || b[1] <= a[0] || a[3] <= b[2] || b[3] <= a[2])
+        }
+    }
+
+    @Test
+    fun `keeps multiline text inside circular outlines`() {
+        val label = List(10) { "abcdefghijklmnopqrstuvwxy" }.joinToString("<br>")
+        for (double in listOf(false, true)) {
+            val source =
+                if (double) "flowchart TD\nA(((\"$label\")))" else "flowchart TD\nA((\"$label\"))"
+            val scene = layoutDiagram(parseDiagram(source), measure)
+            val node = scene.items.filterIsInstance<PathItem>().first { it.shadow }
+            val xs = points(node).map { it.first }
+            val text = scene.items.filterIsInstance<TextItem>().first { it.lines.size == 10 }
+            val width = text.lines.maxOf { measure.width(it, text.size, text.weight) }
+            val height = text.lines.size * lineHeight(text.size)
+            val radius = (xs.max() - xs.min()) / 2 - (if (double) 5 else 0)
+            assertTrue(kotlin.math.hypot(width / 2, height / 2) < radius)
+        }
+    }
+
+    @Test
+    fun `compact circle and cross heads keep target IDs`() {
+        val graph = parseDiagram("flowchart LR\nA---oB\nB---xC") as GraphDiagram
+        assertEquals(listOf("A", "B", "C"), graph.nodes.map { it.id })
+        assertEquals(listOf(EdgeHead.CIRCLE, EdgeHead.CROSS), graph.edges.map { it.end })
+    }
+
+    @Test
+    fun `style properties do not absorb subsequent graph statements`() {
+        val graph =
+            parseDiagram(
+                "flowchart TD\nclassDef default fill:red;stroke:navy; A-->B\nstyle A fill:blue; B-->C"
+            )
+                as GraphDiagram
+        assertEquals(listOf("A", "B", "C"), graph.nodes.map { it.id })
+        assertEquals(DiagramStyle(fill = "blue", stroke = "navy"), graph.nodes.first().style)
+        assertEquals(listOf("A" to "B", "B" to "C"), graph.edges.map { it.from to it.to })
+    }
+
+    @Test
+    fun `keeps state notes on their physical sides in every direction`() {
+        for (direction in Direction.entries) {
+            val scene =
+                layoutDiagram(
+                    parseDiagram(
+                        "stateDiagram-v2\ndirection $direction\nA-->B\nnote left of A : Left\nnote right of A : Right"
+                    ),
+                    measure,
+                )
+            val texts = scene.items.filterIsInstance<TextItem>()
+            val state = texts.first { it.lines.firstOrNull() == "A" }
+            val left = texts.first { it.lines.firstOrNull() == "Left" }
+            val right = texts.first { it.lines.firstOrNull() == "Right" }
+            assertTrue(left.x < state.x)
+            assertTrue(right.x > state.x)
+            assertEquals(state.y, left.y, 0.01)
+            assertEquals(state.y, right.y, 0.01)
+        }
+    }
+
+    @Test
+    fun `wraps supplementary characters without splitting surrogate pairs`() {
+        val word = "aa" + "😀".repeat(20)
+        val lines = wrapText(word, 14.0, 500, 200.0, measure)
+        assertEquals(word, lines.joinToString(""))
+        for (line in lines) for (index in line.indices) {
+            val char = line[index]
+            if (Character.isHighSurrogate(char))
+                assertTrue(index + 1 < line.length && Character.isLowSurrogate(line[index + 1]))
+            if (Character.isLowSurrogate(char))
+                assertTrue(index > 0 && Character.isHighSurrogate(line[index - 1]))
+        }
+    }
+
+    @Test
+    fun `uses configured sequence increments and exact hundredths`() {
+        val diagram =
+            parseDiagram(
+                "sequenceDiagram\nautonumber 0.5 0.25\nA->>B: one\nA->>B: two\nA->>B: three"
+            )
+                as SequenceDiagram
+        assertEquals(
+            listOf(0.5, 0.75, 1.0),
+            diagram.items.filterIsInstance<SequenceMessage>().map { it.number },
+        )
+    }
+
+    @Test
+    fun `keeps zero pie categories and matching series colors`() {
+        for (showData in listOf(false, true)) {
+            val source =
+                "pie" +
+                    (if (showData) " showData" else "") +
+                    "\n\"No jobs\":0\n\"Completed\":1\n\"Failed\":0\n\"Waiting\":1"
+            val scene = layoutDiagram(parseDiagram(source), measure)
+            val texts = scene.items.filterIsInstance<TextItem>().flatMap { it.lines }
+            for (label in listOf("No jobs", "Completed", "Failed", "Waiting")) assertTrue(
+                texts.contains(label)
+            )
+            assertEquals(2, texts.count { it == if (showData) "0% · 0" else "0%" })
+            val series =
+                scene.items.filterIsInstance<PathItem>().filter {
+                    (it.fill as? DiagramPaint.Tone)?.tone?.startsWith("series-") == true
+                }
+            val wedges = series.filter { item ->
+                points(item).maxOf { it.first } - points(item).minOf { it.first } > 20
+            }
+            assertEquals(
+                listOf(DiagramPaint.Tone("series-1"), DiagramPaint.Tone("series-3")),
+                wedges.map { it.fill },
+            )
+            assertEquals(
+                (0..3).map { DiagramPaint.Tone("series-$it") },
+                series.filter { it !in wedges }.map { it.fill },
+            )
+        }
+    }
+
+    @Test
+    fun `moves large pie totals to the legend without clipping their digits`() {
+        val scene = layoutDiagram(parseDiagram("pie\n\"A\":1000000000000000000"), measure)
+        val texts = scene.items.filterIsInstance<TextItem>()
+        val center = texts.first { it.size == 18.0 }
+        assertTrue(measure.width(center.lines.first(), center.size, center.weight) < 88)
+        assertTrue(texts.flatMap { it.lines }.contains("Total: 1,000,000,000,000,000,000"))
+    }
+
+    @Test
+    fun `preserves state class suffixes before transition labels`() {
+        val cases =
+            listOf(
+                "A --> B:::critical" to listOf(""),
+                "A --> B:::critical : proceed" to listOf("proceed"),
+                "A:::critical --> B:::critical : go" to listOf("go"),
+                "B:::critical : Ready" to emptyList(),
+            )
+        for ((statement, labels) in cases) {
+            val graph =
+                parseDiagram("stateDiagram-v2\nclassDef critical fill:red\n$statement")
+                    as GraphDiagram
+            val target = graph.nodes.first { it.id == "B" }
+            assertEquals("red", target.style?.fill)
+            assertEquals(labels, graph.edges.map { it.label })
+            if (labels.isEmpty()) assertEquals("Ready", target.label)
+        }
+    }
+
+    @Test
+    fun `separates document endpoints from a composite named root`() {
+        val graph =
+            parseDiagram(
+                "stateDiagram-v2\n[*] --> root\nstate root {\n[*] --> Ready\nReady --> [*]\n}\nroot --> [*]"
+            )
+                as GraphDiagram
+        val endpoints =
+            graph.nodes.filter { it.shape == NodeShape.START || it.shape == NodeShape.END }
+        assertEquals(4, endpoints.size)
+        assertEquals(2, endpoints.count { it.parent == null })
+        assertEquals(2, endpoints.count { it.parent == "root" })
+    }
+
+    @Test
+    fun `keeps self-message labels clear of wide number badges`() {
+        for (number in listOf("1000.25", "1234567890123")) {
+            val scene =
+                layoutDiagram(
+                    parseDiagram("sequenceDiagram\nautonumber $number\nA->>A: work"),
+                    measure,
+                )
+            val text =
+                scene.items.filterIsInstance<TextItem>().first { it.lines.firstOrNull() == "work" }
+            val badge =
+                scene.items.filterIsInstance<PathItem>().first {
+                    it.fill == DiagramPaint.Tone("edge") && it.stroke == null
+                }
+            assertTrue(text.x > points(badge).maxOf { it.first })
+        }
+    }
+
+    @Test
+    fun `keeps activated message labels before their neighboring lifeline`() {
+        val label = "abcdefghijabcdefghijabcdefghij"
+        for (depth in listOf(20, 80)) for (target in listOf("A", "B")) {
+            val source =
+                "sequenceDiagram\nparticipant A\nparticipant B\n" +
+                    "activate A\n".repeat(depth) +
+                    "A->>$target: $label"
+            val texts =
+                layoutDiagram(parseDiagram(source), measure).items.filterIsInstance<TextItem>()
+            val text = texts.first { it.lines.firstOrNull() == label }
+            val peer = texts.first { it.lines.firstOrNull() == "B" }
+            val fraction = if (text.anchor == TextAnchor.MIDDLE) 0.5 else 1.0
+            assertTrue(text.x + measure.width(label, text.size, text.weight) * fraction < peer.x)
+        }
+    }
+
+    @Test
+    fun `fits deep activations and leaves neighboring lifelines and frames clear`() {
+        val sources =
+            listOf(
+                "sequenceDiagram\nparticipant A\n" + "activate A\n".repeat(20),
+                "sequenceDiagram\nparticipant A\nparticipant B\n" + "activate A\n".repeat(80),
+                "sequenceDiagram\nparticipant A\nloop Nested\n" + "activate A\n".repeat(80) + "end",
+            )
+        for (source in sources) {
+            val scene = layoutDiagram(parseDiagram(source), measure)
+            val bars =
+                scene.items.filterIsInstance<PathItem>().filter {
+                    it.fill == DiagramPaint.Tone("data")
+                }
+            val right = bars.maxOf { bar ->
+                points(bar).maxOf { it.first } + (bar.width ?: 0.0) / 2
+            }
+            assertTrue(right < scene.width)
+            val peer =
+                scene.items.filterIsInstance<TextItem>().find { it.lines.firstOrNull() == "B" }
+            if (peer != null) assertTrue(right < peer.x)
+            val frame =
+                scene.items.filterIsInstance<PathItem>().find {
+                    it.stroke == DiagramPaint.Tone("cluster-line") && it.dash == null
+                }
+            if (frame != null) assertTrue(right < points(frame).maxOf { it.first })
+        }
+    }
+
+    @Test
+    fun `attaches diamond and circle loops to their outlines in every direction`() {
+        for (direction in Direction.entries) for (shape in listOf("diamond", "circle", "choice")) {
+            val node = if (shape == "diamond") "A{Ready?}" else "A((Ready?))"
+            val source =
+                if (shape == "choice")
+                    "stateDiagram-v2\ndirection $direction\nstate A <<choice>>\nA --> A : retry"
+                else "flowchart $direction\n$node -->|retry| A"
+            val scene = layoutDiagram(parseDiagram(source), measure)
+            val outline = scene.items.filterIsInstance<PathItem>().first { it.shadow }
+            val vertices = points(outline)
+            val left = vertices.minOf { it.first }
+            val right = vertices.maxOf { it.first }
+            val top = vertices.minOf { it.second }
+            val bottom = vertices.maxOf { it.second }
+            val curve =
+                scene.items.filterIsInstance<PathItem>().first {
+                    it.fill == null && it.stroke == DiagramPaint.Tone("edge")
+                }
+            val head =
+                scene.items.filterIsInstance<PathItem>().first {
+                    it.fill == DiagramPaint.Tone("edge")
+                }
+            for ((x, y) in listOf(points(curve).first(), points(head).first())) {
+                val dx = (x - (left + right) / 2) / ((right - left) / 2)
+                val dy = (y - (top + bottom) / 2) / ((bottom - top) / 2)
+                val boundary =
+                    if (shape != "circle") kotlin.math.abs(dx) + kotlin.math.abs(dy)
+                    else dx * dx + dy * dy
+                assertEquals(1.0, boundary, if (shape != "circle") 0.000001 else 0.001)
+            }
+        }
+    }
+
+    @Test
+    fun `attaches horizontal links to a slanted node edge`() {
+        val scene = layoutDiagram(parseDiagram("flowchart LR\nA[/Ready?/] --> B[Done]"), measure)
+        val node = scene.items.filterIsInstance<PathItem>().first { it.shadow }
+        val vertices = points(node)
+        val edge =
+            scene.items.filterIsInstance<PathItem>().first {
+                it.fill == null && it.stroke == DiagramPaint.Tone("edge")
+            }
+        assertEquals(
+            (vertices[1].first + vertices[2].first) / 2,
+            points(edge).first().first,
+            0.000001,
+        )
+    }
+
+    @Test
+    fun `keeps horizontal cluster titles inside their boxes`() {
+        val labels = listOf("Long descriptive group title", "Another group")
+        for (direction in listOf("LR", "RL")) for (empty in listOf(false, true)) {
+            val source =
+                "flowchart $direction\nsubgraph S[${labels[0]}]\n" +
+                    (if (empty) "" else "A[Go]\n") +
+                    "end\nsubgraph T[${labels[1]}]\n" +
+                    (if (empty) "" else "B[Done]\n") +
+                    "end\nS --> T"
+            val scene = layoutDiagram(parseDiagram(source), measure)
+            val boxes =
+                scene.items.filterIsInstance<PathItem>().filter {
+                    it.fill == DiagramPaint.Tone("cluster") && it.stroke != null
+                }
+            assertEquals(2, boxes.size)
+            for ((index, label) in labels.withIndex()) {
+                val text =
+                    scene.items.filterIsInstance<TextItem>().first {
+                        it.lines.firstOrNull() == label
+                    }
+                assertTrue(
+                    text.x + measure.width(label, text.size, text.weight) <=
+                        points(boxes[index]).maxOf { it.first }
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `orders whole subgraphs beyond 400 member constraints`() {
+        val source =
+            cases("parse")
+                .first { it.getValue("name").jsonPrimitive.content == "full-cluster-constraints" }
+                .getValue("source")
+                .jsonPrimitive
+                .content
+        val scene = layoutDiagram(parseDiagram(source), measure)
+        val clusters =
+            scene.items.filterIsInstance<PathItem>().filter {
+                it.fill == DiagramPaint.Tone("cluster") && it.stroke != null
+            }
+        assertEquals(2, clusters.size)
+        val sourceBottom = points(clusters[0]).maxOf { it.second }
+        val targetTop = points(clusters[1]).minOf { it.second }
+        assertTrue(sourceBottom < targetTop)
+    }
+
+    @Test
+    fun `wraps long labels between words and inside long words`() {
+        assertEquals(
+            listOf("alpha", "beta", "gamma"),
+            wrapText("alpha beta gamma", 10.0, 400, 50.0, measure),
+        )
+        assertEquals(
+            listOf("abcde", "fghij", "klmno", "p"),
+            wrapText("abcdefghijklmnop", 10.0, 400, 30.0, measure),
+        )
+        assertEquals(listOf("one", "two"), wrapText("one\ntwo", 10.0, 400, 200.0, measure))
+    }
+
+    @Test
+    fun `wraps an adversarial long word with bounded measurement work`() {
+        val source = "a".repeat(15000)
+        var calls = 0
+        var characters = 0
+        val lines =
+            wrapText(
+                source,
+                14.0,
+                600,
+                200.0,
+                TextMeasure { text, size, weight ->
+                    calls++
+                    characters += text.length
+                    measure.width(text, size, weight)
+                },
+            )
+        assertEquals(source, lines.joinToString(""))
+        assertTrue(lines.all { measure.width(it, 14.0, 600) <= 200 })
+        assertTrue("measurement calls: $calls", calls < source.length)
+        assertTrue("measured characters: $characters", characters < source.length * 30)
+    }
+
+    @Test
+    fun `cleans Mermaid label markup with JavaScript semantics`() {
+        assertEquals("A\nB & C", cleanLabel("\"A<br/>B #amp; <b>C</b>\""))
+        assertEquals("é ' ✓", cleanLabel("&#233; #39; &#x2713;"))
+        assertEquals("#constructor; &__proto__;", cleanLabel("#constructor; &__proto__;"))
+        assertTrue(isDiagramLanguage("mermaid"))
+        assertTrue(isDiagramLanguage("mmd"))
+        assertFalse(isDiagramLanguage("js"))
+        assertEquals("mermaid", fenceLanguage(" mermaid title "))
+        // JavaScript's \s, trim() and number parsing, not the platform's Unicode rules.
+        assertEquals("a", cleanLabel(" a﻿"))
+        assertEquals(2.5, jsParseFloat(" 2.5px"), 0.0)
+        assertEquals(16.0, jsNumber("0x10"), 0.0)
+        assertEquals(0.0, jsNumber(" "), 0.0)
+        assertTrue(jsNumber("1.2.3").isNaN())
+        assertEquals("1,234.5", jsLocaleNumber(1234.5))
+        assertEquals("42.5", jsNumberString(42.5))
+        assertEquals("3", jsNumberString(3.0))
+        assertEquals(3.0, jsRound(2.5), 0.0)
+        assertEquals(-2.0, jsRound(-2.5), 0.0)
+    }
+
+    private fun points(item: PathItem): List<Pair<Double, Double>> =
+        item.d.flatMap {
+            when (it) {
+                is PathCommand.Move -> listOf(it.x to it.y)
+                is PathCommand.Line -> listOf(it.x to it.y)
+                is PathCommand.Cubic -> listOf(it.x1 to it.y1, it.x2 to it.y2, it.x to it.y)
+                PathCommand.Close -> emptyList()
+            }
+        }
+
+    /** Numbers compare by value, as JSON does not distinguish 1 from 1.0. */
+    private fun canonical(element: JsonElement): JsonElement =
+        when (element) {
+            is JsonObject -> JsonObject(element.mapValues { canonical(it.value) })
+            is JsonArray -> JsonArray(element.map(::canonical))
+            is JsonPrimitive ->
+                if (
+                    !element.isString &&
+                        element.booleanOrNull == null &&
+                        element.doubleOrNull != null
+                )
+                    JsonPrimitive(element.double)
+                else element
+            JsonNull -> element
+        }
+
+    private fun styleJson(style: DiagramStyle?) = style?.let {
+        buildJsonObject {
+            it.fill?.let { put("fill", it) }
+            it.stroke?.let { put("stroke", it) }
+            it.color?.let { put("color", it) }
+            it.strokeWidth?.let { put("strokeWidth", it) }
+            it.dashed?.let { put("dashed", it) }
+        }
+    }
+
+    private fun diagramJson(diagram: Diagram): JsonObject = buildJsonObject {
+        when (diagram) {
+            is GraphDiagram -> {
+                put("kind", "graph")
+                put("direction", diagram.direction.name)
+                putJsonArray("nodes") {
+                    for (node in diagram.nodes) addJsonObject {
+                        put("id", node.id)
+                        put("label", node.label)
+                        put("shape", node.shape.id)
+                        node.parent?.let { put("parent", it) }
+                        styleJson(node.style)?.let { put("style", it) }
+                        node.link?.let { put("link", it) }
+                        node.annotation?.let { annotation ->
+                            putJsonObject("annotation") {
+                                put("target", annotation.target)
+                                put("side", annotation.side.id)
+                            }
+                        }
+                    }
+                }
+                putJsonArray("edges") {
+                    for (edge in diagram.edges) addJsonObject {
+                        put("from", edge.from)
+                        put("to", edge.to)
+                        put("label", edge.label)
+                        put("line", edge.line.id)
+                        put("start", edge.start.id)
+                        put("end", edge.end.id)
+                        put("length", edge.length)
+                        styleJson(edge.style)?.let { put("style", it) }
+                    }
+                }
+                putJsonArray("clusters") {
+                    for (cluster in diagram.clusters) addJsonObject {
+                        put("id", cluster.id)
+                        put("label", cluster.label)
+                        cluster.parent?.let { put("parent", it) }
+                        styleJson(cluster.style)?.let { put("style", it) }
+                    }
+                }
+            }
+            is SequenceDiagram -> {
+                put("kind", "sequence")
+                putJsonArray("participants") {
+                    for (participant in diagram.participants) addJsonObject {
+                        put("id", participant.id)
+                        put("label", participant.label)
+                        put("actor", participant.actor)
+                    }
+                }
+                putJsonArray("items") {
+                    for (item in diagram.items) add(itemJson(item))
+                }
+            }
+            is PieDiagram -> {
+                put("kind", "pie")
+                put("showData", diagram.showData)
+                putJsonArray("slices") {
+                    for (slice in diagram.slices) addJsonObject {
+                        put("label", slice.label)
+                        put("value", slice.value)
+                    }
+                }
+            }
+        }
+        diagram.title?.let { put("title", it) }
+    }
+
+    private fun itemJson(item: SequenceItem) = buildJsonObject {
+        when (item) {
+            is SequenceMessage -> {
+                put("type", "message")
+                put("from", item.from)
+                put("to", item.to)
+                put("label", item.label)
+                put("line", item.line.id)
+                put("head", item.head.id)
+                put("both", item.both)
+                put("activate", item.activate)
+                put("deactivate", item.deactivate)
+                item.number?.let { put("number", it) }
+            }
+            is SequenceNote -> {
+                put("type", "note")
+                put("placement", item.placement.id)
+                putJsonArray("participants") { item.participants.forEach { add(it) } }
+                put("label", item.label)
+            }
+            is SequenceActivation -> {
+                put("type", if (item.active) "activate" else "deactivate")
+                put("participant", item.participant)
+            }
+            is SequenceBlock -> {
+                put("type", "block")
+                put("kind", item.kind.id)
+                put("label", item.label)
+                item.color?.let { put("color", it) }
+            }
+            is SequenceBranch -> {
+                put("type", "branch")
+                put("kind", item.kind)
+                put("label", item.label)
+            }
+            SequenceEnd -> put("type", "end")
+        }
+    }
+}

@@ -357,6 +357,131 @@ async fn upgraded_uppercase_questionnaire_answers_remain_idempotent() {
 }
 
 #[tokio::test]
+async fn historical_answer_lists_survive_upgrade_reopen_and_public_redaction() {
+    let root = tempfile::tempdir().unwrap();
+    let db = database(root.path()).await;
+    seed(&db);
+    // Public detail intentionally hides all messages from trashed conversations.
+    db.execute(
+        "UPDATE records SET data=? WHERE kind='chats' AND id=?",
+        params![
+            json!({
+                "id": CHAT,
+                "slug": "historical-answer-lists",
+                "agentId": "deleted-agent",
+                "title": "Historical answers",
+                "paused": true,
+                "lifecycle": "active",
+                "createdAt": 42,
+                "updatedAt": 51,
+            })
+            .to_string(),
+            CHAT
+        ],
+    )
+    .unwrap();
+    let answers = json!({
+        "old": ["Private free text", "second choice", "Private free text"],
+        "empty": [],
+        "current": {"selected": ["b", "a"], "comment": "Private comment"},
+    });
+    db.execute(
+        "UPDATE chat_messages SET data=json_set(data,'$.answers',json(?))",
+        [answers.to_string()],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO kv VALUES(?,?,NULL)",
+        params![
+            format!("chat-question:{CHAT}:question"),
+            json!({
+                "id": "question", "chatId": CHAT, "runId": "historical-run",
+                "blocking": false, "status": "answered",
+                "fields": [{"id": "old", "title": "Private question", "secret": true}],
+            })
+            .to_string()
+        ],
+    )
+    .unwrap();
+    drop(db);
+
+    for _ in 0..2 {
+        let store = Store::open(root.path()).unwrap();
+        let expected = answers.clone();
+        store
+            .transaction(move |db| {
+                let messages = db.conversation_messages(CHAT)?;
+                assert_eq!(messages.len(), 2);
+                for message in messages {
+                    assert_eq!(serde_json::to_value(&message.answers)?, expected);
+                    // Rewriting an existing message must retain its historical answers too.
+                    db.save_message(&message)?;
+                }
+                let detail = crate::chats::public_detail(db, CHAT)?;
+                assert_eq!(detail["messages"].as_array().unwrap().len(), 2);
+                for message in detail["messages"].as_array().unwrap() {
+                    assert_eq!(message["text"], "Private answer");
+                    assert!(message.get("answers").is_none());
+                }
+                assert!(!detail.to_string().contains("Private free text"));
+                assert!(!detail.to_string().contains("Private comment"));
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn malformed_historical_answers_roll_back_without_private_diagnostics() {
+    for answer in [
+        json!(["synthetic-private-answer", 1]),
+        json!([["synthetic-private-answer"], "synthetic-private-comment"]),
+        json!({"selected": [1], "comment": "synthetic-private-comment"}),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let db = database(root.path()).await;
+        seed(&db);
+        let answers = json!({"field": answer});
+        db.execute(
+            "UPDATE chat_messages SET data=json_set(data,'$.answers',json(?)) WHERE id='a-message'",
+            [answers.to_string()],
+        )
+        .unwrap();
+        let before: String = db
+            .query_row(
+                "SELECT group_concat(data) FROM chat_messages ORDER BY rowid",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let error = Store::open(root.path()).err().unwrap();
+        assert_eq!(error.message, invalid().message);
+        assert_eq!(
+            db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            14
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT group_concat(data) FROM chat_messages ORDER BY rowid",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            before
+        );
+        assert!(
+            db.prepare("SELECT data FROM records WHERE kind='chats'")
+                .unwrap()
+                .exists([])
+                .unwrap()
+        );
+        assert!(db.prepare("SELECT * FROM conversations").is_err());
+    }
+}
+
+#[tokio::test]
 async fn late_invalid_message_rolls_back_schema_and_all_original_data() {
     let root = tempfile::tempdir().unwrap();
     let db = database(root.path()).await;

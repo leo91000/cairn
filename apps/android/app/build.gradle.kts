@@ -161,6 +161,9 @@ tasks.withType<Test>().configureEach {
     val pluginSetupCorpus = rootProject.file("../../tests/fixtures/plugin-setup.json")
     inputs.file(pluginSetupCorpus)
     systemProperty("cairn.pluginSetupCorpus", pluginSetupCorpus.absolutePath)
+    val diagramCorpus = rootProject.file("../../tests/fixtures/diagrams.json")
+    inputs.file(diagramCorpus)
+    systemProperty("cairn.diagramCorpus", diagramCorpus.absolutePath)
     // Robolectric's Android 16 shared-memory emulation uses JDK file descriptors.
     jvmArgs(
         "--add-opens=java.base/jdk.internal.access=ALL-UNNAMED",
