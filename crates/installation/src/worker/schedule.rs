@@ -444,9 +444,8 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
     let recovery_deadline = checkpoint
         .as_ref()
         .and_then(|saved| match saved.remaining_ms {
-            Some(None) => None,
             Some(Some(remaining)) => Some(now().saturating_add(remaining)),
-            None => Some(now()),
+            Some(None) | None => None,
         });
     let expected_attempt = checkpoint
         .as_ref()
