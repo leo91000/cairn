@@ -912,8 +912,15 @@ pub(super) fn finish_recovery(
         if checkpoint.provider_failed() && super::retry::expire_in(db, id)? {
             return Ok(false);
         }
+        let provider_paid = provider_retry_paid(checkpoint, current)
+            || RunCheckpoint::load_in(db, id)?
+                .as_ref()
+                .is_some_and(|persisted| {
+                    recovery::same_execution(Some(persisted), Some(checkpoint))
+                        && provider_retry_paid(persisted, current)
+                });
         if let Some(cause) = checkpoint.confirmed_provider_failure()
-            && !provider_retry_paid(checkpoint, current)
+            && !provider_paid
         {
             let mut paid = checkpoint.clone();
             if (current.session_id.is_some() || cause.startup)
@@ -926,7 +933,7 @@ pub(super) fn finish_recovery(
             }
             return Ok(false);
         }
-        if checkpoint.provider_failed() && !provider_retry_paid(checkpoint, current) {
+        if checkpoint.provider_failed() && !provider_paid {
             let message = if checkpoint.last_error().is_empty() {
                 "Agent turn failed."
             } else {
@@ -984,7 +991,7 @@ pub(super) fn finish_recovery(
             db.change_run(id, patch)?;
             return Ok(false);
         }
-        if controller_budget_exhausted(checkpoint, current, &record.boundary) {
+        if !provider_paid && controller_budget_exhausted(checkpoint, current, &record.boundary) {
             let expired = matches!(checkpoint.remaining_ms, None | Some(Some(i64::MIN..=0)));
             let message = if expired {
                 "Run exceeded its time limit."
@@ -1005,6 +1012,12 @@ pub(super) fn finish_recovery(
         && saved.turn_pending != Some(true)
         && !saved.has_controller_recovery_reservation()
         && !provider_retry_paid(saved, current)
+        && !RunCheckpoint::load_in(db, id)?
+            .as_ref()
+            .is_some_and(|persisted| {
+                recovery::same_execution(Some(persisted), Some(saved))
+                    && provider_retry_paid(persisted, current)
+            })
     {
         let mut paid = saved.clone();
         paid.controller_recoveries = Some(saved.controller_recoveries() + 1);
@@ -1395,7 +1408,8 @@ mod tests {
                     let saved = RunCheckpoint::from_value(json!({
                         "prepared": {"backend":"native","isolated":true},
                         "runnerId":format!("attempt-{attempt}"), "remainingMs":null,
-                        "terminalCode":null, "providerFailed":true,
+                        "terminalCode":1, "providerFailed":true,
+                        "providerFailureAttempt":format!("attempt-{attempt}"),
                         "lastError":"Provider unavailable", "retryCause":cause
                     }))?;
                     saved.store_in(db, &id)?;

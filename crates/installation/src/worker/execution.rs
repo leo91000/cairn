@@ -198,6 +198,7 @@ async fn record_failure(
                 if may_resume && let Some(paid) = RunCheckpoint::load_in(db, &id)? {
                     current.controller_recoveries = paid.controller_recoveries;
                     current.controller_recovery_reservation = paid.controller_recovery_reservation;
+                    current.provider_retry_reservation = paid.provider_retry_reservation;
                 }
                 Ok(())
             })
