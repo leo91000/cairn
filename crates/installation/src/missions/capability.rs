@@ -46,7 +46,7 @@ pub(crate) const MISSION_OPERATIONS: &[MissionOperation] = &[
     MissionOperation {
         name: "list_task_activity",
         scope: "read",
-        description: "Latest run and read state for each mission; tools use the installation owner's read state.",
+        description: "Latest run of each mission. unread, preview and dismissal describe the Cairn account that authorized this connection; executions have no account delegation and receive none.",
     },
 ];
 
@@ -158,18 +158,15 @@ impl MissionOperation {
             }
             "list_task_activity" => {
                 let _: ListMissionsInput = decode(input)?;
+                // Read and set-aside states belong to the verified account. An execution
+                // has none of its own and never borrows the owner's.
                 let account = match &actor {
-                    Actor::Human(identity) => identity.account_id.clone(),
-                    _ => {
-                        crate::relay::task_author_policy(s)
-                            .await?
-                            .ok_or_else(|| Error::unauthorized("Installation is not claimed."))?
-                            .owner
-                            .account_id
-                    }
+                    Actor::Human(identity) => Some(identity.account_id.clone()),
+                    Actor::Public => crate::native::policy::caller(),
+                    Actor::Installation(_) => None,
                 };
-                if matches!(actor, Actor::Human(_)) {
-                    crate::reads::begin(s, &account).await?;
+                if let Some(account) = &account {
+                    crate::reads::begin(s, account).await?;
                 }
                 s.store
                     .read(move |db| {
@@ -189,7 +186,8 @@ impl MissionOperation {
                         );
                         let mut runs = db.json_rows(&query, [])?;
                         db.hydrate_run_wakeups(&mut runs)?;
-                        crate::reads::Reads::load(&db, &account)?.runs(&db, &mut runs)?;
+                        crate::reads::Reads::load_for(&db, account.as_deref())?
+                            .runs(&db, &mut runs)?;
                         transaction.commit()?;
                         Ok(runs.into())
                     })

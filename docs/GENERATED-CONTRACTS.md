@@ -306,9 +306,9 @@ columns. Connection/revision/external-author lineage from ADR-0068 survives miss
 replacement, restrictive state changes, restart and launch; revocation still uses
 the live native policy. `list_task_activity`
 returns the existing run-summary shape until the run conversion; its input and policy
-are registered here. It uses the authenticated account's read state in the apps and
-the owner's current read state in agent tools, without initializing that state on
-an agent read. No historical format, fallback reader or migration is included.
+are registered here. Its personal read state follows B4 below: the calling account's
+in the apps and through a public grant, none for an execution, never the owner's. A4
+itself added no historical format, fallback reader or migration.
 
 `tests/fixtures/mission-contracts.json` qualifies defaults, null/empty skill selections,
 creation identities, command bounds and wire output in Rust, TypeScript and Kotlin.
@@ -798,3 +798,33 @@ Service assembles the domain without exposing an upload mutex. Unique speculativ
 filenames and reservation tokens fence crash recovery, cancellation and purge;
 committed old files stay at their existing paths. Measurements extend the existing
 A1/A2 `project_measurement` harness; raw results stay outside Git.
+
+## Personal read state and installation settings (B4)
+
+`personal.rs` owns read marks (`{target: {kind: chat|mission, …}, finishedAt}`) and
+set-aside commands (`dismiss`, `snooze`, `restore`); `installation_settings.rs`
+owns installation settings, the overview counts, the audit list and the redacted
+storage view and command. `mark_read`, `set_outcome_aside`,
+`get_installation_settings`, `get_installation_overview`, `list_audit`,
+`get_storage_settings`, `save_storage_settings` and `check_storage` extend the
+existing registry for HTTP, public MCP and `cairn_installation`; both apps use the
+generated calls and models. Their handwritten Zod/TS interfaces and Kotlin data
+classes, the KV keys, the isolated read/dismissal routes and the dynamic settings
+JSON are removed. The run view's `dismissal` is the generated `OutcomeDismissal`.
+
+Personal state belongs to a verified Cairn account. HTTP uses the person's account;
+a public grant acts for the account that authorized it; an execution has no account
+delegation, so its writes are refused explicitly and its listings (`list_chats`,
+`list_task_activity`) carry no unread, preview or set-aside state. The owner's state
+is never borrowed. Personal writes require the `manage` scope. HTTP keeps the owner
+role for settings, audit and storage. Storage views never return credentials;
+saving credentials requires the human owner in the apps, and both tools receive an
+explicit refusal. Probes run outside any database transaction.
+
+SQLite 17 → 18 imports the KV state atomically; see
+[migration 0018](migrations/0018-personal-read-state.md). Constrained
+`WITHOUT ROWID` tables keyed by account replace prefix scans of KV.
+`tests/fixtures/personal-settings-contracts.json` qualifies the commands, views and
+schema bounds in Rust, TS/Ajv and Kotlin. `project_measurement::reads` extends the
+A1/A2 harness against the frozen `f489e1a5` KV mapping for marks and dismissals,
+with another member's state in the same tables; raw results stay outside Git.

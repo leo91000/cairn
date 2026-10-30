@@ -1,0 +1,68 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "How an account sets a blocked mission outcome aside. Each applies until the\nmission finishes again; input the agent asked for can only be snoozed.",
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "finishedAt": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "kind": {
+          "const": "dismiss",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "finishedAt"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "finishedAt": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "kind": {
+          "const": "snooze",
+          "type": "string"
+        },
+        "until": {
+          "description": "At most 30 days ahead.",
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "finishedAt",
+        "until"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "restore",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "OutcomeAsideAction"
+}

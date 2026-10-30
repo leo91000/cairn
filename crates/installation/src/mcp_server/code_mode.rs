@@ -143,10 +143,12 @@ impl CodeMode {
                         let reply = match auth.invoke(s, &name, args).await {
                             Ok(value) => Frame::Reply { value },
                             Err(error) => {
-                                if matches!(auth, Authorization::Public(..))
+                                // Only a missing scope asks the client to step up; an
+                                // actor refusal (owner-only in the apps) cannot be granted.
+                                if let Authorization::Public(granted, _) = auth
                                     && matches!(error.status, 401 | 403)
                                 {
-                                    *denied_scope = operations()
+                                    let required = operations()
                                         .iter()
                                         .find(|op| op["name"] == name)
                                         .and_then(|op| {
@@ -154,6 +156,12 @@ impl CodeMode {
                                                 .as_str()
                                                 .map(str::to_owned)
                                         });
+                                    if required
+                                        .as_ref()
+                                        .is_some_and(|scope| !granted.contains(scope))
+                                    {
+                                        *denied_scope = required;
+                                    }
                                 }
                                 Frame::Denied {
                                     message: error.message,
