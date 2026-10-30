@@ -8,7 +8,8 @@ recorded in Cairn's lockfile before this patch. Upstream revision:
 
 Compared with the archive, this directory patches only
 `src/peer_connection/handler/sctp.rs`, `src/peer_connection/handler/mod.rs` and
-`src/peer_connection/handler/datachannel.rs` and `src/data_channel/mod.rs`,
+`src/peer_connection/handler/datachannel.rs`, `src/data_channel/mod.rs` and
+`src/data_channel/internal.rs`,
 adds this file, replaces the local `.gitignore`,
 and omits packaging metadata (`.cargo*`) and the archive's `Cargo.lock`.
 The upstream MIT/Apache licenses are preserved. Every other file is
@@ -51,7 +52,10 @@ including while a final close event waits behind received messages. Previously
 received messages still drain before OnClose, without an early public OnClosing
 event. Already closed channels remain terminal when a late close is deferred.
 Association shutdown also prevents new writes before SHUTDOWN-COMPLETE arrives.
-Deferred close preserves a connecting channel's queued ACK and Open-before-Message ordering.
+A terminal write fence belongs to each registered channel generation. It
+survives deferred-close ownership transfers and queued ACK processing while
+preserving Open-before-Message ordering and final receive draining. A genuinely
+new channel starts with a fresh fence.
 
 The regular workspace regression uses the same multithreaded Tokio runtime as
 the gateway and repeatedly opens/closes eight concurrent HTTP connections,

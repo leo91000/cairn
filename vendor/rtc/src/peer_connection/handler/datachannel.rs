@@ -98,11 +98,8 @@ impl<'a> DataChannelHandler<'a> {
             if defer_close {
                 if let RTCEventInternal::SCTPStreamClosed(_, id) = &event.event
                     && let Some(channel) = self.data_channels.get_by_stream_mut(id)
-                    && channel.ready_state == RTCDataChannelState::Open
                 {
-                    // A queued ACK must still promote Connecting to Open before
-                    // its buffered messages can be delivered. Closed is terminal.
-                    channel.ready_state = RTCDataChannelState::Closing;
+                    channel.write_closed = true;
                 }
                 self.ctx.pending_sctp_events.push_back(event);
             } else {
@@ -248,16 +245,14 @@ impl<'a>
                 (dc.label.clone(), dc.protocol.clone())
             };
 
-            // Deliver final received messages while Closing as well. Messages that
+            // Only deliver application messages once the channel is Open. Messages that
             // arrive while it is still Connecting stay buffered in the underlying
             // DataChannel's read queue; they drain once the channel opens, or are
             // discarded on close/timeout.
-            let can_deliver_received = self.data_channels.get(&channel_id).is_some_and(|dc| {
-                matches!(
-                    dc.ready_state,
-                    RTCDataChannelState::Open | RTCDataChannelState::Closing
-                )
-            });
+            let can_deliver_received = self
+                .data_channels
+                .get(&channel_id)
+                .is_some_and(|dc| dc.ready_state == RTCDataChannelState::Open);
 
             let data_channel = self
                 .data_channels
@@ -940,52 +935,75 @@ mod tests {
         let mut ctx = DataChannelHandlerContext::new(now);
         let (mut channels, handles) = registry(vec![in_band_channel(1)]);
         let mut stats = RTCStatsAccumulator::new();
-        let mut handler = DataChannelHandler::new(
-            &mut ctx,
-            &mut channels,
-            &mut stats,
-            None,
-            RTCDtlsRole::Server,
-            None,
-        );
-        handler
-            .handle_event(TaggedRTCEventInternal {
-                now,
-                event: RTCEventInternal::SCTPHandshakeComplete(0),
-            })
-            .unwrap();
-        handler
-            .handle_read(TaggedRTCMessageInternal {
-                now,
-                transport: TransportContext::default(),
-                message: RTCMessageInternal::Dtls(DTLSMessage::Sctp(data_message(0, 1, b"final"))),
-            })
-            .unwrap();
-        assert!(
-            handler.poll_read().is_none(),
-            "pre-open data stays buffered"
-        );
+        {
+            let mut handler = DataChannelHandler::new(
+                &mut ctx,
+                &mut channels,
+                &mut stats,
+                None,
+                RTCDtlsRole::Server,
+                None,
+            );
+            handler
+                .handle_event(TaggedRTCEventInternal {
+                    now,
+                    event: RTCEventInternal::SCTPHandshakeComplete(0),
+                })
+                .unwrap();
+            handler
+                .handle_read(TaggedRTCMessageInternal {
+                    now,
+                    transport: TransportContext::default(),
+                    message: RTCMessageInternal::Dtls(DTLSMessage::Sctp(data_message(
+                        0, 1, b"final",
+                    ))),
+                })
+                .unwrap();
+            assert!(
+                handler.poll_read().is_none(),
+                "pre-open data stays buffered"
+            );
 
-        handler
-            .ctx
-            .pending_sctp_events
-            .push_back(TaggedRTCEventInternal {
-                now,
-                event: RTCEventInternal::SCTPStreamClosed(0, 1),
-            });
-        handler
-            .handle_read(TaggedRTCMessageInternal {
-                now,
-                transport: TransportContext::default(),
-                message: RTCMessageInternal::Dtls(DTLSMessage::Sctp(ack(0, 1))),
-            })
+            handler
+                .ctx
+                .pending_sctp_events
+                .push_back(TaggedRTCEventInternal {
+                    now,
+                    event: RTCEventInternal::SCTPStreamClosed(0, 1),
+                });
+            handler
+                .handle_read(TaggedRTCMessageInternal {
+                    now,
+                    transport: TransportContext::default(),
+                    message: RTCMessageInternal::Dtls(DTLSMessage::Sctp(ack(0, 1))),
+                })
+                .unwrap();
+            let received = message_events(handler.ctx);
+            assert!(
+                matches!(received.as_slice(), [DataChannelEvent::Open, DataChannelEvent::Message(message)] if message.data.as_ref() == b"final")
+            );
+        }
+
+        let mut peer = crate::peer_connection::RTCPeerConnectionBuilder::new()
+            .build(now)
             .unwrap();
-        let received = message_events(handler.ctx);
-        assert!(
-            matches!(received.as_slice(), [DataChannelEvent::Open, DataChannelEvent::Message(message)] if message.data.as_ref() == b"final")
-        );
+        peer.data_channels = channels;
+        peer.pipeline_context.datachannel_handler_context = ctx;
+        let mut channel = peer.data_channel(handles[0]).unwrap();
+        let outstanding = channel.outstanding_bytes();
+        assert!(matches!(
+            channel.send(now, BytesMut::from(&b"after deferred close"[..])),
+            Err(Error::ErrDataChannelClosed)
+        ));
+        assert!(matches!(
+            channel.send_text(now, "after deferred close"),
+            Err(Error::ErrDataChannelClosed)
+        ));
+        assert_eq!(channel.outstanding_bytes(), outstanding);
+        assert_eq!(channel.ready_state(), RTCDataChannelState::Closing);
 
         // The final close remains after the established open/message sequence.
+        let mut handler = peer.get_datachannel_handler();
         while handler.poll_read().is_some() {}
         let mut lifecycle = vec![];
         while let Some(event) = handler.poll_event() {

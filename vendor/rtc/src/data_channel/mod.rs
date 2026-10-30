@@ -227,6 +227,9 @@ impl RTCDataChannel<'_> {
         ) {
             return channel.ready_state;
         }
+        if channel.write_closed {
+            return RTCDataChannelState::Closing;
+        }
         let Some(data_channel) = &channel.data_channel else {
             return channel.ready_state;
         };

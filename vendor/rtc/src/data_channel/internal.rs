@@ -31,6 +31,10 @@ pub(crate) struct RTCDataChannelInternal {
     pub(crate) protocol: String,
     pub(crate) negotiated: bool,
     pub(crate) ready_state: RTCDataChannelState,
+    /// Terminal write fence for this channel generation. A deferred SCTP close
+    /// may precede an ACK and final received messages; those still use the
+    /// existing receive lifecycle, but may never reopen application writes.
+    pub(crate) write_closed: bool,
     pub(crate) buffered_amount_high_threshold: u32,
     pub(crate) buffered_amount_low_threshold: u32,
     /// User payload bytes handed to `send()`/`send_text()` that SCTP has not yet
@@ -64,6 +68,7 @@ impl Default for RTCDataChannelInternal {
             protocol: "".to_string(),
             negotiated: false,
             ready_state: RTCDataChannelState::default(),
+            write_closed: false,
             buffered_amount_high_threshold: u32::MAX,
             buffered_amount_low_threshold: 0,
             outstanding_bytes: 0,
@@ -94,6 +99,7 @@ impl RTCDataChannelInternal {
             max_packet_life_time: params.max_packet_life_time,
             max_retransmits: params.max_retransmits,
             ready_state: RTCDataChannelState::Connecting,
+            write_closed: false,
             buffered_amount_high_threshold: u32::MAX,
             buffered_amount_low_threshold: 0,
             outstanding_bytes: 0,

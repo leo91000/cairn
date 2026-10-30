@@ -2372,6 +2372,11 @@ mod tests {
             .handle_of_stream(&1)
             .expect("replacement channel");
         assert_ne!(replacement, old);
+        assert_eq!(
+            peer.data_channel(replacement).unwrap().ready_state(),
+            crate::data_channel::RTCDataChannelState::Open,
+            "a new channel generation must not inherit the old write fence"
+        );
     }
 
     #[test]

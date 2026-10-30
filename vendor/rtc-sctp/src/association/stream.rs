@@ -1,5 +1,4 @@
 use crate::association::Association;
-use crate::association::state::AssociationState;
 use crate::chunk::chunk_payload_data::{ChunkPayloadData, PayloadProtocolIdentifier};
 use crate::queue::reassembly_queue::{Chunks, ReassemblyQueue};
 use crate::{ErrorCauseCode, Event, Side};
