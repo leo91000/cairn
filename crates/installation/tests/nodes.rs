@@ -4266,6 +4266,7 @@ async fn connect_running_source(
     faults: &MoveFaults,
     stop: &CancellationToken,
     gate: Arc<ReleaseRaceGate>,
+    seed: bool,
 ) -> [tokio::task::JoinHandle<()>; 2] {
     use axum::routing::{any, get, post};
     let run = text(record, "id");
@@ -4274,7 +4275,9 @@ async fn connect_running_source(
     std::fs::create_dir_all(&image).unwrap();
     std::fs::write(image.join("root.ext4"), b"fixture runtime").unwrap();
     std::fs::write(image.join("vmlinux"), b"fixture kernel").unwrap();
-    seed_source_disk(owner, &state, record, node, &format!("http://{master}/")).await;
+    if seed {
+        seed_source_disk(owner, &state, record, node, &format!("http://{master}/")).await;
+    }
     let token = auth::token();
     let mut enrolled = schedulable_node(node, &limits(2, 8192, 32768));
     enrolled["revoked"] = false.into();
@@ -4585,6 +4588,7 @@ async fn idle_move_requested_before_old_worker_release_transfers_without_replay(
         &faults,
         &stop,
         gate.clone(),
+        true,
     )
     .await
     .into_iter()
@@ -4740,23 +4744,38 @@ async fn paid_active_move_recovers_after_transfer_at_controller_ceiling() {
     for mode in ["failure", "cancel", "success"] {
         let (listener, address) = common::bind().await;
         let owner = Owner::at(address.to_string()).await;
-        let (run, agent, source, destination, attempt) = (id(), id(), id(), id(), id());
+        let (agent, source, destination, attempt) = (id(), id(), id(), id());
         owner
             .grant_nodes(&agent, json!([source, destination]))
             .await;
-        let mut record = run_record(&run, RunStatus::Running);
-        record["isolated"] = true.into();
-        record["sessionId"] = "retained-session".into();
-        record["nodeId"] = source.clone().into();
-        record["resources"] = limits(1, 512, 128);
-        record["snapshot"] = json!({ "agent": { "id": agent, "provider": "codex" } });
-        owner.add_run_fixture(&record).await;
+        let task = owner.service.task_fixture(json!({
+            "name": "Paid move", "prompt": "Resume once", "worktree": false, "agentId": agent,
+        }), None).await.unwrap();
+        let run = owner
+            .service
+            .enqueue(text(&task, "id"), "manual", None)
+            .await
+            .unwrap();
+        let run = text(&run, "id").to_owned();
+        owner.service.store.change_run(&run, cairn_installation::runs::RunChanges {
+            status: Some(RunStatus::Running), session_id: Some(Some("retained-session".into())),
+            boundary: Some(json!({ "isolated": true, "nodeId": source, "targetNodeId": source, "resources": limits(1, 512, 128) })),
+            ..Default::default()
+        }).await.unwrap();
+        let record = owner.run(&run).await;
+        let run_dir = owner.service.config.data_dir.join("runs").join(&run);
+        let workspace = run_dir.join("workspace");
+        let output = run_dir.join("output");
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        tokio::fs::create_dir_all(&output).await.unwrap();
         owner
             .set_checkpoint(
                 &run,
                 json!({
                     "nodeId": source, "runnerId": attempt, "runtimeId": "development",
-                    "prepared": { "backend": "firecracker", "isolated": true },
+                    "prepared": { "backend": "firecracker", "isolated": true,
+                        "projectRoot": workspace, "cwd": workspace, "output": output.join("result.md"),
+                        "workspaces": [], "mounts": [], "skills": [] },
                     "completed": false, "terminalCode": 75, "remainingMs": null,
                     "controllerRecoveries": 4, "controllerRecoveryReservation": attempt,
                 }),
@@ -4768,21 +4787,32 @@ async fn paid_active_move_recovers_after_transfer_at_controller_ceiling() {
             cancel_during_capture: Arc::new(AtomicBool::new(mode == "cancel")),
         };
         let mut tasks = Vec::new();
-        for node in [&source, &destination] {
-            tasks.extend(
-                connect_node(
-                    &owner,
-                    &record,
-                    node,
-                    address,
-                    &faults,
-                    &stop,
-                    node == &source,
-                )
-                .await,
-            );
-        }
+        tasks.extend(connect_node(&owner, &record, &source, address, &faults, &stop, true).await);
+        let gate = Arc::new(ReleaseRaceGate {
+            entered: tokio::sync::Notify::new(),
+            proceed: tokio::sync::Semaphore::new(1),
+            starts: AtomicUsize::new(0),
+            deletes: AtomicUsize::new(0),
+        });
+        tasks.extend(
+            connect_running_source(
+                &owner,
+                &record,
+                &destination,
+                address,
+                &faults,
+                &stop,
+                gate.clone(),
+                false,
+            )
+            .await,
+        );
         tasks.push(owner.serve(listener));
+        let home = owner.service.config.home.join(".codex");
+        tokio::fs::create_dir_all(&home).await.unwrap();
+        tokio::fs::write(home.join("auth.json"), "{}")
+            .await
+            .unwrap();
         let (status, body) = owner
             .send(
                 "POST",
@@ -4831,10 +4861,59 @@ async fn paid_active_move_recovers_after_transfer_at_controller_ceiling() {
         assert_eq!(transferred["nodeId"], destination, "{transferred}");
         assert!(transferred["moveRequest"].is_null());
         assert_eq!(transferred["recoveryPending"], true);
-        owner.service.worker.tick(&owner.service).await.unwrap();
-        let resumed = owner.run(&run).await;
-        assert_eq!(resumed["status"], RunStatus::Queued, "{resumed}");
-        assert_eq!(resumed["recoveryPending"], false, "{resumed}");
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let mut config = owner.service.config.clone();
+        config.worker_enabled = true;
+        config.port = 0;
+        let config_file = owner.root().join("paid-move-worker.json");
+        tokio::fs::write(&config_file, serde_json::to_vec(&config).unwrap())
+            .await
+            .unwrap();
+        let binary = std::path::Path::new(env!("CARGO_BIN_EXE_cairn"))
+            .parent()
+            .unwrap()
+            .join("examples/worker_fixture");
+        let mut worker = tokio::process::Command::new(binary)
+            .arg("serve")
+            .env("CAIRN_CONFIG", config_file)
+            .env_remove("CAIRN_TOOLKIT_DIR")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut lines = BufReader::new(worker.stdout.take().unwrap()).lines();
+        let listening = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(listening.starts_with("Listening on"), "{listening}");
+        let resumed = common::eventually(
+            Duration::from_secs(20),
+            Duration::from_millis(20),
+            async || {
+                let current = owner.run(&run).await;
+                (current["status"] == RunStatus::Succeeded
+                    || current["status"] == RunStatus::Failed)
+                    .then_some(current)
+            },
+        )
+        .await;
+        assert_eq!(
+            resumed["status"],
+            RunStatus::Succeeded,
+            "{resumed}; starts={}; checkpoint={}",
+            gate.starts.load(Ordering::SeqCst),
+            owner
+                .service
+                .store
+                .checkpoint_boundary(&run)
+                .await
+                .unwrap()
+                .unwrap()
+        );
+        assert_eq!(gate.starts.load(Ordering::SeqCst), 1);
         let checkpoint = owner
             .service
             .store
@@ -4843,6 +4922,8 @@ async fn paid_active_move_recovers_after_transfer_at_controller_ceiling() {
             .unwrap()
             .unwrap();
         assert_eq!(checkpoint["controllerRecoveries"], 4);
+        assert!(checkpoint["moveRecoveryReservation"].is_null());
+        worker.kill().await.unwrap();
         stop.cancel();
         for task in tasks {
             task.abort();
