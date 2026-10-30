@@ -487,7 +487,8 @@ abstract class ChatSwipeCases {
                                 "/api/installations/fixture/api/codex/models",
                                 "/api/installations/fixture/api/claude/models" ->
                                     """{"models":[]}"""
-                                "/api/installations/fixture/api/overview" -> "{}"
+                                "/api/installations/fixture/api/overview" ->
+                                    installationOverviewFixture()
                                 else ->
                                     if (
                                         request.requestUrl

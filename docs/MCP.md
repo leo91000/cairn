@@ -293,6 +293,16 @@ come from verified authority, never command JSON. `get_task`, `list_tasks`,
 `preview_schedule` and `list_task_activity` use the read scope; `list_tasks` returns
 `{tasks: [...]}`. These definitions are shared with HTTP and `cairn_installation`.
 
+`get_installation_settings`, `get_installation_overview`, `list_audit` and
+`get_storage_settings` use the read scope; storage views never contain credentials.
+`check_storage` uses manage. `save_storage_settings` is listed with manage but only
+the human owner can save storage credentials, in the apps: tools receive an explicit
+refusal without an OAuth challenge. `mark_read` and `set_outcome_aside` use manage and
+change the read marks and set-aside outcomes of the Cairn account that authorized the
+connection; `list_chats` and `list_task_activity` report `unread`, `preview` and
+`dismissal` for that account. Executions (`cairn_installation`) have no account
+delegation: their personal writes are refused and their listings carry none.
+
 A run or event too large for a page is returned as a preview with `truncated: true`
 and `totalBytes`. The stored content is unchanged. Use `read_run_content` with
 `runId` and `offset: 0` to read the full run record; also pass `eventId` to read one
@@ -306,8 +316,10 @@ response ceiling without discarding its payload. Use `cairn.read_run_content` wi
 Calls return text and a structured `{ result }` object for compatibility with both
 older and newer clients; the page budget allows for both copies and JSON escaping.
 Tool metadata includes OAuth scopes and
-read/write annotations; denied tool calls carry an OAuth challenge for clients
-that support relinking with additional scopes.
+read/write annotations; calls denied for a scope the grant lacks carry an OAuth
+challenge for clients that support relinking with additional scopes. Refusals that
+no scope can lift, such as saving storage credentials (owner-only in the apps),
+carry no challenge.
 
 OAuth grants and 30-day personal tokens are limited to one installation and the selected scopes. They can be revoked from that installation’s **Settings** on the beacon web app. Personal
 tokens are displayed once; put them in the client's secret storage, never its Git

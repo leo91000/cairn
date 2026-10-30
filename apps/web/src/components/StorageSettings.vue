@@ -1,28 +1,24 @@
 <script setup lang="ts">
+import type { SaveStorageSettingsInput } from '../../../../packages/contracts/generated/typescript/SaveStorageSettingsInput'
+import type { StorageSettings } from '../../../../packages/contracts/generated/typescript/StorageSettings'
 import {
   computed,
   onMounted,
   ref,
   watch,
 } from 'vue'
+import { checkStorage } from '../../../../packages/contracts/generated/checkStorage'
+import { getStorageSettings } from '../../../../packages/contracts/generated/getStorageSettings'
+import { saveStorageSettings } from '../../../../packages/contracts/generated/saveStorageSettings'
 import { api, notify } from '../api'
 import UiAlert from './UiAlert.vue'
 import UiButton from './UiButton.vue'
-
-interface StorageSettings {
-  configured: boolean
-  integrated: boolean
-  environmentManaged: boolean
-  bucket: string
-  endpoint: string
-  region: string
-}
 
 const storage = ref<StorageSettings>()
 const editing = ref(false)
 const busy = ref(false)
 const error = ref('')
-const form = ref({
+const form = ref<SaveStorageSettingsInput>({
   bucket: '',
   endpoint: '',
   region: '',
@@ -47,7 +43,7 @@ watch(() => [form.value.endpoint, form.value.bucket], () => {
 
 onMounted(async () => {
   try {
-    storage.value = await api('/settings/storage')
+    storage.value = await getStorageSettings(api, {})
   }
   catch (cause) {
     error.value = (cause as Error).message
@@ -58,7 +54,7 @@ async function save() {
   busy.value = true
   error.value = ''
   try {
-    storage.value = await api('/settings/storage', { method: 'PUT', body: JSON.stringify(form.value) })
+    storage.value = await saveStorageSettings(api, form.value)
     form.value.accessKeyId = ''
     form.value.secretAccessKey = ''
     form.value.privateBucketConfirmed = false
@@ -77,7 +73,7 @@ async function check() {
   busy.value = true
   error.value = ''
   try {
-    await api('/settings/storage/check', { method: 'POST', body: '{}' })
+    await checkStorage(api, {})
     notify('Storage write, read and deletion succeeded')
   }
   catch (cause) {

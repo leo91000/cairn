@@ -3,6 +3,7 @@ import type { AgentProvider } from './AgentProvider'
 import type { ChatExecution } from './ChatExecution'
 import type { ChatWakeup } from './ChatWakeup'
 import type { ContextUsage } from './ContextUsage'
+import type { OutcomeDismissal } from './OutcomeDismissal'
 import type { Retry } from './Retry'
 import type { RunRequester } from './RunRequester'
 import type { RunSnapshot } from './RunSnapshot'
@@ -29,7 +30,7 @@ export interface Run {
   wakeup?: ChatWakeup | null
   chatExecution?: ChatExecution | null
   outcome?: import('../../contracts').TaskOutcome | null
-  dismissal?: { until: number | null } | null
+  dismissal?: OutcomeDismissal | null
   resources?: import('../../nodes').NodeResources | null
   nativeMode?: import('../../nodes').NativeModeRequest | null
   suspendedByExclusive?: import('../../nodes').ExclusiveReservation | null

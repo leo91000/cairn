@@ -46,9 +46,6 @@ async fn dispatch_inner(s: &Arc<Service>, input: &Input) -> Result<Value> {
     if let Some(result) = crate::worker::routes(s, input).await {
         return result;
     }
-    if let Some(result) = crate::reads::routes(s, input).await {
-        return result;
-    }
     let segments = input
         .path
         .trim_start_matches("/api/")
@@ -71,22 +68,6 @@ async fn dispatch_inner(s: &Arc<Service>, input: &Input) -> Result<Value> {
         return Ok(result);
     }
     Err(Error::not_found("Not found"))
-}
-
-async fn overview(s: &Service) -> Result<Value> {
-    let concurrency = s.config.concurrency;
-    s.store
-        .read(move |db| {
-            Ok(json!({
-                "counts": db.stats()?,
-                "agents": db.agent_snapshots()?.len(),
-                "projects": db.projects()?.len(),
-                "tasks": db.missions()?,
-                "runs": db.runs(None, None, 8, 0, false)?,
-                "concurrency": concurrency,
-            }))
-        })
-        .await
 }
 
 /// Agents, projects, tasks and their scheduling.
@@ -204,7 +185,6 @@ async fn record_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Res
             })?;
             crate::plugins::projects::import(s, &input.body).await?
         }
-        ("GET", ["overview"]) => overview(s).await?,
         ("POST", ["task-authors", "refresh"]) => {
             s.synchronize_task_authors().await?;
             json!({ "updated": true })
@@ -609,53 +589,42 @@ async fn delete_skill(
     Ok(json!({ "deleted": true }))
 }
 
-fn settings(s: &Service) -> Value {
-    let commit = std::env::var("APP_COMMIT").unwrap_or_else(|_| "development".into());
-    json!({
-        "publicUrl": s.config.public_url,
-        "workspaceRoots": s.config.workspace_roots,
-        "home": s.config.home,
-        "concurrency": s.config.concurrency,
-        "mcpUrl": format!("{}/mcp", s.config.public_url),
-        "version": env!("CARGO_PKG_VERSION"),
-        "commit": commit,
-        "protocol": "2026-07-28",
-        "nativeMcpOauth": true,
-    })
-}
-
+/// Installation settings and personal read state, through their registered capabilities.
 async fn settings_routes(
     s: &Arc<Service>,
     input: &Input,
     route: Route<'_>,
 ) -> Result<Option<Value>> {
-    let result = match route {
-        ("GET", ["settings"]) => settings(s),
-        ("GET", ["settings", "conversations"]) => chat_command(s, input, "get_conversation_retention", json!({})).await?,
+    let (name, body) = match route {
+        ("GET", ["settings"]) => ("get_installation_settings", json!({})),
+        ("GET", ["overview"]) => ("get_installation_overview", json!({})),
+        ("GET", ["audit"]) => ("list_audit", json!({})),
+        ("GET", ["settings", "storage"]) => ("get_storage_settings", json!({})),
+        ("PUT", ["settings", "storage"]) => ("save_storage_settings", input.body.clone()),
+        ("POST", ["settings", "storage", "check"]) => ("check_storage", json!({})),
+        ("POST", ["reads"]) => ("mark_read", input.body.clone()),
+        ("POST", ["dismissals"]) => ("set_outcome_aside", input.body.clone()),
+        ("GET", ["settings", "conversations"]) => {
+            return Ok(Some(
+                chat_command(s, input, "get_conversation_retention", json!({})).await?,
+            ));
+        }
         ("PUT", ["settings", "conversations"]) => {
-            chat_command(s, input, "set_conversation_retention", input.body.clone()).await?
-        }
-        ("GET", ["settings", "storage"]) => crate::object_storage::settings(s)?,
-        ("PUT", ["settings", "storage"]) => {
-            crate::object_storage::save_settings(s, &input.body).await?
-        }
-        ("POST", ["settings", "storage", "check"]) => {
-            crate::object_storage::Storage::configured(s)?.probe().await?;
-            json!({ "ok": true })
-        }
-        ("GET", ["audit"]) => {
-            s.store
-                .read(|db| {
-                    let rows = db.json_rows(
-                        "SELECT json_object('id',id,'created_at',created_at,'action',action,'detail',detail)
-                         FROM audit ORDER BY id DESC LIMIT 100",
-                        [],
-                    )?;
-                    Ok(rows.into())
-                })
-                .await?
+            return Ok(Some(
+                chat_command(s, input, "set_conversation_retention", input.body.clone()).await?,
+            ));
         }
         _ => return Ok(None),
+    };
+    let context = crate::capabilities::ResumeContext::http(input)?;
+    let result = match crate::capabilities::personal_operation(name) {
+        Some(operation) => operation.invoke(s, body, context).await?,
+        None => {
+            crate::capabilities::settings_operation(name)
+                .expect("registered settings capability")
+                .invoke(s, body, context)
+                .await?
+        }
     };
     Ok(Some(result))
 }

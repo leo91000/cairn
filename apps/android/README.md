@@ -215,8 +215,8 @@ Optional native UI test captures (fixture data only):
 
 ## MCP OAuth and deployment
 
-Provider browser tabs do not share the Android session cookie. The accompanying
-Rust patch advertises `nativeMcpOauth` in `/api/settings` and supports:
+Provider browser tabs do not share the Android session cookie. The installation
+supports:
 
 1. Authenticated `POST /api/mcps/:id/connect` with `{ "native": true }`.
 2. The provider returns to the existing public HTTPS callback. The server captures

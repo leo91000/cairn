@@ -6,3 +6,7 @@ fun beaconAccountFixture(csrf: String = "fixture"): String =
 
 fun beaconInstallationsFixture(): String =
     """[{"id":"fixture","name":"Installation de test","role":"owner","online":true}]"""
+
+/** The installation overview the apps also read as their connection probe. */
+fun installationOverviewFixture(): String =
+    """{"runsByStatus":{},"agents":0,"projects":0,"missions":0,"concurrency":1}"""
