@@ -488,7 +488,7 @@ fn legacy_provider_retry(saved: &RunCheckpoint, state: &RunState) -> bool {
         && saved.runner_id().is_some_and(|attempt| !attempt.is_empty())
         && saved.provider_failed()
         && !saved.completed()
-        && saved.terminal_code == Some(None)
+        && matches!(saved.terminal_code, Some(None) | Some(Some(1)))
         && saved.turn_pending != Some(true)
         && saved.start_rejected != Some(true)
         && saved.settled().is_none()
@@ -1490,12 +1490,70 @@ mod tests {
         service.shutdown.cancel();
     }
 
+    /// Serialized by base 7f03305a after a real /wait(1) and retry::schedule.
+    #[tokio::test]
+    async fn legacy_wait_one_paid_retry_survives_recovery() {
+        let captured: Value =
+            serde_json::from_str(include_str!("fixtures/legacy-provider-wait-one.json")).unwrap();
+        let (_root, service, _chat, run, _workspace) = fixture().await;
+        for count in [0, 3] {
+            for pending in [true, false] {
+                let id = run.clone();
+                let mut value = captured["checkpoint"].clone();
+                value["controllerRecoveries"] = count.into();
+                let saved = RunCheckpoint::from_value(value).unwrap();
+                let mut retry: crate::run_retry::Retry =
+                    serde_json::from_value(captured["retry"].clone()).unwrap();
+                let original_start = retry.started_at.unwrap();
+                let shift = now() - original_start;
+                retry.started_at = retry.started_at.map(|time| time + shift);
+                retry.next_attempt_at = retry.next_attempt_at.map(|time| time + shift);
+                retry.deadline_at = retry.deadline_at.map(|time| time + shift);
+                service
+                    .store
+                    .transaction(move |db| {
+                        db.change_run(
+                            &id,
+                            crate::runs::RunChanges {
+                                status: Some(RunStatus::Queued),
+                                session_id: Some(Some("session".into())),
+                                retry: Some(Some(retry.clone())),
+                                recovery_pending: Some(pending),
+                                cancel_requested_at: Some(None),
+                                ..Default::default()
+                            },
+                        )?;
+                        saved.store_in(db, &id)?;
+                        for _ in 0..2 {
+                            let before = RunCheckpoint::load_in(db, &id)?.unwrap();
+                            assert!(
+                                finish_recovery(db, &id, Some(&before))?,
+                                "base /wait(1) retry must survive"
+                            );
+                            let after = RunCheckpoint::load_in(db, &id)?.unwrap();
+                            assert_eq!(
+                                after.provider_retry_reservation.as_deref(),
+                                Some("old-attempt")
+                            );
+                            assert_eq!(after.terminal_code(), Some(1));
+                            assert_eq!(after.controller_recoveries(), count);
+                            assert_eq!(db.run_state(&id)?.unwrap().retry, Some(retry.clone()));
+                        }
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+            }
+        }
+        service.shutdown.cancel();
+    }
+
     #[tokio::test]
     async fn legacy_retry_migration_rejects_stale_or_unsafe_evidence() {
         let (_root, service, _chat, run, _workspace) = fixture().await;
         service.store.transaction(move |db| {
             let cause = crate::run_retry::Cause::classify(&json!({"code":"server_error", "message":"Provider unavailable"})).unwrap();
-            for case in ["cancel", "expired", "cause", "provider", "unknown_terminal", "finalization", "replacement_runner", "replacement_node", "replacement_process", "new_failure", "new_admission", "new_turn", "unfenced_release", "already_reserved"] {
+            for case in ["cancel", "expired", "cause", "provider", "unknown_terminal", "terminal_zero", "terminal_other", "terminal_storage", "terminal_signal", "completed", "finalization", "replacement_runner", "replacement_node", "replacement_process", "new_failure", "new_admission", "new_turn", "unfenced_release", "already_reserved"] {
                 let started_at = if case == "expired" { now() - crate::run_retry::MAX_RECOVERY_MS - 1 } else { now() };
                 let mut retry = crate::run_retry::Retry::next(None, cause.clone(), started_at).unwrap();
                 if case == "cause" { retry.cause.message = "Different failure".into(); }
@@ -1513,6 +1571,11 @@ mod tests {
                 match case {
                     "provider" => saved.provider_failed = None,
                     "unknown_terminal" => saved.terminal_code = None,
+                    "terminal_zero" => saved.terminal_code = Some(Some(0)),
+                    "terminal_other" => saved.terminal_code = Some(Some(2)),
+                    "terminal_storage" => saved.terminal_code = Some(Some(70)),
+                    "terminal_signal" => saved.terminal_code = Some(Some(-1)),
+                    "completed" => { saved.terminal_code = Some(Some(1)); saved.completed = Some(true); },
                     "finalization" => saved.finalization_failure_attempt = Some("old-attempt".into()),
                     "replacement_runner" => saved.runner_id = Some(Some("new-attempt".into())),
                     "replacement_node" => saved.node_id = Some(Some("new-node".into())),
@@ -1622,6 +1685,95 @@ mod tests {
                     "remainingMs":null, "completed":false, "terminalCode":null,
                     "providerFailed":true, "lastError":"Provider unavailable", "retryCause":cause
                 });
+                if count != 0 {
+                    value["controllerRecoveries"] = count.into();
+                }
+                RunCheckpoint::from_value(value)
+                    .unwrap()
+                    .store(&service.store, &run)
+                    .await
+                    .unwrap();
+                service
+                    .store
+                    .change_run(
+                        &run,
+                        crate::runs::RunChanges {
+                            status: Some(RunStatus::Queued),
+                            session_id: Some(Some("session".into())),
+                            retry: Some(Some(retry.clone())),
+                            recovery_pending: Some(pending),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+                for _ in 0..2 {
+                    service.shutdown.cancel();
+                    drop(service);
+                    service = Service::new(config.clone()).await.unwrap();
+                    let state = service.store.run_state(&run).await.unwrap();
+                    let wire = service.store.run(&run).await.unwrap();
+                    service
+                        .worker
+                        .try_launch(&service, wire, state, &mut std::collections::HashSet::new())
+                        .await
+                        .unwrap();
+                    let saved = RunCheckpoint::load(&service.store, &run)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(
+                        saved.provider_retry_reservation.as_deref(),
+                        Some("old-attempt")
+                    );
+                    assert_eq!(saved.controller_recoveries(), count);
+                    let state = service.store.run_state(&run).await.unwrap();
+                    assert_eq!(state.status, RunStatus::Queued);
+                    assert_eq!(state.retry, Some(retry.clone()));
+                    assert!(!state.recovery_pending);
+                }
+            }
+        }
+        assert_eq!(starts.load(Ordering::SeqCst), 0);
+        service.shutdown.cancel();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn legacy_wait_one_retry_survives_two_service_restarts_without_new_attempt() {
+        use axum::{Router, extract::Request, routing::any};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let starts = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().fallback(any({
+            let starts = starts.clone();
+            move |request: Request| {
+                let starts = starts.clone();
+                async move {
+                    if request.method() != axum::http::Method::DELETE {
+                        starts.fetch_add(1, Ordering::SeqCst);
+                    }
+                    axum::http::StatusCode::NO_CONTENT
+                }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (_root, mut service, _chat, run, _workspace) =
+            fixture_with_runner(format!("http://{address}")).await;
+        let config = service.config.clone();
+        let cause = crate::run_retry::Cause::classify(
+            &json!({"code":"server_error", "message":"Provider unavailable"}),
+        )
+        .unwrap();
+        for count in [0, 3] {
+            for pending in [true, false] {
+                let mut retry = crate::run_retry::Retry::next(None, cause.clone(), now()).unwrap();
+                retry.next_attempt_at = Some(now() + 60_000);
+                let captured: Value =
+                    serde_json::from_str(include_str!("fixtures/legacy-provider-wait-one.json"))
+                        .unwrap();
+                let mut value = captured["checkpoint"].clone();
                 if count != 0 {
                     value["controllerRecoveries"] = count.into();
                 }

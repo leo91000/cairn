@@ -1242,6 +1242,135 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn legacy_wait_one_paid_admission_refunds_confirmed_capacity_refusal() {
+        let root = tempfile::tempdir().unwrap();
+        let service = Service::new(crate::config::Config {
+            data_dir: root.path().join("data"),
+            home: root.path().join("home"),
+            workspace_roots: vec![root.path().into()],
+            public_url: "http://localhost:4310".into(),
+            host: "127.0.0.1".into(),
+            port: 0,
+            codex_bin: "codex".into(),
+            claude_bin: "claude".into(),
+            opencode_bin: "opencode".into(),
+            opencode_go_usage_url: crate::accounts::opencode::USAGE_URL.into(),
+            concurrency: 1,
+            logger: false,
+            worker_enabled: false,
+            runner_url: String::new(),
+        })
+        .await
+        .unwrap();
+        let captured: Value =
+            serde_json::from_str(include_str!("fixtures/legacy-provider-wait-one.json")).unwrap();
+        let mut retry: crate::run_retry::Retry =
+            serde_json::from_value(captured["retry"].clone()).unwrap();
+        let shift = now() - retry.started_at.unwrap();
+        retry.started_at = retry.started_at.map(|time| time + shift);
+        retry.deadline_at = retry.deadline_at.map(|time| time + shift);
+        retry.next_attempt_at = retry.next_attempt_at.map(|time| time + shift);
+        let id = crate::config::id();
+        let run = json!({"id":id,"taskId":id,"status":"queued"});
+        service
+            .store
+            .transaction(move |db| db.add_run_fixture(&run, None).map(|_| ()))
+            .await
+            .unwrap();
+        service
+            .store
+            .change_run(
+                &id,
+                crate::runs::RunChanges {
+                    status: Some(RunStatus::Queued),
+                    session_id: Some(Some("session".into())),
+                    retry: Some(Some(retry.clone())),
+                    recovery_pending: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let saved = RunCheckpoint::from_value(captured["checkpoint"].clone()).unwrap();
+        saved.store(&service.store, &id).await.unwrap();
+        let key = id.clone();
+        assert!(
+            service
+                .store
+                .transaction(move |db| super::super::schedule::finish_recovery(
+                    db,
+                    &key,
+                    Some(&saved)
+                ))
+                .await
+                .unwrap()
+        );
+        let mut admitted = RunCheckpoint::load(&service.store, &id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(admitted.has_provider_retry_reservation());
+        let state = service.store.run_state(&id).await.unwrap();
+        admitted.bind_paid_admission("paid-candidate", &state);
+        assert!(!admitted.has_provider_retry_reservation());
+        assert_eq!(
+            admitted
+                .pending_paid_admission
+                .as_ref()
+                .unwrap()
+                .provider_cause
+                .as_ref(),
+            Some(&retry.cause)
+        );
+        admitted.start_rejected = Some(true);
+        admitted.terminal_code = None;
+        admitted.store(&service.store, &id).await.unwrap();
+        let mut consumed = retry.clone();
+        consumed.next_attempt_at = None;
+        service
+            .store
+            .change_run(
+                &id,
+                crate::runs::RunChanges {
+                    status: Some(RunStatus::Running),
+                    retry: Some(Some(consumed)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), admitted);
+        let error = Error::unavailable(format!(
+            "{} has no capacity",
+            crate::nodes::placement::NO_CAPACITY
+        ));
+        record_failure(
+            &service,
+            &checkpoint,
+            &CancellationToken::new(),
+            &error,
+            &[],
+        )
+        .await
+        .unwrap();
+        let after = RunCheckpoint::load(&service.store, &id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after.provider_retry_reservation.as_deref(),
+            Some("paid-candidate")
+        );
+        let restored = service.store.run_state(&id).await.unwrap().retry.unwrap();
+        assert_eq!(restored.attempt, retry.attempt);
+        assert_eq!(restored.started_at, retry.started_at);
+        assert_eq!(restored.deadline_at, retry.deadline_at);
+        assert_eq!(restored.cause, retry.cause);
+        assert!(restored.next_attempt_at.is_some());
+        service.shutdown.cancel();
+    }
+
+    #[tokio::test]
     async fn provider_capacity_refund_requires_same_attempt_and_retry_cause() {
         let root = tempfile::tempdir().unwrap();
         let service = Service::new(crate::config::Config {
