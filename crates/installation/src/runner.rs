@@ -28,6 +28,31 @@ pub const CONTROLLER_FAILED: i32 = 70;
 /// Internal guest result outside the valid provider exit-code range.
 pub(crate) const FINALIZATION_FAILED_SENTINEL: i32 = -1;
 
+/// Publish the final controller result after physical cleanup.
+pub(crate) async fn write_final_result(
+    path: &std::path::Path,
+    outcome: &[u8],
+    failed: bool,
+) -> Result<()> {
+    if failed
+        && serde_json::from_slice::<serde_json::Value>(outcome).ok()
+            == Some(
+                serde_json::json!({ "StatusCode": CONTROLLER_FAILED, "FinalizationFailed": true }),
+            )
+        && tokio::fs::metadata(path)
+            .await
+            .is_ok_and(|metadata| metadata.len() <= 1024)
+        && let Ok(existing) = tokio::fs::read(path).await
+        && serde_json::from_slice::<serde_json::Value>(&existing).ok()
+            == Some(
+                serde_json::json!({ "StatusCode": CONTROLLER_FAILED, "FinalizationFailed": true }),
+            )
+    {
+        return Ok(());
+    }
+    atomic_write(path, outcome).await
+}
+
 fn router(broker: Broker) -> Router {
     Router::new()
         .fallback(any(routes::handler))
@@ -418,6 +443,60 @@ mod tests {
         assert_eq!(
             serde_json::from_slice::<Value>(&bytes).unwrap(),
             json!({ "StatusCode": 0 })
+        );
+    }
+
+    #[tokio::test]
+    async fn vm_failed_flush_survives_read_only_final_write_after_cleanup() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let broker = fixture_broker(root.path()).await;
+        let id = crate::config::id();
+        let (_done, attempt) = starting_attempt(&crate::config::id());
+        broker.active.lock().await.insert(id.clone(), attempt);
+        let exit = broker.state.join(format!("{id}.exit"));
+        let record = br#"{"StatusCode":70,"FinalizationFailed":true}"#;
+        atomic_write(&exit, record).await.unwrap();
+        let response = router(broker.clone())
+            .oneshot(authorized_post(format!("/runs/{id}/wait"), Body::empty()))
+            .await
+            .unwrap();
+        let mut body = response.into_body().into_data_stream();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), body.next())
+                .await
+                .is_err()
+        );
+        std::fs::set_permissions(&broker.state, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let written = write_final_result(&exit, record, true).await;
+        let other = write_final_result(
+            &broker.state.join(format!("{}.exit", crate::config::id())),
+            record,
+            true,
+        )
+        .await;
+        std::fs::write(&exit, b"{broken").unwrap();
+        let corrupt = write_final_result(&exit, record, true).await;
+        std::fs::write(&exit, record).unwrap();
+        std::fs::set_permissions(&broker.state, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            written.is_ok(),
+            "a committed failure must not require another write: {written:?}"
+        );
+        assert!(other.is_err() && corrupt.is_err());
+        broker.active.lock().await.remove(&id);
+        let bytes = tokio::time::timeout(Duration::from_secs(2), async {
+            let mut bytes = Vec::new();
+            while let Some(chunk) = body.next().await {
+                bytes.extend_from_slice(&chunk.unwrap());
+            }
+            bytes
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap(),
+            json!({ "StatusCode": 70, "FinalizationFailed": true })
         );
     }
 

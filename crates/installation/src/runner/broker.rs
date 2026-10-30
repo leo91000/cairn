@@ -417,7 +417,13 @@ impl Execution {
         };
         let mut retry_delay = Duration::from_secs(1);
         loop {
-            match atomic_write(&broker.state_file(id, "exit"), outcome.as_bytes()).await {
+            match crate::runner::write_final_result(
+                &broker.state_file(id, "exit"),
+                outcome.as_bytes(),
+                finalization_failed,
+            )
+            .await
+            {
                 Ok(()) => break,
                 Err(error) => {
                     tracing::warn!(attempt = %id, message = %error.message, "Could not record VM exit before releasing the attempt");

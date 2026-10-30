@@ -566,7 +566,13 @@ impl Controller {
             let exit = exit_record(code, finalization_failed);
             let mut retry_delay = Duration::from_secs(1);
             loop {
-                match atomic_write(&controller.file(&id, "exit"), exit.as_bytes()).await {
+                match crate::runner::write_final_result(
+                    &controller.file(&id, "exit"),
+                    exit.as_bytes(),
+                    finalization_failed,
+                )
+                .await
+                {
                     Ok(()) => break,
                     Err(error) if finalization_failed => {
                         tracing::error!(attempt = id, %error, "Native completion must be saved before releasing the attempt");
@@ -3359,17 +3365,86 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_native_flush_survives_controller_wait_reload() {
+    async fn failed_native_flush_survives_read_only_final_write_after_cleanup() {
+        use futures_util::StreamExt;
+        use std::os::unix::fs::PermissionsExt;
         let (_fixture, controller) = fixture().await;
         let attempt = crate::config::id();
         let (code, failed) = completion_status(1, block::Completion::FailedFlush);
         let record = exit_record(code, failed);
+        controller.active.lock().await.insert(
+            attempt.clone(),
+            Attempt {
+                run: crate::config::id(),
+                expires: None,
+                stop: CancellationToken::new(),
+                started: true,
+                protection: None,
+                suspension: Arc::new(super::super::suspension::Suspension::new(
+                    &controller.state,
+                    &attempt,
+                )),
+            },
+        );
         atomic_write(&controller.file(&attempt, "exit"), record.as_bytes())
             .await
             .unwrap();
         let marker = controller.file(&attempt, "active");
         atomic_write(&marker, b"run").await.unwrap();
         preserve_interrupted_exit(&marker).await.unwrap();
+        let response = handler(
+            State(controller.clone()),
+            request(&format!("/runs/{attempt}/wait"), &json!({})),
+        )
+        .await
+        .unwrap();
+        let mut body = response.into_body().into_data_stream();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), body.next())
+                .await
+                .is_err()
+        );
+        std::fs::set_permissions(&controller.state, std::fs::Permissions::from_mode(0o500))
+            .unwrap();
+        let written = crate::runner::write_final_result(
+            &controller.file(&attempt, "exit"),
+            record.as_bytes(),
+            true,
+        )
+        .await;
+        let other = crate::runner::write_final_result(
+            &controller.file(&crate::config::id(), "exit"),
+            record.as_bytes(),
+            true,
+        )
+        .await;
+        std::fs::write(controller.file(&attempt, "exit"), b"{broken").unwrap();
+        let corrupt = crate::runner::write_final_result(
+            &controller.file(&attempt, "exit"),
+            record.as_bytes(),
+            true,
+        )
+        .await;
+        std::fs::write(controller.file(&attempt, "exit"), record.as_bytes()).unwrap();
+        std::fs::set_permissions(&controller.state, std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        assert!(
+            written.is_ok(),
+            "a committed failure must not require another write: {written:?}"
+        );
+        assert!(other.is_err() && corrupt.is_err());
+        controller.active.lock().await.remove(&attempt);
+        let mut received = Vec::new();
+        while let Some(bytes) = tokio::time::timeout(Duration::from_secs(2), body.next())
+            .await
+            .unwrap()
+        {
+            received.extend_from_slice(&bytes.unwrap());
+        }
+        assert_eq!(
+            serde_json::from_slice::<Value>(&received).unwrap(),
+            json!({ "StatusCode": 70, "FinalizationFailed": true })
+        );
         for _ in 0..2 {
             let response = handler(
                 State(controller.clone()),
