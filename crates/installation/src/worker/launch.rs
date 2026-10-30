@@ -1002,6 +1002,7 @@ impl Execution<'_> {
                 c.launched = Some(true);
                 c.start_rejected = Some(false);
                 c.output_interrupted = None;
+                c.provider_failure_attempt = None;
                 c.retry_cause = Some(None);
                 c.completed = Some(false);
                 c.terminal_code = None;

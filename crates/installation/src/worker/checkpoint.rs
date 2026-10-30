@@ -71,6 +71,9 @@ pub struct RunCheckpoint {
     pub last_error: Nullable<String>,
     #[serde(default, with = "nullable", skip_serializing_if = "Option::is_none")]
     pub retry_cause: Nullable<crate::run_retry::Cause>,
+    /// A classified turn.failed durably recorded for this exact managed attempt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_failure_attempt: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -292,12 +295,29 @@ impl RunCheckpoint {
         if !self.managed() || self.completed() {
             return None;
         }
+        if self.confirmed_provider_failure().is_some() {
+            return None;
+        }
         if self.output_interrupted == Some(true) {
             return Some(
                 "Execution output was interrupted before the agent's completion was recorded. The response may be incomplete; automatic replay was stopped.",
             );
         }
         (self.terminal_code() == Some(0)).then_some("Execution ended before the agent's completion was recorded. The response may be incomplete; automatic replay was stopped.")
+    }
+
+    /// A classified provider ending is authoritative only for its own attempt
+    /// and a confirmed ordinary failure, never a controller/finalization fault.
+    pub fn confirmed_provider_failure(&self) -> Option<&crate::run_retry::Cause> {
+        if !self.managed()
+            || self.completed()
+            || self.terminal_code() != Some(1)
+            || self.runner_id().is_none()
+            || self.runner_id() != self.provider_failure_attempt.as_deref()
+        {
+            return None;
+        }
+        self.retry_cause.as_ref().and_then(Option::as_ref)
     }
 
     pub fn finalization_error(&self) -> Option<&str> {
@@ -375,6 +395,7 @@ impl RunCheckpoint {
                 });
         }
         self.runner_id = Some(Some(runner.to_owned()));
+        self.provider_failure_attempt = None;
         self.controller_recovery_reservation = None;
         self.move_recovery_reservation = None;
         self.provider_retry_reservation = None;
@@ -603,11 +624,16 @@ impl Checkpoint {
         let mut saved = persist.then(|| state.clone());
         if let Some(saved) = &mut saved {
             if let Some((message, cause, provider_failure)) = failure {
+                if provider_failure && cause.is_some() {
+                    saved.provider_failure_attempt = saved.runner_id().map(str::to_owned);
+                }
                 saved.last_error = Some(Some(message));
                 saved.retry_cause = Some(cause);
                 if provider_failure {
                     saved.completed = Some(false);
-                    saved.terminal_code = Some(None);
+                    // The provider ending does not prove controller finalization;
+                    // leave the attempt observable if the worker crashes here.
+                    saved.terminal_code = None;
                 }
             }
             if let Some(message) = last_message.take() {

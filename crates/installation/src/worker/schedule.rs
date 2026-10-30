@@ -861,6 +861,21 @@ pub(super) fn finish_recovery(
             db.change_run(id, patch)?;
             return Ok(false);
         }
+        if checkpoint.output_interrupted == Some(true)
+            && let Some(cause) = checkpoint.confirmed_provider_failure()
+            && !provider_retry_paid(checkpoint, current)
+        {
+            let mut paid = checkpoint.clone();
+            if (current.session_id.is_some() || cause.startup)
+                && super::retry::schedule_in(db, id, &mut paid, current, cause.clone())?
+            {
+                paid.store_in(db, id)?;
+            } else {
+                let settled = Settled::failure(RunStatus::Failed, &cause.message);
+                db.change_run(id, settled.run_changes())?;
+            }
+            return Ok(false);
+        }
         if let Some(error) = checkpoint
             .output_error()
             .or_else(|| checkpoint.finalization_error())
