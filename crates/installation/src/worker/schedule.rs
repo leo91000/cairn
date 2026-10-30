@@ -978,6 +978,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn active_observation_cannot_overwrite_replacement() {
+        use axum::{Router, routing::any};
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let app = Router::new().fallback(any({
+            let (entered, gate) = (entered.clone(), gate.clone());
+            move || {
+                let (entered, gate) = (entered.clone(), gate.clone());
+                async move {
+                    entered.notify_one();
+                    gate.acquire().await.unwrap().forget();
+                    axum::Json(json!({ "StatusCode": 0 }))
+                }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (_root, service, _chat, run, _workspace) =
+            fixture_with_runner(format!("http://{address}")).await;
+        let original = RunCheckpoint::from_value(json!({
+            "prepared": { "backend": "native", "isolated": true },
+            "runnerId": "old-attempt", "remainingMs": null,
+        }))
+        .unwrap();
+        original.store(&service.store, &run).await.unwrap();
+        let checkpoint = Arc::new(super::super::checkpoint::Checkpoint::new(
+            service.store.clone(),
+            run.clone(),
+            original.clone(),
+        ));
+        let (s, cp) = (service.clone(), checkpoint.clone());
+        let task = tokio::spawn(async move {
+            super::super::execution::reconcile(&s, &cp, &CancellationToken::new()).await
+        });
+        entered.notified().await;
+        let mut replacement = original;
+        replacement.runner_id = Some(Some("new-attempt".into()));
+        replacement.controller_observation = None;
+        replacement.store(&service.store, &run).await.unwrap();
+        gate.add_permits(1);
+        assert!(task.await.unwrap().is_err());
+        let current = RunCheckpoint::load(&service.store, &run)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.runner_id(), Some("new-attempt"));
+        assert!(current.terminal_code.is_none());
+        assert!(current.controller_observation.is_none());
+        service.shutdown.cancel();
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn interrupted_observations_keep_a_durable_per_attempt_limit() {
         use axum::{Router, extract::Request, response::IntoResponse, routing::any};
         use std::sync::atomic::{AtomicUsize, Ordering};
