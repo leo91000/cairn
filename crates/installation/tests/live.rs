@@ -554,6 +554,23 @@ async fn idle_streams_refresh_lists_after_external_database_writes() {
 
 #[tokio::test]
 async fn a_conversation_stream_carries_the_conversation_list_only_on_request() {
+    async fn paused_list(stream: &mut Stream, first: Option<Value>) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let mut next = first;
+            loop {
+                let batch = match next.take() {
+                    Some(batch) => batch,
+                    None => stream.batch().await.1,
+                };
+                if batch["state"]["chats"][0]["paused"] == true {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("the list must refresh without another write");
+    }
+
     let f = Fixture::new().await;
     let chat = f.service.chat_create(json!({})).await.unwrap();
     let path = format!("/api/chats/{}/stream?window=1", text(&chat, "id"));
@@ -574,9 +591,13 @@ async fn a_conversation_stream_carries_the_conversation_list_only_on_request() {
     // Both follow changes; the list stream at most every quarter of a second.
     f.service.chat_pause(text(&chat, "id"), true).await.unwrap();
     let (_, batch) = carrying.batch().await;
-    assert_eq!(batch["state"]["chats"][0]["paused"], true);
-    let (_, batch) = list.batch().await;
-    assert_eq!(batch["state"]["chats"][0]["paused"], true);
+    assert_eq!(batch["state"]["chat"]["paused"], true);
+    // The chat's own state is immediate. The shared list may coalesce this
+    // commit, but its deadline must deliver it without another database write.
+    tokio::join!(
+        paused_list(&mut carrying, Some(batch)),
+        paused_list(&mut list, None)
+    );
 }
 
 #[tokio::test]
@@ -1568,6 +1589,33 @@ async fn profile_conversation_opening() {
         delivery.push(start.elapsed().as_secs_f64() * 1000.0);
     }
 
+    let delivery_cpu = cpu_ms() - cpu;
+    drop(follower);
+    let mut carrying = f
+        .open_path(&format!("{stream_path}?after=0&window=1&list=1"), None)
+        .await;
+    carrying.batch().await;
+    let cpu = cpu_ms();
+    let mut carrying_delivery = Vec::new();
+    for n in 0..60 {
+        let start = Instant::now();
+        let run = f.run.clone();
+        f.service
+            .store
+            .transaction(move |db| {
+                db.event(&run, &EventKind::Output, &format!("carrying {n}"), None)
+            })
+            .await
+            .unwrap();
+        // A list-only refresh may arrive before the newly appended event.
+        loop {
+            let (_, batch) = carrying.batch().await;
+            if !batch["events"].as_array().unwrap().is_empty() {
+                break;
+            }
+        }
+        carrying_delivery.push(start.elapsed().as_secs_f64() * 1000.0);
+    }
     let profile = json!({
         "events": all.len(),
         "cold_open": summary(cold),
@@ -1582,7 +1630,9 @@ async fn profile_conversation_opening() {
         "resume_events": resume_batch["events"].as_array().unwrap().len(),
         "resume_first_batch_bytes": resume_bytes,
         "delivery_with_12_idle_streams": summary(delivery),
-        "delivery_process_cpu_ms": (cpu_ms() - cpu).round(),
+        "delivery_process_cpu_ms": delivery_cpu.round(),
+        "delivery_with_list_and_12_idle_streams": summary(carrying_delivery),
+        "carrying_delivery_process_cpu_ms": (cpu_ms() - cpu).round(),
     });
     println!("CONVERSATION_OPEN_PROFILE {profile}");
 }

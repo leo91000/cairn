@@ -164,6 +164,18 @@ impl RunCheckpoint {
             .transpose()
     }
 
+    /// A display decision must not decode the retained workspace, tool sources,
+    /// process identity and recovery state merely to inspect this flag.
+    pub(crate) fn fresh_session_in(db: &Db<'_>, run_id: &str) -> Result<bool> {
+        let value: Option<Option<bool>> =
+            db.0.prepare_cached(
+                "SELECT json_extract(state,'$.freshSession') FROM run_checkpoints WHERE run_id=?",
+            )?
+            .query_row([run_id], |row| row.get(0))
+            .optional()?;
+        Ok(value.flatten().unwrap_or(false))
+    }
+
     pub async fn store(&self, store: &Store, run_id: &str) -> Result<()> {
         let (state, run_id) = (self.clone(), run_id.to_owned());
         store.write(move |db| state.store_in(db, &run_id)).await

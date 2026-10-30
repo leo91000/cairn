@@ -61,30 +61,132 @@ impl Scope {
     }
 }
 
-/// The conversation list of each account at the store revision it was read for. Every
-/// commit wakes every stream: the streams carrying the list share one rebuild per commit.
+struct CachedList {
+    revision: u64,
+    built_at: Instant,
+    chats: Vec<Value>,
+}
+
+struct ListMetrics {
+    since: Instant,
+    rebuilds: u64,
+    cache_hits: u64,
+    coalesced: u64,
+    rebuild_us: u64,
+    max_rebuild_us: u64,
+    pages: u64,
+    queue_us: u64,
+    read_us: u64,
+    max_queue_us: u64,
+    max_read_us: u64,
+}
+
+impl Default for ListMetrics {
+    fn default() -> Self {
+        Self {
+            since: Instant::now(),
+            rebuilds: 0,
+            cache_hits: 0,
+            coalesced: 0,
+            rebuild_us: 0,
+            max_rebuild_us: 0,
+            pages: 0,
+            queue_us: 0,
+            read_us: 0,
+            max_queue_us: 0,
+            max_read_us: 0,
+        }
+    }
+}
+
+impl ListMetrics {
+    fn report(&mut self) {
+        let elapsed = self.since.elapsed();
+        if elapsed < Duration::from_secs(30) {
+            return;
+        }
+        tracing::info!(target: "cairn_performance", operation = "conversation_reads",
+            interval_ms = elapsed.as_millis() as u64, pages = self.pages,
+            list_rebuilds = self.rebuilds, list_cache_hits = self.cache_hits,
+            list_coalesced = self.coalesced, list_build_us = self.rebuild_us,
+            max_list_build_us = self.max_rebuild_us, queue_us = self.queue_us,
+            read_us = self.read_us, max_queue_us = self.max_queue_us,
+            max_read_us = self.max_read_us);
+        *self = Self::default();
+    }
+}
+
+/// Account-scoped lists are shared across tabs. The async gate is taken before
+/// enqueueing a SQLite job: concurrent rebuilds never occupy all reader actors
+/// waiting on one synchronous lock. Chat events still bypass list pacing.
 #[derive(Default)]
-pub struct ConversationLists(std::sync::Mutex<HashMap<String, (u64, Vec<Value>)>>);
+pub struct ConversationLists {
+    cache: std::sync::Mutex<HashMap<String, CachedList>>,
+    gates: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    metrics: std::sync::Mutex<ListMetrics>,
+}
 
 impl ConversationLists {
     fn invalidate(&self, account: &str) {
-        self.0.lock().unwrap().remove(account);
+        self.cache.lock().unwrap().remove(account);
     }
 
-    /// A read at `revision` sees at least that commit, so a list built for the same
-    /// revision is never older than the reader's own snapshot.
-    fn get(&self, db: &Db<'_>, scope: &Scope, revision: u64) -> Result<Vec<Value>> {
-        if let Some((built, chats)) = self.0.lock().unwrap().get(&scope.account)
-            && *built == revision
-        {
-            return Ok(chats.clone());
-        }
-        let chats = conversations(db, scope)?;
-        self.0
+    fn gate(&self, account: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.gates
             .lock()
             .unwrap()
-            .insert(scope.account.clone(), (revision, chats.clone()));
-        Ok(chats)
+            .entry(account.to_owned())
+            .or_default()
+            .clone()
+    }
+
+    /// A newer revision may reuse the list for a quarter second, independently
+    /// of chat-event delivery. Its deadline schedules a refresh even if no more
+    /// writes arrive. Same-revision lists need no periodic rebuild.
+    fn get(
+        &self,
+        db: &Db<'_>,
+        scope: &Scope,
+        revision: u64,
+    ) -> Result<(Vec<Value>, Option<Instant>)> {
+        if let Some(cached) = self.cache.lock().unwrap().get(&scope.account) {
+            let refresh_at = cached.built_at + LIST_INTERVAL;
+            let same_revision = cached.revision == revision;
+            if same_revision || Instant::now() < refresh_at {
+                let mut metrics = self.metrics.lock().unwrap();
+                metrics.cache_hits += 1;
+                metrics.coalesced += u64::from(!same_revision);
+                return Ok((cached.chats.clone(), (!same_revision).then_some(refresh_at)));
+            }
+        }
+        let started = Instant::now();
+        let chats = conversations(db, scope)?;
+        let micros = started.elapsed().as_micros() as u64;
+        self.cache.lock().unwrap().insert(
+            scope.account.clone(),
+            CachedList {
+                revision,
+                built_at: Instant::now(),
+                chats: chats.clone(),
+            },
+        );
+        let mut metrics = self.metrics.lock().unwrap();
+        metrics.rebuilds += 1;
+        metrics.rebuild_us += micros;
+        metrics.max_rebuild_us = metrics.max_rebuild_us.max(micros);
+        Ok((chats, None))
+    }
+
+    fn record_page(&self, queue: Duration, read: Duration) {
+        let mut metrics = self.metrics.lock().unwrap();
+        let queue = queue.as_micros() as u64;
+        let read = read.as_micros() as u64;
+        metrics.pages += 1;
+        metrics.queue_us += queue;
+        metrics.read_us += read;
+        metrics.max_queue_us = metrics.max_queue_us.max(queue);
+        metrics.max_read_us = metrics.max_read_us.max(read);
+        metrics.report();
     }
 }
 
@@ -108,6 +210,7 @@ struct Page {
     history: String,
     oldest: Option<i64>,
     has_older: bool,
+    list_refresh_at: Option<Instant>,
 }
 
 /// One SSE `batch` event.
@@ -127,6 +230,9 @@ struct Batch {
 }
 
 use cairn_contracts::HistoryPage;
+
+#[cfg(test)]
+mod read_tests;
 
 struct Request {
     after: i64,
@@ -177,6 +283,7 @@ fn read_page(
     request: Request,
     lists: &ConversationLists,
     revision: u64,
+    list_permit: Option<tokio::sync::OwnedMutexGuard<()>>,
 ) -> Result<Page> {
     let Request {
         after,
@@ -185,8 +292,17 @@ fn read_page(
         recent,
         resume,
     } = request;
+    let (chats, list_refresh_at) = if scope.carries_list() {
+        let (chats, refresh_at) = lists.get(db, scope, revision)?;
+        (Some(chats), refresh_at)
+    } else {
+        (None, None)
+    };
+    // Only list construction is shared. A slow message, run or event read in
+    // this conversation must not hold up another tab's durable event delivery.
+    drop(list_permit);
     let chat = if scope.single_chat() {
-        crate::chats::public_detail(db, &scope.id)?
+        crate::chats::public_stream_detail(db, &scope.id, window)?
     } else {
         Value::Null
     };
@@ -230,26 +346,15 @@ fn read_page(
     }
     let oldest = tail.then(|| events.first().map_or(0, |e| e.id));
     let cursor = events.last().map_or(start, |e| e.id);
-    let mut state = State {
+    let state = State {
         artifacts: artifacts(db, run_id)?,
         run,
         chat,
         cache_revision: db
             .kv("conversation-cache-revision")?
             .unwrap_or_else(|| "initial".into()),
-        chats: scope
-            .carries_list()
-            .then(|| lists.get(db, scope, revision))
-            .transpose()?,
+        chats,
     };
-    // Delivered messages already live in the event history. Do not resend
-    // the entire conversation as metadata on every paginated stream update.
-    if window
-        && scope.single_chat()
-        && let Some(messages) = state.chat["messages"].as_array_mut()
-    {
-        messages.retain(|m| m["status"] != crate::chats::MessageStatus::Delivered);
-    }
     Ok(Page {
         state,
         events,
@@ -258,6 +363,7 @@ fn read_page(
         history,
         oldest,
         has_older,
+        list_refresh_at,
     })
 }
 
@@ -268,17 +374,27 @@ fn conversations(db: &Db<'_>, scope: &Scope) -> Result<Vec<Value>> {
 }
 
 async fn page(s: &Service, scope: Scope, request: Request) -> Result<Page> {
+    let started = Instant::now();
+    let lists = s.conversation_lists.clone();
+    let gate = scope.carries_list().then(|| lists.gate(&scope.account));
+    let permit = match gate {
+        Some(gate) => Some(gate.lock_owned().await),
+        None => None,
+    };
     // Read before the snapshot starts, so the snapshot includes this revision.
     let revision = s.store.revision();
-    let lists = s.conversation_lists.clone();
     s.store
         .read(move |db| {
+            let queue = started.elapsed();
+            let read = Instant::now();
             // A single SQLite snapshot covers metadata and the event boundary.
             let tx = rusqlite::Transaction::new_unchecked(
                 db.0,
                 rusqlite::TransactionBehavior::Deferred,
             )?;
-            read_page(&Db(&tx), &scope, request, &lists, revision)
+            let result = read_page(&Db(&tx), &scope, request, &lists, revision, permit);
+            lists.record_page(queue, read.elapsed());
+            result
         })
         .await
 }
@@ -341,6 +457,7 @@ pub async fn http(s: Arc<Service>, kind: &str, id: &str, input: Input) -> Result
         history: None,
         deltas: crate::live_text::TextDeltas::default(),
         read_at: Instant::now(),
+        list_refresh_at: None,
     };
     let stream = futures_util::stream::try_unfold(subscription, |mut subscription| async move {
         let event = subscription.next().await?;
@@ -369,6 +486,7 @@ struct Subscription {
     deltas: crate::live_text::TextDeltas,
     /// When the last page was read, to pace rebuilding the conversation list.
     read_at: Instant,
+    list_refresh_at: Option<Instant>,
 }
 
 impl Subscription {
@@ -411,8 +529,8 @@ impl Subscription {
                 result = self.changes.changed() => if result.is_err() { return Ok(None); },
                 // Recover writes by an external maintenance process; normal
                 // delivery is notification driven. Transport owns revocation.
-                () = tokio::time::sleep(Duration::from_secs(15)) => {
-                    if self.scope.carries_list() {
+                () = tokio::time::sleep_until(self.list_refresh_at.unwrap_or_else(|| Instant::now() + Duration::from_secs(15)).into()) => {
+                    if self.list_refresh_at.is_none() && self.scope.carries_list() {
                         self.s.conversation_lists.invalidate(&self.scope.account);
                     }
                 },
@@ -433,6 +551,7 @@ impl Subscription {
         if run_changed {
             current = self.read(0, None).await?;
         }
+        self.list_refresh_at = current.list_refresh_at;
         let reset = current.reset || run_changed;
         if reset {
             self.cursor = 0;
