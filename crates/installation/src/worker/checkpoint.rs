@@ -491,15 +491,15 @@ impl Checkpoint {
         decision: impl FnOnce(&mut RunCheckpoint, &mut Db<'_>) -> Result<T> + Send + 'static,
     ) -> Result<T> {
         let mut state = self.state.lock().await;
-        let expected = state.runner_id().map(str::to_owned);
-        let fallback = state.clone();
+        let expected = state.clone();
+        let fallback = expected.clone();
         let id = self.id.clone();
         let deadline = self.deadline();
         let (saved, value) = self
             .store
             .transaction(move |db| {
                 let mut saved = RunCheckpoint::load_in(db, &id)?.unwrap_or(fallback);
-                if saved.runner_id() != expected.as_deref() {
+                if !crate::recovery::same_execution(Some(&saved), Some(&expected)) {
                     return Err(crate::error::Error::conflict(
                         "Execution attempt changed during settlement.",
                     ));

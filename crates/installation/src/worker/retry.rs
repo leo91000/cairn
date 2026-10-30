@@ -29,7 +29,7 @@ pub(super) async fn schedule(
         return Ok(false);
     }
     let id = checkpoint.id.clone();
-    let expected = saved.runner_id().map(str::to_owned);
+    let expected = saved.clone();
     let deadline = checkpoint.deadline();
     let cancel = cancel.clone();
     let shutdown = s.shutdown.clone();
@@ -43,10 +43,10 @@ pub(super) async fn schedule(
             if cancel.is_cancelled()
                 || shutdown.is_cancelled()
                 || deadline.is_some_and(|deadline| now() >= deadline)
-                || current
-                    .as_ref()
-                    .and_then(super::checkpoint::RunCheckpoint::runner_id)
-                    != expected.as_deref()
+                || current.as_ref().map_or(
+                    expected.runner_id().is_some() || expected.process().is_some(),
+                    |current| !crate::recovery::same_execution(Some(current), Some(&expected)),
+                )
                 || run.cancel_requested_at.is_some()
                 || (run.session_id.is_none() && !cause.startup)
                 || !run.status.is_active()
