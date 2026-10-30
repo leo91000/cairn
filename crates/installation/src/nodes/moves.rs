@@ -885,13 +885,13 @@ async fn release_destination(s: &Service, run: &Value) -> Result<()> {
 pub(crate) async fn abort_terminal_recovery(
     s: &Service,
     run_id: &str,
-    expected_attempt: Option<&str>,
+    expected_attempt: Option<&crate::worker::checkpoint::RunCheckpoint>,
 ) -> Result<()> {
     let id = run_id.to_owned();
-    let expected = expected_attempt.map(str::to_owned);
+    let expected = expected_attempt.cloned();
     s.store.transaction(move |db| {
         let checkpoint = crate::worker::checkpoint::RunCheckpoint::load_in(db, &id)?;
-        if checkpoint.as_ref().and_then(crate::worker::checkpoint::RunCheckpoint::runner_id) != expected.as_deref() {
+        if !crate::recovery::same_execution(checkpoint.as_ref(), expected.as_ref()) {
             return Err(Error::conflict("Execution attempt changed during recovery."));
         }
         let current = db.run(&id)?.ok_or_else(|| Error::not_found("Conversation removed."))?;

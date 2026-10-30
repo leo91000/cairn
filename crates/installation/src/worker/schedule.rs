@@ -603,13 +603,24 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
         return Ok(false);
     }
     let fenced = recovery::fence_attempt(s, run, expected_checkpoint.as_ref()).await;
+    let mut expected_fenced = expected_checkpoint.clone();
+    if fenced.is_ok()
+        && let Some(saved) = &mut expected_fenced
+    {
+        saved.process = None;
+    }
     if let Some(deadline) = recovery_deadline {
         let id = run_id.to_owned();
-        let expected = expected_attempt.clone();
+        let expected = if fenced.is_ok() {
+            expected_fenced.clone()
+        } else {
+            expected_checkpoint.clone()
+        };
         s.store
             .transaction(move |db| {
-                if let Some(mut saved) = RunCheckpoint::load_in(db, &id)?
-                    && saved.runner_id() == expected.as_deref()
+                let mut current = RunCheckpoint::load_in(db, &id)?;
+                if recovery::same_execution(current.as_ref(), expected.as_ref())
+                    && let Some(saved) = &mut current
                 {
                     saved.remaining_ms = Some(Some(deadline.saturating_sub(now()).max(0)));
                     saved.store_in(db, &id)?;
@@ -620,16 +631,15 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
     }
     fenced?;
     if cannot_replay && !parked {
-        crate::nodes::moves::abort_terminal_recovery(s, run_id, expected_attempt.as_deref())
-            .await?;
+        crate::nodes::moves::abort_terminal_recovery(s, run_id, expected_fenced.as_ref()).await?;
     }
     let id = run_id.to_owned();
-    let expected = expected_attempt.clone();
+    let expected = expected_fenced.clone();
     let revoked = s
         .store
         .transaction(move |db| {
             let current = RunCheckpoint::load_in(db, &id)?;
-            if current.as_ref().and_then(RunCheckpoint::runner_id) != expected.as_deref() {
+            if !recovery::same_execution(current.as_ref(), expected.as_ref()) {
                 return Ok(false);
             }
             db.revoke_mcp_run(&id)?;
@@ -640,7 +650,7 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
         return Ok(false);
     }
     let current = RunCheckpoint::load(&s.store, run_id).await?;
-    if current.as_ref().and_then(RunCheckpoint::runner_id) != expected_attempt.as_deref() {
+    if !recovery::same_execution(current.as_ref(), expected_fenced.as_ref()) {
         return Ok(false);
     }
     s.accounts.recover_run(s, run).await?;
@@ -648,8 +658,7 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
     s.store
         .transaction(move |db| {
             let mut checkpoint = RunCheckpoint::load_in(db, &id)?;
-            if checkpoint.as_ref().and_then(RunCheckpoint::runner_id) != expected_attempt.as_deref()
-            {
+            if !recovery::same_execution(checkpoint.as_ref(), expected_fenced.as_ref()) {
                 return Ok(false);
             }
             if let (Some(saved), Some(deadline)) = (&mut checkpoint, recovery_deadline) {

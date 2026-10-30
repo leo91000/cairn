@@ -450,9 +450,13 @@ async fn requeue_pending_move(s: &Service, checkpoint: &Checkpoint, fenced: bool
         // finalization and not permission to replay on the destination.
         return Ok(());
     }
+    let mut expected_fenced = saved.clone();
+    if fenced {
+        expected_fenced.process = None;
+    }
     if saved.managed() && saved.completed() && saved.terminal_code() == Some(0) {
         if fenced && run.state.status != RunStatus::Waiting {
-            crate::nodes::moves::abort_terminal_recovery(s, run_id, saved.runner_id()).await?;
+            crate::nodes::moves::abort_terminal_recovery(s, run_id, Some(&expected_fenced)).await?;
         }
         return Ok(());
     }
@@ -463,7 +467,7 @@ async fn requeue_pending_move(s: &Service, checkpoint: &Checkpoint, fenced: bool
         });
     if terminal_failure {
         if fenced {
-            crate::nodes::moves::abort_terminal_recovery(s, run_id, saved.runner_id()).await?;
+            crate::nodes::moves::abort_terminal_recovery(s, run_id, Some(&expected_fenced)).await?;
         }
         return Ok(());
     }
