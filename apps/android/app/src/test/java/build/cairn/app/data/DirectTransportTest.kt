@@ -383,6 +383,81 @@ class DirectTransportTest {
         }
 
     @Test
+    fun `fragmented message write pressure can return a relay rejection before direct recovers`() =
+        runBlocking {
+            MockWebServer().use { server ->
+                server.enqueue(MockResponse().setResponseCode(413))
+                server.start()
+                val api = CairnApi(server.url("/"), MemoryVault(), installationId = "test")
+                var disposed = false
+                var partialTransfer: Int? = null
+                var abortedTransfer: Int? = null
+                lateinit var channel: DirectChannel
+                channel =
+                    DirectChannel(
+                        { packet, _, _ ->
+                            val envelope = ByteBuffer.wrap(packet)
+                            val transfer = envelope.getInt(1)
+                            val total = envelope.getInt(5)
+                            val offset = envelope.getInt(9)
+                            if (total == 0) {
+                                abortedTransfer = transfer
+                            } else if (total > DirectChannel.MAX_PACKET) {
+                                if (offset == 0) partialTransfer = transfer
+                                else throw DirectRequestTimeout()
+                            } else {
+                                val request =
+                                    wireJson
+                                        .parseToJsonElement(
+                                            String(packet.copyOfRange(13, packet.size))
+                                        )
+                                        .jsonObject
+                                if (request["type"]!!.jsonPrimitive.content == "request")
+                                    channel.receive(
+                                        singleFramePacket(
+                                            buildJsonObject {
+                                                put("type", "response")
+                                                put("id", request["id"]!!)
+                                                put("status", 200)
+                                                put("headers", buildJsonArray {})
+                                                put("body", "W10=")
+                                            }
+                                                .toString()
+                                                .toByteArray()
+                                        )
+                                    )
+                            }
+                        },
+                        { disposed = true },
+                    )
+                api.transport.attach(channel)
+                try {
+                    assertEquals("[]", api.request("GET", "/chats"))
+                    assertEquals("direct", api.transport.route.value)
+                    val message = body("id" to "pressured-message", "text" to "x".repeat(1_000_000))
+                    val rejected = runCatching {
+                        api.request("POST", "/chats/missing/messages", message)
+                    }
+                        .exceptionOrNull()
+                    assertEquals(413, (rejected as? ApiException)?.status)
+                    assertNotNull(partialTransfer)
+                    assertEquals(partialTransfer, abortedTransfer)
+                    assertFalse(disposed)
+                    assertEquals("relay", api.transport.route.value)
+                    assertEquals("[]", api.request("GET", "/chats"))
+                    assertEquals("direct", api.transport.route.value)
+                    assertEquals(1, server.requestCount)
+                    val replay = server.takeRequest()
+                    assertEquals("POST", replay.method)
+                    assertEquals("/api/installations/test/api/chats/missing/messages", replay.path)
+                    assertEquals(message, wireJson.parseToJsonElement(replay.body.readUtf8()))
+                } finally {
+                    api.closeStreams()
+                }
+            }
+        }
+
+    @Test
     fun `slow direct read recovers on relay without closing other requests on the peer`() =
         runBlocking {
             MockWebServer().use { server ->

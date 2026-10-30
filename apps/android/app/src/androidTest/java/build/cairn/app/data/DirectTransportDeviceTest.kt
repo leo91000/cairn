@@ -75,10 +75,13 @@ class DirectTransportDeviceTest {
         val initialExpiry = AtomicLong()
         val refusedPeers = ConcurrentHashMap.newKeySet<String>()
         val refusedCandidates = AtomicInteger()
+        val authorizationAttempts = AtomicInteger()
         val client =
             OkHttpClient.Builder()
                 .addInterceptor { chain ->
                     val request = chain.request()
+                    if (request.url.encodedPath.endsWith("/direct/authorize"))
+                        authorizationAttempts.incrementAndGet()
                     if (scenario == "same-lan" && request.url.encodedPath.endsWith("/signal")) {
                         val body = Buffer().also { request.body!!.writeTo(it) }.readUtf8()
                         val signal = wireJson.parseToJsonElement(body).jsonObject
@@ -464,7 +467,7 @@ class DirectTransportDeviceTest {
                         assertEquals("relay", renewal.transport.route.value)
                         assertEquals(
                             "Unavailable renewal must not authorize again: $renewalTrace",
-                            1,
+                            attemptsWhenUnavailable.get(),
                             renewalAttempts.get(),
                         )
                         assertEquals(
@@ -521,6 +524,9 @@ class DirectTransportDeviceTest {
                         }
                     }
                     suspendedControl = true
+
+                    awaitDirect()
+                    val authorizationsBeforeLargeRequest = authorizationAttempts.get()
                     val largeRequest = runCatching {
                         api.request(
                             "POST",
@@ -537,9 +543,16 @@ class DirectTransportDeviceTest {
                         413,
                         (largeRequest as? ApiException)?.status,
                     )
+                    // An ID-backed POST may safely replay on relay under write pressure.
+                    // The route records that response; observe a fresh direct read before
+                    // asserting recovery, rather than requiring the rejection to stay direct.
+                    awaitDirect()
                     assertEquals("direct", api.transport.route.value)
-                    read()
-                    assertEquals("direct", api.transport.route.value)
+                    assertEquals(
+                        "The rejected message must preserve the authorized peer",
+                        authorizationsBeforeLargeRequest,
+                        authorizationAttempts.get(),
+                    )
 
                     // Real selected-installation UI exercises the asynchronous startup/indicator.
                     val vm =
