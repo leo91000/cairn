@@ -1236,6 +1236,90 @@ async fn plan_turns_deny_writes_effects_and_leaving_plan_mode() {
 }
 
 #[tokio::test]
+async fn completed_plan_receipt_replays_the_proposal_without_starting_another_turn() {
+    let root = TempDir::new().unwrap();
+    let mut c = setup(&root);
+    let p = plan_turn(&root);
+    let (result, events) = run_to_end(&c, p.clone()).await;
+    result.unwrap();
+    let completed: Vec<_> = events
+        .iter()
+        .filter(|event| {
+            event["type"] == "item.completed" && event["item"]["type"] == "proposed_plan"
+        })
+        .map(|event| event["item"].clone())
+        .collect();
+    assert_eq!(completed.len(), 1);
+
+    // Model output was buffered when the controller stopped: replay starts with no
+    // durable proposal event or output file, only the adapter's completion receipt.
+    std::fs::remove_file(root.path().join("result.md")).unwrap();
+    c.claude_bin = "/nonexistent-claude-for-receipt".into();
+    let (result, replayed) = run_to_end(&c, p).await;
+    result.unwrap();
+    assert!(completes(&replayed));
+    let proposals: Vec<_> = replayed
+        .iter()
+        .filter(|event| {
+            event["type"] == "item.completed" && event["item"]["type"] == "proposed_plan"
+        })
+        .map(|event| event["item"].clone())
+        .collect();
+    assert_eq!(proposals, completed);
+    let invocations = std::fs::read_to_string(c.home.join(".claude/invocations.jsonl")).unwrap();
+    assert_eq!(invocations.lines().count(), 1);
+}
+
+#[tokio::test]
+async fn completed_plan_receipt_preserves_proposal_ids_and_subagent_parentage() {
+    let root = TempDir::new().unwrap();
+    let mut c = setup(&root);
+    c.claude_bin = "/nonexistent-claude-for-receipt".into();
+    let proposals = json!([
+        {
+            "id": "root-proposal",
+            "type": "proposed_plan",
+            "text": "The root approach",
+            "status": "completed",
+        },
+        {
+            "id": "child-proposal",
+            "parent_id": "delegated-actor",
+            "type": "proposed_plan",
+            "text": "The child approach stays with its actor",
+            "status": "completed",
+        },
+    ]);
+    let receipt = json!({
+        "messageId": "original",
+        "delivered": ["original"],
+        "text": "Waiting for approval",
+        "itemId": "final-reply",
+        "proposals": proposals,
+    });
+    std::fs::write(
+        root.path().join("result.claude-receipt.json"),
+        receipt.to_string(),
+    )
+    .unwrap();
+
+    let (result, replayed) = run_to_end(&c, plan_turn(&root)).await;
+    result.unwrap();
+    assert!(completes(&replayed));
+    let actual: Vec<_> = replayed
+        .iter()
+        .filter(|event| event["item"]["type"] == "proposed_plan")
+        .map(|event| event["item"].clone())
+        .collect();
+    assert_eq!(json!(actual), proposals);
+    assert!(!c.home.join(".claude/invocations.jsonl").exists());
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("result.md")).unwrap(),
+        "Waiting for approval"
+    );
+}
+
+#[tokio::test]
 async fn disk_notice_reaches_engine_without_user_receipts_including_replay() {
     let root = TempDir::new().unwrap();
     let c = setup(&root);

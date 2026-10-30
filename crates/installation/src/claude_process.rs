@@ -395,6 +395,8 @@ struct Receipt {
     delivered: Vec<String>,
     text: String,
     item_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    proposals: Vec<Value>,
 }
 
 impl Receipt {
@@ -412,6 +414,9 @@ impl Receipt {
             emit(events, delivered(id)).await?;
         }
         atomic_write(Path::new(text(plan, "output")), self.text.as_bytes()).await?;
+        for item in self.proposals {
+            emit(events, json!({ "type": "item.completed", "item": item })).await?;
+        }
         let item = json!({ "id": self.item_id, "type": "agent_message", "text": self.text });
         emit(events, json!({ "type": "item.completed", "item": item })).await?;
         emit(events, json!({ "type": "turn.completed" })).await
@@ -525,6 +530,8 @@ struct Turn<'a> {
     stream_message: String,
     last: String,
     last_id: String,
+    /// Completed plan artifacts, including their actor scope, replayed after a restart.
+    proposals: Vec<Value>,
     /// Background tasks that keep the run open, with their descriptions.
     background: BTreeMap<String, String>,
     awaiting_background: HashSet<String>,
@@ -961,6 +968,7 @@ impl Turn<'_> {
             if item["type"] == "proposed_plan" {
                 // Cairn declines to leave plan mode; the plan itself is complete.
                 item["status"] = "completed".into();
+                self.proposals.push(item.clone());
                 self.emit(json!({ "type": "item.completed", "item": item }))
                     .await?;
                 continue;
@@ -1516,6 +1524,7 @@ impl Turn<'_> {
                 delivered: self.delivered.iter().cloned().collect(),
                 text: self.last.clone(),
                 item_id: self.last_id.clone(),
+                proposals: self.proposals.clone(),
             };
             // Save the receipt before completion so restart cannot repeat a finished request.
             atomic_write(&self.receipt, &serde_json::to_vec(&receipt)?).await?;
@@ -1708,6 +1717,7 @@ pub async fn run(
         stream_message: String::new(),
         last: String::new(),
         last_id: format!("{initial_id}-result"),
+        proposals: Vec::new(),
         background: BTreeMap::new(),
         awaiting_background: HashSet::new(),
         background_replayed: false,

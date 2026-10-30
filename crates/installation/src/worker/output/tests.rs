@@ -688,6 +688,69 @@ async fn proposals_over_the_activity_limit_keep_their_redacted_text() {
 }
 
 #[tokio::test]
+async fn completed_plan_frames_above_the_line_limit_reach_storage_intact_and_redacted() {
+    let mut fixture = Fixture::new().await;
+    let plan = format!(
+        "{}sensitive-tool-credential{}",
+        "x".repeat(LINE_LIMIT + 4096),
+        "😀".repeat(100)
+    );
+    let redacted = plan.replace("sensitive-tool-credential", "[redacted]");
+    let items = [
+        json!({
+            "id": "root-plan",
+            "type": "proposed_plan",
+            "text": plan,
+            "status": "completed",
+        }),
+        json!({
+            "id": "child-plan",
+            "parent_id": "delegated-actor",
+            "type": "proposed_plan",
+            "text": plan,
+            "status": "completed",
+        }),
+        json!({
+            "id": "following",
+            "type": "agent_message",
+            "text": "After the proposals",
+        }),
+    ];
+    let (reader, mut writer) = tokio::io::duplex(8192);
+    let (sender, mut receiver) = mpsc::channel(32);
+    // The manager may learn the redaction after the pipe reader starts.
+    let reading = tokio::spawn(read_output(reader, false, sender, Vec::new()));
+    let writing = tokio::spawn(async move {
+        for item in items {
+            let event = json!({ "type": "item.completed", "item": item });
+            writer
+                .write_all(&run_output::event_line(&event))
+                .await
+                .unwrap();
+        }
+    });
+    while let Some(output) = receiver.recv().await {
+        fixture.output(output).await;
+    }
+    writing.await.unwrap();
+    reading.await.unwrap();
+
+    let events = fixture.events().await;
+    assert_eq!(events.len(), 3);
+    for (event, id) in events[..2].iter().zip(["root-plan", "child-plan"]) {
+        let item = &event["payload"]["item"];
+        assert_eq!(item["type"], "proposed_plan");
+        assert_eq!(item["id"], id);
+        assert_eq!(item["text"], redacted);
+        assert!(item["details_truncated"].is_null());
+        assert!(!event.to_string().contains("sensitive-tool-credential"));
+    }
+    assert_eq!(events[1]["payload"]["item"]["parent_id"], "delegated-actor");
+    assert_eq!(events[2]["payload"]["item"]["text"], "After the proposals");
+    assert_eq!(fixture.log_total, 0);
+}
+
+#[tokio::test]
 async fn command_previews_redact_secrets_before_cutting_and_file_changes_stay_bounded() {
     let mut fixture = Fixture::new().await;
     fixture.event(json!({

@@ -49,8 +49,13 @@ impl Output {
             && let Ok(event) = serde_json::from_str::<Value>(&raw)
             && text(&event, "type").starts_with("item.")
             && event["item"].is_object()
-            && !run_output::conversation_item(&event)
         {
+            // JSON frames already have a transport bound. Conversation text must
+            // reach the manager intact for redaction and durable storage.
+            if run_output::conversation_item(&event) {
+                return Self::new(false, raw.into_owned());
+            }
+
             return Self::new(
                 false,
                 run_output::compact_activity(&event, secrets).to_string(),
