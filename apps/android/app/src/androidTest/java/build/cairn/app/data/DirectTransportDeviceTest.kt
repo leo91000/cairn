@@ -18,6 +18,7 @@ import build.cairn.app.ui.installationHeader
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.*
@@ -357,14 +358,39 @@ class DirectTransportDeviceTest {
                     // so a real acknowledged renewal can return the unavailable control fixture.
                     val renewalAttempts = AtomicInteger()
                     val renewalReplies = AtomicInteger()
+                    val attemptsWhenUnavailable = AtomicInteger(-1)
+                    val renewalSetupRejected = AtomicBoolean()
+                    val renewalTrace = ConcurrentLinkedQueue<String>()
+                    val renewalStarted = System.nanoTime()
+                    fun recordRenewal(event: String) {
+                        val elapsedMillis = (System.nanoTime() - renewalStarted) / 1_000_000
+                        renewalTrace.add("$elapsedMillis:$event")
+                    }
                     val renewalClient =
                         OkHttpClient.Builder()
                             .addInterceptor { chain ->
                                 val request = chain.request()
                                 val path = request.url.encodedPath
-                                if (path.endsWith("/direct/authorize"))
-                                    renewalAttempts.incrementAndGet()
+                                if (path.endsWith("/direct/authorize")) {
+                                    val attempt = renewalAttempts.incrementAndGet()
+                                    recordRenewal("authorize:$attempt:start")
+                                    if (attempt == 1) {
+                                        // A valid setup retry must not count as a retry after the
+                                        // later unavailable renewal response.
+                                        renewalSetupRejected.set(true)
+                                        recordRenewal("authorize:$attempt:503")
+                                        return@addInterceptor Response.Builder()
+                                            .request(request)
+                                            .protocol(Protocol.HTTP_1_1)
+                                            .code(503)
+                                            .message("Renewal setup capacity fixture")
+                                            .body("{}".toResponseBody())
+                                            .build()
+                                    }
+                                }
                                 val response = chain.proceed(request)
+                                if (path.endsWith("/direct/authorize"))
+                                    recordRenewal("authorize:response:${response.code}")
                                 if (path.endsWith("/direct/authorize") && response.isSuccessful) {
                                     // The control call permits 30 s. Exercise successful setup
                                     // beyond the former 10 s fixture precondition before testing
@@ -403,6 +429,12 @@ class DirectTransportDeviceTest {
                                         )
                                         .build()
                                 } else if (path.endsWith("/renew") && response.isSuccessful) {
+                                    // Capture the first real response boundary, before the client
+                                    // can react. A later reply must never move this baseline.
+                                    attemptsWhenUnavailable.compareAndSet(-1, renewalAttempts.get())
+                                    recordRenewal(
+                                        "renew:unavailable:authorizations=${renewalAttempts.get()}"
+                                    )
                                     response.close()
                                     renewalReplies.incrementAndGet()
                                     response
@@ -423,15 +455,23 @@ class DirectTransportDeviceTest {
                                     renewal.transport.route.value != "relay"
                             ) delay(100)
                         }
-                        delay(18000)
-                        assertEquals(
-                            "Unavailable renewal must not authorize again",
-                            1,
-                            renewalAttempts.get(),
+                        assertTrue(
+                            "Setup must retry the injected capacity rejection before renewal: $renewalTrace",
+                            renewalSetupRejected.get() && attemptsWhenUnavailable.get() >= 2,
                         )
-                        assertEquals(1, renewalReplies.get())
+                        delay(18000)
                         assertEquals("[]", renewal.request("GET", "/chats"))
                         assertEquals("relay", renewal.transport.route.value)
+                        assertEquals(
+                            "Unavailable renewal must not authorize again: $renewalTrace",
+                            attemptsWhenUnavailable.get(),
+                            renewalAttempts.get(),
+                        )
+                        assertEquals(
+                            "Unavailable renewal must not loop: $renewalTrace",
+                            1,
+                            renewalReplies.get(),
+                        )
                         unavailableRenewal = true
                     } finally {
                         renewal.closeStreams()
