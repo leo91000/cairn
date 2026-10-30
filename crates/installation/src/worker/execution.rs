@@ -856,7 +856,15 @@ mod tests {
             MAX_CONTROLLER_RECOVERIES
         );
         assert!(checkpoint.snapshot().await.settled().is_none());
-        // The next failure must settle even though the node is remote and a session exists.
+        // The paid recovery is consumed by the replacement attempt. Its own
+        // failure must settle at the ceiling even when a session exists.
+        checkpoint
+            .update(|saved| {
+                saved.runner_id = Some(Some(crate::config::id()));
+                saved.controller_recovery_reservation = None;
+            })
+            .await
+            .unwrap();
         record_failure(&service, &checkpoint, &cancel, &error, &[])
             .await
             .unwrap();
