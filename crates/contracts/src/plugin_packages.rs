@@ -223,6 +223,21 @@ pub enum PluginProgramInput {
     deny_unknown_fields
 )]
 pub enum PluginOperationResult {
+    Project {
+        project: Box<Project>,
+    },
+    SourceProjects {
+        page: Box<PluginProjectPage>,
+    },
+    SkillImport {
+        imported: Box<SkillImport>,
+    },
+    SkillSource {
+        status: Box<SkillSourceStatus>,
+    },
+    SkillBundle {
+        bundle: Box<SkillBundle>,
+    },
     Package {
         version: Box<PackageVersion>,
     },
@@ -243,6 +258,9 @@ pub struct PluginOperation {
     pub state: PluginOperationState,
     pub result: Option<PluginOperationResult>,
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub error_status: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema, TS)]

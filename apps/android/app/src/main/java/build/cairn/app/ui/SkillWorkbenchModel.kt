@@ -9,6 +9,8 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import build.cairn.app.data.*
+import build.cairn.contracts.SkillInput
+import build.cairn.contracts.deleteSkill
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -171,7 +173,7 @@ internal class SkillWorkbenchModel : ViewModel() {
         val opened = target ?: return
         val session = editorSession
         vm.perform {
-            delete(skillRoute(opened.scope, opened.name))
+            api.deleteSkill(SkillInput(scope = opened.scope, name = opened.name))
             if (editorSession == session) deleted()
         }
     }
@@ -191,7 +193,7 @@ internal class SkillWorkbenchModel : ViewModel() {
         viewModelScope.launch {
             try {
                 val bundle =
-                    vm.api.applySkillChanges(
+                    vm.api.applyDraftSkillChanges(
                         opened.scope,
                         opened.name,
                         current.base?.revision,

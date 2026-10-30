@@ -230,13 +230,13 @@ data class SkillDraft(
      * The ordered batch: deletions free paths, then moves (cycles go through a temporary path),
      * then content writes on the final paths, then mode changes of untouched files.
      */
-    fun changes(): List<SkillChange> {
-        val result = mutableListOf<SkillChange>()
-        deleted.forEach { result += SkillChange.Delete(it.path) }
+    fun changes(): List<DraftSkillChange> {
+        val result = mutableListOf<DraftSkillChange>()
+        deleted.forEach { result += DraftSkillChange.Delete(it.path) }
         val pending =
             files
                 .filter { it.origin != null && it.origin != it.path }
-                .map { SkillChange.Move(it.origin!!, it.path) }
+                .map { DraftSkillChange.Move(it.origin!!, it.path) }
                 .toMutableList()
         val occupied = (files.map { it.path } + files.mapNotNull { it.origin }).toMutableSet()
         var temporary = 0
@@ -258,17 +258,17 @@ data class SkillDraft(
                 path = "cairn-move-${temporary++}"
             } while (occupied.any { pathsCollide(path, it) })
             occupied += path
-            result += SkillChange.Move(parked.from, path)
-            pending += SkillChange.Move(path, parked.to)
+            result += DraftSkillChange.Move(parked.from, path)
+            pending += DraftSkillChange.Move(path, parked.to)
         }
         files
             .filter { it.body != null }
-            .forEach { result += SkillChange.Write(it.path, it.body!!, it.executable) }
+            .forEach { result += DraftSkillChange.Write(it.path, it.body!!, it.executable) }
         files
             .filter {
                 it.body == null && original(it)?.executable?.let { e -> e != it.executable } == true
             }
-            .forEach { result += SkillChange.Mode(it.path, it.executable) }
+            .forEach { result += DraftSkillChange.Mode(it.path, it.executable) }
         return result
     }
 

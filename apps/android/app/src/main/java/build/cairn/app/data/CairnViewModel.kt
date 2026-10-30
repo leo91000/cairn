@@ -9,6 +9,7 @@ import build.cairn.contracts.GetInstallationOverviewInput
 import build.cairn.contracts.ListMissionsInput
 import build.cairn.contracts.ListModelsInput
 import build.cairn.contracts.ListProjectsInput
+import build.cairn.contracts.ListSkillsInput
 import build.cairn.contracts.MarkReadInput
 import build.cairn.contracts.OutcomeAsideAction
 import build.cairn.contracts.ReadMark
@@ -21,6 +22,7 @@ import build.cairn.contracts.listMcps
 import build.cairn.contracts.listMissions
 import build.cairn.contracts.listModels
 import build.cairn.contracts.listProjects
+import build.cairn.contracts.listSkills
 import build.cairn.contracts.markRead
 import build.cairn.contracts.setOutcomeAside
 import java.io.IOException
@@ -777,7 +779,7 @@ constructor(
         val agents = async { target.listAgents(build.cairn.contracts.ListAgentsInput()).agents }
         val projects = async { target.listProjects(ListProjectsInput()).projects }
         val tasks = async { target.listMissions(ListMissionsInput()).tasks }
-        val skills = async { target.get<List<Skill>>("/skills") }
+        val skills = async { target.listSkills(ListSkillsInput()) }
         val mcps = async {
             if (owner) target.listMcps(build.cairn.contracts.ListMcpsInput()).mcps else emptyList()
         }
@@ -822,7 +824,7 @@ constructor(
 
     suspend fun refreshSkills() {
         val target = api
-        val skills = target.get<List<Skill>>("/skills")
+        val skills = target.listSkills(ListSkillsInput())
         if (connection === target && state.value.session.authenticated)
             mutable.update { it.copy(skills = skills) }
     }

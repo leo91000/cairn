@@ -105,6 +105,7 @@ impl Operations {
                         state: State::Running,
                         result: None,
                         error: None,
+                        error_status: None,
                     },
                 },
             );
@@ -147,6 +148,7 @@ impl Operations {
                     }
                     Err(error) => {
                         operation.state = State::Failed;
+                        operation.error_status = Some(error.status);
                         operation.error = Some(error.message);
                     }
                 }
