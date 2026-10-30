@@ -20,7 +20,9 @@ Conversation and mission continuations move into `durable_wakeups` and ordered
 `wait_conditions`; `conversation_lineage` owns requester chat/run/request IDs.
 An internal integer relation key links conditions to their wakeup; partial unique
 indexes select either a conversation or mission owner, with foreign keys and an
-exclusive-owner constraint. External identities remain unchanged.
+exclusive-owner constraint. One lineage index covers both requester lists and
+idempotent requests; absent request IDs remain distinct. External identities
+remain unchanged.
 Wait identity, turn, absolute deadline, reason, original delay/date, member order,
 all/any mode, progress, next probe, transient errors, observations and plugin
 payloads remain intact. Plugin conditions have an explicit input object and plugin

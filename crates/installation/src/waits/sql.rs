@@ -58,8 +58,9 @@ CREATE TABLE conversation_lineage(
     requester_run_id TEXT NOT NULL,
     request_id TEXT
 ) WITHOUT ROWID;
-CREATE INDEX conversation_lineage_requester ON conversation_lineage(requester_chat_id,chat_id);
-CREATE UNIQUE INDEX conversation_lineage_request ON conversation_lineage(requester_chat_id,request_id) WHERE request_id IS NOT NULL;
+-- One index serves requester lists and idempotent request lookup. SQLite keeps
+-- NULL request IDs distinct, so unkeyed delegations remain unrestricted.
+CREATE UNIQUE INDEX conversation_lineage_request ON conversation_lineage(requester_chat_id,request_id);
 ";
 
 fn decode<T: serde::de::DeserializeOwned>(

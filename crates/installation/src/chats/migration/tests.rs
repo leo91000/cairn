@@ -543,13 +543,20 @@ async fn broken_run_reference_aborts_and_historical_resource_ids_remain_valid() 
             let mut other = conversation();
             other["id"] = "second".into();
             other["slug"] = "second-slug".into();
-            other["requestedBy"]["requestId"] = "second-request".into();
+            // Two unkeyed delegations of one requester must both remain valid.
+            other["requestedBy"]["requestId"] = Value::Null;
+            db.execute(
+                "UPDATE records SET data=json_remove(data,'$.requestedBy.requestId') WHERE id=?",
+                [CHAT],
+            )
+            .unwrap();
             db.execute(
                 "INSERT INTO records VALUES('second','chats',?,124)",
                 [other.to_string()],
             )
             .unwrap();
             assert!(Store::open(root.path()).is_ok());
+            assert_eq!(db.query_row("SELECT count(*) FROM conversation_lineage WHERE requester_chat_id='parent-chat' AND request_id IS NULL", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
         } else {
             let mut invalid = conversation();
             invalid["runId"] = "missing-run".into();
