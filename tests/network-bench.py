@@ -415,7 +415,7 @@ def android_crash_summary(logcat, exit_info):
             result[key].append(value)
 
     for line in lines:
-        exception = re.match(r"(?:Caused by: )?([A-Za-z_$][\w.$]*(?:Exception|Error|Throwable))(?::|$)", line.strip())
+        exception = re.match(r"(?:Caused by: )?((?:[A-Za-z_$][\w$]*\.)+[A-Za-z_$][\w$]*)(?::|$)", line.strip())
         if exception:
             retain("exceptions", exception[1])
         signal_name = re.search(r"\bsignal \d+ \((SIG[A-Z0-9]+)\)", line)

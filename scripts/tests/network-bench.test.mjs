@@ -16,6 +16,7 @@ E/AndroidRuntime(123): Caused by: java.lang.ExceptionInInitializerError: private
 E/AndroidRuntime(123):     at org.webrtc.PeerConnection.<clinit>(PeerConnection.java:44)
 E/AndroidRuntime(123):     at org.webrtc.PeerConnection.<init>(PeerConnection.java:45)
 E/AndroidRuntime(123): Caused by: java.lang.Throwable: private-fixture-cookie
+E/AndroidRuntime(123): Caused by: build.cairn.app.data.DirectRequestTimeout: private-fixture-cookie
 F/DEBUG(321): Cmdline: build.cairn.app
 F/DEBUG(321): signal 6 (SIGABRT), code -1 (SI_QUEUE)
 F/DEBUG(321): Abort message: 'private-fixture-cookie SDP=secret'
@@ -32,7 +33,7 @@ ApplicationExitInfo #1:
  status=0
 '''
 evidence = bench.android_crash_summary(raw, exit_info)
-assert evidence['exceptions'] == ['java.lang.IllegalStateException', 'java.lang.ExceptionInInitializerError', 'java.lang.Throwable'], evidence
+assert evidence['exceptions'] == ['java.lang.IllegalStateException', 'java.lang.ExceptionInInitializerError', 'java.lang.Throwable', 'build.cairn.app.data.DirectRequestTimeout'], evidence
 assert evidence['javaFrames'] == ['org.webrtc.PeerConnection.dispose(PeerConnection.java:546)', 'org.webrtc.PeerConnection.<clinit>(PeerConnection.java:44)', 'org.webrtc.PeerConnection.<init>(PeerConnection.java:45)'], evidence
 assert evidence['signals'] == ['SIGABRT'], evidence
 assert evidence['nativeFrames'] == [{'pc': '0000000000052450', 'library': 'libc.so', 'symbol': 'abort+152'}, {'pc': '0000000000052451', 'library': 'base.apk', 'symbol': 'webrtc::Dispose()+42'}], evidence
