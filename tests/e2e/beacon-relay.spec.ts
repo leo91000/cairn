@@ -1,10 +1,59 @@
 import { Buffer } from 'node:buffer'
 import { once } from 'node:events'
 import { createServer } from 'node:http'
+import { createServer as createTcpServer } from 'node:net'
 import { join } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 import { expect, test } from '@playwright/test'
 import { beaconRelayFixture, executeBeaconSql } from './beacon-relay-fixture'
 import { relayProtocolVersion } from './relay-protocol'
+
+test('Beacon startup preserves a caller deadline while Postgres is unresponsive', async () => {
+  const sockets = new Set<import('node:net').Socket>()
+  const postgres = createTcpServer((socket) => {
+    sockets.add(socket)
+    socket.on('close', () => sockets.delete(socket))
+  })
+  postgres.listen(0, '127.0.0.1')
+  await once(postgres, 'listening')
+  const port = (postgres.address() as { port: number }).port
+  const fixture = await beaconRelayFixture()
+  try {
+    const child = fixture.beacon(`postgres://fixture:fixture-only@127.0.0.1:${port}/fixture`)
+    const result = await Promise.race([
+      fixture.waitForBeacon(child, 100).then(() => 'ready', error => error.message),
+      delay(2000, 'Caller startup deadline was ignored'),
+    ])
+    expect(result).toContain('Beacon did not become ready within 100ms.')
+  }
+  finally {
+    await fixture.close()
+    for (const socket of sockets)
+      socket.destroy()
+    await new Promise<void>(resolve => postgres.close(() => resolve()))
+  }
+})
+
+test('Beacon startup rejects a health response arriving after its caller deadline', async () => {
+  const health = createServer(async (_request, response) => {
+    await delay(350)
+    response.writeHead(200).end()
+  })
+  health.listen(0, '127.0.0.1')
+  await once(health, 'listening')
+  const fixture = await beaconRelayFixture((health.address() as { port: number }).port)
+  try {
+    // Keep a real child listening while this controlled health endpoint responds late.
+    const child = fixture.beacon(undefined, { CAIRN_BEACON_LISTEN: '127.0.0.1:0' })
+    await expect.poll(() => child.diagnostics().listening).toBe(true)
+    await expect(fixture.waitForBeacon(child, 100)).rejects.toThrow('Beacon did not become ready within 100ms.')
+  }
+  finally {
+    await fixture.close()
+    health.closeAllConnections()
+    await new Promise<void>(resolve => health.close(() => resolve()))
+  }
+})
 
 for (const responseStatus of [503, 200, null]) {
   test(`Beacon startup reports an occupied port when its listener ${responseStatus ?? 'hangs'}`, async () => {
