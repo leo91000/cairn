@@ -112,6 +112,13 @@ class SubagentsTest {
             val orphan = timelineEntries(listOf(child), chat = true)
             assertFalse(orphan.any { it.proposal })
             assertEquals("Partial child approach", presentActivity(child).output)
+            val paginated =
+                timelineEntries(
+                    if (childLast) listOf(own, child) else listOf(child, own),
+                    chat = true,
+                )
+            assertEquals(listOf(own), paginated.filter { it.proposal }.flatMap { it.events })
+            assertEquals(listOf(child), paginated.filterNot { it.proposal }.flatMap { it.events })
         }
     }
 

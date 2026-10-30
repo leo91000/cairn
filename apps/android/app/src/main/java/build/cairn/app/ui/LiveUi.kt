@@ -645,7 +645,7 @@ internal fun timelineEntries(
     Performance.measure(PerfOperation.TIMELINE) {
         val folded = mutableListOf<RunEvent>()
         val sources = mutableListOf<MutableList<Long>>()
-        val positions = mutableMapOf<String, Int>()
+        val positions = mutableMapOf<Triple<String, String, String>, Int>()
         val subagents = subagentTimeline(events)
         for (event in events) {
             // Context usage is a measurement the conversation header shows, not an activity.
@@ -662,10 +662,15 @@ internal fun timelineEntries(
             }
             val item = event.item()
             val id = item.string("id")
+            val itemType = item.string("type")
             // Each plan update keeps its place: it shows what changed at that moment.
-            val planUpdate = item.string("type") == "todo_list"
+            val planUpdate = itemType == "todo_list"
             if (!event.isMessage() && id.isNotBlank() && !planUpdate) {
-                val key = "${item.string("type")}:$id"
+                // A paginated child proposal can outlive its spawning event. Its
+                // item ID must not replace the conversation's own proposed plan.
+                val proposalParent =
+                    if (itemType == "proposed_plan") item.string("parent_id") else ""
+                val key = Triple(itemType, id, proposalParent)
                 val index = positions[key]
                 if (index == null) {
                     positions[key] = folded.size
