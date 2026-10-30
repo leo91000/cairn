@@ -86,7 +86,7 @@ CREATE TABLE question_answer_deliveries(
     message_id TEXT PRIMARY KEY NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
     text TEXT NOT NULL,
     private INTEGER NOT NULL CHECK(private IN (0,1))
-) WITHOUT ROWID;
+);
 ";
 
 fn question_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatQuestion> {

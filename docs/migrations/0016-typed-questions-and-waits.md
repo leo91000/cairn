@@ -16,6 +16,8 @@ contain a placeholder; the internal delivery reader reconstructs the original
 text. A private sensitivity snapshot belongs to each reply, survives rewrites and
 expired/purged/reused definitions, and defaults to private when its historical
 definition is unavailable. Known non-private replies retain their visibility. Question, field, option and message identities and ordering remain intact.
+Delivery text uses a rowid table: large text values otherwise cross SQLite's
+smaller `WITHOUT ROWID` local-payload limit and waste overflow pages per reply.
 Opaque retired engine extensions and any previous expiry are retained privately
 in `question_import_metadata`; they never supply current definitions. Expired
 questions remain expired. The `kv` constraint rejects the removed question path.
