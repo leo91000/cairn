@@ -213,6 +213,7 @@ async fn record_failure(
             let cancelled = cancel.is_cancelled() || run.state.cancel_requested_at.is_some();
             let expired = matches!(saved.remaining_ms, Some(Some(i64::MIN..=0)));
             if capacity && !cancelled && !expired && !shutdown.is_cancelled() {
+                let mut restored_retry = None;
                 if saved.start_rejected == Some(true)
                     && let Some(mut paid) = saved.pending_paid_admission.take()
                     && saved.runner_id() == Some(paid.attempt.as_str())
@@ -222,10 +223,13 @@ async fn record_failure(
                         paid.capacity_refused = true;
                     }
                     if let Some(cause) = paid.provider_cause.as_ref()
-                        && run.state.retry.as_ref().is_some_and(|retry| {
-                            retry.next_attempt_at.is_some() && &retry.cause == cause
-                        })
+                        && let Some(mut retry) = run.state.retry.clone()
+                        && &retry.cause == cause
                     {
+                        if retry.next_attempt_at.is_none() {
+                            retry.next_attempt_at = Some(now());
+                        }
+                        restored_retry = Some(retry);
                         saved.retry_cause = Some(Some(cause.clone()));
                         saved.provider_retry_reservation = Some(paid.attempt.clone());
                         paid.capacity_refused = true;
@@ -241,6 +245,7 @@ async fn record_failure(
                         status: Some(RunStatus::Queued),
                         recovery_pending: Some(true),
                         finished_at: Some(None),
+                        retry: restored_retry.map(Some),
                         ..Default::default()
                     },
                 )?;
@@ -678,7 +683,8 @@ mod tests {
                 )
                 .unwrap()
             };
-            let retry = crate::run_retry::Retry::next(None, retry_cause, now()).unwrap();
+            let mut retry = crate::run_retry::Retry::next(None, retry_cause, now()).unwrap();
+            retry.next_attempt_at = None;
             service
                 .store
                 .change_run(
@@ -723,6 +729,17 @@ mod tests {
             assert!(!durable.has_controller_recovery_reservation());
             assert_eq!(durable.controller_recoveries(), 3);
             if expected {
+                assert!(
+                    service
+                        .store
+                        .run_state(&id)
+                        .await
+                        .unwrap()
+                        .retry
+                        .unwrap()
+                        .next_attempt_at
+                        .is_some()
+                );
                 let key = id.clone();
                 assert!(
                     service

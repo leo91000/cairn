@@ -351,7 +351,14 @@ impl RunCheckpoint {
         if self.runner_id() != Some(runner) {
             let controller =
                 self.controller_recoveries() > 0 && self.has_controller_recovery_reservation();
-            let provider_cause = if super::schedule::provider_retry_paid(self, state) {
+            let provider_paid = self.turn_pending != Some(true)
+                && self.has_provider_retry_reservation()
+                && state.retry.as_ref().is_some_and(|retry| {
+                    (retry.next_attempt_at.is_some()
+                        || state.status == cairn_contracts::RunStatus::Running)
+                        && self.retry_cause.as_ref().and_then(Option::as_ref) == Some(&retry.cause)
+                });
+            let provider_cause = if provider_paid {
                 state.retry.as_ref().map(|retry| retry.cause.clone())
             } else {
                 None
@@ -882,6 +889,7 @@ mod tests {
         )
         .unwrap();
         state.retry = Some(crate::run_retry::Retry::next(None, cause.clone(), now()).unwrap());
+        state.retry.as_mut().unwrap().next_attempt_at = None;
         for provider in [false, true] {
             let mut saved = RunCheckpoint::from_value(json!({
                 "prepared": { "backend": "native", "isolated": true }, "runnerId": "old",
