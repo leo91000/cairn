@@ -13,12 +13,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - source: baseline-bbc08430
-            revision: bbc08430ac2e8ede9abcf5b04f6ceea4e4264b74
-            image: ghcr.io/leo91000/cairn@sha256:abef117fe815689a705a9874a49980f8fa2f37e5dd08532228db982dfdd2aaae
-          - source: pr572-92442d4b
-            revision: 92442d4b0e266a1f12db9d13145e29589cbf73f7
-            image: ghcr.io/leo91000/cairn@sha256:3f117abd79e5ea47068922d9277905eaa215e6cdd98de1c6c07bc9d3020152b6
+          - source: main577-3c63a0e4
+            revision: 3c63a0e4229de4b3b9dc2cfa27580fb59ef9184d
+            image: ghcr.io/leo91000/cairn@sha256:c21f1c9f0eb0c2911fb8e7507030f3ef81f50d34b942752121caeb9dab4fd2a1
     steps:
       - uses: actions/checkout@v7.0.1
         with:
