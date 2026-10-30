@@ -56,6 +56,8 @@ first = 'INSTRUMENTATION_RESULT: shortMsg=Process crashed.\\nINSTRUMENTATION_COD
 calls = []
 def adb(*args, **options):
     calls.append(args)
+    if args == ('logcat', '-b', 'crash', '-c'):
+        assert options.get('timeout') == 5, options
     if args[:3] == ('shell', 'am', 'instrument'):
         return SimpleNamespace(stdout=first)
     if args[:3] == ('logcat', '-b', 'crash') and '-d' in args:

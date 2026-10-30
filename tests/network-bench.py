@@ -437,6 +437,7 @@ def android_crash_summary(logcat, exit_info):
                "ANR", "INITIALIZATION_FAILURE", "PERMISSION_CHANGE", "EXCESSIVE_RESOURCE_USAGE",
                "USER_REQUESTED", "USER_STOPPED", "DEPENDENCY_DIED", "OTHER", "FREEZER",
                "PACKAGE_STATE_CHANGE", "PACKAGE_UPDATED"]
+    # This scoped OS history can include earlier exits, not just this test.
     for record in re.split(r"\bApplicationExitInfo\b", exit_info[:16384]):
         reason = re.search(r"(?:^|\s)reason=(\d+)\b", record)
         status = re.search(r"(?:^|\s)status=(-?\d+)\b", record)
@@ -470,7 +471,7 @@ def android_failure_evidence(adb, output):
 def android_instrumentation(adb, scenario, output):
     try:
         # This dedicated test emulator must not attribute a previous run's crash.
-        adb("logcat", "-b", "crash", "-c")
+        adb("logcat", "-b", "crash", "-c", timeout=5)
         result = adb("shell", "am", "instrument", "-w", "-e", "class", "build.cairn.app.data.DirectTransportDeviceTest",
                      "-e", "cairnDirectScenario", scenario, "build.cairn.app.test/androidx.test.runner.AndroidJUnitRunner", text=True, timeout=360)
     except (OSError, subprocess.SubprocessError):
