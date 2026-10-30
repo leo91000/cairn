@@ -285,6 +285,7 @@ fn can_recover_controller(
     let mode_change = run.boundary["nativeModeInterruption"].is_string();
     let may_retry = mode_change
         || saved.controller_recoveries() < MAX_CONTROLLER_RECOVERIES
+        || saved.has_controller_recovery_reservation()
         || run.boundary["moveRequest"].is_object();
     unavailable
         && saved.managed()
