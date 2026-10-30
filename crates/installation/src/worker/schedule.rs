@@ -446,7 +446,13 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
         || (initial_state.trigger != "chat"
             && run["wakeup"].is_object()
             && checkpoint.as_ref().is_some_and(RunCheckpoint::completed));
-    let recovery_deadline = (!parked)
+    // A newly queued turn has not spent any of its active execution budget yet.
+    let new_turn = checkpoint.as_ref().is_some_and(|saved| {
+        !saved.completed()
+            && saved.terminal_code == Some(None)
+            && saved.controller_observation.is_none()
+    });
+    let recovery_deadline = (!parked && !new_turn)
         .then(|| {
             checkpoint
                 .as_ref()
