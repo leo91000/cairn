@@ -99,15 +99,15 @@ test('submitted answers have a readable conversation summary', async ({ page }) 
   await expect(bubble).not.toContainText('selected')
 })
 
-test('raw options without a mode use single selection for both cards and submission', async ({ page }) => {
+test('generated defaults use single selection for both cards and submission', async ({ page }) => {
   let answer: any
   await page.route('**/api/chats/chat/questions/question/answer', async (route) => {
     answer = route.request().postDataJSON()
     await route.fulfill({ json: { status: 'answering' } })
   })
   await page.goto(`${address}scripts/fixtures/questionnaire.html`)
-  await page.waitForFunction(() => window.questionnaireRaw)
-  await page.evaluate(() => window.questionnaireRaw([{
+  await page.waitForFunction(() => window.questionnaire)
+  await page.evaluate(() => window.questionnaire([{
     id: 'filters',
     title: 'Which editor?',
     options: [

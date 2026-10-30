@@ -401,3 +401,12 @@ lancée par le propriétaire, sans URL ni code. Connexion, remplacement de clé,
 code, annulation, suppression et refresh manuel renvoient `humanRequired` aux
 agents ; les apps gardent leur preuve de propriétaire. Aucun flux de confirmation
 ponctuelle du propriétaire n'est ajouté.
+
+
+A8 (#409) : questionnaires, réponses privées, attentes simples/groupées et lineage
+utilisent les contrats Rust générés sur web et Android. Réponse et annulation de
+gestion utilisent les clients générés ; annulation de gestion et retrait workspace
+du run courant gardent leurs autorisations distinctes. Les champs secrets restent
+absents des vues publiques après envoi. Les cartes d'attente et de délégation
+gardent leur présentation native et leur rendu existant ; les adaptateurs de
+présentation lisent les observations typées sans refonte de timeline.

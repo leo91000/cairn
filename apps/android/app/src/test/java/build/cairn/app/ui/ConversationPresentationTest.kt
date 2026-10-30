@@ -465,7 +465,7 @@ class ConversationPresentationTest {
                         taskId = "",
                     ),
                 wakeup =
-                    ChatWakeup(
+                    wakeupFixture(
                         "wake",
                         "one",
                         "Attendre la CI",
@@ -495,7 +495,7 @@ class ConversationPresentationTest {
                         status = "succeeded",
                         taskId = "",
                     ),
-                wakeup = ChatWakeup("wake", "one", "Attendre la CI", 420, 1, 420001),
+                wakeup = wakeupFixture("wake", "one", "Attendre la CI", 420, 1, 420001),
             )
         assertEquals(chat.wakeup, scheduledWakeup(chat))
         assertEquals("Reprise dans 7 min", conversationState(chat, "Agent", null, now = 1).status)
@@ -533,7 +533,7 @@ class ConversationPresentationTest {
                         taskId = "",
                     ),
                 messages = listOf(second),
-                wakeup = ChatWakeup("wake", "one", "Attendre la CI", 420, 1, 420001),
+                wakeup = wakeupFixture("wake", "one", "Attendre la CI", 420, 1, 420001),
             )
         assertEquals(ChatDelivery(emptyList(), listOf(second)), chatDelivery(chat, emptyList()))
         assertEquals(

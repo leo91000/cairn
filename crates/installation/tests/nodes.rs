@@ -2272,9 +2272,11 @@ async fn queued_capacity_moves_preserve_the_source_and_unfinished_mission_waits(
         record["nodeId"] = source.clone().into();
         if saved_wait {
             record["trigger"] = "manual".into();
-            record["wakeup"] = json!({
-                "id": "wait", "seconds": 3600, "wakeAt": now() + 3_600_000,
-            });
+            record["wakeup"] =
+                serde_json::to_value(common::run_fixture::complete_wakeup_fixture(&json!({
+                    "id": "wait", "seconds": 3600, "wakeAt": now() + 3_600_000,
+                })))
+                .unwrap();
         }
         owner.add_run_fixture(&record).await;
         owner

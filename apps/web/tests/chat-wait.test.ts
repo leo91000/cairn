@@ -1,4 +1,4 @@
-import type { ChatView, ChatWakeup } from '../../../packages/contracts/chats'
+import type { ChatView, ChatWakeup, WaitCondition } from '../../../packages/contracts/chats'
 import type { RunEvent } from '../../../packages/contracts/contracts'
 import { describe, expect, it } from 'vitest'
 import sample from '../../../tests/fixtures/activity-events.json'
@@ -19,12 +19,12 @@ import {
 import { filOf } from '../src/signal'
 
 const sha = '0b2ddce3a1b2c3d4e5f60718293a4b5c6d7e8f90'
-const checks = {
-  type: 'github_pr_checks',
+const checks: Extract<WaitCondition, { type: 'plugin' }> = {
+  type: 'plugin',
+  conditionType: 'github_pr_checks',
   pluginId: 'github',
   projectId: 'project',
-  prNumber: 193,
-  headSha: sha,
+  input: { prNumber: 193, headSha: sha },
 }
 const display = {
   title: 'Waiting for required checks on PR #193',

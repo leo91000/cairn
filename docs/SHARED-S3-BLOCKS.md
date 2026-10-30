@@ -51,8 +51,7 @@ Reproduce with `moto[server]==5.2.3` and the AWS CLI installed:
 
 ```sh
 pnpm check
-node --import tsx scripts/backend-schemas.mjs
-git diff --exit-code -- crates/installation/schemas/inputs.json
+pnpm check:contracts
 cargo clippy --locked --workspace --all-targets -- -D warnings
 node scripts/test-backend.mjs --no-fail-fast -- --test-threads=1
 python scripts/tests/node_s3_test.py

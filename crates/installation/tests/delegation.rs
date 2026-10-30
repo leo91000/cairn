@@ -437,7 +437,7 @@ async fn delegation_never_reaches_access_the_requesting_agent_lacks() {
     let delegated = f
         .delegate(
             &turn,
-            json!({ "task": "Review", "agentId": narrower["id"], "projectId": null }),
+            json!({ "task": "Review", "agentId": narrower["id"], "project": {"type":"none"} }),
         )
         .await
         .unwrap();
@@ -568,7 +568,8 @@ async fn deleted_tasks_are_finished_in_status_and_waits() {
     f.s.chat_trash(child, true).await.unwrap();
     let status = delegation::status(&f.s, &turn.token, &json!({ "chatId": child }))
         .await
-        .unwrap();
+        .unwrap()["tasks"][0]
+        .clone();
     assert_eq!(status["finished"], true);
     assert_eq!(status["lifecycle"], "trash");
     assert_eq!(status["report"], "");
@@ -639,7 +640,8 @@ async fn the_requester_waits_for_its_task_and_reads_the_report() {
     let turn = f.running(&turn.chat).await;
     let status = delegation::status(&f.s, &turn.token, &json!({ "chatId": child }))
         .await
-        .unwrap();
+        .unwrap()["tasks"][0]
+        .clone();
     assert_eq!(status["finished"], true);
     assert_eq!(status["status"], "succeeded");
     assert_eq!(status["outcome"]["status"], "completed");
@@ -801,7 +803,8 @@ async fn withdrawing_the_first_message_finishes_an_unstarted_task_and_releases_i
 
     let status = delegation::status(&f.s, &turn.token, &json!({ "chatId": child }))
         .await
-        .unwrap();
+        .unwrap()["tasks"][0]
+        .clone();
     assert_eq!(status["finished"], true);
     assert_eq!(status["status"], "idle");
     let wait = wait_for::schedule(
@@ -845,7 +848,7 @@ async fn preparation_failures_reach_the_requester_and_are_redacted_after_deletio
     let delegated = f
         .delegate(
             &turn,
-            json!({ "task": "Review the project", "agentId": agent["id"], "projectId": project }),
+            json!({ "task": "Review the project", "agentId": agent["id"], "project": {"type":"selected","projectId":project} }),
         )
         .await
         .unwrap();
@@ -868,7 +871,8 @@ async fn preparation_failures_reach_the_requester_and_are_redacted_after_deletio
 
     let status = delegation::status(&f.s, &turn.token, &json!({ "chatId": child }))
         .await
-        .unwrap();
+        .unwrap()["tasks"][0]
+        .clone();
     assert_eq!(status["finished"], true);
     assert_eq!(status["paused"], true);
     assert_eq!(status["error"], error);
@@ -893,7 +897,8 @@ async fn preparation_failures_reach_the_requester_and_are_redacted_after_deletio
     f.s.chat_trash(child, true).await.unwrap();
     let deleted = delegation::status(&f.s, &turn.token, &json!({ "chatId": child }))
         .await
-        .unwrap();
+        .unwrap()["tasks"][0]
+        .clone();
     assert!(deleted["error"].is_null());
     let wait = wait_for::schedule(&f.s, &turn.token, &wait_input)
         .await
@@ -925,7 +930,8 @@ async fn run_failures_include_their_error_in_status_and_wait_results() {
         .unwrap();
     let status = delegation::status(&f.s, &turn.token, &json!({ "chatId": child }))
         .await
-        .unwrap();
+        .unwrap()["tasks"][0]
+        .clone();
     assert_eq!(status["finished"], true);
     assert_eq!(status["error"], "Provider request failed");
     let wait = wait_for::schedule(
@@ -1042,7 +1048,7 @@ async fn deleting_a_task_redacts_recorded_group_progress_and_final_results() {
         assert_eq!(resumed["run"]["status"], "queued");
         let prompt = text(&resumed["run"]["chatExecution"], "text");
         assert!(prompt.contains(r#""status":"deleted""#));
-        assert!(prompt.contains(r#""error":null"#));
+        assert!(!prompt.contains(r#""error":"#));
         assert!(!prompt.contains(diagnostic));
     }
 }

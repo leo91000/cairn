@@ -78,7 +78,8 @@ class ActivityPresentationTest {
             put("type", "run_finished")
             put("runId", "dependency")
         }
-        val wakeup = ChatWakeup("wake", "message", "Pending", 60, 0, 60_000, condition = condition)
+        val wakeup =
+            wakeupFixture("wake", "message", "Pending", 60, 0, 60_000, condition = condition)
         val scheduled =
             RunEvent(
                 id = 1,

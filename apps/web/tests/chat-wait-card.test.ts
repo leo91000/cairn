@@ -36,11 +36,11 @@ const wakeup: ChatWakeup = {
   createdAt: 1,
   wakeAt: 60001,
   condition: {
-    type: 'github_pr_checks',
+    type: 'plugin',
+    conditionType: 'github_pr_checks',
     pluginId: 'github',
     projectId: 'project',
-    prNumber: 1,
-    headSha: 'head',
+    input: { prNumber: 1, headSha: 'head' },
   },
   display: { title: 'Waiting for required checks on PR #1', short: 'PR #1 checks', details: ['head'] },
 }
@@ -83,7 +83,7 @@ it('names a plugin condition with its latest words, and falls back without them'
   const live = await render({ wakeup }, { wakeup: polled, paused: false })
   expect(live).toContain('Waiting for 2 required checks on PR #1')
   expect(live).toContain('head')
-  const bare = { ...wakeup, display: null }
+  const bare = { ...wakeup, display: undefined }
   expect(await render({ wakeup: bare }, { wakeup: bare, paused: false })).toContain('Waiting for a condition')
   expect(await render({ wakeup: null, observation: { state: 'completed', type: 'custom', pluginId: 'ci' } }, { wakeup: null, paused: false })).toContain('A condition')
 })
