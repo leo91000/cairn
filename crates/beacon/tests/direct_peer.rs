@@ -1160,16 +1160,115 @@ async fn partial_transfer(channel: &dyn DataChannel, id: u32, total: usize) {
         .unwrap();
 }
 
+struct FairnessPhaseDiagnostics {
+    started: std::time::Instant,
+    phases: Vec<(&'static str, u32, &'static str, Duration)>,
+    last: Option<(&'static str, u32, &'static str, Duration)>,
+    dropped: usize,
+}
+
+impl FairnessPhaseDiagnostics {
+    const CAPACITY: usize = 128;
+
+    fn new() -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            phases: Vec::with_capacity(Self::CAPACITY),
+            last: None,
+            dropped: 0,
+        }
+    }
+
+    fn mark(&mut self, phase: &'static str, iteration: u32, role: &'static str) {
+        let event = (phase, iteration, role, self.started.elapsed());
+        self.last = Some(event);
+        if self.phases.len() == Self::CAPACITY {
+            self.dropped += 1;
+            return;
+        }
+        self.phases.push(event);
+    }
+}
+
+impl std::fmt::Display for FairnessPhaseDiagnostics {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let elapsed = self.started.elapsed();
+        writeln!(
+            output,
+            "[fairness-phases] elapsed_ms={} recorded={} dropped={}",
+            elapsed.as_millis(),
+            self.phases.len(),
+            self.dropped
+        )?;
+        let mut previous = Duration::ZERO;
+        for (phase, iteration, role, at) in &self.phases {
+            writeln!(
+                output,
+                "[fairness-phase] phase={phase} iteration={iteration} role={role} at_ms={} previous_phase_ms={}",
+                at.as_millis(),
+                at.saturating_sub(previous).as_millis()
+            )?;
+            previous = *at;
+        }
+        if let Some((phase, iteration, role, at)) = self.last {
+            writeln!(
+                output,
+                "[fairness-last-phase] phase={phase} iteration={iteration} role={role} pending_ms={}",
+                elapsed.saturating_sub(at).as_millis()
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for FairnessPhaseDiagnostics {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            return;
+        }
+        // No output or allocation while the real async phases are progressing.
+        // Dump once on failure, without a second panic if the sink is closed.
+        use std::io::Write as _;
+        let _ = write!(std::io::stderr().lock(), "{self}");
+    }
+}
+
+#[test]
+fn fairness_phase_diagnostics_are_bounded_and_keep_the_last_phase() {
+    let mut diagnostics = FairnessPhaseDiagnostics::new();
+    diagnostics.mark("setup_begin", 0, "fixture");
+    for _ in 1..FairnessPhaseDiagnostics::CAPACITY {
+        diagnostics.mark("small_get_wait_begin", 3, "member");
+    }
+    diagnostics.mark("cleanup_begin", 0, "fixture");
+    let report = diagnostics.to_string();
+    assert_eq!(diagnostics.phases.len(), FairnessPhaseDiagnostics::CAPACITY);
+    assert!(report.contains("recorded=128 dropped=1"));
+    assert!(report.contains("phase=setup_begin iteration=0 role=fixture"));
+    assert!(report.contains(
+        "[fairness-last-phase] phase=cleanup_begin iteration=0 role=fixture pending_ms="
+    ));
+    assert!(report.contains("previous_phase_ms="));
+}
+
 #[tokio::test]
 async fn a_member_trickling_every_twenty_nine_seconds_cannot_starve_small_requests() {
+    let mut diagnostics = FairnessPhaseDiagnostics::new();
+    diagnostics.mark("setup_begin", 0, "fixture");
     let router = axum::Router::new().route(
         "/api/fixture/echo",
         axum::routing::post(|bytes: axum::body::Bytes| async { bytes }),
     );
     let mut relay = RelayedInstallation::new(router).await;
+    diagnostics.mark("relay_ready", 0, "fixture");
+    diagnostics.mark("connector_setup_begin", 0, "fixture");
     production_connector(&mut relay).await;
+    diagnostics.mark("connector_ready", 0, "fixture");
+    diagnostics.mark("accounts_setup_begin", 0, "fixture");
     let cookies = common::stream_accounts_with_members(&relay, 2).await;
+    diagnostics.mark("accounts_ready", 0, "fixture");
     let member_cookie = &cookies[1];
+    diagnostics.mark("session_fetch_begin", 0, "member");
     let member_session = relay
         .app
         .client
@@ -1181,9 +1280,13 @@ async fn a_member_trickling_every_twenty_nine_seconds_cannot_starve_small_reques
         .json()
         .await
         .unwrap();
+    diagnostics.mark("session_ready", 0, "member");
+    diagnostics.mark("channel_connect_begin", 0, "member");
     let (member, member_channel, _) =
         client_with_fingerprint(&relay, member_cookie, &member_session, false).await;
+    diagnostics.mark("channel_ready", 0, "member");
     let waiting_cookie = &cookies[2];
+    diagnostics.mark("session_fetch_begin", 0, "waiting");
     let waiting_session = relay
         .app
         .client
@@ -1195,36 +1298,51 @@ async fn a_member_trickling_every_twenty_nine_seconds_cannot_starve_small_reques
         .json()
         .await
         .unwrap();
+    diagnostics.mark("session_ready", 0, "waiting");
+    diagnostics.mark("channel_connect_begin", 0, "waiting");
     let (waiting, waiting_channel, _) =
         client_with_fingerprint(&relay, waiting_cookie, &waiting_session, false).await;
+    diagnostics.mark("channel_ready", 0, "waiting");
+    diagnostics.mark("channel_connect_begin", 0, "owner");
     let (owner, owner_channel, _) = client(&relay).await;
+    diagnostics.mark("channel_ready", 0, "owner");
+    diagnostics.mark("reservation_send_begin", 0, "member");
     partial_transfer(member_channel.as_ref(), 1, cairn_protocol::MAX_FRAME).await;
+    diagnostics.mark("reservation_send_end", 0, "member");
     // A successful request on the holder is a barrier: its reservation is live.
+    diagnostics.mark("barrier_send_begin", 0, "member");
     send_frame(
         member_channel.as_ref(),
         2,
         &request("barrier", "/api/chats"),
     )
     .await;
+    diagnostics.mark("barrier_send_end", 0, "member");
+    diagnostics.mark("barrier_wait_begin", 0, "member");
     assert!(
         matches!(response(member_channel.as_ref()).await, Frame::Response(reply) if reply.id == "barrier" && reply.status == 200)
     );
+    diagnostics.mark("barrier_verified", 0, "member");
 
     let started = tokio::time::Instant::now();
     for offset in 1_u32..=3 {
         if offset > 1 {
+            diagnostics.mark("trickle_delay_begin", offset, "member");
             tokio::time::sleep_until(started + Duration::from_secs(29 * u64::from(offset - 1)))
                 .await;
+            diagnostics.mark("trickle_delay_end", offset, "member");
         }
         let mut packet = vec![1];
         packet.extend(1_u32.to_be_bytes());
         packet.extend((cairn_protocol::MAX_FRAME as u32).to_be_bytes());
         packet.extend(offset.to_be_bytes());
         packet.push(b' ');
+        diagnostics.mark("trickle_send_begin", offset, "member");
         member_channel
             .send(bytes::BytesMut::from(packet.as_slice()))
             .await
             .unwrap();
+        diagnostics.mark("trickle_send_end", offset, "member");
 
         // Prove the slow reservation is still held, even after the second
         // 29-second interval; otherwise expiry could hide the starvation bug.
@@ -1233,43 +1351,70 @@ async fn a_member_trickling_every_twenty_nine_seconds_cannot_starve_small_reques
         };
         upload.method = "POST".into();
         upload.body = vec![0; 20_000];
+        diagnostics.mark("rejection_send_begin", offset, "waiting");
         send_frame(
             waiting_channel.as_ref(),
             offset + 10,
             &Frame::Request(upload),
         )
         .await;
+        diagnostics.mark("rejection_send_end", offset, "waiting");
+        diagnostics.mark("rejection_wait_begin", offset, "waiting");
         let rejected =
             tokio::time::timeout(Duration::from_secs(2), response(waiting_channel.as_ref()))
                 .await
+                .inspect_err(|_| diagnostics.mark("rejection_wait_failed", offset, "waiting"))
                 .unwrap();
+        diagnostics.mark("rejection_wait_end", offset, "waiting");
         assert!(
             matches!(rejected, Frame::Response(reply) if reply.id == "still-reserved" && reply.status == 503)
         );
+        diagnostics.mark("rejection_503_verified", offset, "waiting");
 
-        for channel in [&waiting_channel, &owner_channel, &member_channel] {
+        for (role, channel) in [
+            ("waiting", &waiting_channel),
+            ("owner", &owner_channel),
+            ("member", &member_channel),
+        ] {
+            diagnostics.mark("small_get_send_begin", offset, role);
             send_frame(
                 channel.as_ref(),
                 offset + 2,
                 &request("small-request", "/api/chats"),
             )
             .await;
+            diagnostics.mark("small_get_send_end", offset, role);
+            diagnostics.mark("small_get_wait_begin", offset, role);
             let reply = tokio::time::timeout(Duration::from_secs(2), response(channel.as_ref()))
                 .await
+                .inspect_err(|_| diagnostics.mark("small_get_wait_failed", offset, role))
                 .expect("a trickling member must never delay a small request beyond two seconds");
+            diagnostics.mark("small_get_wait_end", offset, role);
             assert!(
                 matches!(reply, Frame::Response(reply) if reply.id == "small-request" && reply.status == 200)
             );
+            diagnostics.mark("small_get_200_verified", offset, role);
         }
+        diagnostics.mark("relay_get_begin", offset, "fixture");
         assert_eq!(
             relay.get("/chats").send().await.unwrap().status(),
             StatusCode::OK
         );
+        diagnostics.mark("relay_get_verified", offset, "fixture");
     }
+    diagnostics.mark("cleanup_begin", 0, "fixture");
+    diagnostics.mark("channel_close_begin", 0, "member");
     member.close().await.unwrap();
+    diagnostics.mark("channel_close_end", 0, "member");
+    diagnostics.mark("channel_close_begin", 0, "waiting");
     waiting.close().await.unwrap();
+    diagnostics.mark("channel_close_end", 0, "waiting");
+    diagnostics.mark("channel_close_begin", 0, "owner");
     owner.close().await.unwrap();
+    diagnostics.mark("channel_close_end", 0, "owner");
+    diagnostics.mark("relay_close_begin", 0, "fixture");
     relay.close().await;
+    diagnostics.mark("cleanup_complete", 0, "fixture");
 }
 
 #[tokio::test]
