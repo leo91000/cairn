@@ -1,4 +1,8 @@
 //! Content-addressed disk manifests. Capture callers must provide an immutable disk.
+use crate::performance::publication::{self as diagnostic, Stage};
+
+mod direct_readers;
+
 use crate::{
     error::{Error, Result},
     validation::text,
@@ -23,7 +27,13 @@ pub const READ_BATCH: usize = 8;
 /// 60 s; 32 MiB finishes within that limit from a 5 Mbit/s uplink.
 pub const PUBLICATION_BATCH: usize = 8;
 pub const MAX_PUBLICATION_BLOCKS: usize = (1024_u64 * 1024 * 1024 * 1024 / BLOCK) as usize;
-const DIRECT_PUBLICATION_STARTUP: std::time::Duration = std::time::Duration::from_secs(1800);
+
+pub(crate) const DIRECT_PUBLICATION_STARTUP: std::time::Duration =
+    std::time::Duration::from_secs(1800);
+
+/// Opening a stopped journal verifies its durable append history before headers.
+/// Keep that work separate from the idle deadline on the subsequent byte stream.
+pub(crate) const PUBLICATION_STARTUP: std::time::Duration = std::time::Duration::from_secs(300);
 const TRANSFER_IDLE: std::time::Duration = std::time::Duration::from_secs(120);
 const MANIFEST_VERSION: u64 = 1;
 
@@ -52,6 +62,7 @@ pub(crate) fn blocks(manifest: &Value) -> Result<Vec<ManifestBlock>> {
 }
 
 /// Content hashes of the manifest's data blocks, in disk order.
+#[cfg(test)]
 pub(crate) fn hashes(manifest: &Value) -> impl Iterator<Item = &str> {
     manifest["blocks"]
         .as_array()
@@ -143,8 +154,7 @@ pub(crate) async fn index_with_stop(
 }
 
 pub fn validate(manifest: &Value) -> Result<()> {
-    let layout = crate::storage::layout::Layout::from_manifest(manifest)
-        .map_err(|error| Error::bad(error.to_string()))?;
+    crate::storage::layout::validate(manifest).map_err(|error| Error::bad(error.to_string()))?;
     let blocks = manifest["blocks"]
         .as_array()
         .ok_or_else(|| Error::bad("Missing backup blocks."))?;
@@ -152,7 +162,7 @@ pub fn validate(manifest: &Value) -> Result<()> {
         .as_u64()
         .filter(|s| *s > 0 && *s <= 1024 * 1024 * 1024 * 1024)
         .ok_or_else(|| Error::bad("Invalid backup size."))?;
-    if manifest["version"] != layout.manifest_version()
+    if manifest["version"] != 1
         || manifest["blockSize"] != BLOCK
         || blocks.len() as u64 != size.div_ceil(BLOCK)
     {
@@ -185,6 +195,107 @@ pub async fn served(directory: &Path, hash: &str) -> Result<Vec<u8>> {
     Reader::open(directory).await?.block(hash).await
 }
 
+/// Shared native/VM node operation. The controller authenticates the caller;
+/// this owned task drains all started uploads even if the HTTP caller leaves.
+pub async fn upload_direct(directory: &Path, body: &[u8]) -> Result<Value> {
+    if body.len() > 131_072 {
+        return Err(Error::bad(
+            "Direct publication plan exceeds its size limit.",
+        ));
+    }
+    let batch = serde_json::from_slice(body)
+        .map_err(|_| Error::bad("Invalid direct publication batch."))?;
+    let directory = directory.to_owned();
+    let task =
+        tokio::spawn(
+            async move { crate::storage::direct::upload_snapshot(&directory, batch).await },
+        );
+    serde_json::to_value(task.await.map_err(Error::internal)??).map_err(Error::internal)
+}
+
+/// The response owns one reader until explicit close or disconnection. Only weak
+/// entries are shared with subsequent bounded direct-upload requests.
+pub async fn direct_reader(directory: &Path, body: &[u8]) -> Result<axum::body::Body> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Request {
+        #[serde(default)]
+        diagnostics: Option<diagnostic::Request>,
+    }
+    if body.len() > 4096 {
+        return Err(Error::bad("Invalid publication reader request."));
+    }
+    let request: Request = serde_json::from_slice(body)?;
+    direct_readers::response(directory, request.diagnostics).await
+}
+
+pub async fn close_direct_reader(directory: &Path) -> Result<()> {
+    direct_readers::close(directory).await
+}
+
+pub async fn discard(directory: &Path) -> Result<()> {
+    close_direct_reader(directory).await?;
+    tokio::fs::remove_dir_all(directory).await?;
+    if let Some(snapshot) = directory.file_name().and_then(|name| name.to_str()) {
+        diagnostic::discard_snapshot(snapshot);
+    }
+    Ok(())
+}
+
+pub(crate) struct UploadReader {
+    reader: std::sync::Arc<Reader>,
+    _session: Option<std::sync::Arc<direct_readers::Session>>,
+}
+
+impl UploadReader {
+    pub(crate) async fn block(&self, hash: &str) -> Result<Vec<u8>> {
+        let stop = self
+            ._session
+            .as_ref()
+            .map(|session| session.read_stop())
+            .unwrap_or_default();
+        let read = self.reader.block_with_stop(hash, Some(stop.clone()));
+        tokio::pin!(read);
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(crate::storage::direct::TRANSFER_SECONDS),
+            &mut read,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                stop.cancel();
+                // Do not detach a blocking read with physical disk ownership.
+                // Its source observes cancellation; durable reports finish first.
+                let _ = read.await;
+                Err(Error::unavailable("Publication base read timed out."))
+            }
+        }
+    }
+}
+
+pub(crate) async fn upload_reader(directory: &Path, required: bool) -> Result<UploadReader> {
+    if let Some(session) = direct_readers::get(directory) {
+        return Ok(UploadReader {
+            reader: session.reader.clone(),
+            _session: Some(session),
+        });
+    }
+    if required {
+        return Err(Error::unavailable(
+            "Publication reader disconnected; local journal retained.",
+        ));
+    }
+    // Keep the pre-session single-batch seam for older callers and raw fixtures.
+    let sample = diagnostic::start(Stage::NodeOpen);
+    let reader = Reader::open(directory).await?;
+    sample.finish(0);
+    Ok(UploadReader {
+        reader: std::sync::Arc::new(reader),
+        _session: None,
+    })
+}
+
 // A response owns the reader: cancellation releases stopped reads, and no cache
 // or timer can retain an idle journal after the response has ended.
 struct JournalReader {
@@ -194,7 +305,7 @@ struct JournalReader {
     generation: i64,
 }
 
-struct Reader {
+pub(crate) struct Reader {
     directory: std::path::PathBuf,
     manifest: Value,
     journal: Option<JournalReader>,
@@ -202,7 +313,7 @@ struct Reader {
 }
 
 impl Reader {
-    async fn open(directory: &Path) -> Result<Self> {
+    pub(crate) async fn open(directory: &Path) -> Result<Self> {
         let manifest: Value =
             serde_json::from_slice(&tokio::fs::read(directory.join("manifest.json")).await?)?;
         if manifest["onDemand"] == true {
@@ -249,12 +360,22 @@ impl Reader {
         })
     }
 
-    async fn block(&self, hash: &str) -> Result<Vec<u8>> {
+    pub(crate) async fn block(&self, hash: &str) -> Result<Vec<u8>> {
+        self.block_with_stop(hash, None).await
+    }
+
+    async fn block_with_stop(
+        &self,
+        hash: &str,
+        stop: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<Vec<u8>> {
         if let Some(journal) = &self.journal {
             let (volume, generation, hash) =
                 (journal.volume.clone(), journal.generation, hash.to_owned());
-            return tokio::task::spawn_blocking(move || {
-                volume.disk.captured_block(generation, &hash)
+            return diagnostic::blocking(move || {
+                crate::storage::read_scope::scope(stop, || {
+                    volume.disk.captured_block(generation, &hash)
+                })
             })
             .await
             .map_err(Error::internal)?
@@ -280,7 +401,7 @@ pub async fn served_batch(
     directory: &Path,
     hashes: Vec<String>,
 ) -> Result<(u64, axum::body::Body)> {
-    served_blocks(directory, hashes, READ_BATCH).await
+    served_blocks(directory, hashes, READ_BATCH, None).await
 }
 
 /// A publication owns one journal reader, regardless of its number of blocks.
@@ -289,18 +410,36 @@ pub async fn served_publication(
     directory: &Path,
     hashes: Vec<String>,
 ) -> Result<(u64, axum::body::Body)> {
-    served_blocks(directory, hashes, MAX_PUBLICATION_BLOCKS).await
+    served_blocks(directory, hashes, MAX_PUBLICATION_BLOCKS, None).await
+}
+
+pub(crate) async fn served_publication_observed(
+    directory: &Path,
+    hashes: Vec<String>,
+    request: Option<diagnostic::Request>,
+    snapshot: &str,
+) -> Result<(u64, axum::body::Body)> {
+    let summary = diagnostic::NodeSummary::begin(request, snapshot);
+    let metrics = summary.as_ref().map(|summary| summary.metrics.clone());
+    diagnostic::scope(
+        metrics,
+        served_blocks(directory, hashes, MAX_PUBLICATION_BLOCKS, summary),
+    )
+    .await
 }
 
 async fn served_blocks(
     directory: &Path,
     hashes: Vec<String>,
     limit: usize,
+    summary: Option<diagnostic::NodeSummary>,
 ) -> Result<(u64, axum::body::Body)> {
     if hashes.is_empty() || hashes.len() > limit || hashes.iter().any(|hash| !valid_hash(hash)) {
         return Err(Error::bad("Invalid snapshot block batch."));
     }
+    let open = diagnostic::start(Stage::NodeOpen);
     let reader = Reader::open(directory).await?;
+    open.finish(0);
     validate(&reader.manifest)?;
     let sizes: std::collections::HashMap<_, _> = reader.manifest["blocks"]
         .as_array()
@@ -317,13 +456,37 @@ async fn served_blocks(
     }
     drop(sizes);
     let stream = futures_util::stream::try_unfold(
-        (reader, hashes.into_iter()),
-        |(reader, mut hashes)| async move {
-            let Some(hash) = hashes.next() else {
-                return Ok::<_, Error>(None);
-            };
-            let bytes = reader.block(&hash).await?;
-            Ok(Some((bytes, (reader, hashes))))
+        (
+            reader,
+            hashes.into_iter(),
+            summary,
+            None::<diagnostic::Sample>,
+        ),
+        |(reader, mut hashes, mut summary, waiting)| {
+            let metrics = summary.as_ref().map(|summary| summary.metrics.clone());
+            diagnostic::scope(metrics, async move {
+                if let Some(waiting) = waiting {
+                    waiting.finish(0);
+                }
+                let Some(hash) = hashes.next() else {
+                    if let Some(summary) = &mut summary {
+                        summary.complete();
+                    }
+                    return Ok::<_, Error>(None);
+                };
+                let sample = diagnostic::start(Stage::NodeProduce);
+                let bytes = reader.block(&hash).await?;
+                sample.finish(bytes.len());
+                let waiting = if hashes.len() == 0 {
+                    if let Some(summary) = &mut summary {
+                        summary.complete();
+                    }
+                    None
+                } else {
+                    Some(diagnostic::start(Stage::NodeBackpressure))
+                };
+                Ok(Some((bytes, (reader, hashes, summary, waiting))))
+            })
         },
     );
     Ok((length, axum::body::Body::from_stream(stream)))
@@ -335,6 +498,7 @@ async fn block_where(
     hash: &str,
     available: impl Fn(u64) -> bool,
 ) -> Result<Vec<u8>> {
+    let metadata = diagnostic::start(Stage::NodeMetadata);
     if !valid_hash(hash) {
         return Err(Error::bad("Invalid block digest."));
     }
@@ -348,6 +512,8 @@ async fn block_where(
         .as_u64()
         .filter(|s| *s <= BLOCK)
         .ok_or_else(|| Error::bad("Invalid block size."))?;
+    metadata.finish(0);
+    let read = diagnostic::start(Stage::NodeLocalRead);
     let mut file = tokio::fs::File::open(path).await?;
     file.seek(std::io::SeekFrom::Start(
         block["offset"]
@@ -357,6 +523,7 @@ async fn block_where(
     .await?;
     let mut bytes = vec![0; size as usize];
     file.read_exact(&mut bytes).await?;
+    read.finish(bytes.len());
     if !crate::storage::digest::matches(hash, &bytes) {
         return Err(Error::conflict("Backup data changed."));
     }
@@ -416,7 +583,7 @@ pub async fn response_block(response: reqwest::Response) -> Result<Vec<u8>> {
 }
 
 /// Fetch missing blocks in manifest order with bounded response and allocation
-/// sizes. Older controllers keep working through their single-block endpoint.
+/// sizes, using the current publication endpoint.
 pub struct Fetch {
     http: reqwest::Client,
     url: String,
@@ -424,9 +591,9 @@ pub struct Fetch {
     pending: std::collections::VecDeque<(String, u64)>,
     stream: Option<std::pin::Pin<Box<dyn tokio::io::AsyncRead + Send>>>,
     remaining: usize,
-    legacy: bool,
-    publication: bool,
     direct_publication: bool,
+    diagnostics: bool,
+    first_body: bool,
 }
 
 impl Fetch {
@@ -443,15 +610,20 @@ impl Fetch {
             pending: blocks.into(),
             stream: None,
             remaining: 0,
-            legacy: false,
-            publication: true,
             direct_publication: false,
+            diagnostics: false,
+            first_body: false,
         }
     }
 
     /// Direct controller transfers have no reverse-proxy request deadline.
     pub fn direct_publication(mut self) -> Self {
         self.direct_publication = true;
+        self
+    }
+
+    pub(crate) fn diagnostics(mut self, enabled: bool) -> Self {
+        self.diagnostics = enabled;
         self
     }
 
@@ -463,10 +635,8 @@ impl Fetch {
             .filter(|(expected, size)| expected == hash && *size <= BLOCK)
             .map(|(_, size)| *size)
             .ok_or_else(|| Error::bad("Unexpected snapshot block."))?;
-        while self.stream.is_none() && !self.legacy {
-            let count = if !self.publication {
-                READ_BATCH
-            } else if self.direct_publication {
+        while self.stream.is_none() {
+            let count = if self.direct_publication {
                 MAX_PUBLICATION_BLOCKS
             } else {
                 PUBLICATION_BATCH
@@ -474,41 +644,35 @@ impl Fetch {
             let batch: Vec<_> = self.pending.iter().take(count).collect();
             let length: u64 = batch.iter().map(|(_, size)| *size).sum();
             let hashes: Vec<_> = batch.iter().map(|(hash, _)| hash).collect();
-            let endpoint = if self.publication {
-                "publication"
-            } else {
-                "blocks"
-            };
-            let mut request = self
-                .http
-                .post(format!("{}/{endpoint}", self.url))
-                .bearer_auth(&self.credential)
-                .json(&json!({ "hashes": hashes }));
-            if !self.publication {
-                request = request.timeout(TRANSFER_IDLE);
+            let mut input = json!({ "hashes": hashes });
+            if self.diagnostics {
+                input["diagnostic"] =
+                    serde_json::to_value(diagnostic::request(batch.len() == self.pending.len()))?;
             }
+            let request = self
+                .http
+                .post(format!("{}/publication", self.url))
+                .bearer_auth(&self.credential)
+                .json(&input);
             // A stopped local journal is verified once before the response starts.
             // Its byte stream still has the ordinary per-block idle deadline.
-            let startup = if self.publication && self.direct_publication {
+            let startup = if self.direct_publication {
                 DIRECT_PUBLICATION_STARTUP
             } else {
-                TRANSFER_IDLE
+                PUBLICATION_STARTUP
             };
+            let headers = diagnostic::start(Stage::NodeHeaders);
             let response = tokio::time::timeout(startup, request.send())
                 .await
                 .map_err(|_| Error::unavailable("Backup block transfer interrupted."))?
                 .map_err(|_| Error::unavailable("Backup block transfer interrupted."))?;
-            // Old relays translate unsupported operations into 503. Retry the
-            // existing endpoint once; actual unavailability still fails there.
-            if matches!(response.status().as_u16(), 404 | 405 | 503) {
-                if self.publication {
-                    self.publication = false;
-                    continue;
-                }
-                self.legacy = true;
-            } else {
+            headers.finish(0);
+            {
                 if !response.status().is_success() {
-                    return Err(Error::unavailable("Backup block batch unavailable."));
+                    return Err(Error::unavailable(format!(
+                        "Backup block batch unavailable (HTTP {}).",
+                        response.status().as_u16()
+                    )));
                 }
                 if response
                     .content_length()
@@ -517,6 +681,7 @@ impl Fetch {
                     return Err(Error::bad("Backup block batch has the wrong size."));
                 }
                 self.remaining = batch.len();
+                self.first_body = true;
                 self.stream = Some(Box::pin(tokio_util::io::StreamReader::new(
                     response.bytes_stream().map_err(std::io::Error::other),
                 )));
@@ -524,10 +689,21 @@ impl Fetch {
         }
         let bytes = if let Some(stream) = &mut self.stream {
             let mut bytes = vec![0; size as usize];
-            tokio::time::timeout(TRANSFER_IDLE, stream.read_exact(&mut bytes))
-                .await
-                .map_err(|_| Error::unavailable("Backup block batch interrupted."))?
-                .map_err(|_| Error::unavailable("Backup block batch interrupted."))?;
+            let body = diagnostic::start(Stage::NodeBody);
+            tokio::time::timeout(TRANSFER_IDLE, async {
+                if self.first_body && !bytes.is_empty() {
+                    let first = diagnostic::start(Stage::NodeFirstByte);
+                    stream.read_exact(&mut bytes[..1]).await?;
+                    first.finish(1);
+                    self.first_body = false;
+                    stream.read_exact(&mut bytes[1..]).await
+                } else {
+                    stream.read_exact(&mut bytes).await
+                }
+            })
+            .await
+            .map_err(|_| Error::unavailable("Backup block batch interrupted."))?
+            .map_err(|_| Error::unavailable("Backup block batch interrupted."))?;
             self.remaining -= 1;
             if self.remaining == 0 {
                 if tokio::time::timeout(TRANSFER_IDLE, stream.read(&mut [0]))
@@ -540,20 +716,10 @@ impl Fetch {
                 }
                 self.stream = None;
             }
+            body.finish(bytes.len());
             bytes
         } else {
-            let response = self
-                .http
-                .get(format!("{}/{hash}", self.url))
-                .bearer_auth(&self.credential)
-                .timeout(std::time::Duration::from_secs(120))
-                .send()
-                .await
-                .map_err(|_| Error::unavailable("Backup block transfer interrupted."))?;
-            if !response.status().is_success() {
-                return Err(Error::unavailable("Backup block unavailable."));
-            }
-            response_block(response).await?
+            return Err(Error::internal("Missing publication stream."));
         };
         self.pending.pop_front();
         Ok(bytes)
@@ -651,19 +817,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_startup_deadline_follows_the_route_and_resets_on_fallback() {
+    async fn fetch_startup_deadline_follows_the_route() {
         use std::time::Duration;
 
-        for (direct, fallback, delay, succeeds) in [
-            (false, false, TRANSFER_IDLE + Duration::from_secs(1), false),
-            (true, false, TRANSFER_IDLE + Duration::from_secs(1), true),
+        for (direct, delay, succeeds) in [
+            (false, TRANSFER_IDLE + Duration::from_secs(1), true),
+            (false, PUBLICATION_STARTUP + Duration::from_secs(1), false),
+            (true, TRANSFER_IDLE + Duration::from_secs(1), true),
             (
                 true,
-                false,
                 DIRECT_PUBLICATION_STARTUP + Duration::from_secs(1),
                 false,
             ),
-            (true, true, TRANSFER_IDLE + Duration::from_secs(1), false),
         ] {
             let arrived = Arc::new(tokio::sync::Notify::new());
             let release = Arc::new(tokio::sync::Notify::new());
@@ -673,14 +838,7 @@ mod tests {
                 let received = received.clone();
                 let released = released.clone();
                 async move {
-                    if fallback && request.uri().path() == "/publication" {
-                        return axum::http::StatusCode::NOT_FOUND.into_response();
-                    }
-
-                    assert_eq!(
-                        request.uri().path(),
-                        if fallback { "/blocks" } else { "/publication" }
-                    );
+                    assert_eq!(request.uri().path(), "/publication");
                     received.notify_one();
                     released.notified().await;
                     vec![7_u8].into_response()
@@ -726,95 +884,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_batches_in_order_and_falls_back_once_for_old_runners() {
-        for legacy_status in [None, Some(404), Some(405), Some(503)] {
-            let legacy = legacy_status.is_some();
-            let requests = Arc::new(Mutex::new(Vec::new()));
-            let captured = requests.clone();
-            let app = Router::new().fallback(any(move |request: Request| {
-                let captured = captured.clone();
-                async move {
-                    assert_eq!(request.headers()["authorization"], "Bearer fixture");
-                    let method = request.method().clone();
-                    let path = request.uri().path().to_owned();
-                    if path == "/publication" {
-                        captured.lock().unwrap().push((method, Vec::new()));
-                        return axum::http::StatusCode::from_u16(legacy_status.unwrap_or(404))
-                            .unwrap()
-                            .into_response();
-                    }
-                    let bytes = axum::body::to_bytes(request.into_body(), 4096)
-                        .await
-                        .unwrap();
-                    let mut hashes = Vec::new();
-                    if method == "POST" && !legacy {
-                        let body: Value = serde_json::from_slice(&bytes).unwrap();
-                        hashes = body["hashes"]
-                            .as_array()
-                            .unwrap()
-                            .iter()
-                            .map(|hash| hash.as_str().unwrap().to_owned())
-                            .collect();
-                        assert!(hashes.len() <= READ_BATCH);
-                    }
-                    captured
-                        .lock()
-                        .unwrap()
-                        .push((method.clone(), hashes.clone()));
-                    if method == "POST" && legacy {
-                        return axum::http::StatusCode::from_u16(legacy_status.unwrap())
-                            .unwrap()
-                            .into_response();
-                    }
-                    if method == "GET" {
-                        hashes.push(path.trim_start_matches('/').to_owned());
-                    }
-                    let bytes: Vec<_> = hashes
-                        .iter()
-                        .flat_map(|hash| {
-                            let index = u8::from_str_radix(&hash[62..], 16).unwrap();
-                            vec![index; index as usize + 1]
-                        })
-                        .collect();
-                    bytes.into_response()
-                }
-            }));
-            let (url, server) = peer(app).await;
-            let blocks: Vec<_> = (0..READ_BATCH + 1)
-                .map(|i| (format!("{i:064x}"), i as u64 + 1))
-                .collect();
-            let mut fetch = Fetch::new(
-                reqwest::Client::new(),
-                url,
-                "fixture".into(),
-                blocks.clone(),
-            );
-            for (index, (hash, size)) in blocks.iter().enumerate() {
-                assert_eq!(
-                    fetch.block(hash).await.unwrap(),
-                    vec![index as u8; *size as usize]
-                );
-            }
-            let requests = requests.lock().unwrap();
-            let posts: Vec<_> = requests
-                .iter()
-                .filter(|(method, _)| *method == "POST")
-                .collect();
-            if legacy {
-                assert_eq!(posts.len(), 2);
-                assert_eq!(requests.len(), READ_BATCH + 3);
-            } else {
-                assert_eq!(requests.len(), 3);
-                assert_eq!(posts[1].1.len(), READ_BATCH);
-                assert_eq!(posts[2].1.len(), 1);
-            }
-            server.abort();
-        }
-    }
-
-    #[tokio::test]
     async fn fetch_rejects_truncated_excess_and_failed_batches() {
-        for (status, actual, expected) in [(200, 2, 3), (200, 4, 3), (500, 3, 3)] {
+        for (status, actual, expected) in [
+            (200, 2, 3),
+            (200, 4, 3),
+            (404, 3, 3),
+            (405, 3, 3),
+            (503, 3, 3),
+            (500, 3, 3),
+        ] {
             let app = Router::new().fallback(any(move |request: Request| async move {
                 assert_eq!(
                     request.method(),
@@ -871,9 +949,7 @@ mod tests {
     async fn stopped_publication_reader_benchmark() {
         use crate::storage::Disk;
         use futures_util::StreamExt;
-        let count: usize = std::env::var("CAIRN_PUBLICATION_BENCH_BLOCKS")
-            .ok()
-            .map_or(128, |value| value.parse().unwrap());
+        let count = 128;
         assert!((READ_BATCH + 1..=2048).contains(&count));
         let root = tempfile::Builder::new()
             .prefix("cairn-publication-bench-")
@@ -924,7 +1000,7 @@ mod tests {
                 let mut transferred = 0;
                 for group in hashes.chunks(batch) {
                     let opening = std::time::Instant::now();
-                    let (length, body) = served_blocks(&captured, group.to_vec(), batch)
+                    let (length, body) = served_blocks(&captured, group.to_vec(), batch, None)
                         .await
                         .unwrap();
                     open_ms += opening.elapsed().as_secs_f64() * 1000.0;

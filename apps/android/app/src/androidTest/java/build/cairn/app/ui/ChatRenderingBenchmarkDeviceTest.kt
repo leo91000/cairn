@@ -95,20 +95,22 @@ class ChatRenderingBenchmarkDeviceTest {
                             val user = shape == "users" || index % 2 == 1
                             val text = if (user) "Question $index" else source(300)
                             RunEvent(
-                                index.toLong(),
-                                index.toLong(),
-                                if (user) "chat.user" else "item.completed",
-                                text,
-                                if (user) mapOf("text" to JsonPrimitive(text))
-                                else
-                                    mapOf(
-                                        "item" to
-                                            buildJsonObject {
-                                                put("id", "answer-$index")
-                                                put("type", "agent_message")
-                                                put("text", text)
-                                            }
-                                    ),
+                                id = index.toLong(),
+                                createdAt = index.toLong(),
+                                type = if (user) "chat.user" else "item.completed",
+                                text = text,
+                                payload =
+                                    (if (user) mapOf("text" to JsonPrimitive(text))
+                                        else
+                                            mapOf(
+                                                "item" to
+                                                    buildJsonObject {
+                                                        put("id", "answer-$index")
+                                                        put("type", "agent_message")
+                                                        put("text", text)
+                                                    }
+                                            ))
+                                        ?.let { kotlinx.serialization.json.JsonObject(it) },
                             )
                         }
                     var text = source(if (shape == "large_answer") 100_000 else 2_000)
@@ -121,18 +123,21 @@ class ChatRenderingBenchmarkDeviceTest {
                         text += " suite $sample"
                         val last =
                             RunEvent(
-                                (count + sample).toLong(),
-                                count.toLong(),
-                                "item.updated",
-                                text,
-                                mapOf(
-                                    "item" to
-                                        buildJsonObject {
-                                            put("id", "current-answer")
-                                            put("type", "agent_message")
-                                            put("text", text)
-                                        }
-                                ),
+                                id = (count + sample).toLong(),
+                                createdAt = count.toLong(),
+                                type = "item.updated",
+                                text = text,
+                                payload =
+                                    kotlinx.serialization.json.JsonObject(
+                                        mapOf(
+                                            "item" to
+                                                buildJsonObject {
+                                                    put("id", "current-answer")
+                                                    put("type", "agent_message")
+                                                    put("text", text)
+                                                }
+                                        )
+                                    ),
                                 displayId = count.toLong(),
                             )
                         val events = prefix + last
@@ -301,7 +306,12 @@ class ChatRenderingBenchmarkDeviceTest {
             for (count in listOf(40, 400, 2000)) {
                 val events =
                     (1..count).map {
-                        RunEvent(it.toLong(), it.toLong(), "chat.user", "Question $it")
+                        RunEvent(
+                            id = it.toLong(),
+                            createdAt = it.toLong(),
+                            type = "chat.user",
+                            text = "Question $it",
+                        )
                     }
                 val keys = TimelineKeys()
                 val times = mutableListOf<Double>()

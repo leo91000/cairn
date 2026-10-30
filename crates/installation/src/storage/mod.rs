@@ -9,26 +9,22 @@ mod device;
 
 pub use device::{Disk, DiskWrite, LocalDisk, export};
 
-mod view;
-
-pub use view::DiskView;
-
 pub mod block_codec;
 pub mod digest;
+pub mod direct;
 mod lazy;
 pub(crate) mod metrics;
-pub(crate) mod migration;
 
 pub(crate) use lazy::NodeBlockCache;
 pub use lazy::{BlockSource, LazyDisk};
-
-pub mod fuse;
 
 pub mod transport;
 
 pub mod ublk;
 
+pub(crate) mod read_scope;
 pub mod remote;
+mod reports;
 
 pub mod source;
 

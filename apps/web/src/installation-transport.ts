@@ -1,4 +1,9 @@
-import { DirectChannel, TransportLost, TransportNotSent } from './direct-channel'
+import {
+  DirectChannel,
+  ProtocolMismatch,
+  TransportLost,
+  TransportNotSent,
+} from './direct-channel'
 import { DirectSource } from './direct-source'
 import { observeTransport } from './transport-observation'
 
@@ -10,6 +15,7 @@ interface Context {
   authenticated: boolean
   ready: boolean
   transportRoute: TransportRoute
+  protocolError: string
 }
 
 interface GrantResponse {
@@ -119,8 +125,15 @@ export class InstallationTransport {
     })
     if (response.status === 401)
       this.context.authenticated = false
-    if (!response.ok)
+    if (!response.ok) {
+      if ([422, 426].includes(response.status)) {
+        const body = await response.json().catch(() => undefined)
+        throw new ProtocolMismatch(typeof body?.error === 'string' ? body.error : undefined)
+      }
+
       throw new SignalingError(response.status)
+    }
+
     return response.status === 204 ? undefined : response.json()
   }
 
@@ -201,6 +214,13 @@ export class InstallationTransport {
   }
 
   private failed(error?: unknown) {
+    if (error instanceof ProtocolMismatch) {
+      this.context.protocolError = error.message
+      this.blocked = true
+      this.traffic?.close(error)
+      window.dispatchEvent(new Event('cairn-transport-change'))
+    }
+
     if (error instanceof SignalingError && [401, 403].includes(error.status))
       this.blocked = true
     if (error instanceof DOMException && error.name === 'NotAllowedError')
@@ -230,7 +250,7 @@ export class InstallationTransport {
   }
 
   private async connect(iceRestart: boolean) {
-    if (this.stopped || this.blocked || this.online === false || !this.context.authenticated || !navigator.onLine || document.hidden)
+    if (this.stopped || this.blocked || this.context.protocolError || this.online === false || !this.context.authenticated || !navigator.onLine || document.hidden)
       return
     // Visibility resumes an expired retry, but never shortens its deadline.
     if (Date.now() < this.retryAt)
@@ -248,9 +268,9 @@ export class InstallationTransport {
       channel.addEventListener('open', () => {
         if (current()) {
           this.failures = 0
-          this.traffic = new DirectChannel(channel, this.grant!.grant.claims, () => {
+          this.traffic = new DirectChannel(channel, this.grant!.grant.claims, (error) => {
             if (current())
-              this.failed()
+              this.failed(error)
           })
           clearTimeout(this.handshake)
           this.route('direct')
@@ -278,7 +298,7 @@ export class InstallationTransport {
       const fingerprint = /^a=fingerprint:(sha-256 [A-Fa-f0-9:]+)\r?$/m.exec(offer.sdp || '')?.[1]?.toUpperCase().replace('SHA-256', 'sha-256')
       if (!fingerprint)
         throw new Error('Missing DTLS fingerprint')
-      const authorization = { fingerprint, versions: [4] }
+      const authorization = { fingerprint, version: 4 }
       const grant = await this.control('/authorize', authorization) as GrantResponse
       if (!current())
         return
@@ -368,6 +388,8 @@ export class InstallationTransport {
   }
 
   private async sendRequest(path: string, url: string, options: RequestInit = {}) {
+    if (this.context.protocolError)
+      throw new ProtocolMismatch(this.context.protocolError)
     const traffic = this.context.transportRoute === 'direct' && (options.body == null || typeof options.body === 'string') ? this.traffic : undefined
     if (traffic) {
       try {
@@ -435,6 +457,8 @@ export class InstallationTransport {
   }
 
   source(path: string, url: string): EventSource {
+    if (this.context.protocolError)
+      throw new ProtocolMismatch(this.context.protocolError)
     const traffic = this.context.transportRoute === 'direct' ? this.traffic : undefined
     if (!traffic)
       return Object.assign(new EventSource(url), { transportRoute: 'relay' as const })

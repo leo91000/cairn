@@ -455,12 +455,10 @@ async fn chat_run(relay: &common::RelayedInstallation) -> (String, String) {
     .await
     .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let mut chat: Value = response.json().await.unwrap();
+    let chat: Value = response.json().await.unwrap();
     let chat_id = chat["id"].as_str().unwrap().to_owned();
     let run_id = uuid::Uuid::new_v4().to_string();
-    chat["runId"] = run_id.clone().into();
     // The execution adapter supplies a running turn; assertions cross the beacon API or push provider.
-    relay.installation.store.put("chats", chat).await.unwrap();
     let run = json!({
         "id": run_id,
         "taskId": chat_id,
@@ -471,7 +469,13 @@ async fn chat_run(relay: &common::RelayedInstallation) -> (String, String) {
     relay
         .installation
         .store
-        .transaction(move |db| db.add_run(&run, None))
+        .transaction(move |db| {
+            let state: cairn_contracts::RunState = serde_json::from_value(run)?;
+            db.admit_run(&state, None, &json!({}), None)?;
+            let mut conversation = db.conversation(chat["id"].as_str().unwrap())?.unwrap();
+            conversation.run_id = Some(state.id);
+            db.save_conversation(&conversation)
+        })
         .await
         .unwrap();
     (chat_id, run_id)
@@ -1270,7 +1274,9 @@ async fn failed_push_tasks_release_the_relay_window_for_new_events() {
 
     // Concurrent sends may reach the provider in any order. Fill the window
     // with failing sends before adding the event that must get a new slot.
-    tokio::time::timeout(Duration::from_secs(5), async {
+    // The four sends serialize on the same device row, including rollback after
+    // each panic. Allow their combined work to finish on a loaded host.
+    tokio::time::timeout(Duration::from_secs(30), async {
         while mail
             .panics_remaining
             .load(std::sync::atomic::Ordering::SeqCst)
@@ -1746,7 +1752,7 @@ async fn one_android_device_receives_both_installations_without_installation_sub
             .json(&json!({
                 "code": code["code"],
                 "name": name,
-                "protocol": 3,
+                "protocol": cairn_protocol::PROTOCOL_VERSION,
             }))
             .send()
             .await
@@ -1768,16 +1774,25 @@ async fn one_android_device_receives_both_installations_without_installation_sub
         let (mut socket, _) = tokio_tungstenite::connect_async(connect).await.unwrap();
         socket
             .send(Message::Text(
-                serde_json::to_string(&Frame::Hello { versions: vec![3] })
-                    .unwrap()
-                    .into(),
+                serde_json::to_string(&Frame::Hello {
+                    version: cairn_protocol::PROTOCOL_VERSION,
+                })
+                .unwrap()
+                .into(),
             ))
             .await
             .unwrap();
         let welcome = socket.next().await.unwrap().unwrap();
         assert!(matches!(
             serde_json::from_str::<Frame>(welcome.to_text().unwrap()).unwrap(),
-            Frame::Welcome { version: 3 }
+            Frame::Welcome {
+                version: cairn_protocol::PROTOCOL_VERSION
+            }
+        ));
+        let key = socket.next().await.unwrap().unwrap();
+        assert!(matches!(
+            serde_json::from_str::<Frame>(key.to_text().unwrap()).unwrap(),
+            Frame::DirectKey { .. }
         ));
         let event = Frame::Notification(NotificationEvent {
             id: "e".repeat(64),

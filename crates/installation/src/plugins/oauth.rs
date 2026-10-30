@@ -503,11 +503,8 @@ fn authorize_token(
         connections::authorize(db, expected)?;
         return Ok(());
     }
-    let current = db
-        .get(connections::KIND, &expected.id)?
-        .ok_or_else(expired)?;
-    if current["revision"] != expected.revision || (expected.enabled && current["enabled"] != true)
-    {
+    let current = db.plugin_instance(&expected.id)?.ok_or_else(expired)?;
+    if current.revision != expected.revision || (expected.enabled && !current.enabled) {
         return Err(Error::forbidden(
             "This account changed or was disabled. Retry the operation.",
         ));
@@ -657,26 +654,24 @@ where
     s.store
         .transaction(move |db| {
             authorize(db)?;
-            let mut current = db
-                .get(connections::KIND, &expected.id)?
-                .ok_or_else(expired)?;
-            if current["revision"] != expected.revision {
+            let mut current = db.plugin_instance(&expected.id)?.ok_or_else(expired)?;
+            if current.revision != expected.revision {
                 return Err(Error::conflict(
                     "This account changed. Reload it before disconnecting.",
                 ));
             }
-            current["enabled"] = json!(false);
-            current["revision"] = json!(id());
-            current["updatedAt"] = json!(now());
-            db.put(connections::KIND, &current)?;
+            current.enabled = false;
+            current.revision = id();
+            current.updated_at = now();
+            db.save_plugin_instance(&current)?;
             db.delete(&format!(
                 "mcp-secret:{}",
                 connections::credential_key(&expected.id)
             ))?;
-            db.set(
-                &format!("plugin-status:{}", expected.id),
-                &json!({ "state": "disconnected" }),
-                None,
+            db.set_plugin_status(
+                &current.id,
+                &current.revision,
+                &cairn_contracts::PluginStatus::default(),
             )?;
             db.audit(
                 "plugin.oauth.disconnected",
@@ -686,6 +681,7 @@ where
         .await?;
     s.plugins.changed.notify_one();
     s.plugins.files.forget(instance);
+    s.plugins.program_caches.forget(instance);
     let mut revoked = None;
     if let (Some(endpoint), Some(saved)) = (&oauth.revocation_url, saved) {
         let token = saved["oauth"]["refreshToken"]

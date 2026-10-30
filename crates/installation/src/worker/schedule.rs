@@ -14,6 +14,8 @@ use crate::{
     store::{Db, Store},
     validation::text,
 };
+use cairn_contracts::EventKind;
+use cairn_contracts::RunState;
 use serde_json::{Value, json};
 use std::{
     collections::HashSet,
@@ -45,19 +47,21 @@ impl Worker {
             .keys()
             .cloned()
             .collect::<HashSet<_>>();
+        crate::chats::coding_agent::tick(s, &active).await?;
         // Parked missions must release any pre-crash execution independently
         // of their wakeup and of admission capacity for new processes.
-        for run in s.store.read(|db| db.active()).await? {
-            let run_id = text(&run, "id");
-            if run["status"] == RunStatus::Waiting
-                && run["recoveryPending"] == true
+        for state in s.store.read(|db| db.active_run_states()).await? {
+            let run_id = state.id.as_str();
+            if state.status == RunStatus::Waiting
+                && state.recovery_pending
                 && !active.contains(run_id)
             {
                 let preparation = self.run_preparation_lock(run_id).await;
                 let _preparation = preparation.lock().await;
-                recover_or_wait(s, &run).await?;
+                recover_or_wait(s, &s.store.run(run_id).await?).await?;
             }
         }
+        crate::waits::tick_groups(s, &active).await?;
         s.chat_tick(&active).await?;
         crate::waits::tick_missions(s, &active).await?;
         if s.shutdown.is_cancelled() || s.store.kv("deployment-lease").await?.is_some() {
@@ -67,7 +71,9 @@ impl Worker {
         for id in &active {
             projects.extend(locked_projects(s, &s.store.run(id).await?));
         }
-        for run in s.store.read(|db| db.active()).await? {
+        for record in s.store.read(|db| db.queued_run_records()).await? {
+            let state = record.state.clone();
+            let run = record.wire()?;
             if !execution::uses_vm(&run, &s.config) {
                 let active_ids = self.active.lock().await.keys().cloned().collect::<Vec<_>>();
                 let mut host_runs = 0;
@@ -80,7 +86,7 @@ impl Worker {
                     continue;
                 }
             }
-            self.try_launch(s, run, &mut projects).await?;
+            self.try_launch(s, run, state, &mut projects).await?;
         }
         Ok(())
     }
@@ -95,7 +101,7 @@ impl Worker {
                 db.0.execute("DELETE FROM kv WHERE expires IS NOT NULL AND expires<=?", [now()])?;
                 db.0.execute("DELETE FROM audit WHERE created_at<?", [now() - 90 * DAY_MS])?;
                 db.0.execute("DELETE FROM records WHERE kind='node-exclusive-requests' AND json_extract(data,'$.state') IN ('released','failed','expired') AND json_extract(data,'$.createdAt')<?", [now() - 30 * DAY_MS])?;
-                db.0.execute("DELETE FROM events WHERE created_at<? AND run_id IN (SELECT id FROM runs WHERE status NOT IN ('queued','running','waiting') AND json_extract(data,'$.trigger')!='chat')", [now() - 30 * DAY_MS])?;
+                db.0.execute("DELETE FROM events WHERE created_at<? AND run_id IN (SELECT id FROM runs WHERE status NOT IN ('queued','running','waiting') AND trigger!='chat')", [now() - 30 * DAY_MS])?;
                 Ok(())
             })
             .await?;
@@ -108,10 +114,11 @@ impl Worker {
         self: &Arc<Self>,
         s: &Arc<Service>,
         run: Value,
+        state: RunState,
         projects: &mut HashSet<String>,
     ) -> Result<()> {
         let run_id = text(&run, "id").to_owned();
-        if run["status"] != RunStatus::Queued
+        if state.status != RunStatus::Queued
             || locked_projects(s, &run).any(|project| projects.contains(&project))
         {
             return Ok(());
@@ -123,14 +130,26 @@ impl Worker {
             return Ok(());
         }
 
+        if state.cancel_requested_at.is_some() {
+            let pending_id = run_id.clone();
+            if s.store
+                .read(move |db| crate::chats::coding_agent::pending_for_run(db, &pending_id))
+                .await?
+            {
+                return Ok(());
+            }
+        }
         let run_preparation = self.run_preparation_lock(&run_id).await;
         let _run_preparation = run_preparation.lock_owned().await;
         let current_id = run_id.clone();
-        let Some(run) = s.store.read(move |db| db.run(&current_id)).await? else {
+        let Some(record) = s.store.read(move |db| db.run_record(&current_id)).await? else {
             return Ok(());
         };
 
-        let recovering = run["recoveryPending"] == true;
+        let state = record.state.clone();
+        let run = record.wire()?;
+        let state = &state;
+        let recovering = state.recovery_pending;
         let launched = RunCheckpoint::load(&s.store, &run_id)
             .await?
             .is_some_and(|checkpoint| checkpoint.launched());
@@ -150,10 +169,13 @@ impl Worker {
         {
             return Ok(());
         }
-        let current = s.store.run(&run_id).await?;
-        if current["status"] != RunStatus::Queued
-            || crate::run_retry::Retry::waiting(&current, now())
+        let current = s.store.run_state(&run_id).await?;
+        if current.status != RunStatus::Queued
+            || crate::run_retry::Retry::waiting(current.retry.as_ref(), now())
         {
+            return Ok(());
+        }
+        if super::retry::expire(s, &run_id).await? {
             return Ok(());
         }
         // Serialize only the preparation window, until placement has reserved
@@ -186,22 +208,28 @@ impl Worker {
                 {
                     return Ok(());
                 }
-                return report_capacity_wait(s, &current, &error.message).await;
+                return report_capacity_wait(s, &s.store.run_state(&run_id).await?, &error.message)
+                    .await;
             }
         }
         let provider = Provider::of_run(&run)?;
         timing.next("account_acquire");
         let model = text(&run["snapshot"]["agent"], "model");
-        let account = match s.accounts.acquire(s, &run_id, provider, model).await {
+        let speed = text(&run["snapshot"]["agent"], "speed");
+        let account = match s
+            .accounts
+            .acquire_for(s, &run_id, provider, model, speed)
+            .await
+        {
             Ok(account) => account,
-            Err(error) => return report_account_wait(s, &run, provider, &error).await,
+            Err(error) => return report_account_wait(s, state, provider, &error).await,
         };
         let cancel = CancellationToken::new();
         match self.register(s, &run, cancel.clone()).await {
             Ok(true) => {}
             result => {
                 if let Some(account) = account {
-                    s.accounts.release(&account).await?;
+                    s.accounts.release(s, &account).await?;
                 }
                 return result.map(|_| ());
             }
@@ -245,8 +273,8 @@ impl Worker {
         let expected_message = crate::waits::execution_id(prepared).clone();
         let eligible = s
             .store
-            .read(move |db| {
-                if !eligible_run(db, &id)? {
+            .transaction(move |db| {
+                if !eligible_run(db, &id)? || super::retry::expire_in(db, &id)? {
                     return Ok(false);
                 }
                 let current = db
@@ -267,16 +295,13 @@ impl Worker {
 }
 
 fn eligible_run(db: &Db<'_>, id: &str) -> Result<bool> {
-    if db
-        .run(id)?
-        .is_some_and(|run| run["backendMigration"].is_object())
-    {
-        return Ok(false);
-    }
-    let Some(run) = db.run(id)? else {
+    let Some(record) = db.run_record(id)? else {
         return Ok(false);
     };
-    if run["status"] != RunStatus::Queued || !run["cancelRequestedAt"].is_null() {
+    if record.boundary["backendMigration"].is_object()
+        || record.state.status != RunStatus::Queued
+        || record.state.cancel_requested_at.is_some()
+    {
         return Ok(false);
     }
     if RunCheckpoint::load_in(db, id)?
@@ -306,8 +331,11 @@ async fn run_to_completion(
     // disk/database failure must not strand a running record or
     // launch a second process before the previous one is fenced.
     loop {
-        let lease = s.accounts.lease(&run_id).await;
-        match requeue_after_error(&s.store, &run_id, lease).await {
+        let result = match s.accounts.lease(s, &run_id).await {
+            Ok(lease) => requeue_after_error(&s.store, &run_id, lease).await,
+            Err(error) => Err(error),
+        };
+        match result {
             Ok(()) => break,
             Err(error) => {
                 tracing::warn!(run_id = %run_id, error = %error, "Could not requeue run after a worker error");
@@ -336,40 +364,59 @@ fn locked_projects(s: &Service, run: &Value) -> impl Iterator<Item = String> {
 
 async fn report_account_wait(
     s: &Service,
-    run: &Value,
+    run: &RunState,
     provider: Provider,
     error: &Error,
 ) -> Result<()> {
-    if run["accountWaitReason"] == error.message.as_str() {
+    if run.account_wait_reason.as_deref() == Some(error.message.as_str()) {
         return Ok(());
     }
-    let run_id = text(run, "id");
+    let run_id = &run.id;
     // Clients offer Connections when the wait needs the user.
     let required = s
         .accounts
         .needs_attention(s, provider)
         .await?
         .then_some(provider);
-    let patch = json!({ "accountWaitReason": error.message, "accountRequired": required });
-    s.store.patch_run(run_id, patch).await?;
-    s.store.event(run_id, "status", &error.message, None).await
+    let patch = crate::runs::RunChanges {
+        account_wait_reason: Some(Some((error.message).to_owned())),
+        account_required: Some(serde_json::from_value(serde_json::json!(required))?),
+        ..Default::default()
+    };
+    let (run_id, message) = (run_id.to_owned(), error.message.clone());
+    s.store
+        .transaction(move |db| {
+            db.change_run(&run_id, patch)?;
+            db.event(&run_id, &EventKind::Status, &message, None)
+        })
+        .await
 }
 
 /// Shows why `run` waits for a node. Updated figures replace the reason
 /// without adding another status event.
-pub(super) async fn report_capacity_wait(s: &Service, run: &Value, detail: &str) -> Result<()> {
+pub(super) async fn report_capacity_wait(s: &Service, run: &RunState, detail: &str) -> Result<()> {
     let reason = format!("{CAPACITY_WAIT_REASON} {detail}");
-    let previous = run["accountWaitReason"].as_str().unwrap_or_default();
+    let previous = run.account_wait_reason.as_deref().unwrap_or_default();
     if previous == reason {
         return Ok(());
     }
-    let run_id = text(run, "id");
-    let patch = json!({ "accountWaitReason": reason, "accountRequired": null });
-    s.store.patch_run(run_id, patch).await?;
-    if previous.starts_with(CAPACITY_WAIT_REASON) {
-        return Ok(());
-    }
-    s.store.event(run_id, "status", &reason, None).await
+    let run_id = &run.id;
+    let patch = crate::runs::RunChanges {
+        account_wait_reason: Some(Some((reason).to_owned())),
+        account_required: Some(None),
+        ..Default::default()
+    };
+    let changed_figures = previous.starts_with(CAPACITY_WAIT_REASON);
+    let run_id = run_id.to_owned();
+    s.store
+        .transaction(move |db| {
+            db.change_run(&run_id, patch)?;
+            if !changed_figures {
+                db.event(&run_id, &EventKind::Status, &reason, None)?;
+            }
+            Ok(())
+        })
+        .await
 }
 
 /// Returns whether a recovering run may launch again now.
@@ -380,8 +427,11 @@ async fn recover_or_wait(s: &Service, run: &Value) -> Result<bool> {
     if run["accountWaitReason"] != RECOVERY_WAIT_REASON
         && !text(run, "accountWaitReason").starts_with(CAPACITY_WAIT_REASON)
     {
-        let patch = json!({ "accountWaitReason": RECOVERY_WAIT_REASON });
-        s.store.patch_run(text(run, "id"), patch).await?;
+        let patch = crate::runs::RunChanges {
+            account_wait_reason: Some(Some((RECOVERY_WAIT_REASON).to_owned())),
+            ..Default::default()
+        };
+        s.store.change_run(text(run, "id"), patch).await?;
     }
     Ok(false)
 }
@@ -391,8 +441,9 @@ async fn recover_or_wait(s: &Service, run: &Value) -> Result<bool> {
 async fn recover(s: &Service, run: &Value) -> Result<bool> {
     let run_id = text(run, "id");
     let checkpoint = RunCheckpoint::load(&s.store, run_id).await?;
-    let parked = run["status"] == RunStatus::Waiting
-        || (run["trigger"] != "chat"
+    let state = s.store.run_state(run_id).await?;
+    let parked = state.status == RunStatus::Waiting
+        || (state.trigger != "chat"
             && run["wakeup"].is_object()
             && checkpoint.as_ref().is_some_and(RunCheckpoint::completed));
     // A parked turn only needs fencing/release, including a completed turn
@@ -414,21 +465,22 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
 /// Cancellation and the final recovery state commit together. In particular,
 /// a completed provider turn must never restore a wait cancellation removed.
 fn finish_recovery(db: &Db<'_>, id: &str, checkpoint: Option<&RunCheckpoint>) -> Result<bool> {
-    let current = db
-        .run(id)?
+    let record = db
+        .run_record(id)?
         .ok_or_else(|| Error::not_found("Run not found"))?;
-    if !current["cancelRequestedAt"].is_null() {
-        cancel_recovery(db, id, &current)?;
+    let current = &record.state;
+    if current.cancel_requested_at.is_some() {
+        cancel_recovery(db, id, current)?;
         return Ok(false);
     }
     if let Some(checkpoint) = checkpoint {
         if let Some(settled) = checkpoint.settled() {
-            let mut patch = settled.run_patch()?;
+            let mut patch = settled.run_changes();
             if settled.status == RunStatus::Waiting {
-                patch["resumeAvailable"] = true.into();
-                patch["outcome"] = Value::Null;
+                patch.resume_available = Some(true);
+                patch.boundary = Some(json!({"outcome": null}));
             }
-            db.patch_run(id, &patch)?;
+            db.change_run(id, patch)?;
             return Ok(false);
         }
         if checkpoint.completed() {
@@ -438,53 +490,75 @@ fn finish_recovery(db: &Db<'_>, id: &str, checkpoint: Option<&RunCheckpoint>) ->
                 }
                 message => message,
             };
-            let waiting = current["trigger"] != "chat" && current["wakeup"].is_object();
-            if waiting && !current["sessionId"].is_string() {
-                db.patch_run(id, &json!({
-                    "status": RunStatus::Failed,
-                    "finishedAt": now(),
-                    "wakeup": null,
-                    "recoveryPending": false,
-                    "accountWaitReason": null,
-                    "error": "Cannot wait without a saved agent session. Working files were preserved.",
-                }))?;
+            let waiting = current.trigger != "chat" && record.wakeup.is_some();
+            if waiting && current.session_id.is_none() {
+                db.change_run(id,crate::runs::RunChanges {
+                    status: Some(RunStatus::Failed),
+                    finished_at: Some(Some(now())),
+                    recovery_pending: Some(false),
+                    account_wait_reason: Some(None),
+                    error: Some(Some("Cannot wait without a saved agent session. Working files were preserved.".into())),
+                    wakeup: Some(None),
+                    ..Default::default()
+                })?;
                 return Ok(false);
             }
-            let mut patch = json!({
-                "status": if waiting { RunStatus::Waiting } else { RunStatus::Succeeded },
-                "finishedAt": if waiting { None } else { Some(now()) },
-                "resumeAvailable": waiting,
-                "accountWaitReason": null,
-                "recoveryPending": false,
-                "summary": summary,
-            });
+            let mut patch = crate::runs::RunChanges {
+                status: Some(if waiting {
+                    RunStatus::Waiting
+                } else {
+                    RunStatus::Succeeded
+                }),
+                finished_at: Some(if waiting { None } else { Some(now()) }),
+                resume_available: Some(waiting),
+                account_wait_reason: Some(None),
+                recovery_pending: Some(false),
+                summary: Some((summary).to_owned()),
+                boundary: Some(json!({})),
+                ..Default::default()
+            };
             if waiting {
-                patch["outcome"] = Value::Null;
+                patch.boundary.as_mut().unwrap()["outcome"] = Value::Null;
+            } else {
+                // A compaction completed before the restart settles like one that did not.
+                crate::chats::keep_reply_after_compaction(&record.boundary, &mut patch)?;
             }
-            db.patch_run(id, &patch)?;
+            db.change_run(id, patch)?;
             return Ok(false);
         }
     }
-    db.patch_run(id, &json!({ "recoveryPending": false }))?;
+    db.change_run(
+        id,
+        crate::runs::RunChanges {
+            recovery_pending: Some(false),
+            ..Default::default()
+        },
+    )?;
     Ok(true)
 }
 
 /// Settles a recovering run whose cancellation was requested. One waiting for an automatic
 /// retry shows the stop in its conversation; a wait's own card already shows its cancellation.
-fn cancel_recovery(db: &Db<'_>, id: &str, run: &Value) -> Result<()> {
-    db.patch_run(
+fn cancel_recovery(db: &Db<'_>, id: &str, run: &RunState) -> Result<()> {
+    db.change_run(
         id,
-        &json!({
-            "status": RunStatus::Cancelled,
-            "finishedAt": now(),
-            "accountWaitReason": null,
-            "recoveryPending": false,
-            "retry": null,
-            "wakeup": null,
-        }),
+        crate::runs::RunChanges {
+            status: Some(RunStatus::Cancelled),
+            finished_at: Some(Some(now())),
+            account_wait_reason: Some(None),
+            recovery_pending: Some(false),
+            retry: Some(None),
+            wakeup: Some(None),
+            ..Default::default()
+        },
     )?;
-    if run["retry"]["nextAttemptAt"].is_number() {
-        db.event(id, "status", RunStatus::Cancelled.as_str(), None)?;
+    if run
+        .retry
+        .as_ref()
+        .and_then(|retry| retry.next_attempt_at)
+        .is_some()
+    {
+        db.event(id, &EventKind::Status, RunStatus::Cancelled.as_str(), None)?;
     }
     Ok(())
 }
@@ -494,35 +568,40 @@ async fn requeue_after_error(store: &Store, run_id: &str, lease: Option<Lease>) 
     let id = run_id.to_owned();
     store
         .transaction(move |db| {
-            let Some(current) = db.run(&id)? else {
+            let Some(current) = db.run_state(&id)? else {
                 return Ok(());
             };
             let mut checkpoint =
                 RunCheckpoint::load_in(db, &id)?.unwrap_or_else(RunCheckpoint::exhausted);
-            if !RunStatus::of(&current).is_some_and(RunStatus::is_active)
-                && let Some(settled) = Settled::from_run(&current)
-            {
-                checkpoint.settled = Some(Some(settled));
+            if !current.status.is_active() {
+                checkpoint.settled = Some(Some(Settled::from_state(&current)));
             }
             checkpoint.store_in(db, &id)?;
-            let mut patch = json!({
-                "status": RunStatus::Queued,
-                "recoveryPending": true,
-                "finishedAt": null,
-                "accountWaitReason": "Recovering after a worker error.",
-            });
+            let mut patch = crate::runs::RunChanges {
+                status: Some(RunStatus::Queued),
+                recovery_pending: Some(true),
+                finished_at: Some(None),
+                account_wait_reason: Some(Some("Recovering after a worker error.".into())),
+                ..Default::default()
+            };
             if let Some(lease) = lease {
-                patch["accountId"] = lease.account_id.into();
+                patch.account_id = Some(Some((lease.account_id).to_owned()));
             }
-            db.patch_run(&id, &patch)?;
+            db.change_run(&id, patch)?;
             Ok(())
         })
         .await
 }
 
 #[cfg(test)]
+use crate::run_fixture::DbRunFixture;
+
+#[cfg(test)]
 mod tests {
+    use crate::account_fixture::AccountFixtures;
+
     use super::*;
+    use crate::agent_fixture::AgentFixture;
     use std::{future::Future, task::Poll};
 
     async fn fixture() -> (
@@ -557,16 +636,22 @@ mod tests {
         service.store.transaction({
             let run_id = run_id.clone();
             move |db| {
-                let run = json!({ "id": run_id, "status": RunStatus::Queued });
-                db.0.execute(
-                    "INSERT INTO runs(id,task_id,project_id,status,created_at,data) VALUES(?1,?1,'','queued',0,?2)",
-                    rusqlite::params![run_id, run.to_string()],
-                )?;
+                let run = json!({
+                    "id": run_id,
+                    "taskId": run_id,
+                    "status": RunStatus::Queued,
+                    "snapshot": { "agent": { "id": crate::config::MAIN_AGENT_ID, "provider": "codex" } },
+                });
+                db.add_run_fixture(&run, None)?;
                 Ok(())
             }
         }).await.unwrap();
         chat["runId"] = run_id.clone().into();
-        service.store.put("chats", chat).await.unwrap();
+        service
+            .store
+            .save_conversation_boundary(chat)
+            .await
+            .unwrap();
         let workspace = service.config.data_dir.join("runs").join(&run_id);
         tokio::fs::create_dir_all(&workspace).await.unwrap();
         tokio::fs::write(workspace.join("work.txt"), "Private work")
@@ -620,24 +705,32 @@ mod tests {
             };
             original
                 .store
-                .transaction(move |db| db.remove("chats", &chat_id))
+                .transaction(move |db| db.remove_conversation(&chat_id))
                 .await
                 .unwrap();
             drop(original);
             let service = Service::new(config).await.unwrap();
             let wakeup = json!({
-                "id": "wake", "seconds": 3600,
+                "id": "wake", "messageId": null, "reason": "Waiting", "seconds": 3600,
                 "createdAt": now(), "wakeAt": now() + 3_600_000,
             });
             service
                 .store
-                .patch_run(
+                .change_run(
                     &run_id,
-                    json!({
-                        "status": if queued { "queued" } else { "waiting" },
-                        "recoveryPending": queued, "trigger": "manual", "sessionId": "saved",
-                        "isolated": true, "wakeup": wakeup,
-                    }),
+                    crate::runs::RunChanges {
+                        status: Some(if queued {
+                            RunStatus::Queued
+                        } else {
+                            RunStatus::Waiting
+                        }),
+                        recovery_pending: Some(queued),
+                        trigger: Some(("manual").to_owned()),
+                        session_id: Some(Some("saved".into())),
+                        wakeup: Some(Some(serde_json::from_value(wakeup.clone()).unwrap())),
+                        boundary: Some(json!({"isolated": true})),
+                        ..Default::default()
+                    },
                 )
                 .await
                 .unwrap();
@@ -711,7 +804,7 @@ mod tests {
                     "wakeup": { "id": "wake" },
                     "outcome": { "status": "completed" },
                 });
-                db.add_run(&record, None)?;
+                db.add_run_fixture(&record, None)?;
                 let checkpoint = RunCheckpoint::from_value(json!({ "completed": true }))?;
                 assert!(!finish_recovery(db, "mission", Some(&checkpoint))?);
                 let waiting = db.run("mission")?.unwrap();
@@ -722,16 +815,21 @@ mod tests {
                 for settled in [false, true] {
                     // A stale recovery snapshot preceded this cancellation. Completion
                     // must read it in the same transaction that writes the next state.
-                    db.patch_run(
+                    db.change_run(
                         "mission",
-                        &json!({
-                            "status": "queued", "recoveryPending": true,
-                            "cancelRequestedAt": now(), "wakeup": null,
-                        }),
+                        crate::runs::RunChanges {
+                            status: Some(cairn_contracts::RunStatus::Queued),
+                            recovery_pending: Some(true),
+                            cancel_requested_at: Some(Some(now())),
+                            wakeup: Some(None),
+                            ..Default::default()
+                        },
                     )?;
                     let mut checkpoint = checkpoint.clone();
                     if settled {
-                        checkpoint.settled = Some(Some(Settled::from_run(&waiting).unwrap()));
+                        checkpoint.settled = Some(Some(Settled::from_state(
+                            &db.run_state("mission")?.unwrap(),
+                        )));
                     }
                     assert!(!finish_recovery(db, "mission", Some(&checkpoint))?);
                     let cancelled = db.run("mission")?.unwrap();
@@ -740,6 +838,54 @@ mod tests {
                     assert_eq!(cancelled["recoveryPending"], false);
                     assert!(db.active()?.is_empty());
                 }
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn compaction_completed_before_restart_keeps_the_last_reply_and_outcome() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                let outcome = json!({ "status": "completed", "messageId": "first" });
+                let record = json!({
+                    "id": "chat-run",
+                    "taskId": "chat",
+                    "trigger": "chat",
+                    "status": "queued",
+                    "createdAt": 0,
+                    "recoveryPending": true,
+                    "sessionId": "saved",
+                    "summary": "Last reply",
+                    "finishedAt": 500,
+                    // Resuming the interrupted compaction cleared the run's outcome.
+                    "outcome": null,
+                    "chatExecution": {
+                        "messageId": "compact:fixture",
+                        "text": "",
+                        "attachments": [],
+                        "recovery": false,
+                        "operation": "compact",
+                        "previous": { "summary": "Last reply", "finishedAt": 500, "outcome": outcome },
+                    },
+                });
+                db.add_run_fixture(&record, None)?;
+
+                // The compaction's `turn.completed` was saved; the manager stopped before
+                // settling the run, and a compaction leaves no reply in the checkpoint.
+                let checkpoint = RunCheckpoint::from_value(json!({ "completed": true }))?;
+                assert_eq!(checkpoint.last_message(), "");
+                assert!(!finish_recovery(db, "chat-run", Some(&checkpoint))?);
+
+                let recovered = db.run("chat-run")?.unwrap();
+                assert_eq!(recovered["status"], "succeeded");
+                assert_eq!(recovered["recoveryPending"], false);
+                assert_eq!(recovered["summary"], "Last reply");
+                assert_eq!(recovered["finishedAt"], 500);
+                assert_eq!(recovered["outcome"], outcome);
                 Ok(())
             })
             .await
@@ -794,11 +940,14 @@ mod tests {
     async fn deletion_during_account_preparation_leaves_no_orphan_files() {
         let (_root, service, chat_id, run_id, workspace) = fixture().await;
         service.accounts.initialize(&service).await.unwrap();
-        let mut account = service
-            .accounts
-            .create(&service, Provider::Codex, "Ready")
-            .await
-            .unwrap();
+        let mut account = serde_json::to_value(
+            service
+                .accounts
+                .create(&service, Provider::Codex, "Ready")
+                .await
+                .unwrap(),
+        )
+        .unwrap();
         account["state"] = "ready".into();
         account["usage"] = json!({
             "allowed": true,
@@ -808,13 +957,16 @@ mod tests {
         });
         service
             .store
-            .put(crate::accounts::KIND, account.clone())
+            .save_account_fixture(account.clone())
             .await
             .unwrap();
         let account_guard = service.accounts.lock(text(&account, "id")).await;
         let run = service.store.run(&run_id).await.unwrap();
         let mut projects = HashSet::new();
-        let admission = service.worker.try_launch(&service, run, &mut projects);
+        let state = service.store.run_state(&run_id).await.unwrap();
+        let admission = service
+            .worker
+            .try_launch(&service, run, state, &mut projects);
         tokio::pin!(admission);
         let account_mutex = tokio::sync::OwnedMutexGuard::mutex(&account_guard);
         let owners = Arc::strong_count(account_mutex);
@@ -841,7 +993,7 @@ mod tests {
         assert!(
             service
                 .store
-                .get("chats", other_id)
+                .conversation_boundary(other_id)
                 .await
                 .unwrap()
                 .is_none(),
@@ -851,12 +1003,19 @@ mod tests {
         drop(account_guard);
         admission.await.unwrap();
         assert!(service.worker.active.lock().await.is_empty());
-        assert!(service.accounts.lease(&run_id).await.is_none());
+        assert!(
+            service
+                .accounts
+                .lease(&service, &run_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
         service.cleanup_conversations().await.unwrap();
         assert!(
             service
                 .store
-                .get("chats", &chat_id)
+                .conversation_boundary(&chat_id)
                 .await
                 .unwrap()
                 .is_none()
@@ -865,7 +1024,7 @@ mod tests {
         assert!(
             service
                 .store
-                .kv(&format!("run-checkpoint:{run_id}"))
+                .checkpoint_boundary(&run_id)
                 .await
                 .unwrap()
                 .is_none()
@@ -873,6 +1032,70 @@ mod tests {
         assert!(
             !workspace.exists(),
             "Account preparation must not recreate a purged run directory"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_retry_that_expires_during_preparation_cannot_register() {
+        let (_root, service, _chat_id, run_id, workspace) = fixture().await;
+        let _prepared = service
+            .store
+            .change_run(
+                &run_id,
+                crate::runs::RunChanges {
+                    retry: Some(Some(
+                        serde_json::from_value(json!({
+                            "attempt": 1,
+                            "limit": 5,
+                            "nextAttemptAt": now() - 1,
+                            "deadlineAt": now() + 60_000,
+                            "cause": {"kind":"timeout","message":"temporary"},
+                        }))
+                        .unwrap(),
+                    )),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let prepared = service.store.run(&run_id).await.unwrap();
+        // Admission captured an eligible run, then waits behind asynchronous work.
+        let active = service.worker.active.lock().await;
+        let registration = service
+            .worker
+            .register(&service, &prepared, CancellationToken::new());
+        tokio::pin!(registration);
+        std::future::poll_fn(|cx| {
+            assert!(registration.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        service
+            .store
+            .change_run(
+                &run_id,
+                crate::runs::RunChanges {
+                    retry: Some({
+                        let mut retry = service.store.run_state(&run_id).await.unwrap().retry;
+                        retry.as_mut().unwrap().deadline_at = Some(now() - 1);
+                        retry
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        drop(active);
+        assert!(!registration.await.unwrap());
+        let stopped = service.store.run(&run_id).await.unwrap();
+        assert_eq!(stopped["status"], RunStatus::Failed);
+        assert!(stopped["retry"]["nextAttemptAt"].is_null());
+        assert!(service.worker.active.lock().await.is_empty());
+        assert_eq!(
+            tokio::fs::read_to_string(workspace.join("work.txt"))
+                .await
+                .unwrap(),
+            "Private work"
         );
     }
 
@@ -912,7 +1135,12 @@ mod tests {
         let deletion = tokio::spawn(async move { deleting.chat_trash(&deleting_id, true).await });
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
-                let chat = service.store.get("chats", &chat_id).await.unwrap().unwrap();
+                let chat = service
+                    .store
+                    .conversation_boundary(&chat_id)
+                    .await
+                    .unwrap()
+                    .unwrap();
                 let run = service.store.run(&run_id).await.unwrap();
                 if chat["lifecycle"] == "trash" && !run["cancelRequestedAt"].is_null() {
                     assert_eq!(run["status"], RunStatus::Queued);
@@ -935,7 +1163,7 @@ mod tests {
         assert!(
             service
                 .store
-                .get("chats", &chat_id)
+                .conversation_boundary(&chat_id)
                 .await
                 .unwrap()
                 .is_none()
@@ -944,7 +1172,7 @@ mod tests {
         assert!(
             service
                 .store
-                .kv(&format!("run-checkpoint:{run_id}"))
+                .checkpoint_boundary(&run_id)
                 .await
                 .unwrap()
                 .is_none()
@@ -963,23 +1191,34 @@ mod tests {
     async fn an_admission_prepared_before_merge_cannot_register_after_resume() {
         let (_root, service, chat_id, run_id, _workspace) = fixture().await;
         let source = service
-            .agent(json!({ "name": "Source" }), None)
+            .agent_fixture(json!({ "name": "Source" }), None)
             .await
             .unwrap();
+        let run_id_copy = run_id.clone();
+        let source_copy = source.clone();
         let prepared = service
             .store
-            .patch_run(
-                &run_id,
-                json!({
-                    "snapshot": { "agent": source },
-                    "chatExecution": { "messageId": "original-message" },
-                }),
-            )
+            .transaction(move |db| {
+                crate::run_fixture::change_run_fixture(
+                    db,
+                    &run_id_copy,
+                    &json!({
+                        "snapshot": { "agent": source_copy },
+                        "chatExecution": { "messageId": "original-message" },
+                    }),
+                )
+            })
             .await
             .unwrap();
         service
             .store
-            .patch_run(&run_id, json!({ "status": RunStatus::Cancelled }))
+            .change_run(
+                &run_id,
+                crate::runs::RunChanges {
+                    status: Some(RunStatus::Cancelled),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         service
@@ -988,18 +1227,18 @@ mod tests {
                 let chat_id = chat_id.clone();
                 let source = source.clone();
                 move |db| {
-                    let mut chat = db.get("chats", &chat_id)?.unwrap();
+                    let mut chat = db.conversation_boundary(&chat_id)?.unwrap();
                     chat["agentId"] = source["id"].clone();
-                    db.put("chats", &chat)?;
+                    db.save_conversation_boundary(&chat)?;
                     Ok(())
                 }
             })
             .await
             .unwrap();
         service
-            .merge_agents(json!({
+            .merge_agents(serde_json::from_value(json!({
                 "sourceId": source["id"], "targetId": crate::config::MAIN_AGENT_ID, "confirm": true,
-            }))
+            })).unwrap())
             .await
             .unwrap();
         let resumed = service.worker.resume(&service, &run_id).await.unwrap();

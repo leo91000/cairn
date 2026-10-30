@@ -1,0 +1,310 @@
+{
+  "inputs": [
+    {
+      "kind": "setup",
+      "pluginId": "fixture"
+    },
+    {
+      "data": {
+        "accessMode": "allowlist",
+        "agentId": "",
+        "enabled": true,
+        "maxMessagesPerHour": 20,
+        "maxPerPersonPerHour": 5,
+        "name": "Test instance",
+        "people": [],
+        "projectId": null,
+        "secrets": {
+          "token": "synthetic-secret"
+        },
+        "settings": {
+          "nested": {
+            "ids": [
+              1,
+              null,
+              false
+            ]
+          },
+          "scope": true
+        },
+        "userIds": []
+      },
+      "instanceId": null,
+      "kind": "save",
+      "pluginId": "fixture"
+    },
+    {
+      "data": {
+        "changed": "choices",
+        "revision": "r1",
+        "secrets": {},
+        "settings": {
+          "choices": [
+            "a",
+            "b"
+          ]
+        }
+      },
+      "instanceId": "00000000-0000-4000-8000-000000000013",
+      "kind": "form",
+      "pluginId": "fixture"
+    },
+    {
+      "data": {
+        "action": "refresh",
+        "payload": null,
+        "values": {
+          "count": 2
+        }
+      },
+      "instanceId": "00000000-0000-4000-8000-000000000013",
+      "kind": "action",
+      "pluginId": "fixture"
+    },
+    {
+      "data": {
+        "enabled": false
+      },
+      "instanceId": "00000000-0000-4000-8000-000000000013",
+      "kind": "enabled",
+      "pluginId": "fixture"
+    },
+    {
+      "data": {
+        "secrets": {},
+        "settings": {},
+        "sharedFrom": "00000000-0000-4000-8000-000000000013"
+      },
+      "instanceId": null,
+      "kind": "signin",
+      "pluginId": "fixture"
+    },
+    {
+      "flowId": "flow",
+      "kind": "signin_status",
+      "pluginId": "fixture"
+    },
+    {
+      "flowId": "flow",
+      "kind": "signin_cancel",
+      "pluginId": "fixture"
+    },
+    {
+      "instanceId": "00000000-0000-4000-8000-000000000013",
+      "kind": "people",
+      "operation": "approve",
+      "pluginId": "fixture",
+      "userId": "person_1"
+    },
+    {
+      "instanceId": "00000000-0000-4000-8000-000000000013",
+      "kind": "test",
+      "pluginId": "fixture"
+    },
+    {
+      "instanceId": "00000000-0000-4000-8000-000000000013",
+      "kind": "view",
+      "pluginId": "fixture"
+    },
+    {
+      "instanceId": "00000000-0000-4000-8000-000000000013",
+      "kind": "delete",
+      "pluginId": "fixture"
+    },
+    {
+      "instanceId": "00000000-0000-4000-8000-000000000013",
+      "kind": "disconnect",
+      "pluginId": "fixture"
+    }
+  ],
+  "outputs": [
+    {
+      "callbackUrl": null,
+      "kind": "setup",
+      "managementUrl": null,
+      "manifest": {
+        "apiVersion": 2,
+        "capabilities": [],
+        "description": "",
+        "id": "fixture",
+        "name": "Fixture",
+        "version": "1.0.0"
+      },
+      "setup": {}
+    },
+    {
+      "instance": {
+        "accessMode": "allowlist",
+        "activity": [],
+        "agentId": "",
+        "agentIds": [],
+        "enabled": true,
+        "id": "00000000-0000-4000-8000-000000000013",
+        "maxMessagesPerHour": 20,
+        "maxPerPersonPerHour": 5,
+        "name": "Test instance",
+        "people": [],
+        "pluginId": "fixture",
+        "projectId": null,
+        "requests": [],
+        "revision": "revision",
+        "secretKeys": [],
+        "settings": {
+          "nested": {
+            "ids": [
+              1,
+              null,
+              false
+            ]
+          }
+        },
+        "status": {
+          "message": null,
+          "state": "disconnected"
+        },
+        "usage": {
+          "hour": 0
+        },
+        "userIds": []
+      },
+      "kind": "saved"
+    },
+    {
+      "instance": {
+        "accessMode": "allowlist",
+        "activity": [],
+        "agentId": "",
+        "agentIds": [],
+        "enabled": true,
+        "id": "00000000-0000-4000-8000-000000000013",
+        "maxMessagesPerHour": 20,
+        "maxPerPersonPerHour": 5,
+        "name": "Test instance",
+        "people": [],
+        "pluginId": "fixture",
+        "projectId": null,
+        "requests": [],
+        "revision": "revision",
+        "secretKeys": [],
+        "settings": {
+          "nested": {
+            "ids": [
+              1,
+              null,
+              false
+            ]
+          }
+        },
+        "status": {
+          "message": null,
+          "state": "disconnected"
+        },
+        "usage": {
+          "hour": 0
+        },
+        "userIds": []
+      },
+      "kind": "enabled"
+    },
+    {
+      "instance": {
+        "accessMode": "allowlist",
+        "activity": [],
+        "agentId": "",
+        "agentIds": [],
+        "enabled": true,
+        "id": "00000000-0000-4000-8000-000000000013",
+        "maxMessagesPerHour": 20,
+        "maxPerPersonPerHour": 5,
+        "name": "Test instance",
+        "people": [],
+        "pluginId": "fixture",
+        "projectId": null,
+        "requests": [],
+        "revision": "revision",
+        "secretKeys": [],
+        "settings": {
+          "nested": {
+            "ids": [
+              1,
+              null,
+              false
+            ]
+          }
+        },
+        "status": {
+          "message": null,
+          "state": "disconnected"
+        },
+        "usage": {
+          "hour": 0
+        },
+        "userIds": []
+      },
+      "kind": "people"
+    },
+    {
+      "form": {
+        "errors": {},
+        "options": {},
+        "values": {
+          "nested": [
+            1,
+            null,
+            true
+          ]
+        },
+        "view": []
+      },
+      "kind": "form"
+    },
+    {
+      "kind": "tested",
+      "message": "Ready",
+      "ok": true
+    },
+    {
+      "kind": "view",
+      "view": [
+        {
+          "text": "Ready",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "kind": "action",
+      "result": {
+        "notice": "Updated",
+        "view": []
+      }
+    },
+    {
+      "flow": {
+        "expiresAt": 0,
+        "id": "",
+        "message": null,
+        "pluginId": "",
+        "state": "pending",
+        "userCode": "",
+        "verificationUri": "",
+        "verificationUriComplete": null
+      },
+      "kind": "signin"
+    },
+    {
+      "cancelled": true,
+      "kind": "signinCancelled"
+    },
+    {
+      "disconnected": true,
+      "kind": "disconnected",
+      "message": "Disconnected",
+      "revoked": null
+    },
+    {
+      "deleted": true,
+      "kind": "deleted"
+    }
+  ]
+}

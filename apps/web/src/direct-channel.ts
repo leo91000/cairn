@@ -10,6 +10,11 @@ export class TransportLost extends Error {
   constructor() { super('Connection interrupted. Please check the result before trying again.') }
 }
 
+/** A wire-version refusal is terminal until the app and installation are updated. */
+export class ProtocolMismatch extends Error {
+  constructor(message = 'Protocol mismatch. Update required: update the app, Beacon and installation.') { super(message) }
+}
+
 // The peer could not dispatch this request: even mutations are safe on relay.
 export class TransportNotSent extends Error {
   constructor() { super('Direct request was not sent.') }
@@ -17,7 +22,7 @@ export class TransportNotSent extends Error {
 
 interface Frame {
   type: string
-  id: string
+  id?: string
   status?: number
   headers?: [string, string][]
   body?: string
@@ -32,6 +37,7 @@ interface Pending {
   started: boolean
   credited: boolean
   streaming: boolean
+  head: boolean
   sent: boolean
   cleanup: () => void
 }
@@ -70,7 +76,7 @@ export class DirectChannel {
   private outgoingWaiters = new Set<() => void>()
   private deadline: ReturnType<typeof setInterval>
 
-  constructor(private channel: RTCDataChannel, private identity: { account_id: string, role: string }, private failed: () => void) {
+  constructor(private channel: RTCDataChannel, private identity: { account_id: string, role: string }, private failed: (error?: unknown) => void) {
     channel.bufferedAmountLowThreshold = 32768
     channel.addEventListener('message', this.receive)
     this.deadline = setInterval(() => {
@@ -79,7 +85,7 @@ export class DirectChannel {
     }, 1000)
   }
 
-  close() {
+  close(reason?: Error) {
     if (this.closed)
       return
     this.closed = true
@@ -88,9 +94,9 @@ export class DirectChannel {
     for (const [id, pending] of this.pending) {
       this.release(id)
       if (pending.started)
-        pending.stream?.error(new TransportLost())
+        pending.stream?.error(reason ?? new TransportLost())
       else
-        pending.reject(pending.sent ? new TransportLost() : new TransportNotSent())
+        pending.reject(reason ?? (pending.sent ? new TransportLost() : new TransportNotSent()))
     }
 
     this.assemblies.clear()
@@ -213,7 +219,8 @@ export class DirectChannel {
   request(path: string, options: RequestInit = {}, onSent = () => {}) {
     if (this.closed || this.channel.readyState !== 'open')
       return Promise.reject(new TransportNotSent())
-    const streaming = path.split('?')[0].endsWith('/stream')
+    const route = path.split('?')[0]
+    const streaming = route.endsWith('/stream') || route.startsWith('/api/shared-artifacts/')
     const streams = [...this.pending.values()].filter(value => value.streaming).length
     if (this.pending.size >= 32 || (streaming && streams >= 8))
       return Promise.reject(new TransportNotSent())
@@ -236,6 +243,7 @@ export class DirectChannel {
         resolve,
         reject,
         streaming,
+        head: options.method?.toUpperCase() === 'HEAD',
         sent: false,
         started: false,
         credited: false,
@@ -254,9 +262,11 @@ export class DirectChannel {
       }
 
       const headers = new Headers(options.headers)
+      // DataChannel responses bypass the browser's HTTP decompression.
+      headers.set('accept-encoding', !streaming && typeof DecompressionStream !== 'undefined' ? 'gzip' : 'identity')
       if (options.body !== undefined && !headers.has('content-type'))
         headers.set('content-type', 'application/json')
-      const forwarded = [...headers].filter(([name]) => ['content-type', 'accept', 'range', 'if-none-match', 'if-modified-since', 'last-event-id', 'mcp-protocol-version', 'mcp-method'].includes(name))
+      const forwarded = [...headers].filter(([name]) => ['content-type', 'accept', 'accept-encoding', 'range', 'if-none-match', 'if-modified-since', 'last-event-id', 'mcp-protocol-version', 'mcp-method'].includes(name))
       void this.send({
         type: 'request',
         id,
@@ -280,8 +290,10 @@ export class DirectChannel {
       if (!(event.data instanceof ArrayBuffer))
         throw new Error('Binary channel required')
       const packet = new Uint8Array(event.data)
-      if (packet.length < HEADER || packet.length > MAX_PACKET || packet[0] !== 1)
+      if (packet.length < HEADER || packet.length > MAX_PACKET)
         throw new Error('Invalid fragment')
+      if (packet[0] !== 1)
+        throw new ProtocolMismatch()
       const header = new DataView(packet.buffer)
       const id = header.getUint32(1)
       const total = header.getUint32(5)
@@ -327,13 +339,16 @@ export class DirectChannel {
 
       this.dispatch(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(json)))
     }
-    catch { this.failed() }
+    catch (error) { this.failed(error) }
   }
 
   private dispatch(frame: Frame) {
+    if (frame.type === 'update_required')
+      throw new ProtocolMismatch()
     if (!['response', 'stream_start', 'stream_chunk', 'stream_end'].includes(frame.type) || typeof frame.id !== 'string')
       throw new Error('Unexpected frame')
-    const pending = this.pending.get(frame.id)
+    const id = frame.id
+    const pending = this.pending.get(id)
     if (!pending)
       return // Response to an abandoned request; never deliver to another caller.
     if (frame.type === 'response' || frame.type === 'stream_start') {
@@ -343,7 +358,7 @@ export class DirectChannel {
       headers.set('x-cairn-transport', 'direct')
       if (frame.type === 'response') {
         const body = bytes(frame.body!)
-        this.release(frame.id)
+        this.release(id)
         // Reserved transport refusal, emitted before dispatch and excluded from
         // application response headers. An ordinary application 503 is not safe
         // to replay, even if its body has the same wording.
@@ -352,7 +367,25 @@ export class DirectChannel {
           return
         }
 
-        pending.resolve(new Response([204, 205, 304].includes(frame.status!) ? null : body, { status: frame.status, headers }))
+        let response = new Response(pending.head || [204, 205, 304].includes(frame.status!) ? null : body, { status: frame.status, headers })
+        if (headers.get('content-encoding') === 'gzip' && response.body) {
+          let size = 0
+          const decoded = response.body
+            .pipeThrough(new DecompressionStream('gzip'))
+            .pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+              transform(chunk, controller) {
+                size += chunk.byteLength
+                if (size > MAX_BODY)
+                  throw new Error('Response is too large')
+                controller.enqueue(chunk)
+              },
+            }))
+          headers.delete('content-encoding')
+          headers.delete('content-length')
+          response = new Response(decoded, { status: frame.status, headers })
+        }
+
+        pending.resolve(response)
         return
       }
 
@@ -361,14 +394,14 @@ export class DirectChannel {
       const body = new ReadableStream<Uint8Array>({
         start: controller => pending.stream = controller,
         pull: () => {
-          if (this.pending.has(frame.id) && !pending.credited) {
+          if (this.pending.has(id) && !pending.credited) {
             pending.credited = true
-            return this.send({ type: 'stream_credit', id: frame.id })
+            return this.send({ type: 'stream_credit', id })
           }
         },
         cancel: () => {
-          this.release(frame.id)
-          return this.send({ type: 'cancel', id: frame.id })
+          this.release(id)
+          return this.send({ type: 'cancel', id })
         },
       }, { highWaterMark: 0 })
       pending.resolve(new Response(body, { status: frame.status, headers }))
@@ -382,7 +415,7 @@ export class DirectChannel {
     else {
       if (!pending.started)
         throw new Error('Stream not started')
-      this.release(frame.id)
+      this.release(id)
       if (frame.failed)
         pending.stream!.error(new TransportLost())
       else

@@ -318,6 +318,30 @@ mod tests {
 
     #[tokio::test]
     async fn failed_project_does_not_starve_later_background_downloads() {
+        // Prefetch deliberately yields to this process-global mutation lock,
+        // including mutations of unrelated temporary roots in other tests.
+        let _unrelated_cache_mutation = lock().lock().await;
+        let output = tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "project_archives::node::tests::failed_project_background_downloads_child",
+                "--ignored",
+            ])
+            .output()
+            .await
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert!(
+            output.status.success() && stdout.contains("1 passed; 0 failed;"),
+            "{stdout}\n{stderr}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "isolated process-global archive mutation lock child"]
+    async fn failed_project_background_downloads_child() {
         use axum::{
             Router, body::Body, extract::Path as RoutePath, http::StatusCode, routing::post,
         };
@@ -337,9 +361,12 @@ mod tests {
             ..first.clone()
         };
         let first_id = first.project_id.clone();
+        let expected_requests = [first.project_id.clone(), second.project_id.clone()];
+        let (requests, mut received_requests) = tokio::sync::mpsc::unbounded_channel();
         let app = Router::new().route(
             "/internal/node-workspace/cache/{project}",
             post(move |RoutePath(project): RoutePath<String>| {
+                requests.send(project.clone()).unwrap();
                 let failed = project == first_id;
                 async move {
                     if failed {
@@ -365,6 +392,9 @@ mod tests {
         )
         .await
         .unwrap();
+        for project in expected_requests {
+            assert_eq!(received_requests.try_recv().unwrap(), project);
+        }
         assert_eq!(
             tokio::fs::read(second.path(root.path())).await.unwrap(),
             payload

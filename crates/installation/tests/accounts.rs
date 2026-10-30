@@ -1,38 +1,58 @@
+use common::account_fixture::AccountFixtures;
+
 mod common;
 
 use cairn_installation::{
-    accounts::{self, KIND},
     config::{Config, now},
     provider::Provider,
-    run_status::RunStatus,
     service::Service,
-    store::Store,
     validation::text,
 };
 use serde_json::{Value, json};
-use std::path::Path;
 use tempfile::TempDir;
 
-const CODEX_ACCOUNT: &str = "11111111-1111-4111-8111-111111111111";
-const CLAUDE_SESSION: &str = "70f5e7a1-8d65-4f5f-a545-af6ee8c0e1ab";
+#[tokio::test]
+async fn waiting_refresh_does_not_deadlock_multi_account_locking() {
+    let accounts = cairn_installation::accounts::Accounts::default();
+    // Reordering retains the first account while acquiring the next. A refresh
+    // waiting for that first account must leave the registry available to it.
+    let first_account = accounts.lock("first").await;
+    let mut waiting_refresh = Box::pin(accounts.lock("first"));
+    assert!(futures_util::poll!(&mut waiting_refresh).is_pending());
+
+    let next_account =
+        tokio::time::timeout(std::time::Duration::from_secs(1), accounts.lock("next"))
+            .await
+            .expect("an account waiter must not block acquisition of another account");
+
+    drop(next_account);
+    drop(first_account);
+    let refreshed_account =
+        tokio::time::timeout(std::time::Duration::from_secs(1), waiting_refresh)
+            .await
+            .expect("refresh can proceed once reordering releases the account");
+    drop(refreshed_account);
+}
 
 #[tokio::test]
 async fn valid_available_usage_does_not_wait_for_due_account_refresh() {
     let root = TempDir::new().unwrap();
     let s = Service::new(config(&root)).await.unwrap();
     s.accounts.initialize(&s).await.unwrap();
-    let mut account = s
-        .accounts
-        .create(&s, Provider::Codex, "Ready")
-        .await
-        .unwrap();
+    let mut account = serde_json::to_value(
+        s.accounts
+            .create(&s, Provider::Codex, "Ready")
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     account["state"] = "ready".into();
     account["usage"] = json!({
         "allowed": true, "checkedAt": now() - 65_000,
         "windows": [{ "id": "w", "usedPercent": 20, "models": [] }],
         "resets": null
     });
-    s.store.put(KIND, account.clone()).await.unwrap();
+    s.store.save_account_fixture(account.clone()).await.unwrap();
     // The native binary is deliberately unavailable. Usage is still within the
     // existing 90-second validity window, so no synchronous poll is required.
     let lease = s
@@ -42,9 +62,9 @@ async fn valid_available_usage_does_not_wait_for_due_account_refresh() {
         .unwrap()
         .unwrap();
     assert_eq!(lease.account_id, text(&account, "id"));
-    s.accounts.release(&lease).await.unwrap();
+    s.accounts.release(&s, &lease).await.unwrap();
     account["usage"]["checkedAt"] = (now() - 100_000).into();
-    s.store.put(KIND, account).await.unwrap();
+    s.store.save_account_fixture(account).await.unwrap();
     assert!(
         s.accounts
             .acquire(&s, "stale-run", Provider::Codex, "gpt-6.1-sol")
@@ -64,148 +84,6 @@ fn config(root: &TempDir) -> Config {
 }
 
 /// Writes the Codex pool, runs and Claude login of versions before the unified pool.
-async fn write_legacy_state(data: &Path) {
-    let store = Store::open(data).unwrap();
-    let limits = json!({
-        "ordinaryUsageAllowed": true,
-        "rateLimits": {
-            "limitId": "codex",
-            "primary": { "usedPercent": 20, "windowDurationMins": 300, "resetsAt": 1 },
-            "secondary": { "usedPercent": 70, "windowDurationMins": 10080, "resetsAt": 2 },
-        },
-        "rateLimitResetCredits": { "availableCount": 3, "credits": [] },
-    });
-    let account = json!({
-        "id": CODEX_ACCOUNT,
-        "name": "Work",
-        "enabled": true,
-        "email": "work@example.test",
-        "plan": "plus",
-        "identity": "fingerprint",
-        "createdAt": 1,
-        "checkedAt": now(),
-        "state": "ready",
-        "error": "",
-        "limits": limits,
-        "lastUsedAt": null,
-        "exhausted": { "at": 1, "model": "", "limits": limits },
-        "maxConcurrentRuns": 2,
-    });
-    store.put("codexAccounts", account).await.unwrap();
-    common::add_run(
-        &store,
-        &json!({
-            "id": "codex-run",
-            "taskId": "a",
-            "status": RunStatus::Succeeded,
-            "createdAt": 1,
-            "codexAccountId": CODEX_ACCOUNT,
-            "codexAccountName": "Work",
-            "codexAuthMode": "external",
-            "snapshot": { "agent": {} },
-        }),
-    )
-    .await;
-    common::add_run(
-        &store,
-        &json!({
-            "id": "claude-run",
-            "taskId": "b",
-            "status": RunStatus::Succeeded,
-            "createdAt": 2,
-            "sessionId": CLAUDE_SESSION,
-            "isolated": false,
-            "snapshot": { "agent": { "provider": "claude" } },
-        }),
-    )
-    .await;
-    let status =
-        json!({ "connected": true, "email": "old@example.test", "subscriptionType": "pro" });
-    for (key, value) in [
-        ("claude-status", status),
-        ("claude-concurrency", json!(3)),
-        ("claude-usage", json!({ "windows": [] })),
-    ] {
-        store.set(key, value, None).await.unwrap();
-    }
-}
-
-/// Writes the single Claude login home that older versions shared between runs.
-fn write_legacy_claude_home(legacy: &Path) {
-    std::fs::create_dir_all(legacy.join("projects/-data-project")).unwrap();
-    let credentials = json!({
-        "claudeAiOauth": {
-            "accessToken": "old",
-            "refreshToken": "old-refresh",
-            "expiresAt": now() + 3_600_000,
-        },
-    });
-    std::fs::write(legacy.join(".credentials.json"), credentials.to_string()).unwrap();
-    std::fs::write(legacy.join(".claude.json"), "{}").unwrap();
-    // The old serialized credential transfer was interrupted.
-    std::fs::write(legacy.join("sync-required"), "claude-run").unwrap();
-    std::fs::write(
-        legacy.join(format!("projects/-data-project/{CLAUDE_SESSION}.jsonl")),
-        "{\"type\":\"user\"}\n",
-    )
-    .unwrap();
-}
-
-#[tokio::test]
-async fn codex_accounts_and_the_single_claude_login_migrate_into_one_pool() {
-    let root = TempDir::new().unwrap();
-    let c = config(&root);
-    write_legacy_state(&c.data_dir).await;
-    let legacy = c.data_dir.join("claude");
-    write_legacy_claude_home(&legacy);
-
-    let s = Service::new(c).await.unwrap();
-    s.accounts.initialize(&s).await.unwrap();
-    let migrated = s.accounts.get(&s, CODEX_ACCOUNT).await.unwrap();
-    assert_eq!(migrated["provider"], "codex");
-    assert!(migrated.get("limits").is_none());
-    assert_eq!(migrated["usage"]["windows"][1]["usedPercent"], 70);
-    assert_eq!(migrated["usage"]["resets"]["available"], 3);
-    assert_eq!(
-        migrated["exhausted"]["usage"]["windows"][0]["usedPercent"],
-        20
-    );
-    assert!(s.store.list("codexAccounts").await.unwrap().is_empty());
-    let run = s.store.run("codex-run").await.unwrap();
-    assert_eq!(run["accountId"], CODEX_ACCOUNT);
-    assert_eq!(run["accountName"], "Work");
-    for field in ["codexAccountId", "codexAccountName", "codexAuthMode"] {
-        assert!(run.get(field).is_none(), "{field}");
-    }
-
-    let claude = s.accounts.records(&s, Provider::Claude).await.unwrap();
-    assert_eq!(claude.len(), 1);
-    let claude = &claude[0];
-    assert_eq!(claude["email"], "old@example.test");
-    assert_eq!(claude["plan"], "pro");
-    assert_eq!(claude["maxConcurrentRuns"], 3);
-    assert_eq!(claude["state"], "error");
-    let home = accounts::claude::account_home(&s.config, text(claude, "id"));
-    assert!(home.join(".credentials.json").exists());
-    assert!(!home.join("sync-required").exists());
-    assert!(!legacy.exists());
-    for key in ["claude-status", "claude-usage", "claude-concurrency"] {
-        assert!(s.store.kv(key).await.unwrap().is_none(), "{key}");
-    }
-    // A local run keeps its session: it now lives with the run.
-    assert!(
-        s.config
-            .data_dir
-            .join("runs/claude-run/home/.claude/projects/-data-project")
-            .join(format!("{CLAUDE_SESSION}.jsonl"))
-            .exists()
-    );
-    // Migrating again changes nothing.
-    let again = Service::new(s.config.clone()).await.unwrap();
-    again.accounts.initialize(&again).await.unwrap();
-    assert_eq!(again.store.list(KIND).await.unwrap().len(), 2);
-}
-
 #[tokio::test]
 async fn each_coding_agent_has_its_own_next_account_and_paused_accounts_are_skipped() {
     let root = TempDir::new().unwrap();
@@ -217,7 +95,8 @@ async fn each_coding_agent_has_its_own_next_account_and_paused_accounts_are_skip
         (Provider::Codex, "Codex high", 10),
         (Provider::Claude, "Claude", 50),
     ] {
-        let mut account = s.accounts.create(&s, provider, name).await.unwrap();
+        let mut account =
+            serde_json::to_value(s.accounts.create(&s, provider, name).await.unwrap()).unwrap();
         account["state"] = "ready".into();
         account["usage"] = json!({
             "allowed": true,
@@ -225,40 +104,37 @@ async fn each_coding_agent_has_its_own_next_account_and_paused_accounts_are_skip
             "windows": [{ "id": "w", "usedPercent": used, "models": [] }],
             "resets": null,
         });
-        s.store.put(KIND, account.clone()).await.unwrap();
+        s.store.save_account_fixture(account.clone()).await.unwrap();
         ids.push(text(&account, "id").to_owned());
     }
     let status = |accounts: &[Value], id: &str| {
         accounts.iter().find(|a| a["id"] == id).unwrap()["status"].clone()
     };
-    let list = s.accounts.list(&s).await.unwrap();
+    let list = common::account_fixture::account_values(s.accounts.list(&s).await.unwrap());
     assert_eq!(status(&list, &ids[0]), "ready");
     assert_eq!(status(&list, &ids[1]), "next");
     assert_eq!(status(&list, &ids[2]), "next");
-    s.accounts
-        .update(&s, &ids[1], &json!({ "enabled": false }))
+    common::account_fixture::update_account_fixture(&s, &ids[1], &json!({ "enabled": false }))
         .await
         .unwrap();
-    let list = s.accounts.list(&s).await.unwrap();
+    let list = common::account_fixture::account_values(s.accounts.list(&s).await.unwrap());
     assert_eq!(status(&list, &ids[0]), "next");
     assert_eq!(status(&list, &ids[1]), "paused");
     // OpenCode requires a managed API-key account even before one is connected.
     assert_eq!(
-        s.accounts.overview(&s).await.unwrap()["required"],
+        serde_json::to_value(s.accounts.overview(&s).await.unwrap()).unwrap()["required"],
         json!(["opencode"])
     );
     // Once every Claude account is paused, Claude runs wait for the user.
-    s.accounts
-        .update(&s, &ids[2], &json!({ "enabled": false }))
+    common::account_fixture::update_account_fixture(&s, &ids[2], &json!({ "enabled": false }))
         .await
         .unwrap();
     assert_eq!(
-        s.accounts.overview(&s).await.unwrap()["required"],
+        serde_json::to_value(s.accounts.overview(&s).await.unwrap()).unwrap()["required"],
         json!(["claude", "opencode"])
     );
     assert!(
-        s.accounts
-            .update(&s, &ids[0], &json!({ "name": "" }))
+        common::account_fixture::update_account_fixture(&s, &ids[0], &json!({ "name": "" }))
             .await
             .is_err()
     );
@@ -268,4 +144,224 @@ async fn each_coding_agent_has_its_own_next_account_and_paused_accounts_are_skip
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn sql_leases_fence_concurrent_admission_and_pause_keeps_the_running_lease() {
+    use cairn_contracts::AccountSettings;
+    use cairn_installation::accounts::AccountState;
+    let root = TempDir::new().unwrap();
+    let s = Service::new(config(&root)).await.unwrap();
+    s.accounts.initialize(&s).await.unwrap();
+    let mut account = s
+        .accounts
+        .create(&s, Provider::Codex, "One slot")
+        .await
+        .unwrap();
+    account.state = AccountState::Ready;
+    account.max_concurrent_runs = Some(1);
+    account.usage = Some(
+        serde_json::from_value(json!({
+            "checkedAt": now(),
+            "windows": [{ "id": "w", "usedPercent": 10 }],
+        }))
+        .unwrap(),
+    );
+    s.store.save_coding_account(&account).await.unwrap();
+    let (a, b) = tokio::join!(
+        s.accounts
+            .acquire(&s, "concurrent-a", Provider::Codex, "model"),
+        s.accounts
+            .acquire(&s, "concurrent-b", Provider::Codex, "model")
+    );
+    assert_eq!(
+        [a.is_ok(), b.is_ok()]
+            .into_iter()
+            .filter(|success| *success)
+            .count(),
+        1
+    );
+    let lease = a.or(b).unwrap().unwrap();
+    s.accounts
+        .update(
+            &s,
+            &account.id,
+            &AccountSettings {
+                name: account.name.clone(),
+                enabled: false,
+                max_concurrent_runs: 1,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(s.accounts.active(&s, &account.id).await.unwrap().len(), 1);
+    assert!(
+        s.accounts
+            .acquire(&s, "paused", Provider::Codex, "model")
+            .await
+            .is_err()
+    );
+    assert!(s.accounts.remove(&s, &account.id).await.is_err());
+    s.accounts.release(&s, &lease).await.unwrap();
+    assert!(s.accounts.active(&s, &account.id).await.unwrap().is_empty());
+    s.accounts.remove(&s, &account.id).await.unwrap();
+    assert!(s.store.coding_account(&account.id).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn restart_invalidates_account_leases_and_retains_typed_usage_and_exhaustion() {
+    use cairn_installation::accounts::AccountState;
+    let root = TempDir::new().unwrap();
+    let s = Service::new(config(&root)).await.unwrap();
+    s.accounts.initialize(&s).await.unwrap();
+    let mut account = s
+        .accounts
+        .create(&s, Provider::Codex, "Restart")
+        .await
+        .unwrap();
+    account.state = AccountState::Ready;
+    account.usage = Some(
+        serde_json::from_value(json!({
+            "checkedAt": now(),
+            "windows": [{ "id": "w", "usedPercent": 12, "models": ["model"] }],
+        }))
+        .unwrap(),
+    );
+    s.store.save_coding_account(&account).await.unwrap();
+    let lease = s
+        .accounts
+        .acquire(&s, "interrupted", Provider::Codex, "model")
+        .await
+        .unwrap()
+        .unwrap();
+    s.accounts
+        .exhausted(&s, &account.id, "model")
+        .await
+        .unwrap();
+    let saved = s.accounts.account(&s, &account.id).await.unwrap();
+    drop(s);
+    let restarted = Service::new(config(&root)).await.unwrap();
+    restarted.accounts.initialize(&restarted).await.unwrap();
+    assert_eq!(
+        restarted
+            .accounts
+            .account(&restarted, &account.id)
+            .await
+            .unwrap(),
+        saved
+    );
+    assert!(
+        restarted
+            .accounts
+            .active(&restarted, &account.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        restarted
+            .accounts
+            .access(&restarted, &lease, &json!({}))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn account_settings_replace_rejects_stale_revision_and_never_returns_private_identity() {
+    use cairn_installation::{
+        api,
+        auth::{InstallationIdentity, InstallationRole},
+        http::Input,
+    };
+    let root = TempDir::new().unwrap();
+    let s = Service::new(config(&root)).await.unwrap();
+    let account = s
+        .accounts
+        .create(&s, Provider::Claude, "Settings")
+        .await
+        .unwrap();
+    let input = Input {
+        method: "PUT".into(),
+        path: format!("/api/accounts/{}", account.id),
+        body: json!({
+            "revision": account.revision,
+            "settings": {
+                "name": "Renamed",
+                "enabled": false,
+                "maxConcurrentRuns": 2,
+            },
+        }),
+        identity: Some(InstallationIdentity::trusted(
+            InstallationRole::Owner,
+            "owner",
+        )),
+        query: std::collections::HashMap::new(),
+        headers: axum::http::HeaderMap::new(),
+    };
+    for body in [json!([]), json!("invalid"), json!(true)] {
+        let malformed = Input {
+            method: input.method.clone(),
+            path: input.path.clone(),
+            query: input.query.clone(),
+            headers: input.headers.clone(),
+            identity: input.identity.clone(),
+            body,
+        };
+        assert_eq!(api::dispatch(&s, &malformed).await.unwrap_err().status, 400);
+    }
+    let replaced = api::dispatch(&s, &input).await.unwrap();
+    assert_eq!(replaced["name"], "Renamed");
+    assert_eq!(replaced["enabled"], false);
+    assert!(replaced.get("identity").is_none());
+    assert!(replaced.get("extra").is_none());
+    assert_eq!(api::dispatch(&s, &input).await.unwrap_err().status, 409);
+    assert_eq!(
+        s.accounts.account(&s, &account.id).await.unwrap().name,
+        "Renamed"
+    );
+}
+
+#[tokio::test]
+async fn release_retains_the_slot_until_a_transient_database_failure_is_repaired() {
+    use cairn_installation::accounts::{Account, AccountState, Lease};
+    let root = TempDir::new().unwrap();
+    let s = Service::new(config(&root)).await.unwrap();
+    s.accounts.initialize(&s).await.unwrap();
+    let account = Account::new(Provider::Codex, "Retained cleanup", AccountState::Ready);
+    s.store.save_coding_account(&account).await.unwrap();
+    let lease = Lease {
+        account_id: account.id.clone(),
+        provider: Provider::Codex,
+        run_id: "background-cleanup-fixture".into(),
+        model: "model".into(),
+        home: root.path().join("credential-home"),
+    };
+    s.store.transaction({
+        let lease = lease.clone();
+        move |db| {
+            db.reserve_account_lease(&lease)?;
+            db.0.execute_batch("CREATE TRIGGER fail_lease_delete BEFORE DELETE ON account_leases BEGIN SELECT RAISE(FAIL,'synthetic transient write failure'); END;")?;
+            Ok(())
+        }
+    }).await.unwrap();
+    let mut release = Box::pin(s.accounts.release(&s, &lease));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), &mut release)
+            .await
+            .is_err()
+    );
+    assert_eq!(s.accounts.active(&s, &account.id).await.unwrap().len(), 1);
+    s.store
+        .transaction(|db| {
+            db.0.execute_batch("DROP TRIGGER fail_lease_delete")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(3), release)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(s.accounts.active(&s, &account.id).await.unwrap().is_empty());
 }

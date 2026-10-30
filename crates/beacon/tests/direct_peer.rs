@@ -115,7 +115,7 @@ async fn client_with_fingerprint(
     Arc<dyn DataChannel>,
     DirectAuthorization,
 ) {
-    client_with_offer_candidates(relay, cookie, session, mismatched, "").await
+    client_with_offer_candidates(relay, cookie, session, mismatched, "", "cairn.v4").await
 }
 
 async fn client_with_offer_candidates(
@@ -124,6 +124,7 @@ async fn client_with_offer_candidates(
     session: &serde_json::Value,
     mismatched: bool,
     extra_candidates: &str,
+    channel_label: &str,
 ) -> (
     Arc<dyn PeerConnection>,
     Arc<dyn DataChannel>,
@@ -144,7 +145,7 @@ async fn client_with_offer_candidates(
             .await
             .unwrap(),
     );
-    let channel = peer.create_data_channel("cairn.v4", None).await.unwrap();
+    let channel = peer.create_data_channel(channel_label, None).await.unwrap();
     let mut offer = peer.create_offer(None).await.unwrap();
     let local_offer = offer.clone();
     offer.sdp = offer
@@ -181,7 +182,7 @@ async fn client_with_offer_candidates(
         .authenticated(cookie, session, Method::POST, &path)
         .json(&json!({
             "fingerprint": fingerprint,
-            "versions": [4],
+            "version": 4,
         }))
         .send()
         .await
@@ -298,9 +299,15 @@ async fn mixed_usable_and_link_local_offer_opens_the_real_data_channel() {
         "a=candidate:1 1 udp 2122260223 192.0.2.1 50000 typ host\r\n",
         "a=candidate:2 1 udp 2122260223 fe80::1 50001 typ host\r\n",
     );
-    let (peer, channel, _) =
-        client_with_offer_candidates(&relay, &relay.cookie, &relay.session, false, candidates)
-            .await;
+    let (peer, channel, _) = client_with_offer_candidates(
+        &relay,
+        &relay.cookie,
+        &relay.session,
+        false,
+        candidates,
+        "cairn.v4",
+    )
+    .await;
     send_frame(channel.as_ref(), 1, &request("mixed-offer", "/api/chats")).await;
     assert!(
         matches!(response(channel.as_ref()).await, Frame::Response(reply) if reply.status == 200)
@@ -354,6 +361,7 @@ fn request(id: &str, path: &str) -> cairn_protocol::Frame {
         account_id: "forged-account".into(),
         role: cairn_protocol::Role::Member,
         mcp_scopes: Some(vec!["forged-scope".into()]),
+        mcp_credential_digest: Some("forged-credential".into()),
         public_artifact: Some("forged-capability".into()),
         method: "GET".into(),
         path: path.into(),
@@ -479,6 +487,7 @@ async fn fragmented_request_and_response_keep_body_bytes_and_verified_capabiliti
             |Extension(identity): Extension<InstallationIdentity>, bytes: Bytes| async move {
                 assert_eq!(identity.role, InstallationRole::Owner);
                 assert!(identity.mcp_scopes.is_none());
+                assert!(identity.mcp_credential_digest.is_none());
                 assert!(identity.public_artifact.is_none());
                 bytes
             },
@@ -655,7 +664,7 @@ async fn disabling_direct_refuses_authorization_and_preserves_the_relay() {
         )
         .json(&json!({
             "fingerprint": fingerprint,
-            "versions": [4],
+            "version": 4,
         }))
         .send()
         .await
@@ -955,7 +964,7 @@ async fn signal_lag_keeps_the_peer_running_and_new_connections_work() {
         )
         .json(&json!({
             "fingerprint": fingerprint,
-            "versions": [4],
+            "version": 4,
         }))
         .send()
         .await
@@ -1733,7 +1742,7 @@ async fn observed_certificate_is_compared_with_the_grant_without_an_sdp_check() 
         )
         .json(&json!({
             "fingerprint": fingerprint,
-            "versions": [4],
+            "version": 4,
         }))
         .send()
         .await
@@ -1810,7 +1819,7 @@ async fn a_panicking_peer_task_releases_its_authorization_and_preserves_other_pe
         )
         .json(&json!({
             "fingerprint": fingerprint,
-            "versions": [4],
+            "version": 4,
         }))
         .send()
         .await
@@ -1908,7 +1917,7 @@ async fn public_alias_is_withheld_without_remote_candidates_and_does_not_escape_
         )
         .json(&json!({
             "fingerprint": fingerprint,
-            "versions": [4],
+            "version": 4,
         }))
         .send()
         .await
@@ -1993,5 +2002,60 @@ async fn public_alias_is_withheld_without_remote_candidates_and_does_not_escape_
         "ordinary negotiation remains open until its handshake deadline"
     );
     peer.close().await.unwrap();
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn incompatible_data_channels_receive_an_update_required_refusal() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let dispatched = Arc::new(AtomicUsize::new(0));
+    let calls = dispatched.clone();
+    let router = axum::Router::new().route(
+        "/api/version-probe",
+        axum::routing::get(move || {
+            let calls = calls.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                "current"
+            }
+        }),
+    );
+    let mut relay = RelayedInstallation::new(router).await;
+    production_connector(&mut relay).await;
+
+    for label in ["cairn.v4", "cairn.v3"] {
+        let (peer, channel, _) =
+            client_with_offer_candidates(&relay, &relay.cookie, &relay.session, false, "", label)
+                .await;
+        if label == "cairn.v4" {
+            let encoded = cairn_protocol::data_channel::EncodedFrame::new(
+                1,
+                &request("wrong-version", "/api/version-probe"),
+            )
+            .unwrap();
+            let mut packet = encoded.packets().next().unwrap();
+            packet[0] = 2;
+            channel
+                .send(bytes::BytesMut::from(packet.as_slice()))
+                .await
+                .unwrap();
+        }
+
+        let refusal = serde_json::to_value(response(channel.as_ref()).await).unwrap();
+        assert_eq!(refusal["type"], "update_required");
+        assert!(
+            refusal["message"]
+                .as_str()
+                .unwrap()
+                .contains("Update required")
+        );
+        assert_eq!(dispatched.load(Ordering::SeqCst), 0);
+        peer.close().await.unwrap();
+    }
+
+    let response = relay.get("/version-probe").send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(dispatched.load(Ordering::SeqCst), 1);
     relay.close().await;
 }

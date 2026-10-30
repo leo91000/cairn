@@ -7,74 +7,31 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
+typealias NodeAgent = build.cairn.contracts.NodeAgent
+
+typealias NodeResources = build.cairn.contracts.NodeResources
+
+typealias NodeCapabilities = build.cairn.contracts.NodeCapabilities
+
+typealias ExecutionNode = build.cairn.contracts.ExecutionNode
+
+typealias NodeDiskAccounting = build.cairn.contracts.NodeDiskAccounting
+
+typealias NodeUsage = build.cairn.contracts.NodeUsage
+
+typealias StaleDisks = build.cairn.contracts.StaleDisks
+
+typealias NodeEnrollment = build.cairn.contracts.NodeEnrollment
+
+typealias NativeCaller = build.cairn.contracts.NativeCaller
+
+typealias NodeRevocation = build.cairn.contracts.NodeRevocation
+
+typealias NodeConfiguration = build.cairn.contracts.NodeConfiguration
+
+typealias NodeStoragePolicy = build.cairn.contracts.NodeStoragePolicy
+
 const val LOCAL_NODE_ID = "00000000-0000-4000-8000-000000000002"
-
-@Serializable
-data class NodeAgent(val id: String, val name: String = "", val allNodes: Boolean = false)
-
-@Serializable
-data class NodeResources(val cpu: Int = 1, val memoryMiB: Long = 128, val diskMiB: Long = 128)
-
-@Serializable
-data class NodeCapabilities(
-    val cpu: Int = 1,
-    val memoryMiB: Long = 128,
-    val diskMiB: Long = 128,
-    val os: String = "",
-    val arch: String = "",
-    val kvm: Boolean = false,
-    val backend: String = "firecracker",
-    val ublk: Boolean = false,
-    val nativeModeProtocol: Int = 0,
-)
-
-@Serializable
-data class ExecutionNode(
-    val id: String,
-    val name: String,
-    val local: Boolean = false,
-    val accepting: Boolean = false,
-    val nativeModeRequest: NativeModeState? = null,
-    val nativeModeObserved: NativeModeState? = null,
-    val nativeModeStatus: String? = null,
-    val nativeModeProposal: NativeModeState? = null,
-    val nativeReviewedAgents: List<String> = emptyList(),
-    val nativeEnabled: Boolean = false,
-    val nativeAccounts: List<String> = emptyList(),
-    val exclusiveAgents: List<String> = emptyList(),
-    val exclusiveReservations: Boolean = false,
-    val exclusiveReservation: ExclusiveReservation? = null,
-    val revoked: Boolean = false,
-    val status: String,
-    val tags: List<String> = emptyList(),
-    val capabilities: NodeCapabilities = NodeCapabilities(),
-    val limits: NodeResources = NodeResources(),
-    val slots: Int = 4,
-    val occupiedSlots: Int = 0,
-    val availableSlots: Int = 4,
-    val usage: NodeUsage? = null,
-    val budgetError: String? = null,
-    val pressure: String? = null,
-    val executionReady: Boolean = false,
-    val maintenance: String? = null,
-    val imageDigest: String? = null,
-    val updateError: String? = null,
-    val runtimeId: String = "",
-    val lastSeen: Long? = null,
-    val systemTags: List<String> = emptyList(),
-    val maintenanceError: String? = null,
-    val agents: List<NodeAgent> = emptyList(),
-    val staleDisks: StaleDisks = StaleDisks(),
-    val storage: NodeStoragePolicy? = null,
-)
-
-@Serializable
-data class NativeModeState(
-    val mode: String = "protected",
-    val generation: String? = null,
-    val status: String = "",
-    val error: String? = null,
-)
 
 fun nativeModeLabel(mode: String) =
     if (mode == "administrator") "Natif administrateur" else "Natif protégé"
@@ -87,7 +44,8 @@ const val VM_BACKEND = "firecracker"
 
 /** Whether the node runs on the agent's execution backend: the server refuses any other grant. */
 fun ExecutionNode.accepts(agent: Agent) =
-    (capabilities.backend == NATIVE_BACKEND) == (agent.access.backend == NATIVE_BACKEND)
+    agent.access.backend == "auto" ||
+        (capabilities.backend == NATIVE_BACKEND) == (agent.access.backend == NATIVE_BACKEND)
 
 /**
  * Agents already allowed to run on this machine without being allowed everywhere, from the node
@@ -99,13 +57,7 @@ fun ExecutionNode.grantedAgents(agents: List<Agent> = emptyList()): Set<String> 
         this.agents.filter { !it.allNodes }.map { it.id }.toSet() +
             agents.filter { it.access.nodes?.contains(id) == true }.map { it.id }
 
-/**
- * Grants a node to the agents newly [chosen] (already allowed ones in [granted] are skipped) with
- * `PUT /nodes/{id}/agents` `{ agentIds, add: true }`, which never revokes anyone. Nothing is sent
- * when no agent is new. An older installation rejects the unknown `add` field (400): the request is
- * then sent once without it, with the full list, since that form replaces the node's list. Any
- * other rejection is reported.
- */
+/** Grant only newly chosen agents, preserving concurrent grants. */
 suspend fun grantNodeAgents(
     chosen: List<String>,
     granted: Set<String>,
@@ -114,45 +66,16 @@ suspend fun grantNodeAgents(
 ) {
     val added = chosen.distinct().filter { it !in granted }
     if (added.isEmpty()) return
-
-    fun body(ids: List<String>, grantOnly: Boolean) = buildJsonObject {
-        put("agentIds", buildJsonArray { ids.forEach { add(JsonPrimitive(it)) } })
-        if (grantOnly) put("add", true)
-        if (confirmNativeAdministration) put("confirmNativeAdministration", true)
-    }
-    try {
-        send(body(added, grantOnly = true))
-    } catch (e: ApiException) {
-        if (!rejectsGrantOnly(e)) throw e
-        send(body((granted + added).toList(), grantOnly = false))
-    }
+    send(
+        buildJsonObject {
+            put("agentIds", buildJsonArray { added.forEach { add(JsonPrimitive(it)) } })
+            put("add", true)
+            if (confirmNativeAdministration) put("confirmNativeAdministration", true)
+        }
+    )
 }
 
-/**
- * An installation that predates `add` refuses the unknown field while decoding the request, with
- * its generic "Invalid node request." (or a serde "unknown field" message).
- */
-private fun rejectsGrantOnly(error: ApiException): Boolean {
-    val message = error.message.orEmpty().trim()
-    return error.status == 400 &&
-        (message == "Invalid node request." || "unknown field" in message.lowercase())
-}
-
-@Serializable
-data class ExclusiveReservation(
-    val id: String,
-    val nodeId: String,
-    val ownerRunId: String,
-    val reason: String,
-    val state: String,
-    val createdAt: Long = 0,
-    val expiresAt: Long? = null,
-    val renewalPending: Boolean = false,
-    val waitUntil: Long = 0,
-    val pausedRunIds: List<String> = emptyList(),
-    val minimumAvailableMemoryMiB: Long = 0,
-    val error: String? = null,
-)
+typealias ExclusiveReservation = build.cairn.boundary.ExclusiveReservation
 
 fun exclusiveReservationState(state: String): String =
     when (state) {
@@ -166,11 +89,7 @@ fun exclusiveReservationState(state: String): String =
         else -> state
     }
 
-@Serializable data class NodeUsage(val memoryMiB: Long = 0, val diskMiB: Long = 0)
-
 /** Disk kept on a node that no conversation needs there any more. */
-@Serializable data class StaleDisks(val count: Int = 0, val diskMiB: Long = 0)
-
 @Serializable data class StaleDiskCleanup(val freedMiB: Long = 0, val failed: Int = 0)
 
 @Serializable
@@ -201,42 +120,8 @@ fun NodeAlert.localized(): Pair<String, String> =
         else -> title to body
     }
 
-@Serializable
-data class NodeEnrollment(
-    val code: String,
-    val expiresAt: Long,
-    val installCommand: String? = null,
-    val backend: String = "firecracker",
-    val nodeId: String? = null,
-)
-
-@Serializable data class NativeCaller(val id: String, val email: String)
-
-/** Reply to a revocation; older installations omit the released placement count. */
-@Serializable data class NodeRevocation(val releasedPlacements: Int = 0)
-
-@Serializable
-data class NodeConfiguration(
-    val name: String,
-    val accepting: Boolean,
-    val tags: List<String>,
-    val limits: NodeResources,
-    val slots: Int = 4,
-    // No exclusiveAgents: exclusive reservations are granted on each agent's page, and the server
-    // keeps them when the key is omitted.
-    val nativeEnabled: Boolean? = null,
-    val nativeAccounts: List<String>? = null,
-    val confirmNativeAdministration: Boolean = false,
-)
-
-@Serializable
-data class NodeBackup(
-    val id: String? = null,
-    val capturedAt: Long? = null,
-    val status: String = "",
-    val error: String? = null,
-    val uploadedBytes: Long? = null,
-)
+/** Reply to a revocation. */
+typealias NodeBackup = build.cairn.boundary.NodeBackup
 
 @Serializable
 data class NodeSyncSettings(
@@ -255,9 +140,6 @@ fun formatMiB(value: Long): String {
     else "${"%.1f".format(java.util.Locale.FRANCE, gib)} Gio"
 }
 
-fun formatResources(value: NodeResources) =
-    "${value.cpu} CPU · ${formatMiB(value.memoryMiB)} RAM · ${formatMiB(value.diskMiB)} disque"
-
 fun relativeAge(since: Long, now: Long = System.currentTimeMillis()): String {
     val seconds = ((now - since) / 1000).coerceAtLeast(0)
     if (seconds < 60) return "il y a moins d’une minute"
@@ -268,14 +150,368 @@ fun relativeAge(since: Long, now: Long = System.currentTimeMillis()): String {
     return "il y a ${hours / 24} jours"
 }
 
+enum class NodeHealthState {
+    READY,
+    FULL,
+    BUSY,
+    RESERVED,
+    PAUSED,
+    UPDATING,
+    SETUP,
+    ATTENTION,
+    OFFLINE,
+    REVOKED,
+}
+
+data class NodeHealth(val state: NodeHealthState, val label: String, val detail: String)
+
+/**
+ * The server's heartbeat timeout; listing nodes refreshes the built-in runner within it when
+ * reachable.
+ */
+private const val HEARTBEAT_TIMEOUT_MS = 60_000L
+
+/**
+ * The server's clock as seen in an inventory: the latest contact of a machine the server reports
+ * online. Device clocks can drift from the server's, so staleness is judged against this.
+ */
+fun fleetClock(nodes: List<ExecutionNode>, runner: RunnerObservation? = null): Long? {
+    val seen =
+        nodes
+            .filter { !it.local && !it.revoked && it.status == "online" }
+            .mapNotNull { it.lastSeen }
+    // A runner contact that changed while this device watched was server time then; the device
+    // time elapsed until the latest successful listing has passed since.
+    val watched =
+        runner?.takeIf { it.refreshed }?.let { it.lastSeen + it.checkedAt - it.observedAt }
+    return (seen + listOfNotNull(watched)).maxOrNull()
+}
+
+/**
+ * Free slots as placement counts them: the runtime's pool can be smaller than the configured slots.
+ */
+fun freeSlots(node: ExecutionNode): Long =
+    maxOf(0, minOf(node.availableSlots, slotCapacity(node) - node.occupiedSlots))
+
+/**
+ * Slots placement can use: the configured ones (the server defaults them to the pool, then 4),
+ * within the runtime's pool.
+ */
+fun slotCapacity(node: ExecutionNode): Long {
+    val slots = node.slots ?: node.runtimeSlots ?: 4
+    return minOf(slots, node.runtimeSlots ?: slots)
+}
+
+/** An unready machine without a reported error, first seen and last confirmed by listings. */
+data class UnreadyObservation(val since: Long, val checkedAt: Long)
+
+/** How long an unexplained unready state may last before it needs the owner. */
+const val LASTING_UNREADY_MS = 5 * 60_000L
+
+/** The health label of a runtime unready without a reported error; only it is timed. */
+private const val NOT_READY = "Pas prête"
+
+/**
+ * Follows unexplained unready states across successful listings. Only time spent showing "Pas
+ * prête" counts: while an earlier blocker explains the machine (offline, update, privilege change),
+ * or once it recovers, it starts over.
+ */
+fun observeUnready(
+    nodes: List<ExecutionNode>,
+    previous: Map<String, UnreadyObservation>,
+    now: Long = System.currentTimeMillis(),
+    clock: Long? = null,
+    runner: RunnerObservation? = null,
+): Map<String, UnreadyObservation> =
+    nodes
+        .filter { nodeHealth(it, now, clock, runner).label == NOT_READY }
+        .associate { it.id to UnreadyObservation(previous[it.id]?.since ?: now, now) }
+
+/** How long a machine has stayed unready without a reported error, as listings saw it. */
+fun unreadyFor(node: ExecutionNode, unready: Map<String, UnreadyObservation>?): Long =
+    unready?.get(node.id)?.let { it.checkedAt - it.since } ?: 0
+
+/** The built-in runner's last contact, and when this device first saw that value. */
+data class RunnerObservation(
+    val lastSeen: Long,
+    val observedAt: Long,
+    /** The latest successful listing that still showed this contact. */
+    val checkedAt: Long = observedAt,
+    /** The contact changed while this device watched: it was fresh when observed. */
+    val refreshed: Boolean = false,
+)
+
+/** Keeps the first time each runner contact was seen across inventory refreshes. */
+fun observeRunner(
+    nodes: List<ExecutionNode>,
+    previous: RunnerObservation?,
+    now: Long = System.currentTimeMillis(),
+): RunnerObservation? {
+    val seen = nodes.firstOrNull { it.local && !it.revoked }?.lastSeen ?: return null
+    if (previous?.lastSeen == seen) return previous.copy(checkedAt = now)
+    return RunnerObservation(seen, now, now, refreshed = previous != null)
+}
+
+/**
+ * An offline machine's silence: the server marks it offline after the heartbeat timeout, while the
+ * fleet clock can trail server time by a heartbeat, so the age never reads shorter than that
+ * timeout.
+ */
+private fun offlineAge(lastSeen: Long, reference: Long) =
+    relativeAge(lastSeen, maxOf(reference, lastSeen + HEARTBEAT_TIMEOUT_MS))
+
+/** How long the built-in runner's contact is known to lag server time, if it is. */
+private fun runnerLag(node: ExecutionNode, clock: Long?): Long? =
+    if (clock != null && node.lastSeen != null) clock - node.lastSeen else null
+
+/**
+ * The built-in runner always reports "local". Listing refreshes its contact (every refresh, 10 s)
+ * only when it answers with usable health, so it is stale when it lags the server clock by the
+ * heartbeat timeout, or when its contact has not changed for that long across successful listings.
+ * Neither depends on the device clock's offset; a runner already stale when the screen opens is
+ * found after a minute at most. The failure may be no answer, a mismatched version or missing
+ * capabilities.
+ */
+fun runnerStale(node: ExecutionNode, clock: Long?, runner: RunnerObservation? = null): Boolean {
+    if (!node.local || node.revoked || node.lastSeen == null) return false
+    val lag = runnerLag(node, clock)
+    if (lag != null && lag >= HEARTBEAT_TIMEOUT_MS) return true
+    // Failed listings do not count: they say nothing about the runner.
+    return runner?.lastSeen == node.lastSeen &&
+        runner.checkedAt - runner.observedAt >= HEARTBEAT_TIMEOUT_MS
+}
+
+/**
+ * The stale runner's age when a server reference shows it; otherwise only its lower bound is known.
+ */
+private fun runnerSilence(node: ExecutionNode, clock: Long?): String? {
+    val lag = runnerLag(node, clock) ?: return null
+    return if (lag >= HEARTBEAT_TIMEOUT_MS) relativeAge(node.lastSeen!!, clock!!) else null
+}
+
+/**
+ * Whether a node can take work, as one state and a short sentence; the first blocker wins. Online
+ * follows the server's 60-second heartbeat timeout; placement wants a heartbeat within 30 seconds,
+ * so a machine that just stopped answering can read ready for up to half a minute.
+ */
+fun nodeHealth(
+    node: ExecutionNode,
+    now: Long = System.currentTimeMillis(),
+    clock: Long? = null,
+    runner: RunnerObservation? = null,
+    unready: Map<String, UnreadyObservation>? = null,
+): NodeHealth {
+    if (node.revoked) return NodeHealth(NodeHealthState.REVOKED, "Révoquée", "N’a plus accès")
+    // Ages use the server clock when the fleet shows it, so device clock drift does not shift them.
+    val reference = clock ?: now
+    if (!node.local && node.status == "offline")
+        return NodeHealth(
+            NodeHealthState.OFFLINE,
+            "Hors ligne",
+            node.lastSeen?.let { "Dernier contact ${offlineAge(it, reference)}" }
+                ?: "Jamais connectée",
+        )
+    if (runnerStale(node, clock, runner))
+        return NodeHealth(
+            NodeHealthState.ATTENTION,
+            "À vérifier",
+            runnerSilence(node, clock)?.let { "Dernier rapport exploitable $it" }
+                ?: "Aucun rapport exploitable depuis plus d’une minute",
+        )
+    val native = node.capabilities.backend == NATIVE_BACKEND
+    if (!native && !node.capabilities.kvm)
+        return NodeHealth(NodeHealthState.ATTENTION, "À vérifier", "KVM indisponible")
+    if (native && !node.capabilities.ublk)
+        return NodeHealth(NodeHealthState.ATTENTION, "À vérifier", "ublk indisponible")
+    // A privilege change blocks placements until the supervisor confirms it. The server reports
+    // a failure only for the current request; an older failed attempt is still pending.
+    if (native && node.nativeModeStatus == "failed")
+        return NodeHealth(
+            NodeHealthState.ATTENTION,
+            "À vérifier",
+            "Le changement de privilèges a échoué",
+        )
+    // Supervisors without the privilege protocol never confirm a mode: the status stays pending.
+    if (native && node.capabilities.nativeModeProtocol != 1L)
+        return NodeHealth(
+            NodeHealthState.ATTENTION,
+            "À vérifier",
+            "Mettez à jour le superviseur pour confirmer les privilèges",
+        )
+    if (native && node.nativeModeStatus == "pending")
+        return NodeHealth(
+            NodeHealthState.UPDATING,
+            "Mise à jour",
+            "Changement de privilèges en cours",
+        )
+    if (node.maintenance != null && node.maintenanceError != null)
+        return NodeHealth(
+            NodeHealthState.ATTENTION,
+            "À vérifier",
+            "La préparation de la mise à jour a échoué",
+        )
+    if (node.maintenance != null)
+        return NodeHealth(
+            NodeHealthState.UPDATING,
+            "Mise à jour",
+            "Les nouveaux travaux attendent la mise à jour",
+        )
+    // Without a reported error, readiness is usually on its way, as after a budget change until
+    // the next heartbeat: it waits rather than alarms. The inventory cannot tell a lasting cause
+    // (image, pool, data root) from that wait; the diagnostics list the possible causes.
+    if (!node.executionReady)
+        return when {
+            node.budgetError != null ->
+                NodeHealth(
+                    NodeHealthState.ATTENTION,
+                    "À vérifier",
+                    "Le budget partagé n’a pas pu être appliqué",
+                )
+            node.updateError != null ->
+                NodeHealth(
+                    NodeHealthState.ATTENTION,
+                    "À vérifier",
+                    "La mise à jour a échoué",
+                )
+            unreadyFor(node, unready) >= LASTING_UNREADY_MS ->
+                NodeHealth(
+                    NodeHealthState.ATTENTION,
+                    "À vérifier",
+                    "Pas prête depuis plus de 5 minutes",
+                )
+            else ->
+                NodeHealth(
+                    NodeHealthState.UPDATING,
+                    NOT_READY,
+                    "Le runtime n’est pas encore prêt",
+                )
+        }
+    if (native && node.nativeModeProposal != null)
+        return NodeHealth(
+            NodeHealthState.ATTENTION,
+            "À vérifier",
+            "Un agent demande ${nativeModeLabel(node.nativeModeProposal.mode)}",
+        )
+    // With trusted people chosen, disabled native execution is the owner's off switch, like pausing
+    // new work.
+    if (native && !node.nativeEnabled && node.nativeAccounts.isNotEmpty())
+        return NodeHealth(NodeHealthState.PAUSED, "En pause", "Exécution native désactivée")
+    if (native && (!node.nativeEnabled || node.nativeAccounts.isEmpty()))
+        return NodeHealth(
+            NodeHealthState.SETUP,
+            "À configurer",
+            "Activez l’exécution native et choisissez les personnes de confiance",
+        )
+    if (node.agents.isEmpty())
+        return NodeHealth(
+            NodeHealthState.SETUP,
+            "À configurer",
+            "Aucun agent ne peut encore utiliser cette machine",
+        )
+    if (!node.accepting)
+        return NodeHealth(NodeHealthState.PAUSED, "En pause", "Nouveaux travaux suspendus")
+    node.exclusiveReservation?.let {
+        return NodeHealth(NodeHealthState.RESERVED, "Réservée", it.reason)
+    }
+    node.pressure?.let {
+        return NodeHealth(
+            NodeHealthState.BUSY,
+            "Chargée",
+            if (it == "memory") "RAM partagée sous pression"
+            else "Espace disque partagé insuffisant",
+        )
+    }
+    val slots = slotCapacity(node)
+    val free = freeSlots(node)
+    if (free <= 0)
+        return NodeHealth(
+            NodeHealthState.FULL,
+            "Pleine",
+            if (slots > 0) "Les $slots slots sont occupés" else "Le runtime n’offre aucun slot",
+        )
+    val running = node.occupiedSlots
+    return NodeHealth(
+        NodeHealthState.READY,
+        "Prête",
+        if (running > 0) "$running en cours · $free slots libres sur $slots"
+        else "$free slots libres sur $slots",
+    )
+}
+
+data class FleetSummary(
+    val machines: Int,
+    val connected: Int,
+    val usedSlots: Long,
+    val totalSlots: Long,
+    val attention: Int,
+)
+
+/**
+ * The fleet at a glance. Connected machines answer heartbeats, the built-in runner too unless it
+ * went silent; their slots are counted within each runtime pool, whether or not the machine takes
+ * work now. Offline machines, those needing attention and those waiting for setup need the owner.
+ */
+fun fleetSummary(
+    nodes: List<ExecutionNode>,
+    now: Long = System.currentTimeMillis(),
+    clock: Long? = null,
+    runner: RunnerObservation? = null,
+    unready: Map<String, UnreadyObservation>? = null,
+): FleetSummary {
+    val active = nodes.filter { !it.revoked }
+    val healths = active.associateWith { nodeHealth(it, now, clock, runner, unready) }
+    val live = active.filter {
+        (it.local || it.status == "online") &&
+            healths.getValue(it).state != NodeHealthState.OFFLINE &&
+            !runnerStale(it, clock, runner)
+    }
+    return FleetSummary(
+        machines = active.size,
+        connected = live.size,
+        usedSlots = live.sumOf { minOf(it.occupiedSlots, slotCapacity(it)) },
+        totalSlots = live.sumOf { slotCapacity(it) },
+        // A built-in runner no agent may use is a common choice (remote machines only), not a task
+        // for the owner.
+        attention =
+            healths.count { (node, health) ->
+                health.state == NodeHealthState.OFFLINE ||
+                    health.state == NodeHealthState.ATTENTION ||
+                    (health.state == NodeHealthState.SETUP && !node.local)
+            },
+    )
+}
+
+/** A native privilege change keeps the runtime unready until the supervisor confirms it. */
+private fun privilegeReason(node: ExecutionNode): String? {
+    if (node.capabilities.backend != NATIVE_BACKEND) return null
+    return when (node.nativeModeStatus) {
+        "failed" ->
+            "Le changement de privilèges a échoué : réessayez-le ou revenez en Natif protégé."
+        "pending" ->
+            if (node.capabilities.nativeModeProtocol == 1L)
+                "Un changement de privilèges attend la confirmation du superviseur."
+            else "Mettez à jour le superviseur pour confirmer les privilèges."
+        else -> null
+    }
+}
+
 /** Why a node cannot take new work right now; empty when it can. */
-fun nodeDiagnostics(node: ExecutionNode, now: Long = System.currentTimeMillis()): List<String> {
+fun nodeDiagnostics(
+    node: ExecutionNode,
+    now: Long = System.currentTimeMillis(),
+    clock: Long? = null,
+    runner: RunnerObservation? = null,
+): List<String> {
     if (node.revoked) return emptyList()
     val reasons = mutableListOf<String>()
+    val reference = clock ?: now
+    if (runnerStale(node, clock, runner))
+        reasons +=
+            "Le runner du master n’envoie plus de rapport exploitable ${runnerSilence(node, clock)?.let { "depuis ${it.removePrefix("il y a ")}" } ?: "depuis plus d’une minute"} : vérifiez qu’il tourne, à la même version que le serveur."
     if (!node.local && node.status == "offline")
         reasons +=
             node.lastSeen?.let {
-                "Aucun contact depuis ${relativeAge(it, now).removePrefix("il y a ")} : vérifiez que la machine est allumée, connectée et que le service ${if (node.capabilities.backend == NATIVE_BACKEND) "cairn-native-node" else "cairn-node"} tourne."
+                "Aucun contact depuis ${offlineAge(it, reference).removePrefix("il y a ")} : vérifiez que la machine est allumée, connectée et que le service ${if (node.capabilities.backend == NATIVE_BACKEND) "cairn-native-node" else "cairn-node"} tourne."
             } ?: "La machine ne s’est jamais connectée : lancez la commande d’installation dessus."
     if (node.capabilities.backend != "native" && !node.capabilities.kvm)
         reasons +=
@@ -285,7 +521,8 @@ fun nodeDiagnostics(node: ExecutionNode, now: Long = System.currentTimeMillis())
             "ublk indisponible : cette node a besoin d’un runtime natif à jour et du module noyau ublk_drv (/dev/ublk-control) pour monter les disques de conversation stockés sur S3."
     if (node.status != "offline" && !node.executionReady)
         reasons +=
-            node.budgetError?.let { "Le budget partagé n’a pas pu être appliqué : $it" }
+            privilegeReason(node)
+                ?: node.budgetError?.let { "Le budget partagé n’a pas pu être appliqué : $it" }
                 ?: node.updateError?.let { "Le runtime n’est pas prêt : $it" }
                 ?: "Le runtime n’est pas encore prêt ou ne correspond pas à la version approuvée par le master."
     if (node.maintenance != null)
@@ -308,24 +545,7 @@ fun nodeDiagnostics(node: ExecutionNode, now: Long = System.currentTimeMillis())
     return reasons
 }
 
-@Serializable
-data class RunStorage(
-    val mode: String = "",
-    val localBytes: Long? = null,
-    val dirtyBytes: Long? = null,
-    val dirtySince: Long? = null,
-    val waitingFor: String? = null,
-)
-
-@Serializable
-data class NodeStoragePolicy(
-    val cacheMiB: Long = 102400,
-    val reserveMiB: Long = 10240,
-    val reservePercent: Int = 5,
-    val backupSeconds: Long = 60,
-    val maxDirtySeconds: Long = 300,
-    val memoryCacheMiB: Long? = null,
-)
+typealias RunStorage = build.cairn.boundary.RunStorage
 
 fun formatBytes(bytes: Long): String {
     if (bytes < 1024) return "$bytes o"

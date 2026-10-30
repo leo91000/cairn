@@ -9,6 +9,8 @@ use crate::{
     store::Db,
     validation::text,
 };
+#[cfg(test)]
+use cairn_contracts::EventKind;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc, time::Duration};
@@ -76,7 +78,7 @@ pub async fn enqueue(s: &Service, run_id: &str) -> Result<()> {
             }
             let chat_id = text(&run, "taskId");
             let current = db
-                .get("chats", chat_id)?
+                .conversation_boundary(chat_id)?
                 .is_some_and(|chat| chat["runId"] == run_id);
             if current {
                 let pending = Pending {
@@ -353,7 +355,7 @@ fn apply(db: &Db<'_>, chat: &Value, pending: &Value, title: &str) -> Result<bool
     if db.kv(&key)?.as_ref() != Some(pending) {
         return Ok(false);
     }
-    let Some(mut current) = db.get("chats", text(chat, "id"))? else {
+    let Some(mut current) = db.conversation_boundary(text(chat, "id"))? else {
         db.delete(&key)?;
         return Ok(false);
     };
@@ -370,10 +372,7 @@ fn apply(db: &Db<'_>, chat: &Value, pending: &Value, title: &str) -> Result<bool
     }
     current["title"] = title.into();
     // Renaming alone must not move the conversation in the recent list.
-    db.0.execute(
-        "UPDATE records SET data=? WHERE kind='chats' AND id=?",
-        rusqlite::params![current.to_string(), text(chat, "id")],
-    )?;
+    db.rename_conversation_title(text(chat, "id"), title)?;
     Ok(true)
 }
 
@@ -419,7 +418,7 @@ pub async fn tick(s: &Service) -> Result<()> {
     }
     for (key, pending) in s.store.keys(PREFIX).await? {
         let chat_id = key.trim_start_matches(PREFIX);
-        let chat = s.store.get("chats", chat_id).await?;
+        let chat = s.store.conversation_boundary(chat_id).await?;
         if !still_pending(s, &key, chat.as_ref(), &pending).await? {
             continue;
         }
@@ -466,7 +465,12 @@ pub async fn run(s: Arc<Service>) {
 }
 
 #[cfg(test)]
+use crate::run_fixture::DbRunFixture;
+
+#[cfg(test)]
 mod tests {
+    use crate::account_fixture::AccountFixtures;
+
     use super::*;
     use crate::provider::Provider;
 
@@ -492,11 +496,13 @@ mod tests {
         };
         let s = Service::new(config).await.unwrap();
         s.accounts.initialize(&s).await.unwrap();
-        let account = s
-            .accounts
-            .create(&s, Provider::Codex, "Title fixture")
-            .await
-            .unwrap();
+        let account = serde_json::to_value(
+            s.accounts
+                .create(&s, Provider::Codex, "Title fixture")
+                .await
+                .unwrap(),
+        )
+        .unwrap();
         let tokens = json!({
             "tokens": {
                 "access_token": "synthetic",
@@ -517,7 +523,6 @@ mod tests {
                     "title": "Configurer GitHub",
                     "updatedAt": 1,
                 });
-                db.put("chats", &chat)?;
                 let run = json!({
                     "id": "run",
                     "taskId": "chat",
@@ -525,10 +530,11 @@ mod tests {
                     "trigger": "chat",
                     "createdAt": 1,
                 });
-                db.add_run(&run, None)?;
+                db.add_run_fixture(&run, None)?;
+                db.save_conversation_boundary(&chat)?;
                 db.event(
                     "run",
-                    "chat.user",
+                    &EventKind::ChatUser,
                     "Configurer les mises à jour Android",
                     None,
                 )?;
@@ -539,7 +545,7 @@ mod tests {
                         "text": "Les mises à jour Android fonctionnent.",
                     },
                 });
-                db.event("run", "item.completed", "", Some(&reply))?;
+                db.event("run", &EventKind::ItemCompleted, "", Some(&reply))?;
                 Ok(())
             })
             .await
@@ -555,7 +561,7 @@ mod tests {
         s.store
             .transaction(|db| {
                 for _ in 0..12 {
-                    db.event("run", "chat.user", "Merci, continue", None)?;
+                    db.event("run", &EventKind::ChatUser, "Merci, continue", None)?;
                 }
                 Ok(())
             })
@@ -564,11 +570,11 @@ mod tests {
         let before: i64 = s
             .store
             .read(|db| {
-                Ok(db
-                    .0
-                    .query_row("SELECT updated_at FROM records WHERE id='chat'", [], |r| {
-                        r.get(0)
-                    })?)
+                Ok(db.0.query_row(
+                    "SELECT persisted_at FROM conversations WHERE id='chat'",
+                    [],
+                    |r| r.get(0),
+                )?)
             })
             .await
             .unwrap();
@@ -576,17 +582,17 @@ mod tests {
         tick(&s).await.unwrap();
         assert!(changes.has_changed().unwrap());
         changes.borrow_and_update();
-        let chat = s.get("chats", "chat").await.unwrap();
+        let chat = s.conversation_boundary("chat").await.unwrap();
         assert_eq!(chat["title"], "Mises à jour Android");
         assert_eq!(chat["updatedAt"], 1);
         let after: i64 = s
             .store
             .read(|db| {
-                Ok(db
-                    .0
-                    .query_row("SELECT updated_at FROM records WHERE id='chat'", [], |r| {
-                        r.get(0)
-                    })?)
+                Ok(db.0.query_row(
+                    "SELECT persisted_at FROM conversations WHERE id='chat'",
+                    [],
+                    |r| r.get(0),
+                )?)
             })
             .await
             .unwrap();
@@ -598,8 +604,14 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        for account in s.accounts.list(&s).await.unwrap() {
-            assert!(s.accounts.active(text(&account, "id")).await.is_empty());
+        for account in crate::account_fixture::account_values(s.accounts.list(&s).await.unwrap()) {
+            assert!(
+                s.accounts
+                    .active(&s, text(&account, "id"))
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
         }
         enqueue(&s, "run").await.unwrap();
         let pending = s.store.kv("chat-title-pending:chat").await.unwrap();
@@ -618,7 +630,7 @@ mod tests {
             .unwrap();
         tick(&s).await.unwrap();
         assert_eq!(
-            s.get("chats", "chat").await.unwrap()["title"],
+            s.conversation_boundary("chat").await.unwrap()["title"],
             chat["title"]
         );
         assert!(
@@ -638,7 +650,7 @@ mod tests {
             let s = service(&root, identity).await;
             tick(&s).await.unwrap();
             assert_eq!(
-                s.get("chats", "chat").await.unwrap()["title"],
+                s.conversation_boundary("chat").await.unwrap()["title"],
                 "Configurer GitHub"
             );
             assert!(
@@ -648,8 +660,16 @@ mod tests {
                     .unwrap()
                     .is_some()
             );
-            for account in s.accounts.list(&s).await.unwrap() {
-                assert!(s.accounts.active(text(&account, "id")).await.is_empty());
+            for account in
+                crate::account_fixture::account_values(s.accounts.list(&s).await.unwrap())
+            {
+                assert!(
+                    s.accounts
+                        .active(&s, text(&account, "id"))
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
             }
             s.shutdown.cancel();
         }
@@ -659,13 +679,19 @@ mod tests {
     async fn background_generation_releases_capacity_when_foreground_work_arrives() {
         let root = tempfile::TempDir::new().unwrap();
         let s = service(&root, "hang").await;
-        let account = s.store.list(crate::accounts::KIND).await.unwrap().remove(0);
+        let account = s.store.account_fixtures().await.unwrap().remove(0);
         let task = tokio::spawn({
             let s = s.clone();
             async move { tick(&s).await }
         });
         tokio::time::timeout(Duration::from_secs(5), async {
-            while s.accounts.active(text(&account, "id")).await.is_empty() {
+            while s
+                .accounts
+                .active(&s, text(&account, "id"))
+                .await
+                .unwrap()
+                .is_empty()
+            {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
             let foreground = json!({
@@ -673,10 +699,11 @@ mod tests {
                 "taskId": "other",
                 "status": "queued",
                 "createdAt": 2,
+                "snapshot": { "agent": { "provider": "codex" } },
             });
             s.store
                 .transaction(move |db| {
-                    db.add_run(&foreground, None)?;
+                    db.add_run_fixture(&foreground, None)?;
                     Ok(())
                 })
                 .await
@@ -685,9 +712,15 @@ mod tests {
         })
         .await
         .unwrap();
-        assert!(s.accounts.active(text(&account, "id")).await.is_empty());
+        assert!(
+            s.accounts
+                .active(&s, text(&account, "id"))
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
-            s.get("chats", "chat").await.unwrap()["title"],
+            s.conversation_boundary("chat").await.unwrap()["title"],
             "Configurer GitHub"
         );
         assert!(
@@ -706,13 +739,16 @@ mod tests {
         let s = service(&root, "ready").await;
         s.store
             .transaction(|db| {
-                let chat = db.get("chats", "chat")?.unwrap();
+                let chat = db.conversation_boundary("chat")?.unwrap();
                 let pending = db.kv("chat-title-pending:chat")?.unwrap();
                 let mut newer = chat.clone();
                 newer["updatedAt"] = 2.into();
-                db.put("chats", &newer)?;
+                newer = db.save_conversation_boundary(&newer)?;
                 assert!(!apply(db, &chat, &pending, "Old result")?);
-                assert_eq!(db.get("chats", "chat")?.unwrap()["title"], chat["title"]);
+                assert_eq!(
+                    db.conversation_boundary("chat")?.unwrap()["title"],
+                    chat["title"]
+                );
                 db.set(
                     "chat-title-pending:chat",
                     &json!({ "revision": "new" }),
@@ -726,9 +762,12 @@ mod tests {
                 db.set("chat-title-pending:chat", &pending, None)?;
                 newer["title"] = "Custom title".into();
                 newer["updatedAt"] = chat["updatedAt"].clone();
-                db.put("chats", &newer)?;
+                db.save_conversation_boundary(&newer)?;
                 assert!(!apply(db, &chat, &pending, "Old result")?);
-                assert_eq!(db.get("chats", "chat")?.unwrap()["title"], "Custom title");
+                assert_eq!(
+                    db.conversation_boundary("chat")?.unwrap()["title"],
+                    "Custom title"
+                );
                 Ok(())
             })
             .await
@@ -741,7 +780,13 @@ mod tests {
         let root = tempfile::TempDir::new().unwrap();
         let s = service(&root, "ready").await;
         s.store
-            .patch_run("run", json!({ "status": "running" }))
+            .change_run(
+                "run",
+                crate::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Running),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         tick(&s).await.unwrap();
@@ -753,7 +798,13 @@ mod tests {
                 .is_none()
         );
         s.store
-            .patch_run("run", json!({ "status": "succeeded" }))
+            .change_run(
+                "run",
+                crate::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Succeeded),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         s.store
@@ -773,7 +824,7 @@ mod tests {
         let restarted = Service::new(s.config.clone()).await.unwrap();
         tick(&restarted).await.unwrap();
         assert_eq!(
-            restarted.get("chats", "chat").await.unwrap()["title"],
+            restarted.conversation_boundary("chat").await.unwrap()["title"],
             "Mises à jour Android"
         );
         assert!(
@@ -795,19 +846,19 @@ mod tests {
             .transaction(|db| {
                 for index in 0..15 {
                     let body = format!("Recent {index} {}", "é".repeat(3000));
-                    db.event("run", "chat.user", &body, None)?;
+                    db.event("run", &EventKind::ChatUser, &body, None)?;
                 }
                 let private = json!({ "text": "secret answer" });
                 db.event(
                     "run",
-                    "chat.user",
+                    &EventKind::ChatUser,
                     "Answered a private question.",
                     Some(&private),
                 )?;
                 let partial = json!({
                     "item": { "id": "latest", "type": "agent_message", "text": "partial" },
                 });
-                db.event("run", "item.updated", "partial", Some(&partial))?;
+                db.event("run", &EventKind::ItemUpdated, "partial", Some(&partial))?;
                 let tool = json!({
                     "item": {
                         "id": "tool",
@@ -815,17 +866,17 @@ mod tests {
                         "aggregated_output": "tool secret",
                     },
                 });
-                db.event("run", "item.completed", "tool secret", Some(&tool))?;
+                db.event("run", &EventKind::ItemCompleted, "tool secret", Some(&tool))?;
                 let latest = json!({
                     "item": { "id": "latest", "type": "agent_message", "text": "Latest reply" },
                 });
                 for _ in 0..2 {
-                    db.event("run", "item.completed", "", Some(&latest))?;
+                    db.event("run", &EventKind::ItemCompleted, "", Some(&latest))?;
                 }
                 let full_body = format!("{}Preserve the end", "é".repeat(20_000));
                 db.event(
                     "run",
-                    "chat.user",
+                    &EventKind::ChatUser,
                     &full_body,
                     Some(&json!({ "text": full_body })),
                 )?;
@@ -884,7 +935,12 @@ mod tests {
                         _ => "",
                     };
                     let body = format!("{}{marker}", "x".repeat(40_000));
-                    db.event("run", "chat.user", &body, Some(&json!({ "text": body })))?;
+                    db.event(
+                        "run",
+                        &EventKind::ChatUser,
+                        &body,
+                        Some(&json!({ "text": body })),
+                    )?;
                 }
                 Ok(())
             })
@@ -892,7 +948,7 @@ mod tests {
             .unwrap();
         tick(&s).await.unwrap();
         assert_eq!(
-            s.get("chats", "chat").await.unwrap()["title"],
+            s.conversation_boundary("chat").await.unwrap()["title"],
             "Historique complet Android"
         );
         assert!(
@@ -913,14 +969,19 @@ mod tests {
             s.store
                 .transaction(|db| {
                     let body = "x".repeat(80_000);
-                    db.event("run", "chat.user", &body, Some(&json!({ "text": body })))?;
+                    db.event(
+                        "run",
+                        &EventKind::ChatUser,
+                        &body,
+                        Some(&json!({ "text": body })),
+                    )?;
                     Ok(())
                 })
                 .await
                 .unwrap();
             tick(&s).await.unwrap();
             assert_eq!(
-                s.get("chats", "chat").await.unwrap()["title"],
+                s.conversation_boundary("chat").await.unwrap()["title"],
                 "Configurer GitHub"
             );
             assert!(
@@ -930,8 +991,16 @@ mod tests {
                     .unwrap()
                     .is_some()
             );
-            for account in s.accounts.list(&s).await.unwrap() {
-                assert!(s.accounts.active(text(&account, "id")).await.is_empty());
+            for account in
+                crate::account_fixture::account_values(s.accounts.list(&s).await.unwrap())
+            {
+                assert!(
+                    s.accounts
+                        .active(&s, text(&account, "id"))
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
             }
             s.shutdown.cancel();
         }

@@ -88,10 +88,17 @@ class AttachmentViewsTest {
         }
 
     private fun file(name: String, chat: String = "", size: Long = 3 * 1024) =
-        ChatAttachment(name, chat, name, size)
+        ChatAttachment(id = name, chatId = chat, name = name, size = size.toInt())
 
     private fun image(name: String, chat: String = "") =
-        ChatAttachment(name, chat, name, 2048, "image/png", "image")
+        ChatAttachment(
+            id = name,
+            chatId = chat,
+            name = name,
+            size = 2048,
+            mediaType = "image/png",
+            kind = "image",
+        )
 
     @Test
     fun copyingRenamedImagesKeepsTheImageMimeAndOriginalBytes() {
@@ -111,7 +118,29 @@ class AttachmentViewsTest {
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path.endsWith("/overview") -> "{}"
                                 path.endsWith("/models") -> """{"models":[]}"""
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
+                                    else "[]"
                             }
                         return MockResponse()
                             .setHeader("Content-Type", "application/json")
@@ -299,7 +328,32 @@ class AttachmentViewsTest {
                                         path == "/api/installations" -> beaconInstallationsFixture()
                                         path.endsWith("/overview") -> "{}"
                                         path.endsWith("/models") -> """{"models":[]}"""
-                                        else -> "[]"
+                                        else ->
+                                            if (
+                                                request.requestUrl
+                                                    ?.encodedPath
+                                                    ?.endsWith("/api/projects") == true
+                                            )
+                                                """{"projects":[]}"""
+                                            else if (
+                                                request.requestUrl
+                                                    ?.encodedPath
+                                                    ?.endsWith("/api/agents") == true
+                                            )
+                                                """{"agents":[]}"""
+                                            else if (
+                                                request.requestUrl
+                                                    ?.encodedPath
+                                                    ?.endsWith("/api/tasks") == true
+                                            )
+                                                """{"tasks":[]}"""
+                                            else if (
+                                                request.requestUrl
+                                                    ?.encodedPath
+                                                    ?.endsWith("/api/mcps") == true
+                                            )
+                                                """{"mcps":[]}"""
+                                            else "[]"
                                     }
                                 return MockResponse()
                                     .setHeader("Content-Type", "application/json")

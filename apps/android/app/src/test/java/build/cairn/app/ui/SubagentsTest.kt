@@ -15,7 +15,14 @@ class SubagentsTest {
 
     private fun event(type: String, payload: JsonObject, runId: String = "run"): RunEvent {
         val id = ++serial
-        return RunEvent(id, id * 1000, type, "", payload, runId = runId)
+        return RunEvent(
+            id = id,
+            createdAt = id * 1000,
+            type = type,
+            text = "",
+            payload = (payload)?.let { kotlinx.serialization.json.JsonObject(it) },
+            runId = runId,
+        )
     }
 
     private fun item(type: String, runId: String = "run", body: JsonObjectBuilder.() -> Unit) =
@@ -136,6 +143,39 @@ class SubagentsTest {
                 if (it.agents.isNotEmpty()) "team" else presentActivity(it.events.single()).command
             },
         )
+    }
+
+    @Test
+    fun `a resumed subagent keeps its row, steps and new report`() {
+        val (agent) =
+            teams(
+                    listOf(
+                        subagent("item.started", "reviewer"),
+                        message("first", "Looks good.", parent = "reviewer"),
+                        subagent("item.completed", "reviewer") {
+                            put("status", "completed")
+                            put("result", "Looks good.")
+                            put("task_id", "task-review")
+                            put("run_id", "run-1")
+                        },
+                        subagent("item.updated", "reviewer") {
+                            put("resumed", true)
+                            put("run_id", "run-2")
+                        },
+                        message("second", "Docs are fine too.", parent = "reviewer"),
+                        subagent("item.updated", "reviewer") {
+                            put("status", "completed")
+                            put("result", "Docs are fine too.")
+                            put("run_id", "run-2")
+                        },
+                    )
+                )
+                .single()
+        assertEquals("run:reviewer", agent.id)
+        assertTrue(agent.resumed)
+        assertEquals(SubagentState.DONE, agent.state)
+        assertEquals("Docs are fine too.", agent.result)
+        assertEquals("task-review", agent.taskId)
     }
 
     @Test
@@ -547,7 +587,7 @@ class SubagentsTest {
         assertEquals(SubagentState.RUNNING, team.first().state(active = false))
 
         fun follow(chat: Chat?) = team.first().followed(chat).let { it.state to it.summary(false) }
-        val chat = Chat("a", status = "running", runId = "child")
+        val chat = Chat(id = "a", status = "running", runId = "child")
         assertEquals(SubagentState.RUNNING to "En cours", follow(chat))
         assertEquals(
             SubagentState.RUNNING to "En attente d’un runner",
@@ -623,7 +663,7 @@ class SubagentsTest {
         val timeline =
             timelineEntries(listOf(user("First"), delegated("a"), user("Second")), chat = true)
         assertTrue(currentSubagents(timeline).isEmpty())
-        val followed = timeline.followingDelegations(listOf(Chat("a", status = "succeeded")))
+        val followed = timeline.followingDelegations(listOf(Chat(id = "a", status = "succeeded")))
         assertEquals(
             SubagentState.DONE,
             followed.single { it.agents.isNotEmpty() }.agents.single().state,

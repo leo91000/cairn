@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { ChatView } from '../../../../packages/contracts/chats'
+
 import type { FilItem } from '../signal'
 import {
   computed,
@@ -9,6 +10,8 @@ import {
   watch,
 } from 'vue'
 import { useRouter } from 'vue-router'
+import { runMission as queueMission } from '../../../../packages/contracts/generated/runMission'
+import { setMissionState } from '../../../../packages/contracts/generated/setMissionState'
 import {
   api,
   notify,
@@ -173,7 +176,7 @@ function open(item: FilItem) {
 
 async function runAgain(item: FilItem) {
   try {
-    await api(`/tasks/${item.taskId}/run`, { method: 'POST' })
+    await queueMission(api, { taskId: item.taskId! })
     notify(`${item.title} started`)
     await refreshMissionRuns()
   }
@@ -198,7 +201,12 @@ async function archive(item: FilItem) {
   if (!task)
     return
   try {
-    await api(`/tasks/${task.id}`, { method: 'PUT', body: JSON.stringify({ ...task, archived: true, enabled: false }) })
+    await setMissionState(api, {
+      taskId: task.id,
+      revision: task.revision,
+      archived: true,
+      enabled: false,
+    })
     await refresh()
     notify(`${item.title} archived`)
   }
@@ -499,6 +507,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
                   class="shrink-0 self-start pt-0.5 text-[11px] font-semibold tabular-nums text-accent"
                   :title="item.kind === 'snoozed' ? 'Time left before it is back in For you' : item.condition ? 'Resumes when the result arrives, at the latest by its deadline' : 'Time left before it resumes'"
                 >{{ waitLeft({ wakeAt: item.wakeAt!, condition: item.condition, resolved: item.resolved }, now) }}</span>
+                <span v-else-if="item.kind === 'waiting'" class="shrink-0 self-start pt-0.5 text-[11px] text-accent">Awaiting availability</span>
                 <span v-else class="shrink-0 self-start pt-0.5 text-[11px] tabular-nums" :class="item.kind === 'running' ? 'font-semibold text-accent' : 'text-subtle'">{{ shortAge(item.at, now) }}</span>
               </button>
             </template>

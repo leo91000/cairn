@@ -1,5 +1,6 @@
 //! HTTP interface of the VM controller.
 use super::broker::{Broker, ProjectImport, erase_attempt_content};
+use crate::runner::exclusive::Reservations;
 use crate::{
     auth::safe_equal,
     error::{Error, Result},
@@ -76,12 +77,15 @@ pub(super) async fn handler(State(broker): State<Broker>, request: Request) -> R
         ["exclusive", "release"] => exclusive_release(&broker, request).await,
         ["node-budget"] => node_budget(&broker, request).await,
         ["storage-policy"] => storage_policy(&broker, request).await,
+        ["storage-policy", "probe"] => storage_policy_probe(request).await,
         ["snapshots", snapshot, hash] => snapshot_file(&broker, request, snapshot, hash).await,
         ["disks", run, "snapshot"] => disk_snapshot(&broker, request, run).await,
         ["disks", run, "snapshot-completed"] => completed_snapshot(&broker, request, run).await,
-        ["disks", run, operation @ ("storage-status" | "published")] => {
-            disk_storage(&broker, request, run, operation).await
-        }
+        [
+            "disks",
+            run,
+            operation @ ("storage-status" | "published" | "publication-fence"),
+        ] => disk_storage(&broker, request, run, operation).await,
         ["disks", run, "restore"] => disk_restore(&broker, request, run).await,
         ["disks", run, action] => disk_action(&broker, request, run, action).await,
         _ => run_route(broker, request, &segments).await,
@@ -89,17 +93,7 @@ pub(super) async fn handler(State(broker): State<Broker>, request: Request) -> R
 }
 
 async fn health(broker: &Broker) -> Result<Response> {
-    let mut runtimes = Vec::new();
-    if let Ok(mut entries) = tokio::fs::read_dir(broker.state.join("images")).await {
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let complete =
-                entry.path().join("root.ext4").exists() && entry.path().join("vmlinux").exists();
-            if complete {
-                runtimes.push(entry.file_name().to_string_lossy().into_owned());
-            }
-        }
-    }
-    let runtime_id = std::env::var("APP_RUNTIME_ID").unwrap_or_else(|_| "development".into());
+    let runtime_id = crate::nodes::component_runtime();
     let active_runs = broker.active.lock().await.len();
     let mut capabilities = crate::nodes::connector::capabilities(&broker.state).ok();
     if let (Some(capabilities), Some(hardware)) = (&mut capabilities, broker.pool.hardware()) {
@@ -113,9 +107,9 @@ async fn health(broker: &Broker) -> Result<Response> {
         "backend": Backend::Firecracker,
         "runtimeId": runtime_id,
         "nodeProtocol": NODE_PROTOCOL,
+        "directStorageProtocol": 1,
         "sharedResources": broker.pool.budget().await.is_some(),
         "exclusiveReservations": true,
-        "runtimes": runtimes,
         "dataRoot": broker.data,
         "activeRuns": active_runs,
         "capabilities": capabilities,
@@ -123,6 +117,7 @@ async fn health(broker: &Broker) -> Result<Response> {
         "budget": broker.pool.budget().await,
         "usage": usage,
         "pressure": pressure,
+        "storagePolicy": broker.storage_policy.current().await,
     }))
 }
 
@@ -165,21 +160,22 @@ async fn node_budget(broker: &Broker, request: Request) -> Result<Response> {
     json_response(json!({ "ready": true }))
 }
 
-async fn storage_policy(broker: &Broker, request: Request) -> Result<Response> {
+async fn storage_policy_probe(request: Request) -> Result<Response> {
     require_post(&request)?;
     let bytes = body(request, 16384, "Invalid storage policy.").await?;
     let policy: crate::storage::policy::Policy = serde_json::from_slice(&bytes)?;
-    policy.validate()?;
+    policy.validate().map_err(Error::bad)?;
+    json_response(json!({ "ready": true }))
+}
+
+async fn storage_policy(broker: &Broker, request: Request) -> Result<Response> {
+    require_post(&request)?;
+    let bytes = body(request, 16384, "Invalid storage policy.").await?;
+    let configuration: crate::storage::policy::Configuration = serde_json::from_slice(&bytes)?;
+    let control = broker.storage_policy.clone();
     let state = broker.state.clone();
-    tokio::task::spawn_blocking(move || crate::storage::fuse::probe(&state))
-        .await
-        .map_err(Error::internal)??;
-    crate::skills::atomic_write(
-        &broker.state.join("storage-policy.json"),
-        &serde_json::to_vec(&policy)?,
-    )
-    .await?;
-    crate::storage::runtime::configure(&broker.state, &policy)?;
+    let operation = tokio::spawn(async move { control.apply(&state, configuration).await });
+    operation.await.map_err(Error::internal)??;
     json_response(json!({ "ready": true }))
 }
 
@@ -188,6 +184,8 @@ async fn storage_policy(broker: &Broker, request: Request) -> Result<Response> {
 #[serde(deny_unknown_fields)]
 struct BlockBatch {
     hashes: Vec<String>,
+    #[serde(default)]
+    diagnostic: Option<crate::performance::publication::Request>,
 }
 
 async fn snapshot_file(
@@ -198,8 +196,25 @@ async fn snapshot_file(
 ) -> Result<Response> {
     uuid(snapshot)?;
     let directory = broker.state.join("snapshots").join(snapshot);
+    if hash == "direct-reader" {
+        if request.method() == "DELETE" {
+            crate::nodes::snapshots::close_direct_reader(&directory).await?;
+            return json_response(json!({ "closed": true }));
+        }
+        require_post(&request)?;
+        let bytes = body(request, 4096, "Invalid publication reader request.").await?;
+        return Ok(crate::nodes::snapshots::direct_reader(&directory, &bytes)
+            .await?
+            .into_response());
+    }
+    if request.method() == "POST" && hash == "direct-upload" {
+        let bytes = body(request, 131_072, "Invalid direct publication batch.").await?;
+        return json_response(
+            super::super::nodes::snapshots::upload_direct(&directory, &bytes).await?,
+        );
+    }
     if request.method() == "DELETE" && hash == "discard" {
-        tokio::fs::remove_dir_all(directory).await?;
+        crate::nodes::snapshots::discard(&directory).await?;
         return json_response(json!({ "ok": true }));
     }
     if request.method() == "POST" && matches!(hash, "blocks" | "publication") {
@@ -212,7 +227,13 @@ async fn snapshot_file(
         let batch: BlockBatch = serde_json::from_slice(&bytes)
             .map_err(|_| Error::bad("Invalid snapshot block batch."))?;
         let (length, blocks) = if hash == "publication" {
-            crate::nodes::snapshots::served_publication(&directory, batch.hashes).await?
+            crate::nodes::snapshots::served_publication_observed(
+                &directory,
+                batch.hashes,
+                batch.diagnostic,
+                snapshot,
+            )
+            .await?
         } else {
             crate::nodes::snapshots::served_batch(&directory, batch.hashes).await?
         };
@@ -292,6 +313,14 @@ async fn disk_storage(
 ) -> Result<Response> {
     uuid(run)?;
     require_post(&request)?;
+    if operation == "publication-fence" {
+        let bytes = body(request, 16384, "Invalid publication fence.").await?;
+        let fence: Value = decode(&bytes, "Invalid publication fence.")?;
+        let publication = text(&fence, "backupId");
+        uuid(publication)?;
+        crate::storage::runtime::fence_publication(&broker.state, run, publication).await?;
+        return json_response(json!({"fenced":publication}));
+    }
     let directory = crate::storage::environment::directory(&broker.state, run)?;
     if !crate::storage::runtime::exists(&directory) {
         return Err(Error::conflict("Conversation has no S3-backed journal."));
@@ -311,9 +340,14 @@ async fn disk_storage(
     let backup_id = receipt.backup_id;
     uuid(&backup_id)?;
     let disk = volume.disk.clone();
-    tokio::task::spawn_blocking(move || disk.commit_published(generation, &backup_id))
-        .await
-        .map_err(Error::internal)??;
+    let state = broker.state.clone();
+    tokio::task::spawn_blocking(move || {
+        volume
+            .source
+            .acknowledge(&state, &disk, generation, &backup_id)
+    })
+    .await
+    .map_err(Error::internal)??;
     json_response(json!({ "committed": true }))
 }
 
@@ -383,10 +417,7 @@ async fn prune_stale_disks(directory: &Path) -> Result<Vec<String>> {
             continue;
         }
         let is_dir = entry.file_type().await?.is_dir();
-        if is_dir
-            && (entry.path().join("journal.sqlite").exists()
-                || entry.path().join("journal-v2.sqlite").exists())
-        {
+        if is_dir && entry.path().join("journal-v2.sqlite").exists() {
             let context = crate::storage::LazyDisk::context(&entry.path())?;
             retired_grants.push(crate::auth::digest(text(&context, "grant")));
         }
@@ -625,12 +656,13 @@ fn wait(broker: Broker, id: String) -> Response {
         .into_response()
 }
 
-/// Older managers omit the mode and keep the coherent filesystem capture path.
 async fn snapshot_consistency(request: Request) -> Result<crate::storage::checkpoint::Consistency> {
     let bytes = body(request, 1024, "Invalid snapshot request.").await?;
-    let value = serde_json::from_slice::<Value>(&bytes).unwrap_or_default();
+    let value = serde_json::from_slice::<Value>(&bytes).map_err(|_| {
+        Error::bad("Invalid snapshot request; an explicit consistency is required.")
+    })?;
     match value.get("consistency") {
-        None => Ok(crate::storage::checkpoint::Consistency::default()),
+        None => Err(Error::bad("Missing snapshot consistency.")),
         Some(value) => serde_json::from_value(value.clone())
             .map_err(|_| Error::bad("Invalid snapshot consistency.")),
     }
@@ -642,13 +674,10 @@ mod snapshot_request_tests {
     use crate::storage::checkpoint::Consistency;
 
     #[tokio::test]
-    async fn legacy_requests_keep_guest_flushing_and_unknown_modes_are_rejected() {
-        for legacy in ["", "{}", r#"{"baseline":"previous"}"#] {
-            let request = Request::new(Body::from(legacy));
-            assert!(matches!(
-                snapshot_consistency(request).await.unwrap(),
-                Consistency::Filesystem
-            ));
+    async fn snapshot_requests_require_an_explicit_valid_consistency() {
+        for invalid in ["", "{}", r#"{"baseline":"previous"}"#] {
+            let request = Request::new(Body::from(invalid));
+            assert!(snapshot_consistency(request).await.is_err());
         }
         let request = Request::new(Body::from(r#"{"consistency":"crash"}"#));
         assert!(matches!(

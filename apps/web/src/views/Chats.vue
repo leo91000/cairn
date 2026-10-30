@@ -22,8 +22,23 @@ import { useRoute, useRouter } from 'vue-router'
 import { providers } from '../../../../packages/contracts/accounts'
 import { latestArtifacts } from '../../../../packages/contracts/artifacts'
 import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
+import { compactChat } from '../../../../packages/contracts/generated/compactChat'
+import { createChat } from '../../../../packages/contracts/generated/createChat'
+import { deleteChatMessage } from '../../../../packages/contracts/generated/deleteChatMessage'
+import { editChatMessage } from '../../../../packages/contracts/generated/editChatMessage'
+import { restartChatSession } from '../../../../packages/contracts/generated/restartChatSession'
+import { restoreChat } from '../../../../packages/contracts/generated/restoreChat'
+import { resumeRun } from '../../../../packages/contracts/generated/resume-run'
+import { sendChatMessage } from '../../../../packages/contracts/generated/sendChatMessage'
+import { setChatPaused } from '../../../../packages/contracts/generated/setChatPaused'
+import { stopChat } from '../../../../packages/contracts/generated/stopChat'
 import { failureReason, sameReason, stopEcho } from '../activity'
-import { api, apiUpload, state } from '../api'
+import {
+  api,
+  apiUpload,
+  refreshSkills,
+  state,
+} from '../api'
 import { reuseAttachmentKey } from '../attachment-media'
 import {
   isImage,
@@ -51,6 +66,7 @@ import Modal from '../components/Modal.vue'
 import NodeExecution from '../components/NodeExecution.vue'
 import PlanBar from '../components/PlanBar.vue'
 import QueueStrip from '../components/QueueStrip.vue'
+import RecoveryNotice from '../components/RecoveryNotice.vue'
 import SkillTextarea from '../components/SkillTextarea.vue'
 import SubagentBar from '../components/SubagentBar.vue'
 import SubagentPanel from '../components/SubagentPanel.vue'
@@ -59,6 +75,7 @@ import UiAlert from '../components/UiAlert.vue'
 import UiButton from '../components/UiButton.vue'
 import UiNotice from '../components/UiNotice.vue'
 import VirtualSelect from '../components/VirtualSelect.vue'
+import { contextSummary } from '../context-usage'
 import {
   ArrowDown,
   ArrowUp,
@@ -88,8 +105,9 @@ import {
   Zap,
 } from '../icons'
 import { connectionTone, installationKey, routeLabel } from '../installation-context'
+import { modelCatalogs } from '../models'
 import { useReadWhileOpen } from '../reads'
-import { useRetryNotice } from '../run-retry'
+import { useRetryState } from '../run-retry'
 import { exclusiveSuspensionLabel, isExclusivelySuspended } from '../run-status'
 import { backgroundWait } from '../signal'
 import { chatSkills } from '../skill-mentions'
@@ -101,7 +119,7 @@ import { chatPath } from '../workspace-links'
 
 const router = useRouter()
 const route = useRoute()
-const detail = ref<(ChatDetail & { error?: string }) | null>(null)
+const detail = ref<ChatDetail | null>(null)
 const recoverable = computed(() => detail.value?.lifecycle === 'trash' && (detail.value?.purgeAt ?? 0) > Date.now())
 const inactive = computed(() => !!detail.value?.lifecycle && detail.value.lifecycle !== 'active')
 const chatId = computed(() => typeof route.params.id === 'string' ? route.params.id : undefined)
@@ -150,8 +168,8 @@ const live = useLiveRun(() => streamPath.value, {
   // Also saved under its slug when a link by identifier opened it: the Fil links to slugs.
   savedAs: state => state.chat ? `/chats/${state.chat.slug || state.chat.id}/stream` : undefined,
 })
-// Its stream carries the list while available; a failed open or a finite relay read
-// releases it to the shell, so the Fil keeps working even when the conversation cannot.
+// Its stream carries the list while available; a failed open releases it to the shell,
+// so the Fil keeps working even when the conversation cannot.
 watch(live.carriesList, value => chatListCarried.value = value, { immediate: true, flush: 'sync' })
 onBeforeUnmount(() => chatListCarried.value = false)
 const { events, connectionNotice, catchingUp } = live
@@ -159,6 +177,9 @@ const deliverables = computed(() => live.snapshot.value?.artifacts ?? [])
 const draft = ref('')
 const model = ref('')
 const reasoning = ref('')
+const speed = ref('')
+// Names queued messages' speeds; the composer's picker keeps this catalog current.
+const codexModels = computed(() => modelCatalogs.codex.catalog.models)
 const provider = ref<'' | Provider>('')
 const history = ref(false)
 const deletingConversation = ref<ChatDetail>()
@@ -316,6 +337,8 @@ function addFiles(selected: File[]) {
       kind: ['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(file.type) ? 'image' : 'file',
       mediaType: file.type,
       chatId: '',
+      digest: '',
+      createdAt: 0,
     }
     const rejected = selection.rejected[index]
     // A rejected file is shown with its reason but never uploaded.
@@ -372,12 +395,10 @@ const active = computed(() => !!detail.value?.run && ['queued', 'running'].inclu
 const suspended = computed(() => isExclusivelySuspended(detail.value?.run))
 // The plan of the current request stays in sight beside the composer while the agent follows it.
 const currentPlan = computed(() => runActive.value && !suspended.value ? activity.value?.plan : undefined)
-const retryNotice = useRetryNotice(() => detail.value?.run)
+const recovery = useRetryState(() => detail.value?.run)
 const scheduled = computed(() => scheduledWakeup(detail.value))
 // The scheduled wait shows as a card in the conversation; these notices explain a run that cannot start.
-const waitNotice = computed(() => retryNotice.value
-  ? { account: null, message: retryNotice.value }
-  : chatWaitNotice(detail.value?.run))
+const waitNotice = computed(() => recovery.value ? null : chatWaitNotice(detail.value?.run))
 const waitNow = ref(Date.now())
 let waitClock: ReturnType<typeof setInterval> | undefined
 watch(() => !!scheduled.value, (waiting) => {
@@ -451,6 +472,7 @@ const chosenProvider = computed({
     provider.value = value
     model.value = ''
     reasoning.value = ''
+    speed.value = ''
   },
 })
 const switchingProvider = computed(() => !!detail.value?.run && chosenProvider.value !== currentProvider.value)
@@ -519,6 +541,7 @@ let submission: {
     provider: Provider
     model: string
     reasoning: string
+    speed: string
     attachmentIds: string[]
   }
 } | undefined
@@ -533,6 +556,7 @@ function newConversation() {
   provider.value = ''
   model.value = ''
   reasoning.value = ''
+  speed.value = ''
   agentId.value = MAIN_AGENT_ID
   projectId.value = ''
   createdChat = undefined
@@ -553,7 +577,7 @@ async function send(mode: 'queue' | 'steer' = 'queue') {
   busy.value = true
   error.value = ''
   try {
-    const chat = detail.value ?? createdChat ?? await api<Chat>('/chats', { method: 'POST', body: JSON.stringify({ agentId: agentId.value, projectId: projectId.value || null }) })
+    const chat = detail.value ?? createdChat ?? await createChat(api, { agentId: agentId.value, projectId: projectId.value || null })
     createdChat = chat
     // Items without a local file (reused or already sent records) are never uploaded again.
     const pendingUploads = attachments.value.filter(attachment => files.has(attachment.id) && !uploaded.has(attachment.id))
@@ -589,12 +613,15 @@ async function send(mode: 'queue' | 'steer' = 'queue') {
     // conversation selection explicit on the wire, including after a reload.
     const selectedModel = model.value || inheritedAssistant.value?.model || ''
     const selectedReasoning = reasoning.value || (!model.value ? inheritedAssistant.value?.reasoning : '') || ''
+    // The speed survives a model change, so it is inherited even with a new model.
+    const selectedSpeed = speed.value || inheritedAssistant.value?.speed || ''
     const content = {
       text,
       mode,
       provider: chosenProvider.value,
       model: selectedModel,
       reasoning: selectedReasoning,
+      speed: selectedSpeed,
       attachmentIds,
     }
     const submissionKey = JSON.stringify({ chatId: chat.id, editing: editing.value, ...content })
@@ -610,13 +637,17 @@ async function send(mode: 'queue' | 'steer' = 'queue') {
       outgoing.value = {
         ...submission.message,
         chatId: chat.id,
+        revision: '',
         status: 'queued',
         createdAt: Date.now(),
         attachments: [...attachments.value],
       }
     }
 
-    await api(`/chats/${chat.id}/messages${editing.value ? `/${editing.value}` : ''}`, { method: editing.value ? 'PUT' : 'POST', body: JSON.stringify(submission.message) })
+    if (editing.value)
+      await editChatMessage(api, { chatId: chat.id, messageId: editing.value, message: submission.message })
+    else
+      await sendChatMessage(api, { chatId: chat.id, message: submission.message })
     // Another conversation was opened meanwhile; its composer is not this message's.
     if (chatId.value !== origin) {
       submission = undefined
@@ -646,14 +677,26 @@ async function send(mode: 'queue' | 'steer' = 'queue') {
 }
 
 const newSession = ref(false)
+const compacting = ref(false)
+const context = computed(() => contextSummary(detail.value?.contextUsage))
 
-async function action(name: 'pause' | 'stop' | 'restore' | 'new-session', body?: object) {
+async function action(name: 'pause' | 'stop' | 'restore' | 'new-session' | 'compact', body?: { paused?: boolean, confirm?: boolean }) {
   if (!detail.value || busy.value)
     return false
   busy.value = true
   error.value = ''
   try {
-    await api(`/chats/${detail.value.id}/${name}`, { method: 'POST', ...(body ? { body: JSON.stringify(body) } : {}) })
+    const chatId = detail.value.id
+    if (name === 'pause')
+      await setChatPaused(api, { chatId, paused: body?.paused ?? false })
+    else if (name === 'stop')
+      await stopChat(api, { chatId })
+    else if (name === 'restore')
+      await restoreChat(api, { chatId })
+    else if (name === 'new-session')
+      await restartChatSession(api, { chatId, confirm: body?.confirm ?? false })
+    else
+      await compactChat(api, { chatId })
     return true
   }
   catch (e) {
@@ -671,8 +714,8 @@ async function resumeQuota() {
   error.value = ''
   try {
     if (chat.run?.status === 'failed')
-      await api(`/runs/${chat.run.id}/resume`, { method: 'POST' })
-    await api(`/chats/${chat.id}/pause`, { method: 'POST', body: JSON.stringify({ paused: false }) })
+      await resumeRun(api, { runId: chat.run.id })
+    await setChatPaused(api, { chatId: chat.id, paused: false })
   }
   catch (e) {
     error.value = (e as Error).message
@@ -683,7 +726,11 @@ async function resumeQuota() {
 async function update(message: ChatMessage, mode?: 'steer') {
   error.value = ''
   try {
-    await api(`/chats/${detail.value!.id}/messages/${message.id}`, { method: mode ? 'PUT' : 'DELETE', ...(mode ? { body: JSON.stringify({ ...message, mode, attachmentIds: message.attachments?.map(attachment => attachment.id) ?? [] }) } : {}) })
+    const reference = { chatId: detail.value!.id, messageId: message.id }
+    if (mode)
+      await editChatMessage(api, { ...reference, message: { ...message, mode, attachmentIds: message.attachments.map(attachment => attachment.id) } })
+    else
+      await deleteChatMessage(api, reference)
   }
   catch (e) { error.value = (e as Error).message }
 }
@@ -701,6 +748,7 @@ function edit(message: ChatMessage) {
   provider.value = message.provider || currentProvider.value
   model.value = message.model
   reasoning.value = message.reasoning || ''
+  speed.value = message.speed || ''
   textarea.value?.focus()
 }
 
@@ -717,6 +765,7 @@ watch(chatId, (id) => {
   provider.value = ''
   model.value = ''
   reasoning.value = ''
+  speed.value = ''
   submission = undefined
   const destinationId = createdChat && createdChat.slug === id ? createdChat.id : selectedChatId.value
   createdChat = undefined
@@ -743,6 +792,15 @@ function key(event: KeyboardEvent) {
 </script>
 
 <template>
+  <Modal v-if="compacting" title="Compact the agent context?" @close="compacting = false">
+    <div class="p-6">
+      <p>The coding agent summarizes its earlier context to free space in its window. This uses the agent's model, like a short turn.</p>
+      <p>Every message stays visible in this conversation. Messages you send meanwhile wait for the compaction to finish.</p>
+      <UiButton :disabled="busy || !detail?.compaction?.available" @click="action('compact').then((succeeded) => { if (succeeded) compacting = false })">
+        Compact context
+      </UiButton>
+    </div>
+  </Modal>
   <Modal v-if="newSession" title="Start a fresh agent session?" @close="newSession = false">
     <div class="p-6">
       <p>The conversation history and working files will be preserved. The next message will use a new native agent session.</p>
@@ -787,6 +845,14 @@ function key(event: KeyboardEvent) {
         </dt><dd class="m-0 flex items-center gap-2">
           <span class="size-1.5 rounded-full bg-accent" />{{ chatStatus }}
         </dd>
+        <template v-if="detail?.run">
+          <dt class="text-muted">
+            Context
+          </dt><dd class="m-0" data-testid="context-usage">
+            <span class="block">{{ context.label }}</span>
+            <span v-for="line in context.details" :key="line" class="block text-muted">{{ line }}</span>
+          </dd>
+        </template>
       </dl>
       <button class="chat-detail-action" @click="detailAction(newConversation)">
         <Icon :name="Plus" :size="18" />New chat
@@ -799,6 +865,20 @@ function key(event: KeyboardEvent) {
       >
         <Icon :name="FileText" :size="18" />Files <span class="ml-auto text-muted">{{ fileCount }}</span>
       </button>
+      <template v-if="detail?.compaction?.supported && !inactive">
+        <button
+          class="chat-detail-action"
+          aria-haspopup="dialog"
+          :disabled="!detail.compaction.available"
+          :aria-describedby="detail.compaction.reason ? 'compaction-reason' : undefined"
+          @click="detailAction(() => { compacting = true })"
+        >
+          <Icon :name="Layers" :size="18" />{{ detail.compaction.running ? 'Compacting context…' : 'Compact context' }}
+        </button>
+        <p v-if="detail.compaction.reason && !detail.compaction.running" id="compaction-reason" class="m-0! mb-1! px-3 text-2xs text-muted">
+          {{ detail.compaction.reason }}
+        </p>
+      </template>
       <button class="chat-detail-action" @click="detailAction(() => { history = true })">
         <Icon :name="Search" :size="18" />Search conversations
       </button>
@@ -939,6 +1019,13 @@ function key(event: KeyboardEvent) {
                 <Icon :name="CornerDownRight" :size="13" /><span class="truncate max-w-56">Delegated by {{ heading.requester.title || 'New conversation' }}</span>
               </RouterLink>
               <span v-if="detail" class="flex items-center gap-1.5 font-semibold" :class="chatStatus === 'Working' ? 'text-accent' : chatStatus === 'Failed' || chatStatus === 'Interrupted' ? 'text-coral' : ''"><span v-if="chatStatus !== 'Working'" class="size-1 shrink-0 rounded-full" :class="active ? 'bg-accent' : 'bg-muted'" />{{ chatStatus }}<span v-if="chatStatus === 'Working'" class="working-wave"><i /><i /><i /></span></span>
+              <span
+                v-if="context.percent !== null || detail?.contextUsage"
+                class="tabular-nums"
+                :class="(context.percent ?? 0) >= 85 ? 'text-coral' : ''"
+                :title="[context.label, ...context.details].join('\n')"
+                data-testid="context-indicator"
+              >Context {{ context.short }}</span>
               <NodeExecution v-if="detail?.run && state.installationRole === 'owner'" :key="detail.run.id" :run="detail.run" />
             </div>
           </div>
@@ -1054,6 +1141,8 @@ function key(event: KeyboardEvent) {
             :sending="delivery.sending"
             :events="events"
             :quota="quota"
+            :chat-id="detail?.id"
+            :coding-agent-switch="detail?.codingAgentSwitch"
             :can-manage-accounts="state.installationRole === 'owner'"
             :busy="busy"
             :wakeup="liveWait"
@@ -1076,11 +1165,27 @@ function key(event: KeyboardEvent) {
             @ask="sideQuestions?.ask($event)"
             @side-questions="sideQuestions?.show($event)"
             @resume-quota="resumeQuota"
+            @coding-agent-switched="chosenProvider = $event"
             @load="live.loadOlder"
             @position="live.savePosition"
             @pause-wait="busy || action('pause', { paused: true })"
           />
           <div v-if="!inactive" class="mx-auto w-full max-w-205 shrink-0 px-5 pb-1 pt-3 phone:px-0 phone:pt-2">
+            <UiNotice
+              v-if="detail?.environmentState"
+              role="status"
+              class="mb-3"
+              tone="info"
+              title="Working environment expired"
+            >
+              <p>
+                {{ detail.environmentState === 'cleaning' ? 'Removing the working environment after inactivity. Please wait before sending another message.' : 'The working environment was removed after inactivity. Your next message starts a fresh environment using the conversation history.' }}
+                History, uploaded attachments, published files and shared links are retained. Unpushed changes and other working files are no longer available.
+              </p>
+              <p v-if="detail.environmentError">
+                Cleanup will retry: {{ detail.environmentError }}
+              </p>
+            </UiNotice>
             <ChatQuestions
               v-if="detail"
               :questions="detail.questions || []"
@@ -1094,6 +1199,7 @@ function key(event: KeyboardEvent) {
               :chat-id="detail.id"
               :questions="detail.sideQuestions || []"
               :can-ask="!!detail.canAskSideQuestion"
+              :reason="detail.sideQuestionReason"
               :provider="detail.provider"
               @reveal="activity?.reveal($event)"
             />
@@ -1158,8 +1264,14 @@ function key(event: KeyboardEvent) {
                 </button>
               </template>
             </UiNotice>
+            <RecoveryNotice
+              v-if="recovery && !quota"
+              :recovery="recovery"
+              :busy="busy"
+              @cancel="action('stop')"
+            />
             <UiNotice
-              v-if="waitNotice && !quota"
+              v-else-if="waitNotice && !quota"
               role="status"
               class="mb-3"
               :tone="waitNotice.account ? 'warning' : 'info'"
@@ -1217,6 +1329,7 @@ function key(event: KeyboardEvent) {
               <template v-if="pending.length || detail?.paused">
                 <QueueStrip
                   :pending="pending"
+                  :models="codexModels"
                   :paused="!!detail?.paused"
                   :working="active"
                   :busy="busy"
@@ -1278,6 +1391,7 @@ function key(event: KeyboardEvent) {
                   rows="2"
                   maxlength="50000"
                   @keydown="key"
+                  @skills-open="refreshSkills().catch(() => {})"
                 />
                 <div class="flex items-center justify-between gap-2 pt-2">
                   <div class="flex min-w-0 flex-1 items-center gap-1">
@@ -1290,9 +1404,11 @@ function key(event: KeyboardEvent) {
                       v-model:provider="chosenProvider"
                       v-model:model="model"
                       v-model:reasoning="reasoning"
+                      v-model:speed="speed"
                       :inherit="!!inheritedAssistant"
                       :default-model="inheritedAssistant?.model || ''"
                       :default-reasoning="inheritedAssistant?.reasoning || ''"
+                      :default-speed="inheritedAssistant?.speed || ''"
                       :default-source="inheritConversation ? 'conversation' : 'agent'"
                       :switching="switchingProvider"
                       :disabled="busy"

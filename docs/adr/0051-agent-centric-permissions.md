@@ -1,3 +1,5 @@
+> Statut : remplacée en partie par [ADR-0075](0075-plugin-hooks-rules-and-scoped-grants.md) : un droit sur une instance de plugin devient un accès complet, à côté de droits contribution par contribution, dont les outils, commandes et hooks peuvent être restreints à des ressources ; le MCP public expose ces droits, `cairn_installation` peut les lire et les réduire dans les limites d’ADR-0075 sans jamais les élargir ; les délégations externes, leur suspension et leur réapprobation disparaissent.
+
 # Toutes les permissions d’un agent se règlent sur sa page
 
 Date : 2026-10-18.
@@ -58,11 +60,8 @@ explicitement, pour ne jamais approuver des accès que le propriétaire n’a pa
 
 Les nodes et les instances gardent une copie, `exclusiveAgents` et `agentIds`, écrite
 dans la même transaction que l’agent. L’application des droits lit cette copie,
-comme les versions précédentes. Une version antérieure lit donc les mêmes droits
-après un retour arrière, et l’epoch de compatibilité ne change pas. Ces versions ne
-modifient que la copie. Au démarrage, toute différence vient donc d’elles, et la
-copie l’emporte : le côté agent est reconstruit, et les identifiants d’agents
-supprimés sont retirés des copies. Les anciens clients qui envoient encore
+Au démarrage, la copie l’emporte : le côté agent est reconstruit et les identifiants
+d’agents supprimés sont retirés des copies. Les anciens clients qui envoient encore
 `exclusiveAgents` à une node ou `agentIds` à une instance mettent à jour les agents,
 et leur omission conserve les droits existants.
 
@@ -74,11 +73,10 @@ ces champs (les copies sur les ressources restent, et le démarrage suivant reco
 l’agent). Le démarrage donne aussi une révision aux agents enregistrés avant son
 introduction.
 
-Les clients sont mis à jour indépendamment de l’installation (le web est servi par
-Beacon). `GET /agents` ajoute à chaque agent un indicateur calculé, jamais enregistré,
-`grantsOnAgent` : sans lui, l’installation est antérieure ou revenue en arrière. Les
-clients affichent alors ces droits en lecture seule depuis les copies, renvoient la
-liste `agentIds` d’une instance enregistrée et se passent de l’aperçu.
+Depuis la campagne de refacto (2026-10-25), les clients exigent le protocole et les
+API courants. Le marqueur `grantsOnAgent`, les droits en lecture seule pour les
+anciennes installations et le repli sans aperçu ont été supprimés. Les instances
+éditées omettent `agentIds` : le serveur conserve leurs droits en direct.
 
 Les autres modifications d’un agent conservent ses droits en direct, par exemple
 la suppression d’une connexion MCP, qui change aussi sa révision. Un droit déjà
@@ -95,5 +93,5 @@ cet identifiant orphelin faisait échouer l’enregistrement suivant de la node.
   1Password ce que voit le compte, et crée un autre compte pour d’autres droits.
 - Les délégations externes restent choisies sur l’instance (quel agent répond aux
   personnes). La page de l’agent les montre et propose leur réapprobation.
-- Les comptes d’agent de code restent un pool partagé (ADR 0002) : la page l’indique
+- Les comptes d’agent de code restent un pool partagé ([ADR-0061](0061-one-account-pool-for-coding-agents.md)) : la page l’indique
   sans créer de droit.

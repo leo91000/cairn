@@ -17,31 +17,43 @@ class TimelineTest {
                         return values.entries
                     }
             }
-        val retry = RunEvent(1, 1, "diagnostic", "WebSocket connection failed: 503")
+        val retry =
+            RunEvent(
+                id = 1,
+                createdAt = 1,
+                type = "diagnostic",
+                text = "WebSocket connection failed: 503",
+            )
         val user =
             RunEvent(
-                2,
-                2,
-                "chat.user",
-                "Question",
-                observed(mapOf("text" to JsonPrimitive("Question"))),
+                id = 2,
+                createdAt = 2,
+                type = "chat.user",
+                text = "Question",
+                payload =
+                    kotlinx.serialization.json.JsonObject(
+                        observed(mapOf("text" to JsonPrimitive("Question")))
+                    ),
             )
         val reply =
             RunEvent(
-                3,
-                3,
-                "item.updated",
-                "Answer",
-                observed(
-                    mapOf(
-                        "item" to
-                            buildJsonObject {
-                                put("id", "answer")
-                                put("type", "agent_message")
-                                put("text", "Answer ".repeat(10_000))
-                            }
-                    )
-                ),
+                id = 3,
+                createdAt = 3,
+                type = "item.updated",
+                text = "Answer",
+                payload =
+                    kotlinx.serialization.json.JsonObject(
+                        observed(
+                            mapOf(
+                                "item" to
+                                    buildJsonObject {
+                                        put("id", "answer")
+                                        put("type", "agent_message")
+                                        put("text", "Answer ".repeat(10_000))
+                                    }
+                            )
+                        )
+                    ),
             )
         val entries = timelineEntries(listOf(retry, user, reply), chat = true)
         assertEquals(listOf(1L, 2L, 3L), entries.flatMap { it.events }.map { it.id })
@@ -143,13 +155,19 @@ class TimelineTest {
             event(id, "status")
                 .copy(
                     text = "Kimi K2 via $provider",
-                    payload = mapOf("route" to buildJsonObject { put("providerName", provider) }),
+                    payload =
+                        (mapOf("route" to buildJsonObject { put("providerName", provider) }))?.let {
+                            kotlinx.serialization.json.JsonObject(it)
+                        },
                 )
         fun attempt(id: Long) =
             event(id, "status")
                 .copy(
                     text = "Preparing workspace",
-                    payload = mapOf("attempt" to JsonPrimitive(true)),
+                    payload =
+                        (mapOf("attempt" to JsonPrimitive(true)))?.let {
+                            kotlinx.serialization.json.JsonObject(it)
+                        },
                 )
         val events =
             listOf(
@@ -219,14 +237,17 @@ class TimelineTest {
             event(2, "item.completed", "tool", status = "completed").let {
                 it.copy(
                     payload =
-                        mapOf("item" to JsonObject(it.item()!! + ("exit_code" to JsonPrimitive(0))))
+                        (mapOf(
+                                "item" to
+                                    JsonObject(it.item()!! + ("exit_code" to JsonPrimitive(0)))
+                            ))
+                            ?.let { kotlinx.serialization.json.JsonObject(it) }
                 )
             }
         for (continued in
             listOf(
                 event(2, "turn.completed"),
                 event(2, "item.completed", "answer", "agent_message"),
-                event(2, "item.completed").copy(text = "Recovered answer"),
                 successfulTool,
             )) {
             assertFalse(timelineEntries(listOf(retry, continued), chat = true).any { it.notice })
@@ -247,21 +268,31 @@ class TimelineTest {
         val capacity = "Selected model is at capacity. Please try a different model."
         fun failure(id: Long, type: String, message: String, text: String = message) =
             RunEvent(
-                id,
-                id,
-                type,
-                text,
-                mapOf(
-                    "error" to
-                        buildJsonObject {
-                            put("message", message)
-                            put("codexErrorInfo", "serverOverloaded")
-                        }
-                ),
+                id = id,
+                createdAt = id,
+                type = type,
+                text = text,
+                payload =
+                    kotlinx.serialization.json.JsonObject(
+                        mapOf(
+                            "error" to
+                                buildJsonObject {
+                                    put("message", message)
+                                    put("codexErrorInfo", "serverOverloaded")
+                                }
+                        )
+                    ),
                 runId = "run",
             )
         fun plain(id: Long, type: String, text: String = "", payload: JsonObject? = null) =
-            RunEvent(id, id, type, text, payload, runId = "run")
+            RunEvent(
+                id = id,
+                createdAt = id,
+                type = type,
+                text = text,
+                payload = (payload)?.let { kotlinx.serialization.json.JsonObject(it) },
+                runId = "run",
+            )
         fun attempt(start: Long) =
             listOf(
                 plain(start, "turn.started"),
@@ -487,20 +518,22 @@ class TimelineTest {
         status: String = "in_progress",
     ) =
         RunEvent(
-            id,
-            id * 1000,
-            type,
-            "",
-            if (itemId.isEmpty()) null
-            else
-                mapOf(
-                    "item" to
-                        buildJsonObject {
-                            put("id", itemId)
-                            put("type", itemType)
-                            put("status", status)
-                        }
-                ),
+            id = id,
+            createdAt = id * 1000,
+            type = type,
+            text = "",
+            payload =
+                (if (itemId.isEmpty()) null
+                    else
+                        mapOf(
+                            "item" to
+                                buildJsonObject {
+                                    put("id", itemId)
+                                    put("type", itemType)
+                                    put("status", status)
+                                }
+                        ))
+                    ?.let { kotlinx.serialization.json.JsonObject(it) },
         )
 
     @Test

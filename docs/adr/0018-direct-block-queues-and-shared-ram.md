@@ -1,3 +1,5 @@
+> Statut : Remplacée par [ADR-0055](0055-ublk-only-vm-storage.md) pour le transport vhost-user et le patch mémoire partagée de Firecracker ; le regroupement durable et les autres règles d’E/S restent applicables.
+
 # Transport disque direct et restitution de la RAM partagée
 
 Date : 2026-10-01.

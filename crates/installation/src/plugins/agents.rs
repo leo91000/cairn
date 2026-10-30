@@ -2,7 +2,7 @@
 //! prompt instructions. Only agents the owner granted on an enabled instance get them,
 //! and only through those instances.
 use super::{
-    connections::{self, Connection},
+    connections::Connection,
     registry::{self, Package},
     scope::{self, Scope},
 };
@@ -23,10 +23,7 @@ async fn granted(
     plugin: Option<&str>,
 ) -> Result<Vec<(Package, Vec<Connection>)>> {
     let mut by_plugin = BTreeMap::<String, Vec<Connection>>::new();
-    for value in s.store.list(connections::KIND).await? {
-        let Ok(connection) = serde_json::from_value::<Connection>(value) else {
-            continue;
-        };
+    for connection in s.store.plugin_instances().await? {
         if connection.grants(agent_id) && plugin.is_none_or(|plugin| plugin == connection.plugin_id)
         {
             by_plugin

@@ -21,10 +21,10 @@ class HistoryCacheMeasurementTest {
         val events =
             (1L..1250L).map {
                 RunEvent(
-                    it,
-                    it,
-                    "item.completed",
-                    "Output $it\n" + "Synthetic output line.\n".repeat(20),
+                    id = it,
+                    createdAt = it,
+                    type = "item.completed",
+                    text = "Output $it\n" + "Synthetic output line.\n".repeat(20),
                 )
             }
         val process =

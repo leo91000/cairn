@@ -8,10 +8,12 @@ import VirtualSelect from './VirtualSelect.vue'
 interface Migration {
   chatId: string
   required: boolean
+  optional?: boolean
   fromBackend: 'native' | 'firecracker'
   toBackend: 'native' | 'firecracker'
   nodes: { id: string, name: string }[]
   pending: boolean
+  environmentExpired?: boolean
   reason?: string | null
   error?: string | null
 }
@@ -38,7 +40,7 @@ async function load() {
     const value = await api<Migration>(`/nodes/placement/${props.runId}/backend-migration`)
     if (stopped)
       return
-    if (state.value?.pending && !value.pending && !value.required) {
+    if (state.value?.pending && !value.pending && value.fromBackend === state.value.toBackend && value.fromBackend !== state.value.fromBackend) {
       completed.value = true
       emit('completed')
     }
@@ -80,18 +82,37 @@ async function migrate() {
 </script>
 
 <template>
-  <section v-if="state?.required || state?.pending || completed" class="mt-3 border-t border-line pt-3" aria-label="Change execution backend">
+  <section v-if="state?.required || state?.optional || state?.pending || completed" class="mt-3 border-t border-line pt-3" aria-label="Change execution backend">
     <h3 class="m-0! text-xs! font-semibold text-ink">
       Change execution backend
     </h3>
-    <p v-if="completed" role="status">
-      Migration complete. Send a new message to continue in the same conversation.
-    </p>
+    <template v-if="completed">
+      <p role="status">
+        Migration complete. Send a new message to continue in the same conversation.
+      </p>
+      <UiButton v-if="state?.optional" size="small" @click="completed = false">
+        Change environment again
+      </UiButton>
+    </template>
     <p v-else-if="state?.pending" role="status">
-      Migrating to {{ label }}. Execution is stopped while the environment is saved and transferred. You can leave this screen.
+      Migrating to {{ label }}.
+      <template v-if="state.environmentExpired">
+        The next message will create an empty environment. Conversation history and published files are retained.
+      </template>
+      <template v-else>
+        Execution is stopped while the environment is saved and transferred. You can leave this screen.
+      </template>
     </p>
     <template v-else>
-      <p>The agent now uses {{ label }}. Migrate this conversation to keep its history and files.</p>
+      <p v-if="state?.environmentExpired">
+        The previous environment expired. Confirm {{ label }} to continue in the same conversation with an empty environment. History, uploads and published artifacts are retained.
+      </p>
+      <p v-else-if="state?.optional">
+        You can explicitly change this conversation to {{ label }}. Its current environment is kept until you confirm.
+      </p>
+      <p v-else>
+        The agent now uses {{ label }}. Migrate this conversation to keep its history and files.
+      </p>
       <p v-if="state?.reason" class="text-warning">
         {{ state.reason }}
       </p>
@@ -120,15 +141,28 @@ async function migrate() {
     </p>
     <Modal v-if="confirm" title="Migrate this conversation?" @close="confirm = false">
       <div class="p-6 grid gap-4">
-        <p>Execution will stop and its files will move to {{ label }}. This keeps the same conversation and history.</p>
+        <p v-if="state?.environmentExpired">
+          The previous working files were deleted after inactivity. Confirm {{ label }} for a new empty environment, keeping the same conversation, history, uploads and published artifacts.
+        </p>
+        <p v-else>
+          Execution will stop and its files will move to {{ label }}. This keeps the same conversation and history.
+        </p>
         <p>The next message starts a fresh engine session with the conversation context. Operating-system tools and dependencies may need reinstalling.</p>
-        <p>The original environment is retained if migration fails. The conversation's previous node preference will be cleared.</p>
+        <p v-if="!state?.environmentExpired">
+          The original environment is retained if migration fails.
+        </p>
+        <p v-if="state?.environmentExpired">
+          Your chosen node is pinned for the new environment. You can change this in the conversation's node preferences.
+        </p>
+        <p v-else>
+          The conversation's previous node preference will be cleared.
+        </p>
         <div class="mt-4 flex justify-end gap-2">
           <UiButton :disabled="busy" @click="confirm = false">
             Cancel
           </UiButton>
           <UiButton variant="primary" :disabled="busy" @click="migrate">
-            Stop and migrate
+            {{ state?.environmentExpired ? 'Confirm backend change' : 'Stop and migrate' }}
           </UiButton>
         </div>
       </div>

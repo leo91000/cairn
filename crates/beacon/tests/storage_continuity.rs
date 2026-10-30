@@ -1,8 +1,10 @@
 mod common;
+#[path = "../../installation/tests/common/node_fixture.rs"]
+mod node_fixture;
 
 use axum::{
     Json, Router,
-    body::Body,
+    body::{Body, to_bytes},
     http::{Request, StatusCode},
     response::IntoResponse,
 };
@@ -12,8 +14,8 @@ use cairn_installation::{
     object_storage::Storage,
 };
 use common::RelayedInstallation;
+use node_fixture::{DbNodeFixture, direct_snapshot_upload};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 
 #[tokio::test]
@@ -24,6 +26,10 @@ async fn existing_disks_keep_publishing_reading_and_purging_on_their_original_st
     let controller = Router::new().fallback(move |request: Request<Body>| {
         let source = source.clone();
         async move {
+            if request.method() == "DELETE" && request.uri().path().ends_with("/direct-reader") {
+                return node_fixture::direct_reader_closed(request.uri().path());
+            }
+
             if request.method() == "DELETE" {
                 return Json(json!({})).into_response();
             }
@@ -38,19 +44,38 @@ async fn existing_disks_keep_publishing_reading_and_purging_on_their_original_st
                         "blocks": [{
                             "offset": 0,
                             "size": data.len(),
-                            "hash": hex::encode(Sha256::digest(&data))
+                            "hash": cairn_installation::storage::digest::block(&data)
                         }]
                     }
                 }))
                 .into_response();
             }
-            if request.uri().path().ends_with("/blocks")
-                || request.uri().path().ends_with("/publication")
-            {
-                // Exercise the supported single-block transport, without a VM.
-                return StatusCode::NOT_FOUND.into_response();
+            if request.method() == "POST" && request.uri().path().ends_with("/publication") {
+                let body = to_bytes(request.into_body(), 4096).await.unwrap();
+                let request: Value = serde_json::from_slice(&body).unwrap();
+                let data = source.lock().unwrap().clone();
+                assert_eq!(
+                    request["hashes"],
+                    json!([cairn_installation::storage::digest::block(&data)])
+                );
+                return data.into_response();
             }
-            source.lock().unwrap().clone().into_response()
+
+            if request.method() == "POST" && request.uri().path().ends_with("/direct-reader") {
+                return node_fixture::direct_reader_response(request.uri().path());
+            }
+            if request.method() == "POST" && request.uri().path().ends_with("/direct-upload") {
+                let body = to_bytes(request.into_body(), 131_072).await.unwrap();
+                let data = source.lock().unwrap().clone();
+                let root = tempfile::tempdir().unwrap();
+                let disk = root.path().join("source");
+                tokio::fs::write(&disk, &data).await.unwrap();
+                let manifest = cairn_installation::nodes::snapshots::index(&disk)
+                    .await
+                    .unwrap();
+                return direct_snapshot_upload(&disk, manifest, &body, false).await;
+            }
+            StatusCode::METHOD_NOT_ALLOWED.into_response()
         }
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -69,6 +94,7 @@ async fn existing_disks_keep_publishing_reading_and_purging_on_their_original_st
     .unwrap();
     let original_storage = Storage::configured(service).unwrap();
     let run_id = id();
+    let agent_id = id();
     let record = json!({
         "id": run_id,
         "taskId": run_id,
@@ -78,15 +104,46 @@ async fn existing_disks_keep_publishing_reading_and_purging_on_their_original_st
     });
     service
         .store
-        .write(move |db| db.add_run(&record, None))
+        .write(move |db| {
+            db.put_node_fixture(&json!({"id": LOCAL_NODE_ID, "local": true}))?;
+            let settings = serde_json::from_value(json!({
+                "name": "Storage continuity fixture",
+                "access": {"nodes": [LOCAL_NODE_ID], "mcpTools": {}},
+                "exclusiveNodes": [], "plugins": []
+            }))?;
+            let agent = cairn_installation::agents::new_agent(
+                settings,
+                Some(serde_json::from_value(json!(agent_id))?),
+            );
+            db.save_agent(&agent)?;
+            let snapshot = cairn_contracts::RunSnapshot {
+                task: serde_json::from_value(json!({
+                    "id": record["id"],
+                    "name": "Storage continuity fixture",
+                    "prompt": "Verify retained storage",
+                    "agentId": agent_id
+                }))?,
+                agent,
+                project: None,
+                projects: vec![],
+                available_projects: vec![],
+                skills: vec![],
+                delegation: None,
+            };
+            db.admit_run(
+                &serde_json::from_value(record)?,
+                Some(&snapshot),
+                &json!({"nodeId": LOCAL_NODE_ID}),
+                None,
+            )
+        })
         .await
         .unwrap();
     service
         .store
-        .set(
-            &format!("run-checkpoint:{run_id}"),
+        .save_checkpoint_boundary(
+            &run_id,
             json!({ "nodeId": LOCAL_NODE_ID, "runnerId": id() }),
-            None,
         )
         .await
         .unwrap();
@@ -174,10 +231,15 @@ async fn existing_disks_keep_publishing_reading_and_purging_on_their_original_st
                 .unwrap(),
             vec![expected; 4096]
         );
-        objects.push(shared_blocks::key(hash, block["object"].as_str().unwrap()));
+        objects.push(shared_blocks::object_key(
+            3,
+            hash,
+            block["object"].as_str().unwrap(),
+        ));
     }
     publication::purge(service, &run_id).await.unwrap();
-    // Advance the existing GC grace period; production purge is asynchronous.
+    // Advance both the GC grace period and the issued PUT capabilities' expiry;
+    // production purge must retain objects while a delayed PUT could recreate them.
     service
         .store
         .write(|db| {
@@ -185,6 +247,7 @@ async fn existing_disks_keep_publishing_reading_and_purging_on_their_original_st
                 "UPDATE shared_objects SET unused_at=0 WHERE unused_at IS NOT NULL",
                 [],
             )?;
+            db.0.execute("UPDATE direct_storage_grants SET expires_at=0", [])?;
             Ok(())
         })
         .await

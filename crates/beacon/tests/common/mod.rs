@@ -157,7 +157,8 @@ impl Fixture {
         } else {
             tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap()
         };
-        let url = format!("http://localhost:{}", listener.local_addr().unwrap().port());
+        let address = listener.local_addr().unwrap();
+        let url = format!("http://localhost:{}", address.port());
         let browser_origin = if subdomains {
             url.replace("localhost", "cairn.localhost")
         } else {
@@ -187,7 +188,12 @@ impl Fixture {
         Self {
             url,
             browser_origin,
-            client: Client::new(),
+            // Preserve localhost origins/cookies while targeting this IPv4 listener.
+            // Another process can own the same port on IPv6 loopback.
+            client: Client::builder()
+                .resolve("localhost", std::net::SocketAddr::new(address.ip(), 0))
+                .build()
+                .unwrap(),
             mail,
             pool,
             admin,
@@ -234,7 +240,9 @@ impl Fixture {
     }
 
     pub async fn wait_for_blocked_request(&self, barrier_pid: i32) {
-        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        // This is an infrastructure watchdog, not an account-lock latency assertion.
+        // Allow scheduling stalls while still requiring an observed PostgreSQL waiter.
+        tokio::time::timeout(std::time::Duration::from_secs(35), async {
             loop {
                 let (waiting,): (bool,) = sqlx_core::query_as::query_as(
                     "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))",
@@ -304,6 +312,7 @@ pub struct RelayedInstallation {
     pub cookie: String,
     pub session: Value,
     pub base: String,
+    pub beacon_origin: String,
     pub stop: tokio_util::sync::CancellationToken,
     pub connector: JoinHandle<cairn_installation::error::Result<()>>,
     pub direct: cairn_installation::direct::DirectConnections,
@@ -365,7 +374,7 @@ impl RelayedInstallation {
         Self::with_app(extra_routes, String::new(), app).await
     }
 
-    async fn with_app(extra_routes: axum::Router, runner_url: String, app: Fixture) -> Self {
+    pub async fn with_app(extra_routes: axum::Router, runner_url: String, app: Fixture) -> Self {
         use cairn_installation::{config::Config, service::Service};
         use serde_json::json;
         use std::time::Duration;
@@ -412,8 +421,11 @@ impl RelayedInstallation {
             .unwrap()
             .merge(extra_routes);
         let identity_dir = installation.config.data_dir.join("installation-relay");
+        // Machine clients do not share the HTTP fixture client's DNS override.
+        // The claimed origin is also retained by the real relay connector.
+        let beacon_origin = app.url.replace("localhost", "127.0.0.1");
         cairn_installation::relay::claim(
-            &app.url,
+            &beacon_origin,
             &identity_dir,
             claim["code"].as_str().unwrap(),
             "Real installation",
@@ -448,12 +460,16 @@ impl RelayedInstallation {
             cookie,
             session,
             base,
+            beacon_origin,
             stop,
             connector,
             direct,
             root,
         };
-        tokio::time::timeout(Duration::from_secs(10), async {
+        // This bounds fixture startup on the shared HTTP/Postgres host, not an
+        // authorization or revocation deadline. Keep enough infrastructure slack
+        // for a scheduling stall while still requiring a real successful request.
+        tokio::time::timeout(Duration::from_secs(35), async {
             loop {
                 let response = fixture.get("/chats").send().await.unwrap();
                 if response.status() == reqwest::StatusCode::OK {
@@ -533,3 +549,9 @@ pub async fn stream_accounts_with_members(
     }
     cookies
 }
+
+#[path = "../../../installation/tests/common/mission_fixture.rs"]
+pub mod mission_fixture;
+
+#[allow(unused_imports)]
+pub use mission_fixture::{MissionFixture, StoreMissionFixture};

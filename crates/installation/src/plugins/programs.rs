@@ -7,7 +7,8 @@ use crate::{
     validation::text,
 };
 use serde_json::{Value, json};
-use std::{process::Stdio, time::Duration};
+use sha2::{Digest, Sha256};
+use std::{collections::BTreeMap, process::Stdio, time::Duration};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 const MAX_ARGUMENTS: usize = 64;
@@ -57,7 +58,14 @@ pub async fn run(s: &Service, context: &Context, args: &Value) -> Result<Value> 
     let program = manifest
         .program(text(args, "program"))
         .ok_or_else(|| Error::forbidden("This program is not declared by the plugin."))?;
-    let path = super::program_installation::executable(s, manifest, program).await?;
+    let authority = context
+        .management
+        .as_ref()
+        .and_then(|authority| authority.preparation.as_ref())
+        .cloned()
+        .unwrap_or_default();
+    let path = super::program_installation::executable_authorized(s, manifest, program, &authority)
+        .await?;
     let arguments = match &args["args"] {
         Value::Null => Vec::new(),
         Value::Array(items) => items
@@ -74,25 +82,19 @@ pub async fn run(s: &Service, context: &Context, args: &Value) -> Result<Value> 
     {
         return Err(Error::bad("Program arguments are too long or invalid."));
     }
-    let home = tempfile::tempdir()?;
-    let mut command = tokio::process::Command::new(&path);
-    command
-        .args(&arguments)
-        .env_clear()
-        .env("HOME", home.path())
-        .env("TMPDIR", home.path())
-        .current_dir(home.path())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
+    let mut resolved_environment = BTreeMap::new();
     if let Some(environment) = args["env"].as_object() {
         if environment.len() > MAX_ENVIRONMENT {
             return Err(Error::bad("Too many program environment variables."));
         }
         let mut secrets = None;
         for (name, value) in environment {
-            if !variable(name) {
+            if !variable(name)
+                || program
+                    .cache
+                    .as_ref()
+                    .is_some_and(|cache| cache.socket_env == *name)
+            {
                 return Err(Error::bad("Invalid program environment variable."));
             }
             let value = match value {
@@ -114,7 +116,7 @@ pub async fn run(s: &Service, context: &Context, args: &Value) -> Result<Value> 
                 }
                 _ => return Err(Error::bad("Invalid program environment variable.")),
             };
-            command.env(name, value);
+            resolved_environment.insert(name.clone(), value);
         }
     } else if !args["env"].is_null() {
         return Err(Error::bad("Program environment must be a table."));
@@ -128,6 +130,73 @@ pub async fn run(s: &Service, context: &Context, args: &Value) -> Result<Value> 
         .unwrap_or(MAX_SECONDS)
         .clamp(1, MAX_SECONDS);
     capabilities::authorize_management(s, context).await?;
+    if s.shutdown.is_cancelled() {
+        return Err(Error::unavailable("The installation is shutting down."));
+    }
+    let cache = if let Some(config) = &program.cache {
+        let generation = s.plugins.program_caches.generation();
+        let package = super::registry::active(s, &manifest.id).await?;
+        if serde_json::to_value(&package.manifest)? != serde_json::to_value(manifest)? {
+            return Err(Error::conflict("The plugin changed. Retry the command."));
+        }
+        let identity = super::program_cache::Identity {
+            plugin: manifest.id.clone(),
+            connection: context.connection.id.clone(),
+            revision: context.connection.revision.clone(),
+            package: package.digest,
+            program: program.name.clone(),
+            executable: path.clone(),
+            environment: hex::encode(Sha256::digest(serde_json::to_vec(&resolved_environment)?)),
+        };
+        let reusable = context.draft.is_none() && context.connection.enabled;
+        if let Some(draft) = &context.draft {
+            let draft = draft.clone();
+            s.store.read(move |db| draft.authorize(db)).await?;
+        } else {
+            let expected = context.connection.clone();
+            s.store
+                .read(move |db| super::connections::check_revision(db, &expected))
+                .await?;
+        }
+        Some(tokio::select! {
+            biased;
+            () = s.shutdown.cancelled() => return Err(Error::unavailable("The installation is shutting down.")),
+            result = s.plugins.program_caches.acquire(identity, config, reusable, generation) => result?,
+        })
+    } else {
+        None
+    };
+    let temporary = if cache.is_none() {
+        Some(tempfile::tempdir()?)
+    } else {
+        None
+    };
+    let home = match &cache {
+        Some(cache) => cache.home(),
+        None => temporary.as_ref().expect("temporary home").path(),
+    };
+    let mut command = tokio::process::Command::new(&path);
+    command
+        .args(&arguments)
+        .env_clear()
+        .envs(&resolved_environment)
+        .env("HOME", home)
+        .env("TMPDIR", home)
+        .current_dir(home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    if let Some(cache) = &cache {
+        command.env(
+            &program
+                .cache
+                .as_ref()
+                .expect("cache declaration")
+                .socket_env,
+            cache.socket(),
+        );
+    }
     let mut child = command.spawn().map_err(|_| {
         Error::unavailable("The program could not start. Is it installed on this server?")
     })?;
@@ -149,14 +218,25 @@ pub async fn run(s: &Service, context: &Context, args: &Value) -> Result<Value> 
         )?;
         Ok::<_, Error>((stdout, overflow, stderr, status))
     };
-    let (stdout, overflow, stderr, status) =
-        match tokio::time::timeout(Duration::from_secs(seconds), operation).await {
-            Ok(result) => result?,
-            Err(_) => {
-                let _ = child.kill().await;
-                return Err(Error::unavailable("The program did not finish in time."));
-            }
-        };
+    let invalidated = async {
+        match &cache {
+            Some(cache) => cache.stop().cancelled().await,
+            None => std::future::pending().await,
+        }
+    };
+    let completed = tokio::select! {
+        biased;
+        () = s.shutdown.cancelled() => return Err(Error::unavailable("The installation is shutting down.")),
+        () = invalidated => return Err(Error::conflict("The program cache was invalidated. Retry the operation.")),
+        result = tokio::time::timeout(Duration::from_secs(seconds),operation) => result,
+    };
+    let (stdout, overflow, stderr, status) = match completed {
+        Ok(result) => result?,
+        Err(_) => {
+            let _ = child.kill().await;
+            return Err(Error::unavailable("The program did not finish in time."));
+        }
+    };
     if overflow {
         return Err(Error::too_large("The program output is larger than 1 MB."));
     }

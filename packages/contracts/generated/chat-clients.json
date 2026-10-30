@@ -1,0 +1,132 @@
+[
+  {
+    "bodyField": "answer",
+    "input": "AnswerChatQuestionInput",
+    "method": "POST",
+    "name": "answerChatQuestion",
+    "output": "ChatQuestion",
+    "path": "/chats/{chatId}/questions/{questionId}/answer"
+  },
+  {
+    "input": "ChatQuestionInput",
+    "method": "POST",
+    "name": "cancelChatQuestion",
+    "output": "ChatQuestion",
+    "path": "/chats/{chatId}/questions/{questionId}/cancel"
+  },
+  {
+    "bodyField": "question",
+    "input": "AskChatSideQuestionInput",
+    "method": "POST",
+    "name": "askChatSideQuestion",
+    "output": "ChatSideQuestion",
+    "path": "/chats/{chatId}/side-questions"
+  },
+  {
+    "input": "ChatSideQuestionInput",
+    "method": "POST",
+    "name": "cancelChatSideQuestion",
+    "output": "ChatSideQuestion",
+    "path": "/chats/{chatId}/side-questions/{sideQuestionId}/cancel"
+  },
+  {
+    "input": "GetConversationRetentionInput",
+    "method": "GET",
+    "name": "getConversationRetention",
+    "output": "ConversationRetention",
+    "path": "/settings/conversations"
+  },
+  {
+    "input": "ConversationRetention",
+    "method": "PUT",
+    "name": "setConversationRetention",
+    "output": "ConversationRetention",
+    "path": "/settings/conversations"
+  },
+  {
+    "input": "CreateChatInput",
+    "method": "POST",
+    "name": "createChat",
+    "output": "Chat",
+    "path": "/chats"
+  },
+  {
+    "input": "ChatInput",
+    "method": "GET",
+    "name": "getChat",
+    "output": "Chat",
+    "path": "/chats/{chatId}"
+  },
+  {
+    "bodyField": "message",
+    "input": "SendChatMessageInput",
+    "method": "POST",
+    "name": "sendChatMessage",
+    "output": "ChatMessage",
+    "path": "/chats/{chatId}/messages"
+  },
+  {
+    "bodyField": "message",
+    "input": "EditChatMessageInput",
+    "method": "PUT",
+    "name": "editChatMessage",
+    "output": "ChatMessage",
+    "path": "/chats/{chatId}/messages/{messageId}"
+  },
+  {
+    "input": "ChatMessageReference",
+    "method": "DELETE",
+    "name": "deleteChatMessage",
+    "output": "DeleteChatMessageOutput",
+    "path": "/chats/{chatId}/messages/{messageId}"
+  },
+  {
+    "input": "SetChatPausedInput",
+    "method": "POST",
+    "name": "setChatPaused",
+    "output": "Chat",
+    "path": "/chats/{chatId}/pause"
+  },
+  {
+    "input": "ChatInput",
+    "method": "POST",
+    "name": "stopChat",
+    "output": "Chat",
+    "path": "/chats/{chatId}/stop"
+  },
+  {
+    "input": "ChatInput",
+    "method": "POST",
+    "name": "compactChat",
+    "output": "Chat",
+    "path": "/chats/{chatId}/compact"
+  },
+  {
+    "input": "ConfirmChatInput",
+    "method": "POST",
+    "name": "restartChatSession",
+    "output": "Chat",
+    "path": "/chats/{chatId}/new-session"
+  },
+  {
+    "input": "ChatInput",
+    "method": "POST",
+    "name": "restoreChat",
+    "output": "Chat",
+    "path": "/chats/{chatId}/restore"
+  },
+  {
+    "input": "ConfirmChatInput",
+    "method": "DELETE",
+    "name": "deleteChat",
+    "output": "Chat",
+    "path": "/chats/{chatId}"
+  },
+  {
+    "input": "RunInput",
+    "method": "POST",
+    "name": "convertRunToChat",
+    "output": "Chat",
+    "path": "/runs/{runId}/chat"
+  }
+]

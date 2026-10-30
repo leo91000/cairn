@@ -1,4 +1,5 @@
 use super::*;
+use crate::common::run_fixture::DbRunFixture;
 
 #[tokio::test]
 async fn legacy_statuses_cannot_satisfy_multiple_application_bindings() {
@@ -16,7 +17,7 @@ async fn legacy_statuses_cannot_satisfy_multiple_application_bindings() {
             &f.s,
             &f.token,
             &json!({
-                "condition": condition(&f), "reason": "Ambiguous source", "timeoutSeconds": 420,
+                "conditions": [condition(&f)], "reason": "Ambiguous source", "timeoutSeconds": 420,
             }),
         )
         .await;
@@ -48,17 +49,20 @@ async fn failures_bound_check_details_and_missing_names_with_full_counts() {
     let result = f.schedule(condition(&f)).await;
     let observed = &result["observation"];
     assert_eq!(result["deferred"], false);
-    assert_eq!(observed["conclusion"], "failure");
-    assert_eq!(observed["requiredCount"], 500);
-    assert_eq!(observed["missingCheckCount"], 499);
-    assert_eq!(observed["pendingCount"], 499);
-    assert_eq!(observed["checksTruncated"], true);
+    assert_eq!(observed["pluginResult"]["conclusion"], "failure");
+    assert_eq!(observed["pluginResult"]["requiredCount"], 500);
+    assert_eq!(observed["pluginResult"]["missingCheckCount"], 499);
+    assert_eq!(observed["pluginResult"]["pendingCount"], 499);
+    assert_eq!(observed["pluginResult"]["checksTruncated"], true);
     assert_eq!(
-        observed["checks"].as_array().unwrap().len()
-            + observed["missingChecks"].as_array().unwrap().len(),
+        observed["pluginResult"]["checks"].as_array().unwrap().len()
+            + observed["pluginResult"]["missingChecks"]
+                .as_array()
+                .unwrap()
+                .len(),
         100
     );
-    assert_eq!(observed["checks"][0]["name"], "CI");
+    assert_eq!(observed["pluginResult"]["checks"][0]["name"], "CI");
 }
 
 fn check(name: &str, status: &str, conclusion: Option<&str>, required: bool) -> Value {
@@ -125,8 +129,14 @@ async fn required_pr_checks_resume_once_without_waiting_for_optional_checks() {
     );
     conditions::poll_once(&restarted).await.unwrap();
     let ready = restarted.chat_detail(&f.chat).await.unwrap();
-    assert_eq!(ready["wakeup"]["observation"]["conclusion"], "success");
-    assert_eq!(ready["wakeup"]["observation"]["requiredCount"], 1);
+    assert_eq!(
+        ready["wakeup"]["observation"]["pluginResult"]["conclusion"],
+        "success"
+    );
+    assert_eq!(
+        ready["wakeup"]["observation"]["pluginResult"]["requiredCount"],
+        1
+    );
     restarted.chat_tick(&HashSet::new()).await.unwrap();
     let resumed = restarted.chat_detail(&f.chat).await.unwrap();
     assert!(resumed["wakeup"].is_null());
@@ -141,7 +151,7 @@ async fn required_pr_checks_resume_once_without_waiting_for_optional_checks() {
     let run = f.run.clone();
     let events = restarted
         .store
-        .read(move |db| db.events(&run, 0, 1000))
+        .read(move |db| db.events_fixture(&run, 0, 1000))
         .await
         .unwrap();
     assert_eq!(
@@ -172,7 +182,10 @@ async fn missing_required_checks_and_wrong_apps_never_look_like_success() {
         let result = f.schedule(condition(&f)).await;
         if mode == "disabled_classic" {
             assert_eq!(result["deferred"], false);
-            assert_eq!(result["observation"]["conclusion"], "no_required_checks");
+            assert_eq!(
+                result["observation"]["pluginResult"]["conclusion"],
+                "no_required_checks"
+            );
         } else {
             assert_eq!(result["deferred"], true, "{mode}: {result}");
             f.finish().await;
@@ -203,7 +216,10 @@ async fn required_failures_and_cancellations_wake_even_when_other_checks_are_mis
         );
         let result = f.schedule(condition(&f)).await;
         assert_eq!(result["deferred"], false);
-        assert_eq!(result["observation"]["conclusion"], expected);
+        assert_eq!(
+            result["observation"]["pluginResult"]["conclusion"],
+            expected
+        );
         assert!(f.s.chat_detail(&f.chat).await.unwrap()["wakeup"].is_null());
     }
 }
@@ -223,7 +239,7 @@ async fn legacy_status_contexts_follow_github_required_and_pending_states() {
         assert_eq!(result["deferred"], !ready);
         if ready {
             assert_eq!(
-                result["observation"]["conclusion"],
+                result["observation"]["pluginResult"]["conclusion"],
                 if status == "SUCCESS" {
                     "success"
                 } else {
@@ -279,7 +295,7 @@ async fn check_pagination_and_limits_preserve_complete_head_bound_results() {
         101.into();
     state(&f, &json!({ "pr": initial, "pages": { "page-two": next } }));
     assert_eq!(
-        f.schedule(condition(&f)).await["observation"]["conclusion"],
+        f.schedule(condition(&f)).await["observation"]["pluginResult"]["conclusion"],
         "success"
     );
     assert!(
@@ -293,7 +309,7 @@ async fn check_pagination_and_limits_preserve_complete_head_bound_results() {
     let result = wait_for::schedule(
         &f.s,
         &f.token,
-        &json!({ "condition": condition(&f), "reason": "More", "timeoutSeconds": 420 }),
+        &json!({ "conditions": [condition(&f)], "reason": "More", "timeoutSeconds": 420 }),
     )
     .await;
     assert_eq!(result.unwrap_err().status, 409);
@@ -325,7 +341,7 @@ async fn incomplete_graphql_results_never_expose_errors_or_schedule_success() {
     let result = wait_for::schedule(
         &f.s,
         &f.token,
-        &json!({ "condition": condition(&f), "reason": "Errors", "timeoutSeconds": 420 }),
+        &json!({ "conditions": [condition(&f)], "reason": "Errors", "timeoutSeconds": 420 }),
     )
     .await;
     let error = result.unwrap_err();
@@ -348,9 +364,14 @@ async fn pr_waits_keep_cancellation_permission_and_deadline_contracts() {
                     .unwrap();
             }
             "permission" => {
-                connections::set_enabled(&f.s, "github", &f.instance, &json!({ "enabled": false }))
-                    .await
-                    .unwrap();
+                connections::set_enabled(
+                    &f.s,
+                    "github",
+                    &f.instance,
+                    &cairn_contracts::PluginEnabledInput { enabled: false },
+                )
+                .await
+                .unwrap();
             }
             "deadline" => {
                 f.due().await;
@@ -395,7 +416,7 @@ async fn pr_ids_and_commit_sha_are_canonical_and_invalid_sources_are_rejected() 
         let result = wait_for::schedule(
             &f.s,
             &f.token,
-            &json!({ "condition": source, "reason": "Invalid", "timeoutSeconds": 420 }),
+            &json!({ "conditions": [source], "reason": "Invalid", "timeoutSeconds": 420 }),
         )
         .await;
         assert_eq!(result.unwrap_err().status, 400);

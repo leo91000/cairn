@@ -1,0 +1,896 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "ExecutionNode": {
+      "additionalProperties": false,
+      "properties": {
+        "accepting": {
+          "default": false,
+          "type": "boolean"
+        },
+        "agents": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/NodeAgent"
+          },
+          "type": "array"
+        },
+        "availableSlots": {
+          "default": 0,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "budgetError": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "capabilities": {
+          "$ref": "#/definitions/NodeCapabilities"
+        },
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "diskAccounting": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NodeDiskAccounting"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "diskCapacity": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NodeDiskObservation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "diskGrowthProtocol": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "exclusiveAgents": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "exclusiveReservation": {
+          "additionalProperties": true,
+          "default": null,
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-kotlin-type": "ExclusiveReservation"
+        },
+        "exclusiveReservations": {
+          "default": false,
+          "type": "boolean"
+        },
+        "executionReady": {
+          "default": false,
+          "type": "boolean"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "imageDigest": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lastSeen": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "limits": {
+          "$ref": "#/definitions/NodeResources"
+        },
+        "local": {
+          "default": false,
+          "type": "boolean"
+        },
+        "maintenance": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "maintenanceError": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "maintenanceGeneration": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "maintenanceStartedAt": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "nativeAccounts": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "nativeEnabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "nativeModeObserved": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NativeModeObserved"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "nativeModeProposal": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NativeModeProposal"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "nativeModeRequest": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NativeModeRequest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "nativeModeStatus": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nativeReviewedAgents": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "occupiedSlots": {
+          "default": 0,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "pressure": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retainedRuns": {
+          "default": null,
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "revision": {
+          "type": "string"
+        },
+        "revoked": {
+          "default": false,
+          "type": "boolean"
+        },
+        "runtimeId": {
+          "default": "",
+          "type": "string"
+        },
+        "runtimeSlots": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "slots": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "staleDisks": {
+          "$ref": "#/definitions/StaleDisks"
+        },
+        "status": {
+          "default": "offline",
+          "pattern": "^(online|offline|local|revoked)$",
+          "type": "string"
+        },
+        "storage": {
+          "$ref": "#/definitions/NodeStoragePolicy"
+        },
+        "systemTags": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "tags": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "updateError": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NodeUsage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "revision",
+        "capabilities",
+        "limits",
+        "createdAt",
+        "storage",
+        "staleDisks"
+      ],
+      "type": "object"
+    },
+    "NativeAffectedAgent": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "type": "object"
+    },
+    "NativeAffectedConversation": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "status"
+      ],
+      "type": "object"
+    },
+    "NativeModeImpact": {
+      "properties": {
+        "agents": {
+          "items": {
+            "$ref": "#/definitions/NativeAffectedAgent"
+          },
+          "type": "array"
+        },
+        "conversations": {
+          "items": {
+            "$ref": "#/definitions/NativeAffectedConversation"
+          },
+          "type": "array"
+        },
+        "interruptions": {
+          "type": "string"
+        },
+        "mode": {
+          "pattern": "^(protected|administrator)$",
+          "type": "string"
+        },
+        "tasks": {
+          "items": {
+            "$ref": "#/definitions/NativeAffectedAgent"
+          },
+          "type": "array"
+        },
+        "trustedAccounts": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "trustedPeople": {
+          "items": {
+            "$ref": "#/definitions/NativeTrustedPerson"
+          },
+          "type": "array"
+        },
+        "warning": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode",
+        "warning",
+        "interruptions",
+        "trustedAccounts",
+        "trustedPeople",
+        "agents",
+        "conversations",
+        "tasks"
+      ],
+      "type": "object"
+    },
+    "NativeModeObserved": {
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "generation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "pattern": "^(protected|administrator)$",
+          "type": "string"
+        },
+        "status": {
+          "pattern": "^(pending|applied|failed)$",
+          "type": "string"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NativeModeRequest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "mode",
+        "status"
+      ],
+      "type": "object"
+    },
+    "NativeModeProposal": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "pattern": "^(protected|administrator)$",
+          "type": "string"
+        },
+        "previewId": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "previewId",
+        "mode",
+        "status"
+      ],
+      "type": "object"
+    },
+    "NativeModeRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "generation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "pattern": "^(protected|administrator)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "type": "object"
+    },
+    "NativeTrustedPerson": {
+      "properties": {
+        "email": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "NodeAgent": {
+      "additionalProperties": false,
+      "properties": {
+        "allNodes": {
+          "default": false,
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "type": "object"
+    },
+    "NodeCapabilities": {
+      "additionalProperties": false,
+      "properties": {
+        "arch": {
+          "type": "string"
+        },
+        "backend": {
+          "default": "firecracker",
+          "pattern": "^(firecracker|native)$",
+          "type": "string"
+        },
+        "cpu": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "diskMiB": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "diskTotalMiB": {
+          "default": 0,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kvm": {
+          "type": "boolean"
+        },
+        "memoryMiB": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "nativeModeProtocol": {
+          "default": 0,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "os": {
+          "type": "string"
+        },
+        "ublk": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "os",
+        "arch",
+        "kvm",
+        "cpu",
+        "memoryMiB",
+        "diskMiB"
+      ],
+      "type": "object"
+    },
+    "NodeDiskAccounting": {
+      "additionalProperties": false,
+      "properties": {
+        "capturedAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "hostFreeBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "hostReserveBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "localBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "poolReserveBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reclaimableBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unsynchronizedBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unusedGrantedBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "capturedAt",
+        "localBytes",
+        "unusedGrantedBytes",
+        "hostFreeBytes",
+        "hostReserveBytes",
+        "poolReserveBytes",
+        "reclaimableBytes",
+        "unsynchronizedBytes"
+      ],
+      "type": "object"
+    },
+    "NodeDiskObservation": {
+      "additionalProperties": false,
+      "properties": {
+        "capturedAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "freeBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ownedBytes": {
+          "additionalProperties": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "object"
+        },
+        "protocol": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "requests": {
+          "items": {
+            "$ref": "#/definitions/NodeGrowthRequest"
+          },
+          "type": "array"
+        },
+        "retainedBytes": {
+          "additionalProperties": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "object"
+        },
+        "usedBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "protocol",
+        "capturedAt",
+        "usedBytes",
+        "freeBytes",
+        "ownedBytes",
+        "retainedBytes",
+        "requests"
+      ],
+      "type": "object"
+    },
+    "NodeGrowthRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "attemptId": {
+          "type": "string"
+        },
+        "currentMiB": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "attemptId",
+        "currentMiB"
+      ],
+      "type": "object"
+    },
+    "NodeResources": {
+      "additionalProperties": false,
+      "properties": {
+        "cpu": {
+          "format": "uint32",
+          "maximum": 4096,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "diskMiB": {
+          "format": "uint64",
+          "maximum": 1099511627776,
+          "minimum": 128,
+          "type": "integer"
+        },
+        "memoryMiB": {
+          "format": "uint64",
+          "maximum": 1073741824,
+          "minimum": 128,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cpu",
+        "memoryMiB",
+        "diskMiB"
+      ],
+      "type": "object"
+    },
+    "NodeStoragePolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "backupSeconds": {
+          "default": 60,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cacheMiB": {
+          "default": 102400,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxDirtySeconds": {
+          "default": 300,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "memoryCacheMiB": {
+          "default": 256,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reserveMiB": {
+          "default": 10240,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reservePercent": {
+          "default": 5,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "NodeUsage": {
+      "additionalProperties": false,
+      "properties": {
+        "diskBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "diskMiB": {
+          "default": 0,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "memoryMiB": {
+          "default": 0,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "StaleDisks": {
+      "additionalProperties": false,
+      "properties": {
+        "count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "diskMiB": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "count",
+        "diskMiB"
+      ],
+      "type": "object"
+    }
+  },
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "preview",
+          "type": "string"
+        },
+        "preview": {
+          "$ref": "#/definitions/NativeModeImpact"
+        },
+        "previewId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "previewId",
+        "preview"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "awaitingOwner",
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "node": {
+          "$ref": "#/definitions/ExecutionNode"
+        }
+      },
+      "required": [
+        "kind",
+        "node",
+        "message"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "requested",
+          "type": "string"
+        },
+        "node": {
+          "$ref": "#/definitions/ExecutionNode"
+        }
+      },
+      "required": [
+        "kind",
+        "node"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "NativeModeChangeOutput"
+}

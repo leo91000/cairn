@@ -118,35 +118,65 @@ abstract class SkillWorkbenchCases {
             packages =
                 listOf(
                     PluginEntry(
-                        "github",
+                        id = "github",
                         builtin = true,
                         active = "1.0.0",
                         manifest =
                             PluginManifest(
                                 id = "github",
                                 name = "GitHub",
-                                instances = PluginInstances("Account", "Accounts"),
+                                instances =
+                                    PluginInstances(singular = "Account", plural = "Accounts"),
                                 skillSources =
                                     listOf(
                                         PluginSkillSource(
-                                            "repository",
-                                            "GitHub repository",
-                                            "A public or private repository this account can read.",
-                                            listOf(
-                                                PluginSetting(
-                                                    "repository",
-                                                    "Repository",
-                                                    required = true,
-                                                    placeholder = "owner/name",
-                                                ),
-                                                PluginSetting("ref", "Branch, tag or commit"),
-                                            ),
+                                            name = "repository",
+                                            title = "GitHub repository",
+                                            description =
+                                                "A public or private repository this account can read.",
+                                            fields =
+                                                (listOf(
+                                                        PluginSetting(
+                                                            "repository",
+                                                            "Repository",
+                                                            required = true,
+                                                            placeholder = "owner/name",
+                                                        ),
+                                                        PluginSetting(
+                                                            "ref",
+                                                            "Branch, tag or commit",
+                                                        ),
+                                                    ))
+                                                    .map {
+                                                        wireJson.encodeToJsonElement(
+                                                            PluginSetting.serializer(),
+                                                            it,
+                                                        )
+                                                    },
                                         )
                                     ),
+                                version = "1.0.0",
+                                apiVersion = 2,
+                                capabilities = emptyList(),
                             ),
+                        status = "active",
+                        setup = null,
+                        versions = emptyList(),
                     )
                 ),
-            connections = listOf(PluginConnection("acct", "github", "octo")),
+            connections =
+                listOf(
+                    PluginConnection(
+                        id = "acct",
+                        pluginId = "github",
+                        name = "octo",
+                        settings = kotlinx.serialization.json.JsonObject(emptyMap()),
+                        status = PluginStatus(),
+                        usage = PluginUsage(),
+                        enabled = true,
+                    )
+                ),
+            capabilities = emptyList(),
         )
 
     private val pdfBundle =
@@ -182,7 +212,7 @@ abstract class SkillWorkbenchCases {
             Skill(
                 "release-notes",
                 "Rédiger les notes de version à partir des commits.",
-                scope = "project",
+                scope = "46d045dd-9bce-51e3-8a99-65aa9384efc9",
                 files = 1,
                 bytes = 900,
             ),
@@ -229,7 +259,13 @@ abstract class SkillWorkbenchCases {
                         json("""{"deleted":true}""")
                     }
                     path == "$api/projects" ->
-                        json(wireJson.encodeToString(listOf(Project("project", "Cairn"))))
+                        json(
+                            wireJson.encodeToString(
+                                build.cairn.contracts.ListProjectsOutput(
+                                    listOf(Project("46d045dd-9bce-51e3-8a99-65aa9384efc9", "Cairn"))
+                                )
+                            )
+                        )
                     path == "$api/skills/global/review/bundle" && request.method == "GET" -> {
                         fixture.bundleLoads++
                         json(wireJson.encodeToString(reviewBundle))
@@ -335,7 +371,22 @@ abstract class SkillWorkbenchCases {
                     path == "$api/plugins" -> json(wireJson.encodeToString(catalog))
                     path == "$api/overview" -> json("{}")
                     path.endsWith("/models") -> json("""{"models":[]}""")
-                    else -> json("[]")
+                    else ->
+                        json(
+                            if (request.requestUrl?.encodedPath?.endsWith("/api/projects") == true)
+                                """{"projects":[]}"""
+                            else if (
+                                request.requestUrl?.encodedPath?.endsWith("/api/agents") == true
+                            )
+                                """{"agents":[]}"""
+                            else if (
+                                request.requestUrl?.encodedPath?.endsWith("/api/tasks") == true
+                            )
+                                """{"tasks":[]}"""
+                            else if (request.requestUrl?.encodedPath?.endsWith("/api/mcps") == true)
+                                """{"mcps":[]}"""
+                            else "[]"
+                        )
                 }
             }
         }
@@ -768,6 +819,7 @@ abstract class SkillWorkbenchCases {
                 .performTextReplacement(skillMarkdown + "\n4. Vérifier la documentation.\n")
             compose.onNodeWithTag("skill-mode-preview").performClick()
             shown(hasTestTag("skill-preview"))
+            shown(hasTestTag("skill-save") and isEnabled())
             compose.onNodeWithTag("skill-save").performClick()
             shown(hasTestTag("skill-conflict"))
             compose

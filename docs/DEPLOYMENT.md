@@ -11,178 +11,91 @@ failed recovery preparation or validation prevents deployment.
 For the beacon installation flow (one machine, integrated S3, no
 incoming ports), see [One-command installation](INSTALLATION.md).
 
-<a id="required-migration-to-beacon"></a>
-
-## Historical access migration to Beacon (v0.53)
-
-This section concerns the old standalone manager's transition to Beacon. An
-installation already using Beacon does not repeat it during ordinary releases.
-The [v0.53 archive](archive/CAIRN-V0.53-MIGRATION.md) records the initial launch;
-current claim and credential recovery are documented in
-[installation access](INSTALLATION-RELAY.md).
-
-This release removes the installation's browser login and application hosting.
-Administrator passwords, `SETUP_TOKEN`, local browser sessions and CSRF tokens no
-longer grant access. Local MCP OAuth/PAT entry points and public artifact URLs
-also stop working; their beacon replacements are delivered separately (#55).
-MCP OAuth setup that redirects to the old manager `/oauth/mcp/callback` also
-needs an beacon callback route before it can work again; existing stored
-outbound MCP credentials remain usable by agents. Old Android clients that use
-local login need the separate Beacon sign-in/client migration (#57).
-Do not deploy this as a transparent upgrade of the old public site.
-**The `.env.example` default follows `:latest`. Pulling that tag after this
-release removes local browser access immediately.** Before any pull or automated
-upgrade, pin `CAIRN_IMAGE` to the currently verified immutable digest and complete
-the migration preparation below. Keep that digest for rollback.
-
-Before upgrading, back up the volumes below and deploy Beacon
-with its own Postgres database, email delivery, HTTPS origin and web bundle
-([Beacon setup](BEACON.md)). Upgrade its binary and web bundle
-together before running the new `cairn claim`: earlier beacon binaries do not
-provide the device-review confirmation step. Sign in there. The installation
-and Beacon must use compatible relay protocols. Keep one relay process,
-and route account/access mutations, installation API requests and relay
-WebSockets to it. Revocation notifications are process-local; multiple beacon
-replicas are unsupported even with sticky installation routing. See
-[beacon process limits](BEACON.md#configuration) and
-[single-relay-process decision](adr/0032-single-official-relay-process.md) for this explicit restriction
-of spec #43 and the tolerance of persisted revocation checks.
-
-For an existing installation, preserve all volumes, add `CAIRN_BEACON_ORIGIN`
-to the manager environment, upgrade the image, then run:
-
-```sh
-docker compose exec manager cairn claim
-```
-
-The command prints the beacon `/claim` URL and a temporary device code. Open
-that URL, sign in to the Cairn account that will own the installation, and approve
-only the code displayed on your own machine. Wait for the command to confirm
-success, then restart the manager to load its new relay identity:
-
-```sh
-docker compose restart manager
-```
-
-The restart uses the usual execution recovery; do it at a suitable maintenance
-window. No automatic migration of browser accounts, grants or installations is
-provided. Alternatively, reinstall with fresh volumes and claim the new
-installation. **Discarding old volumes discards their data**: retain the original volumes
-until the replacement has been verified. The one-command installer includes local
-S3 setup; this manual Compose procedure still needs existing S3 configuration.
-
-After migration, use the beacon site. Verify the installation appears, a
-conversation can be read and modified, and access returns after a manager
-restart. Direct `/api/session`, `/api/setup`, `/api/login`, static pages, local
-OAuth, local `/mcp` and public artifact requests must be refused. Remove obsolete
-setup secrets and the installation's public browser domain/proxy. `PUBLIC_URL`
-is now an optional **internal manager origin** for execution nodes, defaulting to
-loopback; it is not a browser address or a relay prerequisite. Agents in VMs
-reach run-scoped MCP through their [VM-local channel](MICROVMS.md#vm-local-mcp-channel),
-not through this origin.
-For additional nodes use a reachable private LAN/VPN origin and keep the node
-channel available. Agent execution and node traffic continue during an beacon
-service outage, while browser access is unavailable.
-
-The read-only `/health` readiness probe and authenticated deployment lease remain
-operational endpoints. `/internal/nodes`, disk/workspace/execution channels and
-run-scoped `/mcp-workspace` and `/mcp-gateway` retain their own machine credentials;
-they do not accept browser sessions or local personal tokens. Keep port 4310
-private, only reachable by runners/nodes and deployment health checks.
-
-Detaching or definitively revoking an installation requires an email/passkey
-proof from the last five minutes in the calling session; use **Confirm identity**
-in its confirmation form.
-
-Detaching an installation revokes access and disconnects the active tunnel while
-preserving the beacon installation record and its local data. Deleting its
-owner account has the same effect. To claim it again, run `cairn claim` on its
-machine; successful approval rotates and atomically replaces the private identity
-file. A still-owned installation cannot be claimed by another account. A failed
-or expired claim keeps the existing identity file intact. Remove a used
-`CAIRN_INSTALLATION_CLAIM_CODE` from the environment. Protect
-`/data/installation-relay/identity.json` like node credentials and never publish it.
-
-If recovery is interrupted after the service attached the owner but before the
-machine saved its new token, detach that installation in the app and run
-`cairn claim` again with the existing private file. The service retains the proof
-used to start recovery separately from the tunnel credential, so the same
-installation record remains recoverable; that proof never reconnects a tunnel.
-A still-owned installation must be detached before any recovery attempt.
-
-If the identity file is missing/corrupt (or an initial claim response was lost
-before any identity was saved), choose **Revoke and forget installation** in the
-beacon app. This also works when it is offline and permanently invalidates old
-credentials and recovery proofs. Stop the manager, back up the entire private
-`installation-relay` directory outside the deployment volumes, remove that
-directory, and run `cairn claim` with `CAIRN_BEACON_ORIGIN`. This creates a new
-beacon installation ID while preserving existing data volumes.
-Retain the original identity and data until access has been verified. Use this **Revoke and forget**
-path after machine-token theft too: the thief may rotate first, making the old
-local token unusable for `cairn rotate-token`.
-
-To renew a credential while retaining the installation ID and its sharing,
-run `cairn rotate-token` with the deployment's usual `DATA_DIR`, then restart the
-manager. Retry the same command if its response is lost; retain `rotation.json`
-until the command succeeds. See [credential renewal](INSTALLATION-RELAY.md#renewing-a-machine-credential).
-
-### Roll back this access migration
-
-This ticket makes **no installation SQLite schema migration**. To restore the
-previous access model, stop the new manager, set `CAIRN_IMAGE` back to the exact
-previous verified image digest for both manager and runner, then run
-`docker compose pull && docker compose up -d`. Keep all four existing volumes.
-For Coolify, restore that same digest in `CAIRN_IMAGE` and restart the service.
-Restore the previous manager origin/proxy and its old setup configuration if
-removed; the previous image reads the preserved administrator/session records.
-Check its `/health` commit and local sign-in before declaring rollback complete.
-This deliberately restores the old local-access behavior. The private relay
-identity file can stay on disk; the old image ignores it. Detach the installation
-in the beacon app to revoke its relay identity if abandoning the migration.
-
-The Beacon Postgres migrations are separate and remain applied. Do not run an
-older binary against incompatible migrated data. If a later installation release
-has changed SQLite incompatibly, preserve active data and apply a reviewed
-forward fix; image rollback cannot reverse the migration.
-
 ## Additional execution nodes
 
-In the beacon app, open the installation’s **Nodes → Add a machine** screen.
-Supply the **Direct manager address** reachable from that machine: a LAN address,
-VPN hostname or optional public HTTPS origin, including its port. The browser
-continues to use the beacon relay; the additional node connects directly to
-this address. No public domain is required. The manager needs a listener or
-reverse proxy reachable from that LAN/VPN. The one-command installation keeps
-its manager on the private Docker network; expose only the manager’s node
-channel through a TLS proxy on your chosen private interface. For Compose,
-keep its loopback binding behind that proxy rather than exposing plaintext 4310.
-Use a certificate trusted by the node host and its container. Self-signed
-certificates are not silently trusted.
+In the beacon app, open the installation’s **Nodes → Add a machine** screen,
+name the machine and choose **Create enrollment code**. Copy the command onto a
+trusted Linux x86-64 machine and enter the single-use code when asked:
+
+```sh
+curl --fail --silent --show-error 'https://cairn.build/install/node.sh' \
+  | sudo bash -s -- '<installation-id>' firecracker '<manager-certificate-pin>'
+```
+
+No manager address, certificate or open port is needed. The command installs the
+**node gateway** (`cairn-node-gateway.service`, `/opt/cairn-gateway`,
+`/var/lib/cairn-gateway`), a static binary checksum-verified from Beacon, which
+serves `http://127.0.0.1:4319` on the machine. It then downloads and runs the
+manager’s usual node installer through that origin
+([ADR-0069](adr/0069-nodes-introduced-by-beacon.md)):
+
+- Beacon introduces the gateway to the manager: it forwards one WebRTC offer and
+  one answer. The machine and the manager then exchange UDP **directly**, on the
+  same LAN or across NATs, without Beacon.
+- When the networks prevent that (UDP blocked, symmetric NATs on both sides),
+  each connection goes **through Beacon** in a WebSocket, as TLS that Beacon
+  cannot read.
+- Both paths end on the manager’s node certificate. The last argument of the
+  command is its SHA-256 pin, so neither Beacon nor anyone on the way can
+  impersonate the manager.
+
+Requests keep their enrollment code, node token or disk grant, checked by the
+manager; only node routes are served to these connections. Firecracker
+containers reach the gateway through its socket under
+`/var/lib/cairn-gateway/socket`. The installation and Beacon must both support
+relay protocol 5; otherwise the command reports that the installation is offline
+or must be updated. The gateway logs which path it uses; to keep every
+connection on Beacon, for example on a network that drops UDP silently, set
+`"direct": false` in `/var/lib/cairn-gateway/config.json` and restart it.
+
+Rerunning the command is safe: it refreshes the gateway and the node supervisor
+without re-enrolling, and does not restart a running node. It is also how the
+gateway is updated. Restart `cairn-node`
+or `cairn-native-node` when idle to load a refreshed supervisor.
+
+```sh
+sudo systemctl status cairn-node-gateway
+sudo journalctl -u cairn-node-gateway
+```
+
+### Direct manager address
+
+Under **Connect directly instead**, supply a **Direct manager address** reachable
+from that machine to keep node traffic off Beacon even when a direct connection
+is impossible: a LAN address, VPN hostname or
+optional public HTTPS origin, including its port. The browser continues to use
+the beacon relay; the node connects directly to this address. The manager needs a
+listener or reverse proxy reachable from that LAN/VPN. The one-command
+installation keeps its manager on the private Docker network; expose only the
+manager’s node channel through a TLS proxy on your chosen private interface. For
+Compose, keep its loopback binding behind that proxy rather than exposing
+plaintext 4310. Use a certificate trusted by the node host and its container.
+Self-signed certificates are not silently trusted.
 
 HTTPS remains mandatory outside loopback, even on a private network or VPN.
-HTTP on loopback is the existing development/test exception, which does not
-send credentials across the network. Node identities and enrollment codes
-remain stored as hashes on the manager; enrollment codes expire and can be
-consumed only once. The address is connection configuration, not authorization.
-Disk blocks travel over the authenticated direct node channel or to configured
-S3 storage, never through the beacon relay.
+HTTP on loopback is the existing development/test exception, also used by the
+node gateway, which encrypts everything it sends across the network.
+Node identities and enrollment codes remain stored as hashes on the manager;
+enrollment codes expire and can be consumed only once. The address is connection
+configuration, not authorization.
 
 The chosen address is visible as an argument in the generated command:
 `curl …/internal/nodes/install.sh | sudo bash -s -- 'https://manager.vpn.example'`.
 The installer refuses URL query parameters that could hide a different download
 origin, and validates its argument before downloading the supervisor or changing
-the host. A usable configured manager origin remains the default for older
-commands without an argument; a Docker-only origin requires the explicit address.
-The address is saved in the node’s protected identity and supervisor configuration. The node uses
-this authenticated connection address for disk preparation and restoration,
-even if the manager’s internal origin is loopback. The manager’s optional
-`PUBLIC_URL` remains a fallback for older enrollment clients and
-manager-local calls; it need not be the browser’s origin. Installers require
-`CAIRN_NODE_IMAGE` to pin the manager’s approved image digest. Without it, use the
-matching `cairn node-enroll` binary with the address and temporary code shown in
-the app. Changes of address after installation require updating the node’s
-private identity and supervisor configuration together while its service is
-stopped; no credential is displayed by the app.
+the host. Without an address argument, a usable configured manager origin is
+the default, including for unclaimed installations; a Docker-only
+origin requires the explicit address. The address is saved in the node’s
+protected identity and supervisor configuration. The node uses this
+authenticated connection address for disk preparation and restoration, even if
+the manager’s internal origin is loopback. The manager’s optional `PUBLIC_URL`
+provides the default for enrollment and manager-local calls; it need
+not be the browser’s origin. Installers require `CAIRN_NODE_IMAGE` to pin the
+manager’s approved image digest. Without it, use the matching `cairn node-enroll`
+binary with the address and temporary code shown in the app. Changes of address
+after installation require updating the node’s private identity and supervisor
+configuration together while its service is stopped; no credential is displayed
+by the app.
 
 The node channel accepts the Host preserved by a private TLS proxy independently
 of `PUBLIC_URL`. Enrollment still needs its single-use code; node traffic and
@@ -196,15 +109,16 @@ Install Docker Engine and the Compose plugin. Clone this repository on the serve
 copy `.env.example` to `.env`, and configure `CAIRN_BEACON_ORIGIN`.
 Keep one manager replica per SQLite data volume. If using a prefilled claim code,
 set `CAIRN_INSTALLATION_CLAIM_CODE` and `CAIRN_INSTALLATION_NAME` before first startup;
-otherwise use `cairn claim` as above.
+otherwise follow [Manual Compose claim](#manual-compose-claim) after startup.
 
-For a local build, resolve current stable CLI versions and pass them to Docker:
+For a local build, resolve the agent tool versions CI would choose and pass them to Docker
+(see [tool versions](CLI-UPDATES.md)):
 
 ```sh
-codex_version=$(npm view @openai/codex version)
-gh_version=$(gh api repos/cli/cli/releases/latest --jq '.tag_name | ltrimstr("v")')
-docker compose build --build-arg CODEX_VERSION="$codex_version" --build-arg GH_VERSION="$gh_version"
-docker compose up -d
+versions=$(node scripts/cli-updates.mjs build-versions) \
+  && node -e 'for (const [tool, version] of Object.entries(JSON.parse(process.argv[1]))) console.log(`--build-arg=${tool.toUpperCase()}_VERSION=${version}`)' "$versions" \
+  | xargs docker compose build \
+  && docker compose up -d
 ```
 
 For published images, use
@@ -227,9 +141,27 @@ The image runs as UID/GID 1000. Bind mounts need matching ownership. Do not run
 The Compose defaults give the application two CPUs and 4 GB of memory; adjust these
 for the projects your agents build. Container logs rotate independently of run logs.
 
+## Manual Compose claim
+
+After starting the manager without a prefilled claim code, request a device code:
+
+```sh
+docker compose exec manager cairn claim
+```
+
+Approve the printed code while signed in to your Cairn account on Beacon, then
+restart the manager so it loads the new identity:
+
+```sh
+docker compose restart manager
+```
+
+See [fallback claim and credential recovery](INSTALLATION-RELAY.md#fallback-claim-and-detachment)
+for expired codes or a lost credential. The manager port stays private.
+
 ## Cairn account and CLI accounts
 
-Complete the claim above, then open the installation from your Cairn account on the
+Complete the [claim](#manual-compose-claim), then open the installation from your Cairn account on the
 Beacon site. Agent CLI accounts remain separate from your Cairn account. Keep
 tokens and account files out of Git, images, screenshots and support logs.
 
@@ -304,11 +236,12 @@ the default `memswap_limit` rather than setting it equal to `mem_limit`.
 ## Coolify
 
 Create a Compose service from `compose.yaml`, using the published GHCR image for
-both manager and runner. Configure the beacon origin and claim the manager as
-above. Preserve the persistent mounts, one replica and a 60-second shutdown grace
+both manager and runner. Configure the beacon origin and
+[claim the manager](#manual-compose-claim). Preserve the persistent mounts, one replica and a 60-second shutdown grace
 period. Use `/health` only for the private readiness check. Do not configure a
 public browser domain for the installation; serve the beacon application on its
-own HTTPS origin. Additional nodes still need a direct private route to port 4310.
+own HTTPS origin. Additional nodes connect through Beacon, or through a direct
+private route to port 4310.
 
 ### Deploy version tags through GitHub Actions
 
@@ -317,16 +250,19 @@ public installation manager. The [release runbook](PRODUCTION-CAIRN.md) covers
 release checks and failure recovery. The [configuration reference](PRODUCTION-CAIRN-SETUP.md)
 covers environment setup, DNS, Resend, OAuth and co-location.
 
-Main and same-repository PRs build both installation and beacon images. All
-existing quality, browser, network and installation/VM smoke checks remain
+Nightly, manual and version-tag qualification builds both installation and Beacon
+images. PRs and main pushes run the short checks described in
+[PR validation](agents/pr-validation.md). All quality, browser, network and installation/VM smoke checks remain
 publication prerequisites, alongside the exact beacon-image smoke with
 Postgres, bundled SPA, sign-in, persistence and readiness checks. Both images
 carry SBOM/provenance and share schema-3 evidence for one validated Git tree.
-Older single-image evidence cannot be reused. Fork images remain local.
+Older single-image evidence cannot be reused. Manual runs provide test results
+but cannot supply reusable release provenance.
 
 A `v*` tag promotes both immutable digests without rebuilding if a trusted run
-validated that exact tree and current installation CLI versions. Otherwise the
-full pipeline runs. A tag waits for concurrent main validation for up to 40
+validated that exact tree and current installation CLI versions, and production
+still serves the engine releases its rollback checks used. Otherwise the full
+pipeline runs. A tag waits for concurrent nightly validation for up to 40
 minutes; if validation is still pending, retry after it completes. No second
 build starts at that deadline. Production deployment jobs remain serialized.
 Main, PR and manual workflows never deploy.
@@ -337,7 +273,7 @@ variables listed in the [production setup](PRODUCTION-CAIRN-SETUP.md#read-only-r
 Follow that setup's credential transition before removing required reviewers;
 the legacy `COOLIFY_TOKEN` environment secret must be deleted so historical
 workflows cannot bypass current checks. Routine stable releases deploy automatically
-after installation data compatibility verification; they create no backups.
+after release validation; they create no backups.
 The obsolete `CAIRN_PUBLIC_URL` and standalone-manager deployment target are no
 longer used by the CLI. The script refuses a manager/runner Compose target.
 
@@ -352,17 +288,18 @@ verify the pair. Only beacon is restarted. It waits up to ten minutes for
 report the tested merge commit with the released tree. Existing installations
 update through their host timer; the release job also verifies the configured host has both approved images and
 execution readiness. See [failed releases](PRODUCTION-CAIRN.md#failed-releases)
-for operator intervention; do not roll back an incompatible data migration.
+for operator intervention.
 
-Retained VM disks keep their original guest OS and tools. Only approve an
-installation image automatically if both versions can read the persisted data.
-Review incompatible forward migrations separately.
+Resumed VM disks boot the current guest OS and tools. Manager, runner, nodes and
+guests deploy at the same version.
 
 ## Persisted data
 
-The release system does not create or retain backups. Image rollback cannot undo
-an incompatible data migration. Keep active volumes and credentials intact;
-recover incompatible migrations with a reviewed forward fix.
+The release system does not create or retain backups. Version-11 installations
+support the [data-preserving upgrade](PRODUCTION-CAIRN.md#data-preserving-upgrades);
+retain a consistent database/WAL backup and all installation state before rollout.
+Subsequent update failures retain the pending candidate for repair and retry;
+recover with a reviewed forward fix.
 
 Finished-run events expire after 30 days and audit entries after 90 days. Expired
 OAuth/session records are removed hourly. Run summaries and preserved worktrees
@@ -420,7 +357,7 @@ direct and log the name of the faulty setting; the relay keeps working.
 - **Unexpected host/origin:** check the internal manager origin for node traffic, and the beacon origin for browser access.
 - **Project outside workspace root:** use a directory under `WORKSPACE_ROOTS` (colon-separated on Linux), then register its canonical path.
 - **Worktree preparation failed:** check that the project is a Git repository and the configured local base branch exists.
-- **Recovering:** active conversations resume after the previous process/container stops. If the runner is unavailable, recovery waits and retains project/account locks. **Interrupted:** older runs without a checkpoint need review and an explicit retry. See [restart recovery](RESTART-RECOVERY.md).
+- **Recovering:** active conversations resume after the previous process/container stops. If the runner is unavailable, recovery waits and retains project/account locks. **Interrupted:** a run without its required checkpoint needs review and an explicit retry. See [restart recovery](RESTART-RECOVERY.md).
 - **No CLI installed/signed in:** use Connections and the commands above; provider account credentials are separate from the manager password.
 - **MCP rejects initialization:** verify the client uses Streamable HTTP and the deployed image includes stateless compatibility. Both 2026-07-28 and older 2025 clients are supported; standalone HTTP+SSE and stateful sessions are not.
 - **Always on relay:** see [Direct connection](#direct-connection) checks. Outbound UDP must be allowed from the installation host and the client network.
@@ -431,12 +368,10 @@ and [Codex authentication](https://learn.chatgpt.com/docs/auth) for the underlyi
 
 ## Automatic CLI updates
 
-The historical standalone CLI updater has been removed; see
-[tool versions and retired standalone updates](CLI-UPDATES.md) for old timer
-retirement instructions. Installations update tools through fully validated
-paired image releases and their host timer, with runtime verification and rollback. CI
-application images also resolve current stable
-Codex/GitHub CLI versions before building and validating them.
+Installations update tools through fully validated paired image releases and
+their host timer, with runtime verification and candidate retry. CI resolves the current
+Codex, GitHub CLI, Claude Code and OpenCode releases before building and
+validating images; see [tool versions](CLI-UPDATES.md).
 
 Codex `initialize` and retained-session `thread/resume` get separate, bounded
 two-minute deadlines for cold executable loading and native context recovery.
@@ -484,27 +419,27 @@ node scripts/nested-android-validation.mjs record /path/to/intel.json https://<d
 
 The recorded commit status documents the result; CI does not wait for it.
 
-Image promotion requires the ordinary CI checks. Tag releases reuse the successful
-main pipeline's exact image.
+Image promotion requires the ordinary CI checks. Tag releases reuse a successful nightly
+qualification's exact image, or run the complete qualification themselves.
 
-### Task-author security upgrade (#59)
+### Task-author security and coordinated upgrades (#59)
 
-Deploy Beacon before upgrading installations for the task-author
-checks. Startup applies the additive `202610072155_task_author_access` migration
-with the existing SQLx migrator; historical migration numbers and checksums stay
-unchanged. Existing memberships receive access identifiers automatically.
-An upgraded manager cannot reconnect to an older beacon binary that lacks
-`/api/relay/{installation}/task-authors`: its 404 defers scheduled admissions
-and keeps the relay offline. Keep the upgraded Beacon while rolling
-back an installation. Rolling back Beacon requires confirmation that the older binary and managers
-can read the current database. Use a forward fix for incompatible migrations.
-Older managers also restore the previous task-author/public-link rules, so
-suspend shared access during any compatible rollback.
+Deploy matching current Beacon and installation binaries. Follow the
+[Beacon database compatibility runbook](BEACON.md#next-release-recreate-the-beacon-database)
+before promotion. Historical incompatible migration ledgers need a separately
+prepared data-preserving migration; routine releases do not reset Beacon or
+installation data. Version-11 installations use the
+[automatic inventory upgrade](migrations/0012-typed-node-inventory.md).
+A protocol mismatch requires an update and prevents reconnection. Rollback also
+requires a matching binary set and a database created by that Beacon version;
+keep access closed until the set is consistent.
 
-Upgrade every shared installation: older binaries do not enforce the task-author
-policy. Upgraded installations require the beacon task-author endpoint before
-reconnecting and before admitting scheduled work. During an beacon outage,
-new scheduled admissions wait and already admitted work continues. On first
-reconciliation, old tasks without authors belong to the current owner. Removed
-members' tasks and admitted runs remain available; re-invitation does not resume
-old schedules. Public links remain owner-managed until explicitly revoked.
+Installations require the Beacon task-author endpoint before reconnecting and
+before admitting scheduled work. During a Beacon outage, new scheduled admissions
+wait and already admitted work continues. Removed members' tasks and admitted
+runs remain available; re-invitation does not resume old schedules. Public links
+remain owner-managed until explicitly revoked.
+
+VM runners use ublk and a single flat ext4 conversation disk. No block-transport,
+disk-layout or RAM-snapshot selector is required. The ready VM pool remains
+configurable with `CAIRN_READY_VM_POOL` and `CAIRN_READY_VM_POOL_SIZE` on the runner.

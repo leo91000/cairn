@@ -10,6 +10,26 @@ import {
   workspacePath,
 } from './fixtures'
 
+test('expired environments retain the conversation and explain fresh resumption and cleanup retries', async ({ page, workspace }) => {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  workspace.service.store.put('chats', { ...chat, environmentState: 'expired', environmentExpiredAt: Date.now() })
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  const notice = page.getByRole('status').filter({ hasText: 'Working environment expired' })
+  await expect(notice).toContainText('Your next message starts a fresh environment')
+  await expect(notice).toContainText('published files and shared links are retained')
+  await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeVisible()
+  workspace.service.store.put('chats', {
+    ...chat,
+    environmentState: 'cleaning',
+    environmentRetryAfter: Date.now() + 3600_000,
+    environmentError: 'Node unavailable',
+  })
+  await page.reload()
+  await expect(notice).toContainText('Please wait before sending another message')
+  await expect(notice).toContainText('Cleanup will retry: Node unavailable')
+})
+
 test('a lost message acknowledgement retries the same submission without duplicating it', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
   const attempts: { id: string, chatId: string }[] = []
@@ -265,10 +285,12 @@ test('a durable condition wait follows a dependency across restart and queue pau
   workspace.service.store.set('deployment-lease', 'condition-wait-fixture', Date.now() + 120000)
   try {
     const task = await workspace.api('/api/tasks', 'POST', {
-      name: 'Condition dependency',
-      prompt: 'Other work',
-      agentId: agent.id,
-      worktree: false,
+      settings: {
+        name: 'Condition dependency',
+        prompt: 'Other work',
+        agentId: agent.id,
+        worktree: false,
+      },
     })
     const target = await workspace.api(`/api/tasks/${task.id}/run`, 'POST', {})
     const wakeup = {
@@ -304,6 +326,79 @@ test('a durable condition wait follows a dependency across restart and queue pau
     expect(resumed.run.sessionId).toBe(detail.run.sessionId)
     expect(resumed.wakeup).toBeNull()
     expect(workspace.service.store.events(detail.run.id, 0, 100).filter(event => event.type === 'chat.user')).toHaveLength(1)
+  }
+  finally {
+    workspace.service.store.delete('deployment-lease')
+  }
+})
+
+test('a large grouped wait pages through every condition and resumes once all are in', async ({ page, workspace }) => {
+  test.setTimeout(90000)
+  const agent = workspace.service.store.get('agents', '00000000-0000-4000-8000-000000000001')!
+  workspace.service.store.put('agents', { ...agent, access: { ...agent.access, installation: true } })
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Finish after all dependencies' })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).toBe('succeeded')
+  const detail = await workspace.api(`/api/chats/${chat.id}`)
+  workspace.service.store.set('deployment-lease', 'grouped-wait-fixture', Date.now() + 120000)
+  try {
+    const targets = await Promise.all(Array.from({ length: 23 }, (_, index) => `Grouped dependency ${index + 1}`).map(async (name) => {
+      const task = await workspace.api('/api/tasks', 'POST', {
+        settings: {
+          name,
+          prompt: 'Other work',
+          agentId: agent.id,
+          worktree: false,
+        },
+      })
+      return workspace.api(`/api/tasks/${task.id}/run`, 'POST', {})
+    }))
+    const first = targets[0]
+    const last = targets.at(-1)!
+    workspace.service.store.updateRun(first.id, { status: 'failed', finishedAt: Date.now() })
+    const conditions = targets.map(target => ({ type: 'run_finished' as const, runId: target.id }))
+    const wakeup = {
+      id: randomUUID(),
+      messageId: detail.run.chatExecution.messageId,
+      reason: 'Join all dependencies',
+      seconds: 420,
+      createdAt: Date.now(),
+      wakeAt: Date.now() + 420000,
+      condition: { type: 'group' as const, mode: 'all' as const, conditions },
+      members: targets.map(() => ({})),
+    }
+    workspace.service.store.put('chats', { ...workspace.service.store.get('chats', chat.id)!, wakeup })
+    workspace.service.store.event(detail.run.id, 'chat.wait', wakeup.reason, wakeup)
+    await page.goto(workspacePath(`/chats/${chat.id}`))
+    await authenticateWorkspace(page)
+    const card = page.locator('.chat-wait')
+    await expect(card).toContainText('Waiting for 23 results')
+    // The failure already counts as a result: Cairn records it while the other run is pending.
+    await expect(card.getByTestId('wait-member')).toHaveCount(10)
+    await expect(card.getByTestId('wait-member').first()).toContainText('The run failed')
+    await expect(card.getByTestId('wait-member').last()).toContainText('Waiting for it to finish')
+    await expect(card).toContainText('1/23')
+    await expect(page.getByRole('region', { name: 'Waiting', exact: true }).locator(`[data-fil-key="chat:${chat.id}"]`)).toContainText('1 of 23 results')
+    await expect(card.getByRole('link', { name: `Open run ${first.id.slice(0, 8)}` })).toHaveAttribute('href', new RegExp(`/runs/${first.id}$`))
+    await expect(card.getByRole('button', { name: 'Previous conditions' })).toBeDisabled()
+    await card.getByRole('button', { name: 'Next conditions' }).click()
+    await expect(card).toContainText('11–20 of 23')
+    await card.getByRole('button', { name: 'Next conditions' }).click()
+    await expect(card.getByTestId('wait-member')).toHaveCount(3)
+    await expect(card).toContainText('21–23 of 23')
+    await expect(card.getByRole('button', { name: 'Next conditions' })).toBeDisabled()
+    await expect(card.getByRole('link', { name: `Open run ${last.id.slice(0, 8)}` })).toHaveAttribute('href', new RegExp(`/runs/${last.id}$`))
+    for (const width of [1280, 390]) {
+      await page.setViewportSize({ width, height: 844 })
+      await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1)
+    }
+
+    for (const target of targets.slice(1))
+      workspace.service.store.updateRun(target.id, { status: 'succeeded', finishedAt: Date.now() })
+    workspace.service.store.delete('deployment-lease')
+    await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.summary, { timeout: 30000 }).toContain('Cairn resumed this conversation')
+    await expect(card).toContainText('All 23 results in')
+    await expect(card).toContainText('1 failed · 22 succeeded')
   }
   finally {
     workspace.service.store.delete('deployment-lease')
@@ -612,29 +707,65 @@ test('a transient agent error shows a retry countdown and resumes without user i
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.retry?.attempt).toBe(1)
   const waiting = (await workspace.api(`/api/chats/${chat.id}`)).run
   expect(waiting.status).toBe('queued')
+  waiting.retry.nextAttemptAt = Date.now() + 60_000
+  workspace.service.store.updateRun(waiting.id, { retry: waiting.retry })
   // A retry keeps earlier conversation events, including an interrupted background wait.
   workspace.service.store.event(waiting.id, 'turn.waiting', '', {
     tasks: [{ id: 'old-build', description: 'Earlier background build' }],
   })
   await page.goto(workspacePath(`/chats/${chat.id}`))
   await authenticateWorkspace(page)
-  const notice = page.getByRole('status').filter({ hasText: /Temporary agent error\. Retrying in \d+ seconds \(attempt 1\/3\)\./ })
+  const notice = page.getByTestId('recovery-notice')
   await expect(notice).toBeVisible()
   // The failed attempt shows one card, marked as a temporary error Cairn retries itself.
   const failure = page.getByRole('note').filter({ hasText: 'workspace routing discovery timed out' })
   await expect(failure).toHaveCount(1)
-  await expect(failure).toContainText('Temporary error — automatic retry 1/3')
+  await expect(failure).toContainText('Temporary error — automatic retry 1/5')
   await expect(page.locator('.agent-waiting')).toHaveCount(0)
   await expect(page.getByText('Background task', { exact: true })).toHaveCount(0)
   const before = await notice.textContent()
   await expect.poll(() => notice.textContent()).not.toBe(before)
-  await page.screenshot({ path: test.info().outputPath('agent-retry-countdown.png') })
+  for (const colorScheme of ['light', 'dark'] as const) {
+    await page.emulateMedia({ colorScheme })
+    for (const width of [1280, 390, 320]) {
+      await page.setViewportSize({ width, height: 900 })
+      await expect(notice).toBeVisible()
+      await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1)
+      await page.screenshot({ path: test.info().outputPath(`agent-retry-${colorScheme}-${width}.png`) })
+    }
+  }
+
   expect((await workspace.api(`/api/chats/${chat.id}`)).paused).toBe(false)
   workspace.service.store.updateRun(waiting.id, { retry: { ...waiting.retry, nextAttemptAt: Date.now() } })
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).toBe('succeeded')
   await expect(page.getByText('Ready for the next step.', { exact: false }).last()).toBeVisible()
   await expect(notice).toHaveCount(0)
   await expect(failure).toHaveCount(1)
+})
+
+test('cancelling automatic recovery pauses the conversation and preserves its work', async ({ page, workspace }) => {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
+    id: randomUUID(),
+    text: 'fixture:agent-failures:[{"code":"server_overloaded","message":"Please try again"}]',
+  })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.retry?.attempt).toBe(1)
+  const waiting = (await workspace.api(`/api/chats/${chat.id}`)).run
+  workspace.service.store.updateRun(waiting.id, { retry: { ...waiting.retry, nextAttemptAt: Date.now() + 60_000 } })
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  const notice = page.getByTestId('recovery-notice')
+  await expect(notice.getByText('Retry 1 of 5')).toBeVisible()
+  await notice.getByText('What happened').click()
+  await expect(notice.getByText('Please try again')).toBeVisible()
+  await notice.getByRole('button', { name: 'Cancel retry' }).click()
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).paused).toBe(true)
+  await expect(notice).toHaveCount(0)
+  const stopped = (await workspace.api(`/api/chats/${chat.id}`)).run
+  expect(stopped.id).toBe(waiting.id)
+  expect(stopped.workspace).toBe(waiting.workspace)
+  expect(stopped.retry).toBeNull()
+  expect(stopped.status).toBe('cancelled')
 })
 
 test('native Codex reconnect notices remain visible until work continues', async ({ page, workspace }) => {
@@ -1202,7 +1333,7 @@ test('starts project chats, steers, edits the queue and preserves a compact mobi
 test('withdraws an obsolete question without sending an answer on desktop and mobile', async ({ page, workspace }) => {
   for (const width of [1440, 390]) {
     const chat = await workspace.api('/api/chats', 'POST', {})
-    await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'fixture:question blocking' })
+    await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'fixture:cairn-question' })
     await page.setViewportSize({ width, height: 844 })
     await page.goto(workspacePath(`/chats/${chat.id}`))
     await authenticateWorkspace(page)
@@ -1233,7 +1364,7 @@ test('answers in-flight questions with choices or free text on desktop and mobil
   await authenticateWorkspace(page)
   await expect(page.locator('.task-focus-detail')).toBeVisible()
   await page.goto(workspacePath('/chats'))
-  await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Plan the navigation refresh. fixture:question')
+  await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Plan the navigation refresh. fixture:cairn-question')
   await page.getByRole('button', { name: 'Send', exact: true }).click()
   await expect(page.getByRole('button', { name: 'Answer pending questions' })).toBeVisible()
   await page.setViewportSize({ width: 1440, height: 1000 })
@@ -1241,14 +1372,15 @@ test('answers in-flight questions with choices or free text on desktop and mobil
   await expectSingleScroll(page)
   await page.screenshot({ path: test.info().outputPath('questions-chat-desktop.png'), animations: 'disabled' })
   await page.getByRole('button', { name: 'Answer', exact: true }).click()
-  await expect(page.getByText('Agent keeps working', { exact: true })).toBeVisible()
+  await expect(page.getByText('Continue the conversation', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Send answer', exact: true })).toBeDisabled()
-  await expect(page.getByRole('radio').first()).not.toBeChecked()
+  await expect(page.getByRole('checkbox').first()).not.toBeChecked()
   await expectSingleScroll(page)
   await page.screenshot({ path: test.info().outputPath('questions-desktop-light.png'), animations: 'disabled' })
   await page.emulateMedia({ colorScheme: 'dark' })
   await page.screenshot({ path: test.info().outputPath('questions-desktop-dark.png'), animations: 'disabled' })
-  await page.getByRole('radio', { name: /Gradual rollout/ }).check()
+  await page.getByRole('checkbox', { name: /Chat view/ }).check()
+  await page.getByRole('checkbox', { name: /Android/ }).check()
   await expect(page.getByRole('button', { name: 'Send answer', exact: true })).toBeEnabled()
   await page.getByRole('button', { name: 'Answer later' }).click()
   await page.reload()
@@ -1259,17 +1391,18 @@ test('answers in-flight questions with choices or free text on desktop and mobil
   await expectSingleScroll(page)
   await page.screenshot({ path: test.info().outputPath('questions-mobile-dark.png'), animations: 'disabled' })
   await page.emulateMedia({ colorScheme: 'light' })
-  await page.getByRole('textbox', { name: 'Or write your own answer' }).fill('Start with the chat, keeping keyboard navigation intact.')
+  await page.getByRole('textbox', { name: 'Comment or your own answer (optional with choices)' }).fill('Start with the chat, keeping keyboard navigation intact.')
   await page.screenshot({ path: test.info().outputPath('questions-mobile-light.png'), animations: 'disabled' })
   await page.setViewportSize({ width: 320, height: 600 })
   await expectSingleScroll(page)
   await page.getByRole('button', { name: 'Send answer', exact: true }).click()
   await expect(page.getByRole('dialog')).not.toBeVisible()
   await expect(page.getByRole('button', { name: 'Answer pending questions' })).not.toBeVisible()
-  await expectChatReady(page)
   const chatKey = new URL(page.url()).pathname.split('/').at(-1)!
   const chatId = (await workspace.api(`/api/chats/${chatKey}`)).id
-  expect(workspace.service.questions.list(chatId)[0].status).toBe('answered')
+  // Submission queues the answer; Ready can still describe the preceding turn.
+  await expect.poll(() => workspace.service.questions.list(chatId)[0].status).toBe('answered')
+  await expectChatReady(page)
   await page.setViewportSize({ width: 390, height: 844 })
   await page.getByRole('button', { name: 'Chat details', exact: true }).click()
   await page.getByRole('link', { name: 'Question notifications' }).click()
@@ -1540,4 +1673,82 @@ test('a plugin condition wait reads in its plugin\'s words, with generic fallbac
   await expect(cards.last()).toContainText('Action required')
   await expect(cards.last()).toContainText('A condition · The result was already available')
   await expect(cards.filter({ hasText: /GitHub|unreachable/ })).toHaveCount(0)
+})
+
+test('context usage shows the latest request and an explicit compaction keeps the visible history', async ({ page, workspace }, testInfo) => {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Measure the context' })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 15000 }).toBe('succeeded')
+  const opened = await workspace.api(`/api/chats/${chat.id}`)
+  const before = opened.run
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+
+  // Codex reports the latest request (40,900 tokens), not the thread's cumulative total.
+  const indicator = page.getByTestId('context-indicator')
+  await expect(indicator).toHaveText('Context 41K / 258K · 16%')
+  const earlierReply = page.getByRole('region', { name: 'Run conversation', exact: true })
+    .getByText('Ready for the next step.', { exact: true })
+  await expect(earlierReply).toBeVisible()
+  await page.getByRole('button', { name: 'Chat details', exact: true }).click()
+  const details = page.getByRole('dialog', { name: 'Chat details', exact: true })
+  await expect(details.getByTestId('context-usage')).toContainText('40,900 of 258,400 tokens (16%)')
+  await expect(details.getByTestId('context-usage')).toContainText('36,000 tokens read from cache')
+  await page.screenshot({ path: testInfo.outputPath('context-details.png'), animations: 'disabled' })
+  await details.getByRole('button', { name: 'Compact context', exact: true }).click()
+  const confirmation = page.getByRole('dialog', { name: 'Compact the agent context?', exact: true })
+  await expect(confirmation).toContainText('Every message stays visible')
+  await confirmation.getByRole('button', { name: 'Compact context', exact: true }).click()
+  await expect(confirmation).toHaveCount(0)
+
+  const divider = page.getByTestId('context-compaction')
+  await expect(divider).toHaveCount(1)
+  await expect(divider).toContainText('Context compacted', { timeout: 15000 })
+  await expect(indicator).toHaveText('Context ≈ 6K / 258K · 2%')
+  // The earlier reply and request stay in the transcript; no reply or new finish is invented.
+  await expect(earlierReply).toBeVisible()
+  await expect(page.locator('.user-bubble').filter({ hasText: 'Measure the context' })).toBeVisible()
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).compaction?.available).toBe(true)
+  const after = await workspace.api(`/api/chats/${chat.id}`)
+  expect(after.run.status).toBe('succeeded')
+  expect(after.run.finishedAt).toBe(before.finishedAt)
+  expect(after.run.summary).toBe(before.summary)
+  // The compaction is not a chat message.
+  expect(after.messages).toEqual(opened.messages)
+  expect(after.contextUsage).toEqual({
+    contextTokens: 6200,
+    contextWindow: 258400,
+    cachedTokens: null,
+    estimated: true,
+  })
+
+  for (const colorScheme of ['light', 'dark'] as const) {
+    await page.emulateMedia({ colorScheme })
+    for (const width of [1280, 390]) {
+      await page.setViewportSize({ width, height: 844 })
+      await divider.scrollIntoViewIfNeeded()
+      await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1)
+      await page.screenshot({ path: testInfo.outputPath(`context-compaction-${colorScheme}-${width}.png`), animations: 'disabled' })
+    }
+  }
+
+  // On phones the details sheet carries the same measurement and action.
+  await page.getByRole('button', { name: 'Chat details', exact: true }).click()
+  await expect(details.getByTestId('context-usage')).toContainText('Estimated by the coding agent')
+  await expect(details.getByRole('button', { name: 'Compact context', exact: true })).toBeEnabled()
+  await page.screenshot({ path: testInfo.outputPath('context-details-phone.png'), animations: 'disabled' })
+})
+
+test('compaction is unavailable while a turn runs and explains why', async ({ page, workspace }) => {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'fixture:chat-hang' })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 15000 }).toBe('running')
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  await page.getByRole('button', { name: 'Chat details', exact: true }).click()
+  const details = page.getByRole('dialog', { name: 'Chat details', exact: true })
+  await expect(details.getByRole('button', { name: 'Compact context', exact: true })).toBeDisabled()
+  await expect(details).toContainText('Wait for the current turn to finish before compacting.')
+  await expect(workspace.api(`/api/chats/${chat.id}/compact`, 'POST', {})).rejects.toThrow(/Wait for the current turn to finish/)
+  await workspace.api(`/api/chats/${chat.id}/stop`, 'POST', {})
 })

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { ExecutionNode, NodeStoragePolicy } from '../../../../packages/contracts/nodes'
 import { ref } from 'vue'
+import { updateNodeStorage } from '../../../../packages/contracts/generated/updateNodeStorage'
 import { api } from '../api'
 import { HardDrive } from '../icons'
 import Icon from './Icon.vue'
@@ -10,11 +11,13 @@ import UiButton from './UiButton.vue'
 const props = defineProps<{ node: ExecutionNode }>()
 const emit = defineEmits<{ saved: [] }>()
 const policy = ref<NodeStoragePolicy | null>(null)
+const revision = ref('')
 const error = ref('')
 const busy = ref(false)
 
 function open() {
   error.value = ''
+  revision.value = props.node.revision
   const saved = props.node.storage
   policy.value = {
     cacheMiB: saved?.cacheMiB ?? 102400,
@@ -27,10 +30,12 @@ function open() {
 }
 
 async function save() {
+  if (!policy.value)
+    return
   busy.value = true
   error.value = ''
   try {
-    await api(`/nodes/${props.node.id}/storage`, { method: 'PUT', body: JSON.stringify(policy.value) })
+    await updateNodeStorage(api, { nodeId: props.node.id, revision: revision.value, storage: policy.value })
     policy.value = null
     emit('saved')
   }
@@ -41,7 +46,7 @@ async function save() {
 
 <template>
   <UiButton variant="default" @click="open">
-    <Icon :name="HardDrive" :size="15" /> Storage
+    <Icon :name="HardDrive" :size="15" /> Edit storage settings
   </UiButton>
   <Modal
     v-if="policy"
@@ -88,14 +93,14 @@ async function save() {
           max="3600"
           required
         ></label>
-        <label>Maximum active synchronization delay (seconds)<input
+        <label>Synchronization warning after (seconds)<input
           v-model.number="policy.maxDirtySeconds"
           type="number"
           :min="policy.backupSeconds"
           max="86400"
           required
         ></label>
-        <p>Old unsaved work is synchronized first on resume. This limit bounds how long the resumed execution can continue without publication.</p>
+        <p>Old unsaved work is synchronized first on resume. Overdue synchronization is reported while work continues; integrity and free-space protections still apply.</p>
       </fieldset><p v-if="error" role="alert" class="text-coral">
         {{ error }}
       </p>

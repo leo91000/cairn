@@ -1,0 +1,17 @@
+[package]
+name = "cairn-contracts"
+version = "0.52.3"
+edition = "2024"
+publish = false
+
+[dependencies]
+rand = "0.9"
+serde = { version = "1", features = [ "derive" ] }
+serde_json = { version = "1", features = [ "raw_value" ] }
+schemars = { version = "=1.2.3", features = [ "uuid1" ] }
+ts-rs = { version = "=12.0.1", features = [ "uuid-impl" ] }
+uuid = { version = "1", features = [
+  "serde",
+  "v4"
+] }
+cairn-plugin-api = { path = "../plugin-api" }

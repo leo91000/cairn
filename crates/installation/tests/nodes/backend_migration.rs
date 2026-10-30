@@ -45,7 +45,7 @@ async fn seed_ext4(owner: &Owner, record: &Value, node: &str, master: &str) {
     std::fs::create_dir_all(&directory).unwrap();
     std::fs::write(
         directory.join("runtime.json"),
-        br#"{"runtimeId":"fixture","backend":"firecracker","storage":"ublk"}"#,
+        br#"{"runtimeId":"development","backend":"firecracker","storage":"ublk"}"#,
     )
     .unwrap();
     let grant = disk_grants::new_disk(&owner.service, record, node)
@@ -142,7 +142,7 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     let (listener, address) = common::bind().await;
     let owner = Owner::at(address.to_string()).await;
     let (run, agent, chat, vm_node, native_node) = (id(), id(), id(), id(), id());
-    let original_agent = json!({ "id": agent, "revision": 1, "access": { "backend": "firecracker", "nodes": [vm_node] } });
+    let original_agent = json!({ "id": agent, "revision": id(), "access": { "backend": "firecracker", "nodes": [vm_node] } });
     owner.put("agents", original_agent.clone()).await;
     let mut record = run_record(&run, RunStatus::Succeeded);
     record["isolated"] = true.into();
@@ -150,17 +150,49 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     record["sessionId"] = "old-engine-session".into();
     record["resources"] = limits(1, 512, 128);
     record["snapshot"] = json!({ "agent": original_agent });
-    owner.add_run(&record).await;
-    owner.put("chats", json!({ "id": chat, "runId": run, "agentId": agent, "paused": false, "title": "same conversation" })).await;
-    let message = json!({ "id": id(), "chatId": chat, "text": "keep this history", "createdAt": now(), "status": "delivered" });
+    owner.add_run_fixture(&record).await;
+    owner.save_conversation_boundary(json!({ "id": chat, "runId": run, "agentId": agent, "paused": false, "title": "same conversation" })).await;
+    let message = json!({
+        "id": id(),
+        "chatId": chat,
+        "text": "keep this history",
+        "createdAt": now(),
+        "status": "delivered",
+        "provider": "codex",
+        "model": "retained-model",
+        "reasoning": "high",
+        "speed": "fast",
+        "mode": "steer",
+        "attachments": [{
+            "id": id(),
+            "chatId": chat,
+            "name": "retained-image.png",
+            "size": 42,
+            "mediaType": "image/png",
+            "kind": "image",
+            "width": 3,
+            "height": 4,
+            "digest": "retained-image-digest",
+            "createdAt": now(),
+        }, {
+            "id": id(),
+            "chatId": chat,
+            "name": "retained-notes.txt",
+            "size": 17,
+            "mediaType": "text/plain",
+            "kind": "file",
+            "digest": "retained-file-digest",
+            "createdAt": now(),
+        }],
+    });
     let saved = message.clone();
-    owner
+    let message = owner
         .service
         .store
         .transaction(move |db| db.put_message(&saved))
         .await
         .unwrap();
-    owner.set_checkpoint(&run, json!({ "nodeId": vm_node, "runnerId": run, "runtimeId": "fixture", "completed": true,
+    owner.set_checkpoint(&run, json!({ "nodeId": vm_node, "runnerId": run, "runtimeId": "development", "completed": true,
         "prepared": { "backend": "firecracker", "isolated": true, "projectRoot": "/data/runs/test/workspace", "output": "/data/runs/test/output/result.md" } })).await;
     let stop = CancellationToken::new();
     let faults = MoveFaults {
@@ -182,31 +214,55 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     }
     let mut native = owner.stored("nodes", &native_node).await.unwrap();
     native["capabilities"]["backend"] = "native".into();
+    native["capabilities"]["nativeModeProtocol"] = 1.into();
+    native["nativeModeObserved"] =
+        json!({ "mode": "protected", "generation": null, "status": "applied" });
     native["capabilities"]["ublk"] = true.into();
     native["nativeEnabled"] = true.into();
     native["nativeAccounts"] = json!(["fixture-owner"]);
-    owner.put("nodes", native).await;
+    owner.put_node_fixture(native).await;
     let mut vm_record = owner.stored("nodes", &vm_node).await.unwrap();
     vm_record["capabilities"]["backend"] = "firecracker".into();
-    owner.put("nodes", vm_record).await;
+    owner.put_node_fixture(vm_record).await;
     seed_ext4(&owner, &record, &vm_node, &format!("http://{address}/")).await;
     tasks.push(owner.serve(listener));
     publication::capture(&owner.service, &owner.run(&run).await)
         .await
         .unwrap();
-    let sending = json!({ "id": id(), "chatId": chat, "text": "stop this input", "createdAt": now(), "status": "sending" });
-    let queued = json!({ "id": id(), "chatId": chat, "text": "independent queued follow-up", "createdAt": now() + 1, "status": "queued" });
+    let sending = json!({
+        "id": id(),
+        "chatId": chat,
+        "text": "stop this input",
+        "createdAt": now(),
+        "status": "sending",
+        "provider": "claude",
+        "model": "active-model",
+        "reasoning": "medium",
+        "speed": "standard",
+        "mode": "steer",
+        "attachments": message["attachments"],
+    });
+    let queued = json!({
+        "id": id(),
+        "chatId": chat,
+        "text": "independent queued follow-up",
+        "createdAt": now() + 1,
+        "status": "queued",
+    });
     let (active_input, later_input) = (sending.clone(), queued.clone());
-    owner
+    let (sending, queued) = owner
         .service
         .store
         .transaction(move |db| {
-            db.put_message(&active_input)?;
-            db.put_message(&later_input)?;
-            Ok(())
+            Ok((
+                db.put_message(&active_input)?,
+                db.put_message(&later_input)?,
+            ))
         })
         .await
         .unwrap();
+    // Compare complete stored records, including defaults and generated revisions.
+    let mut expected_messages = vec![message, sending, queued];
     for (backend, destination) in [("native", &native_node), ("firecracker", &vm_node)] {
         let source_node = if backend == "native" {
             &vm_node
@@ -217,7 +273,13 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
         owner
             .service
             .store
-            .patch_run(&run, json!({ "status": RunStatus::Running }))
+            .change_run(
+                &run,
+                cairn_installation::runs::RunChanges {
+                    status: Some(RunStatus::Running),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         owner.service.store.set("native-authority", json!({ "observedAt": now(), "accounts": { "fixture-owner": { "email": "fixture@example.test" } } }), None).await.unwrap();
@@ -299,9 +361,15 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
             .read(move |db| db.messages(&key))
             .await
             .unwrap();
-        let mut cancelled = sending.clone();
-        cancelled["status"] = "cancelled".into();
-        assert_eq!(messages, vec![message.clone(), cancelled, queued.clone()]);
+        if expected_messages[1]["status"] == "sending" {
+            // Only cancellation rewrites a message, so only that revision changes.
+            let revision = messages[1]["revision"].as_str().unwrap();
+            assert!(!revision.is_empty());
+            assert_ne!(messages[1]["revision"], expected_messages[1]["revision"]);
+            expected_messages[1]["status"] = "cancelled".into();
+            expected_messages[1]["revision"] = messages[1]["revision"].clone();
+        }
+        assert_eq!(messages, expected_messages);
         assert!(
             disk_grants::authorize(&owner.service, credential)
                 .await
@@ -338,7 +406,7 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     owner
         .service
         .store
-        .patch_run(&run, json!({ "backendMigration": marker }))
+        .update_run_boundary(&run, json!({ "backendMigration": marker }))
         .await
         .unwrap();
     let (status, response) = owner
@@ -356,16 +424,36 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     let checkpoint_before = owner
         .service
         .store
-        .kv(&format!("run-checkpoint:{run}"))
+        .checkpoint_boundary(&run)
         .await
         .unwrap()
         .unwrap();
     let saved_point = retried["backup"]["id"].clone();
     let reservation = id();
     let mut pending = json!({ "id": id(), "reservationId": reservation, "process": "old-manager-process", "paused": false,
-        "nodeId": native_node, "runtimeId": "fixture", "snapshot": retried["snapshot"], "convertedBackup": saved_point });
-    pending["grant"] = json!({ "nativePrincipals": retried["nativePrincipals"], "nativeAuthorityNodes": retried["nativeAuthorityNodes"], "nativeProvenanceUnknown": false });
-    owner.service.store.patch_run(&run, json!({ "snapshot": before["snapshot"], "nodeId": before["nodeId"], "backup": before["backup"], "backendMigration": pending })).await.unwrap();
+        "nodeId": native_node, "runtimeId": "development", "snapshot": retried["snapshot"], "convertedBackup": saved_point });
+    pending["grant"] = json!({
+        "nativePrincipals": retried["nativePrincipals"],
+        "nativeAuthorityNodes": retried["nativeAuthorityNodes"],
+        "nativeProvenanceUnknown": false,
+    });
+    owner
+        .service
+        .store
+        .change_run(
+            &run,
+            cairn_installation::runs::RunChanges {
+                snapshot: Some(serde_json::from_value(before["snapshot"].clone()).unwrap()),
+                boundary: Some(json!({
+                    "nodeId": before["nodeId"],
+                    "backup": before["backup"],
+                    "backendMigration": pending,
+                })),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
     let mut source_checkpoint = checkpoint_before;
     source_checkpoint["nodeId"] = vm_node.clone().into();
     source_checkpoint["prepared"]["backend"] = "firecracker".into();
@@ -373,7 +461,7 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     let mut candidate = retried.clone();
     candidate["placementTransition"] = true.into();
     candidate["targetNodeId"] = native_node.clone().into();
-    candidate["requiredRuntime"] = "fixture".into();
+    candidate["requiredRuntime"] = "development".into();
     placement::reserve(&owner.service, &candidate, &reservation)
         .await
         .unwrap();
@@ -406,8 +494,7 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     vm_profile["access"]["nodes"] = json!([vm_node]);
     owner.put("agents", vm_profile).await;
     owner
-        .put(
-            "nodes",
+        .put_node_fixture(
             json!({ "id": LOCAL_NODE_ID, "storage": { "reserveMiB": 16 * 1024 * 1024 } }),
         )
         .await;

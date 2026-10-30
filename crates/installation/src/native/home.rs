@@ -16,6 +16,19 @@ pub struct Binding {
     pub read_only: bool,
 }
 
+/// Recovery pins persisted inodes. Finish it before refreshing any mount target
+/// in the durable home, including an otherwise disposable empty credential file.
+pub(super) async fn prepare_for_identity(
+    source: &Path,
+    data: &Path,
+    identity: &super::identity::Identity,
+) -> Result<Vec<Binding>> {
+    super::identity::reconcile(data, identity).await?;
+    let bindings = prepare(source, &data.join("home"), identity.uid(), identity.gid()).await?;
+    super::workspace::own_tree(source, identity.uid(), identity.gid()).await?;
+    Ok(bindings)
+}
+
 pub async fn prepare(source: &Path, home: &Path, uid: u32, gid: u32) -> Result<Vec<Binding>> {
     // Validate ancestors before creating generated directories: staging is input,
     // and chmod/create_dir_all must never follow a redirected source.
@@ -94,6 +107,7 @@ pub async fn prepare(source: &Path, home: &Path, uid: u32, gid: u32) -> Result<V
             // Only an empty mount target reaches the persistent filesystem.
             // Config bytes, credentials and frozen skills remain in staging.
             tokio::fs::File::create(&destination).await?;
+            std::os::unix::fs::lchown(&destination, Some(uid), Some(gid))?;
             bindings.push(Binding {
                 source: path.clone(),
                 target: Path::new("/home/node").join(relative),

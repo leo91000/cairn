@@ -3,8 +3,7 @@ use serde_json::Value;
 use std::{collections::HashMap, sync::LazyLock};
 
 static SCHEMAS: LazyLock<Value> = LazyLock::new(|| {
-    let mut schemas: Value =
-        serde_json::from_str(include_str!("../schemas/inputs.json")).expect("checked schemas");
+    let mut schemas = serde_json::json!({});
     let catalog: Value = serde_json::from_str(include_str!("../schemas/mcp-operations.json"))
         .expect("checked MCP schemas");
     for tool in catalog.as_array().unwrap() {
@@ -65,6 +64,18 @@ fn defaults(value: &mut Value, schema: &Value) {
             }
         }
     }
+    if let Some(additional) = schema
+        .get("additionalProperties")
+        .filter(|schema| schema.is_object())
+        && let Some(values) = value.as_object_mut()
+    {
+        let properties = schema["properties"].as_object();
+        for (key, item) in values {
+            if !properties.is_some_and(|properties| properties.contains_key(key)) {
+                defaults(item, additional);
+            }
+        }
+    }
     if let Some(items) = value.as_array_mut() {
         for item in items {
             defaults(item, &schema["items"]);
@@ -77,76 +88,10 @@ pub fn parse(kind: &str, mut value: Value) -> Result<Value> {
         .get(kind)
         .ok_or_else(|| Error::internal("Unknown input schema"))?;
     defaults(&mut value, schema);
-    trim_text(kind, &mut value);
     if let Err(error) = VALIDATORS[kind].validate(&value) {
         return Err(Error::bad(format!("{}: {}", error.instance_path(), error)));
     }
-    match kind {
-        "questions" => unique_question_ids(&value)?,
-        "mcp" => mcp_transport(&value)?,
-        _ => {}
-    }
     Ok(value)
-}
-
-fn trim_text(kind: &str, value: &mut Value) {
-    let trims: &[&str] = match kind {
-        "agent" | "project" => &["name"],
-        "task" => &["name", "prompt"],
-        "message" => &["text", "model"],
-        "sideQuestion" => &["text", "quote"],
-        "mcp" => &["name", "command", "clientId", "scopes"],
-        _ => &[],
-    };
-    for key in trims {
-        if let Some(text) = value[*key].as_str() {
-            value[*key] = text.trim().into();
-        }
-    }
-    if kind != "answer" {
-        return;
-    }
-    let Some(answers) = value["answers"].as_object_mut() else {
-        return;
-    };
-    for items in answers.values_mut().filter_map(Value::as_array_mut) {
-        for item in items {
-            if let Some(text) = item.as_str() {
-                *item = text.trim().into();
-            }
-        }
-    }
-}
-
-fn unique_question_ids(fields: &Value) -> Result<()> {
-    let mut ids = std::collections::HashSet::new();
-    for field in fields.as_array().into_iter().flatten() {
-        if !ids.insert(text(field, "id")) {
-            return Err(Error::bad("Question identifiers must be unique"));
-        }
-    }
-    Ok(())
-}
-
-fn mcp_transport(value: &Value) -> Result<()> {
-    if value["transport"] != "http" {
-        if value["command"] == "" || value["auth"] != "none" {
-            return Err(Error::bad(
-                "Command servers require an executable and use environment variables for authentication.",
-            ));
-        }
-        return Ok(());
-    }
-    let invalid = || Error::bad("Enter an HTTP(S) URL without embedded credentials or a fragment.");
-    let url = url::Url::parse(text(value, "url")).map_err(|_| invalid())?;
-    if !["http", "https"].contains(&url.scheme())
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.fragment().is_some()
-    {
-        return Err(invalid());
-    }
-    Ok(())
 }
 
 /// Parses a validated input into its typed shape (see [`parse`]).

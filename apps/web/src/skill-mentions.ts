@@ -5,7 +5,12 @@ const MENTION = /(?<![\w$\\])\$([a-z0-9][a-z0-9-]{0,63})(?![\w-])/g
 const CODE = /```[\s\S]*?```|`[^`\n]*`/g
 const TYPING = /(?<![\w$\\])\$([a-z0-9-]*)$/
 
-export interface SkillOption { name: string, description: string, scope: string }
+export interface SkillOption {
+  name: string
+  description: string
+  scope: string
+  usageCount?: number
+}
 export interface Mention { start: number, end: number, query: string }
 export interface MentionSegment { text: string, skill?: string }
 
@@ -20,8 +25,14 @@ export function chatSkills(skills: Skill[], agent: Agent | undefined, projectId:
     if (!skill.valid || !inScope(skill.scope) || (agent.access.skills !== null && !agent.access.skills.includes(`${skill.scope}/${skill.name}`)))
       continue
     // A project skill shadows the global one with the same name in the list.
-    if (!byName.has(skill.name) || skill.scope !== 'global')
-      byName.set(skill.name, { name: skill.name, description: skill.description, scope: skill.scope })
+    if (!byName.has(skill.name) || skill.scope !== 'global') {
+      byName.set(skill.name, {
+        name: skill.name,
+        description: skill.description,
+        scope: skill.scope,
+        usageCount: skill.usageCount ?? 0,
+      })
+    }
   }
 
   return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name))
@@ -65,7 +76,7 @@ export function matchSkills(skills: SkillOption[], query: string, limit = 50) {
   return skills
     .map(skill => ({ skill, score: rank(skill, query) }))
     .filter(item => item.score >= 0)
-    .sort((a, b) => a.score - b.score || (query ? a.skill.name.length - b.skill.name.length : 0) || a.skill.name.localeCompare(b.skill.name))
+    .sort((a, b) => a.score - b.score || (b.skill.usageCount ?? 0) - (a.skill.usageCount ?? 0) || (query ? a.skill.name.length - b.skill.name.length : 0) || a.skill.name.localeCompare(b.skill.name))
     .slice(0, limit)
     .map(item => item.skill)
 }

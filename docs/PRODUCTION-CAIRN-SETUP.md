@@ -6,15 +6,12 @@ application release keeps the existing setup and follows the
 [release runbook](PRODUCTION-CAIRN.md). Infrastructure changes need authorization
 for their own scope.
 
-The [v0.53 migration archive](archive/CAIRN-V0.53-MIGRATION.md) records the initial
-cutover and retirement of the old public manager. It is not a setup prerequisite
-for an installation already using Beacon.
-
 ## Host and release images
 
 Choose a fully successful `Quality and container` run for the intended Git tree.
 Its schema-3 `validated-image-<tree>/image.json` records both immutable digests,
-the tested commit, tree, repository, run ID and installation CLI versions. Use:
+the tested commit, tree, repository, run ID, installation CLI versions and the
+served engine releases its rollback checks used. Use:
 
 - `CAIRN_BEACON_IMAGE=ghcr.io/leo91000/cairn-beacon@sha256:<beacon digest>`;
 - `CAIRN_INSTALLATION_IMAGE=ghcr.io/leo91000/cairn@sha256:<installation digest>`.
@@ -48,7 +45,8 @@ concurrency. Monitor disk space and memory under real work. Rerunning the
 installer regenerates its Compose defaults; reapply reviewed budgets afterwards.
 
 The installation host needs Linux x86-64, systemd, Docker Engine/Compose,
-Python 3, curl, working `/dev/kvm`, `/dev/net/tun`, `/dev/fuse`, and at least
+Python 3, curl, working `/dev/kvm`, `/dev/net/tun`, `ublk_drv` with
+`/dev/ublk-control` and io_uring enabled, and at least
 16 GiB free **in addition to** Postgres and conversation disks. See
 [installation prerequisites](INSTALLATION.md). KVM is for the installation,
 not the beacon process. Do not give the beacon container privileged mode,
@@ -245,7 +243,7 @@ traffic resumes. Never widen trust to fix a mismatch. Sources:
 [Coolify main proxy configuration](https://coolify.io/docs/core/networking/proxy/traefik/overview),
 [Compose static network addresses](https://docs.docker.com/reference/compose-file/services/#ipv4_address-ipv6_address).
 
-**Lessons from the first deployment (2026-10-10).**
+**Proxy recreation requirements.**
 
 - Recreating `coolify-proxy` outside Coolify drops the networks that Coolify had attached
   to it dynamically (`docker network connect`), one per service. Every service routed through
@@ -280,9 +278,12 @@ so. Do not enable the proxy's access logs without first updating `/privacy`
 Start the new service only after Léo's approval. Verify `/health` reports the
 expected tested commit, `/install/release` reports the paired digest, `/` and
 `/claim` serve the SPA with framing protection, and an email-code sign-in works.
-Use the compatibility checks and failure procedure in the
+Use the release checks and failure procedure in the
 [release runbook](PRODUCTION-CAIRN.md#failed-releases) for subsequent updates.
-Releases create no backups. Automatic checksum-checked migrations run on startup; do not reuse a historical development database.
+Releases create no backups. Existing version-11 installations support the
+[data-preserving upgrade](PRODUCTION-CAIRN.md#data-preserving-upgrades); retain their
+identity, data and a consistent database/WAL backup. Check explicit compatibility
+for other historical manager layouts before deployment.
 
 Configure GitHub's **production** environment:
 
@@ -299,9 +300,9 @@ Configure GitHub's **production** environment:
 
 Keep the environment's deployment branch/tag policy restricted to the intended
 release refs. Routine stable tags deploy automatically, without required
-reviewers, after data compatibility checks succeed.
+reviewers, after the release checks succeed.
 Enable this only after the host helper, SSH identity and new workflow are installed;
-approve any older pending release separately after its own compatibility checks.
+approve any older pending release separately after its own release checks.
 Use a fresh `CAIRN_RELEASE_COOLIFY_TOKEN` credential for this workflow, then remove
 the old environment secret `COOLIFY_TOKEN` before removing required reviewers.
 Historical workflows lack the current release checks and must no longer have a usable

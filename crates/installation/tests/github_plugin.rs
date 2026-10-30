@@ -2,10 +2,16 @@
 //! in through the host's device flow, granted agents' runs receive the account's
 //! credentials, projects are imported through its project source, and data saved
 //! before the package exists moves into instances. GitHub is simulated locally.
+#[allow(unused_imports)]
+use common::{PluginServiceFixture as _, PluginStoreFixture as _};
+
+use common::AgentFixture;
+use common::MissionFixture;
+
 mod common;
 
 use cairn_installation::{
-    config::{MAIN_AGENT_ID, id},
+    config::MAIN_AGENT_ID,
     execution,
     plugins::{connections, device_flow, projects, registry, run_credentials},
     project_workspaces, run_output,
@@ -14,10 +20,7 @@ use cairn_installation::{
 };
 use common::github::{self, Github};
 use serde_json::{Value, json};
-use std::{
-    collections::HashSet, io::Write, os::unix::fs::PermissionsExt, path::Path, sync::Arc,
-    time::Duration,
-};
+use std::{io::Write, os::unix::fs::PermissionsExt, path::Path, sync::Arc, time::Duration};
 use tempfile::TempDir;
 
 struct Fixture {
@@ -46,7 +49,7 @@ fn restricted(name: &str) -> Value {
 
 async fn run(s: &Service, agent: &str) -> Value {
     let task = s
-        .task(
+        .task_fixture(
             json!({ "name": "Probe", "agentId": agent, "prompt": "Hello" }),
             None,
         )
@@ -80,7 +83,7 @@ async fn the_owner_signs_in_through_the_host_and_the_token_never_leaves_it() {
     assert!(body.contains("client_id=") && body.contains("scope=repo+workflow+read%3Aorg"));
 
     // Saving before the owner approves is refused.
-    let early = connections::save(
+    let early = common::save_plugin(
         &f.s,
         "github",
         &json!({ "name": "GitHub", "enabled": true, "credentialFlow": flow }),
@@ -102,7 +105,7 @@ async fn the_owner_signs_in_through_the_host_and_the_token_never_leaves_it() {
     assert!(!completed.to_string().contains(github::USER_TOKEN));
 
     // The package's form checks the account with the signed-in token, unsaved.
-    let form = connections::save(
+    let form = common::save_plugin(
         &f.s,
         "github",
         &json!({ "name": "GitHub", "enabled": true, "credentialFlow": flow, "agentIds": [MAIN_AGENT_ID] }),
@@ -153,9 +156,15 @@ async fn the_owner_signs_in_through_the_host_and_the_token_never_leaves_it() {
 #[tokio::test]
 async fn granted_runs_receive_the_account_and_lose_it_with_the_grant() {
     let f = fixture().await;
-    let agent = f.s.agent(restricted("Builder"), None).await.unwrap();
+    let agent =
+        f.s.agent_fixture(restricted("Builder"), None)
+            .await
+            .unwrap();
     let agent_id = text(&agent, "id").to_owned();
-    let other = f.s.agent(restricted("Bystander"), None).await.unwrap();
+    let other =
+        f.s.agent_fixture(restricted("Bystander"), None)
+            .await
+            .unwrap();
     let instance = github::instance(
         &f.s,
         "GitHub",
@@ -236,7 +245,7 @@ async fn granted_runs_receive_the_account_and_lose_it_with_the_grant() {
     );
 
     // Withdrawing the grant empties the files when the run resumes.
-    connections::set_enabled(&f.s, "github", &instance, &json!({ "enabled": false }))
+    common::enable_plugin(&f.s, "github", &instance, &json!({ "enabled": false }))
         .await
         .unwrap();
     let withdrawn = run_credentials::for_run(&f.s, &agent_id, &[])
@@ -269,13 +278,16 @@ async fn granted_runs_receive_the_account_and_lose_it_with_the_grant() {
 #[tokio::test]
 async fn each_agent_runs_with_one_account_and_tokens_are_masked() {
     let f = fixture().await;
-    let agent = f.s.agent(restricted("Builder"), None).await.unwrap();
+    let agent =
+        f.s.agent_fixture(restricted("Builder"), None)
+            .await
+            .unwrap();
     let first = github::instance(&f.s, "First", "fixture-first", &[]).await;
     let second = github::instance(&f.s, "Second", "fixture-second", &[]).await;
     let mut edited = agent.clone();
     edited["plugins"] = json!([first, second]);
     let error =
-        f.s.agent(edited.clone(), Some(text(&agent, "id")))
+        f.s.agent_fixture(edited.clone(), Some(text(&agent, "id")))
             .await
             .unwrap_err();
     assert!(
@@ -284,9 +296,11 @@ async fn each_agent_runs_with_one_account_and_tokens_are_masked() {
         error.message
     );
     edited["plugins"] = json!([first]);
-    f.s.agent(edited, Some(text(&agent, "id"))).await.unwrap();
-    // Granting from the instance side is refused the same way.
-    let refused = connections::save(
+    f.s.agent_fixture(edited, Some(text(&agent, "id")))
+        .await
+        .unwrap();
+    // Existing instance editors must use a revision-guarded profile command.
+    let refused = common::save_plugin(
         &f.s,
         "github",
         &json!({ "name": "Second", "enabled": true, "agentIds": [agent["id"]] }),
@@ -294,13 +308,18 @@ async fn each_agent_runs_with_one_account_and_tokens_are_masked() {
     )
     .await
     .unwrap_err();
-    assert!(refused.message.contains("one GitHub instance per agent"));
+    assert_eq!(refused.status, 400);
+    assert!(refused.message.contains("current revision"));
+    assert_eq!(
+        f.s.agent_snapshot(text(&agent, "id")).await.unwrap()["plugins"],
+        json!([first])
+    );
 
     // Long display names are cut on character boundaries.
     f.github
         .state(&json!({ "user": { "id": 7, "login": "long", "name": "é".repeat(150) } }));
     let long = github::instance(&f.s, "Long", "fixture-long", &[]).await;
-    let saved = f.s.get(connections::KIND, &long).await.unwrap();
+    let saved = f.s.instance_fixture(&long).await.unwrap();
     assert_eq!(saved["settings"]["gitName"], "é".repeat(100));
 
     let package = registry::builtin("github").unwrap();
@@ -316,15 +335,25 @@ async fn each_agent_runs_with_one_account_and_tokens_are_masked() {
 #[tokio::test]
 async fn granted_agents_see_github_conditions_and_others_do_not() {
     let f = fixture().await;
-    let agent = f.s.agent(restricted("Watcher"), None).await.unwrap();
+    let agent =
+        f.s.agent_fixture(restricted("Watcher"), None)
+            .await
+            .unwrap();
     let agent_id = text(&agent, "id").to_owned();
     let instance = github::instance(&f.s, "GitHub", "fixture-token", &[&agent_id]).await;
     let run = run(&f.s, &agent_id).await;
     let run =
         f.s.store
-            .patch_run(text(&run, "id"), json!({ "status": "running" }))
+            .change_run(
+                text(&run, "id"),
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Running),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
+    let run = f.s.store.run(&run.id).await.unwrap();
     let config = f.s.mcps.run_configuration(&f.s, &run).await.unwrap();
     let bearer = text(&config["env"], "CAIRN_MCP_RUN_TOKEN").to_owned();
     let types = |listing: &Value| {
@@ -333,7 +362,7 @@ async fn granted_agents_see_github_conditions_and_others_do_not() {
             .unwrap()
             .iter()
             .find(|tool| tool["name"] == "wait_for")
-            .unwrap()["inputSchema"]["properties"]["condition"]["oneOf"]
+            .unwrap()["inputSchema"]["properties"]["conditions"]["items"]["oneOf"]
             .as_array()
             .unwrap()
             .iter()
@@ -476,182 +505,6 @@ async fn repositories_are_listed_and_imported_with_the_instance() {
     );
 }
 
-#[tokio::test]
-async fn data_saved_before_the_package_moves_into_instances() {
-    let root = TempDir::new().unwrap();
-    common::managed_codex_home(&root.path().join("home"));
-    let config = common::config(root.path());
-    let s = Service::new(config.clone()).await.unwrap();
-    s.agent(json!({ "name": "Main agent" }), Some(MAIN_AGENT_ID))
-        .await
-        .unwrap();
-    let scoped = s.agent(restricted("Scoped"), None).await.unwrap();
-    let unused = s
-        .agent(json!({ "name": "Unused token" }), None)
-        .await
-        .unwrap();
-    let scoped_id = text(&scoped, "id").to_owned();
-    let unused_id = text(&unused, "id").to_owned();
-    // Earlier releases stored the setting and plaintext dedicated tokens.
-    for (agent, github) in [
-        (MAIN_AGENT_ID, true),
-        (scoped_id.as_str(), false),
-        (unused_id.as_str(), true),
-    ] {
-        let mut record = s.get("agents", agent).await.unwrap();
-        record["access"]["github"] = github.into();
-        if !github {
-            record["access"].as_object_mut().unwrap().remove("mcps");
-        }
-        s.store.put("agents", record).await.unwrap();
-    }
-    for agent in [&scoped_id, &unused_id] {
-        s.store
-            .set(
-                &format!("agent-github:{agent}"),
-                json!(format!("github_pat_{agent}")),
-                None,
-            )
-            .await
-            .unwrap();
-    }
-    std::fs::create_dir_all(config.home.join(".config/gh")).unwrap();
-    std::fs::write(
-        config.home.join(".config/gh/hosts.yml"),
-        "github.com:\n    users:\n        octo:\n            oauth_token: gho_shared_login\n    git_protocol: https\n    user: octo\n",
-    )
-    .unwrap();
-    let project = id();
-    s.store
-        .put(
-            "projects",
-            json!({ "id": project, "name": "Repo", "path": "/srv/repo", "origin": "github.com:fixture/repo.git", "baseBranch": "main", "sourceMode": "remote" }),
-        )
-        .await
-        .unwrap();
-    s.store
-        .set(
-            "skill-source:global/review",
-            json!({ "type": "github", "repository": "fixture/skills", "path": "skills/review", "ref": "main", "commit": "a".repeat(40), "importedAt": 1, "revision": "r1" }),
-            None,
-        )
-        .await
-        .unwrap();
-    // The scoped agent answers anyone in a channel: it must hold no plugin grant.
-    s.store
-        .put(
-            connections::KIND,
-            json!({ "id": id(), "pluginId": "discord", "name": "#support", "enabled": true, "agentId": scoped_id, "accessMode": "everyone", "agentIds": [], "grantedAccess": { "github": false } }),
-        )
-        .await
-        .unwrap();
-    let chat = id();
-    s.store
-        .put(
-            "chats",
-            json!({ "id": chat, "wakeup": { "condition": { "type": "github_pr_checks", "projectId": project, "prNumber": 7, "headSha": "1".repeat(40) } } }),
-        )
-        .await
-        .unwrap();
-    s.store
-        .transaction(|db| {
-            db.0.execute_batch("PRAGMA user_version=7;")?;
-            Ok(())
-        })
-        .await
-        .unwrap();
-    drop(s);
-
-    let s = Service::new(config.clone()).await.unwrap();
-    let database = rusqlite::Connection::open(config.data_dir.join("manager.db")).unwrap();
-    let version: i64 = database
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .unwrap();
-    assert!(version > 7, "The old manager must refuse migrated accounts");
-    let mut instances = s
-        .store
-        .list(connections::KIND)
-        .await
-        .unwrap()
-        .into_iter()
-        .filter(|instance| instance["pluginId"] == "github")
-        .collect::<Vec<_>>();
-    instances.sort_by_key(|instance| text(instance, "name").to_owned());
-    let names = instances
-        .iter()
-        .map(|instance| text(instance, "name"))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        names,
-        ["GitHub", "GitHub (Scoped)", "GitHub (Unused token)"]
-    );
-    let shared = &instances[0];
-    let mut shared_agents = shared["agentIds"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|id| id.as_str().unwrap().to_owned())
-        .collect::<HashSet<_>>();
-    assert!(shared_agents.remove(MAIN_AGENT_ID));
-    assert!(shared_agents.remove(&unused_id));
-    assert!(shared_agents.is_empty());
-    assert_eq!(instances[1]["agentIds"], json!([]));
-    assert_eq!(instances[2]["agentIds"], json!([]));
-    let token = |instance: &Value| {
-        let id = text(instance, "id").to_owned();
-        let vault = s.vault.clone();
-        async move {
-            vault
-                .get(&connections::credential_key(&id))
-                .await
-                .unwrap()
-                .unwrap()["token"]
-                .clone()
-        }
-    };
-    assert_eq!(token(shared).await, "gho_shared_login");
-    assert_eq!(
-        token(&instances[1]).await,
-        format!("github_pat_{scoped_id}")
-    );
-    // Plaintext tokens are gone; the vault holds them encrypted.
-    assert!(s.store.keys("agent-github:").await.unwrap().is_empty());
-
-    for agent in [MAIN_AGENT_ID, &scoped_id, &unused_id] {
-        let record = s.get("agents", agent).await.unwrap();
-        assert!(record["access"].get("github").is_none(), "{record}");
-    }
-    let scoped = s.get("agents", &scoped_id).await.unwrap();
-    assert_eq!(scoped["plugins"], json!([]));
-    // A GitHub-only restriction keeps restricting MCP connections.
-    assert_eq!(scoped["access"]["mcps"], json!([]));
-
-    let migrated = s.get("projects", &project).await.unwrap();
-    assert_eq!(migrated["source"]["id"], "fixture/repo");
-    assert_eq!(migrated["source"]["instance"], shared["id"]);
-    let source = s
-        .store
-        .kv("skill-source:global/review")
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(source["pluginId"], "github");
-    assert_eq!(
-        source["location"],
-        json!({ "repository": "fixture/skills", "ref": "main" })
-    );
-    assert_eq!(source["folder"], "skills/review");
-    assert_eq!(source["version"], "a".repeat(40));
-    assert_eq!(source["revision"], "r1");
-    let wait = s.get("chats", &chat).await.unwrap();
-    assert_eq!(wait["wakeup"]["condition"]["pluginId"], "github");
-
-    // A second start changes nothing.
-    drop(s);
-    let s = Service::new(config).await.unwrap();
-    assert_eq!(s.store.list(connections::KIND).await.unwrap().len(), 4);
-}
-
 /// The bundled package against the real GitHub: run with `CAIRN_LIVE_GITHUB=<file>`;
 /// the user code is written to that file for someone to approve on github.com.
 #[tokio::test]
@@ -672,7 +525,7 @@ async fn live_device_sign_in_against_github() {
     })
     .await;
     assert_eq!(status["state"], "completed", "{status}");
-    let saved = connections::save(
+    let saved = common::save_plugin(
         &s,
         "github",
         &json!({ "name": "GitHub", "enabled": true, "credentialFlow": flow }),
@@ -684,7 +537,7 @@ async fn live_device_sign_in_against_github() {
         "LIVE_GITHUB {}",
         json!({ "login": saved["settings"]["login"], "gitEmail": saved["settings"]["gitEmail"] })
     );
-    let test = cairn_installation::plugins::panels::test(&s, "github", text(&saved, "id"))
+    let test = common::plugin_test(&s, "github", text(&saved, "id"))
         .await
         .unwrap();
     println!("LIVE_GITHUB_TEST {test}");

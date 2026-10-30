@@ -12,7 +12,7 @@ export interface LiveState {
 export interface LiveBatch {
   oldest?: number
   hasOlder?: boolean
-  /** Append-only history identity and retention revision; absent on older servers. */
+  /** Append-only history identity and retention revision for conversation streams. */
   history?: string
   events: RunEvent[]
   state?: LiveState
@@ -21,9 +21,4 @@ export interface LiveBatch {
   more: boolean
 }
 
-export interface HistoryPage {
-  events: RunEvent[]
-  history: string
-  oldest: number
-  hasOlder: boolean
-}
+export type { HistoryPage } from './generated/typescript/HistoryPage'

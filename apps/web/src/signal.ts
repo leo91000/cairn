@@ -2,6 +2,7 @@ import type { Provider } from '../../../packages/contracts/accounts'
 import type { ChatView } from '../../../packages/contracts/chats'
 import type { RunEvent, RunListItem, Task } from '../../../packages/contracts/contracts'
 import type { ActivityEntry } from './activity'
+import { isQuotaWait } from './chat-quota'
 import { waitTarget } from './chat-wait'
 import { exclusiveSuspensionLabel, isExclusivelySuspended } from './run-status'
 import { chatPath } from './workspace-links'
@@ -126,6 +127,9 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
     else if (isExclusivelySuspended(chat)) {
       live.push({ ...base, kind: 'suspended', subtitle: exclusiveSuspensionLabel })
     }
+    else if (isQuotaWait(chat)) {
+      waiting.push({ ...base, kind: 'waiting', subtitle: 'Waiting for quota' })
+    }
     else if (chat.status === 'running') {
       live.push({ ...base, kind: 'running', subtitle: 'Working' })
     }
@@ -188,7 +192,7 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
       title: task.name,
       agent: run.agentName,
       agentKey: task.agentId,
-      harness: run.provider,
+      harness: run.provider ?? undefined,
       project: null,
       at: run.finishedAt ?? run.startedAt ?? run.createdAt,
       to: filRunPath(run.id),
@@ -197,6 +201,9 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
     }
     if (isExclusivelySuspended(run)) {
       live.push({ ...base, kind: 'suspended', subtitle: exclusiveSuspensionLabel })
+    }
+    else if (isQuotaWait(run)) {
+      waiting.push({ ...base, kind: 'waiting', subtitle: 'Waiting for quota' })
     }
     // A mission that scheduled its continuation resumes on its own, like a chat.
     else if (run.status === 'waiting') {
@@ -281,7 +288,7 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
   // What asks for an answer or a decision stays above what only waits to be read.
   const urgency = (a: FilItem, b: FilItem) => Number(isUnread(a)) - Number(isUnread(b)) || newest(a, b)
   // A wait whose result arrived resumes first, before any deadline.
-  const soonest = (a: FilItem, b: FilItem) => Number(!!b.resolved) - Number(!!a.resolved) || a.wakeAt! - b.wakeAt!
+  const soonest = (a: FilItem, b: FilItem) => Number(!!b.resolved) - Number(!!a.resolved) || (a.wakeAt ?? Infinity) - (b.wakeAt ?? Infinity)
   return {
     forYou: forYou.sort(urgency),
     live: live.sort(newest),

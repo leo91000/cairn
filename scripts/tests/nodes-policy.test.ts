@@ -1,20 +1,11 @@
 import type { ExecutionNode } from '../../packages/contracts/nodes'
 import { expect, it } from 'vitest'
-import { agentInput, agentUpdate } from '../../packages/contracts/contracts'
 import {
   formatBytes,
   formatMiB,
-  LOCAL_NODE_ID,
   nodeDiagnostics,
   relativeAge,
 } from '../../packages/contracts/nodes'
-
-it('new agents retain the current runner but partial updates do not grant it', () => {
-  expect(agentInput.parse({ name: 'New agent' }).access.nodes).toEqual([LOCAL_NODE_ID])
-  expect(agentUpdate.parse({ access: { mcps: [] } }).access).not.toHaveProperty('nodes')
-  expect(agentUpdate.parse({ access: { nodes: [] } }).access?.nodes).toEqual([])
-  expect(agentUpdate.parse({ access: { nodes: null } }).access?.nodes).toBeNull()
-})
 
 it('formats node sizes, recovery ages and blocking reasons for people', () => {
   expect(formatMiB(512)).toBe('512 MiB')
@@ -30,6 +21,45 @@ it('formats node sizes, recovery ages and blocking reasons for people', () => {
   expect(relativeAge(0, 3 * 60_000)).toBe('3 min ago')
   expect(relativeAge(0, 5 * 3_600_000)).toBe('5 h ago')
   const node: ExecutionNode = {
+    revision: 'fixture',
+    createdAt: 0,
+    systemTags: [],
+    runtimeSlots: null,
+    nativeEnabled: false,
+    nativeAccounts: [],
+    nativeReviewedAgents: [],
+    nativeModeRequest: null,
+    nativeModeObserved: null,
+    nativeModeProposal: null,
+    nativeModeStatus: null,
+    exclusiveReservations: false,
+    exclusiveReservation: null,
+    exclusiveAgents: [],
+    usage: null,
+    budgetError: null,
+    pressure: null,
+    maintenance: null,
+    maintenanceError: null,
+    maintenanceGeneration: null,
+    maintenanceStartedAt: null,
+    imageDigest: null,
+    updateError: null,
+    retainedRuns: null,
+    diskGrowthProtocol: null,
+    diskCapacity: null,
+    occupiedSlots: 0,
+    availableSlots: 4,
+    staleDisks: { count: 0, diskMiB: 0 },
+    diskAccounting: null,
+    storage: {
+      cacheMiB: 102400,
+      memoryCacheMiB: 256,
+      reserveMiB: 10240,
+      reservePercent: 5,
+      backupSeconds: 60,
+      maxDirtySeconds: 300,
+    },
+
     id: 'n',
     name: 'Desktop',
     local: false,
@@ -39,13 +69,17 @@ it('formats node sizes, recovery ages and blocking reasons for people', () => {
     slots: 4,
     tags: [],
     capabilities: {
+      backend: 'firecracker',
+      ublk: false,
+      nativeModeProtocol: 0,
+      diskTotalMiB: 0,
       os: 'linux',
       arch: 'x86_64',
       kvm: true,
-      fuse: true,
       cpu: 8,
       memoryMiB: 16384,
       diskMiB: 65536,
+
     },
     limits: { cpu: 7, memoryMiB: 15872, diskMiB: 52428 },
     executionReady: true,
@@ -58,7 +92,7 @@ it('formats node sizes, recovery ages and blocking reasons for people', () => {
   expect(nodeDiagnostics({ ...node, agents: [] })).toEqual(['No agent can use this machine yet.'])
   expect(nodeDiagnostics({ ...node, status: 'offline', lastSeen: 0 }, 10 * 60_000)[0]).toContain('No contact since 10 min ago')
 
-  // Native nodes need ublk rather than KVM/FUSE, and run under their own service.
+  // Native nodes need ublk without KVM, and run under their own service.
   const native = {
     ...node,
     nativeEnabled: true,
@@ -67,7 +101,6 @@ it('formats node sizes, recovery ages and blocking reasons for people', () => {
       ...node.capabilities,
       backend: 'native' as const,
       kvm: false,
-      fuse: false,
       ublk: true,
     },
   }

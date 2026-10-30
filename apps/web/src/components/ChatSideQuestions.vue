@@ -8,6 +8,8 @@ import {
   watch,
 } from 'vue'
 import { providers } from '../../../../packages/contracts/accounts'
+import { askChatSideQuestion } from '../../../../packages/contracts/generated/askChatSideQuestion'
+import { cancelChatSideQuestion } from '../../../../packages/contracts/generated/cancelChatSideQuestion'
 import { api } from '../api'
 import { MessageSquareQuote, Send, X } from '../icons'
 import Icon from './Icon.vue'
@@ -22,6 +24,8 @@ const props = defineProps<{
   questions: ChatSideQuestion[]
   /** The running reply can answer a side question now. */
   canAsk: boolean
+  /** Why a side question cannot be asked now, from the server. */
+  reason?: string | null
   provider?: Provider | null
 }>()
 const emit = defineEmits<{
@@ -96,7 +100,7 @@ async function send() {
     const serialized = JSON.stringify({ chatId: props.chatId, ...body })
     if (submission?.serialized !== serialized)
       submission = { id: crypto.randomUUID(), serialized }
-    await api(`/chats/${props.chatId}/side-questions`, { method: 'POST', body: JSON.stringify({ id: submission.id, ...body }) })
+    await askChatSideQuestion(api, { chatId: props.chatId, question: { id: submission.id, ...body } })
     submission = undefined
     text.value = ''
     quote.value = ''
@@ -108,7 +112,7 @@ async function send() {
 async function withdraw(question: ChatSideQuestion) {
   error.value = ''
   try {
-    await api(`/chats/${props.chatId}/side-questions/${question.id}/cancel`, { method: 'POST' })
+    await cancelChatSideQuestion(api, { chatId: props.chatId, sideQuestionId: question.id })
   }
   catch (e) { error.value = (e as Error).message }
 }
@@ -175,7 +179,7 @@ defineExpose({ ask, show })
         </div>
       </form>
       <UiNotice v-else :icon="MessageSquareQuote">
-        {{ provider === 'opencode' ? 'OpenCode cannot answer side questions in Cairn yet. Ask in the conversation instead.' : 'Side questions are answered while Codex or Claude Code works on a reply.' }}
+        {{ reason || 'Side questions are answered while Claude Code works on a reply.' }}
       </UiNotice>
       <UiAlert v-if="error">
         {{ error }}

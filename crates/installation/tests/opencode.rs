@@ -1,11 +1,9 @@
+use common::account_fixture::AccountFixtures;
+
 mod common;
 
 use cairn_installation::{
-    accounts::{KIND, broker},
-    config::Config,
-    opencode,
-    provider::Provider,
-    service::Service,
+    accounts::broker, config::Config, opencode, provider::Provider, service::Service,
     validation::text,
 };
 use serde_json::{Value, json};
@@ -27,10 +25,47 @@ async fn service(root: &TempDir) -> std::sync::Arc<Service> {
 }
 
 async fn connect(s: &Service) -> Value {
-    s.accounts
-        .connect_api_key(s, Provider::Opencode, "Zen", "opencode", KEY, None)
+    serde_json::to_value(
+        s.accounts
+            .connect_api_key(s, Provider::Opencode, "Zen", "opencode", KEY, None)
+            .await
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn incompatible_model_routes_are_not_reported_as_exhausted_usage_or_busy_slots() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let account = connect(&s).await;
+    common::account_fixture::update_account_fixture(
+        &s,
+        text(&account, "id"),
+        &json!({ "maxConcurrentRuns": 1 }),
+    )
+    .await
+    .unwrap();
+    let lease = s
+        .accounts
+        .acquire(&s, "busy-zen", Provider::Opencode, MODEL)
         .await
         .unwrap()
+        .unwrap();
+    let error = s
+        .accounts
+        .acquire(
+            &s,
+            "wrong-route",
+            Provider::Opencode,
+            "opencode-go/ling-3.1-flash-free",
+        )
+        .await
+        .unwrap_err();
+    assert!(error.message.contains("supports"), "{}", error.message);
+    assert!(!error.message.contains("available usage"));
+    assert!(!error.message.contains("free OpenCode account slot"));
+    s.accounts.release(&s, &lease).await.unwrap();
 }
 
 #[tokio::test]
@@ -42,7 +77,7 @@ async fn api_keys_are_private_provider_bound_and_fenced_against_live_replacement
     assert_eq!(account["modelProviderName"], "OpenCode Zen");
     assert!(!account.to_string().contains(KEY));
     assert!(
-        !serde_json::to_string(&s.store.list(KIND).await.unwrap())
+        !serde_json::to_string(&s.store.account_fixtures().await.unwrap())
             .unwrap()
             .contains(KEY)
     );
@@ -98,18 +133,21 @@ async fn api_keys_are_private_provider_bound_and_fenced_against_live_replacement
             .is_err()
     );
     drop(broker);
-    s.accounts.release(&lease).await.unwrap();
-    s.accounts
-        .connect_api_key(
-            &s,
-            Provider::Opencode,
-            "Zen",
-            "opencode",
-            "replacement-key",
-            Some(id),
-        )
-        .await
-        .unwrap();
+    s.accounts.release(&s, &lease).await.unwrap();
+    serde_json::to_value(
+        s.accounts
+            .connect_api_key(
+                &s,
+                Provider::Opencode,
+                "Zen",
+                "opencode",
+                "replacement-key",
+                Some(id),
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     s.accounts.remove(&s, id).await.unwrap();
     assert!(
         s.vault
@@ -158,8 +196,96 @@ async fn run(s: &Service, plan: Value) -> (cairn_installation::error::Result<()>
     .await
     .expect("native turn must finish or fail without hanging");
     drop(broker);
-    s.accounts.release(&lease).await.unwrap();
+    s.accounts.release(s, &lease).await.unwrap();
     (result, output.await.unwrap())
+}
+
+#[tokio::test]
+async fn disk_notice_is_submitted_without_user_delivery_receipts_including_replay() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    connect(&s).await;
+    tokio::fs::create_dir_all(root.path().join("inbox"))
+        .await
+        .unwrap();
+    tokio::fs::write(
+        root.path().join("inbox/disk-notice.json"),
+        json!({ "id": "disk-notice", "operationalNotice": true, "text": "Runtime disk pressure" })
+            .to_string(),
+    )
+    .await
+    .unwrap();
+    let input = plan(&root, "Build the status panel");
+    for _ in 0..2 {
+        let (result, events) = run(&s, input.clone()).await;
+        result.unwrap();
+        assert!(events.iter().any(|event| event["type"] == "turn.completed"));
+        assert!(
+            !events
+                .iter()
+                .any(|event| event["type"] == "chat.delivered"
+                    && event["messageId"] == "disk-notice")
+        );
+    }
+    let receipt = tokio::fs::read_to_string(root.path().join("result.opencode-receipt.json"))
+        .await
+        .unwrap();
+    assert!(
+        !serde_json::from_str::<Value>(&receipt).unwrap()["delivered"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("disk-notice"))
+    );
+}
+
+#[tokio::test]
+async fn later_submissions_settle_when_their_assistant_response_was_created_first() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    connect(&s).await;
+    tokio::fs::create_dir_all(root.path().join("inbox"))
+        .await
+        .unwrap();
+    tokio::fs::write(
+        root.path().join("inbox/disk-notice.json"),
+        json!({ "id": "disk-notice", "operationalNotice": true, "text": "Runtime disk pressure" })
+            .to_string(),
+    )
+    .await
+    .unwrap();
+    let mut input = plan(&root, "Build the status panel");
+    input["opencodeConfig"] = json!({ "fixtureReversePromptCompletion": true });
+    for _ in 0..2 {
+        let (result, events) = run(&s, input.clone()).await;
+        result.unwrap();
+        assert_eq!(
+            tokio::fs::read_to_string(root.path().join("result.md"))
+                .await
+                .unwrap(),
+            "Runtime disk pressure"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event["type"] == "chat.delivered" && event["messageId"] == "initial")
+        );
+        assert!(events.iter().any(|event| event["type"] == "turn.completed"));
+        assert!(
+            !events
+                .iter()
+                .any(|event| event["type"] == "chat.delivered"
+                    && event["messageId"] == "disk-notice")
+        );
+    }
+    let receipt = tokio::fs::read_to_string(root.path().join("result.opencode-receipt.json"))
+        .await
+        .unwrap();
+    assert!(
+        !serde_json::from_str::<Value>(&receipt).unwrap()["delivered"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("disk-notice"))
+    );
 }
 
 #[tokio::test]
@@ -245,10 +371,13 @@ async fn persisted_usage_errors_do_not_poison_the_replacement_provider() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
     connect(&s).await;
-    s.accounts
-        .connect_api_key(&s, Provider::Opencode, "Go", "opencode-go", "go-key", None)
-        .await
-        .unwrap();
+    serde_json::to_value(
+        s.accounts
+            .connect_api_key(&s, Provider::Opencode, "Go", "opencode-go", "go-key", None)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     let mut first = plan(&root, "fixture:opencode-limit Build the status panel.");
     first["model"] = "opencode-go/ling-3.1-flash-free".into();
     let (result, events) = run(&s, first.clone()).await;
@@ -386,78 +515,6 @@ async fn cancelling_during_native_startup_kills_the_waiting_process() {
 }
 
 #[tokio::test]
-async fn legacy_receipts_reject_native_continuations_during_recovery() {
-    let root = TempDir::new().unwrap();
-    let s = service(&root).await;
-    connect(&s).await;
-    let session = "ses_legacy";
-    let legacy_wire = "msg_1a000000000001abcdefghijklmn";
-    let native_wire = "msg_000000001002abcdefghijklmn";
-    let submitted_at: i64 = 0x1a000000000000 / 4096;
-    assert!(native_wire < legacy_wire);
-
-    // An older incomplete receipt has an untruncated ID and no submission time.
-    tokio::fs::write(
-        root.path().join("result.opencode-receipt.json"),
-        json!({
-            "messageId": "initial",
-            "submissions": [["initial", legacy_wire]],
-            "delivered": ["initial"],
-        })
-        .to_string(),
-    )
-    .await
-    .unwrap();
-    let native_data = Provider::Opencode
-        .driver()
-        .home(&s, "protocol-test")
-        .join("data/opencode");
-    tokio::fs::create_dir_all(&native_data).await.unwrap();
-    // Put the unknown continuation first, so detection must establish the
-    // timestamp boundary from owned history before visiting any unknown user.
-    tokio::fs::write(
-        native_data.join("fixture-sessions.json"),
-        json!({
-            session: {
-                "id": session,
-                "messages": [
-                    {
-                        "info": {
-                            "id": native_wire,
-                            "role": "user",
-                            "time": { "created": submitted_at + 1 },
-                        },
-                        "parts": [],
-                    },
-                    {
-                        "info": {
-                            "id": legacy_wire,
-                            "role": "user",
-                            "time": { "created": submitted_at },
-                        },
-                        "parts": [],
-                    },
-                ],
-            },
-        })
-        .to_string(),
-    )
-    .await
-    .unwrap();
-
-    let mut input = plan(&root, "Continue the interrupted request.");
-    input["sessionId"] = session.into();
-    let (result, events) = run(&s, input).await;
-    assert!(
-        result
-            .unwrap_err()
-            .message
-            .contains("unsupported continuation")
-    );
-    assert!(!events.iter().any(|event| event["type"] == "turn.completed"));
-}
-
-#[tokio::test]
 async fn cancellation_stops_a_busy_native_turn() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
@@ -495,26 +552,69 @@ async fn cancellation_stops_a_busy_native_turn() {
     );
 }
 
-/// Optional pinned-native smoke: real OpenCode, a local model server, synthetic auth.
+/// Optional native qualification: the real OpenCode release reports the provider and
+/// model catalog that account connection and the model picker read.
 /// Run with OPENCODE_NATIVE_BIN set via the credential-isolated backend launcher.
 #[tokio::test]
-#[ignore = "requires the pinned OpenCode 1.19.0 binary"]
+#[ignore = "requires a native OpenCode binary"]
+async fn native_cli_lists_providers_and_models() {
+    let binary = std::env::var("OPENCODE_NATIVE_BIN").expect("set OPENCODE_NATIVE_BIN");
+    let root = TempDir::new().unwrap();
+    let s = Service::new(Config {
+        opencode_bin: binary,
+        ..common::config(root.path())
+    })
+    .await
+    .unwrap();
+    let providers = s.opencode.providers(&s).await.unwrap();
+    for provider in ["opencode", "openai"] {
+        assert!(
+            providers
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["id"] == provider && !text(p, "name").is_empty()),
+            "{providers}"
+        );
+    }
+    // Connecting checks the provider against the same native catalog.
+    serde_json::to_value(
+        s.accounts
+            .connect_api_key(&s, Provider::Opencode, "OpenAI", "openai", KEY, None)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let models = s.opencode.models(&s).await.unwrap();
+    assert_eq!(models["error"], "", "{models}");
+    assert!(!models["models"].as_array().unwrap().is_empty(), "{models}");
+}
+
+/// Optional pinned-native smoke: real OpenCode, a local model server, synthetic auth.
+/// Run with OPENCODE_NATIVE_BIN set via the credential-isolated backend launcher.
+/// OPENCODE_NATIVE_RESUME_BIN resumes the session with another release: a newer
+/// one taking over sessions an installation already holds, or an older one after
+/// a rollback.
+#[tokio::test]
+#[ignore = "requires a native OpenCode binary"]
 async fn pinned_native_cli_executes_and_resumes_without_global_plugins() {
     use axum::{Router, http::HeaderMap, routing::post};
     let binary = std::env::var("OPENCODE_NATIVE_BIN").expect("set OPENCODE_NATIVE_BIN");
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
-    let account = s
-        .accounts
-        .connect_api_key(&s, Provider::Opencode, "Local model", "openai", KEY, None)
-        .await
-        .unwrap();
+    let account = serde_json::to_value(
+        s.accounts
+            .connect_api_key(&s, Provider::Opencode, "Local model", "openai", KEY, None)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     // Keep the public API restricted to built-in providers. This test's custom
     // local provider avoids the native OpenAI-specific Responses loader.
     let id = text(&account, "id");
-    let mut stored = s.store.get(KIND, id).await.unwrap().unwrap();
+    let mut stored = s.store.account_fixture(id).await.unwrap().unwrap();
     stored["modelProvider"] = "fixture".into();
-    s.store.put(KIND, stored).await.unwrap();
+    s.store.save_account_fixture(stored).await.unwrap();
     s.vault
         .set(
             &format!("opencode-account:{id}"),
@@ -524,8 +624,12 @@ async fn pinned_native_cli_executes_and_resumes_without_global_plugins() {
         .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let router = Router::new().route("/v1/chat/completions", post(|headers: HeaderMap| async move {
+    // Model requests, to check that a resumed session sends its earlier turns.
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let recorded = requests.clone();
+    let router = Router::new().route("/v1/chat/completions", post(move |headers: HeaderMap, body: axum::body::Bytes| async move {
         assert_eq!(headers["authorization"], format!("Bearer {KEY}"));
+        recorded.lock().unwrap().push(serde_json::from_slice(&body).unwrap());
         let chunks = [
             json!({
                 "id": "local",
@@ -616,6 +720,10 @@ async fn pinned_native_cli_executes_and_resumes_without_global_plugins() {
         "thread_id",
     )
     .to_owned();
+    if let Ok(binary) = std::env::var("OPENCODE_NATIVE_RESUME_BIN") {
+        config.opencode_bin = binary;
+    }
+    let first_turn = requests.lock().unwrap().len();
     input["sessionId"] = session.clone().into();
     input["execution"]["messageId"] = "follow-up".into();
     input["execution"]["text"] = "Continue in the same session. Do not call tools.".into();
@@ -653,10 +761,22 @@ async fn pinned_native_cli_executes_and_resumes_without_global_plugins() {
             .unwrap(),
         "Native OpenCode local model passed."
     );
+    // The resuming release loaded the stored history rather than starting over.
+    assert!(
+        requests.lock().unwrap()[first_turn..]
+            .iter()
+            .any(|request| {
+                let messages = request["messages"].to_string();
+                messages.contains("Reply with the local model result")
+                    && messages.contains("Native OpenCode local model passed.")
+                    && messages.contains("Continue in the same session")
+            }),
+        "The follow-up request did not include the first turn"
+    );
 }
 
 #[tokio::test]
-async fn withdrawn_questions_reject_the_native_request_without_an_answer() {
+async fn native_questions_are_rejected_without_creating_a_cairn_question() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
     connect(&s).await;
@@ -694,99 +814,7 @@ async fn withdrawn_questions_reject_the_native_request_without_an_answer() {
         tokio::fs::read_to_string(root.path().join("result.md"))
             .await
             .unwrap(),
-        "Question withdrawn without an answer."
-    );
-}
-
-#[tokio::test]
-async fn native_questions_use_cairn_ids_and_answers_reach_the_original_native_request() {
-    let root = TempDir::new().unwrap();
-    let s = service(&root).await;
-    connect(&s).await;
-    let lease = s
-        .accounts
-        .acquire(&s, "question-test", Provider::Opencode, MODEL)
-        .await
-        .unwrap()
-        .unwrap();
-    let _broker = broker::serve(&s, &lease).await.unwrap();
-    let mut config = s.config.clone();
-    config.home = lease.home.parent().unwrap().to_owned();
-    let next_config = config.clone();
-    let input = plan(&root, "fixture:opencode-question");
-    let (tx, mut rx) = mpsc::channel(128);
-    let task =
-        tokio::spawn(
-            async move { opencode::run(&config, input, tx, CancellationToken::new()).await },
-        );
-    let mut answered = false;
-    let mut session = String::new();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while let Some(event) = rx.recv().await {
-            if event["type"] == "thread.started" {
-                session = text(&event, "thread_id").to_owned();
-            }
-            if event["type"] == "chat.question" {
-                let id = text(&event["question"], "id");
-                assert_eq!(id.len(), 64);
-                assert!(id.bytes().all(|c| c.is_ascii_hexdigit()));
-                tokio::fs::create_dir_all(root.path().join("inbox"))
-                    .await
-                    .unwrap();
-                tokio::fs::write(
-                    root.path().join("inbox/messages.json"),
-                    json!([{
-                        "id": "answer", "questionId": id, "answers": { "0": ["Compact"] },
-                        "text": "Compact", "attachments": [],
-                    }])
-                    .to_string(),
-                )
-                .await
-                .unwrap();
-                answered = true;
-            }
-        }
-    })
-    .await
-    .unwrap();
-    task.await.unwrap().unwrap();
-    assert!(answered);
-    assert_eq!(
-        tokio::fs::read_to_string(root.path().join("result.md"))
-            .await
-            .unwrap(),
-        "I will use the Compact layout."
-    );
-
-    // Leave the delivered answer on disk, as it can be until the manager's next tick.
-    let mut next = plan(&root, "Continue after the question.");
-    next["execution"]["messageId"] = "next".into();
-    next["sessionId"] = session.into();
-    let (tx, mut rx) = mpsc::channel(128);
-    let next_task = tokio::spawn(async move {
-        opencode::run(&next_config, next, tx, CancellationToken::new()).await
-    });
-    let mut events = Vec::new();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while let Some(event) = rx.recv().await {
-            events.push(event);
-        }
-    })
-    .await
-    .unwrap();
-    next_task.await.unwrap().unwrap();
-    assert!(events.iter().any(|e| e["type"] == "turn.completed"));
-    assert!(!events.iter().any(|e| e["type"] == "chat.question"));
-    assert!(
-        !events
-            .iter()
-            .any(|e| e["type"] == "chat.delivered" && e["messageId"] == "answer")
-    );
-    assert!(
-        tokio::fs::read_to_string(root.path().join("result.md"))
-            .await
-            .unwrap()
-            .contains("compact status panel")
+        "Native question tools are disabled. Use cairn_workspace.ask_questions to ask the user."
     );
 }
 
@@ -814,7 +842,10 @@ async fn key_replacement_keeps_concurrent_account_edits() {
     updated.name = "Paused Zen".into();
     updated.enabled = false;
     updated.max_concurrent_runs = Some(1);
-    s.store.put(KIND, updated.to_value()).await.unwrap();
+    s.store
+        .save_account_fixture(updated.to_value())
+        .await
+        .unwrap();
     drop(update_guard);
 
     tokio::time::timeout(Duration::from_secs(5), replace)
@@ -839,11 +870,13 @@ async fn connection_order_waits_for_in_flight_account_updates() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
     let zen = text(&connect(&s).await, "id").to_owned();
-    let go = s
-        .accounts
-        .connect_api_key(&s, Provider::Opencode, "Go", "opencode-go", "go-key", None)
-        .await
-        .unwrap();
+    let go = serde_json::to_value(
+        s.accounts
+            .connect_api_key(&s, Provider::Opencode, "Go", "opencode-go", "go-key", None)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     let go = text(&go, "id").to_owned();
 
     // A refresh or edit holds this lock while saving its account snapshot.
@@ -858,7 +891,10 @@ async fn connection_order_waits_for_in_flight_account_updates() {
         "ordering must wait for the account update to finish"
     );
     updating.name = "Updated Zen".into();
-    s.store.put(KIND, updating.to_value()).await.unwrap();
+    s.store
+        .save_account_fixture(updating.to_value())
+        .await
+        .unwrap();
     drop(update_guard);
 
     tokio::time::timeout(Duration::from_secs(5), reorder)
@@ -867,11 +903,8 @@ async fn connection_order_waits_for_in_flight_account_updates() {
         .unwrap();
     let zen = s.accounts.account(&s, &zen).await.unwrap();
     assert_eq!(zen.name, "Updated Zen");
-    assert_eq!(zen.extra["priority"], 1);
-    assert_eq!(
-        s.accounts.account(&s, &go).await.unwrap().extra["priority"],
-        0
-    );
+    assert_eq!(zen.priority, Some(1));
+    assert_eq!(s.accounts.account(&s, &go).await.unwrap().priority, Some(0));
 }
 
 #[tokio::test]
@@ -879,11 +912,13 @@ async fn auto_models_follow_the_connection_order_and_fall_back_when_one_is_exhau
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
     let zen = text(&connect(&s).await, "id").to_owned();
-    let go = s
-        .accounts
-        .connect_api_key(&s, Provider::Opencode, "Go", "opencode-go", "go-key", None)
-        .await
-        .unwrap();
+    let go = serde_json::to_value(
+        s.accounts
+            .connect_api_key(&s, Provider::Opencode, "Go", "opencode-go", "go-key", None)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     let go = text(&go, "id").to_owned();
     assert!(
         s.accounts
@@ -892,10 +927,13 @@ async fn auto_models_follow_the_connection_order_and_fall_back_when_one_is_exhau
             .is_err(),
         "an order must list every account"
     );
-    s.accounts
-        .reorder(&s, Provider::Opencode, &[go.clone(), zen.clone()])
-        .await
-        .unwrap();
+    serde_json::to_value(
+        s.accounts
+            .reorder(&s, Provider::Opencode, &[go.clone(), zen.clone()])
+            .await
+            .unwrap(),
+    )
+    .unwrap();
 
     let auto = "auto/ling-3-1-flash-free";
     let models = s.opencode.models(&s).await.unwrap();
@@ -918,7 +956,7 @@ async fn auto_models_follow_the_connection_order_and_fall_back_when_one_is_exhau
         .unwrap()
         .unwrap();
     assert_eq!(first.account_id, go);
-    s.accounts.release(&first).await.unwrap();
+    s.accounts.release(&s, &first).await.unwrap();
     s.accounts.exhausted(&s, &go, auto).await.unwrap();
     let next = s
         .accounts
@@ -927,7 +965,7 @@ async fn auto_models_follow_the_connection_order_and_fall_back_when_one_is_exhau
         .unwrap()
         .unwrap();
     assert_eq!(next.account_id, zen);
-    s.accounts.release(&next).await.unwrap();
+    s.accounts.release(&s, &next).await.unwrap();
 
     // A pinned route never moves to another provider.
     let pinned = s

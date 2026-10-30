@@ -37,41 +37,67 @@ class FilUnreadJourneyTest {
     @get:Rule val compose = createComposeRule()
 
     private val now = System.currentTimeMillis()
-    private val main = Agent(MAIN_AGENT_ID, "Rédacteur")
+    private val main =
+        Agent(
+            exclusiveNodes = emptyList(),
+            plugins = emptyList(),
+            revision = "",
+            createdAt = 0,
+            access =
+                AccessPolicy(
+                    mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                    projects = null,
+                    skills = null,
+                    mcps = null,
+                ),
+            id = MAIN_AGENT_ID,
+            name = "Rédacteur",
+        )
     private val notes =
-        Task("notes", "Notes de version hebdomadaires", "Résumer la semaine.", MAIN_AGENT_ID)
-    private val audit = Task("audit", "Audit de sécurité nocturne", "Auditer.", MAIN_AGENT_ID)
+        Task(
+            "348988cc-0279-5ed4-801b-ac44d6987c6e",
+            "Notes de version hebdomadaires",
+            "Résumer la semaine.",
+            MAIN_AGENT_ID,
+        )
+    private val audit =
+        Task(
+            "b7ec3b50-62dd-530b-8060-bd5700fb7eb6",
+            "Audit de sécurité nocturne",
+            "Auditer.",
+            MAIN_AGENT_ID,
+        )
     private val activity =
         listOf(
             Run(
-                "notes-run",
-                taskId = "notes",
+                id = "notes-run",
+                taskId = "348988cc-0279-5ed4-801b-ac44d6987c6e",
                 status = "succeeded",
                 trigger = "schedule",
                 startedAt = now - 30 * 60_000,
                 finishedAt = now - 20 * 60_000,
-                snapshot = Snapshot(task = notes, agent = main),
+                snapshot = Snapshot(task = notes.runTaskSnapshot(), agent = main),
                 provider = "codex",
                 unread = true,
                 preview =
                     "Trois nouveautés cette semaine : reprise à la demande, partage d’installations et notifications.",
             ),
             Run(
-                "audit-run",
-                taskId = "audit",
+                id = "audit-run",
+                taskId = "b7ec3b50-62dd-530b-8060-bd5700fb7eb6",
                 status = "failed",
                 trigger = "schedule",
                 startedAt = now - 7_200_000,
                 finishedAt = now - 7_000_000,
-                snapshot = Snapshot(task = audit, agent = main),
+                snapshot = Snapshot(task = audit.runTaskSnapshot(), agent = main),
                 provider = "opencode",
             ),
         )
     private val chats =
         listOf(
             Chat(
-                "done",
-                "Rédiger le changelog 0.53",
+                id = "a2b21257-b699-5665-82a6-6ee68c85fe62",
+                title = "Rédiger le changelog 0.53",
                 agentName = "Rédacteur",
                 status = "succeeded",
                 runId = "done-run",
@@ -83,16 +109,16 @@ class FilUnreadJourneyTest {
                     "Le changelog est prêt : 12 corrections, 3 nouveautés. J’ai ouvert la PR #184.",
             ),
             Chat(
-                "question",
-                "Choisir la pagination",
+                id = "765886cd-efa2-5d30-bdce-99340ee87a3d",
+                title = "Choisir la pagination",
                 agentName = "Rédacteur",
                 pendingQuestions = 1,
                 updatedAt = now - 60_000,
                 provider = "claude",
             ),
             Chat(
-                "old",
-                "Relecture du guide d’installation",
+                id = "7e0552ad-fde3-5785-a37c-8bc7e408e409",
+                title = "Relecture du guide d’installation",
                 agentName = "Rédacteur",
                 status = "succeeded",
                 updatedAt = now - 86_400_000,
@@ -155,9 +181,19 @@ class FilUnreadJourneyTest {
                             path == "/api/installations" -> json(beaconInstallationsFixture())
                             path == "/api/account/session" -> json(beaconAccountFixture("fixture"))
                             path == "/api/installations/fixture/api/agents" ->
-                                json(wireJson.encodeToString(listOf(main)))
+                                json(
+                                    wireJson.encodeToString(
+                                        build.cairn.contracts.ListAgentsOutput(listOf(main))
+                                    )
+                                )
                             path == "/api/installations/fixture/api/tasks" ->
-                                json(wireJson.encodeToString(listOf(notes, audit)))
+                                json(
+                                    wireJson.encodeToString(
+                                        build.cairn.contracts.ListMissionsOutput(
+                                            listOf(notes, audit)
+                                        )
+                                    )
+                                )
                             path == "/api/installations/fixture/api/tasks/activity" ->
                                 json(wireJson.encodeToString(activity))
                             path == "/api/installations/fixture/api/chats/stream" ->
@@ -169,7 +205,31 @@ class FilUnreadJourneyTest {
                             path == "/api/installations/fixture/api/overview" ||
                                 path.endsWith("/models") ||
                                 path == "/api/installations/fixture/api/accounts" -> json("{}")
-                            else -> json("[]")
+                            else ->
+                                json(
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
+                                    else "[]"
+                                )
                         }
                     }
                 }
@@ -225,7 +285,7 @@ class FilUnreadJourneyTest {
                     reads.isNotEmpty()
                 }
                 assertEquals(
-                    "{\"items\":[{\"key\":\"chat:done\",\"finishedAt\":${chats.first().finishedAt}}]}",
+                    "{\"items\":[{\"key\":\"chat:${chats.first().id}\",\"finishedAt\":${chats.first().finishedAt}}]}",
                     reads.first(),
                 )
                 compose.waitUntil(10000) {
@@ -245,7 +305,7 @@ class FilUnreadJourneyTest {
                     reads.size == 2
                 }
                 assertEquals(
-                    "{\"items\":[{\"key\":\"task:notes\",\"finishedAt\":${activity.first().finishedAt}}]}",
+                    "{\"items\":[{\"key\":\"task:348988cc-0279-5ed4-801b-ac44d6987c6e\",\"finishedAt\":${activity.first().finishedAt}}]}",
                     reads[1],
                 )
                 compose.waitUntil(10000) {
@@ -283,7 +343,29 @@ class FilUnreadJourneyTest {
                                     "{\"read\":1}"
                                 }
                                 path.endsWith("/overview") || path.endsWith("/models") -> "{}"
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
+                                    else "[]"
                             }
                         return MockResponse()
                             .setHeader("Content-Type", "application/json")
@@ -345,13 +427,13 @@ class FilUnreadJourneyTest {
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path!!.substringBefore('?')
-                        if (path.endsWith("/chats/done/stream")) {
+                        if (path.endsWith("/chats/a2b21257-b699-5665-82a6-6ee68c85fe62/stream")) {
                             started.set(true)
                             check(release.await(20, TimeUnit.SECONDS))
                             val run =
                                 Run(
-                                    "done-run",
-                                    taskId = "done",
+                                    id = "done-run",
+                                    taskId = "a2b21257-b699-5665-82a6-6ee68c85fe62",
                                     status = "succeeded",
                                     trigger = "chat",
                                     finishedAt = chats.first().finishedAt,
@@ -368,7 +450,29 @@ class FilUnreadJourneyTest {
                                     "{\"read\":1}"
                                 }
                                 path.endsWith("/overview") || path.endsWith("/models") -> "{}"
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
+                                    else "[]"
                             }
                         return MockResponse()
                             .setHeader("Content-Type", "application/json")
@@ -389,7 +493,13 @@ class FilUnreadJourneyTest {
                 }
                 CairnTheme {
                     if (state.installation != null)
-                        ChatScreen(vm, state, "done", openChat = {}, openRun = {})
+                        ChatScreen(
+                            vm,
+                            state,
+                            "a2b21257-b699-5665-82a6-6ee68c85fe62",
+                            openChat = {},
+                            openRun = {},
+                        )
                 }
             }
             try {
@@ -401,7 +511,7 @@ class FilUnreadJourneyTest {
                 compose.waitUntil(10000) {
                     compose.onAllNodes(isRoot()).fetchSemanticsNodes()
                     compose
-                        .onAllNodesWithTag("chat-page:question")
+                        .onAllNodesWithTag("chat-page:765886cd-efa2-5d30-bdce-99340ee87a3d")
                         .fetchSemanticsNodes()
                         .isNotEmpty()
                 }
@@ -413,7 +523,7 @@ class FilUnreadJourneyTest {
                     reads.isNotEmpty()
                 }
                 assertEquals(
-                    "{\"items\":[{\"key\":\"chat:done\",\"finishedAt\":${chats.first().finishedAt}}]}",
+                    "{\"items\":[{\"key\":\"chat:${chats.first().id}\",\"finishedAt\":${chats.first().finishedAt}}]}",
                     reads.first(),
                 )
             } finally {
@@ -464,7 +574,29 @@ class FilUnreadJourneyTest {
                                     "{\"read\":1}"
                                 }
                                 path.endsWith("/overview") || path.endsWith("/models") -> "{}"
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
+                                    else "[]"
                             }
                         return MockResponse()
                             .setHeader("Content-Type", "application/json")
@@ -507,7 +639,7 @@ class FilUnreadJourneyTest {
                     reads.isNotEmpty()
                 }
                 assertEquals(
-                    "{\"items\":[{\"key\":\"task:notes\",\"finishedAt\":${finished.finishedAt}}]}",
+                    "{\"items\":[{\"key\":\"task:348988cc-0279-5ed4-801b-ac44d6987c6e\",\"finishedAt\":${finished.finishedAt}}]}",
                     reads.single(),
                 )
             } finally {

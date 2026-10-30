@@ -2,6 +2,7 @@ import type { Provider } from '../../../packages/contracts/accounts'
 import type { ModelCatalog } from '../../../packages/contracts/models'
 import { reactive } from 'vue'
 import { providers } from '../../../packages/contracts/accounts'
+import { listModels } from '../../../packages/contracts/generated/listModels'
 import { api, state } from './api'
 
 // The last catalog is kept locally so pickers can label saved models without
@@ -39,7 +40,7 @@ function createCatalog(provider: Provider) {
     if (pending)
       return pending
     catalog.loading = true
-    pending = api<ModelCatalog>(`/${provider}/models`)
+    pending = listModels(api, { provider })
       .then((value) => {
         Object.assign(catalog, value)
         store(key, value)

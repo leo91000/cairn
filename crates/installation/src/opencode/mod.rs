@@ -1,4 +1,4 @@
-//! OpenCode 1.19's native HTTP session protocol. Each execution gets a private
+//! OpenCode's native HTTP session protocol, as of 1.19. Each execution gets a private
 //! server, state, and credentials; engine and model-provider identifiers stay separate.
 mod turn;
 
@@ -24,7 +24,10 @@ use tokio::{
     task::JoinHandle,
 };
 
-pub const VERSION: &str = "1.19.0";
+/// The oldest release whose HTTP session protocol this adapter speaks. Each image
+/// build installs OpenCode's latest release, which CI runs through this adapter's
+/// native test before validation (scripts/cli-updates.mjs).
+pub const MINIMUM: &str = "1.19.0";
 const LIMIT: usize = 16_000_000;
 
 const API_PROVIDERS: &[&str] = &[
@@ -108,7 +111,7 @@ fn environment(config: &Config, home: &Path) -> Environment {
             && key != "ANTHROPIC_AUTH_TOKEN"
             && key != "GOOGLE_APPLICATION_CREDENTIALS"
     });
-    // The pinned native release reads global plugins from Global.Path.home.
+    // OpenCode reads global plugins from Global.Path.home.
     // Override that lookup without changing HOME for shell tools and GitHub auth.
     env.insert(
         "OPENCODE_TEST_HOME".into(),
@@ -207,7 +210,9 @@ impl Server {
             .build()
             .map_err(Error::internal)?;
         let mut child = cmd.spawn().map_err(|_| {
-            Error::unavailable("Unable to start OpenCode. Install OpenCode 1.19.0 on the server.")
+            Error::unavailable(format!(
+                "Unable to start OpenCode. Install OpenCode {MINIMUM} or newer on the server."
+            ))
         })?;
         let stdout = child.stdout.take().unwrap();
         let mut stderr = child.stderr.take().unwrap();
@@ -228,10 +233,10 @@ impl Server {
             let _ = tokio::io::copy(&mut stdout, &mut tokio::io::sink()).await;
         }));
         let health = server.get("/global/health").await?;
-        if health["version"] != VERSION {
-            return Err(Error::bad(
-                "This integration requires OpenCode 1.19.0. Update OPENCODE_BIN or the runner image.",
-            ));
+        if !supported_version(health["version"].as_str().unwrap_or_default()) {
+            return Err(Error::bad(format!(
+                "This integration requires OpenCode {MINIMUM} or newer. Update OPENCODE_BIN or the runner image."
+            )));
         }
         Ok(server)
     }
@@ -459,10 +464,7 @@ impl Catalog {
             .collect::<Vec<_>>();
         accounts.sort_by(|a, b| a.priority().cmp(&b.priority()).then(a.id.cmp(&b.id)));
         let mut connected = Vec::<String>::new();
-        for provider in accounts
-            .iter()
-            .filter_map(|a| a.extra.get("modelProvider").and_then(Value::as_str))
-        {
+        for provider in accounts.iter().filter_map(|a| a.model_provider.as_deref()) {
             if !connected.iter().any(|p| p == provider) {
                 connected.push(provider.to_owned());
             }
@@ -757,6 +759,23 @@ fn group(raw: &Value, connected: &[String]) -> Vec<Value> {
     entries
 }
 
+/// A plain `MAJOR.MINOR.PATCH` release.
+fn release(version: &str) -> Option<[u64; 3]> {
+    let mut parts = version.split('.').map(|part| {
+        (!part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| part.parse().ok())
+            .flatten()
+    });
+    let release = [parts.next()??, parts.next()??, parts.next()??];
+    parts.next().is_none().then_some(release)
+}
+
+/// A stable release at or after [`MINIMUM`]; prereleases and snapshots never qualify.
+fn supported_version(version: &str) -> bool {
+    release(version)
+        .is_some_and(|version| release(MINIMUM).is_some_and(|minimum| version >= minimum))
+}
+
 fn provider_name(provider: &Value) -> &str {
     if provider["id"] == "opencode" {
         "OpenCode Zen"
@@ -768,6 +787,27 @@ fn provider_name(provider: &Value) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_stable_releases_from_the_minimum_are_supported() {
+        for version in ["1.19.0", "1.19.4", "1.19.12", "1.20.0", "1.190.0", "2.0.0"] {
+            assert!(supported_version(version), "{version}");
+        }
+        for version in [
+            "",
+            "1.19",
+            "1.19.",
+            "1.18.9",
+            "0.99.99",
+            "1.19.4.1",
+            "+1.19.4",
+            "1.19.5-beta.1",
+            "0.0.0-dev-202610221304",
+            "1.19.4 ",
+        ] {
+            assert!(!supported_version(version), "{version}");
+        }
+    }
 
     #[tokio::test(start_paused = true)]
     async fn restored_native_state_can_start_after_the_previous_deadline() {

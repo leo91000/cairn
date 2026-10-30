@@ -190,7 +190,7 @@ pub(crate) async fn run_archives(
 }
 
 async fn allowed(s: &Service, node_id: &str, project: &Value) -> Result<bool> {
-    let node = s.get("nodes", node_id).await?;
+    let node = s.node_boundary(node_id).await?;
     if node["revoked"] == true || node["accepting"] != true {
         return Ok(false);
     }
@@ -224,9 +224,9 @@ async fn allowed(s: &Service, node_id: &str, project: &Value) -> Result<bool> {
     {
         return Ok(false);
     }
-    Ok(s.store.list("agents").await?.iter().any(|agent| {
+    Ok(s.store.agent_snapshots().await?.iter().any(|agent| {
         let policy = crate::service::policy(agent);
-        crate::native::policy::native(agent) == native
+        crate::native::policy::supports(agent, if native { "native" } else { "firecracker" })
             && crate::nodes::agent_allows(agent, node_id)
             && crate::service::allowed(&policy["projects"], text(project, "id"))
     }))
@@ -234,7 +234,8 @@ async fn allowed(s: &Service, node_id: &str, project: &Value) -> Result<bool> {
 
 pub(crate) async fn catalog(s: &Service, node: &str) -> Result<Vec<Archive>> {
     let mut result = Vec::new();
-    for project in s.store.list("projects").await? {
+    for project in s.store.projects().await? {
+        let project = serde_json::to_value(project)?;
         if project["sourceMode"] == "local" || !allowed(s, node, &project).await? {
             continue;
         }
@@ -312,7 +313,7 @@ async fn refresh(s: &Service, project: &Value) -> Result<()> {
     if project["sourceMode"] == "local" {
         return Ok(());
     }
-    let agents = s.store.list("agents").await?;
+    let agents = s.store.agent_snapshots().await?;
     let Some(agent) = agents.iter().find(|agent| {
         crate::service::allowed(
             &crate::service::policy(agent)["projects"],
@@ -375,7 +376,8 @@ pub(crate) async fn maintain(s: Arc<Service>) {
     }
     loop {
         let refresh_all = async {
-            for project in s.store.list("projects").await? {
+            for project in s.store.projects().await? {
+                let project = serde_json::to_value(project)?;
                 if let Err(error) = refresh(&s, &project).await {
                     tracing::warn!(
                         status = error.status,

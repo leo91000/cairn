@@ -1,3 +1,5 @@
+> Statut : les approbations de bots de plugins disparaissent avec la délégation externe ([ADR-0075](0075-plugin-hooks-rules-and-scoped-grants.md)) ; la couverture des droits d’un agent délégué compare désormais les contributions et les ressources accordées, pas seulement les instances, revérifiée à chaque action ; l’accès à l’agent de la conversation demandeuse suffit pour poursuivre ou orienter la tâche ou répondre à ses questions, tant que cette conversation existe ; supprimer la tâche exige l’accès à son propre agent.
+
 # Delegated tasks across coding agents and models
 
 Date: 2026-10-23.
@@ -74,9 +76,3 @@ task is a normal conversation: a person can open it, answer its questions,
 continue it or delete it. Requesters must state self-contained tasks and push the
 work a task reads. Agents that need a person's answer still route it through the
 person: requesters cannot answer their tasks' questions yet.
-
-The persisted lineage fields are additive and the data compatibility epoch stays
-unchanged: older releases can read the records, and new releases treat an absent
-`nativeParentAccess` as installation-management provenance. Older releases cannot
-run a native child authorized only by the new delegation permission; they deny it
-under their existing installation-access requirement.

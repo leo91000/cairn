@@ -35,17 +35,54 @@ class BlockedMissionJourneyTest {
 
     private val calls = CopyOnWriteArrayList<Triple<String, String, String>>()
     private val activityReads = CopyOnWriteArrayList<List<Run>>()
+    private val savedMissions = ConcurrentHashMap<String, Task>()
     private val now = System.currentTimeMillis()
-    private val claude = Agent("claude", "Claude", provider = "claude")
-    private val proof = Task("proof", "Preuve appareil F8", agentId = "claude")
-    private val notes = Task("notes", "Notes de version 0.53", agentId = "claude")
-    private val checks = Task("checks", "Checks de la PR315", agentId = "claude")
-    private val deploy = Task("deploy", "Déploiement staging", agentId = "claude")
+    private val claude =
+        Agent(
+            exclusiveNodes = emptyList(),
+            plugins = emptyList(),
+            revision = "",
+            createdAt = 0,
+            access =
+                AccessPolicy(
+                    mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                    projects = null,
+                    skills = null,
+                    mcps = null,
+                ),
+            id = "8630fb2d-e8d4-5aac-9c89-6874bb9a60b1",
+            name = "Claude",
+            provider = "claude",
+        )
+    private val proof =
+        Task(
+            "2db836ee-ce2e-552d-b9fa-2fef2030546c",
+            "Preuve appareil F8",
+            agentId = "8630fb2d-e8d4-5aac-9c89-6874bb9a60b1",
+        )
+    private val notes =
+        Task(
+            "348988cc-0279-5ed4-801b-ac44d6987c6e",
+            "Notes de version 0.53",
+            agentId = "8630fb2d-e8d4-5aac-9c89-6874bb9a60b1",
+        )
+    private val checks =
+        Task(
+            "25078a9c-7f0c-5a2b-8424-e17e90946633",
+            "Checks de la PR315",
+            agentId = "8630fb2d-e8d4-5aac-9c89-6874bb9a60b1",
+        )
+    private val deploy =
+        Task(
+            "888f7003-e15b-5b1f-a1b3-a221bc92ec3a",
+            "Déploiement staging",
+            agentId = "8630fb2d-e8d4-5aac-9c89-6874bb9a60b1",
+        )
     private val parent =
         Chat(
-            "parent",
-            "Orchestrer les chantiers F8",
-            agentId = "claude",
+            id = "71497beb-c0e7-59a9-8f10-5df2b19e61c7",
+            title = "Orchestrer les chantiers F8",
+            agentId = "8630fb2d-e8d4-5aac-9c89-6874bb9a60b1",
             agentName = "Claude",
             updatedAt = now - 3_600_000,
         )
@@ -57,14 +94,14 @@ class BlockedMissionJourneyTest {
         requestedBy: RunRequester? = null,
     ) =
         Run(
-            "${task.id}-run",
+            id = "${task.id}-run",
             taskId = task.id,
             status = "succeeded",
             trigger = "mcp",
             createdAt = now - minutes * 60_000 - 300_000,
             startedAt = now - minutes * 60_000 - 300_000,
             finishedAt = now - minutes * 60_000,
-            snapshot = Snapshot(task = task, agent = claude),
+            snapshot = Snapshot(task = task.runTaskSnapshot(), agent = claude),
             outcome = outcome.copy(reportedAt = now - minutes * 60_000),
             requestedBy = requestedBy,
         )
@@ -92,7 +129,10 @@ class BlockedMissionJourneyTest {
                     waitingOn = "requester",
                 ),
                 20,
-                RunRequester("parent-run", chatId = "parent"),
+                RunRequester(
+                    runId = "parent-run",
+                    chatId = "71497beb-c0e7-59a9-8f10-5df2b19e61c7",
+                ),
             ),
             run(
                 deploy,
@@ -158,9 +198,44 @@ class BlockedMissionJourneyTest {
                         return when {
                             path == "/api/installations" -> json(beaconInstallationsFixture())
                             path == "/api/account/session" -> json(beaconAccountFixture("fixture"))
-                            path == "$api/agents" -> json(wireJson.encodeToString(listOf(claude)))
+                            path == "$api/agents" ->
+                                json(
+                                    wireJson.encodeToString(
+                                        build.cairn.contracts.ListAgentsOutput(listOf(claude))
+                                    )
+                                )
                             path == "$api/tasks" && request.method == "GET" ->
-                                json(wireJson.encodeToString(listOf(proof, notes, checks, deploy)))
+                                json(
+                                    wireJson.encodeToString(
+                                        build.cairn.contracts.ListMissionsOutput(
+                                            listOf(proof, notes, checks, deploy).map {
+                                                savedMissions[it.id] ?: it
+                                            }
+                                        )
+                                    )
+                                )
+                            path.startsWith("$api/tasks/") &&
+                                path.endsWith("/state") &&
+                                request.method == "POST" -> {
+                                val command =
+                                    wireJson.decodeFromString<
+                                        build.cairn.contracts.MissionStateInput
+                                    >(
+                                        text
+                                    )
+                                val current =
+                                    listOf(proof, notes, checks, deploy).single {
+                                        it.id == command.taskId
+                                    }
+                                val saved =
+                                    current.copy(
+                                        enabled = command.enabled,
+                                        archived = command.archived,
+                                        revision = "saved-state",
+                                    )
+                                savedMissions[current.id] = saved
+                                json(wireJson.encodeToString(saved))
+                            }
                             path == "$api/tasks/activity" -> {
                                 val snapshot = activity()
                                 activityReads += snapshot
@@ -176,9 +251,9 @@ class BlockedMissionJourneyTest {
                                 stream(LiveState(run = activity().first { it.id == id }))
                             }
                             path == "$api/accounts" -> json("{\"accounts\":[],\"required\":[]}")
-                            path == "$api/projects" ||
-                                path == "$api/skills" ||
-                                path == "$api/mcps" ||
+                            path == "$api/projects" -> json("""{"projects":[]}""")
+                            path == "$api/mcps" -> json("""{"mcps":[]}""")
+                            path == "$api/skills" ||
                                 path == "$api/onepassword" ||
                                 path == "$api/runs" -> json("[]")
                             else -> json("{}")
@@ -267,14 +342,41 @@ class BlockedMissionJourneyTest {
                     .jsonArray
                     .single()
                     .jsonObject
-            assertEquals("task:notes", snooze["key"]!!.jsonPrimitive.content)
+            assertEquals(
+                "task:348988cc-0279-5ed4-801b-ac44d6987c6e",
+                snooze["key"]!!.jsonPrimitive.content,
+            )
             assertEquals(tomorrowMorning(), snooze["until"]!!.jsonPrimitive.long)
 
             compose.onNodeWithContentDescription("Écarter Preuve appareil F8").performClick()
             waitText("Tâche bloquée · Écartée")
-            assertTrue(dismissals.containsKey("proof"))
+            assertTrue(dismissals.containsKey("2db836ee-ce2e-552d-b9fa-2fef2030546c"))
             capture("android-blocked-set-aside")
         }
+
+    @Test
+    fun `archiving from the Fil uses the current mission revision`() = journey { vm ->
+        waitText("Preuve appareil F8")
+        compose
+            .onNodeWithContentDescription("Autres actions pour Preuve appareil F8")
+            .performScrollTo()
+            .performClick()
+        waitText("Archiver la mission")
+        compose.onNodeWithText("Archiver la mission").performClick()
+        val statePath = "/api/installations/fixture/api/tasks/${proof.id}/state"
+        waitCall("POST", statePath)
+        val command =
+            wireJson.decodeFromString<build.cairn.contracts.MissionStateInput>(
+                calls.last { it.second == statePath }.third
+            )
+        assertEquals(proof.id, command.taskId)
+        assertEquals(proof.revision, command.revision)
+        assertEquals(false, command.enabled)
+        assertEquals(true, command.archived)
+        waitText("Modifications enregistrées")
+        assertEquals("Archive refresh failed", null, vm.state.value.error)
+        assertTrue(vm.state.value.tasks.any { it.id == proof.id && it.archived && !it.enabled })
+    }
 
     @Test
     fun `a blocked run says who it waits on and can be set aside from its outcome`() = journey {
@@ -289,7 +391,7 @@ class BlockedMissionJourneyTest {
         capture("android-blocked-run-dismissed")
         compose.onNodeWithText("Remettre dans Pour vous").performClick()
         waitText("Me le rappeler demain")
-        assertTrue(!dismissals.containsKey("proof"))
+        assertTrue(!dismissals.containsKey("2db836ee-ce2e-552d-b9fa-2fef2030546c"))
     }
 
     @Test
@@ -334,6 +436,8 @@ class BlockedMissionJourneyTest {
     @Test
     fun `a run handed back to its requester links the conversation that started it`() = journey {
         waitText("Checks de la PR315")
+        // The parent snapshot moves this card out of Pour vous. Tap after that layout change.
+        waitText("Tâche bloquée · En attente de Orchestrer les chantiers F8")
         compose.onNodeWithText("Checks de la PR315").performClick()
         waitText("En attente de « Orchestrer les chantiers F8 »", substring = true)
         waitText("Ouvrir « Orchestrer les chantiers F8 »")

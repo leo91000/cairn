@@ -28,15 +28,55 @@ abstract class ImagePasteCases {
             val app = ApplicationProvider.getApplicationContext<Application>()
             val uploads = CopyOnWriteArrayList<Pair<String, Long>>()
             val sent = CopyOnWriteArrayList<JsonObject>()
-            val agent = Agent(MAIN_AGENT_ID, "Agent principal")
-            val run = Run("run", status = "succeeded", snapshot = Snapshot(agent = agent))
+            val agent =
+                Agent(
+                    exclusiveNodes = emptyList(),
+                    plugins = emptyList(),
+                    revision = "",
+                    createdAt = 0,
+                    access =
+                        AccessPolicy(
+                            mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                            projects = null,
+                            skills = null,
+                            mcps = null,
+                        ),
+                    id = MAIN_AGENT_ID,
+                    name = "Agent principal",
+                )
+            val run =
+                Run(
+                    id = "run",
+                    status = "succeeded",
+                    snapshot =
+                        Snapshot(
+                            agent = agent,
+                            task =
+                                build.cairn.contracts.RunTaskSnapshot(
+                                    agentId = build.cairn.app.data.MAIN_AGENT_ID,
+                                    id = "00000000-0000-4000-8000-000000000003",
+                                    name = "Fixture",
+                                    prompt = "Fixture",
+                                ),
+                        ),
+                    taskId = "",
+                )
             val chat =
-                Chat("chat", title = "Capture", runId = "run", agentName = agent.name, run = run)
+                Chat(
+                    id = "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                    title = "Capture",
+                    runId = "run",
+                    agentName = agent.name,
+                    run = run,
+                )
             server.dispatcher =
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path!!.substringBefore('?')
-                        if (path == "/api/installations/fixture/api/chats/chat/stream") {
+                        if (
+                            path ==
+                                "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/stream"
+                        ) {
                             val frame =
                                 "event: batch\nid: 1\ndata: ${wireJson.encodeToString(LiveBatch(emptyList(), LiveState(chat = chat, run = run), true, false))}\n\n"
                             return MockResponse()
@@ -51,7 +91,7 @@ abstract class ImagePasteCases {
                         if (
                             request.method == "PUT" &&
                                 path.startsWith(
-                                    "/api/installations/fixture/api/chats/chat/attachments/"
+                                    "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/attachments/"
                                 )
                         ) {
                             val id = path.substringAfterLast('/')
@@ -61,12 +101,12 @@ abstract class ImagePasteCases {
                                 .setBody(
                                     wireJson.encodeToString(
                                         ChatAttachment(
-                                            id,
-                                            "chat",
-                                            name,
-                                            request.bodySize,
-                                            "image/png",
-                                            "image",
+                                            id = id,
+                                            chatId = "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                                            name = name,
+                                            size = request.bodySize.toInt(),
+                                            mediaType = "image/png",
+                                            kind = "image",
                                         )
                                     )
                                 )
@@ -76,17 +116,45 @@ abstract class ImagePasteCases {
                                 "/api/installations" -> beaconInstallationsFixture()
                                 "/api/account/session" -> beaconAccountFixture("fixture")
                                 "/api/installations/fixture/api/agents" ->
-                                    wireJson.encodeToString(listOf(agent))
-                                "/api/installations/fixture/api/chats/chat/messages" -> {
+                                    wireJson.encodeToString(
+                                        build.cairn.contracts.ListAgentsOutput(listOf(agent))
+                                    )
+                                "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/messages" -> {
                                     sent +=
                                         wireJson
                                             .parseToJsonElement(request.body.readUtf8())
                                             .jsonObject
-                                    "{}"
+                                    wireJson.encodeToString(
+                                        ChatMessage(
+                                            id = sent.last().getValue("id").jsonPrimitive.content
+                                        )
+                                    )
                                 }
                                 "/api/installations/fixture/api/codex/models" -> """{"models":[]}"""
                                 "/api/installations/fixture/api/overview" -> "{}"
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
+                                    else "[]"
                             }
                         return MockResponse().setBody(body)
                     }
@@ -102,7 +170,13 @@ abstract class ImagePasteCases {
                 }
                 CairnTheme {
                     if (state.session.authenticated)
-                        ChatScreen(vm, state, "chat", openChat = {}, openRun = {})
+                        ChatScreen(
+                            vm,
+                            state,
+                            "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                            openChat = {},
+                            openRun = {},
+                        )
                 }
             }
             compose.waitUntil(20000) {

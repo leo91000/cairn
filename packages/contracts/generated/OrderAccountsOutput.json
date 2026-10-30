@@ -1,0 +1,413 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "AccountResets": {
+      "properties": {
+        "available": {
+          "default": 0,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "credits": {
+          "default": [],
+          "description": "Codex's own credit objects, kept verbatim.",
+          "items": {
+            "additionalProperties": true,
+            "description": "Validated against the selected package's manifest, never used for Cairn policy.",
+            "type": "object",
+            "x-cairn-json-object": true
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "AccountSignIn": {
+      "properties": {
+        "acceptsCode": {
+          "default": false,
+          "type": "boolean"
+        },
+        "accountId": {
+          "default": "",
+          "type": "string"
+        },
+        "code": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expiresAt": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "phase": {
+          "default": "starting",
+          "pattern": "^(starting|authorizing|verifying)$",
+          "type": "string"
+        },
+        "provider": {
+          "default": "codex",
+          "pattern": "^(codex|claude|opencode)$",
+          "type": "string"
+        },
+        "state": {
+          "default": "pending",
+          "pattern": "^(pending|complete|failed|cancelled)$",
+          "type": "string"
+        },
+        "url": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "AccountUsage": {
+      "properties": {
+        "allowed": {
+          "default": true,
+          "type": "boolean"
+        },
+        "attemptedAt": {
+          "description": "The last reading attempt, successful or not (Claude Code and OpenCode Go).",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "checkedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resets": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AccountResets"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Codex banked resets."
+        },
+        "useBalance": {
+          "type": "boolean"
+        },
+        "windows": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/AccountWindow"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "AccountWindow": {
+      "properties": {
+        "durationMins": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "default": "",
+          "type": "string"
+        },
+        "label": {
+          "default": "",
+          "type": "string"
+        },
+        "models": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "reached": {
+          "default": false,
+          "type": "boolean"
+        },
+        "resetsAt": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "usedPercent": {
+          "default": null,
+          "description": "Kept as reported, so integer readings stay integers.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "CodingAgentAccount": {
+      "properties": {
+        "activeRunIds": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "checkedAt": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "createdAt": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "email": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "error": {
+          "default": "",
+          "type": "string"
+        },
+        "exhausted": {
+          "default": false,
+          "type": "boolean"
+        },
+        "id": {
+          "default": "",
+          "type": "string"
+        },
+        "lastUsedAt": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "maxConcurrentRuns": {
+          "default": 4,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "modelProvider": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "modelProviderName": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "default": "",
+          "type": "string"
+        },
+        "plan": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "priority": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "provider": {
+          "default": "codex",
+          "pattern": "^(codex|claude|opencode)$",
+          "type": "string"
+        },
+        "remainingPercent": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "resetError": {
+          "default": "",
+          "type": "string"
+        },
+        "resetsAt": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "revision": {
+          "default": "",
+          "type": "string"
+        },
+        "stale": {
+          "default": true,
+          "type": "boolean"
+        },
+        "state": {
+          "default": "pending",
+          "pattern": "^(pending|ready|error)$",
+          "type": "string"
+        },
+        "status": {
+          "default": "ready",
+          "pattern": "^(signIn|reconnect|paused|unavailable|waiting|full|next|low|ready)$",
+          "type": "string"
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AccountUsage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "type": "object"
+    },
+    "CodingAgentAccounts": {
+      "properties": {
+        "accounts": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/CodingAgentAccount"
+          },
+          "type": "array"
+        },
+        "required": {
+          "default": [],
+          "items": {
+            "pattern": "^(codex|claude|opencode)$",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "signIn": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AccountSignIn"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "type": "object"
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "kind": {
+          "const": "ordered",
+          "type": "string"
+        },
+        "overview": {
+          "$ref": "#/definitions/CodingAgentAccounts"
+        }
+      },
+      "required": [
+        "kind",
+        "overview"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "capability": {
+          "type": "string"
+        },
+        "kind": {
+          "const": "unsupported",
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "provider": {
+          "pattern": "^(codex|claude|opencode)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "provider",
+        "capability",
+        "message"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "OrderAccountsOutput"
+}

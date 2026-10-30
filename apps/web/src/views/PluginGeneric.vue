@@ -16,7 +16,7 @@ import {
   watch,
 } from 'vue'
 import { useRoute } from 'vue-router'
-import { currentAgentIds } from '../agent-access'
+import { listPluginPackages } from '../../../../packages/contracts/generated/listPluginPackages'
 import {
   api,
   notify,
@@ -66,7 +66,7 @@ import {
   pluginSecrets,
   pluginSettings,
 } from '../plugin-form-values'
-import { pluginOperation } from '../plugin-operations'
+import { pluginCommand } from '../plugin-management'
 import {
   effortLabels,
   matchingPreset,
@@ -202,7 +202,7 @@ const tones = {
 }
 
 async function load() {
-  catalog.value = await api<Catalog>('/plugins')
+  catalog.value = await listPluginPackages(api, {})
   loaded.value = true
 }
 
@@ -278,14 +278,19 @@ async function complete(changed?: string) {
   const inputs = Object.fromEntries(fields.value.map(field => [field.key, fieldInput(field)]))
   completing.value = true
   try {
-    const result = await pluginOperation<FormResult>(`/plugins/${id.value}/form`, {
-      instance: editing.value?.id,
-      settings: pluginSettings(storedFields.value, values.value),
-      secrets: pluginSecrets(secrets.value),
-      ...sharing.value,
-      ...credentialInput(form.value.token, signIn.flow.value),
-      ...(changed ? { changed } : {}),
-    })
+    const { form: result } = await pluginCommand({
+      kind: 'form',
+      pluginId: id.value,
+      instanceId: editing.value?.id ?? null,
+      data: {
+        revision: editing.value?.revision,
+        settings: pluginSettings(storedFields.value, values.value),
+        secrets: pluginSecrets(secrets.value),
+        ...sharing.value,
+        ...credentialInput(form.value.token, signIn.flow.value),
+        ...(changed ? { changed } : {}),
+      },
+    }, 'form')
     if (ask !== asked)
       return
     for (const field of storedFields.value) {
@@ -447,33 +452,32 @@ async function save() {
     return
   await action(async () => {
     const agent = state.agents.find(item => item.id === form.value.agentId)
-    const agentIds = await currentAgentIds(state.agents, entry.value, editing.value, async () => (await api<Catalog>('/plugins')).connections)
     const body = {
+      revision: editing.value?.revision,
       name: form.value.name,
       // The save consumes a completed sign-in.
       ...credentialInput(form.value.token, signIn.flow.value),
       settings: pluginSettings(storedFields.value, values.value),
       // Blank secret fields keep what is saved.
       secrets: pluginSecrets(secrets.value),
-      // Agents are granted on their own page; omitting the list keeps it.
-      ...(delegates.value && {
-        agentId: form.value.agentId,
-        // An agent with one project answers in it; a broader one answers outside projects.
-        projectId: agent?.access.projects?.length === 1 ? agent.access.projects[0] : null,
-        accessMode: form.value.accessMode,
-        userIds: people.value.map(item => item.id),
-        people: people.value,
-        maxMessagesPerHour: Number(form.value.maxMessagesPerHour),
-        maxPerPersonPerHour: Number(form.value.maxPerPersonPerHour),
-      }),
+      agentId: delegates.value ? form.value.agentId : '',
+      projectId: delegates.value && agent?.access.projects?.length === 1 ? agent.access.projects[0] : null,
+      accessMode: form.value.accessMode,
+      userIds: people.value.map(item => item.id),
+      people: people.value,
+      maxMessagesPerHour: Number(form.value.maxMessagesPerHour),
+      maxPerPersonPerHour: Number(form.value.maxPerPersonPerHour),
       enabled: form.value.enabled,
       ...sharing.value,
-      // An older (or unknown) installation needs the granted agents back, as they are now. A
-      // new instance is granted to the agents chosen on the assistant's last step.
-      ...(agentIds ? { agentIds } : !editing.value && grants.value.length ? { agentIds: grants.value } : {}),
+      // New instances grant the chosen agents; editing keeps current grants.
+      ...(!editing.value && grants.value.length ? { agentIds: grants.value } : {}),
     }
-    const path = `/plugins/${id.value}/connections${editing.value ? `/${editing.value.id}` : ''}`
-    await pluginOperation(path, body, editing.value ? 'PUT' : 'POST')
+    await pluginCommand({
+      kind: 'save',
+      pluginId: id.value,
+      instanceId: editing.value?.id ?? null,
+      data: body,
+    }, 'saved')
     signIn.consumed()
     form.value.token = ''
     secrets.value = pluginFormSecrets()
@@ -483,23 +487,41 @@ async function save() {
   })
 }
 
-async function post(connection: PluginConnection, path: string, body?: unknown) {
+async function setEnabled(connection: PluginConnection, enabled: boolean) {
   await action(async () => {
-    await api(`/plugins/${id.value}/connections/${connection.id}/${path}`, { method: 'POST', body: body ? JSON.stringify(body) : undefined })
+    await pluginCommand({
+      kind: 'enabled',
+      pluginId: id.value,
+      instanceId: connection.id,
+      data: { enabled },
+    }, 'enabled')
+    await load()
+  })
+}
+
+async function personAction(connection: PluginConnection, userId: string, operation: 'approve' | 'deny' | 'remove') {
+  await action(async () => {
+    await pluginCommand({
+      kind: 'people',
+      pluginId: id.value,
+      instanceId: connection.id,
+      userId,
+      operation,
+    }, 'people')
     await load()
   })
 }
 
 async function test(connection: PluginConnection) {
   await action(async () => {
-    const result = await pluginOperation<{ message?: string }>(`/plugins/${id.value}/connections/${connection.id}/test`)
+    const result = await pluginCommand({ kind: 'test', pluginId: id.value, instanceId: connection.id }, 'tested')
     notify(`${connection.name}: ${result.message || 'it works'}`)
   })
 }
 
 async function disconnect(connection: PluginConnection) {
   await action(async () => {
-    const result = await api<{ message: string }>(`/plugins/${id.value}/connections/${connection.id}/disconnect`, { method: 'POST' })
+    const result = await pluginCommand({ kind: 'disconnect', pluginId: id.value, instanceId: connection.id }, 'disconnected')
     await load()
     notify(`${connection.name}: ${result.message}`)
   })
@@ -507,7 +529,7 @@ async function disconnect(connection: PluginConnection) {
 
 async function remove() {
   await action(async () => {
-    await api(`/plugins/${id.value}/connections/${removing.value!.id}`, { method: 'DELETE' })
+    await pluginCommand({ kind: 'delete', pluginId: id.value, instanceId: removing.value!.id }, 'deleted')
     removing.value = undefined
     await load()
   })
@@ -729,14 +751,14 @@ onBeforeUnmount(() => {
                 <li v-for="request in connection.requests" :key="request.id" class="flex items-center gap-3 rounded-xl bg-coral-soft px-3 py-2">
                   <PersonAvatar :name="request.name || request.userId" :identity="request.userId" :size="26" />
                   <span class="flex-1 truncate text-xs"><b>{{ request.name || request.userId }}</b> asked to use it</span>
-                  <UiButton size="small" :disabled="busy" @click="post(connection, `people/${request.userId}/deny`)">
+                  <UiButton size="small" :disabled="busy" @click="personAction(connection, request.userId, 'deny')">
                     Deny
                   </UiButton>
                   <UiButton
                     size="small"
                     variant="primary"
                     :disabled="busy"
-                    @click="post(connection, `people/${request.userId}/approve`)"
+                    @click="personAction(connection, request.userId, 'approve')"
                   >
                     Approve
                   </UiButton>
@@ -748,7 +770,7 @@ onBeforeUnmount(() => {
                     size="small"
                     :disabled="busy"
                     :aria-label="`Remove ${personName(connection, user)}`"
-                    @click="post(connection, `people/${user}/remove`)"
+                    @click="personAction(connection, user, 'remove')"
                   >
                     Remove
                   </UiButton>
@@ -788,7 +810,7 @@ onBeforeUnmount(() => {
                   role="switch"
                   :checked="connection.enabled"
                   :disabled="busy"
-                  @change="post(connection, 'enabled', { enabled: !connection.enabled })"
+                  @change="setEnabled(connection, !connection.enabled)"
                 >
                 Active
               </label>

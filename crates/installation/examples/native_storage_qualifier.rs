@@ -1,5 +1,15 @@
 //! Test-only manager for the disposable native-runtime/S3 qualification.
 //! JSONL stays on private pipes: responses include synthetic scoped read grants.
+use run_fixture::DbRunFixture;
+
+#[path = "../tests/common/agent_fixture.rs"]
+mod agent_fixture;
+
+use agent_fixture::{AgentFixture, StoreAgentFixture};
+use cairn_contracts::{
+    ExecutionNode, NativeMode, NativeModeObserved, NativeObservationStatus, NodeBackend,
+    NodeCapabilities, NodeId, NodeStoragePolicy,
+};
 use cairn_installation::{
     config::{Config, id, now},
     error::{Error, Result},
@@ -33,13 +43,13 @@ async fn dispatch(s: &Arc<Service>, requests: &AtomicU64, command: &Value) -> Re
     match command["op"].as_str().unwrap_or("") {
         "create" => {
             cairn_installation::validation::uuid(run_id)?;
-            let mut agent = s.agent(json!({ "name": "Fixture" }), None).await?;
+            let mut agent = s.agent_fixture(json!({ "name": "Fixture" }), None).await?;
             // The reserved local ID is a VM runner in production. Only this
             // disposable manager seeds it as native to route through the private
             // fixture bridge; do not weaken the real agent-save prohibition.
             agent["access"]["backend"] = "native".into();
             agent["access"]["nodes"] = json!([nodes::LOCAL_NODE_ID]);
-            s.store.put("agents", agent.clone()).await?;
+            s.store.put_agent_fixture(agent.clone()).await?;
             let run = json!({
                 "id": run_id, "taskId": id(), "projectId": "", "status": "succeeded", "createdAt": now(),
                 "isolated": true, "nodeId": nodes::LOCAL_NODE_ID, "executionBackend": "native",
@@ -49,7 +59,7 @@ async fn dispatch(s: &Arc<Service>, requests: &AtomicU64, command: &Value) -> Re
             s.store
                 .transaction({
                     let run = run.clone();
-                    move |db| db.add_run(&run, None)
+                    move |db| db.add_run_fixture(&run, None)
                 })
                 .await?;
             let grant = disk_grants::new_disk(s, &run, nodes::LOCAL_NODE_ID).await?;
@@ -61,20 +71,32 @@ async fn dispatch(s: &Arc<Service>, requests: &AtomicU64, command: &Value) -> Re
             )
         }
         "checkpoint" => {
-            s.store.set(&format!("run-checkpoint:{run_id}"), json!({
+            s.store.save_checkpoint_boundary(run_id, json!({
                 "runnerId": command["attempt"], "nodeId": nodes::LOCAL_NODE_ID,
                 "prepared": { "backend": "native", "isolated": true }, "runtimeId": "synthetic"
-            }), None).await?;
+            })).await?;
             Ok(json!({ "ok": true }))
         }
         "publish" | "live-publish" => {
             if command["op"] == "live-publish" {
                 s.store
-                    .patch_run(run_id, json!({ "status": "running" }))
+                    .change_run(
+                        run_id,
+                        cairn_installation::runs::RunChanges {
+                            status: Some(cairn_contracts::RunStatus::Running),
+                            ..Default::default()
+                        },
+                    )
                     .await?;
             } else {
                 s.store
-                    .patch_run(run_id, json!({ "status": "succeeded" }))
+                    .change_run(
+                        run_id,
+                        cairn_installation::runs::RunChanges {
+                            status: Some(cairn_contracts::RunStatus::Succeeded),
+                            ..Default::default()
+                        },
+                    )
                     .await?;
                 publication::request(s, run_id).await?;
             }
@@ -126,20 +148,22 @@ async fn dispatch(s: &Arc<Service>, requests: &AtomicU64, command: &Value) -> Re
             Ok(json!({ "hash": blake3::hash(&tokio::fs::read(path).await?).to_hex().to_string() }))
         }
         "revoke" => {
-            let mut node = s.get("nodes", nodes::LOCAL_NODE_ID).await?;
+            let mut node = s.node_boundary(nodes::LOCAL_NODE_ID).await?;
             node["nativeEnabled"] = false.into();
-            s.store.put("nodes", node).await?;
+            s.store.save_node_boundary(node).await?;
             Ok(json!({ "ok": true }))
         }
         "purge" => {
             publication::purge(s, run_id).await?;
-            // Only the isolated fixture skips the normal orphan grace period.
+            // Advance only this isolated fixture's GC grace and issued PUT expiry.
+            // Production must retain objects while a capability can recreate them.
             s.store
                 .transaction(|db| {
                     db.0.execute(
                         "UPDATE shared_objects SET unused_at=0 WHERE unused_at IS NOT NULL",
                         [],
                     )?;
+                    db.0.execute("UPDATE direct_storage_grants SET expires_at=0", [])?;
                     Ok(())
                 })
                 .await?;
@@ -191,7 +215,7 @@ async fn main() -> Result<()> {
     tokio::fs::write(&wrapper, script).await?;
     tokio::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).await?;
     tokio::fs::write(
-        data.join("archive-s3.json"),
+        data.join("storage-s3.json"),
         serde_json::to_vec(&json!({ "bucket": "cairn-node-test", "awsBinary": wrapper }))?,
     )
     .await?;
@@ -213,12 +237,44 @@ async fn main() -> Result<()> {
     })
     .await?;
     authority(&s).await?;
-    s.store.put("nodes", json!({
-        "id": nodes::LOCAL_NODE_ID, "local": true, "name": "Disposable fixture", "accepting": true,
-        "nativeEnabled": true, "nativeAccounts": [TRUSTED], "lastSeen": now(),
-        "capabilities": { "backend": "native", "ublk": true, "os": "linux", "arch": "x86_64" },
-        "storage": { "reserveMiB": 64, "reservePercent": 1, "memoryCacheMiB": 4, "cacheMiB": 128 }
-    })).await?;
+    s.store
+        .transaction(|db| {
+            db.save_node(&ExecutionNode {
+                id: NodeId(uuid::Uuid::parse_str(nodes::LOCAL_NODE_ID).map_err(Error::internal)?),
+                revision: id(),
+                local: true,
+                name: "Disposable fixture".into(),
+                accepting: true,
+                native_enabled: true,
+                native_accounts: vec![TRUSTED.into()],
+                last_seen: Some(now()),
+                created_at: now(),
+                capabilities: NodeCapabilities {
+                    backend: NodeBackend::Native,
+                    ublk: true,
+                    native_mode_protocol: 1,
+                    os: "linux".into(),
+                    arch: "x86_64".into(),
+                    ..Default::default()
+                },
+                native_mode_observed: Some(NativeModeObserved {
+                    mode: NativeMode::Protected,
+                    generation: None,
+                    status: NativeObservationStatus::Applied,
+                    error: None,
+                    target: None,
+                }),
+                storage: NodeStoragePolicy {
+                    reserve_mi_b: 64,
+                    reserve_percent: 1,
+                    memory_cache_mi_b: 4,
+                    cache_mi_b: 128,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        })
+        .await?;
     let requests = Arc::new(AtomicU64::new(0));
     let count = requests.clone();
     let router = http::router(s.clone())
@@ -261,3 +317,6 @@ async fn main() -> Result<()> {
     s.shutdown.cancel();
     Ok(())
 }
+
+#[path = "../tests/common/run_fixture.rs"]
+mod run_fixture;

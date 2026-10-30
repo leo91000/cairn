@@ -25,47 +25,89 @@ import org.robolectric.annotation.GraphicsMode
 class PluginProjectPickerTest {
     @get:Rule val compose = createComposeRule()
 
-    private val account = PluginConnection("acct-1", "forge", "Work")
+    private val account =
+        PluginConnection(
+            id = "acct-1",
+            pluginId = "forge",
+            name = "Work",
+            settings = kotlinx.serialization.json.JsonObject(emptyMap()),
+            status = PluginStatus(),
+            usage = PluginUsage(),
+            enabled = true,
+        )
     private val catalog =
         PluginCatalog(
             packages =
                 listOf(
                     PluginEntry(
-                        "forge",
+                        id = "forge",
                         active = "1.0.0",
                         manifest =
                             PluginManifest(
                                 id = "forge",
                                 name = "Forge",
-                                instances = PluginInstances("Account", "Accounts"),
+                                instances =
+                                    PluginInstances(singular = "Account", plural = "Accounts"),
                                 projectSources =
                                     listOf(
                                         PluginProjectSource(
-                                            "repositories",
-                                            "Repositories",
-                                            "Repositories this account can read.",
+                                            name = "repositories",
+                                            title = "Repositories",
+                                            description = "Repositories this account can read.",
                                         )
                                     ),
+                                version = "1.0.0",
+                                apiVersion = 2,
+                                capabilities = emptyList(),
                             ),
+                        builtin = false,
+                        status = "active",
+                        setup = null,
+                        versions = emptyList(),
                     ),
                     // Not approved: its sources are not offered.
                     PluginEntry(
-                        "pending",
+                        id = "pending",
                         status = "needs_approval",
                         manifest =
                             PluginManifest(
                                 id = "pending",
                                 name = "Pending",
-                                projectSources = listOf(PluginProjectSource("all", "All")),
+                                projectSources =
+                                    listOf(PluginProjectSource(name = "all", title = "All")),
+                                version = "1.0.0",
+                                apiVersion = 2,
+                                capabilities = emptyList(),
                             ),
+                        builtin = false,
+                        active = null,
+                        setup = null,
+                        versions = emptyList(),
                     ),
                 ),
             connections =
                 listOf(
                     account,
-                    PluginConnection("acct-2", "forge", "Paused", enabled = false),
-                    PluginConnection("p1", "pending", "Pending"),
+                    PluginConnection(
+                        id = "acct-2",
+                        pluginId = "forge",
+                        name = "Paused",
+                        enabled = false,
+                        settings = kotlinx.serialization.json.JsonObject(emptyMap()),
+                        status = PluginStatus(),
+                        usage = PluginUsage(),
+                    ),
+                    PluginConnection(
+                        id = "p1",
+                        pluginId = "pending",
+                        name = "Pending",
+                        settings = kotlinx.serialization.json.JsonObject(emptyMap()),
+                        status = PluginStatus(),
+                        usage = PluginUsage(),
+                        enabled = true,
+                    ),
                 ),
+            capabilities = emptyList(),
         )
 
     @Test

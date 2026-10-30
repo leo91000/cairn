@@ -4,6 +4,7 @@ import { expect, test } from '@playwright/test'
 import vue from '@vitejs/plugin-vue'
 import { createServer } from 'vite'
 import whitespace from '../fixtures/plugin-form-whitespace.json' with { type: 'json' }
+import { mockPluginCommand } from './mock-plugin-command'
 
 // Exercise the actual panel -> form -> action HTTP seam with synthetic admitted
 // view values. No installation/backend fixture or manifest defaults are needed.
@@ -65,7 +66,7 @@ test('panel action whitespace matches Kotlin for opening, edits and raw secrets'
   ]
   let value = ''
   const actions: Record<string, unknown>[] = []
-  await page.route('**/api/plugins/forms/connections/example/view', route => route.fulfill({
+  await mockPluginCommand(page, '**/api/plugins/forms/connections/example/view', route => route.fulfill({
     json: {
       view: [{
         type: 'form',
@@ -82,7 +83,7 @@ test('panel action whitespace matches Kotlin for opening, edits and raw secrets'
       }],
     },
   }))
-  await page.route('**/api/plugins/forms/connections/example/actions', async (route) => {
+  await mockPluginCommand(page, '**/api/plugins/forms/connections/example/actions', async (route) => {
     const body = route.request().postDataJSON()
     expect(body.action).toBe('apply')
     actions.push(body.values)

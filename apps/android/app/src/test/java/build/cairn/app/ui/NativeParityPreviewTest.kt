@@ -70,15 +70,30 @@ class NativeParityPreviewTest {
             val now = System.currentTimeMillis()
             val task =
                 Task(
-                    "task",
+                    "85aac3c3-27f5-5b76-a34d-d59120d410eb",
                     "Revue hebdomadaire du projet",
                     "Vérifier les changements et préparer le compte rendu.",
                     MAIN_AGENT_ID,
                     cron = "0 9 * * 1",
                     nextRun = now + 86400000,
                 )
-            val agent = Agent(MAIN_AGENT_ID, "Agent principal")
-            val project = Project("project", "Cairn")
+            val agent =
+                Agent(
+                    exclusiveNodes = emptyList(),
+                    plugins = emptyList(),
+                    revision = "",
+                    createdAt = 0,
+                    access =
+                        AccessPolicy(
+                            mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                            projects = null,
+                            skills = null,
+                            mcps = null,
+                        ),
+                    id = MAIN_AGENT_ID,
+                    name = "Agent principal",
+                )
+            val project = Project("46d045dd-9bce-51e3-8a99-65aa9384efc9", "Cairn")
             val outcome =
                 TaskOutcome(
                     "completed",
@@ -92,17 +107,18 @@ class NativeParityPreviewTest {
                 )
             val run =
                 Run(
-                    "run",
+                    id = "run",
                     taskId = task.id,
                     status = "succeeded",
                     taskName = task.name,
-                    snapshot = Snapshot(task = task, agent = agent, project = project),
+                    snapshot =
+                        Snapshot(task = task.runTaskSnapshot(), agent = agent, project = project),
                     outcome = outcome,
                 )
             val chat =
                 Chat(
-                    "chat",
-                    "Simplifier l’interface mobile",
+                    id = "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                    title = "Simplifier l’interface mobile",
                     agentName = agent.name,
                     projectName = project.name,
                     runId = run.id,
@@ -162,20 +178,28 @@ class NativeParityPreviewTest {
                         "une-longue-adresse-".repeat(7)
             val events =
                 listOf(
-                    RunEvent(1, now - 60000, "chat.user", "Peux-tu simplifier cette interface ?"),
                     RunEvent(
-                        2,
-                        now,
-                        "item.completed",
-                        "",
-                        mapOf(
-                            "item" to
-                                buildJsonObject {
-                                    put("id", "reply")
-                                    put("type", "agent_message")
-                                    put("text", reply)
-                                }
-                        ),
+                        id = 1,
+                        createdAt = now - 60000,
+                        type = "chat.user",
+                        text = "Peux-tu simplifier cette interface ?",
+                    ),
+                    RunEvent(
+                        id = 2,
+                        createdAt = now,
+                        type = "item.completed",
+                        text = "",
+                        payload =
+                            kotlinx.serialization.json.JsonObject(
+                                mapOf(
+                                    "item" to
+                                        buildJsonObject {
+                                            put("id", "reply")
+                                            put("type", "agent_message")
+                                            put("text", reply)
+                                        }
+                                )
+                            ),
                     ),
                 )
             fun stream(state: LiveState): MockResponse {
@@ -207,20 +231,46 @@ class NativeParityPreviewTest {
                                 "/api/account/session" -> beaconAccountFixture("fixture")
                                 "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(
-                                        listOf(Agent("custom", "Agent spécialisé"), agent)
+                                        build.cairn.contracts.ListAgentsOutput(
+                                            listOf(
+                                                Agent(
+                                                    exclusiveNodes = emptyList(),
+                                                    plugins = emptyList(),
+                                                    revision = "",
+                                                    createdAt = 0,
+                                                    access =
+                                                        AccessPolicy(
+                                                            mcpTools =
+                                                                build.cairn.contracts.McpTools(
+                                                                    emptyMap()
+                                                                ),
+                                                            projects = null,
+                                                            skills = null,
+                                                            mcps = null,
+                                                        ),
+                                                    id = "b918f201-4801-5816-afec-b8facde634f4",
+                                                    name = "Agent spécialisé",
+                                                ),
+                                                agent,
+                                            )
+                                        )
                                     )
                                 "/api/installations/fixture/api/projects" ->
-                                    wireJson.encodeToString(listOf(project))
+                                    wireJson.encodeToString(
+                                        build.cairn.contracts.ListProjectsOutput(listOf(project))
+                                    )
                                 "/api/installations/fixture/api/tasks" ->
                                     wireJson.encodeToString(
-                                        listOf(
-                                            task,
-                                            task.copy(
-                                                id = "next",
-                                                name = "Préparer la prochaine version",
-                                                cron = null,
-                                                nextRun = null,
-                                            ),
+                                        build.cairn.contracts.ListMissionsOutput(
+                                            listOf(
+                                                task,
+                                                task.copy(
+                                                    id = "00000000-0000-4000-8000-000000000099",
+                                                    name = "Préparer la prochaine version",
+                                                    cron = null,
+                                                    nextRun = null,
+                                                ),
+                                            )
                                         )
                                     )
                                 "/api/installations/fixture/api/tasks/activity" ->
@@ -231,12 +281,12 @@ class NativeParityPreviewTest {
                                     """{"occurrences":[${now + 86400000},${now + 8 * 86400000}]}"""
                                 "/api/installations/fixture/api/chats/stream" ->
                                     return stream(LiveState(chats = listOf(chat)))
-                                "/api/installations/fixture/api/chats/chat/stream" ->
+                                "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/stream" ->
                                     return stream(LiveState(chat = chat, run = chat.run))
                                 "/api/installations/fixture/api/runs/run/stream" ->
                                     return stream(LiveState(run = run))
-                                "/api/installations/fixture/api/skills",
-                                "/api/installations/fixture/api/mcps" -> "[]"
+                                "/api/installations/fixture/api/skills" -> "[]"
+                                "/api/installations/fixture/api/mcps" -> """{"mcps":[]}"""
                                 else -> "{}"
                             }
                         return MockResponse()

@@ -282,3 +282,123 @@ async fn sessions_show_a_bounded_device_description_and_hide_expired_devices() {
     assert_eq!(sessions["sessions"][0]["current"], true);
     app.close().await;
 }
+
+#[tokio::test]
+async fn generated_account_methods_are_scoped_to_the_beacon_session_without_an_installation() {
+    use cairn_contracts::beacon::ListAccountMethodsOutput;
+    let app = common::Fixture::new().await;
+    let (cookie, session) = login(&app, "methods@example.test").await;
+    let (other_cookie, _) = login(&app, "other-methods@example.test").await;
+    let account = session["account"]["id"].as_str().unwrap();
+    query("INSERT INTO sign_in_methods (id, account_id, kind, subject, label, removed) VALUES ('removed-method', $1, 'passkey', 'removed-credential', 'Removed device', true)")
+        .bind(account).execute(&app.pool).await.unwrap();
+    let route = format!(
+        "{}{}",
+        app.url,
+        cairn_contracts::beacon::LIST_ACCOUNT_METHODS_PATH
+    );
+    for active_cookie in [&cookie, &other_cookie] {
+        let response = app
+            .client
+            .get(&route)
+            .header("cookie", active_cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let output: ListAccountMethodsOutput = response.json().await.unwrap();
+        let methods = output.methods;
+        assert_eq!(methods.len(), 1);
+        assert_eq!(methods[0].kind, "email");
+        assert_eq!(
+            methods[0].label,
+            if active_cookie == &cookie {
+                "methods@example.test"
+            } else {
+                "other-methods@example.test"
+            }
+        );
+    }
+    // An installation grant (or an arbitrary bearer) is never a Beacon cookie.
+    let denied = app
+        .client
+        .get(&route)
+        .bearer_auth("installation-grant")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    query("DELETE FROM web_sessions WHERE account_id = $1")
+        .bind(account)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        app.client
+            .get(&route)
+            .header("cookie", cookie)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    app.close().await;
+}
+
+#[tokio::test]
+async fn account_methods_remain_at_beacon_when_the_installation_goes_offline() {
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let route = format!(
+        "{}{}",
+        relay.app.url,
+        cairn_contracts::beacon::LIST_ACCOUNT_METHODS_PATH
+    );
+    let before: cairn_contracts::beacon::ListAccountMethodsOutput = relay
+        .app
+        .client
+        .get(&route)
+        .header("cookie", &relay.cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    relay.stop.cancel();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let status: Value = relay
+                .app
+                .client
+                .get(format!("{}/api/account/session", relay.app.url))
+                .header("cookie", &relay.cookie)
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            if status["installations"][0]["online"] == false {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("installation must go offline");
+    let after: cairn_contracts::beacon::ListAccountMethodsOutput = relay
+        .app
+        .client
+        .get(&route)
+        .header("cookie", &relay.cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(before, after);
+    assert!(!after.methods.is_empty());
+    relay.close().await;
+}

@@ -11,6 +11,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
+import java.util.zip.GZIPInputStream
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -31,6 +32,13 @@ import okio.ForwardingSink
 import okio.buffer
 import okio.source
 
+/** A protocol mismatch requires an update, rather than a network retry. */
+class ProtocolMismatch :
+    ApiException(
+        426,
+        "Protocole incompatible. Mise à jour requise de l’app, de Beacon et de l’installation.",
+    )
+
 /** Owns the current installation route; account operations and binaries stay on HTTPS. */
 class DirectTransport(private val installationId: String?, private val switched: () -> Unit = {}) :
     Interceptor {
@@ -40,8 +48,18 @@ class DirectTransport(private val installationId: String?, private val switched:
     private val current = AtomicReference<DirectChannel?>()
     private val observed = MutableStateFlow("relay")
     val route = observed.asStateFlow()
+    private val mismatch = MutableStateFlow<String?>(null)
+    val protocolError = mismatch.asStateFlow()
+
+    fun rejectProtocol(error: ProtocolMismatch = ProtocolMismatch()) {
+        mismatch.value = error.message
+        current.getAndSet(null)?.close(error)
+        observed.value = "relay"
+        switched()
+    }
 
     fun attach(channel: DirectChannel) {
+        channel.onProtocolMismatch = ::rejectProtocol
         channel.onClosed = {
             if (current.compareAndSet(channel, null)) {
                 observed.value = "relay"
@@ -82,6 +100,7 @@ class DirectTransport(private val installationId: String?, private val switched:
         response.request.tag(DirectChannel::class.java) != null
 
     override fun intercept(chain: Interceptor.Chain): Response {
+        if (mismatch.value != null) throw ProtocolMismatch()
         val request = chain.request()
         val acceptsApplication =
             request.header("Accept") in setOf("application/json", "text/event-stream")
@@ -191,6 +210,7 @@ class DirectChannel(
 
     private val pending = ConcurrentHashMap<String, Exchange>()
     internal var onClosed: () -> Unit = {}
+    internal var onProtocolMismatch: (ProtocolMismatch) -> Unit = {}
     private val closed = AtomicBoolean()
     private val transfers = AtomicInteger()
 
@@ -215,6 +235,9 @@ class DirectChannel(
                 }
             } catch (error: CancellationException) {
                 throw error
+            } catch (error: ProtocolMismatch) {
+                onProtocolMismatch(error)
+                close(error)
             } catch (_: Exception) {
                 // Malformed wire data keeps the existing connection-loss recovery rules.
                 close()
@@ -222,10 +245,10 @@ class DirectChannel(
         }
     }
 
-    fun close() {
+    fun close(reason: IOException = DirectLost("Connexion directe interrompue")) {
         if (!closed.compareAndSet(false, true)) return
         pending.values.forEach {
-            it.failure = DirectLost("Connexion directe interrompue")
+            it.failure = reason
         }
         pending.clear()
         incoming.cancel()
@@ -270,7 +293,8 @@ class DirectChannel(
         val frame =
             synchronized(assemblies) {
                 val envelope = ByteBuffer.wrap(packet)
-                require(packet.size in HEADER..MAX_PACKET && envelope.get() == 1.toByte())
+                require(packet.size in HEADER..MAX_PACKET)
+                if (envelope.get() != 1.toByte()) throw ProtocolMismatch()
                 require(
                     assemblies.values.none {
                         System.nanoTime() - it.started >= TimeUnit.SECONDS.toNanos(30)
@@ -302,8 +326,9 @@ class DirectChannel(
                     .jsonObject
             }
         val type = frame["type"]!!.jsonPrimitive.content
-        require(type in setOf("response", "stream_start", "stream_chunk", "stream_end"))
         require(frame["type"]!!.jsonPrimitive.isString)
+        if (type == "update_required") throw ProtocolMismatch()
+        require(type in setOf("response", "stream_start", "stream_chunk", "stream_end"))
         val id = frame["id"]!!.jsonPrimitive
         require(id.isString)
 
@@ -367,6 +392,8 @@ class DirectChannel(
             "/api/" +
                 request.url.encodedPath.removePrefix(prefix) +
                 (request.url.encodedQuery?.let { "?$it" } ?: "")
+        val route = path.substringBefore('?')
+        val streamedRoute = route.endsWith("/stream") || route.startsWith("/api/shared-artifacts/")
         val frame = buildJsonObject {
             put("type", "request")
             put("id", id)
@@ -377,6 +404,12 @@ class DirectChannel(
             put(
                 "headers",
                 buildJsonArray {
+                    add(
+                        buildJsonArray {
+                            add("accept-encoding")
+                            add(if (streamedRoute) "identity" else "gzip")
+                        }
+                    )
                     for (name in
                         listOf(
                             "accept",
@@ -531,7 +564,23 @@ class DirectChannel(
                     )
                     .build()
             }
-            return builder.body(bytes.toResponseBody()).build()
+            val decoded =
+                if (request.method != "HEAD" && responseHeaders["content-encoding"] == "gzip") {
+                    builder.removeHeader("content-encoding").removeHeader("content-length")
+                    GZIPInputStream(bytes.inputStream()).use { input ->
+                        val output = ByteArrayOutputStream()
+                        val buffer = ByteArray(8192)
+                        while (true) {
+                            val count = input.read(buffer)
+                            if (count == -1) break
+                            if (output.size() + count > MAX_BODY)
+                                throw IOException("Réponse trop volumineuse")
+                            output.write(buffer, 0, count)
+                        }
+                        output.toByteArray()
+                    }
+                } else bytes
+            return builder.body(decoded.toResponseBody()).build()
         } catch (error: IOException) {
             runCatching { control("cancel", id) }
             throw error

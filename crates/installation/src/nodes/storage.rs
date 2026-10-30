@@ -6,6 +6,7 @@ use crate::{
     store::Db,
     validation::text,
 };
+use futures_util::StreamExt;
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
 
@@ -52,15 +53,17 @@ pub async fn monitor(s: Arc<Service>) {
         let Ok(runs) = s.store.read(monitored_runs).await else {
             continue;
         };
-        for run in runs.iter().filter(|run| {
+        futures_util::stream::iter(runs.iter().filter(|run| {
             matches!(
                 run["storage"]["mode"].as_str(),
                 Some("on-demand" | "native")
             )
-        }) {
-            // Unreachable controllers and unacknowledged grants are retried on the next tick.
+        }))
+        .for_each_concurrent(4, |run| async {
+            // One slow/offline conversation must not serialize every receipt.
             let _ = refresh(&s, run).await;
-        }
+        })
+        .await;
     }
 }
 
@@ -70,7 +73,14 @@ fn monitored_runs(db: &mut Db<'_>) -> Result<Vec<Value>> {
     let mut runs = db.active()?;
     let mut seen: std::collections::HashSet<String> =
         runs.iter().map(|run| text(run, "id").to_owned()).collect();
-    for node in db.list("nodes")? {
+    // Completed native disks need reconciliation even after their VM is gone.
+    // A durable node receipt can outlive the HTTP response that acknowledged it.
+    for run in db.json_rows(super::publication::SYNC_CANDIDATES, [])? {
+        if seen.insert(text(&run, "id").to_owned()) {
+            runs.push(run);
+        }
+    }
+    for node in db.nodes_boundary()? {
         if node["revoked"] == true {
             continue;
         }
@@ -107,7 +117,7 @@ pub async fn refresh(s: &Service, run: &Value) -> Result<()> {
         );
         return s
             .store
-            .transaction(move |db| record_status(db, &id, &node, &status, None))
+            .transaction(move |db| record_status(db, &id, &node, &status, None, 0))
             .await;
     }
     if status["mode"] != super::ON_DEMAND {
@@ -121,8 +131,9 @@ pub async fn refresh(s: &Service, run: &Value) -> Result<()> {
 
     let id = id.to_owned();
     let node = super::owner_node(run).to_owned();
+    let revision = run["backup"]["requestedRevision"].as_u64().unwrap_or(0);
     s.store
-        .transaction(move |db| record_status(db, &id, &node, &status, point.as_ref()))
+        .transaction(move |db| record_status(db, &id, &node, &status, point.as_ref(), revision))
         .await
 }
 
@@ -141,6 +152,7 @@ fn record_status(
     node: &str,
     status: &Value,
     point: Option<&Value>,
+    observed_revision: u64,
 ) -> Result<()> {
     let Some(current) = db.run(id)? else {
         return Ok(());
@@ -154,12 +166,28 @@ fn record_status(
         && let Some(point) = point
         && captured_at(point) >= captured_at(&current["backup"])
     {
+        let completed = status["completedGeneration"].as_i64();
+        let published = status["published"]["generation"].as_i64();
+        let covers_completed = completed.is_some_and(|generation| {
+            generation > 0
+                && published.is_some_and(|published| published >= generation)
+                && published == point["diskGeneration"].as_i64()
+        });
+        let requested = current["backup"]["requestedRevision"].as_u64().unwrap_or(0);
+        let acknowledged = current["backup"]["acknowledgedRevision"]
+            .as_u64()
+            .unwrap_or(0);
+        let acknowledged = if covers_completed {
+            acknowledged.max(observed_revision.min(requested))
+        } else {
+            acknowledged
+        };
         let pointer = serde_json::to_value(PublishedPointer {
             id: &point["id"],
             snapshot_id: &point["snapshotId"],
             captured_at: &point["capturedAt"],
             uploaded_bytes: None,
-            status: if super::publication::requested(&current) {
+            status: if requested > acknowledged {
                 BackupStatus::Pending
             } else {
                 BackupStatus::Ready
@@ -168,9 +196,12 @@ fn record_status(
         })?;
         let mut backup = current["backup"].as_object().cloned().unwrap_or_default();
         backup.extend(pointer.as_object().unwrap().clone());
+        if covers_completed {
+            backup.insert("acknowledgedRevision".into(), acknowledged.into());
+        }
         patch["backup"] = backup.into();
     }
-    db.patch_run(id, &patch)?;
+    db.update_run_boundary(id, &patch)?;
     record_volume(db, id, node, status)?;
     Ok(())
 }

@@ -17,7 +17,9 @@ pub fn tool() -> Value {
             must act next: user (the person using Cairn, the default), requester (the agent \
             conversation or mission that started this run, when it kept the remaining steps for \
             itself), or external (a CI run, a reviewer or another system that finishes on its \
-            own).",
+            own). Use external only for work already underway that can finish without \
+            intervention. Missing credentials, permissions or broken run access require \
+            repair by the user or requester; they are not outside checks.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -72,7 +74,7 @@ pub async fn report(s: &Service, bearer: &str, input: &Value) -> Result<Value> {
             // attempt cannot overwrite the next user message's outcome.
             let run = crate::project_workspaces::authorize_in(db, &bearer)?;
             outcome["messageId"] = crate::waits::execution_id(&run).clone();
-            db.patch_run(
+            db.update_run_boundary(
                 text(&run, "id"),
                 &json!({
                     "outcome": outcome

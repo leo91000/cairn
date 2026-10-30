@@ -1,100 +1,13 @@
-//! Persisted shapes of MCP connections, their encrypted secrets and run grants.
+//! Internal OAuth credentials and execution grants; public models live in contracts.
 use crate::validation::text;
+pub use cairn_contracts::{AuthKind, ConnectionState, McpServer, Transport};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Transport {
-    #[default]
-    Http,
-    Stdio,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AuthKind {
-    #[default]
-    None,
-    Bearer,
-    #[serde(rename = "oauth")]
-    OAuth,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ConnectionState {
-    #[default]
-    Untested,
-    Connected,
-    NeedsAuth,
-    Error,
-}
-
-/// A configured MCP connection (`mcps` record). Settings come from the `mcp`
-/// input schema; the remaining fields track discovery.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct McpServer {
-    pub id: String,
-    pub name: String,
-    pub transport: Transport,
-    pub url: String,
-    pub command: String,
-    pub args: Vec<String>,
-    pub auth: AuthKind,
-    pub client_id: String,
-    pub scopes: String,
-    pub allow_private_network: bool,
-    pub enabled: bool,
-    pub enabled_tools: Option<Vec<String>>,
-    pub created_at: i64,
-    pub revision: u64,
-    pub state: ConnectionState,
-    /// Tool catalog as returned by the server.
-    pub tools: Vec<Value>,
-    pub checked_at: Option<i64>,
-    pub error: String,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
-}
-
-impl McpServer {
-    pub fn is_http(&self) -> bool {
-        self.transport == Transport::Http
-    }
-
-    pub fn uses_oauth(&self) -> bool {
-        self.auth == AuthKind::OAuth
-    }
-
-    /// Settings that invalidate stored credentials when they change.
-    pub fn same_endpoint(&self, other: &Self) -> bool {
-        self.url == other.url
-            && self.transport == other.transport
-            && self.auth == other.auth
-            && self.client_id == other.client_id
-            && self.scopes == other.scopes
-    }
-
-    pub fn record_success(&mut self, tools: Vec<Value>, checked_at: i64) {
-        self.tools = tools;
-        self.state = ConnectionState::Connected;
-        self.error = String::new();
-        self.checked_at = Some(checked_at);
-    }
-
-    pub fn reset_state(&mut self, state: ConnectionState) {
-        self.state = state;
-        self.error = String::new();
-        self.checked_at = None;
-    }
-}
-
 /// Stored OAuth discovery: the MCP resource and its authorization server.
 /// Both metadata documents are third-party JSON and kept verbatim.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OAuthDiscovery {
     pub authorization_server_url: String,
@@ -120,7 +33,7 @@ impl OAuthDiscovery {
 }
 
 /// Encrypted per-connection credentials (`mcp-secret:{id}` in the vault).
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpSecrets {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -200,31 +113,28 @@ impl GrantScope {
     }
 }
 
-/// Run-scoped bearer grant (`mcp-grant:{digest}`) for the gateway and workspace MCPs.
+/// Typed run-scoped bearer grant for the gateway and workspace MCPs.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunGrant {
     pub run_id: String,
-    pub message_id: Value,
+    pub message_id: Option<String>,
     pub servers: BTreeMap<String, GrantScope>,
     pub workspace: bool,
-    #[serde(default)]
     pub installation: bool,
 }
 
-/// An OAuth authorization in flight (`mcp-oauth:{digest(state)}`).
+/// An OAuth authorization in flight, indexed by the digest of its state.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PendingAuthorization {
     pub connection_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub revision: Option<u64>,
+    pub revision: u64,
     pub session: String,
     pub nonce: String,
     #[serde(default)]
     pub native: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<i64>,
+    pub expires_at: i64,
     /// Callback parameters captured for a native client, first response only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub callback: Option<HashMap<String, String>>,

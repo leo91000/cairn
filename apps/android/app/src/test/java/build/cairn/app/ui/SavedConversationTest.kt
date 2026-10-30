@@ -6,8 +6,14 @@ import org.junit.Test
 
 /** Mirrors the web's `savedIsCurrent`: which saved conversations open before their stream. */
 class SavedConversationTest {
-    private val run = Run("run", status = "succeeded", finishedAt = 20)
-    private val chat = Chat("chat", runId = "run", updatedAt = 10, status = "succeeded")
+    private val run =
+        Run(
+            id = "run",
+            status = "succeeded",
+            finishedAt = 20,
+            taskId = "",
+        )
+    private val chat = Chat(id = "chat", runId = "run", updatedAt = 10, status = "succeeded")
 
     private fun saved(run: Run? = this.run, chat: Chat? = this.chat) =
         CachedHistory(

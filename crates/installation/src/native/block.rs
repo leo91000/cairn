@@ -3,17 +3,21 @@ use super::{atomic_write, workspace};
 use crate::{
     error::{Error, Result},
     skills::private_dir,
-    storage::{self, environment, runtime::Volume},
+    storage::{self, Disk, environment, runtime::Volume},
     validation::text,
 };
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 use tokio_util::sync::CancellationToken;
 
 pub(crate) const KIND: &str = "native-ext4-v1";
+pub(crate) const STORAGE: &str = "ublk-rootless-v1";
 
 pub(crate) const DISK_BUSY: &str = "Native disk is active.";
 
@@ -21,6 +25,67 @@ pub fn exists(state: &Path, run: &str) -> Result<bool> {
     Ok(storage::runtime::exists(&environment::directory(
         state, run,
     )?))
+}
+
+/// Resume the retained journal as-is even if a manager grant arrived before a
+/// stop. The supervision path applies any outstanding allowance lazily after
+/// mount, without bootstrap's legacy whole-image materialization.
+fn preparation_size(directory: &Path, requested: u64) -> Result<u64> {
+    if storage::runtime::exists(directory) {
+        return Ok(storage::LazyDisk::geometry(&directory.join("lazy"))?);
+    }
+    Ok(requested)
+}
+
+async fn record_runtime(directory: &Path, plan: &Value) -> Result<()> {
+    let runtime = json!({
+        "backend": "native",
+        "storage": STORAGE,
+        "os": "linux",
+        "arch": "x86_64",
+        "runtimeId": plan["runtimeId"],
+    });
+    if directory.join("runtime.json").exists() {
+        let previous: Value =
+            serde_json::from_slice(&tokio::fs::read(directory.join("runtime.json")).await?)?;
+        if ["backend", "os", "arch"]
+            .iter()
+            .any(|field| previous[*field] != runtime[*field])
+            || !matches!(previous["storage"].as_str(), Some("ublk") | Some(STORAGE))
+        {
+            return Err(Error::conflict("Native disk platform changed."));
+        }
+    }
+    // Older controllers require storage="ublk" before mounting/reconciling.
+    // Commit the isolation fence while preserving current tool-bundle updates.
+    atomic_write(
+        &directory.join("runtime.json"),
+        &serde_json::to_vec(&runtime)?,
+    )
+    .await?;
+    Ok(())
+}
+
+fn ext4_bytes(superblock: &[u8; 1024]) -> Result<u64> {
+    if u16::from_le_bytes(superblock[56..58].try_into().unwrap()) != 0xef53 {
+        return Err(Error::conflict("Invalid native ext4 geometry."));
+    }
+    let low = u64::from(u32::from_le_bytes(superblock[4..8].try_into().unwrap()));
+    let features = u32::from_le_bytes(superblock[96..100].try_into().unwrap());
+    let high = if features & 0x80 != 0 {
+        u64::from(u32::from_le_bytes(
+            superblock[0x150..0x154].try_into().unwrap(),
+        ))
+    } else {
+        0
+    };
+    let shift = u32::from_le_bytes(superblock[24..28].try_into().unwrap());
+    let size = 1024u64
+        .checked_shl(shift)
+        .and_then(|block| ((high << 32) | low).checked_mul(block))
+        .filter(|bytes| *bytes > 0 && *bytes <= 1 << 40)
+        .ok_or_else(|| Error::conflict("Invalid native ext4 size."))?;
+    Ok(size)
 }
 
 struct HostMount {
@@ -124,7 +189,9 @@ pub async fn recover_host_mounts(state: &Path) -> Result<()> {
         verify_host_mount(state, &mounted)?;
         let identity: Value =
             serde_json::from_slice(&tokio::fs::read(owner.directory.join("runtime.json")).await?)?;
-        if identity["backend"] != "native" || identity["storage"] != "ublk" {
+        if identity["backend"] != "native"
+            || !matches!(identity["storage"].as_str(), Some("ublk") | Some(STORAGE))
+        {
             return Err(Error::conflict("Mounted disk is not a native journal."));
         }
         let attempt = tokio::fs::read_to_string(root.join("attempt")).await?;
@@ -177,6 +244,7 @@ async fn unmount(path: &Path) -> Result<()> {
 /// filesystem flush holds its lifecycle lock waiting for journal headroom.
 pub struct Handle {
     pub volume: Arc<Volume>,
+    pub filesystem: Arc<AtomicU64>,
     pub mount: tokio::sync::Mutex<Mounted>,
 }
 
@@ -184,6 +252,7 @@ impl Handle {
     pub fn new(mount: Mounted) -> Self {
         Self {
             volume: mount.volume.clone(),
+            filesystem: mount.filesystem.clone(),
             mount: tokio::sync::Mutex::new(mount),
         }
     }
@@ -197,15 +266,35 @@ impl Handle {
 
 pub struct Mounted {
     pub volume: Arc<Volume>,
+    filesystem: Arc<AtomicU64>,
+    quota_directory: PathBuf,
+    retained_usage: Option<u64>,
     target: PathBuf,
     jail: PathBuf,
     mounted: bool,
     completed: bool,
     aborted: bool,
+    flush_failed: bool,
 
     device: Arc<std::sync::Mutex<storage::ublk::MountedDisk>>,
     _owner: Option<environment::OwnerLease>,
     _physical: Option<crate::file_lock::Guard>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Completion {
+    Flushed,
+    Aborted,
+    FailedFlush,
+}
+
+impl Completion {
+    pub fn exit_code(self, previous: i32) -> i32 {
+        if self == Self::FailedFlush {
+            return crate::runner::CONTROLLER_FAILED;
+        }
+        previous
+    }
 }
 
 pub async fn mount(
@@ -229,16 +318,16 @@ pub async fn mount(
                 "Native journal restore must finish before execution resumes.",
             ));
         }
-        // A later execution invalidates restore idempotence, just as the native
-        // file backend invalidates restored.json when it acquires its writer.
+        // A later execution invalidates restore idempotence.
         remove(&directory.join("recovery.json")).await?;
         tokio::fs::File::open(directory).await?.sync_all().await?;
+        let requested = plan["resources"]["diskMiB"]
+            .as_u64()
+            .ok_or_else(|| Error::bad("Missing native disk size."))?
+            .saturating_mul(super::disk::MIB);
         storage::bootstrap::prepare_native(
             directory,
-            plan["resources"]["diskMiB"]
-                .as_u64()
-                .ok_or_else(|| Error::bad("Missing native disk size."))?
-                .saturating_mul(super::disk::MIB),
+            preparation_size(directory, requested)?,
             &plan["storage"],
             stop,
         )
@@ -251,47 +340,10 @@ pub async fn mount(
             }
         })?;
         let physical = crate::file_lock::exclusive(&directory.join("lock"), DISK_BUSY)?;
-        let runtime = json!({
-            "backend": "native", "storage": "ublk", "os": "linux", "arch": "x86_64",
-            "runtimeId": plan["runtimeId"],
-        });
-        if directory.join("runtime.json").exists() {
-            let previous: Value =
-                serde_json::from_slice(&tokio::fs::read(directory.join("runtime.json")).await?)?;
-            if previous != runtime {
-                return Err(Error::conflict("Native disk runtime changed."));
-            }
-        } else {
-            atomic_write(
-                &directory.join("runtime.json"),
-                &serde_json::to_vec(&runtime)?,
-            )
-            .await?;
-        }
+        record_runtime(directory, plan).await?;
         let volume = storage::runtime::load(directory).await?;
-        if volume.disk.layout()? != storage::layout::Layout::Flat {
-            return Err(Error::conflict(
-                "Native workspaces require a flat ext4 layout.",
-            ));
-        }
         let target = root.join("data");
         if !root.join("block-initialized").exists() && !root.join("block-seeding").exists() {
-            if target.exists() && !root.join("initialized").exists() {
-                let mut entries = tokio::fs::read_dir(&target).await?;
-                if entries.next_entry().await?.is_some() {
-                    return Err(Error::conflict(
-                        "Incomplete legacy native preparation requires review before migration.",
-                    ));
-                }
-            }
-            // Existing stopped file workspaces are retained until the new disk
-            // has been published. A failed migration never erases its source.
-            if target.exists() {
-                if root.join("legacy-data").exists() {
-                    return Err(Error::conflict("Ambiguous native migration sources."));
-                }
-                tokio::fs::rename(&target, root.join("legacy-data")).await?;
-            }
             atomic_write(&root.join("block-seeding"), b"1").await?;
         }
         private_dir(&target).await?;
@@ -359,27 +411,135 @@ pub async fn mount(
             .await;
             return Err(error.into());
         }
-        Ok(Mounted {
+        let mut result = Mounted {
             volume,
             target,
             jail,
             mounted: true,
+            filesystem: Arc::new(AtomicU64::new(0)),
+            quota_directory: directory.join("lazy"),
+            retained_usage: None,
             completed: false,
             aborted,
+            flush_failed: false,
             device,
             _owner: Some(owner),
             _physical: Some(physical),
-        })
+        };
+        // The durable journal size is also the resize intent. A crash after
+        // growing the journal/device, or a restored older filesystem image,
+        // resumes resize2fs on the next owned mount without a separate marker.
+        let resized = async {
+            let filesystem = result.filesystem_bytes().await?;
+            result.filesystem.store(filesystem, Ordering::Release);
+            if filesystem > result.volume.disk.size() {
+                return Err(Error::conflict(
+                    "Native filesystem exceeds its journal geometry.",
+                ));
+            }
+            if filesystem < result.volume.disk.size() {
+                result.finish_growth().await?;
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = resized {
+            result.close().await?;
+            return Err(error);
+        }
+        Ok(result)
     }
 }
 
 impl Mounted {
+    /// Journal -> kernel geometry -> ext4. A crash after either geometry change
+    /// leaves the journal geometry as intent for the next owned mount.
+    pub(crate) async fn grow(&mut self, bytes: u64) -> Result<bool> {
+        if self.aborted || !self.mounted || !storage::ublk::supports_growth() {
+            return Err(Error::unavailable(
+                "Online native disk growth is unavailable.",
+            ));
+        }
+        if bytes < self.volume.disk.size() {
+            return Err(Error::conflict(
+                "Native disk allowance cannot shrink retained geometry.",
+            ));
+        }
+        let filesystem = self.filesystem_bytes().await?;
+        if filesystem > bytes {
+            return Err(Error::conflict(
+                "Native filesystem exceeds its journal geometry.",
+            ));
+        }
+        if bytes == self.volume.disk.size() && filesystem == bytes {
+            return Ok(true);
+        }
+        if bytes > self.volume.disk.size() {
+            // Keep the mount and its leases alive through an uncancellable
+            // metadata commit; the caller owns the native lifecycle lock.
+            let disk = self.volume.disk.clone();
+            let result = tokio::task::spawn_blocking(move || disk.grow(bytes))
+                .await
+                .map_err(Error::internal)?;
+            match result {
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
+                result => result?,
+            }
+        }
+        let device = self.device.clone();
+        tokio::task::spawn_blocking(move || {
+            device
+                .lock()
+                .map_err(|_| std::io::Error::other("Native device lock poisoned"))?
+                .grow(bytes)
+        })
+        .await
+        .map_err(Error::internal)??;
+        self.finish_growth().await?;
+        Ok(true)
+    }
+
+    async fn filesystem_bytes(&self) -> Result<u64> {
+        let disk = self.volume.disk.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut bytes = [0; 1024];
+            storage::Disk::read_at(disk.as_ref(), 1024, &mut bytes)?;
+            ext4_bytes(&bytes)
+        })
+        .await
+        .map_err(Error::internal)?
+    }
+
+    async fn finish_growth(&mut self) -> Result<()> {
+        let mut command = tokio::process::Command::new("resize2fs");
+        command.arg(self.jail.join("disk.blk")).kill_on_drop(true);
+        let output = tokio::time::timeout(std::time::Duration::from_secs(120), command.output())
+            .await
+            .map_err(|_| {
+                Error::unavailable("Native filesystem growth timed out; it will retry.")
+            })??;
+        if !output.status.success() {
+            return Err(Error::unavailable(
+                "Native filesystem growth failed; the journal and growth intent are retained.",
+            ));
+        }
+        sync(&self.target).await?;
+        let bytes = self.filesystem_bytes().await?;
+        self.filesystem.store(bytes, Ordering::Release);
+        if bytes != self.volume.disk.size() {
+            return Err(Error::unavailable(
+                "Native filesystem growth is incomplete; it will retry.",
+            ));
+        }
+        Ok(())
+    }
+
     /// Keep this object owned on every error: an uncertain flush/unmount cannot
     /// release its physical lease or terminate a backend still serving a mount.
     pub async fn abort_io(&mut self) -> Result<()> {
-        // Abort only after cancellation during preparation or a failed systemd
-        // fence. A later non-lazy unmount remains mandatory. The retained journal
-        // then represents a crash prefix, like a forcibly stopped guest.
+        // Abort after cancellation during preparation, a failed systemd fence,
+        // or a fenced filesystem's terminal read-only flush failure. A later
+        // non-lazy unmount remains mandatory. The journal is a crash prefix.
         self.aborted = true;
         self.volume.stop.cancel();
 
@@ -397,13 +557,35 @@ impl Mounted {
         Ok(())
     }
 
-    pub async fn close(&mut self) -> Result<()> {
+    pub async fn close(&mut self) -> Result<Completion> {
         if self.mounted {
             if !self.aborted {
-                sync(&self.target).await?;
+                match sync_io(&self.target).await {
+                    Ok(()) => self.retained_usage = used_bytes(&self.target).ok(),
+                    Err(error) if matches!(error.raw_os_error(), Some(libc::EROFS | libc::EIO)) => {
+                        tracing::error!(%error, "Native filesystem flush failed; retaining a crash prefix after fencing");
+                        self.flush_failed = true;
+                        self.abort_io().await?;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
             }
             unmount(&self.target).await?;
             self.mounted = false;
+        }
+        if let Some(used) = self.retained_usage.take() {
+            // This optional admission credit must never prevent writer release.
+            // A missing observation falls back to conservative admission/eviction.
+            let recorded = async {
+                let attempt =
+                    tokio::fs::read_to_string(self.target.parent().unwrap().join("attempt"))
+                        .await?;
+                super::capacity::record_retained(&self.quota_directory, &attempt, used).await
+            }
+            .await;
+            if let Err(error) = recorded {
+                tracing::warn!(%error, "Native retained capacity credit unavailable");
+            }
         }
         if !self.completed
             && self
@@ -431,7 +613,13 @@ impl Mounted {
         }
         // No mount or backend can still use this controller-private attachment.
         retire_attachment(&self.jail).await?;
-        Ok(())
+        Ok(if self.flush_failed {
+            Completion::FailedFlush
+        } else if self.aborted {
+            Completion::Aborted
+        } else {
+            Completion::Flushed
+        })
     }
 }
 
@@ -453,18 +641,39 @@ async fn retire_attachment(jail: &Path) -> Result<()> {
 }
 
 pub async fn sync(path: &Path) -> Result<()> {
+    sync_io(path).await.map_err(Into::into)
+}
+
+async fn sync_io(path: &Path) -> std::io::Result<()> {
     let path = path.to_owned();
     tokio::task::spawn_blocking(move || -> std::io::Result<()> {
         use std::os::fd::AsRawFd;
         let directory = std::fs::File::open(path)?;
+        require_writable(&directory)?;
         if unsafe { libc::syncfs(directory.as_raw_fd()) } != 0 {
             return Err(std::io::Error::last_os_error());
         }
-        Ok(())
+        // An error can remount ext4 during this very flush, while syncfs still
+        // returns success. Check both sides before claiming completion.
+        require_writable(&directory)
     })
     .await
-    .map_err(Error::internal)?
-    .map_err(Into::into)
+    .map_err(std::io::Error::other)?
+}
+
+fn require_writable(directory: &std::fs::File) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    // Native workspaces are mounted writable. ext4 can return success from
+    // syncfs after shutdown, so a read-only mount is also a terminal failure.
+    let mut status = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    if unsafe { libc::fstatvfs(directory.as_raw_fd(), status.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { status.assume_init() }.f_flag & libc::ST_RDONLY != 0 {
+        return Err(std::io::Error::from_raw_os_error(libc::EROFS));
+    }
+    Ok(())
 }
 
 pub async fn initialize(state: &Path, run: &str, plan: &Value, budget: u64) -> Result<()> {
@@ -480,9 +689,7 @@ pub async fn initialize(state: &Path, run: &str, plan: &Value, budget: u64) -> R
         if staged.exists() {
             tokio::fs::remove_dir_all(&staged).await?;
         }
-        if root.join("legacy-data").exists() {
-            workspace::copy_durable(&root.join("legacy-data"), &staged, budget).await?;
-        } else {
+        {
             private_dir(&staged).await?;
             let seed = crate::microvm::plan::Plan::new(plan.clone());
             let source = seed
@@ -579,9 +786,14 @@ pub async fn published(state: &Path, run: &str, receipt: &Value) -> Result<Value
     let backup = text(receipt, "backupId").to_owned();
     crate::validation::uuid(&backup)?;
     let disk = volume.disk.clone();
-    tokio::task::spawn_blocking(move || disk.commit_published(generation, &backup))
-        .await
-        .map_err(Error::internal)??;
+    let state = state.to_owned();
+    tokio::task::spawn_blocking(move || {
+        volume
+            .source
+            .acknowledge(&state, &disk, generation, &backup)
+    })
+    .await
+    .map_err(Error::internal)??;
     Ok(json!({ "committed": true }))
 }
 
@@ -672,29 +884,24 @@ pub async fn restore(state: &Path, run: &str, request: Value) -> Result<Value> {
     let manifest = &request["manifest"];
     if manifest["kind"] != KIND
         || manifest["runtime"]["backend"] != "native"
-        || manifest["runtime"]["storage"] != "ublk"
+        || !matches!(
+            manifest["runtime"]["storage"].as_str(),
+            Some("ublk") | Some(STORAGE)
+        )
         || manifest["runtime"]["os"] != "linux"
         || manifest["runtime"]["arch"] != "x86_64"
-        || storage::layout::Layout::from_manifest(manifest)? != storage::layout::Layout::Flat
     {
         return Err(Error::conflict(
             "Native block checkpoints require native Linux x86-64 and flat ext4.",
         ));
     }
     crate::nodes::snapshots::validate(manifest)?;
-    super::systemd::tools(text(&manifest["runtime"], "runtimeId"))?;
+    super::systemd::tools(&crate::nodes::component_runtime())?;
     crate::validation::uuid(text(&request, "backupId"))?;
     let root = workspace::directory(state, run)?;
     private_dir(&root).await?;
     let _owner =
         crate::file_lock::exclusive(&root.join("owner.lock"), "Native workspace is active.")?;
-    if root.join("legacy-block-restore.pending.json").exists()
-        || root.join("restore.pending.json").exists()
-    {
-        return Err(Error::conflict(
-            "Finish the pending native file restore first.",
-        ));
-    }
     let pending = root.join("block-restore.pending.json");
     if pending.exists() {
         let current: Value = serde_json::from_slice(&tokio::fs::read(&pending).await?)?;
@@ -711,7 +918,7 @@ pub async fn restore(state: &Path, run: &str, request: Value) -> Result<Value> {
         .await?;
     }
     let runtime = manifest["runtime"].clone();
-    let result = crate::nodes::restore::restore_journal(state, run, request, false).await?;
+    let result = crate::nodes::restore::restore_journal(state, run, request).await?;
     let data = root.join("data");
     if data.exists() {
         let mut entries = tokio::fs::read_dir(&data).await?;
@@ -750,8 +957,6 @@ pub async fn evict(data: &Path, state: &Path, run: &str, expected: &Value) -> Re
         crate::file_lock::exclusive(&root.join("owner.lock"), "Native workspace is active.")?;
     let lease = environment::lock(state, run, DISK_BUSY).await?;
     if root.join("block-restore.pending.json").exists()
-        || root.join("restore.pending.json").exists()
-        || root.join("legacy-block-restore.pending.json").exists()
         || lease.directory.join("restore.pending").exists()
         || !root.join("block-initialized").exists()
     {
@@ -779,12 +984,8 @@ pub async fn evict(data: &Path, state: &Path, run: &str, expected: &Value) -> Re
         tokio::task::spawn_blocking(move || storage::cache::evict_clean(&state, &directory))
             .await
             .map_err(Error::internal)??;
-    // Legacy migration is complete and its replacement is acknowledged. Other
-    // stale recovery trees still need explicit prune; no S3 reference is removed.
-    remove(&root.join("legacy-data")).await?;
     remove(&root.join("tmp")).await?;
     cleanup_attempt_files(data, state_path(&lease.directory)?, run).await?;
-    workspace::collect_archives(state_path(&lease.directory)?, run, None).await?;
     let mut status = volume.inspect().await?;
     status["evictedBytes"] = evicted.into();
     Ok(status)
@@ -866,8 +1067,7 @@ pub async fn action(state: &Path, run: &str, delete: bool) -> Result<Vec<String>
         }
         if entry.file_type().await?.is_dir()
             && name.to_string_lossy().starts_with("stale-")
-            && (entry.path().join("journal-v2.sqlite").exists()
-                || entry.path().join("journal.sqlite").exists())
+            && entry.path().join("journal-v2.sqlite").exists()
         {
             let context = storage::LazyDisk::context(&entry.path())?;
             grants.push(crate::auth::digest(text(&context, "grant")));
@@ -892,89 +1092,6 @@ pub async fn recover_completed(state: &Path, run: &str, attempt: &str) -> Result
     Ok(())
 }
 
-pub async fn restore_files(
-    state: &Path,
-    run: &str,
-    request: &Value,
-    budget: u64,
-    growth: u64,
-) -> Result<Value> {
-    let root = workspace::directory(state, run)?;
-    private_dir(&root).await?;
-    let pending = root.join("legacy-block-restore.pending.json");
-    crate::validation::uuid(text(request, "backupId"))?;
-    {
-        let _owner =
-            crate::file_lock::exclusive(&root.join("owner.lock"), "Native workspace is active.")?;
-        if root.join("block-restore.pending.json").exists() {
-            return Err(Error::conflict(
-                "Finish the pending native block restore first.",
-            ));
-        }
-        if pending.exists() {
-            let current: Value = serde_json::from_slice(&tokio::fs::read(&pending).await?)?;
-            if current["backupId"] != request["backupId"] {
-                return Err(Error::conflict(
-                    "Another native file restore must finish first.",
-                ));
-            }
-        } else {
-            atomic_write(
-                &pending,
-                &serde_json::to_vec(&json!({ "backupId": request["backupId"] }))?,
-            )
-            .await?;
-        }
-        let lease = environment::lock(state, run, DISK_BUSY).await?;
-        let _replacement = storage::runtime::replacement(&lease.directory).await?;
-        if lease.directory.join("restore.pending").exists() {
-            return Err(Error::conflict(
-                "Finish the pending native journal restore first.",
-            ));
-        }
-        if lease.directory.join("lazy").exists() {
-            tokio::fs::rename(
-                lease.directory.join("lazy"),
-                lease
-                    .directory
-                    .join(format!("stale-native-{}", crate::config::id())),
-            )
-            .await?;
-        }
-        for name in ["runtime.json", "recovery.json", "restore.pending"] {
-            let source = lease.directory.join(name);
-            if source.exists() {
-                tokio::fs::rename(
-                    &source,
-                    lease
-                        .directory
-                        .join(format!("stale-native-{}-{name}", crate::config::id())),
-                )
-                .await?;
-            }
-        }
-        if root.join("legacy-data").exists() {
-            tokio::fs::rename(
-                root.join("legacy-data"),
-                root.join(format!("stale-native-{}", crate::config::id())),
-            )
-            .await?;
-        }
-        tokio::fs::File::open(&lease.directory)
-            .await?
-            .sync_all()
-            .await?;
-        tokio::fs::File::open(&root).await?.sync_all().await?;
-    }
-    let result = workspace::restore(state, run, request, budget, growth).await?;
-    for name in ["block-initialized", "block-seeding", "file-owner.json"] {
-        remove(&root.join(name)).await?;
-    }
-    remove(&pending).await?;
-    tokio::fs::File::open(&root).await?.sync_all().await?;
-    Ok(result)
-}
-
 pub fn used_bytes(path: &Path) -> Result<u64> {
     use std::os::unix::ffi::OsStrExt;
     let path = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(Error::internal)?;
@@ -992,6 +1109,112 @@ pub fn used_bytes(path: &Path) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completed_close_preserves_cancellation_without_a_flush_failure() {
+        for (completion, previous, expected) in [
+            (Completion::Flushed, 0, 0),
+            (Completion::Flushed, 143, 143),
+            (Completion::Aborted, 143, 143),
+            (Completion::Aborted, 70, 70),
+            (Completion::FailedFlush, 0, 70),
+            (Completion::FailedFlush, 143, 70),
+        ] {
+            assert_eq!(completion.exit_code(previous), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn native_disks_resume_with_current_tools_and_keep_the_platform_boundary() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("runtime.json");
+        let previous = json!({
+            "backend": "native", "storage": "ublk", "os": "linux", "arch": "x86_64",
+            "runtimeId": "previous-release",
+        });
+        atomic_write(&path, &serde_json::to_vec(&previous).unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(root.path().join("workspace"), b"retained")
+            .await
+            .unwrap();
+        record_runtime(root.path(), &json!({ "runtimeId": "current-release" }))
+            .await
+            .unwrap();
+        let current: Value =
+            serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(current["runtimeId"], "current-release");
+        assert_eq!(current["storage"], STORAGE);
+        assert_eq!(
+            tokio::fs::read(root.path().join("workspace"))
+                .await
+                .unwrap(),
+            b"retained"
+        );
+        // A future isolation/storage implementation must never be downgraded
+        // by rewriting its marker or touching the retained payload.
+        let mut future = current.clone();
+        future["storage"] = "ublk-rootless-v2".into();
+        atomic_write(&path, &serde_json::to_vec(&future).unwrap())
+            .await
+            .unwrap();
+        assert!(
+            record_runtime(root.path(), &json!({ "runtimeId": "next-release" }))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&tokio::fs::read(&path).await.unwrap()).unwrap(),
+            future
+        );
+        let mut incompatible = current.clone();
+        incompatible["arch"] = "aarch64".into();
+        atomic_write(&path, &serde_json::to_vec(&incompatible).unwrap())
+            .await
+            .unwrap();
+        assert!(
+            record_runtime(root.path(), &json!({ "runtimeId": "next-release" }))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&tokio::fs::read(path).await.unwrap()).unwrap(),
+            incompatible
+        );
+    }
+
+    #[tokio::test]
+    async fn unapplied_grant_resumes_retained_journal_without_materializing_it() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join(crate::config::id());
+        let size = 4 * 1024 * 1024;
+        let manifest = json!({ "version": 1, "size": size, "blockSize": size,
+            "blocks": [{ "offset": 0, "size": size, "hash": null }] });
+        let context = json!({ "master": "http://127.0.0.1:1/", "grant": "synthetic", "policy": storage::policy::Policy::default() });
+        let disk = storage::runtime::create(&directory.join("lazy"), &manifest, &context)
+            .await
+            .unwrap();
+        disk.write_at(0, b"retained").unwrap();
+        disk.sync().unwrap();
+        drop(disk);
+        let requested = 2 * size;
+        let prepare = preparation_size(&directory, requested).unwrap();
+        assert_eq!(prepare, size);
+        storage::bootstrap::prepare_native(
+            &directory,
+            prepare,
+            &context,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            storage::LazyDisk::geometry(&directory.join("lazy")).unwrap(),
+            size
+        );
+        assert!(!directory.join("data.ext4").exists());
+        assert!(!directory.join("bootstrap.pending").exists());
+    }
 
     #[test]
     fn host_recovery_selects_only_conversation_mounts_and_rejects_stacked_or_foreign_filesystems() {

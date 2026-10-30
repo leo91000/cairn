@@ -1,6 +1,7 @@
-use super::checkpoint::{Checkpoint, RunCheckpoint};
-use crate::{error::Result, run_output, service::Service, validation::text};
-use serde_json::Value;
+use super::checkpoint::{Checkpoint, EventChanges, RunCheckpoint};
+use crate::{config::now, error::Result, run_output, service::Service, validation::text};
+use cairn_contracts::EventKind;
+use serde_json::{Value, json};
 use std::sync::LazyLock;
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
@@ -83,17 +84,31 @@ static AGENT_PERFORMANCE_RECORD: LazyLock<regex::Regex> = LazyLock::new(|| {
 const TOOL_FRAME_LIMIT: usize = 100_000_000;
 const MESSAGE_LIMIT: usize = 100_000;
 const ERROR_LIMIT: usize = 10_000;
+/// Claude Code's notices are status lines; a longer one is cut.
+const NOTICE_LIMIT: usize = 4_000;
 
-/// Event types that are always recorded. Clients use turn markers to scope reused message IDs.
-const CONVERSATION_EVENTS: [&str; 7] = [
+/// Event types that are always recorded. Clients use turn markers to scope reused message IDs,
+/// show the latest context usage, and show the engine's retries and usage limits in the
+/// conversation.
+const CONVERSATION_EVENTS: [&str; 10] = [
     "thread.started",
+    "context.usage",
     "turn.started",
     "turn.completed",
     "turn.failed",
     "turn.waiting",
     "error",
     "runner.failed",
+    "engine.retry",
+    "provider.limit",
 ];
+
+/// An engine notice the conversation shows. Other notices only reach the run log, within its
+/// budget.
+fn shown_notice(event: &Value) -> bool {
+    event["type"] == "engine.notice"
+        && (matches!(text(event, "level"), "warning" | "suggestion") || event["stopsTurn"] == true)
+}
 
 // Separate pipe readers keep stderr draining even while stdout applies database backpressure.
 pub(super) async fn read_output(
@@ -238,6 +253,38 @@ pub(super) async fn record(
         record_raw(s, id, "output", raw, secrets, log_total).await?;
         return Ok(false);
     };
+    if event["type"] == "runtime.disk_notice" {
+        let event = run_output::payload(&event, secrets);
+        let message = text(&event, "text").to_owned();
+        // Capacity is runtime diagnostic state, separate from the controller's
+        // authoritative storage document refreshed by the publication monitor.
+        let id = id.to_owned();
+        s.store
+            .transaction(move |db| {
+                db.update_run_boundary(&id, &json!({ "diskCapacity": event["capacity"] }))?;
+                db.event(&id, &EventKind::Status, &message, Some(&event))
+            })
+            .await?;
+        return Ok(false);
+    }
+    if event["type"] == "turn.speed" {
+        let event = run_output::payload(&event, secrets);
+        let (message, outcome) = speed_notice(s, id, &event).await?;
+        let id = id.to_owned();
+        s.store
+            .transaction(move |db| {
+                if let Some(message) = message {
+                    db.event(&id, &EventKind::Status, message, Some(&event))?;
+                }
+                db.set(
+                    &format!("turn-speed:{id}"),
+                    &outcome,
+                    Some(now() + 30 * 86_400_000),
+                )
+            })
+            .await?;
+        return Ok(false);
+    }
     if event["type"] == "runner.start_rejected" {
         let run = s.store.run(id).await?;
         let first_rejected = !previously_launched
@@ -247,7 +294,7 @@ pub(super) async fn record(
             let mut execution = run["chatExecution"].clone();
             execution["recovery"] = false.into();
             s.store
-                .patch_run(id, serde_json::json!({ "chatExecution": execution }))
+                .update_run_boundary(id, serde_json::json!({ "chatExecution": execution }))
                 .await?;
         }
 
@@ -274,23 +321,30 @@ pub(super) async fn record(
         return Ok(false);
     }
     let exhausted = run_output::exhausted(&event);
-    apply_event(s, id, &event, checkpoint, secrets).await?;
     // Every activity item has its own detail limit, regardless of earlier output.
     let conversation = event["item"]["type"] == "agent_message"
-        || CONVERSATION_EVENTS.contains(&text(&event, "type"));
+        || CONVERSATION_EVENTS.contains(&text(&event, "type"))
+        || shown_notice(&event);
     let activity_item = text(&event, "type").starts_with("item.") && event["item"].is_object();
     if conversation || activity_item || *log_total < LOG_BUDGET {
         let abbreviated = !conversation && activity_item && raw.len() > ITEM_DETAIL_LIMIT;
-        let stored = if abbreviated {
+        let mut stored = if abbreviated {
             run_output::compact_activity(&event, secrets)
         } else {
             run_output::payload(&event, secrets)
         };
+        // Cut once redacted, so a cut cannot expose part of a secret.
+        if let Some(message) = stored["message"]
+            .as_str()
+            .filter(|_| stored["type"] == "engine.notice")
+        {
+            stored["message"] = cut_notice(message).into();
+        }
         let serialized = serde_json::to_string(&stored)?;
         if !conversation && !activity_item {
             *log_total = log_total.saturating_add(serialized.len());
         }
-        store_event(s, id, &serialized, &stored).await?;
+        store_event(s, id, &serialized, &event, &stored, checkpoint, secrets).await?;
     }
     if event["type"] == "turn.completed" {
         // Title failures cannot change the outcome of the user's turn.
@@ -320,13 +374,16 @@ async fn record_raw(
     if recorded.is_empty() {
         return Ok(());
     }
-    s.store.event(id, kind, recorded, None).await
+    s.store
+        .event(id, &EventKind::from_adapter(kind), recorded, None)
+        .await
 }
 
 /// Handles chat protocol messages, which are not run output.
 async fn handle_chat_control(s: &Service, id: &str, event: &Value) -> Result<bool> {
     match text(event, "type") {
-        "chat.question" => s.question_receive(id, event["question"].clone()).await?,
+        // Only the authenticated workspace tool can create a questionnaire.
+        "chat.question" => {}
         "chat.question.closed" => {
             s.question_release(id, event["questionId"].as_str()).await?;
         }
@@ -342,71 +399,131 @@ async fn handle_chat_control(s: &Service, id: &str, event: &Value) -> Result<boo
     Ok(true)
 }
 
-/// Updates the checkpoint and run from an agent event.
+/// Derives checkpoint and run changes from the redacted adapter frame. The
+/// transaction that publishes the event also owns all of these durable changes.
 async fn apply_event(
     s: &Service,
-    id: &str,
     event: &Value,
+    stored: &Value,
     checkpoint: &Checkpoint,
+    kind: EventKind,
+    text_value: String,
     secrets: &[String],
 ) -> Result<()> {
     let failure = text(&event["error"], "message");
     let provider_failure = event["type"] == "turn.failed";
     let controller_failure = event["type"] == "runner.failed";
-    if (provider_failure || controller_failure)
-        && !failure.is_empty()
-        && checkpoint.read(|c| c.last_error().is_empty()).await
-    {
-        let failure = truncate(&run_output::redact(failure, secrets), ERROR_LIMIT);
+    let failure = ((provider_failure || controller_failure) && !failure.is_empty()).then(|| {
+        let message = truncate(&run_output::redact(failure, secrets), ERROR_LIMIT);
         let mut error = run_output::payload(&event["error"], secrets);
-        error["message"] = failure.clone().into();
-        let cause = if provider_failure {
-            crate::run_retry::Cause::classify(&error)
-        } else {
-            None
-        };
-        checkpoint
-            .update(|c| {
-                c.last_error = Some(Some(failure));
-                c.retry_cause = Some(cause);
-                if provider_failure {
-                    c.completed = Some(false);
-                }
-            })
-            .await?;
-    }
+        error["message"] = message.clone().into();
+        let cause = provider_failure
+            .then(|| crate::run_retry::Cause::classify(&error))
+            .flatten();
+        (message, cause)
+    });
+    let mut changes = crate::runs::RunChanges::default();
+    let mut changed = false;
     if event["type"] == "thread.started" && event["thread_id"].is_string() {
-        let patch = serde_json::json!({ "sessionId": event["thread_id"], "resumeAvailable": true });
-        s.store.patch_run(id, patch).await?;
+        changes.session_id = Some(serde_json::from_value(event["thread_id"].clone())?);
+        changes.resume_available = Some(true);
+        changed = true;
     }
-    if event["item"]["type"] == "agent_message" && event["item"]["text"].is_string() {
-        let message = truncate(
-            &run_output::redact(text(&event["item"], "text"), secrets),
-            MESSAGE_LIMIT,
-        );
-        checkpoint
-            .remember(|c| c.last_message = Some(message))
-            .await;
+    if event["type"] == "context.usage" && event["usage"]["contextTokens"].is_u64() {
+        changes.boundary = Some(json!({ "contextUsage": event["usage"] }));
+        changed = true;
     }
-    if event["type"] == "turn.completed" {
-        checkpoint.update(|c| c.completed = Some(true)).await?;
-        let run = s.store.run(id).await?;
+    let message = (event["item"]["type"] == "agent_message" && event["item"]["text"].is_string())
+        .then(|| {
+            truncate(
+                &run_output::redact(text(&event["item"], "text"), secrets),
+                MESSAGE_LIMIT,
+            )
+        });
+    let completed = event["type"] == "turn.completed";
+    if completed && !event["usage"].is_null() {
+        changes.boundary = Some(json!({ "usage": event["usage"] }));
+        changed = true;
+    }
+    checkpoint
+        .record_event(
+            kind,
+            text_value,
+            stored.clone(),
+            EventChanges {
+                run: changed.then_some(changes),
+                failure: failure.map(|(message, cause)| (message, cause, provider_failure)),
+                completed,
+                last_message: message,
+            },
+        )
+        .await?;
+    if completed {
+        let run = s.store.run(&checkpoint.id).await?;
         let outcome = &run["outcome"];
         if outcome["status"] == "completed"
             && outcome["messageId"].is_string()
             && outcome["messageId"] == *crate::waits::execution_id(&run)
         {
-            s.question_release(id, None).await?;
-        }
-        if !event["usage"].is_null() {
-            let patch = serde_json::json!({ "usage": event["usage"] });
-            s.store.patch_run(id, patch).await?;
+            s.question_complete(&checkpoint.id).await?;
         }
     }
     Ok(())
 }
 
-async fn store_event(s: &Service, id: &str, raw: &str, event: &Value) -> Result<()> {
+/// The notice a turn's speed check needs: every faster turn states how it runs, since the picker
+/// and queue judge from cached catalogs. Each attempt of a turn checks again, on whichever account
+/// it runs: only a change of outcome for the message is shown, so retries do not repeat a notice
+/// and a later attempt that gets the speed after all says so.
+async fn speed_notice(
+    s: &Service,
+    id: &str,
+    event: &Value,
+) -> Result<(Option<&'static str>, Value)> {
+    let speed = &event["speed"];
+    let outcome = if speed["confirmed"] == true {
+        "confirmed"
+    } else if text(speed, "applied") == crate::models::STANDARD_SPEED {
+        "standard"
+    } else {
+        "unconfirmed"
+    };
+    let key = format!("turn-speed:{id}");
+    let earlier = s
+        .store
+        .kv(&key)
+        .await?
+        .filter(|earlier| earlier["messageId"] == event["messageId"])
+        .map(|earlier| text(&earlier, "outcome").to_owned());
+    let record = json!({ "messageId": event["messageId"], "outcome": outcome });
+
+    let message = match (outcome, earlier.as_deref()) {
+        (outcome, Some(earlier)) if outcome == earlier => None,
+        ("confirmed", None) => Some(
+            "Codex lists the selected speed for this model here, so this turn asks for it. The account’s plan decides whether it applies.",
+        ),
+        ("confirmed", Some(_)) => Some(
+            "Codex now lists the selected speed for this model here, so this turn asks for it. The account’s plan decides whether it applies.",
+        ),
+        ("standard", _) => Some(
+            "Codex doesn’t list the selected speed for this model here, so this turn runs at Standard speed.",
+        ),
+        _ => Some(
+            "The selected speed couldn’t be confirmed for this account and model. This turn asks for it but may run at Standard speed.",
+        ),
+    };
+    Ok((message, record))
+}
+
+async fn store_event(
+    s: &Service,
+    id: &str,
+    raw: &str,
+    source: &Value,
+    event: &Value,
+    checkpoint: &Checkpoint,
+    secrets: &[String],
+) -> Result<()> {
     let value = event["item"]
         .get("text")
         .or_else(|| event["item"].get("aggregated_output"))
@@ -419,11 +536,35 @@ async fn store_event(s: &Service, id: &str, raw: &str, event: &Value) -> Result<
         "" => "output",
         kind => kind,
     };
-    s.store.event(id, kind, &value, Some(event.clone())).await
+    let kind = EventKind::from_adapter(kind);
+    if matches!(kind, EventKind::External(_)) {
+        tracing::warn!(
+            run_id = id,
+            "Unknown coding-agent event retained as redacted adapter data"
+        );
+    }
+    apply_event(s, source, event, checkpoint, kind, value, secrets).await
 }
 
 fn truncate(value: &str, limit: usize) -> String {
     value.chars().take(limit).collect()
+}
+
+/// A redacted notice cut to its limit, never inside a redaction marker, marked as cut.
+fn cut_notice(message: &str) -> String {
+    const MARKER: &str = "[redacted]";
+    if message.chars().count() <= NOTICE_LIMIT {
+        return message.to_owned();
+    }
+    let mut cut = truncate(message, NOTICE_LIMIT - 1);
+    if let Some(start) = cut.rfind('[')
+        && message[start..].starts_with(MARKER)
+        && start + MARKER.len() > cut.len()
+    {
+        cut.truncate(start);
+    }
+    cut.push('…');
+    cut
 }
 
 #[cfg(test)]

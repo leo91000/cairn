@@ -131,6 +131,12 @@ internal object CairnIcons {
             lineTo(12f, 15f)
             lineTo(18f, 9f)
         }
+    val Left =
+        line("Left") {
+            moveTo(15f, 6f)
+            lineTo(9f, 12f)
+            lineTo(15f, 18f)
+        }
     val Right =
         line("Right") {
             moveTo(9f, 6f)
@@ -320,19 +326,6 @@ internal object CairnIcons {
             lineTo(12f, 12f)
             lineTo(17f, 17.5f)
             lineTo(17f, 21.5f)
-        }
-    val PullRequest =
-        line("PullRequest") {
-            moveTo(9f, 6f)
-            arcTo(3f, 3f, 0f, true, true, 8.99f, 5.9f)
-            moveTo(21f, 18f)
-            arcTo(3f, 3f, 0f, true, true, 20.99f, 17.9f)
-            moveTo(6f, 9f)
-            lineTo(6f, 21f)
-            moveTo(13f, 6f)
-            lineTo(16f, 6f)
-            quadTo(18f, 6f, 18f, 8f)
-            lineTo(18f, 15f)
         }
     val Workflow =
         line("Workflow") {
@@ -689,6 +682,91 @@ internal object CairnIcons {
                 arcTo(1.7f, 1.7f, 0f, true, true, x - 1.7f, 12f)
                 arcTo(1.7f, 1.7f, 0f, true, true, x + 1.7f, 12f)
             }
+        }
+    // Diagrams drawn from Markdown: their kinds and viewer actions.
+    val Code =
+        line("Code") {
+            moveTo(16f, 18f)
+            lineTo(22f, 12f)
+            lineTo(16f, 6f)
+            moveTo(8f, 6f)
+            lineTo(2f, 12f)
+            lineTo(8f, 18f)
+        }
+    val Expand =
+        line("Expand") {
+            moveTo(15f, 3f)
+            lineTo(21f, 3f)
+            lineTo(21f, 9f)
+            moveTo(9f, 21f)
+            lineTo(3f, 21f)
+            lineTo(3f, 15f)
+            moveTo(21f, 3f)
+            lineTo(14f, 10f)
+            moveTo(3f, 21f)
+            lineTo(10f, 14f)
+        }
+    val ZoomIn =
+        line("ZoomIn") {
+            moveTo(19f, 11f)
+            arcTo(8f, 8f, 0f, true, true, 18.99f, 10.9f)
+            moveTo(21f, 21f)
+            lineTo(16.65f, 16.65f)
+            moveTo(11f, 8f)
+            lineTo(11f, 14f)
+            moveTo(8f, 11f)
+            lineTo(14f, 11f)
+        }
+    val ZoomOut =
+        line("ZoomOut") {
+            moveTo(19f, 11f)
+            arcTo(8f, 8f, 0f, true, true, 18.99f, 10.9f)
+            moveTo(21f, 21f)
+            lineTo(16.65f, 16.65f)
+            moveTo(8f, 11f)
+            lineTo(14f, 11f)
+        }
+    val Fit =
+        line("Fit") {
+            moveTo(3f, 7f)
+            lineTo(3f, 5f)
+            quadTo(3f, 3f, 5f, 3f)
+            lineTo(7f, 3f)
+            moveTo(17f, 3f)
+            lineTo(19f, 3f)
+            quadTo(21f, 3f, 21f, 5f)
+            lineTo(21f, 7f)
+            moveTo(21f, 17f)
+            lineTo(21f, 19f)
+            quadTo(21f, 21f, 19f, 21f)
+            lineTo(17f, 21f)
+            moveTo(7f, 21f)
+            lineTo(5f, 21f)
+            quadTo(3f, 21f, 3f, 19f)
+            lineTo(3f, 17f)
+        }
+    val Sequence =
+        line("Sequence") {
+            moveTo(8f, 3f)
+            lineTo(4f, 7f)
+            lineTo(8f, 11f)
+            moveTo(4f, 7f)
+            lineTo(20f, 7f)
+            moveTo(16f, 21f)
+            lineTo(20f, 17f)
+            lineTo(16f, 13f)
+            moveTo(20f, 17f)
+            lineTo(4f, 17f)
+        }
+    val Pie =
+        line("Pie") {
+            moveTo(21.2f, 15.9f)
+            arcTo(10f, 10f, 0f, true, true, 8f, 2.8f)
+            moveTo(13f, 3f)
+            lineTo(13f, 11f)
+            lineTo(21f, 11f)
+            arcTo(8f, 8f, 0f, false, false, 13f, 3f)
+            close()
         }
 }
 

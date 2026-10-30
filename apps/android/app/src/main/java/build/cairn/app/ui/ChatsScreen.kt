@@ -46,6 +46,31 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.SecureFlagPolicy
 import build.cairn.app.data.*
+import build.cairn.contracts.AnswerChatQuestionInput
+import build.cairn.contracts.ChatInput
+import build.cairn.contracts.ChatMessageInput
+import build.cairn.contracts.ChatMessageReference
+import build.cairn.contracts.ChatQuestionInput
+import build.cairn.contracts.ConfirmChatInput
+import build.cairn.contracts.CreateChatInput
+import build.cairn.contracts.EditChatMessage
+import build.cairn.contracts.EditChatMessageInput
+import build.cairn.contracts.QuestionAnswerInput
+import build.cairn.contracts.ResumeRunInput
+import build.cairn.contracts.SendChatMessageInput
+import build.cairn.contracts.SetChatPausedInput
+import build.cairn.contracts.answerChatQuestion
+import build.cairn.contracts.cancelChatQuestion
+import build.cairn.contracts.compactChat
+import build.cairn.contracts.createChat
+import build.cairn.contracts.deleteChatMessage
+import build.cairn.contracts.editChatMessage
+import build.cairn.contracts.restartChatSession
+import build.cairn.contracts.restoreChat
+import build.cairn.contracts.resumeRun
+import build.cairn.contracts.sendChatMessage
+import build.cairn.contracts.setChatPaused
+import build.cairn.contracts.stopChat
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.launch
@@ -206,7 +231,7 @@ internal fun ConversationList(
                                                 verticalAlignment = Alignment.CenterVertically,
                                             ) {
                                                 val working =
-                                                    chat.pendingQuestions == 0 &&
+                                                    chat.pendingQuestions == 0L &&
                                                         !chat.paused &&
                                                         !chat.exclusiveSuspended &&
                                                         chat.status == "running"
@@ -376,6 +401,7 @@ internal fun ChatPage(
     var provider by rememberSaveable(id) { mutableStateOf(savedDraft.provider) }
     var model by rememberSaveable(id) { mutableStateOf(savedDraft.model) }
     var reasoning by rememberSaveable(id) { mutableStateOf(savedDraft.reasoning) }
+    var speed by rememberSaveable(id) { mutableStateOf(savedDraft.speed) }
     var attachments by rememberForm(savedDraft.attachments)
     // Per-file states of the composer: refused before upload, uploading, or failed to upload.
     var rejected by rememberForm(savedDraft.rejected)
@@ -391,6 +417,7 @@ internal fun ChatPage(
     var fullscreen by rememberSaveable(id) { mutableStateOf(false) }
     var queueExpanded by rememberSaveable(id) { mutableStateOf(false) }
     var newSession by remember(id) { mutableStateOf(false) }
+    var compacting by remember(id) { mutableStateOf(false) }
     var cancelledExpanded by rememberSaveable(id) { mutableStateOf(false) }
     BackHandler(selected && fullscreen) { fullscreen = false }
     var choosing by rememberSaveable(id) { mutableStateOf(false) }
@@ -410,6 +437,7 @@ internal fun ChatPage(
                     submissionKey,
                     provider,
                     rejected,
+                    speed,
                 )
     }
     SideEffect { persistDraft() }
@@ -557,10 +585,12 @@ internal fun ChatPage(
         else selectedAgent?.takeIf { it.provider == chosenProvider }
     val defaultModel = inheritedAssistant?.model.orEmpty()
     val defaultReasoning = inheritedAssistant?.reasoning.orEmpty()
+    val defaultSpeed = inheritedAssistant?.speed.orEmpty()
     fun chooseProvider(value: String) {
         provider = value
         model = ""
         reasoning = ""
+        speed = ""
     }
     val skillOptions =
         remember(state.skills, selectedAgent, chat?.projectId, project, chat == null) {
@@ -579,6 +609,16 @@ internal fun ChatPage(
             mention.start != dismissedMention &&
             (suggestions.isNotEmpty() || mention.query.firstOrNull()?.isDigit() != true)
     BackHandler(selected && showSkills) { dismissedMention = mention?.start }
+    LaunchedEffect(selected && showSkills) {
+        if (selected && showSkills) {
+            try {
+                vm.refreshSkills()
+            } catch (error: Exception) {
+                if (error is kotlinx.coroutines.CancellationException) throw error
+                // Keep the loaded catalog usable when the connection is unavailable.
+            }
+        }
+    }
     val projects =
         state.projects.filter {
             selectedAgent?.access?.projects == null ||
@@ -656,13 +696,8 @@ internal fun ChatPage(
             val chatId =
                 id
                     ?: createdId
-                    ?: api.send<Chat>(
-                            "POST",
-                            "/chats",
-                            buildJsonObject {
-                                put("agentId", agent)
-                                put("projectId", project.ifEmpty { null })
-                            },
+                    ?: api.createChat(
+                            CreateChatInput(agentId = agent, projectId = project.ifEmpty { null })
                         )
                         .id
                         .also { createdId = it }
@@ -695,44 +730,61 @@ internal fun ChatPage(
             val selectedReasoning = reasoning.ifBlank {
                 if (model.isBlank()) defaultReasoning else ""
             }
-            val content = buildJsonObject {
-                put("text", draft.trim())
-                put("mode", mode)
-                put("provider", chosenProvider)
-                put("model", selectedModel)
-                put("reasoning", selectedReasoning)
-                put(
-                    "attachmentIds",
-                    wireJson.encodeToJsonElement(attachments.map { it.attachment.id }),
+            // The speed survives a model change, so it is inherited even with a new model.
+            val selectedSpeed = speed.ifBlank { defaultSpeed }
+            val content =
+                EditChatMessage(
+                    text = draft.trim(),
+                    mode = mode,
+                    provider = chosenProvider,
+                    model = selectedModel,
+                    reasoning = selectedReasoning,
+                    speed = selectedSpeed,
+                    attachmentIds = attachments.map { it.attachment.id },
                 )
-            }
-            val key = "$chatId/${editing.orEmpty()}/$content"
+            val key = "$chatId/${editing.orEmpty()}/${wireJson.encodeToJsonElement(content)}"
             if (key != submissionKey) {
                 submissionKey = key
                 submissionId = UUID.randomUUID().toString()
             }
-            val payload = JsonObject(content + ("id" to JsonPrimitive(editing ?: submissionId)))
             if (editing == null)
                 outgoing =
                     ChatMessage(
-                        submissionId,
-                        chatId,
-                        draft.trim(),
-                        selectedModel,
-                        selectedReasoning,
-                        mode,
-                        "sending",
-                        System.currentTimeMillis(),
-                        attachments.map { it.attachment },
+                        id = submissionId,
+                        chatId = chatId,
+                        text = draft.trim(),
+                        model = selectedModel,
+                        reasoning = selectedReasoning,
+                        mode = mode,
+                        status = "sending",
+                        createdAt = System.currentTimeMillis(),
+                        attachments = attachments.map { it.attachment },
                         provider = chosenProvider,
+                        speed = selectedSpeed,
                     )
             try {
-                api.request(
-                    if (editing == null) "POST" else "PUT",
-                    "/chats/${segment(chatId)}/messages" +
-                        (editing?.let { "/${segment(it)}" } ?: ""),
-                    payload,
-                )
+                val edited = editing
+                if (edited == null)
+                    api.sendChatMessage(
+                        SendChatMessageInput(
+                            chatId = chatId,
+                            message =
+                                ChatMessageInput(
+                                    id = submissionId,
+                                    text = content.text,
+                                    mode = content.mode,
+                                    provider = content.provider,
+                                    model = content.model,
+                                    reasoning = content.reasoning,
+                                    speed = content.speed.orEmpty(),
+                                    attachmentIds = content.attachmentIds,
+                                ),
+                        )
+                    )
+                else
+                    api.editChatMessage(
+                        EditChatMessageInput(chatId = chatId, messageId = edited, message = content)
+                    )
             } catch (e: Exception) {
                 outgoing = null
                 throw e
@@ -755,35 +807,32 @@ internal fun ChatPage(
         provider = message.provider.ifBlank { currentProvider }
         model = message.model
         reasoning = message.reasoning
+        speed = message.speed
         attachments = message.attachments.map { DraftAttachment(it) }
     }
     fun steerQueued(message: ChatMessage) {
         vm.perform {
-            api.request(
-                "PUT",
-                "/chats/${segment(message.chatId.ifBlank { id.orEmpty() })}/messages/${segment(message.id)}",
-                buildJsonObject {
-                    put("id", message.id)
-                    put("text", message.text)
-                    put("mode", "steer")
-                    put("provider", message.provider)
-                    put("model", message.model)
-                    put("reasoning", message.reasoning)
-                    put(
-                        "attachmentIds",
-                        wireJson.encodeToJsonElement(message.attachments.map { it.id }),
-                    )
-                },
+            api.editChatMessage(
+                EditChatMessageInput(
+                    chatId = message.chatId.ifBlank { id.orEmpty() },
+                    messageId = message.id,
+                    message =
+                        EditChatMessage(
+                            text = message.text,
+                            mode = "steer",
+                            provider = message.provider,
+                            model = message.model,
+                            reasoning = message.reasoning,
+                            speed = message.speed,
+                            attachmentIds = message.attachments.map { it.id },
+                        ),
+                )
             )
         }
     }
     fun setPaused(current: Chat, paused: Boolean) {
         vm.perform {
-            api.request(
-                "POST",
-                "/chats/${segment(current.id)}/pause",
-                buildJsonObject { put("paused", paused) },
-            )
+            api.setChatPaused(SetChatPausedInput(chatId = current.id, paused = paused))
         }
     }
     fun togglePause(current: Chat) = setPaused(current, !current.paused)
@@ -1074,6 +1123,43 @@ internal fun ChatPage(
                         Text(
                             "${live.state?.artifacts?.size ?: 0} fichiers · ${questions.size} questions en attente"
                         )
+                        if (chat?.run != null) {
+                            val context = contextSummary(chat.contextUsage)
+                            Text("Contexte : ${context.label}", Modifier.testTag("context-usage"))
+                            context.details.forEach {
+                                Text(
+                                    it,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                        chat
+                            ?.compaction
+                            ?.takeIf { it.supported && chat.lifecycle == "active" }
+                            ?.let { compaction ->
+                                TextButton(
+                                    {
+                                        details = false
+                                        compacting = true
+                                    },
+                                    enabled = compaction.available,
+                                ) {
+                                    Text(
+                                        if (compaction.running) "Compaction du contexte…"
+                                        else "Compacter le contexte"
+                                    )
+                                }
+                                compaction.reason
+                                    ?.takeIf { !compaction.running }
+                                    ?.let {
+                                        Text(
+                                            it,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                            }
                         chat?.run?.let {
                             if (state.isOwner) NodePlacement(vm, it)
                             Text(
@@ -1100,7 +1186,20 @@ internal fun ChatPage(
                         )
                         ActionIcon("Masquer l’erreur", CairnIcons.Close) { errorDismissed = true }
                     }
-                if (quota == null) ChatRunWaitingNotice(chat?.run, openConnections, state.isOwner)
+                if (quota == null)
+                    ChatRunWaitingNotice(
+                        chat?.run,
+                        openConnections,
+                        state.isOwner,
+                        state.busy,
+                        {
+                            chat?.let { current ->
+                                vm.perform {
+                                    api.stopChat(ChatInput(chatId = current.id))
+                                }
+                            }
+                        },
+                    )
                 if (gallery) {
                     ModalBottomSheet(
                         onDismissRequest = { gallery = false },
@@ -1151,7 +1250,7 @@ internal fun ChatPage(
                             Button(
                                 onClick = {
                                     vm.perform {
-                                        api.request("POST", "/chats/${segment(chat.id)}/restore")
+                                        api.restoreChat(ChatInput(chatId = chat.id))
                                     }
                                 },
                                 enabled = !state.busy,
@@ -1167,6 +1266,9 @@ internal fun ChatPage(
                             .align(Alignment.CenterHorizontally)
                     ) {
                         // Labels align with the error banner above.
+                        chat?.environmentState?.let { state ->
+                            EnvironmentExpirationNotice(state, chat.environmentError)
+                        }
                         if (chat?.canRequestNewSession == true)
                             TextButton(
                                 { newSession = true },
@@ -1263,6 +1365,8 @@ internal fun ChatPage(
                                                         pauseWait,
                                                         settled = it.run?.status == "succeeded",
                                                         busy = state.busy,
+                                                        openRun = openRun,
+                                                        openChat = openChat,
                                                     )
                                                 },
                                         ) {
@@ -1277,34 +1381,40 @@ internal fun ChatPage(
                                             )
                                         }
                                     }
-                                    quota?.let { notice ->
-                                        item(key = "quota:${chat?.run?.id}") {
-                                            ChatQuotaCard(
-                                                notice,
-                                                canManage = state.isOwner,
-                                                busy = state.busy,
-                                                openConnections = openConnections,
-                                                resume = {
-                                                    chat?.let { current ->
-                                                        vm.perform {
-                                                            if (current.run?.status == "failed")
+                                    chat
+                                        ?.takeIf { quota != null || it.codingAgentSwitch != null }
+                                        ?.let { currentChat ->
+                                            item(key = "quota:${chat?.run?.id}") {
+                                                ChatQuotaRecovery(
+                                                    vm,
+                                                    currentChat,
+                                                    quota,
+                                                    followConversation = { chooseProvider("") },
+                                                    canManage = state.isOwner,
+                                                    busy = state.busy,
+                                                    openConnections = openConnections,
+                                                    resume = {
+                                                        chat?.let { current ->
+                                                            vm.perform {
+                                                                if (current.run?.status == "failed")
+                                                                    api.resumeRun(
+                                                                        ResumeRunInput(
+                                                                            current.run.id
+                                                                        )
+                                                                    )
                                                                 api.request(
                                                                     "POST",
-                                                                    "/runs/${segment(current.run.id)}/resume",
+                                                                    "/chats/${segment(current.id)}/pause",
+                                                                    buildJsonObject {
+                                                                        put("paused", false)
+                                                                    },
                                                                 )
-                                                            api.request(
-                                                                "POST",
-                                                                "/chats/${segment(current.id)}/pause",
-                                                                buildJsonObject {
-                                                                    put("paused", false)
-                                                                },
-                                                            )
+                                                            }
                                                         }
-                                                    }
-                                                },
-                                            )
+                                                    },
+                                                )
+                                            }
                                         }
-                                    }
                                     if (!active && delivery.sending.isEmpty() && !live.catchingUp)
                                         chat?.run?.outcome?.let { outcome ->
                                             item(
@@ -1320,18 +1430,27 @@ internal fun ChatPage(
                                             EventRow(
                                                 vm,
                                                 RunEvent(
-                                                    -1,
-                                                    sending.message.createdAt,
-                                                    "chat.user",
-                                                    sending.message.text,
-                                                    mapOf(
-                                                        "text" to
-                                                            JsonPrimitive(sending.message.text),
-                                                        "attachments" to
-                                                            wireJson.encodeToJsonElement(
-                                                                sending.message.attachments
-                                                            ),
-                                                    ),
+                                                    id = -1,
+                                                    createdAt = sending.message.createdAt,
+                                                    type = "chat.user",
+                                                    text = sending.message.text,
+                                                    payload =
+                                                        kotlinx.serialization.json.JsonObject(
+                                                            mapOf(
+                                                                "text" to
+                                                                    JsonPrimitive(
+                                                                        questionAnswerText(
+                                                                            sending.message.text,
+                                                                            sending.message
+                                                                                .questionId,
+                                                                        )
+                                                                    ),
+                                                                "attachments" to
+                                                                    wireJson.encodeToJsonElement(
+                                                                        sending.message.attachments
+                                                                    ),
+                                                            )
+                                                        ),
                                                 ),
                                                 chat?.agentName ?: "Cairn",
                                             )
@@ -1448,6 +1567,7 @@ internal fun ChatPage(
                                             steer = ::steerQueued,
                                             remove = { removing = it },
                                             togglePause = { chat?.let(::togglePause) },
+                                            models = state.modelCatalog("codex").models,
                                             attachments = {
                                                 MessageAttachments(
                                                     vm,
@@ -1597,6 +1717,9 @@ internal fun ChatPage(
                                                 provider = chosenProvider,
                                                 changeProvider = ::chooseProvider,
                                                 switching = switchingProvider,
+                                                speed = speed,
+                                                defaultSpeed = defaultSpeed,
+                                                changeSpeed = { speed = it },
                                             ) { m, r ->
                                                 model = m
                                                 reasoning = r
@@ -1721,12 +1844,21 @@ internal fun ChatPage(
                     { newSession = false },
                 ) {
                     vm.perform {
-                        api.request(
-                            "POST",
-                            "/chats/${segment(chat.id)}/new-session",
-                            buildJsonObject { put("confirm", true) },
-                        )
+                        api.restartChatSession(ConfirmChatInput(chatId = chat.id, confirm = true))
                         newSession = false
+                    }
+                }
+            if (compacting && chat != null)
+                Confirm(
+                    "Compacter le contexte de l’agent ?",
+                    "L’agent résume son contexte antérieur pour libérer de la place dans sa fenêtre, en utilisant son modèle comme pour un court tour. Tous les messages restent visibles ici ; ceux envoyés entre-temps attendent la fin de la compaction.",
+                    state.busy,
+                    state.error,
+                    { compacting = false },
+                ) {
+                    vm.perform {
+                        api.compactChat(ChatInput(chatId = chat.id))
+                        compacting = false
                     }
                 }
             if (stopping && chat != null)
@@ -1738,7 +1870,7 @@ internal fun ChatPage(
                     { stopping = false },
                 ) {
                     vm.perform {
-                        api.request("POST", "/chats/${segment(chat.id)}/stop")
+                        api.stopChat(ChatInput(chatId = chat.id))
                         stopping = false
                     }
                 }
@@ -1751,9 +1883,8 @@ internal fun ChatPage(
                     { removing = null },
                 ) {
                     vm.perform {
-                        api.request(
-                            "DELETE",
-                            "/chats/${segment(message.chatId)}/messages/${segment(message.id)}",
+                        api.deleteChatMessage(
+                            ChatMessageReference(chatId = message.chatId, messageId = message.id)
                         )
                         removing = null
                     }
@@ -1772,8 +1903,10 @@ internal fun QuestionDialog(
     select: (ChatQuestion) -> Unit,
     close: () -> Unit,
 ) {
+    val supported = question.fields.isNotEmpty() && question.fields.all { it.supportsAnswers }
     // Private answers never enter SavedState or on-disk drafts.
     var answers by remember(question.id) { mutableStateOf<Map<String, String>>(emptyMap()) }
+    var selected by remember(question.id) { mutableStateOf<Map<String, List<String>>>(emptyMap()) }
     var submission by remember(question.id) { mutableStateOf("") }
     var submissionKey by remember(question.id) { mutableStateOf("") }
     Dialog(
@@ -1808,56 +1941,130 @@ internal fun QuestionDialog(
                             ) { key ->
                                 select(questions.first { it.id == key })
                             }
-                        question.fields.forEach { field ->
-                            Text(field.title, style = MaterialTheme.typography.titleMedium)
-                            field.options.forEach { option ->
-                                OutlinedCard(
-                                    onClick = { answers = answers + (field.id to option.label) },
-                                    modifier = Modifier.fillMaxWidth(),
-                                ) {
-                                    Row(Modifier.padding(12.dp)) {
-                                        RadioButton(
-                                            answers[field.id] == option.label,
-                                            { answers = answers + (field.id to option.label) },
-                                        )
-                                        Column {
-                                            Text(option.label)
-                                            if (option.description.isNotBlank())
-                                                Text(
-                                                    option.description,
-                                                    style = MaterialTheme.typography.bodySmall,
-                                                )
+                        if (!supported)
+                            Text(
+                                "Cette question utilise un format non pris en charge. Mettez à jour l’installation Cairn, puis demandez à l’agent de reposer la question. Vous pouvez retirer cette demande ci-dessous.",
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        if (supported)
+                            question.fields.forEach { field ->
+                                Text(field.title, style = MaterialTheme.typography.titleMedium)
+                                field.options.forEach { option ->
+                                    val checked = selected[field.id].orEmpty().contains(option.id)
+                                    val toggle = {
+                                        val current = selected[field.id].orEmpty()
+                                        val next =
+                                            if (field.mode == "single") listOf(option.id)
+                                            else if (checked) current - option.id
+                                            else current + option.id
+                                        selected = selected + (field.id to next)
+                                    }
+                                    OutlinedCard(
+                                        onClick = toggle,
+                                        modifier = Modifier.fillMaxWidth(),
+                                        colors =
+                                            CardDefaults.outlinedCardColors(
+                                                containerColor =
+                                                    if (checked)
+                                                        MaterialTheme.colorScheme.secondaryContainer
+                                                    else MaterialTheme.colorScheme.surface
+                                            ),
+                                    ) {
+                                        Row(
+                                            Modifier.padding(12.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                        ) {
+                                            if (field.mode == "multiple")
+                                                Checkbox(checked, { toggle() })
+                                            else RadioButton(checked, toggle)
+                                            Column {
+                                                Text(option.label)
+                                                if (option.recommended)
+                                                    Text(
+                                                        "Recommandé",
+                                                        color = MaterialTheme.colorScheme.primary,
+                                                    )
+                                                if (option.description.isNotBlank())
+                                                    Text(
+                                                        option.description,
+                                                        style = MaterialTheme.typography.bodySmall,
+                                                    )
+                                            }
                                         }
                                     }
                                 }
+                                if (field.options.isNotEmpty()) {
+                                    val minimum = field.minChoices ?: 1
+                                    val maximum =
+                                        if (field.mode == "single") 1
+                                        else field.maxChoices ?: field.options.size
+                                    val range =
+                                        if (minimum == maximum) "$minimum"
+                                        else "$minimum à $maximum"
+                                    Text(
+                                        if (field.mode == "multiple")
+                                            "Choisissez $range options, ou répondez en texte libre."
+                                        else "Choisissez une option, ou répondez en texte libre.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                    if (field.mode == "multiple") {
+                                        val count = selected[field.id].orEmpty().size
+                                        val detail =
+                                            when {
+                                                count > maximum ->
+                                                    " · Retirez ${count - maximum} choix"
+                                                count in 1 until minimum ->
+                                                    " · Encore ${minimum - count} choix"
+                                                else -> ""
+                                            }
+                                        Text(
+                                            "Choix sélectionnés : $count$detail",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color =
+                                                if (detail.isNotEmpty())
+                                                    MaterialTheme.colorScheme.error
+                                                else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                    if (selected[field.id].orEmpty().isNotEmpty())
+                                        TextButton(
+                                            onClick = {
+                                                selected = selected + (field.id to emptyList())
+                                            }
+                                        ) {
+                                            Text("Effacer les choix")
+                                        }
+                                }
+                                if (field.secret)
+                                    OutlinedTextField(
+                                        answers[field.id].orEmpty(),
+                                        { answers = answers + (field.id to it.take(10000)) },
+                                        Modifier.fillMaxWidth(),
+                                        label = { Text("Réponse privée") },
+                                        visualTransformation = PasswordVisualTransformation(),
+                                        keyboardOptions = InputKeyboards.Password,
+                                    )
+                                else
+                                    Field(
+                                        if (field.options.isEmpty()) "Réponse"
+                                        else "Commentaire ou réponse libre",
+                                        answers[field.id].orEmpty(),
+                                        { answers = answers + (field.id to it.take(10000)) },
+                                        2,
+                                    )
                             }
-                            if (field.secret)
-                                OutlinedTextField(
-                                    answers[field.id].orEmpty(),
-                                    { answers = answers + (field.id to it.take(10000)) },
-                                    Modifier.fillMaxWidth(),
-                                    label = { Text("Réponse privée") },
-                                    visualTransformation = PasswordVisualTransformation(),
-                                    keyboardOptions = InputKeyboards.Password,
-                                )
-                            else
-                                Field(
-                                    if (field.options.isEmpty()) "Réponse"
-                                    else "Ou votre propre réponse",
-                                    answers[field.id].orEmpty(),
-                                    { answers = answers + (field.id to it.take(10000)) },
-                                    2,
-                                )
-                        }
                         state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                         TextButton(
                             onClick = {
                                 vm.perform {
-                                    api.request(
-                                        "POST",
-                                        "/chats/${segment(question.chatId)}/questions/${segment(question.id)}/cancel",
+                                    api.cancelChatQuestion(
+                                        ChatQuestionInput(
+                                            chatId = question.chatId,
+                                            questionId = question.id,
+                                        )
                                     )
                                     answers = emptyMap()
+                                    selected = emptyMap()
                                     close()
                                 }
                             },
@@ -1877,26 +2084,47 @@ internal fun QuestionDialog(
                             vm.perform {
                                 val values =
                                     wireJson.encodeToJsonElement(
-                                        answers.mapValues { listOf(it.value.trim()) }
+                                        question.fields.associate { field ->
+                                            field.id to
+                                                QuestionAnswer(
+                                                    selected =
+                                                        field.options
+                                                            .filter {
+                                                                selected[field.id]
+                                                                    .orEmpty()
+                                                                    .contains(it.id)
+                                                            }
+                                                            .map { it.id },
+                                                    comment = answers[field.id].orEmpty().trim(),
+                                                )
+                                        }
                                     )
                                 if (submissionKey != values.toString()) {
                                     submissionKey = values.toString()
                                     submission = UUID.randomUUID().toString()
                                 }
-                                api.request(
-                                    "POST",
-                                    "/chats/${segment(question.chatId)}/questions/${segment(question.id)}/answer",
-                                    buildJsonObject {
-                                        put("id", submission)
-                                        put("answers", values)
-                                    },
+                                api.answerChatQuestion(
+                                    AnswerChatQuestionInput(
+                                        chatId = question.chatId,
+                                        questionId = question.id,
+                                        answer =
+                                            QuestionAnswerInput(
+                                                id = submission,
+                                                answers = wireJson.decodeFromJsonElement(values),
+                                            ),
+                                    )
                                 )
                                 answers = emptyMap()
+                                selected = emptyMap()
                                 close()
                             }
                         },
                         enabled =
-                            !state.busy && question.fields.all { !answers[it.id].isNullOrBlank() },
+                            !state.busy &&
+                                supported &&
+                                question.fields.all {
+                                    it.accepts(selected[it.id].orEmpty(), answers[it.id].orEmpty())
+                                },
                     ) {
                         Text("Envoyer la réponse")
                     }

@@ -32,7 +32,7 @@ internal class ParityDeviceCases(private val compose: ComposeContentTestRule) {
     private val timestamp = System.currentTimeMillis()
     private val task =
         Task(
-            "task",
+            "85aac3c3-27f5-5b76-a34d-d59120d410eb",
             "Revue hebdomadaire du projet",
             "Examiner les changements, vérifier les tests et publier le compte rendu.",
             MAIN_AGENT_ID,
@@ -52,19 +52,38 @@ internal class ParityDeviceCases(private val compose: ComposeContentTestRule) {
         )
     private val run =
         Run(
-            "run",
-            taskId = "task",
+            id = "run",
+            taskId = "85aac3c3-27f5-5b76-a34d-d59120d410eb",
             status = "succeeded",
             taskName = task.name,
             summary =
                 "## Revue terminée\n\nLes changements sont prêts. La navigation est plus claire et la conversation reste au centre de l’écran.",
-            snapshot = Snapshot(task = task, agent = Agent(MAIN_AGENT_ID, "Agent principal")),
+            snapshot =
+                Snapshot(
+                    task = task.runTaskSnapshot(),
+                    agent =
+                        Agent(
+                            exclusiveNodes = emptyList(),
+                            plugins = emptyList(),
+                            revision = "",
+                            createdAt = 0,
+                            access =
+                                AccessPolicy(
+                                    mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                                    projects = null,
+                                    skills = null,
+                                    mcps = null,
+                                ),
+                            id = MAIN_AGENT_ID,
+                            name = "Agent principal",
+                        ),
+                ),
             outcome = outcome,
         )
     private val chat =
         Chat(
-            "chat",
-            "Simplifier l’interface mobile",
+            id = "6cc6efab-10af-54c7-a91b-dcff664166a1",
+            title = "Simplifier l’interface mobile",
             agentName = "Agent principal",
             projectName = "Cairn",
             runId = "run",
@@ -74,28 +93,31 @@ internal class ParityDeviceCases(private val compose: ComposeContentTestRule) {
     private val events =
         listOf(
             RunEvent(
-                1,
-                timestamp - 60000,
-                "chat.user",
-                "Peux-tu simplifier cette interface et vérifier les détails ?",
+                id = 1,
+                createdAt = timestamp - 60000,
+                type = "chat.user",
+                text = "Peux-tu simplifier cette interface et vérifier les détails ?",
             ),
             RunEvent(
-                2,
-                timestamp,
-                "item.completed",
-                "",
-                mapOf(
-                    "item" to
-                        buildJsonObject {
-                            put("id", "reply")
-                            put("type", "agent_message")
-                            put(
-                                "text",
-                                "La nouvelle interface est prête.\n\n- Navigation compacte\n- Détails accessibles à la demande\n- Plus de place pour la conversation\n\nLes mots longs restent dans le message : https://example.test/" +
-                                    "longue-adresse".repeat(8),
-                            )
-                        }
-                ),
+                id = 2,
+                createdAt = timestamp,
+                type = "item.completed",
+                text = "",
+                payload =
+                    kotlinx.serialization.json.JsonObject(
+                        mapOf(
+                            "item" to
+                                buildJsonObject {
+                                    put("id", "reply")
+                                    put("type", "agent_message")
+                                    put(
+                                        "text",
+                                        "La nouvelle interface est prête.\n\n- Navigation compacte\n- Détails accessibles à la demande\n- Plus de place pour la conversation\n\nLes mots longs restent dans le message : https://example.test/" +
+                                            "longue-adresse".repeat(8),
+                                    )
+                                }
+                        )
+                    ),
             ),
         )
 
@@ -158,10 +180,33 @@ internal class ParityDeviceCases(private val compose: ComposeContentTestRule) {
                             "/api/account/session" -> beaconAccountFixture("fixture")
                             "/api/installations/fixture/api/agents" ->
                                 wireJson.encodeToString(
-                                    listOf(Agent(MAIN_AGENT_ID, "Agent principal"))
+                                    build.cairn.contracts.ListAgentsOutput(
+                                        listOf(
+                                            Agent(
+                                                exclusiveNodes = emptyList(),
+                                                plugins = emptyList(),
+                                                revision = "",
+                                                createdAt = 0,
+                                                access =
+                                                    AccessPolicy(
+                                                        mcpTools =
+                                                            build.cairn.contracts.McpTools(
+                                                                emptyMap()
+                                                            ),
+                                                        projects = null,
+                                                        skills = null,
+                                                        mcps = null,
+                                                    ),
+                                                id = MAIN_AGENT_ID,
+                                                name = "Agent principal",
+                                            )
+                                        )
+                                    )
                                 )
                             "/api/installations/fixture/api/tasks" ->
-                                wireJson.encodeToString(listOf(task))
+                                wireJson.encodeToString(
+                                    build.cairn.contracts.ListMissionsOutput(listOf(task))
+                                )
                             "/api/installations/fixture/api/tasks/activity" ->
                                 wireJson.encodeToString(listOf(run))
                             "/api/installations/fixture/api/runs" ->
@@ -169,9 +214,15 @@ internal class ParityDeviceCases(private val compose: ComposeContentTestRule) {
                             "/api/installations/fixture/api/schedule/preview" ->
                                 "{\"occurrences\":[${timestamp + 86400000},${timestamp + 8 * 86400000}]}"
                             "/api/installations/fixture/api/projects" ->
-                                wireJson.encodeToString(listOf(Project("project", "Cairn")))
-                            "/api/installations/fixture/api/skills",
-                            "/api/installations/fixture/api/mcps" -> "[]"
+                                wireJson.encodeToString(
+                                    build.cairn.contracts.ListProjectsOutput(
+                                        listOf(
+                                            Project("46d045dd-9bce-51e3-8a99-65aa9384efc9", "Cairn")
+                                        )
+                                    )
+                                )
+                            "/api/installations/fixture/api/skills" -> "[]"
+                            "/api/installations/fixture/api/mcps" -> """{"mcps":[]}"""
                             else -> "{}"
                         }
                     return MockResponse()

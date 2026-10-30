@@ -83,7 +83,7 @@ class LiveAccumulator {
                     event =
                         original.copy(
                             text = text,
-                            payload = original.payload.orEmpty() + ("item" to expanded),
+                            payload = JsonObject(original.payload.orEmpty() + ("item" to expanded)),
                         )
                 }
                 if (index == null) {
@@ -247,10 +247,6 @@ class LiveSession {
     @Volatile var followsLatest = true
 
     fun restore(value: CachedHistory, route: String, currentGeneration: Long) {
-        // Older caches discarded run identities. Re-fetch them instead of mixing their
-        // unscoped items with new events received after the saved cursor.
-        if (value.events.any { it.runId.isBlank() }) return
-
         accumulator.restore(value.events, value.cursor)
         generation = currentGeneration
         path = route

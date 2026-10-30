@@ -5,6 +5,7 @@ use crate::{
     service::Service,
     validation::text,
 };
+use cairn_contracts::EventKind;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -48,8 +49,12 @@ pub async fn raise(s: &Service, run: &str, kind: &str, title: &str, body: &str) 
                 return Ok(());
             }
             db.set(&throttle, &now().into(), Some(now() + REPEAT_MS))?;
-            db.event(&run, "status", &body, None)?;
-            let Some(chat) = db.list("chats")?.into_iter().find(|c| c["runId"] == run) else {
+            db.event(&run, &EventKind::Status, &body, None)?;
+            let Some(chat) = db
+                .conversations_boundary()?
+                .into_iter()
+                .find(|c| c["runId"] == run)
+            else {
                 return Ok(());
             };
             for old in db.list("node-alerts")? {

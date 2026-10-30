@@ -86,7 +86,25 @@ class ScopeTransitionTest {
                                 return MockResponse().setResponseCode(503).setBody("{}")
                             path == "/api/account/options" || path == "/api/account/methods" -> "{}"
                             path.endsWith("/models") || path.endsWith("/overview") -> "{}"
-                            else -> "[]"
+                            else ->
+                                if (
+                                    request.requestUrl?.encodedPath?.endsWith("/api/projects") ==
+                                        true
+                                )
+                                    """{"projects":[]}"""
+                                else if (
+                                    request.requestUrl?.encodedPath?.endsWith("/api/agents") == true
+                                )
+                                    """{"agents":[]}"""
+                                else if (
+                                    request.requestUrl?.encodedPath?.endsWith("/api/tasks") == true
+                                )
+                                    """{"tasks":[]}"""
+                                else if (
+                                    request.requestUrl?.encodedPath?.endsWith("/api/mcps") == true
+                                )
+                                    """{"mcps":[]}"""
+                                else "[]"
                         }
                     return MockResponse().setBody(result)
                 }
@@ -152,7 +170,14 @@ class ScopeTransitionTest {
                     1,
                     "v1:r:1",
                     LiveState(),
-                    listOf(RunEvent(1, 1, "chat.user", "fixture")),
+                    listOf(
+                        RunEvent(
+                            id = 1,
+                            createdAt = 1,
+                            type = "chat.user",
+                            text = "fixture",
+                        )
+                    ),
                 ),
                 true,
             )

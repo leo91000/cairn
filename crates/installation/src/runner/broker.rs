@@ -1,5 +1,6 @@
 //! Attempt lifecycle on the VM controller.
 use super::{CONTROLLER_FAILED, CONTROLLER_INTERRUPTED};
+use crate::runner::exclusive::Reservations;
 use crate::{
     config::now,
     error::{Error, Result},
@@ -53,6 +54,7 @@ pub(super) struct Broker {
     pub data: PathBuf,
     pub state: PathBuf,
     pub pool: Arc<Pool>,
+    pub storage_policy: crate::storage::policy::Control,
     pub active: Arc<Mutex<HashMap<String, Attempt>>>,
     pub stop: CancellationToken,
     /// Node lease deadline of each attempt, in controller boot milliseconds.
@@ -140,6 +142,7 @@ async fn remove_if_present(path: &Path) -> Result<()> {
 impl Broker {
     pub fn new(data: PathBuf, state: PathBuf, pool: Arc<Pool>, stop: CancellationToken) -> Self {
         Self {
+            storage_policy: crate::storage::policy::Control::default(),
             data,
             state,
             pool,
@@ -625,7 +628,7 @@ mod ownership_tests {
     }
 
     #[tokio::test]
-    async fn controller_failures_emit_structured_events_and_legacy_diagnostics() {
+    async fn controller_failures_emit_structured_events_and_readable_diagnostics() {
         let root = tempfile::tempdir().unwrap();
         let (broker, run) = pending_claim(root.path()).await;
         let message = "Guest output exceeded the run limit.";

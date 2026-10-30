@@ -1,4 +1,11 @@
+use crate::common::run_fixture::DbRunFixture;
+use common::AgentFixture;
+use common::PluginStoreFixture;
+use common::StoreAgentFixture;
+
 mod common;
+
+use common::ProjectFixture;
 
 use cairn_installation::{
     chats::wait_for,
@@ -29,11 +36,13 @@ impl Fixture {
         common::managed_codex_home(&root.path().join("home"));
         let s = Service::new(cairn_installation::config::Config {
             runner_url: "http://unused-runner:4311".into(),
+            opencode_bin: common::fixture("opencode.mjs"),
+            opencode_go_usage_url: "http://127.0.0.1:1/usage".into(),
             ..common::config(root.path())
         })
         .await
         .unwrap();
-        s.agent(
+        s.agent_fixture(
             json!({ "name": "Main agent", "access": { "delegation": delegation } }),
             Some(MAIN_AGENT_ID),
         )
@@ -48,22 +57,24 @@ impl Fixture {
         let detail = self.s.chat_detail(chat).await.unwrap();
         let run = detail["run"].clone();
         let run_id = text(&run, "id").to_owned();
-        let run = self
-            .s
+        self.s
             .store
-            .patch_run(&run_id, json!({ "status": "running" }))
+            .change_run(
+                &run_id,
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Running),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
+        let run = self.s.store.run(&run_id).await.unwrap();
         let message = text(&run["chatExecution"], "messageId").to_owned();
         self.s.chat_acknowledge(&run_id, &message).await.unwrap();
         let config = self.s.mcps.run_configuration(&self.s, &run).await.unwrap();
         self.s
             .store
-            .set(
-                &format!("run-checkpoint:{run_id}"),
-                json!({ "completed": true, "launched": true }),
-                None,
-            )
+            .save_checkpoint_boundary(&run_id, json!({ "completed": true, "launched": true }))
             .await
             .unwrap();
         Turn {
@@ -114,7 +125,7 @@ impl Fixture {
             .find(|tool| tool["name"] == "wait_for")
             .unwrap()
             .clone();
-        wait["inputSchema"]["properties"]["condition"]["oneOf"]
+        wait["inputSchema"]["properties"]["conditions"]["items"]["oneOf"]
             .as_array()
             .unwrap()
             .iter()
@@ -134,9 +145,14 @@ impl Fixture {
     async fn finish(&self, turn: &Turn) {
         self.s
             .store
-            .patch_run(
+            .change_run(
                 &turn.run,
-                json!({ "status": "succeeded", "sessionId": "saved-session", "workspace": "/saved/workspace" }),
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Succeeded),
+                    session_id: Some(Some("saved-session".into())),
+                    workspace: Some(Some("/saved/workspace".into())),
+                    ..Default::default()
+                },
             )
             .await
             .unwrap();
@@ -162,7 +178,7 @@ async fn delegation_is_an_opt_in_agent_power() {
     let f = Fixture::new(true).await;
     let turn = f.conversation(MAIN_AGENT_ID).await;
     let tools = f.tools(&turn).await;
-    for tool in ["delegate_task", "task_status", "task_cancel"] {
+    for tool in ["delegate_task", "task_models", "task_status", "task_cancel"] {
         assert!(tools.contains(&tool.to_owned()), "{tool} is offered");
     }
     assert_eq!(
@@ -171,6 +187,142 @@ async fn delegation_is_an_opt_in_agent_power() {
     );
     let run = f.s.store.run(&turn.run).await.unwrap();
     assert_eq!(run["snapshot"]["delegation"], "requester");
+}
+
+#[tokio::test]
+async fn opencode_delegation_discovers_automatic_models_and_rejects_unconnected_routes() {
+    let f = Fixture::new(true).await;
+    let turn = f.conversation(MAIN_AGENT_ID).await;
+    serde_json::to_value(
+        f.s.accounts
+            .connect_api_key(
+                &f.s,
+                cairn_installation::provider::Provider::Opencode,
+                "Go",
+                "opencode-go",
+                "synthetic-delegation-go-key",
+                None,
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let before = f.s.store.conversations_boundary().await.unwrap().len();
+    for model in [
+        "opencode/ling-3.1-flash-free",
+        "auto/unknown-model",
+        "auto/retired-model",
+    ] {
+        let error = f
+            .delegate(
+                &turn,
+                json!({
+                    "task": "Review", "provider": "opencode", "model": model,
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.status, 400);
+        assert!(error.message.contains("task_models"), "{}", error.message);
+    }
+    assert_eq!(
+        f.s.store.conversations_boundary().await.unwrap().len(),
+        before
+    );
+
+    let response = project_workspaces::rpc(
+        &f.s,
+        &turn.token,
+        "tools/call",
+        &json!({ "name": "task_models", "arguments": { "provider": "opencode" } }),
+    )
+    .await
+    .unwrap();
+    assert_ne!(response["isError"], true, "{response}");
+    let catalog = &response["structuredContent"];
+    assert_eq!(catalog["models"][0]["model"], "auto/ling-3-1-flash-free");
+    assert!(!catalog.to_string().contains("synthetic-delegation-go-key"));
+
+    // An explicitly requested connection remains supported when it is connected.
+    let pinned = f
+        .delegate(
+            &turn,
+            json!({
+                "task": "Review through Go", "provider": "opencode",
+                "model": "opencode-go/ling-3.1-flash-free",
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(pinned["model"], "opencode-go/ling-3.1-flash-free");
+
+    // Saved explicit routes may still use a deprecated model; only Auto skips it.
+    let retired = f
+        .delegate(
+            &turn,
+            json!({
+                "task": "Review through the saved model", "provider": "opencode",
+                "model": "opencode-go/retired-model",
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(retired["model"], "opencode-go/retired-model");
+
+    let request = id();
+    let input = json!({
+        "task": "Review", "provider": "opencode",
+        "model": "auto/ling-3-1-flash-free", "requestId": request,
+    });
+    let delegated = f.delegate(&turn, input.clone()).await.unwrap();
+    assert_eq!(delegated["model"], "auto/ling-3-1-flash-free");
+    // A delivered request stays idempotent even when its connection is paused later.
+    let account =
+        f.s.accounts
+            .of(&f.s, cairn_installation::provider::Provider::Opencode)
+            .await
+            .unwrap()
+            .remove(0);
+    common::account_fixture::update_account_fixture(
+        &f.s,
+        &account.id,
+        &json!({ "enabled": false }),
+    )
+    .await
+    .unwrap();
+    let retried = f.delegate(&turn, input).await.unwrap();
+    assert_eq!(retried["chatId"], delegated["chatId"]);
+}
+
+#[tokio::test]
+async fn task_model_discovery_requires_live_delegation_access() {
+    let f = Fixture::new(false).await;
+    let turn = f.conversation(MAIN_AGENT_ID).await;
+    assert!(!f.tools(&turn).await.contains(&"task_models".to_owned()));
+    let response = project_workspaces::rpc(
+        &f.s,
+        &turn.token,
+        "tools/call",
+        &json!({
+            "name": "task_models", "arguments": { "provider": "opencode" },
+        }),
+    )
+    .await;
+    assert!(response.is_err() || response.unwrap()["isError"] == true);
+
+    let f = Fixture::new(true).await;
+    let turn = f.conversation(MAIN_AGENT_ID).await;
+    f.finish(&turn).await;
+    let response = project_workspaces::rpc(
+        &f.s,
+        &turn.token,
+        "tools/call",
+        &json!({
+            "name": "task_models", "arguments": { "provider": "opencode" },
+        }),
+    )
+    .await;
+    assert!(response.is_err() || response.unwrap()["isError"] == true);
 }
 
 #[tokio::test]
@@ -202,7 +354,7 @@ async fn a_delegated_conversation_remembers_its_requester_and_runs_on_the_chosen
     let run = turn.run.clone();
     let events =
         f.s.store
-            .read(move |db| db.events(&run, 0, 500))
+            .read(move |db| db.events_fixture(&run, 0, 500))
             .await
             .unwrap();
     let announced: Vec<_> = events
@@ -251,7 +403,7 @@ async fn delegation_never_reaches_access_the_requesting_agent_lacks() {
     let f = Fixture::new(true).await;
     let project = id();
     let restricted =
-        f.s.agent(
+        f.s.agent_fixture(
             json!({
                 "name": "Reviewer",
                 "access": { "projects": [], "skills": [], "mcps": [], "delegation": true },
@@ -273,7 +425,7 @@ async fn delegation_never_reaches_access_the_requesting_agent_lacks() {
 
     // An agent within the requester's access is allowed.
     let narrower =
-        f.s.agent(
+        f.s.agent_fixture(
             json!({
                 "name": "Read-only reviewer",
                 "access": { "projects": [], "skills": [], "mcps": [], "sandbox": "read-only" },
@@ -285,7 +437,7 @@ async fn delegation_never_reaches_access_the_requesting_agent_lacks() {
     let delegated = f
         .delegate(
             &turn,
-            json!({ "task": "Review", "agentId": narrower["id"], "projectId": null }),
+            json!({ "task": "Review", "agentId": narrower["id"], "project": {"type":"none"} }),
         )
         .await
         .unwrap();
@@ -307,10 +459,17 @@ async fn delegation_never_reaches_access_the_requesting_agent_lacks() {
 async fn delegation_checks_node_plugin_and_exclusive_reservation_grants() {
     let f = Fixture::new(true).await;
     let turn = f.conversation(MAIN_AGENT_ID).await;
-    let requester = f.s.get("agents", MAIN_AGENT_ID).await.unwrap();
-    let target = f.s.agent(json!({ "name": "Target" }), None).await.unwrap();
+    let requester = f.s.agent_snapshot(MAIN_AGENT_ID).await.unwrap();
+    let target =
+        f.s.agent_fixture(json!({ "name": "Target" }), None)
+            .await
+            .unwrap();
     let node = id();
     let instance = id();
+    f.s.store
+        .put_instance_fixture(json!({ "id": instance, "pluginId": "fixture" }))
+        .await
+        .unwrap();
     let changes = [
         ("plugins", json!([instance])),
         ("exclusiveNodes", json!([node])),
@@ -328,7 +487,7 @@ async fn delegation_checks_node_plugin_and_exclusive_reservation_grants() {
     for (key, value) in changes {
         let mut wider = target.clone();
         wider[key] = value;
-        f.s.store.put("agents", wider).await.unwrap();
+        f.s.store.put_agent_fixture(wider).await.unwrap();
         let denied = f
             .delegate(&turn, json!({ "task": "Review", "agentId": target["id"] }))
             .await
@@ -340,11 +499,11 @@ async fn delegation_checks_node_plugin_and_exclusive_reservation_grants() {
     let mut current = requester;
     current["plugins"] = json!([instance]);
     current["exclusiveNodes"] = json!([node]);
-    f.s.store.put("agents", current).await.unwrap();
+    f.s.store.put_agent_fixture(current).await.unwrap();
     let mut allowed = target.clone();
     allowed["plugins"] = json!([instance]);
     allowed["exclusiveNodes"] = json!([node]);
-    f.s.store.put("agents", allowed).await.unwrap();
+    f.s.store.put_agent_fixture(allowed).await.unwrap();
     assert!(
         f.delegate(&turn, json!({ "task": "Review", "agentId": target["id"] }))
             .await
@@ -355,7 +514,7 @@ async fn delegation_checks_node_plugin_and_exclusive_reservation_grants() {
 #[tokio::test]
 async fn omitted_engine_choices_are_recorded_before_the_task_starts() {
     let f = Fixture::new(true).await;
-    f.s.agent(
+    f.s.agent_fixture(
         json!({
             "name": "Main agent",
             "provider": "codex",
@@ -376,7 +535,7 @@ async fn omitted_engine_choices_are_recorded_before_the_task_starts() {
     assert_eq!(delegated["model"], "gpt-5.5");
     let events =
         f.s.store
-            .read(move |db| db.events(&turn.run, 0, 500))
+            .read(move |db| db.events_fixture(&turn.run, 0, 500))
             .await
             .unwrap();
     let announced = events
@@ -399,19 +558,18 @@ async fn deleted_tasks_are_finished_in_status_and_waits() {
     let child_turn = f.running(child).await;
     f.finish(&child_turn).await;
     f.s.store
-        .patch_run(
-            &child_turn.run,
-            json!({
-                "summary": "A report that must disappear when deleted",
-                "outcome": { "status": "completed", "reason": "A private outcome" },
-            }),
-        )
+        .change_run(&child_turn.run,cairn_installation::runs::RunChanges {
+            summary : Some(("A report that must disappear when deleted").to_owned()),
+            boundary: Some(serde_json::json!({"outcome": { "status": "completed", "reason": "A private outcome" }})),
+            ..Default::default()
+        })
         .await
         .unwrap();
     f.s.chat_trash(child, true).await.unwrap();
     let status = delegation::status(&f.s, &turn.token, &json!({ "chatId": child }))
         .await
-        .unwrap();
+        .unwrap()["tasks"][0]
+        .clone();
     assert_eq!(status["finished"], true);
     assert_eq!(status["lifecycle"], "trash");
     assert_eq!(status["report"], "");
@@ -426,7 +584,7 @@ async fn deleted_tasks_are_finished_in_status_and_waits() {
         &f.s,
         &turn.token,
         &json!({
-            "condition": { "type": "task_finished", "chatId": child },
+            "conditions": [{ "type": "task_finished", "chatId": child }],
             "reason": "Observe the deleted task",
             "timeoutSeconds": 60,
         }),
@@ -450,7 +608,7 @@ async fn the_requester_waits_for_its_task_and_reads_the_report() {
     let wait = wait_for::schedule(
         &f.s,
         &turn.token,
-        &json!({ "condition": condition, "reason": "Wait for the review", "timeoutSeconds": 3600 }),
+        &json!({ "conditions": [condition], "reason": "Wait for the review", "timeoutSeconds": 3600 }),
     )
     .await
     .unwrap();
@@ -462,15 +620,13 @@ async fn the_requester_waits_for_its_task_and_reads_the_report() {
     assert_eq!(resumed["run"]["status"], "succeeded", "Still waiting");
 
     f.s.store
-        .patch_run(
-            &delegated_turn.run,
-            json!({
-                "status": "succeeded",
-                "finishedAt": cairn_installation::config::now(),
-                "summary": "**2 findings**\n\n1. Retry can reorder a steered message.",
-                "outcome": { "status": "completed", "reason": "Reviewed", "evidence": ["diff"] },
-            }),
-        )
+        .change_run(&delegated_turn.run,cairn_installation::runs::RunChanges {
+            status : Some(cairn_contracts::RunStatus::Succeeded),
+            finished_at : Some(Some(cairn_installation::config::now())),
+            summary : Some(("**2 findings**\n\n1. Retry can reorder a steered message.").to_owned()),
+            boundary: Some(serde_json::json!({"outcome": { "status": "completed", "reason": "Reviewed", "evidence": ["diff"] }})),
+            ..Default::default()
+        })
         .await
         .unwrap();
     f.s.chat_tick(&HashSet::new()).await.unwrap();
@@ -484,7 +640,8 @@ async fn the_requester_waits_for_its_task_and_reads_the_report() {
     let turn = f.running(&turn.chat).await;
     let status = delegation::status(&f.s, &turn.token, &json!({ "chatId": child }))
         .await
-        .unwrap();
+        .unwrap()["tasks"][0]
+        .clone();
     assert_eq!(status["finished"], true);
     assert_eq!(status["status"], "succeeded");
     assert_eq!(status["outcome"]["status"], "completed");
@@ -494,6 +651,81 @@ async fn the_requester_waits_for_its_task_and_reads_the_report() {
         .unwrap();
     assert_eq!(listed["tasks"][0]["chatId"], child.as_str());
     assert!(text(&listed["tasks"][0], "preview").starts_with("2 findings"));
+}
+
+#[tokio::test]
+async fn delegated_tasks_can_be_waited_on_as_all_or_any_without_installation_access() {
+    for mode in ["all", "any"] {
+        let f = Fixture::new(true).await;
+        let turn = f.conversation(MAIN_AGENT_ID).await;
+        let first = f
+            .delegate(&turn, json!({ "task": "Review the backend" }))
+            .await
+            .unwrap();
+        let second = f
+            .delegate(&turn, json!({ "task": "Review the UI" }))
+            .await
+            .unwrap();
+        let first_chat = text(&first, "chatId");
+        let second_chat = text(&second, "chatId");
+        let wait = wait_for::schedule(
+            &f.s,
+            &turn.token,
+            &json!({
+                "conditions": [
+                    { "type": "task_finished", "chatId": first_chat },
+                    { "type": "task_finished", "chatId": second_chat },
+                ],
+                "mode": mode,
+                "reason": "Wait for independent reviews",
+                "timeoutSeconds": 3600,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(wait["deferred"], true);
+        f.finish(&turn).await;
+        let first_turn = f.running(first_chat).await;
+        let second_turn = f.running(second_chat).await;
+        f.s.store
+            .change_run(
+                &first_turn.run,
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Failed),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        wait_for::tick_groups(&f.s, &HashSet::new()).await.unwrap();
+        let partial = f.s.chat_detail(&turn.chat).await.unwrap();
+        assert_eq!(
+            partial["wakeup"]["members"][0]["observation"]["status"],
+            "failed"
+        );
+        assert!(partial["wakeup"]["members"][1]["observation"].is_null());
+        f.s.chat_tick(&HashSet::new()).await.unwrap();
+        if mode == "all" {
+            assert_eq!(
+                f.s.chat_detail(&turn.chat).await.unwrap()["run"]["status"],
+                "succeeded"
+            );
+            f.finish(&second_turn).await;
+            f.s.chat_tick(&HashSet::new()).await.unwrap();
+        }
+        let resumed = f.s.chat_detail(&turn.chat).await.unwrap();
+        assert_eq!(resumed["run"]["status"], "queued");
+        let execution = text(&resumed["run"]["chatExecution"], "text");
+        assert!(execution.contains(first_chat) && execution.contains(second_chat));
+        assert!(execution.contains(r#""status":"failed""#));
+        if mode == "any" {
+            assert!(execution.contains(r#""result":null"#));
+            assert_eq!(
+                f.s.store.run(&second_turn.run).await.unwrap()["status"],
+                "running"
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -518,7 +750,7 @@ async fn tasks_belong_to_the_conversation_that_delegated_them() {
         &f.s,
         &second.token,
         &json!({
-            "condition": { "type": "task_finished", "chatId": child },
+            "conditions": [{ "type": "task_finished", "chatId": child }],
             "reason": "Not mine",
             "timeoutSeconds": 60,
         }),
@@ -571,14 +803,15 @@ async fn withdrawing_the_first_message_finishes_an_unstarted_task_and_releases_i
 
     let status = delegation::status(&f.s, &turn.token, &json!({ "chatId": child }))
         .await
-        .unwrap();
+        .unwrap()["tasks"][0]
+        .clone();
     assert_eq!(status["finished"], true);
     assert_eq!(status["status"], "idle");
     let wait = wait_for::schedule(
         &f.s,
         &turn.token,
         &json!({
-            "condition": { "type": "task_finished", "chatId": child },
+            "conditions": [{ "type": "task_finished", "chatId": child }],
             "reason": "Observe the withdrawn task",
             "timeoutSeconds": 60,
         }),
@@ -599,15 +832,14 @@ async fn preparation_failures_reach_the_requester_and_are_redacted_after_deletio
     let f = Fixture::new(true).await;
     let turn = f.conversation(MAIN_AGENT_ID).await;
     let project = id();
-    f.s.store
-        .put(
-            "projects",
-            json!({ "id": project, "name": "Review project", "path": f._root.path() }),
-        )
-        .await
-        .unwrap();
+    f.s.project_fixture(
+        json!({ "creationId": project, "name": "Review project", "path": f._root.path() }),
+        None,
+    )
+    .await
+    .unwrap();
     let agent =
-        f.s.agent(
+        f.s.agent_fixture(
             json!({ "name": "Reviewer", "access": { "projects": [project] } }),
             None,
         )
@@ -616,12 +848,12 @@ async fn preparation_failures_reach_the_requester_and_are_redacted_after_deletio
     let delegated = f
         .delegate(
             &turn,
-            json!({ "task": "Review the project", "agentId": agent["id"], "projectId": project }),
+            json!({ "task": "Review the project", "agentId": agent["id"], "project": {"type":"selected","projectId":project} }),
         )
         .await
         .unwrap();
     let child = text(&delegated, "chatId");
-    f.s.agent(
+    f.s.agent_fixture(
         json!({ "name": "Reviewer", "access": { "projects": [] } }),
         agent["id"].as_str(),
     )
@@ -639,7 +871,8 @@ async fn preparation_failures_reach_the_requester_and_are_redacted_after_deletio
 
     let status = delegation::status(&f.s, &turn.token, &json!({ "chatId": child }))
         .await
-        .unwrap();
+        .unwrap()["tasks"][0]
+        .clone();
     assert_eq!(status["finished"], true);
     assert_eq!(status["paused"], true);
     assert_eq!(status["error"], error);
@@ -649,7 +882,7 @@ async fn preparation_failures_reach_the_requester_and_are_redacted_after_deletio
     assert_eq!(listed["tasks"][0]["error"], error);
 
     let wait_input = json!({
-        "condition": { "type": "task_finished", "chatId": child },
+        "conditions": [{ "type": "task_finished", "chatId": child }],
         "reason": "Observe the preparation failure",
         "timeoutSeconds": 60,
     });
@@ -664,7 +897,8 @@ async fn preparation_failures_reach_the_requester_and_are_redacted_after_deletio
     f.s.chat_trash(child, true).await.unwrap();
     let deleted = delegation::status(&f.s, &turn.token, &json!({ "chatId": child }))
         .await
-        .unwrap();
+        .unwrap()["tasks"][0]
+        .clone();
     assert!(deleted["error"].is_null());
     let wait = wait_for::schedule(&f.s, &turn.token, &wait_input)
         .await
@@ -684,22 +918,27 @@ async fn run_failures_include_their_error_in_status_and_wait_results() {
     let child = text(&delegated, "chatId");
     let child_turn = f.running(child).await;
     f.s.store
-        .patch_run(
+        .change_run(
             &child_turn.run,
-            json!({ "status": "failed", "error": "Provider request failed" }),
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Failed),
+                error: Some(Some("Provider request failed".into())),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
     let status = delegation::status(&f.s, &turn.token, &json!({ "chatId": child }))
         .await
-        .unwrap();
+        .unwrap()["tasks"][0]
+        .clone();
     assert_eq!(status["finished"], true);
     assert_eq!(status["error"], "Provider request failed");
     let wait = wait_for::schedule(
         &f.s,
         &turn.token,
         &json!({
-            "condition": { "type": "task_finished", "chatId": child },
+            "conditions": [{ "type": "task_finished", "chatId": child }],
             "reason": "Observe the failure",
             "timeoutSeconds": 60,
         }),
@@ -715,7 +954,7 @@ async fn run_failures_include_their_error_in_status_and_wait_results() {
 async fn removing_delegation_revokes_a_live_requester() {
     let f = Fixture::new(true).await;
     let turn = f.conversation(MAIN_AGENT_ID).await;
-    f.s.agent(
+    f.s.agent_fixture(
         json!({ "name": "Main agent", "access": { "delegation": false } }),
         Some(MAIN_AGENT_ID),
     )
@@ -734,11 +973,82 @@ async fn older_profile_updates_keep_delegation() {
     let f = Fixture::new(true).await;
     // An older client sends access without the key it does not know.
     let saved =
-        f.s.agent(
+        f.s.agent_fixture(
             json!({ "name": "Main agent", "access": { "installation": false } }),
             Some(MAIN_AGENT_ID),
         )
         .await
         .unwrap();
     assert_eq!(saved["access"]["delegation"], true);
+}
+
+#[tokio::test]
+async fn deleting_a_task_redacts_recorded_group_progress_and_final_results() {
+    for finalized in [false, true] {
+        let f = Fixture::new(true).await;
+        let parent = f.conversation(MAIN_AGENT_ID).await;
+        let first = f
+            .delegate(&parent, json!({ "task": "Review backend" }))
+            .await
+            .unwrap();
+        let second = f
+            .delegate(&parent, json!({ "task": "Review UI" }))
+            .await
+            .unwrap();
+        let first_chat = text(&first, "chatId");
+        let second_chat = text(&second, "chatId");
+        wait_for::schedule(
+            &f.s,
+            &parent.token,
+            &json!({
+                "conditions": [
+                    { "type": "task_finished", "chatId": first_chat },
+                    { "type": "task_finished", "chatId": second_chat },
+                ],
+                "mode": "all", "reason": "Collect reviews", "timeoutSeconds": 3600,
+            }),
+        )
+        .await
+        .unwrap();
+        f.finish(&parent).await;
+        let first_turn = f.running(first_chat).await;
+        let second_turn = f.running(second_chat).await;
+        let diagnostic = "Private diagnostic from a deleted task";
+        f.s.store
+            .change_run(
+                &first_turn.run,
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Failed),
+                    error: Some(Some((diagnostic).to_owned())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        wait_for::tick_groups(&f.s, &HashSet::new()).await.unwrap();
+        let partial = f.s.chat_detail(&parent.chat).await.unwrap();
+        assert_eq!(
+            partial["wakeup"]["members"][0]["observation"]["error"],
+            diagnostic
+        );
+        if finalized {
+            f.finish(&second_turn).await;
+            wait_for::tick_groups(&f.s, &HashSet::new()).await.unwrap();
+            assert_eq!(
+                f.s.chat_detail(&parent.chat).await.unwrap()["wakeup"]["observation"]["state"],
+                "completed"
+            );
+        }
+        f.s.chat_trash(first_chat, true).await.unwrap();
+        if !finalized {
+            f.finish(&second_turn).await;
+        }
+        f.s.chat_tick(&HashSet::new()).await.unwrap();
+        let resumed = f.s.chat_detail(&parent.chat).await.unwrap();
+        assert_eq!(resumed["run"]["status"], "queued");
+        let prompt = text(&resumed["run"]["chatExecution"], "text");
+        assert!(prompt.contains(r#""status":"deleted""#));
+        assert!(!prompt.contains(r#""error":"#));
+        assert!(!prompt.contains(diagnostic));
+    }
 }

@@ -1,0 +1,51 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "SideQuestionInput": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "description": "Client-chosen identity: retrying with the same content returns the same question.",
+          "format": "uuid",
+          "type": "string"
+        },
+        "itemId": {
+          "default": "",
+          "maxLength": 200,
+          "type": "string"
+        },
+        "quote": {
+          "default": "",
+          "maxLength": 4000,
+          "type": "string"
+        },
+        "text": {
+          "maxLength": 4000,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "text"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "chatId": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "question": {
+      "$ref": "#/definitions/SideQuestionInput"
+    }
+  },
+  "required": [
+    "chatId",
+    "question"
+  ],
+  "title": "AskChatSideQuestionInput",
+  "type": "object"
+}

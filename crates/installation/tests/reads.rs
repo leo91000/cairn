@@ -1,3 +1,7 @@
+use crate::common::run_fixture::DbRunFixture;
+use crate::common::run_fixture::RunFixture;
+use common::MissionFixture;
+
 mod common;
 
 use common::{RelayContext, relay_fixture::router};
@@ -96,14 +100,10 @@ impl App {
             "finishedAt": now(),
             "summary": "## Release ready\n\nI **shipped** the `0.53` notes.",
         });
-        let (run_id, task) = (run.clone(), task.to_owned());
         self.service
             .store
             .transaction(move |db| {
-                db.0.execute(
-                    "INSERT INTO runs(id,task_id,project_id,status,created_at,data) VALUES(?1,?2,'',?3,?4,?5)",
-                    rusqlite::params![run_id, task, status.as_str(), now(), record.to_string()],
-                )?;
+                db.add_run_fixture(&record, None)?;
                 Ok(())
             })
             .await
@@ -119,9 +119,17 @@ impl App {
         let run = self
             .finished_run(text(&chat, "id"), "chat", RunStatus::Succeeded)
             .await;
-        let mut stored = self.service.get("chats", text(&chat, "id")).await.unwrap();
+        let mut stored = self
+            .service
+            .conversation_boundary(text(&chat, "id"))
+            .await
+            .unwrap();
         stored["runId"] = run.into();
-        self.service.store.put("chats", stored).await.unwrap();
+        self.service
+            .store
+            .save_conversation_boundary(stored)
+            .await
+            .unwrap();
         chat
     }
 }
@@ -166,9 +174,13 @@ async fn finished_conversations_stay_unread_for_each_account_until_opened() {
     let run = app
         .finished_run(chat_id, "chat", RunStatus::Succeeded)
         .await;
-    let mut stored = app.service.get("chats", chat_id).await.unwrap();
+    let mut stored = app.service.conversation_boundary(chat_id).await.unwrap();
     stored["runId"] = run.into();
-    app.service.store.put("chats", stored).await.unwrap();
+    app.service
+        .store
+        .save_conversation_boundary(stored)
+        .await
+        .unwrap();
     let owner = app.get(&app.owner, "/api/chats").await;
     assert_eq!(find(&owner, "id", chat_id)["unread"], true);
 }
@@ -208,9 +220,17 @@ async fn failed_and_stopped_work_is_never_unread() {
         .await;
     for status in [RunStatus::Failed, RunStatus::Cancelled] {
         let run = app.finished_run(text(&chat, "id"), "chat", status).await;
-        let mut stored = app.service.get("chats", text(&chat, "id")).await.unwrap();
+        let mut stored = app
+            .service
+            .conversation_boundary(text(&chat, "id"))
+            .await
+            .unwrap();
         stored["runId"] = run.into();
-        app.service.store.put("chats", stored).await.unwrap();
+        app.service
+            .store
+            .save_conversation_boundary(stored)
+            .await
+            .unwrap();
         let listed = app.get(&app.owner, "/api/chats").await;
         assert_eq!(find(&listed, "id", text(&chat, "id"))["unread"], false);
     }
@@ -221,7 +241,7 @@ async fn mission_runs_are_unread_until_their_mission_is_opened() {
     let app = App::new().await;
     let task = app
         .service
-        .task(
+        .task_fixture(
             json!({ "name": "Release notes", "prompt": "Write them", "agentId": MAIN_AGENT_ID }),
             None,
         )
@@ -286,9 +306,13 @@ async fn reading_an_observed_completion_does_not_consume_newer_work() {
     let run = app
         .finished_run(chat_id, "chat", RunStatus::Succeeded)
         .await;
-    let mut stored = app.service.get("chats", chat_id).await.unwrap();
+    let mut stored = app.service.conversation_boundary(chat_id).await.unwrap();
     stored["runId"] = run.into();
-    app.service.store.put("chats", stored).await.unwrap();
+    app.service
+        .store
+        .save_conversation_boundary(stored)
+        .await
+        .unwrap();
 
     let read = |at| {
         json!({
@@ -319,7 +343,7 @@ async fn opening_an_old_mission_run_leaves_the_latest_result_unread() {
     let app = App::new().await;
     let task = app
         .service
-        .task(
+        .task_fixture(
             json!({
                 "name": "Release notes",
                 "prompt": "Write them",
@@ -614,7 +638,7 @@ async fn blocked_missions_stay_set_aside_for_each_account_until_they_finish_agai
     let app = App::new().await;
     let task = app
         .service
-        .task(
+        .task_fixture(
             json!({ "name": "Device proof", "prompt": "Prove it", "agentId": MAIN_AGENT_ID }),
             None,
         )
@@ -628,7 +652,7 @@ async fn blocked_missions_stay_set_aside_for_each_account_until_they_finish_agai
     let stored = app
         .service
         .store
-        .patch_run(&run, blocked("blocked"))
+        .change_run_fixture(&run, blocked("blocked"))
         .await
         .unwrap();
     let finished_at = stored["finishedAt"].as_i64().unwrap();
@@ -648,7 +672,7 @@ async fn blocked_missions_stay_set_aside_for_each_account_until_they_finish_agai
     // Input the agent asked for can only be snoozed.
     app.service
         .store
-        .patch_run(&run, blocked("needs_input"))
+        .change_run_fixture(&run, blocked("needs_input"))
         .await
         .unwrap();
     assert!(app.dismissal(&app.owner, &run).await.is_null());
@@ -670,7 +694,7 @@ async fn blocked_missions_stay_set_aside_for_each_account_until_they_finish_agai
     let next = app.finished_run(task_id, "mcp", RunStatus::Succeeded).await;
     app.service
         .store
-        .patch_run(&next, blocked("blocked"))
+        .change_run_fixture(&next, blocked("blocked"))
         .await
         .unwrap();
     let runs = app.get(&app.owner, "/api/tasks/activity").await;

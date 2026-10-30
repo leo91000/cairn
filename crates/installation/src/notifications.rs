@@ -13,17 +13,6 @@ use std::collections::HashSet;
 
 const DELIVERY_TTL_MS: i64 = 3_600_000;
 
-/// Local registrations and their encrypted keys cannot authorize beacon account push.
-pub fn remove_local_registrations(db: &mut Db<'_>) -> Result<()> {
-    for prefix in ["push-device:", "mcp-secret:push-device:"] {
-        for (key, _) in db.keys(prefix)? {
-            db.delete(&key)?;
-        }
-    }
-
-    db.delete("mcp-secret:push-vapid")
-}
-
 fn enqueue_event(db: &Db<'_>, event: &NotificationEvent) -> Result<()> {
     let key = format!("push-outbox:{}", event.id);
     if db.kv(&key)?.is_none() {
@@ -95,13 +84,8 @@ pub async fn pending(
                 }
 
                 if let NotificationKind::Question { question_id } = &event.kind {
-                    let question = db.kv(&format!(
-                        "{}{}",
-                        crate::chats::question_prefix(&event.chat_id),
-                        question_id
-                    ))?;
-                    if !question
-                        .is_some_and(|question| question["status"] == QuestionStatus::Pending)
+                    let question = db.question(&event.chat_id, question_id)?;
+                    if !question.is_some_and(|question| question.status == QuestionStatus::Pending)
                     {
                         db.delete(&key)?;
                         continue;

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import type { AccountSignInMethod } from '../../../../packages/contracts/generated/typescript/AccountSignInMethod'
 import {
   computed,
   onMounted,
@@ -6,15 +7,10 @@ import {
   ref,
   watch,
 } from 'vue'
+import { listAccountMethods } from '../../../../packages/contracts/generated/list-account-methods'
 import AccountSecurity from './AccountSecurity.vue'
 import UiAlert from './UiAlert.vue'
 import UiButton from './UiButton.vue'
-
-interface SignInMethod {
-  id: string
-  kind: 'email' | 'google' | 'github' | 'passkey'
-  label: string
-}
 
 const props = defineProps<{
   email: string
@@ -33,7 +29,7 @@ const emit = defineEmits<{
   clearError: []
 }>()
 const accountRequest = props.request
-const methods = ref<SignInMethod[]>([])
+const methods = ref<AccountSignInMethod[]>([])
 const passkeyName = ref('My passkey')
 const challenge = ref('')
 const code = ref('')
@@ -41,7 +37,7 @@ const localBusy = ref(false)
 const busy = computed(() => localBusy.value || props.busy)
 const error = ref('')
 const confirmingIdentity = ref(false)
-const methodNames = {
+const methodNames: Record<string, string> = {
   email: 'Email',
   google: 'Google',
   github: 'GitHub',
@@ -55,7 +51,7 @@ onScopeDispose(() => emit('busy', false))
 onMounted(async () => {
   localBusy.value = true
   try {
-    methods.value = (await accountRequest('methods')).methods
+    methods.value = await loadMethods()
   }
   catch (cause) {
     error.value = cause instanceof Error ? cause.message : 'Unable to load sign-in methods.'
@@ -65,13 +61,18 @@ onMounted(async () => {
   }
 })
 
+async function loadMethods(): Promise<AccountSignInMethod[]> {
+  const result = await listAccountMethods(accountRequest)
+  return result.methods
+}
+
 async function removeMethod(id: string) {
   localBusy.value = true
   error.value = ''
   emit('clearError')
   try {
     await accountRequest('methods/remove', { id })
-    methods.value = (await accountRequest('methods')).methods
+    methods.value = await loadMethods()
   }
   catch (cause) {
     error.value = cause instanceof Error ? cause.message : 'Unable to remove sign-in method.'
@@ -97,7 +98,7 @@ async function registerPasskey() {
       credential: credential.toJSON(),
       label: passkeyName.value,
     })
-    methods.value = (await accountRequest('methods')).methods
+    methods.value = await loadMethods()
     passkeyName.value = 'My passkey'
   }
   catch (cause) {
@@ -119,7 +120,7 @@ async function enableEmail() {
       emit('sessionUpdated', await accountRequest('verify', { challenge: challenge.value, code: code.value }))
       challenge.value = ''
       code.value = ''
-      methods.value = (await accountRequest('methods')).methods
+      methods.value = await loadMethods()
     }
     else {
       const start = await accountRequest('email-code', { email: props.email })

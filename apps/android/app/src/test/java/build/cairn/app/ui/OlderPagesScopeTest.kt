@@ -55,18 +55,19 @@ class OlderPagesScopeTest {
                                                 .setBody(
                                                     wireJson.encodeToString(
                                                         HistoryPage(
-                                                            listOf(
-                                                                RunEvent(
-                                                                    9,
-                                                                    9,
-                                                                    "chat.user",
-                                                                    "Older $label",
-                                                                    runId = "r1",
-                                                                )
-                                                            ),
-                                                            "v1:r1:1",
-                                                            9,
-                                                            false,
+                                                            events =
+                                                                listOf(
+                                                                    RunEvent(
+                                                                        id = 9,
+                                                                        createdAt = 9,
+                                                                        type = "chat.user",
+                                                                        text = "Older $label",
+                                                                        runId = "r1",
+                                                                    )
+                                                                ),
+                                                            history = "v1:r1:1",
+                                                            oldest = 9,
+                                                            hasOlder = false,
                                                         )
                                                     )
                                                 )
@@ -83,14 +84,21 @@ class OlderPagesScopeTest {
                                             LiveBatch(
                                                 listOf(
                                                     RunEvent(
-                                                        10,
-                                                        10,
-                                                        "chat.user",
-                                                        "$label $path",
+                                                        id = 10,
+                                                        createdAt = 10,
+                                                        type = "chat.user",
+                                                        text = "$label $path",
                                                         runId = "r1",
                                                     )
                                                 ),
-                                                LiveState(chat = Chat("fixture", title = "Test")),
+                                                LiveState(
+                                                    chat =
+                                                        Chat(
+                                                            id =
+                                                                "be1410ba-6c1a-5ab2-b0c8-2733e2a5eb13",
+                                                            title = "Test",
+                                                        )
+                                                ),
                                                 false,
                                                 false,
                                                 "v1:r1:1",
@@ -114,13 +122,17 @@ class OlderPagesScopeTest {
 
                                     val body =
                                         when (path) {
+                                            "/api/installations/fixture/api/tasks" ->
+                                                """{"tasks":[]}"""
                                             "/api/account/session" -> beaconAccountFixture()
                                             "/api/installations" -> beaconInstallationsFixture()
-                                            "/api/installations/fixture/api/agents",
-                                            "/api/installations/fixture/api/projects",
-                                            "/api/installations/fixture/api/tasks",
-                                            "/api/installations/fixture/api/skills",
-                                            "/api/installations/fixture/api/mcps" -> "[]"
+                                            "/api/installations/fixture/api/projects" ->
+                                                """{"projects":[]}"""
+                                            "/api/installations/fixture/api/agents" ->
+                                                """{"agents":[]}"""
+                                            "/api/installations/fixture/api/skills" -> "[]"
+                                            "/api/installations/fixture/api/mcps" ->
+                                                """{"mcps":[]}"""
                                             else -> "{}"
                                         }
                                     return MockResponse()

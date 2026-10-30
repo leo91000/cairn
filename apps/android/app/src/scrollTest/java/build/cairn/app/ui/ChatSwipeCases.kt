@@ -19,7 +19,6 @@ import build.cairn.app.diagnostics.Performance
 import build.cairn.app.diagnostics.UploadCadence
 import java.io.File
 import java.util.concurrent.TimeUnit
-import kotlinx.coroutines.flow.first
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
@@ -129,8 +128,14 @@ abstract class ChatSwipeCases {
             moveTo(Offset(this.width * .48f, height * .4f), 350)
         }
         compose.waitForIdle()
-        val current = compose.onNodeWithTag("chat-page:recent").getUnclippedBoundsInRoot()
-        val next = compose.onNodeWithTag("chat-page:middle").getUnclippedBoundsInRoot()
+        val current =
+            compose
+                .onNodeWithTag("chat-page:35bcbcf2-6d5f-5c5e-955f-b5256afbdffc")
+                .getUnclippedBoundsInRoot()
+        val next =
+            compose
+                .onNodeWithTag("chat-page:bd8d3a56-d149-50fb-add8-e245382bdd5b")
+                .getUnclippedBoundsInRoot()
         Assert.assertTrue(
             "The current screen follows the finger",
             current.left.value < -width * .25f,
@@ -151,7 +156,11 @@ abstract class ChatSwipeCases {
         waitForChat("Chat récent")
         Assert.assertEquals(
             0f,
-            compose.onNodeWithTag("chat-page:recent").getUnclippedBoundsInRoot().left.value,
+            compose
+                .onNodeWithTag("chat-page:35bcbcf2-6d5f-5c5e-955f-b5256afbdffc")
+                .getUnclippedBoundsInRoot()
+                .left
+                .value,
             1f,
         )
         history.performTouchInput { swipeLeft() }
@@ -161,8 +170,14 @@ abstract class ChatSwipeCases {
             moveTo(Offset(this.width * .52f, height * .4f), 350)
         }
         compose.waitForIdle()
-        val previous = compose.onNodeWithTag("chat-page:recent").getUnclippedBoundsInRoot()
-        val middle = compose.onNodeWithTag("chat-page:middle").getUnclippedBoundsInRoot()
+        val previous =
+            compose
+                .onNodeWithTag("chat-page:35bcbcf2-6d5f-5c5e-955f-b5256afbdffc")
+                .getUnclippedBoundsInRoot()
+        val middle =
+            compose
+                .onNodeWithTag("chat-page:bd8d3a56-d149-50fb-add8-e245382bdd5b")
+                .getUnclippedBoundsInRoot()
         Assert.assertTrue(
             "The previous screen is visible while swiping right",
             previous.right.value in 1f..width * .85f,
@@ -209,13 +224,13 @@ abstract class ChatSwipeCases {
     fun onlyTheSelectedChatKeepsALiveStreamWhileNeighborsStayPreviewed() = withChats {
         open("Chat récent")
         compose.waitUntil(10000) { hasReply("Chat intermédiaire", visible = false) }
-        waitForChatStreams("recent")
+        waitForChatStreams("35bcbcf2-6d5f-5c5e-955f-b5256afbdffc")
         history.performTouchInput { swipeLeft() }
         waitForChat("Chat intermédiaire")
         compose.waitUntil(10000) {
             hasReply("Chat ancien", visible = false) && hasReply("Chat récent", visible = false)
         }
-        waitForChatStreams("middle")
+        waitForChatStreams("bd8d3a56-d149-50fb-add8-e245382bdd5b")
     }
 
     @Test
@@ -224,16 +239,18 @@ abstract class ChatSwipeCases {
             open("Chat récent")
             compose.waitUntil(10000) {
                 hasReply("Chat intermédiaire", visible = false) &&
-                    historyRequests.contains("recent")
+                    historyRequests.contains("35bcbcf2-6d5f-5c5e-955f-b5256afbdffc")
             }
             compose.waitForIdle()
             Assert.assertFalse(
                 "A hidden preview must not page through history",
-                historyRequests.contains("middle"),
+                historyRequests.contains("bd8d3a56-d149-50fb-add8-e245382bdd5b"),
             )
             history.performTouchInput { swipeLeft() }
             waitForChat("Chat intermédiaire")
-            compose.waitUntil(10000) { historyRequests.contains("middle") }
+            compose.waitUntil(10000) {
+                historyRequests.contains("bd8d3a56-d149-50fb-add8-e245382bdd5b")
+            }
         }
 
     /** Previews release their catch-up stream; only the settled page may stay connected. */
@@ -267,7 +284,7 @@ abstract class ChatSwipeCases {
             open("Chat récent")
             history.performTouchInput { swipeLeft() }
             waitForChat("Chat intermédiaire")
-            compose.runOnIdle { incomingChat = "recent" }
+            compose.runOnIdle { incomingChat = "35bcbcf2-6d5f-5c5e-955f-b5256afbdffc" }
             waitForChat("Chat récent")
             compose.onNodeWithContentDescription("Retour").performClick()
             compose.onNodeWithTag("fil").assertExists()
@@ -336,14 +353,48 @@ abstract class ChatSwipeCases {
         test: () -> Unit,
     ) {
         MockWebServer().use { server ->
-            val agent = Agent(MAIN_AGENT_ID, "Agent principal")
+            val agent =
+                Agent(
+                    exclusiveNodes = emptyList(),
+                    plugins = emptyList(),
+                    revision = "",
+                    createdAt = 0,
+                    access =
+                        AccessPolicy(
+                            mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                            projects = null,
+                            skills = null,
+                            mcps = null,
+                        ),
+                    id = MAIN_AGENT_ID,
+                    name = "Agent principal",
+                )
             val chats =
-                if (single) listOf(Chat("recent", "Chat récent", updatedAt = 300))
+                if (single)
+                    listOf(
+                        Chat(
+                            id = "35bcbcf2-6d5f-5c5e-955f-b5256afbdffc",
+                            title = "Chat récent",
+                            updatedAt = 300,
+                        )
+                    )
                 else
                     listOf(
-                        Chat("old", "Chat ancien", updatedAt = 100),
-                        Chat("recent", "Chat récent", updatedAt = 300),
-                        Chat("middle", "Chat intermédiaire", updatedAt = 200),
+                        Chat(
+                            id = "7e0552ad-fde3-5785-a37c-8bc7e408e409",
+                            title = "Chat ancien",
+                            updatedAt = 100,
+                        ),
+                        Chat(
+                            id = "35bcbcf2-6d5f-5c5e-955f-b5256afbdffc",
+                            title = "Chat récent",
+                            updatedAt = 300,
+                        ),
+                        Chat(
+                            id = "bd8d3a56-d149-50fb-add8-e245382bdd5b",
+                            title = "Chat intermédiaire",
+                            updatedAt = 200,
+                        ),
                     )
             expectedPages = chats.size
             server.dispatcher =
@@ -361,7 +412,12 @@ abstract class ChatSwipeCases {
                             return MockResponse()
                                 .setBody(
                                     wireJson.encodeToString(
-                                        HistoryPage(emptyList(), "v1:swipe:1", 1, false)
+                                        HistoryPage(
+                                            events = emptyList(),
+                                            history = "v1:swipe:1",
+                                            oldest = 1,
+                                            hasOlder = false,
+                                        )
                                     )
                                 )
                         }
@@ -374,23 +430,26 @@ abstract class ChatSwipeCases {
                                 else
                                     (if (paginated) 101..103 else 1..30).map {
                                         RunEvent(
-                                            it.toLong(),
-                                            it.toLong(),
-                                            "item.completed",
-                                            "",
-                                            mapOf(
-                                                "item" to
-                                                    buildJsonObject {
-                                                        put("id", "answer-$it")
-                                                        put("type", "agent_message")
-                                                        put(
-                                                            "text",
-                                                            "Réponse **$it** de ${chat.title}. " +
-                                                                "Du contenu sélectionnable pour faire défiler l’historique. "
-                                                                    .repeat(12),
-                                                        )
-                                                    }
-                                            ),
+                                            id = it.toLong(),
+                                            createdAt = it.toLong(),
+                                            type = "item.completed",
+                                            text = "",
+                                            payload =
+                                                kotlinx.serialization.json.JsonObject(
+                                                    mapOf(
+                                                        "item" to
+                                                            buildJsonObject {
+                                                                put("id", "answer-$it")
+                                                                put("type", "agent_message")
+                                                                put(
+                                                                    "text",
+                                                                    "Réponse **$it** de ${chat.title}. " +
+                                                                        "Du contenu sélectionnable pour faire défiler l’historique. "
+                                                                            .repeat(12),
+                                                                )
+                                                            }
+                                                    )
+                                                ),
                                         )
                                     }
                             val state =
@@ -422,12 +481,36 @@ abstract class ChatSwipeCases {
                                 "/api/installations" -> beaconInstallationsFixture()
                                 "/api/account/session" -> beaconAccountFixture("fixture")
                                 "/api/installations/fixture/api/agents" ->
-                                    wireJson.encodeToString(listOf(agent))
+                                    wireJson.encodeToString(
+                                        build.cairn.contracts.ListAgentsOutput(listOf(agent))
+                                    )
                                 "/api/installations/fixture/api/codex/models",
                                 "/api/installations/fixture/api/claude/models" ->
                                     """{"models":[]}"""
                                 "/api/installations/fixture/api/overview" -> "{}"
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
+                                    else "[]"
                             }
                         return MockResponse().setBody(body).apply {
                             if (slowActivity && path.endsWith("/tasks/activity"))
@@ -447,7 +530,7 @@ abstract class ChatSwipeCases {
                 CairnViewModel(
                     ApplicationProvider.getApplicationContext<Application>(),
                     vault,
-                    beaconOrigin = "",
+                    beaconOrigin = server.url("/").toString(),
                 )
             this.vm = vm
             val models = ViewModelStore().apply { put("fixture", vm) }
@@ -457,10 +540,6 @@ abstract class ChatSwipeCases {
                 restoration.setContent {
                     if (mounted) {
                         val state by vm.state.collectAsStateWithLifecycle()
-                        LaunchedEffect(Unit) {
-                            vm.state.first { it.ready }
-                            vm.connect(server.url("/").toString())
-                        }
                         CompositionLocalProvider(
                             LocalPerformanceUploadCadence provides uploadCadence
                         ) {

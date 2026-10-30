@@ -1,8 +1,8 @@
 //! Codex: ChatGPT sign-in through the app-server device code, credentials in the encrypted
 //! vault, usage from `account/rateLimits/read`, and banked resets redeemed at 2% remaining.
 use super::{
-    Account, AccountState, Driver, KIND, Lease, Login, broker, lenient, remove_directory,
-    remove_file, save,
+    Account, AccountState, Driver, Lease, Login, broker, lenient, remove_directory, remove_file,
+    save,
     usage::{self, Resets, Usage},
 };
 use crate::{
@@ -346,7 +346,7 @@ async fn with_session<T>(
 
 pub async fn discover_models(s: &Service, id: &str) -> Result<Value> {
     let _guard = s.accounts.lock(id).await;
-    s.accounts.get(s, id).await?;
+    s.accounts.account(s, id).await?;
     if s.accounts.busy(s, id).await? {
         return Err(Error::conflict(
             "Account sign-in or recovery is in progress.",
@@ -649,30 +649,6 @@ async fn redeem(
     }
 }
 
-/// Records written before usage was normalized kept Codex's raw rate limits.
-async fn upgrade_records(s: &Service) -> Result<()> {
-    for mut account in s.store.list(KIND).await? {
-        let Some(object) = account.as_object_mut() else {
-            continue;
-        };
-        let Some(limits) = object.remove("limits") else {
-            continue;
-        };
-        if !limits.is_null() {
-            let mut usage = normalize(&limits);
-            usage["checkedAt"] = object.get("checkedAt").cloned().unwrap_or(Value::Null);
-            object.insert("usage".into(), usage);
-        }
-        if let Some(exhausted) = object.get_mut("exhausted").and_then(Value::as_object_mut)
-            && let Some(limits) = exhausted.remove("limits")
-        {
-            exhausted.insert("usage".into(), normalize(&limits));
-        }
-        s.store.put(KIND, account).await?;
-    }
-    Ok(())
-}
-
 /// Recovers credentials a manager session may have rotated just before a crash.
 async fn recover_sessions(s: &Service) -> Result<()> {
     for account in s.accounts.of(s, Provider::Codex).await? {
@@ -701,10 +677,10 @@ async fn import_host_login(s: &Service) -> Result<()> {
         return Ok(());
     }
     let account = Account::new(Provider::Codex, "Primary account", AccountState::Ready);
-    let imported = account.to_value();
+    let imported = account.clone();
     s.store
         .transaction(move |db| {
-            db.put(KIND, &imported)?;
+            db.save_coding_account(&imported)?;
             Codex.added(db)
         })
         .await?;
@@ -734,9 +710,6 @@ pub struct Codex;
 #[async_trait::async_trait]
 impl Driver for Codex {
     async fn initialize(&self, s: &Service) -> Result<()> {
-        upgrade_records(s).await?;
-        // Earlier versions signed in here; an unfinished sign-in never survives a restart.
-        remove_directory(&s.config.data_dir.join("codex-login")).await?;
         recover_sessions(s).await?;
         if s.store.kv(MANAGED).await?.is_some() {
             return Ok(());
@@ -801,10 +774,15 @@ impl Driver for Codex {
     }
 
     async fn due(&self, s: &Service, account: &Account, attempted: i64) -> Result<bool> {
-        let model = s.accounts.active(&account.id).await.first().map_or_else(
-            || account.exhausted_model("").to_owned(),
-            |l| l.model.clone(),
-        );
+        let model = s
+            .accounts
+            .active(s, &account.id)
+            .await?
+            .first()
+            .map_or_else(
+                || account.exhausted_model("").to_owned(),
+                |l| l.model.clone(),
+            );
         let pending = s.store.kv(&reset_key(&account.id)).await?.is_some();
         let usage = account.usage();
         let attention = account.exhausted.is_some()
@@ -828,8 +806,8 @@ impl Driver for Codex {
         true
     }
 
-    async fn supports(&self, s: &Service, id: &str, model: &str) -> Result<bool> {
-        crate::models::account_supports(s, id, model).await
+    async fn supports(&self, s: &Service, id: &str, model: &str, speed: &str) -> Result<bool> {
+        crate::models::account_supports(s, id, model, speed).await
     }
 
     fn home(&self, s: &Service, run_id: &str) -> PathBuf {

@@ -13,6 +13,7 @@ import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlinx.coroutines.flow.first
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.*
 import okhttp3.mockwebserver.*
 import org.junit.Assert.*
@@ -25,26 +26,33 @@ abstract class SideQuestionCases {
 
     private val answered =
         ChatSideQuestion(
-            "a1b2c3d4-0000-4000-8000-000000000001",
-            "chat",
+            id = "a1b2c3d4-0000-4000-8000-000000000001",
+            chatId = "chat",
+            runId = "run",
             text = "Pourquoi cet ordre ?",
             itemId = "reply-1",
             provider = "claude",
             status = "answered",
             answer = "Parce que la migration doit précéder le code.",
+            createdAt = 1,
+            settledAt = 2,
         )
     private val pending =
         ChatSideQuestion(
-            "a1b2c3d4-0000-4000-8000-000000000002",
-            "chat",
+            id = "a1b2c3d4-0000-4000-8000-000000000002",
+            chatId = "chat",
+            runId = "run",
             text = "Et les tests ?",
             itemId = "reply-2",
             provider = "claude",
+            status = "pending",
+            createdAt = 3,
+            settledAt = null,
         )
 
     private fun chat(canAsk: Boolean, provider: String = "claude") =
         Chat(
-            "chat",
+            id = "chat",
             provider = provider,
             status = "running",
             canAskSideQuestion = canAsk,
@@ -59,7 +67,13 @@ abstract class SideQuestionCases {
                         val path = request.path!!.substringBefore('?')
                         if (request.method == "POST" && path.contains("/side-questions")) {
                             writes += path to request.body.readUtf8()
-                            return MockResponse().setBody("""{"status":"pending"}""")
+                            val question =
+                                if (path.endsWith("/cancel"))
+                                    pending.copy(status = "cancelled", settledAt = 4)
+                                else pending
+                            return MockResponse()
+                                .setHeader("Content-Type", "application/json")
+                                .setBody(Json.encodeToString(question))
                         }
                         val body =
                             when {
@@ -177,7 +191,7 @@ abstract class SideQuestionCases {
                 CairnTheme {
                     if (state.installation != null)
                         Column(Modifier.verticalScroll(rememberScrollState())) {
-                            SideQuestionPanel(vm, state, chat(canAsk = false, "opencode"), side) {}
+                            SideQuestionPanel(vm, state, chat(canAsk = false, "codex"), side) {}
                         }
                 }
             }
@@ -187,7 +201,7 @@ abstract class SideQuestionCases {
                 }
                 compose
                     .onNodeWithText(
-                        "OpenCode ne peut pas encore répondre aux questions à côté dans Cairn. Posez-la dans la conversation."
+                        "Codex ne peut pas répondre aux questions à côté dans Cairn : ses conversations à côté peuvent encore utiliser des outils. Posez-la dans la conversation."
                     )
                     .assertExists()
                 compose.onNodeWithText("Demander").assertDoesNotExist()

@@ -1,145 +1,41 @@
 package build.cairn.app.data
 
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.JsonObject
 
-@Serializable
-data class ChatAttachment(
-    val id: String,
-    val chatId: String = "",
-    val name: String,
-    val size: Long = 0,
-    val mediaType: String = "application/octet-stream",
-    val kind: String = "file",
-)
+typealias ChatAttachment = build.cairn.contracts.ChatAttachment
 
-@Serializable
-data class ChatMessage(
-    val id: String,
-    val chatId: String = "",
-    val text: String = "",
-    val model: String = "",
-    val reasoning: String = "",
-    val mode: String = "queue",
-    val status: String = "queued",
-    val createdAt: Long = 0,
-    val attachments: List<ChatAttachment> = emptyList(),
-    val questionId: String? = null,
-    val provider: String = "",
-)
+typealias ChatMessage = build.cairn.contracts.ChatMessage
 
-@Serializable data class QuestionOption(val label: String, val description: String = "")
+typealias QuestionOption = build.cairn.contracts.QuestionOption
 
-@Serializable
-data class QuestionField(
-    val id: String,
-    val title: String,
-    val secret: Boolean = false,
-    val options: List<QuestionOption> = emptyList(),
-)
+typealias QuestionField = build.cairn.contracts.QuestionField
 
-@Serializable
-data class ChatQuestion(
-    val id: String,
-    val chatId: String,
-    val runId: String = "",
-    val blocking: Boolean = false,
-    val fields: List<QuestionField> = emptyList(),
-    val status: String = "pending",
-    val createdAt: Long = 0,
-)
+typealias QuestionAnswer = build.cairn.contracts.QuestionAnswer
 
-/**
- * A question the running agent answers from its context beside its reply, without tools, steering
- * or a change to the conversation's history.
- */
-@Serializable
-data class ChatSideQuestion(
-    val id: String,
-    val chatId: String = "",
-    val runId: String = "",
-    val text: String = "",
-    val quote: String = "",
-    val itemId: String = "",
-    val provider: String? = null,
-    val status: String = "pending",
-    val answer: String? = null,
-    val error: String? = null,
-    val createdAt: Long = 0,
-    val settledAt: Long? = null,
-)
+typealias ChatQuestion = build.cairn.contracts.ChatQuestion
 
-@Serializable
-data class ChatWakeup(
-    val id: String,
-    val messageId: String? = null,
-    val reason: String,
-    val seconds: Long,
-    val createdAt: Long,
-    val wakeAt: Long,
-    val condition: JsonObject? = null,
-    val observation: JsonObject? = null,
-    /** Plugin conditions: when Cairn checks again, and why its last check failed. */
-    val nextCheckAt: Long? = null,
-    val lastError: String? = null,
-    /**
-     * A plugin condition's words while it waits: `{ title, short, details[] }`. Kept as JSON so a
-     * plugin's unexpected shape never hides the conversation.
-     */
-    val display: JsonObject? = null,
-)
+typealias ChatSideQuestion = build.cairn.contracts.ChatSideQuestion
 
-/** The conversation whose agent delegated a conversation. */
-@Serializable data class ChatRequester(val chatId: String, val title: String = "")
+typealias ChatWakeup = build.cairn.contracts.ChatWakeup
 
-@Serializable
-data class Chat(
-    val id: String,
-    val title: String = "Nouvelle conversation",
-    val agentId: String = MAIN_AGENT_ID,
-    val projectId: String? = null,
-    val runId: String? = null,
-    val paused: Boolean = false,
-    val createdAt: Long = 0,
-    val updatedAt: Long = 0,
-    val pendingQuestions: Int = 0,
-    val agentName: String = "",
-    val projectName: String? = null,
-    val status: String = "idle",
-    /** The coding agent of the latest turn; a message may switch it from the agent's own. */
-    val provider: String? = null,
-    /** When the agent's latest turn ended. */
-    val finishedAt: Long? = null,
-    /** The agent finished a turn this account has not opened since. */
-    val unread: Boolean = false,
-    /** The opening of the agent's final message, while unread. */
-    val preview: String? = null,
-    val questions: List<ChatQuestion> = emptyList(),
-    /** Explanations asked beside the running reply, oldest first. */
-    val sideQuestions: List<ChatSideQuestion> = emptyList(),
-    /** The running reply's coding agent can answer a side question now. */
-    val canAskSideQuestion: Boolean = false,
-    val pendingSideQuestions: Int = 0,
-    val run: Run? = null,
-    val messages: List<ChatMessage> = emptyList(),
-    val error: String? = null,
-    val lifecycle: String = "active",
-    val purgeAt: Long? = null,
-    val restoredAt: Long? = null,
-    val sessionRestartRequested: Boolean = false,
-    val canRequestNewSession: Boolean = false,
-    val lifecycleError: String? = null,
-    val wakeup: ChatWakeup? = null,
-    val suspendedByExclusive: ExclusiveReservation? = null,
-    /** The conversation that delegated this one, while it still exists. */
-    val requester: ChatRequester? = null,
-) {
-    val exclusiveSuspended
-        get() =
-            (run?.status ?: status) in listOf("running", "queued") &&
-                (suspendedByExclusive != null || run?.suspendedByExclusive != null)
-}
+typealias ContextUsage = build.cairn.contracts.ContextUsage
+
+typealias ChatCompaction = build.cairn.contracts.ChatCompaction
+
+typealias ChatRequester = build.cairn.contracts.ChatRequester
+
+typealias CodingAgentSwitch = build.cairn.contracts.CodingAgentSwitch
+
+typealias CodingAgentChoice = build.cairn.contracts.CodingAgentChoice
+
+typealias CodingAgentOptions = build.cairn.contracts.CodingAgentOptions
+
+typealias Chat = build.cairn.contracts.Chat
+
+val Chat.exclusiveSuspended: Boolean
+    get() =
+        (run?.status ?: status) in listOf("running", "queued") &&
+            (suspendedByExclusive != null || run?.suspendedByExclusive != null)
 
 @Serializable
 data class Deliverable(
@@ -192,95 +88,54 @@ data class LiveBatch(
     val hasOlder: Boolean = false,
 )
 
-@Serializable
-data class HistoryPage(
-    val events: List<RunEvent>,
-    val history: String,
-    val oldest: Long,
-    val hasOlder: Boolean,
-)
+typealias HistoryPage = build.cairn.contracts.HistoryPage
 
-@Serializable data class ReasoningOption(val reasoningEffort: String, val description: String = "")
+typealias ReasoningOption = build.cairn.contracts.ReasoningOption
 
-/** One connected provider offering a model, as `provider/model`. */
-@Serializable
-data class ModelRoute(
-    val model: String,
-    val provider: String = "",
-    val providerName: String = "",
-    /** `subscription`, `credits` or `key`: who pays for this route's usage. */
-    val billing: String = "key",
-    val hidden: Boolean = false,
-    val supportedReasoningEfforts: List<ReasoningOption> = emptyList(),
-)
+typealias ServiceTier = build.cairn.contracts.ServiceTier
 
-@Serializable
-data class CodingAgentModel(
-    val model: String,
-    val displayName: String = "",
-    val description: String = "",
-    val hidden: Boolean = false,
-    val isDefault: Boolean = false,
-    val defaultReasoningEffort: String = "",
-    val supportedReasoningEfforts: List<ReasoningOption> = emptyList(),
-    /** Models offered by several providers. [model] then runs on the first available route. */
-    val routes: List<ModelRoute> = emptyList(),
-)
+typealias ModelRoute = build.cairn.contracts.ModelRoute
+
+typealias CodingAgentModel = build.cairn.contracts.CodingAgentModel
+
+typealias ModelCatalog = build.cairn.contracts.ModelCatalog
 
 fun CodingAgentModel.route(value: String): ModelRoute? = routes.find { it.model == value }
 
 /** Whether [value] selects this model, on any of its routes. */
 fun CodingAgentModel.matches(value: String) = model == value || route(value) != null
 
-@Serializable
-data class ModelCatalog(
-    val models: List<CodingAgentModel> = emptyList(),
-    val checkedAt: Long? = null,
-    val stale: Boolean = false,
-    val error: String = "",
-)
+typealias Mcp = build.cairn.contracts.McpView
 
-@Serializable
-data class McpTool(
-    val name: String,
-    val title: String? = null,
-    val description: String? = null,
-    val inputSchema: JsonElement? = null,
-)
+typealias McpTool = build.cairn.contracts.McpTool
 
-@Serializable
-data class Mcp(
-    val id: String = "",
-    val name: String = "",
-    val transport: String = "http",
-    val url: String = "",
-    val command: String = "",
-    val args: List<String> = emptyList(),
-    val auth: String = "none",
-    val clientId: String = "",
-    val scopes: String = "",
-    val allowPrivateNetwork: Boolean = false,
-    val enabled: Boolean = true,
-    val enabledTools: List<String>? = null,
-    val state: String = "untested",
-    val error: String = "",
-    val tools: List<McpTool> = emptyList(),
-    val checkedAt: Long? = null,
-    val hasToken: Boolean = false,
-    val hasClientSecret: Boolean = false,
-    val envKeys: List<String> = emptyList(),
-    val callbackUrl: String = "",
-)
+fun Mcp.settings(
+    token: String? = null,
+    clientSecret: String? = null,
+    env: Map<String, String>? = null,
+    removeEnv: List<String> = emptyList(),
+) =
+    build.cairn.contracts.McpInput(
+        name = name,
+        transport = transport,
+        url = url,
+        command = command,
+        args = args,
+        auth = auth,
+        clientId = clientId,
+        scopes = scopes,
+        allowPrivateNetwork = allowPrivateNetwork,
+        enabled = enabled,
+        enabledTools = enabledTools,
+        token = token,
+        clientSecret = clientSecret,
+        env = env?.let { build.cairn.contracts.McpEnvironment(it) },
+        removeEnv = removeEnv,
+    )
 
 @Serializable data class UrlResult(val url: String)
 
-@Serializable
-data class RunWorkspace(
-    val projectId: String,
-    val path: String,
-    val kind: String = "worktree",
-    val revision: String? = null,
-)
+typealias RunWorkspace = build.cairn.contracts.RunWorkspace
 
 /**
  * Recognize only a delivered file on the connected origin; tool-provided URLs are never fetched.
@@ -322,3 +177,22 @@ fun artifactPathForLink(
         }
     return path.takeIf { Regex("/runs/[A-Za-z0-9_-]+/artifacts/[A-Za-z0-9_-]+").matches(it) }
 }
+
+fun build.cairn.contracts.McpInput.replacement() =
+    build.cairn.contracts.McpReplacementInput(
+        name = name,
+        transport = transport,
+        url = url,
+        command = command,
+        args = args,
+        auth = auth,
+        clientId = clientId,
+        scopes = scopes,
+        allowPrivateNetwork = allowPrivateNetwork,
+        enabled = enabled,
+        enabledTools = enabledTools,
+        token = token,
+        clientSecret = clientSecret,
+        env = env,
+        removeEnv = removeEnv,
+    )

@@ -1,3 +1,9 @@
+use crate::common::run_fixture::DbRunFixture;
+use cairn_contracts::EventKind;
+use common::AgentFixture;
+use common::MissionFixture;
+use common::ProjectFixture;
+
 mod common;
 
 use cairn_installation::plugins::run_credentials::RunCredentials;
@@ -12,7 +18,7 @@ use cairn_installation::{
     vault::Vault,
 };
 use serde_json::{Value, json};
-use std::{collections::HashSet, path::Path};
+use std::collections::HashSet;
 use tempfile::TempDir;
 
 const COMPLETE: &str = "The requested work is complete.";
@@ -56,22 +62,22 @@ async fn restart_restores_missing_chat_summaries_once_without_repeating_existing
         .store
         .transaction(move |db| {
             for (index, run_id) in fixtures.iter().enumerate() {
-                db.add_run(&summarized_run(index, run_id), None)?;
+                db.add_run_fixture(&summarized_run(index, run_id), None)?;
                 if index == 1 || index == 2 {
                     let existing = json!({
                         "type": "item.completed",
                         "item": { "id": "existing", "type": "agent_message", "text": format!("{COMPLETE}\n") },
                     });
-                    db.event(run_id, "item.completed", COMPLETE, Some(&existing))?;
+                    db.event(run_id, &EventKind::ItemCompleted, COMPLETE, Some(&existing))?;
                 }
                 if index == 5 {
                     let longer = json!({
                         "item": { "type": "agent_message", "text": "x".repeat(100_001) },
                     });
-                    db.event(run_id, "item.completed", "", Some(&longer))?;
+                    db.event(run_id, &EventKind::ItemCompleted, "", Some(&longer))?;
                 }
                 if index == 2 {
-                    db.event(run_id, "chat.user", "Check again", None)?;
+                    db.event(run_id, &EventKind::ChatUser, "Check again", None)?;
                 }
             }
             Ok(())
@@ -85,7 +91,7 @@ async fn restart_restores_missing_chat_summaries_once_without_repeating_existing
             let run_id = run_id.clone();
             let events = restarted
                 .store
-                .read(move |db| db.events(&run_id, 0, 100))
+                .read(move |db| db.events_fixture(&run_id, 0, 100))
                 .await
                 .unwrap();
             let answers = events
@@ -102,7 +108,7 @@ async fn restart_restores_missing_chat_summaries_once_without_repeating_existing
 }
 
 #[test]
-fn weekly_schedules_and_dst_transitions_match_the_existing_scheduler() {
+fn weekly_schedules_dst_leap_days_and_day_union_have_explicit_calendar_results() {
     let cases = json!([
         ["0 9 * * 1", "Europe/Paris", "2026-09-11T08:00:00Z"],
         ["30 2 * * *", "Europe/Paris", "2026-03-28T22:00:00Z"],
@@ -111,25 +117,50 @@ fn weekly_schedules_and_dst_transitions_match_the_existing_scheduler() {
         ["0 0 29 2 *", "UTC", "2026-01-01T00:00:00Z"],
         ["15 4 1 * MON", "UTC", "2026-09-11T08:00:00Z"]
     ]);
-    let script = r"
-import { CronExpressionParser } from 'cron-parser';
-const cases = JSON.parse(process.argv[1]).map(([cron, tz, date]) => {
-    const parsed = CronExpressionParser.parse(cron, { tz, currentDate: new Date(date) });
-    return Array.from({ length: 5 }, () => parsed.next().getTime());
-});
-console.log(JSON.stringify(cases));
-";
-    let output = std::process::Command::new("node")
-        .args(["--input-type=module", "-e", script, &cases.to_string()])
-        .current_dir(common::repository())
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let expected: Vec<Vec<i64>> = serde_json::from_slice(&output.stdout).unwrap();
+    let expected: Vec<Vec<&str>> = vec![
+        vec![
+            "2026-09-14T07:00:00Z",
+            "2026-09-21T07:00:00Z",
+            "2026-09-28T07:00:00Z",
+            "2026-10-05T07:00:00Z",
+            "2026-10-12T07:00:00Z",
+        ],
+        vec![
+            "2026-03-29T01:30:00Z",
+            "2026-03-30T00:30:00Z",
+            "2026-03-31T00:30:00Z",
+            "2026-04-01T00:30:00Z",
+            "2026-04-02T00:30:00Z",
+        ],
+        vec![
+            "2026-10-25T00:30:00Z",
+            "2026-10-26T01:30:00Z",
+            "2026-10-27T01:30:00Z",
+            "2026-10-28T01:30:00Z",
+            "2026-10-29T01:30:00Z",
+        ],
+        vec![
+            "2026-11-01T05:00:00Z",
+            "2026-11-01T06:00:00Z",
+            "2026-11-01T07:00:00Z",
+            "2026-11-01T08:00:00Z",
+            "2026-11-01T09:00:00Z",
+        ],
+        vec![
+            "2028-02-29T00:00:00Z",
+            "2032-02-29T00:00:00Z",
+            "2036-02-29T00:00:00Z",
+            "2040-02-29T00:00:00Z",
+            "2044-02-29T00:00:00Z",
+        ],
+        vec![
+            "2026-09-14T04:15:00Z",
+            "2026-09-21T04:15:00Z",
+            "2026-09-28T04:15:00Z",
+            "2026-10-01T04:15:00Z",
+            "2026-10-05T04:15:00Z",
+        ],
+    ];
     for (case, expected) in cases.as_array().unwrap().iter().zip(expected) {
         let time = chrono::DateTime::parse_from_rfc3339(case[2].as_str().unwrap())
             .unwrap()
@@ -142,7 +173,12 @@ console.log(JSON.stringify(cases));
                 5
             )
             .unwrap(),
-            expected,
+            expected
+                .into_iter()
+                .map(|date| chrono::DateTime::parse_from_rfc3339(date)
+                    .unwrap()
+                    .timestamp_millis())
+                .collect::<Vec<_>>(),
             "{case}"
         );
     }
@@ -155,7 +191,7 @@ async fn restricted_agents_cannot_escalate_projects_skills_or_the_main_policy() 
     tokio::fs::create_dir(&config.home).await.unwrap();
     let s = Service::new(config).await.unwrap();
     let project = s
-        .project(json!({ "name": "Allowed", "path": root.path() }), None)
+        .project_fixture(json!({ "name": "Allowed", "path": root.path() }), None)
         .await
         .unwrap();
     let restricted = json!({
@@ -167,24 +203,24 @@ async fn restricted_agents_cannot_escalate_projects_skills_or_the_main_policy() 
             "sandbox": "read-only",
         },
     });
-    let agent = s.agent(restricted, None).await.unwrap();
+    let agent = s.agent_fixture(restricted, None).await.unwrap();
     assert!(service::isolated(&agent));
     let main = json!({ "name": "Main", "access": { "projects": [] } });
-    assert!(s.agent(main, Some(MAIN_AGENT_ID)).await.is_err());
+    assert!(s.agent_fixture(main, Some(MAIN_AGENT_ID)).await.is_err());
     let foreign = json!({
         "name": "Foreign",
         "agentId": agent["id"],
         "projectId": id(),
         "prompt": "no",
     });
-    assert!(s.task(foreign, None).await.is_err());
+    assert!(s.task_fixture(foreign, None).await.is_err());
     let allowed = json!({
         "name": "Allowed",
         "agentId": agent["id"],
         "prompt": "inspect",
         "worktree": false,
     });
-    let task = s.task(allowed, None).await.unwrap();
+    let task = s.task_fixture(allowed, None).await.unwrap();
     let run = s
         .enqueue(task["id"].as_str().unwrap(), "manual", None)
         .await
@@ -205,7 +241,7 @@ async fn restricted_agents_cannot_escalate_projects_skills_or_the_main_policy() 
     let link = root.path().join("escape");
     std::os::unix::fs::symlink(outside.path(), &link).unwrap();
     assert!(
-        s.project(json!({ "name": "Escape", "path": link }), None)
+        s.project_fixture(json!({ "name": "Escape", "path": link }), None)
             .await
             .is_err()
     );
@@ -248,7 +284,7 @@ async fn writes_serialize_and_failed_transactions_roll_back() {
 /// The worker integration tests patch a run from a second process while the
 /// worker patches the same run. Neither writer may drop the other's fields.
 #[tokio::test]
-async fn run_patches_from_two_connections_keep_every_field() {
+async fn run_transitions_from_two_connections_preserve_each_others_fields() {
     const PATCHES: usize = 200;
 
     let root = TempDir::new().unwrap();
@@ -267,8 +303,19 @@ async fn run_patches_from_two_connections_keep_every_field() {
         let run_id = run_id.clone();
         tokio::spawn(async move {
             for index in 0..PATCHES {
-                let patch = json!({ format!("{name}-{index}"): index });
-                store.patch_run(&run_id, patch).await.unwrap();
+                let value = format!("{name}-{index}");
+                let change = if name == "first" {
+                    cairn_installation::runs::RunChanges {
+                        summary: Some(value),
+                        ..Default::default()
+                    }
+                } else {
+                    cairn_installation::runs::RunChanges {
+                        account_wait_reason: Some(Some(value)),
+                        ..Default::default()
+                    }
+                };
+                store.change_run(&run_id, change).await.unwrap();
             }
         })
     });
@@ -276,37 +323,22 @@ async fn run_patches_from_two_connections_keep_every_field() {
         writer.await.unwrap();
     }
 
-    let patched = first.run(&run_id).await.unwrap();
-    let missing = ["first", "second"]
-        .iter()
-        .flat_map(|name| (0..PATCHES).map(move |index| format!("{name}-{index}")))
-        .filter(|field| patched[field].is_null())
-        .collect::<Vec<_>>();
-    assert!(missing.is_empty(), "Lost run fields: {missing:?}");
+    let state = first.run_state(&run_id).await.unwrap();
+    assert_eq!(state.summary, format!("first-{}", PATCHES - 1));
+    assert_eq!(
+        state.account_wait_reason,
+        Some(format!("second-{}", PATCHES - 1))
+    );
 }
 
 #[tokio::test]
-async fn vault_accepts_node_ciphertext_and_authentication_rejects_tampering() {
+async fn vault_round_trips_json_and_authentication_rejects_tampering() {
     let root = TempDir::new().unwrap();
     let store = Store::open(root.path()).unwrap();
-    // This fixture is generated by Node's existing AES-GCM format, not by Rust.
-    let script = r"
-const { createCipheriv } = require('node:crypto');
-const { writeFileSync } = require('node:fs');
-const key = Buffer.alloc(32, 7);
-writeFileSync(process.argv[1] + '/mcp-encryption-key', key);
-const cipher = createCipheriv('aes-256-gcm', key, Buffer.alloc(12, 9));
-cipher.setAAD(Buffer.from('fixture'));
-const data = Buffer.concat([cipher.update(JSON.stringify({ token: 'test-only' })), cipher.final()]);
-process.stdout.write(Buffer.concat([Buffer.alloc(12, 9), cipher.getAuthTag(), data]).toString('base64'));
-";
-    let output = std::process::Command::new("node")
-        .args(["-e", script, root.path().to_str().unwrap()])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
     let vault = Vault::new(store, root.path()).unwrap();
-    let ciphertext = Value::String(String::from_utf8(output.stdout).unwrap());
+    let ciphertext = vault
+        .encrypt("fixture", &json!({ "token": "test-only" }))
+        .unwrap();
     assert_eq!(
         vault.decrypt("fixture", &ciphertext).unwrap(),
         json!({ "token": "test-only" })
@@ -352,10 +384,6 @@ async fn binary_vault_records_preserve_bytes_and_reject_wrong_scope_or_damage() 
 
 #[test]
 fn schemas_apply_defaults_but_reject_ambiguous_questions_and_bad_mcp() {
-    let agent = parse("agent", json!({ "name": " Alice ", "unknown": true })).unwrap();
-    assert_eq!(agent["name"], "Alice");
-    assert!(agent.get("unknown").is_none());
-    assert_eq!(agent["access"]["sandbox"], "yolo");
     assert!(
         parse(
             "questions",
@@ -389,9 +417,6 @@ async fn concurrent_messages_and_answers_are_idempotent_and_survive_restart() {
     );
     assert_eq!(a.unwrap(), b.unwrap());
     let run_id = id();
-    let mut chat = chat.clone();
-    chat["runId"] = run_id.clone().into();
-    service.store.put("chats", chat).await.unwrap();
     let run = json!({
         "id": run_id,
         "taskId": chat_id,
@@ -399,8 +424,21 @@ async fn concurrent_messages_and_answers_are_idempotent_and_survive_restart() {
         "status": RunStatus::Running,
         "createdAt": now(),
         "trigger": "chat",
+        "snapshot": { "agent": { "id": MAIN_AGENT_ID, "provider": "codex" } },
     });
     common::add_run(&service.store, &run).await;
+    let mut current = service
+        .store
+        .conversation_boundary(chat_id)
+        .await
+        .unwrap()
+        .unwrap();
+    current["runId"] = run_id.clone().into();
+    service
+        .store
+        .save_conversation_boundary(current)
+        .await
+        .unwrap();
     let question = json!({
         "id": "a".repeat(64),
         "blocking": false,
@@ -422,7 +460,7 @@ async fn concurrent_messages_and_answers_are_idempotent_and_survive_restart() {
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].id, question["id"].as_str().unwrap());
     let question_id = question["id"].as_str().unwrap();
-    let answer = json!({ "id": id(), "answers": { "choice": ["A private answer"] } });
+    let answer = json!({ "id": id(), "answers": { "choice": { "selected": [], "comment": "A private answer" } } });
     let (a, b) = tokio::join!(
         service.question_answer(chat_id, question_id, answer.clone()),
         service.question_answer(chat_id, question_id, answer.clone())
@@ -458,7 +496,7 @@ async fn concurrent_messages_and_answers_are_idempotent_and_survive_restart() {
         .unwrap();
     let events = reopened
         .store
-        .read(move |db| db.events(&run_id, 0, 100))
+        .read(move |db| db.events_fixture(&run_id, 0, 100))
         .await
         .unwrap();
     assert_eq!(events.len(), 1);
@@ -469,110 +507,54 @@ async fn concurrent_messages_and_answers_are_idempotent_and_survive_restart() {
     );
 }
 
-/// Runs `git` in `directory` and returns its trimmed output.
-fn git(directory: &Path, args: &[&str]) -> String {
-    let result = std::process::Command::new("git")
-        .arg("-C")
-        .arg(directory)
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    String::from_utf8_lossy(&result.stdout).trim().to_owned()
-}
-
 #[tokio::test]
-async fn microvm_migration_preserves_linked_worktree_commits_and_uncommitted_changes() {
+async fn old_pending_questions_are_retired_without_rewriting_historical_answers() {
     let root = TempDir::new().unwrap();
-    let mut config = config(&root);
-    config.runner_url = "http://runner:4311".into();
-    tokio::fs::create_dir(&config.home).await.unwrap();
-    let repo = root.path().join("repository");
-    let old = root.path().join("old-worktree");
-    tokio::fs::create_dir(&repo).await.unwrap();
-    git(&repo, &["init", "-b", "main"]);
-    git(&repo, &["config", "user.name", "Fixture"]);
-    git(&repo, &["config", "user.email", "fixture@example.test"]);
-    tokio::fs::write(repo.join("deleted"), "tracked")
-        .await
-        .unwrap();
-    git(&repo, &["add", "."]);
-    git(&repo, &["commit", "-m", "initial"]);
-    git(
-        &repo,
-        &["worktree", "add", "-b", "feat/saved", old.to_str().unwrap()],
-    );
-    tokio::fs::write(old.join("committed"), "saved commit")
-        .await
-        .unwrap();
-    git(&old, &["add", "."]);
-    git(&old, &["commit", "-m", "saved work"]);
-    let head = git(&old, &["rev-parse", "HEAD"]);
-    tokio::fs::remove_file(old.join("deleted")).await.unwrap();
-    tokio::fs::write(old.join("untracked"), "unsaved work")
-        .await
-        .unwrap();
-    let s = Service::new(config).await.unwrap();
-    let project = s
-        .project(
-            json!({ "name": "Fixture", "path": repo, "baseBranch": "main" }),
-            None,
-        )
-        .await
-        .unwrap();
-    let task = json!({
-        "name": "Migrate",
-        "agentId": MAIN_AGENT_ID,
-        "projectId": project["id"],
-        "prompt": "inspect",
+    let config = config(&root);
+    let s = Service::new(config.clone()).await.unwrap();
+    let chat = s.chat_create(json!({})).await.unwrap();
+    let chat_id = chat["id"].as_str().unwrap().to_owned();
+    let historical = json!({
+        "id": id(),
+        "chatId": chat_id,
+        "text": "My historical response",
+        "status": "delivered",
+        "createdAt": now(),
     });
-    let task = s.task(task, None).await.unwrap();
-    let run = s
-        .enqueue(task["id"].as_str().unwrap(), "manual", None)
+    let original = historical.clone();
+    s.store
+        .transaction(move |db| {
+            db.put_message(&historical)?;
+            db.save_question(&serde_json::from_value(json!({
+                "id": "a".repeat(64),
+                "chatId": chat_id,
+                "runId": "old-run",
+                "source": "codex",
+                "blocking": true,
+                "status": "pending",
+                "createdAt": now(),
+                "fields": [
+                    {
+                        "id": "scope",
+                        "title": "An old question",
+                        "options": [
+                            {
+                                "id": "old-option",
+                                "label": "Old option",
+                            },
+                        ],
+                    },
+                ],
+            }))?)
+        })
         .await
         .unwrap();
-    let home = s
-        .config
-        .data_dir
-        .join("runs")
-        .join(run["id"].as_str().unwrap())
-        .join("codex");
-    tokio::fs::create_dir_all(home.join("sessions"))
+    let reopened = Service::new(config).await.unwrap();
+    let detail = reopened
+        .chat_detail(original["chatId"].as_str().unwrap())
         .await
         .unwrap();
-    tokio::fs::write(home.join("cairn-managed-auth"), "1")
-        .await
-        .unwrap();
-    tokio::fs::write(home.join("sessions/saved.jsonl"), "saved session")
-        .await
-        .unwrap();
-    let prepared = json!({
-        "isolated": false,
-        "workspaces": [{ "projectId": project["id"], "path": old, "kind": "worktree" }],
-    });
-    let migrated = execution::restore(&run, prepared, &s.config, &RunCredentials::default())
-        .await
-        .unwrap();
-    let target = Path::new(migrated["workspaces"][0]["path"].as_str().unwrap());
-    assert!(target.join(".git").is_dir());
-    assert_eq!(git(target, &["rev-parse", "HEAD"]), head);
-    assert_eq!(git(target, &["branch", "--show-current"]), "feat/saved");
-    assert!(!target.join("deleted").exists());
-    assert_eq!(
-        tokio::fs::read_to_string(target.join("untracked"))
-            .await
-            .unwrap(),
-        "unsaved work"
-    );
-    assert!(
-        home.parent()
-            .unwrap()
-            .join("home/.codex/sessions/saved.jsonl")
-            .exists()
-    );
-    assert_eq!(git(&old, &["rev-parse", "HEAD"]), head);
+    assert_eq!(detail["questions"][0]["status"], "cancelled");
+    assert_eq!(detail["questions"][0]["blocking"], false);
+    assert_eq!(detail["messages"][0]["text"], "My historical response");
 }

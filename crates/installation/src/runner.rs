@@ -1,7 +1,9 @@
 //! Authenticated execution interface shared by chats, scheduled tasks and recovery.
+use crate::runner::exclusive::Reservations;
+
 mod broker;
 mod client;
-mod exclusive;
+pub(crate) mod exclusive;
 mod routes;
 
 pub(crate) use broker::validate as validate_plan;
@@ -386,7 +388,7 @@ mod tests {
         let response = router(broker)
             .oneshot(authorized_post(
                 format!("/runs/{id}/snapshot"),
-                Body::from("{}"),
+                Body::from(r#"{"consistency":"filesystem"}"#),
             ))
             .await
             .unwrap();
@@ -418,7 +420,7 @@ mod tests {
         let response = app
             .oneshot(authorized_post(
                 format!("/runs/{id}/snapshot"),
-                Body::from("{}"),
+                Body::from(r#"{"consistency":"filesystem"}"#),
             ))
             .await
             .unwrap();

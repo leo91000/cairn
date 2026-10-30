@@ -103,20 +103,16 @@ struct Request<'a> {
     access: &'a Value,
     checkpoint: &'a Value,
     moving: bool,
-    required_runtime: Option<&'a str>,
 }
 
 impl<'a> Request<'a> {
-    fn new(run: &'a Value, access: &'a Value, checkpoint: &'a Value) -> Result<Self> {
-        Ok(Self {
+    fn new(run: &'a Value, access: &'a Value, checkpoint: &'a Value) -> Self {
+        Self {
             run,
             access,
             checkpoint,
             moving: run["placementTransition"] == true,
-            required_runtime: run["requiredRuntime"]
-                .as_str()
-                .or(checkpoint["runtimeId"].as_str()),
-        })
+        }
     }
 
     fn run_id(&self) -> &'a str {
@@ -137,38 +133,39 @@ impl<'a> Request<'a> {
             .into_iter()
             .flatten()
             .all(|tag| super::node_tags(node).any(|present| present == tag));
-        let has_runtime = self.required_runtime.is_none_or(|runtime| {
-            node["runtimes"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .any(|r| r == runtime)
-        });
         let only = |field: &str| run[field].as_str().is_none_or(|only| only == id);
         // An existing environment stays where it is unless it is moving.
         let existing = self.moving || self.checkpoint["nodeId"].as_str().is_none_or(|p| p == id);
         let local_unconfigured = node["local"] == true && !configured;
-        let native = crate::native::policy::native(&self.run["snapshot"]["agent"]);
-        if native != crate::native::policy::node_native(node)
+        // Development's shared process is not an available VM controller.
+        let automatic_needs_controller = policy(&run["snapshot"]["agent"])["backend"] == "auto"
+            && (crate::service::isolated(&run["snapshot"]["agent"])
+                || self.access["nodes"].is_null()
+                || self.access["nodes"]
+                    .as_array()
+                    .is_some_and(|nodes| nodes.iter().any(|node| node != LOCAL_NODE_ID)));
+        let native = crate::native::policy::node_native(node);
+        let backend = if native { "native" } else { "firecracker" };
+        if !crate::native::policy::supports(&self.run["snapshot"]["agent"], backend)
+            || !matches!(self.access["backend"].as_str(), Some("auto") | None)
+                && self.access["backend"] != backend
             || native && node["capabilities"]["ublk"] != true
         {
             return false;
         }
-        let ready = (native
-            && node["executionReady"] == true
-            && super::seen_within(node, FRESH_HEARTBEAT_MS))
-            || local_unconfigured
-            || (node["capabilities"]["kvm"] == true
+        let same_version = local_unconfigured || node["runtimeId"] == super::component_runtime();
+        let ready = same_version
+            && ((native
                 && node["executionReady"] == true
-                && super::seen_within(node, FRESH_HEARTBEAT_MS));
-        // A moved disk is mounted from its published S3 state. A node that
-        // has not passed the storage probe cannot receive that disk.
-        (native || node["capabilities"]["fuse"] == true)
-            && !node["maintenance"].is_string()
+                && super::seen_within(node, FRESH_HEARTBEAT_MS))
+                || local_unconfigured
+                || (node["capabilities"]["kvm"] == true
+                    && node["executionReady"] == true
+                    && super::seen_within(node, FRESH_HEARTBEAT_MS)));
+        !node["maintenance"].is_string()
             && !node["exclusiveReservation"].is_object()
-            && !(local_unconfigured && run["isolated"] == true)
+            && !(local_unconfigured && (run["isolated"] == true || automatic_needs_controller))
             && has_tags
-            && has_runtime
             && only("targetNodeId")
             && allowed(&self.access["nodes"], id)
             && only("pinnedNodeId")
@@ -178,13 +175,26 @@ impl<'a> Request<'a> {
             && ready
     }
 
-    /// VM address-space ceilings follow the node; they never reserve host capacity.
+    /// Native negotiated allowances reserve capacity; VM ceilings retain their policy.
     fn resources_for(&self, node: &Value) -> Option<Resources> {
         let limits: Resources = serde_json::from_value(node["limits"].clone()).ok()?;
         let disk = self.run["resources"]["diskMiB"]
             .as_u64()
             .or(self.checkpoint["resources"]["diskMiB"].as_u64())
-            .unwrap_or_else(|| defaults().disk_mi_b.min(limits.disk_mi_b));
+            .unwrap_or_else(|| {
+                let usable = if node["diskGrowthProtocol"] == 1 {
+                    limits.disk_mi_b.saturating_sub(
+                        super::disk_capacity::pool_reserve(
+                            limits.disk_mi_b.saturating_mul(1_048_576),
+                        ) / 1_048_576
+                            + JOURNAL_MIB,
+                    ) / 4
+                        * 4
+                } else {
+                    limits.disk_mi_b
+                };
+                defaults().disk_mi_b.min(usable)
+            });
         Some(Resources {
             cpu: limits.cpu.min(32),
             memory_mi_b: limits.memory_mi_b,
@@ -218,7 +228,7 @@ impl Fleet<'_> {
 
     fn fit(&self, request: &Request, node: &Value, resources: &Resources) -> Result<Option<f64>> {
         let free = self.free_slots(request, node);
-        let storage_policy = Policy::for_node(&node["storage"])?;
+        let storage_policy = crate::storage::policy::for_node(&node["storage"])?;
         if free == 0
             || node["pressure"].is_string()
             || !self.disk_fits(request, node, resources, &storage_policy)
@@ -243,6 +253,15 @@ impl Fleet<'_> {
         storage_policy: &Policy,
     ) -> bool {
         let id = text(node, "id");
+        if node["diskGrowthProtocol"] == 1 && crate::native::policy::node_native(node) {
+            return super::disk_capacity::admission_fits(
+                node,
+                self.attempts,
+                request.run_id(),
+                resources.disk_mi_b.saturating_mul(1_048_576),
+                !request.replacing(id),
+            );
+        }
         // Nodes reporting free space keep their reserve plus room for each pending journal.
         if let Some(free) = node["capabilities"]["diskMiB"].as_u64() {
             let total = node["capabilities"]["diskTotalMiB"]
@@ -277,6 +296,7 @@ impl Fleet<'_> {
 
 struct Candidate {
     preferred: bool,
+    priority: usize,
     headroom: f64,
     node: Value,
     resources: Resources,
@@ -285,8 +305,11 @@ struct Candidate {
 impl Candidate {
     /// Automatic placement spreads work by free-slot fraction; a preferred node wins.
     fn beats(&self, other: &Self) -> bool {
-        (self.preferred && !other.preferred)
-            || (self.preferred == other.preferred && self.headroom > other.headroom)
+        (self.preferred, std::cmp::Reverse(self.priority))
+            > (other.preferred, std::cmp::Reverse(other.priority))
+            || self.preferred == other.preferred
+                && self.priority == other.priority
+                && self.headroom > other.headroom
     }
 }
 
@@ -298,8 +321,20 @@ pub async fn reserve(s: &Service, run: &Value, attempt: &str) -> Result<Value> {
     let attempt = attempt.to_owned();
     let configured = !s.config.runner_url.is_empty();
     s.store
-        .transaction(move |db| reserve_in(db, &run, &attempt, configured))
-        .await
+        .transaction(move |db| {
+            let result = match reserve_in(db, &run, &attempt, configured) {
+                Ok(placement) => Ok(placement),
+                Err(error) if is_no_capacity(&error) => Err(error),
+                Err(error) => return Err(error),
+            };
+            if result.as_ref().is_err_and(is_no_capacity) {
+                request_reclamation(db, &run, configured)?;
+            }
+            // A failed transaction rolls back its pressure signal as well.
+            // Return the decision as data so the independent signal commits.
+            Ok(result)
+        })
+        .await?
 }
 
 /// Without a configured controller, development execution uses the process itself.
@@ -314,7 +349,7 @@ fn development_node(configured: bool) -> Value {
             "diskMiB": 1_099_511_627_776u64,
         },
         "slots": 4096,
-        "capabilities": { "kvm": configured, "fuse": true },
+        "capabilities": { "kvm": configured },
         "runtimeId": "local",
     })
 }
@@ -322,6 +357,7 @@ fn development_node(configured: bool) -> Value {
 /// What a placement decision reads, from one consistent database view.
 struct Snapshot {
     access: Value,
+    priorities: Vec<Value>,
     checkpoint: Value,
     nodes: Vec<Value>,
     attempts: Vec<Value>,
@@ -331,9 +367,9 @@ struct Snapshot {
 impl Snapshot {
     fn load(db: &Db<'_>, run: &Value, configured: bool) -> Result<Self> {
         let agent = db
-            .get("agents", super::run_agent(run))?
+            .agent_snapshot(super::run_agent(run))?
             .ok_or_else(|| Error::forbidden("Agent removed."))?;
-        let mut nodes = db.list("nodes")?;
+        let mut nodes = db.nodes_boundary()?;
         // Existing development execution stays available without a controller.
         if !configured && nodes.iter().all(|n| n["id"] != LOCAL_NODE_ID) {
             nodes.push(development_node(configured));
@@ -351,6 +387,10 @@ impl Snapshot {
         });
         Ok(Self {
             access: policy(&agent),
+            priorities: agent["nodePriorities"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default(),
             checkpoint: super::db_checkpoint(db, text(run, "id"))?,
             nodes,
             attempts: db.list("node-attempts")?,
@@ -383,6 +423,11 @@ impl Snapshot {
             };
             let candidate = Candidate {
                 preferred: node["id"] == request.run["preferredNodeId"],
+                priority: self
+                    .priorities
+                    .iter()
+                    .position(|id| id == &node["id"])
+                    .unwrap_or(usize::MAX),
                 headroom,
                 node: node.clone(),
                 resources,
@@ -416,33 +461,143 @@ fn shortage(full: &[String]) -> String {
 }
 
 fn reserve_in(db: &Db<'_>, run: &Value, attempt: &str, configured: bool) -> Result<Value> {
+    // Moves deliberately supply a prospective environment. Automatic admission
+    // reads the latest persisted run so stale callers cannot rebind its backend.
+    let persisted;
+    let run = if run["placementTransition"] == true
+        || policy(&run["snapshot"]["agent"])["backend"] != "auto"
+    {
+        run
+    } else {
+        persisted = db
+            .run(text(run, "id"))?
+            .ok_or_else(|| Error::not_found("Conversation removed."))?;
+        &persisted
+    };
     let snapshot = Snapshot::load(db, run, configured)?;
-    let request = Request::new(run, &snapshot.access, &snapshot.checkpoint)?;
+    let request = Request::new(run, &snapshot.access, &snapshot.checkpoint);
     if !request.moving
         && let Some(reservation) = run["moveReservation"].as_str()
     {
-        return claim_reservation(db, &request, &snapshot.nodes, reservation, attempt);
+        return claim_reservation(
+            db,
+            &request,
+            &snapshot.nodes,
+            reservation,
+            attempt,
+            configured,
+        );
     }
     let best = snapshot.select(&request, configured)?;
     admit(db, &request, &best, &snapshot.attempts, attempt)
 }
 
-/// Fails like [`reserve`] when no node can take `run` now, without reserving anything.
+fn request_reclamation(db: &Db<'_>, run: &Value, configured: bool) -> Result<()> {
+    let snapshot = Snapshot::load(db, run, configured)?;
+    let request = Request::new(run, &snapshot.access, &snapshot.checkpoint);
+    for node in &snapshot.nodes {
+        if node["diskGrowthProtocol"] == 1
+            && request.eligible(node, configured)
+            && snapshot.fleet().free_slots(&request, node) > 0
+            && request.resources_for(node).is_some_and(|resources| {
+                !super::disk_capacity::admission_fits(
+                    node,
+                    &snapshot.attempts,
+                    request.run_id(),
+                    resources.disk_mi_b.saturating_mul(1_048_576),
+                    !request.replacing(text(node, "id")),
+                )
+            })
+        {
+            super::eviction::request(db, node)?;
+        }
+    }
+    Ok(())
+}
+
+/// Growth leaves enough capacity for the oldest eligible queued conversation.
+/// This is a transaction-local ceiling, not an allocation or an authority grant.
+pub(super) fn waiting_disk_bytes(db: &Db<'_>, node: &Value, attempts: &[Value]) -> Result<u64> {
+    let mut runs = db.queued_run_records()?;
+    runs.sort_by(|left, right| {
+        left.state
+            .created_at
+            .cmp(&right.state.created_at)
+            .then_with(|| left.state.id.cmp(&right.state.id))
+    });
+    for record in runs {
+        let state = &record.state;
+        if record.boundary["isolated"] != true
+            || state.cancel_requested_at.is_some()
+            || record.boundary["backendMigration"].is_object()
+            || attempts
+                .iter()
+                .any(|attempt| attempt["runId"] == state.id && super::is_active_attempt(attempt))
+            || crate::run_retry::Retry::waiting(state.retry.as_ref(), crate::config::now())
+            || crate::conversation_lifecycle::require_active_run(db, &state.id).is_err()
+        {
+            continue;
+        }
+        let run = record.wire()?;
+        let agent = db
+            .agent_snapshot(super::run_agent(&run))?
+            .unwrap_or_default();
+        if !crate::native::policy::allows(db, &run, node)? {
+            continue;
+        }
+        let access = policy(&agent);
+        let checkpoint = super::db_checkpoint(db, text(&run, "id"))?;
+        if checkpoint["capacityRetryAt"]
+            .as_i64()
+            .is_some_and(|at| at > crate::config::now())
+        {
+            continue;
+        }
+        let request = Request::new(&run, &access, &checkpoint);
+        let fleet = Fleet {
+            attempts,
+            volumes: &[],
+        };
+        if !request.eligible(node, true) || fleet.free_slots(&request, node) == 0 {
+            continue;
+        }
+        let Some(resources) = request.resources_for(node) else {
+            continue;
+        };
+        return Ok(super::disk_capacity::admission_bytes(
+            node,
+            attempts,
+            request.run_id(),
+            resources.disk_mi_b.saturating_mul(1_048_576),
+            !request.replacing(text(node, "id")),
+        ));
+    }
+    Ok(0)
+}
+
+/// Fails like [`reserve`] without holding capacity; disk pressure can schedule
+/// verification and reclamation of synchronized inactive local caches.
 pub async fn check(s: &Service, run: &Value) -> Result<()> {
     let _ = super::refresh_local(s).await;
     let run = run.clone();
     let configured = !s.config.runner_url.is_empty();
     s.store
-        .read(move |db| {
+        .transaction(move |db| {
             let snapshot = Snapshot::load(db, &run, configured)?;
-            let request = Request::new(&run, &snapshot.access, &snapshot.checkpoint)?;
-            // A move already holds its destination.
+            let request = Request::new(&run, &snapshot.access, &snapshot.checkpoint);
             if !request.moving && run["moveReservation"].is_string() {
-                return Ok(());
+                return Ok(Ok(()));
             }
-            snapshot.select(&request, configured).map(drop)
+            match snapshot.select(&request, configured) {
+                Ok(_) => Ok(Ok(())),
+                Err(error) if is_no_capacity(&error) => {
+                    request_reclamation(db, &run, configured)?;
+                    Ok(Err(error))
+                }
+                Err(error) => Err(error),
+            }
         })
-        .await
+        .await?
 }
 
 /// A move reserved destination capacity in advance; the new execution takes it over.
@@ -452,6 +607,7 @@ fn claim_reservation(
     nodes: &[Value],
     reservation: &str,
     attempt: &str,
+    configured: bool,
 ) -> Result<Value> {
     let mut held = db
         .get("node-attempts", reservation)?
@@ -461,16 +617,24 @@ fn claim_reservation(
         .iter()
         .find(|n| n["id"] == node.as_str())
         .ok_or_else(|| Error::conflict("Destination removed."))?;
+    let local_unconfigured = record["local"] == true && !configured;
+    if !local_unconfigured && record["runtimeId"] != super::component_runtime() {
+        return Err(Error::conflict(
+            "Destination version mismatch; deploy all components at the same version.",
+        ));
+    }
+    if !local_unconfigured
+        && (record["executionReady"] != true || !super::seen_within(record, FRESH_HEARTBEAT_MS))
+    {
+        return Err(Error::unavailable(
+            "Destination execution is not ready; restore a healthy controller with matching component versions.",
+        ));
+    }
     let native = crate::native::policy::native(&request.run["snapshot"]["agent"]);
     if native != crate::native::policy::node_native(record)
         || native && record["capabilities"]["ublk"] != true
     {
         return Err(Error::conflict("Destination execution backend changed."));
-    }
-    if !native && record["capabilities"]["fuse"] != true {
-        return Err(Error::conflict(
-            "Destination no longer supports on-demand disks.",
-        ));
     }
     if record["maintenance"].is_string() {
         return Err(Error::unavailable(
@@ -489,9 +653,10 @@ fn claim_reservation(
     db.put("node-attempts", &consumed)?;
     held["id"] = attempt.into();
     held["role"] = AttemptRole::Execution.as_str().into();
+    held["runtimeId"] = record["runtimeId"].clone();
     held["leaseExpiresAt"] = (now() + RESERVATION_LEASE_MS).into();
     db.put("node-attempts", &held)?;
-    db.patch_run(request.run_id(), &json!({ "moveReservation": null }))?;
+    db.update_run_boundary(request.run_id(), &json!({ "moveReservation": null }))?;
     let placement = Placement {
         native_mode: held["nativeMode"].clone(),
         node_id: &held["nodeId"],
@@ -522,9 +687,7 @@ fn admit(
             "Previous execution still owns this conversation.",
         ));
     }
-    let runtime_id = request
-        .required_runtime
-        .unwrap_or_else(|| text(&best.node, "runtimeId"));
+    let runtime_id = text(&best.node, "runtimeId");
     let volume_id = format!("{}:{id}", request.run_id());
     let mut volume = match db.get("node-volumes", &volume_id)? {
         Some(volume) => volume,
@@ -562,6 +725,24 @@ fn admit(
     };
     db.put("node-attempts", &serde_json::to_value(record)?)?;
     db.put("node-volumes", &volume)?;
+    if policy(&run["snapshot"]["agent"])["backend"] == "auto" {
+        let mut snapshot = run["snapshot"].clone();
+        let backend = if crate::native::policy::node_native(&best.node) {
+            "native"
+        } else {
+            "firecracker"
+        };
+        snapshot["agent"]["access"]["backend"] = backend.into();
+        snapshot["agent"]["access"]["nodes"] = request.access["nodes"].clone();
+        db.change_run(
+            request.run_id(),
+            crate::runs::RunChanges {
+                snapshot: Some(serde_json::from_value(snapshot)?),
+                ..Default::default()
+            },
+        )?;
+        db.update_run_boundary(request.run_id(), &json!({ "executionBackend": backend }))?;
+    }
     let placement = Placement {
         native_mode: super::native_mode::requested(&best.node),
         node_id: &id.into(),
@@ -576,6 +757,40 @@ pub async fn release(s: &Service, attempt: &str) -> Result<()> {
     let attempt = attempt.to_owned();
     s.store
         .transaction(move |db| release_in(db, &attempt))
+        .await
+}
+
+/// Initial automatic admission precedes workspace preparation. Keep its capacity
+/// until materialization hands the attempt over to the ordinary controller lease.
+pub(crate) async fn renew_preparation(s: &Service, run: &str, attempt: &str) -> Result<()> {
+    let (run, attempt) = (run.to_owned(), attempt.to_owned());
+    s.store
+        .transaction(move |db| {
+            let Some(mut held) = db.get("node-attempts", &attempt)? else {
+                return Ok(());
+            };
+            if held["runId"] != run || held["released"] == true || held["diskMaterialized"] == true
+            {
+                return Ok(());
+            }
+            let current = db.run(&run)?.unwrap_or_default();
+            let agent = db
+                .agent_snapshot(super::run_agent(&current))?
+                .unwrap_or_default();
+            let node = db.node_boundary(text(&held, "nodeId"))?.unwrap_or_default();
+            if current["status"] != RunStatus::Running
+                || !current["cancelRequestedAt"].is_null()
+                || !super::agent_allows(&agent, text(&held, "nodeId"))
+                || node["revoked"] == true
+                || crate::native::policy::node_native(&node)
+                    && !crate::native::policy::allows(db, &current, &node)?
+            {
+                return Ok(());
+            }
+            held["leaseExpiresAt"] = (now() + RESERVATION_LEASE_MS).into();
+            db.put("node-attempts", &held)?;
+            Ok(())
+        })
         .await
 }
 
@@ -673,7 +888,7 @@ fn configure_in(db: &Db<'_>, run: &str, input: Option<Value>) -> Result<Value> {
         .run(run)?
         .ok_or_else(|| Error::not_found("Conversation not found."))?;
     let agent = db
-        .get("agents", super::run_agent(&record))?
+        .agent_snapshot(super::run_agent(&record))?
         .ok_or_else(|| Error::forbidden("Agent removed."))?;
     let access = policy(&agent);
     if let Some(input) = input {
@@ -686,7 +901,7 @@ fn configure_in(db: &Db<'_>, run: &str, input: Option<Value>) -> Result<Value> {
             crate::validation::uuid(node)?;
             let unauthorized = !allowed(&access["nodes"], node)
                 || (node != LOCAL_NODE_ID
-                    && db.get("nodes", node)?.is_none_or(|n| n["revoked"] == true));
+                    && db.node_boundary(node)?.is_none_or(|n| n["revoked"] == true));
             if unauthorized {
                 return Err(Error::forbidden(
                     "This node is not authorized for the conversation's agent.",
@@ -696,7 +911,7 @@ fn configure_in(db: &Db<'_>, run: &str, input: Option<Value>) -> Result<Value> {
         if record["moveRequest"].is_object() || record["moveReservation"].is_string() {
             return Err(Error::conflict("Wait for the current movement to finish."));
         }
-        record = db.patch_run(run, &serde_json::to_value(&selection)?)?;
+        record = db.update_run_boundary(run, &serde_json::to_value(&selection)?)?;
         db.audit(
             "node.placement.configured",
             &json!({
@@ -707,11 +922,11 @@ fn configure_in(db: &Db<'_>, run: &str, input: Option<Value>) -> Result<Value> {
         )?;
     }
     let nodes = db
-        .list("nodes")?
+        .nodes_boundary()?
         .into_iter()
         .filter(|n| n["revoked"] != true && allowed(&access["nodes"], text(n, "id")))
-        .map(super::public)
-        .collect::<Vec<_>>();
+        .map(super::public_boundary)
+        .collect::<Result<Vec<_>>>()?;
     Ok(json!({
         "nodes": nodes,
         "pinnedNodeId": record["pinnedNodeId"],
@@ -737,7 +952,7 @@ pub async fn renew_local(s: &Service, run_id: &str) -> Result<()> {
                 .run(&run_id)?
                 .ok_or_else(|| Error::not_found("Conversation removed."))?;
             let agent = db
-                .get("agents", super::run_agent(&run))?
+                .agent_snapshot(super::run_agent(&run))?
                 .unwrap_or_default();
             let mut record = db
                 .get("node-attempts", &owned)?
@@ -776,4 +991,63 @@ pub async fn renew_local(s: &Service, run_id: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+use crate::run_fixture::DbRunFixture;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn move_reservations_require_the_current_node_and_adopt_its_runtime() {
+        for backend in ["native", "firecracker"] {
+            let root = tempfile::tempdir().unwrap();
+            let store = crate::store::Store::open(root.path()).unwrap();
+            let run_id = crate::config::id();
+            let held_id = crate::config::id();
+            let attempt = crate::config::id();
+            let node_id = crate::config::id();
+            store.transaction(move |db| {
+                let run = json!({
+                    "id": run_id, "taskId": crate::config::id(), "createdAt": now(),
+                    "status": "queued", "moveReservation": held_id,
+                    "snapshot": { "agent": { "provider": "codex", "access": { "backend": backend } } },
+                });
+                db.add_run_fixture(&run, None)?;
+                db.put("node-attempts", &json!({
+                    "id": held_id, "runId": run_id, "nodeId": node_id,
+                    "role": "destination", "runtimeId": "previous-build", "released": false,
+                    "resources": { "cpu": 1, "memoryMiB": 512, "diskMiB": 1024 },
+                    "nativeMode": { "mode": "protected", "generation": null },
+                }))?;
+                let access = json!({ "nodes": [node_id] });
+                let checkpoint = Value::Null;
+                let request = Request::new(&run, &access, &checkpoint);
+                let mut node = json!({
+                    "id": node_id, "runtimeId": "previous-build", "executionReady": true,
+                    "capabilities": { "backend": backend, "ublk": true },
+                });
+                let error = claim_reservation(db, &request, &[node.clone()], &held_id, &attempt, true).unwrap_err();
+                assert!(error.message.contains("version mismatch"));
+                assert_eq!(db.get("node-attempts", &held_id)?.unwrap()["released"], false);
+                assert!(db.get("node-attempts", &attempt)?.is_none());
+                assert_eq!(db.run(&run_id)?.unwrap()["moveReservation"], held_id);
+
+                node["runtimeId"] = super::super::component_runtime().into();
+                node["lastSeen"] = (now() - FRESH_HEARTBEAT_MS).into();
+                assert!(claim_reservation(db, &request, &[node.clone()], &held_id, &attempt, true).is_err());
+                assert_eq!(db.get("node-attempts", &held_id)?.unwrap()["released"], false);
+                assert!(db.get("node-attempts", &attempt)?.is_none());
+                node["lastSeen"] = now().into();
+                let placement = claim_reservation(db, &request, &[node], &held_id, &attempt, true)?;
+                assert_eq!(placement["runtimeId"], super::super::component_runtime());
+                assert_eq!(db.get("node-attempts", &attempt)?.unwrap()["runtimeId"], placement["runtimeId"]);
+                assert_eq!(db.get("node-attempts", &held_id)?.unwrap()["released"], true);
+                assert!(db.run(&run_id)?.unwrap()["moveReservation"].is_null());
+                Ok(())
+            }).await.unwrap();
+        }
+    }
 }

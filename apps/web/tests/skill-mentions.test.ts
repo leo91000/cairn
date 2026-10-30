@@ -70,6 +70,20 @@ describe('skill mentions', () => {
     expect(insertSkill('Use $re now', { start: 4, end: 7, query: 're' }, 'review')).toEqual({ text: 'Use $review now', caret: 12 })
   })
 
+  it('ranks frequent skills within each text relevance group before applying the limit', () => {
+    const skills = chatSkills([
+      skill('review'),
+      skill('reviewer', 'global', { usageCount: 3 }),
+      skill('review-code', 'global', { usageCount: 12 }),
+      skill('code-review', 'global', { usageCount: 100 }),
+      skill('ship', 'global', { usageCount: 12 }),
+    ], agent(), null)
+    expect(matchSkills(skills, '', 3).map(s => s.name)).toEqual(['code-review', 'review-code', 'ship'])
+    expect(matchSkills(skills, 'review').map(s => s.name)).toEqual(['review', 'review-code', 'reviewer', 'code-review'])
+    expect(matchSkills(skills, 'ship').map(s => s.name)).toEqual(['ship'])
+    expect(matchSkills(chatSkills([skill('review', 'global', { usageCount: 3 }), skill('review', project, { usageCount: 3 })], agent(), project), '')[0]).toMatchObject({ scope: project, usageCount: 3 })
+  })
+
   it('highlights known skills outside code only', () => {
     const names = new Set(['review'])
     expect(mentionSegments('Run $review, not $HOME or `$review` or $reviewer', names)).toEqual([

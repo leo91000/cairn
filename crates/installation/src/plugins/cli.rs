@@ -9,8 +9,8 @@ use serde_json::{Value, json};
 use std::io::Write;
 
 const USAGE: &str = "Use cairn plugin <plugin> <command> [arguments], for example cairn plugin onepassword accounts.";
-/// The run channel's origin when it differs from the VM relay: native nodes
-/// share the host loopback, so each attempt listens on its own port.
+/// The run channel's origin. VM and native enclaves use private loopback;
+/// the override also supports legacy native transports and qualification.
 pub(crate) const ORIGIN_ENV: &str = "CAIRN_MCP_ORIGIN";
 
 pub fn arguments(args: &[String]) -> Result<Value> {
@@ -49,9 +49,12 @@ fn origin(configured: Option<&str>) -> Result<String> {
 pub async fn run(args: &[String]) -> Result<()> {
     let input = arguments(args)?;
     let origin = origin(std::env::var(ORIGIN_ENV).ok().as_deref())?;
-    let bearer = std::env::var("CAIRN_MCP_RUN_TOKEN").map_err(|_| {
-        Error::unauthorized("Run this command inside an active Cairn conversation.")
-    })?;
+    let bearer = std::env::var(crate::mcps::RUN_TOKEN_ENV)
+        .ok()
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| {
+            Error::unauthorized("Run this command inside an active Cairn conversation.")
+        })?;
     // Always use the run-local channel, never an arbitrary user-provided URL.
     let client = reqwest::Client::builder()
         .no_proxy()

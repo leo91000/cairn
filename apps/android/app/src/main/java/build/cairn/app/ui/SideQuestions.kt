@@ -19,10 +19,12 @@ import build.cairn.app.data.CairnViewModel
 import build.cairn.app.data.Chat
 import build.cairn.app.data.ChatSideQuestion
 import build.cairn.app.data.Workspace
-import build.cairn.app.data.segment
+import build.cairn.contracts.AskChatSideQuestionInput
+import build.cairn.contracts.ChatSideQuestionInput
+import build.cairn.contracts.SideQuestionInput
+import build.cairn.contracts.askChatSideQuestion
+import build.cairn.contracts.cancelChatSideQuestion
 import java.util.UUID
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.put
 
 /**
  * What a reply can do with side questions: ask about it while the agent works, or show those asked
@@ -221,15 +223,17 @@ internal fun ColumnScope.SideQuestionPanel(
                     // Close the keyboard so the answer appears in view.
                     focusManager.clearFocus()
                     vm.perform {
-                        api.request(
-                            "POST",
-                            "/chats/${segment(chat.id)}/side-questions",
-                            buildJsonObject {
-                                put("id", id)
-                                put("text", question)
-                                put("quote", side.quote)
-                                put("itemId", side.itemId)
-                            },
+                        api.askChatSideQuestion(
+                            AskChatSideQuestionInput(
+                                chatId = chat.id,
+                                question =
+                                    SideQuestionInput(
+                                        id = id,
+                                        text = question,
+                                        quote = side.quote,
+                                        itemId = side.itemId,
+                                    ),
+                            )
                         )
                         side.text = ""
                         side.quote = ""
@@ -242,10 +246,14 @@ internal fun ColumnScope.SideQuestionPanel(
             }
         } else
             Notice(
-                if (chat.provider == "opencode")
-                    "OpenCode ne peut pas encore répondre aux questions à côté dans Cairn. Posez-la dans la conversation."
-                else
-                    "Les questions à côté sont possibles pendant que Codex ou Claude Code travaille sur une réponse.",
+                when (chat.provider) {
+                    "codex" ->
+                        "Codex ne peut pas répondre aux questions à côté dans Cairn : ses conversations à côté peuvent encore utiliser des outils. Posez-la dans la conversation."
+                    "opencode" ->
+                        "OpenCode ne peut pas encore répondre aux questions à côté dans Cairn. Posez-la dans la conversation."
+                    else ->
+                        "Les questions à côté sont possibles pendant que Claude Code travaille sur une réponse."
+                },
                 icon = CairnIcons.SideQuestion,
                 maxLines = 4,
             )
@@ -341,9 +349,11 @@ private fun SideQuestionRow(
                     TextButton(
                         onClick = {
                             vm.perform {
-                                api.request(
-                                    "POST",
-                                    "/chats/${segment(question.chatId)}/side-questions/${segment(question.id)}/cancel",
+                                api.cancelChatSideQuestion(
+                                    ChatSideQuestionInput(
+                                        chatId = question.chatId,
+                                        sideQuestionId = question.id,
+                                    )
                                 )
                             }
                         },

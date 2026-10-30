@@ -21,6 +21,15 @@ pub use setup::{CopyValue, Effort, Preset, Risk, Setup, Step, StepKind, Task};
 pub use sources::{MAX_MODULES, MAX_SOURCE_BYTES, Sources, module_path, resolve};
 pub use view::{validate_action_result, validate_view};
 
+/// Preserve serde's omitted-empty manifest representation, while generated clients
+/// decode an absent empty list/string/flag with the same Rust default.
+pub(crate) fn client_default<T: Default + Serialize>(schema: &mut schemars::Schema) {
+    schema.insert(
+        "default".into(),
+        serde_json::to_value(T::default()).expect("manifest default"),
+    );
+}
+
 /// Worker protocol and manifest version. Manifests must declare exactly this one.
 pub const API_VERSION: u32 = 2;
 pub const MAX_FRAME_BYTES: usize = 1_048_576;
@@ -85,7 +94,9 @@ pub fn capability(method: &str) -> Option<&'static str> {
 
 /// How the host injects a connection's secret into authorized HTTP requests.
 /// Plugin code never receives the secret itself.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, schemars::JsonSchema, ts_rs::TS)]
+#[schemars(rename = "PluginCredential")]
+#[ts(rename = "PluginCredential")]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Credential {
     pub label: String,
@@ -101,22 +112,74 @@ pub struct Credential {
 }
 
 /// A program on the installation the package may run through `exec`.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, schemars::JsonSchema, ts_rs::TS)]
+#[schemars(rename = "PluginProgram")]
+#[ts(rename = "PluginProgram")]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Program {
     pub name: String,
     /// Absolute path, approved by the owner with the package.
     #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[schemars(transform = crate::client_default::<String>)]
     pub path: String,
     /// Package-relative Luau module exporting `resolve` and `install` handlers.
     #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[schemars(transform = crate::client_default::<String>)]
     pub installer: String,
     #[serde(default)]
     pub description: String,
+    /// Optional foreground cache daemon, isolated to a saved instance and revision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<ProgramCache>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, schemars::JsonSchema, ts_rs::TS)]
+#[schemars(rename = "PluginProgramCache")]
+#[ts(rename = "PluginProgramCache")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProgramCache {
+    /// Static arguments to the same executable. It must remain in the foreground.
+    pub daemon_args: Vec<String>,
+    /// Cairn supplies a private Unix socket path to the daemon and its clients.
+    pub socket_env: String,
+}
+
+impl ProgramCache {
+    fn valid(&self) -> bool {
+        let name = &self.socket_env;
+        !self.daemon_args.is_empty()
+            && self.daemon_args.len() <= 64
+            && self
+                .daemon_args
+                .iter()
+                .all(|arg| arg.len() <= 8192 && !arg.contains('\0'))
+            && !name.is_empty()
+            && name.len() <= 64
+            && name.starts_with(|c: char| c.is_ascii_uppercase())
+            && name
+                .bytes()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == b'_')
+            && !name.starts_with("LD_")
+            && !name.starts_with("DYLD_")
+            && !matches!(name.as_str(), "HOME" | "TMPDIR" | "PATH")
+    }
 }
 
 /// Where a command's result goes.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Deserialize,
+    Serialize,
+    PartialEq,
+    Eq,
+    schemars::JsonSchema,
+    ts_rs::TS,
+)]
+#[schemars(rename = "PluginCommandOutput")]
+#[ts(rename = "PluginCommandOutput")]
 #[serde(rename_all = "camelCase")]
 pub enum Output {
     /// Printed as JSON; the agent sees it in its command output.
@@ -129,17 +192,22 @@ pub enum Output {
 }
 
 /// One flag (`--vault ID`) or positional value of a command. Values are text.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, schemars::JsonSchema, ts_rs::TS)]
+#[schemars(rename = "PluginArgument")]
+#[ts(rename = "PluginArgument")]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Argument {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flag: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[schemars(transform = crate::client_default::<bool>)]
     pub positional: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[schemars(transform = crate::client_default::<bool>)]
     pub required: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[schemars(transform = crate::client_default::<String>)]
     pub description: String,
     /// A regular expression the whole value must match.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -149,29 +217,40 @@ pub struct Argument {
 }
 
 /// A command agents run in their conversation: `cairn plugin <plugin> <name> …`.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, schemars::JsonSchema, ts_rs::TS)]
+#[schemars(rename = "PluginCommand")]
+#[ts(rename = "PluginCommand")]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Command {
     pub name: String,
     #[serde(default)]
     pub description: String,
     #[serde(default)]
+    #[schemars(with = "String", pattern("^(json|text|secret)$"))]
     pub output: Output,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(transform = crate::client_default::<Vec<Argument>>)]
     pub arguments: Vec<Argument>,
 }
 
 /// A tool listed by the run's Cairn MCP server. Input is checked against the schema.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, schemars::JsonSchema, ts_rs::TS)]
+#[schemars(rename = "PluginTool")]
+#[ts(rename = "PluginTool")]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Tool {
     pub name: String,
     pub description: String,
+    #[ts(type = "any ")]
     pub input_schema: Value,
 }
 
 /// Agents the owner grants on each instance may run the package's commands and tools.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[derive(
+    Clone, Debug, Default, Deserialize, Serialize, PartialEq, schemars::JsonSchema, ts_rs::TS,
+)]
+#[schemars(rename = "PluginAgentAccess")]
+#[ts(rename = "PluginAgentAccess")]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentAccess {
     #[serde(default)]
@@ -179,24 +258,31 @@ pub struct AgentAccess {
 }
 
 /// The package's mark: a background colour and an SVG path on a 24×24 grid.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, schemars::JsonSchema, ts_rs::TS)]
+#[schemars(rename = "PluginBrand")]
+#[ts(rename = "PluginBrand")]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Brand {
     /// `#rrggbb`.
     pub color: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[schemars(transform = crate::client_default::<String>)]
     pub path: String,
 }
 
 /// How the owner's interfaces name one configured instance, e.g. "Service account".
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, schemars::JsonSchema, ts_rs::TS)]
+#[schemars(rename = "PluginInstances")]
+#[ts(rename = "PluginInstances")]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Instances {
     pub singular: String,
     pub plural: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, schemars::JsonSchema, ts_rs::TS)]
+#[schemars(rename = "PluginManifest")]
+#[ts(rename = "PluginManifest")]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Manifest {
     pub id: String,
@@ -210,51 +296,65 @@ pub struct Manifest {
     /// Hostnames reachable through `http` (HTTPS) and `socket` (WSS). `*.example.com`
     /// covers every subdomain of `example.com`, not the domain itself.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(transform = crate::client_default::<Vec<String>>)]
     pub hosts: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential: Option<Credential>,
     /// Instance fields Cairn renders, in order: `[{ key, title, type, ... }]`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(type = "Array<any> ")]
+    #[schemars(transform = crate::client_default::<Vec<Value>>)]
     pub settings: Vec<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instances: Option<Instances>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub brand: Option<Brand>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(transform = crate::client_default::<Vec<Program>>)]
     pub programs: Vec<Program>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_access: Option<AgentAccess>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(transform = crate::client_default::<Vec<Command>>)]
     pub commands: Vec<Command>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(transform = crate::client_default::<Vec<Tool>>)]
     pub tools: Vec<Tool>,
     /// Added to the prompt of runs whose agent is granted on an enabled instance.
     #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[schemars(transform = crate::client_default::<String>)]
     pub instructions: String,
     /// The script's `view` handler describes each instance's panel.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[schemars(transform = crate::client_default::<bool>)]
     pub instance_view: bool,
     /// The script's `test` handler checks an instance.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[schemars(transform = crate::client_default::<bool>)]
     pub instance_test: bool,
     /// The script's `form` handler fills dynamic choices, derived values, errors and
     /// guidance while the owner edits an instance, and checks it before it is saved.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[schemars(transform = crate::client_default::<bool>)]
     pub instance_form: bool,
     /// Files, Git credentials and identity rendered into granted agents' runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_credentials: Option<RunCredentials>,
     /// Regular expressions of the service's token formats, masked in run output.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(transform = crate::client_default::<Vec<String>>)]
     pub secret_patterns: Vec<String>,
     /// Projects the owner can import through the `projects` handler.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(transform = crate::client_default::<Vec<ProjectSource>>)]
     pub project_sources: Vec<ProjectSource>,
     /// Conditions granted agents wait for, observed by the `condition` handler.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(transform = crate::client_default::<Vec<Condition>>)]
     pub conditions: Vec<Condition>,
     /// Skill sources the owner imports from through the `skills` handler.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(transform = crate::client_default::<Vec<SkillSource>>)]
     pub skill_sources: Vec<SkillSource>,
     /// What connecting an instance takes and the steps the owner follows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -435,6 +535,7 @@ impl Manifest {
                 || names.contains(&program.name.as_str())
                 || !valid_source
                 || !short(&program.description, 200)
+                || program.cache.as_ref().is_some_and(|cache| !cache.valid())
             {
                 return Err("Plugin manifest has an invalid program.");
             }
@@ -601,6 +702,36 @@ mod tests {
         serde_json::from_value::<Manifest>(value)
             .map_err(|_| "parse")?
             .validate()
+    }
+
+    #[test]
+    fn program_caches_require_a_bounded_daemon_and_a_private_socket_variable() {
+        let mut value = json!({
+            "id":"probe", "name":"Probe", "version":"1.0.0", "apiVersion":2,
+            "capabilities":["exec"],
+            "programs":[{"name":"probe", "path":"/usr/bin/probe", "cache":{
+                "daemonArgs":["daemon","--timeout","0"], "socketEnv":"OP_SOCK"
+            }}]
+        });
+        assert!(manifest(value.clone()).is_ok());
+        for name in [
+            "HOME",
+            "TMPDIR",
+            "PATH",
+            "LD_PRELOAD",
+            "DYLD_FOO",
+            "lower",
+            "",
+            "1_SOCKET",
+        ] {
+            value["programs"][0]["cache"]["socketEnv"] = name.into();
+            assert!(manifest(value.clone()).is_err(), "{name}");
+        }
+        value["programs"][0]["cache"]["socketEnv"] = "OP_SOCK".into();
+        value["programs"][0]["cache"]["daemonArgs"] = json!([]);
+        assert!(manifest(value.clone()).is_err());
+        value["programs"][0]["cache"]["daemonArgs"] = json!(["daemon\u{0000}bad"]);
+        assert!(manifest(value).is_err());
     }
 
     #[test]

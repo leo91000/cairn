@@ -1,3 +1,5 @@
+use crate::common::run_fixture::DbRunFixture;
+
 mod common;
 
 use cairn_installation::{config::MAIN_AGENT_ID, service::Service, store::Store};
@@ -32,7 +34,7 @@ async fn failed_paused_chats_without_wakeups_do_not_need_the_writer() {
         service
             .store
             .transaction(move |db| {
-                db.add_run(
+                db.add_run_fixture(
                     &json!({
                         "id": "run",
                         "taskId": "chat",
@@ -41,19 +43,16 @@ async fn failed_paused_chats_without_wakeups_do_not_need_the_writer() {
                     }),
                     None,
                 )?;
-                db.put(
-                    "chats",
-                    &json!({
-                        "id": "chat",
-                        "runId": "run",
-                        "paused": true,
-                        "wakeup": null,
-                    }),
-                )
+                db.save_conversation_boundary(&json!({
+                    "id": "chat",
+                    "runId": "run",
+                    "paused": true,
+                    "wakeup": null,
+                }))
             })
             .await
             .unwrap();
-        let before = service.store.get("chats", "chat").await.unwrap();
+        let before = service.store.conversation_boundary("chat").await.unwrap();
         let mut changes = service.store.subscribe();
         changes.borrow_and_update();
 
@@ -82,7 +81,10 @@ async fn failed_paused_chats_without_wakeups_do_not_need_the_writer() {
         release.send(()).unwrap();
         writer.await.unwrap().unwrap();
         assert!(ticks.is_ok(), "{status}: idle ticks waited for the writer");
-        assert_eq!(service.store.get("chats", "chat").await.unwrap(), before);
+        assert_eq!(
+            service.store.conversation_boundary("chat").await.unwrap(),
+            before
+        );
         assert!(!changes.has_changed().unwrap());
         service.shutdown.cancel();
     }
@@ -95,7 +97,7 @@ async fn an_idle_tick_does_not_lose_a_concurrently_committed_wakeup() {
     service
         .store
         .transaction(|db| {
-            db.add_run(
+            db.add_run_fixture(
                 &json!({
                     "id": "run",
                     "taskId": "chat",
@@ -104,10 +106,7 @@ async fn an_idle_tick_does_not_lose_a_concurrently_committed_wakeup() {
                 }),
                 None,
             )?;
-            db.put(
-                "chats",
-                &json!({ "id": "chat", "runId": "run", "paused": true }),
-            )
+            db.save_conversation_boundary(&json!({ "id": "chat", "runId": "run", "paused": true }))
         })
         .await
         .unwrap();
@@ -120,10 +119,14 @@ async fn an_idle_tick_does_not_lose_a_concurrently_committed_wakeup() {
             .write(move |db| {
                 entered.send(()).unwrap();
                 wait.recv_timeout(Duration::from_secs(10)).unwrap();
-                let mut chat = db.get("chats", "chat")?.unwrap();
-                chat["wakeup"] = json!({ "id": "concurrent-wakeup" });
+                let mut chat = db.conversation_boundary("chat")?.unwrap();
+                chat["wakeup"] =
+                    serde_json::to_value(common::run_fixture::complete_wakeup_fixture(&json!({
+                        "id": "concurrent-wakeup", "createdAt": cairn_installation::config::now(),
+                        "wakeAt": cairn_installation::config::now() + 3600000,
+                    })))?;
                 chat["title"] = "Concurrent edit".into();
-                db.put("chats", &chat)
+                db.save_conversation_boundary(&chat)
             })
             .await
     });
@@ -135,11 +138,24 @@ async fn an_idle_tick_does_not_lose_a_concurrently_committed_wakeup() {
     release.send(()).unwrap();
     writer.await.unwrap().unwrap();
     tick.unwrap().unwrap();
-    assert!(service.store.get("chats", "chat").await.unwrap().unwrap()["wakeup"].is_object());
+    assert!(
+        service
+            .store
+            .conversation_boundary("chat")
+            .await
+            .unwrap()
+            .unwrap()["wakeup"]
+            .is_object()
+    );
 
     service.chat_tick(&HashSet::new()).await.unwrap();
 
-    let chat = service.store.get("chats", "chat").await.unwrap().unwrap();
+    let chat = service
+        .store
+        .conversation_boundary("chat")
+        .await
+        .unwrap()
+        .unwrap();
     assert!(chat["wakeup"].is_null());
     assert_eq!(chat["title"], "Concurrent edit");
     assert_eq!(chat["paused"], true);
@@ -177,11 +193,10 @@ async fn measure_failed_paused_scheduler() {
             "paused": true,
             "wakeup": null,
         });
-        let chat = service.store.put("chats", chat).await.unwrap();
         service
             .store
             .write(move |db| {
-                db.add_run(
+                db.add_run_fixture(
                     &json!({
                         "id": "run",
                         "taskId": "chat",
@@ -194,6 +209,11 @@ async fn measure_failed_paused_scheduler() {
             .await
             .unwrap();
 
+        let mut chat = service
+            .store
+            .save_conversation_boundary(chat)
+            .await
+            .unwrap();
         let before_cpu = cpu_seconds();
         let mut warm = Vec::new();
         let mut cold = Vec::new();
@@ -201,17 +221,21 @@ async fn measure_failed_paused_scheduler() {
         let mut ticks = Vec::new();
         for _ in 0..50 {
             let start = Instant::now();
-            service.store.get("chats", "chat").await.unwrap();
+            service.store.conversation_boundary("chat").await.unwrap();
             warm.push(start.elapsed().as_secs_f64() * 1000.0);
 
             let reopened = Store::open(&service.config.data_dir).unwrap();
             let start = Instant::now();
-            reopened.get("chats", "chat").await.unwrap();
+            reopened.conversation_boundary("chat").await.unwrap();
             cold.push(start.elapsed().as_secs_f64() * 1000.0);
             drop(reopened);
 
             let start = Instant::now();
-            service.store.put("chats", chat.clone()).await.unwrap();
+            chat = service
+                .store
+                .save_conversation_boundary(chat.clone())
+                .await
+                .unwrap();
             writes.push(start.elapsed().as_secs_f64() * 1000.0);
 
             let start = Instant::now();
@@ -231,7 +255,7 @@ async fn measure_failed_paused_scheduler() {
             })
         );
         assert_eq!(
-            service.store.get("chats", "chat").await.unwrap(),
+            service.store.conversation_boundary("chat").await.unwrap(),
             Some(chat)
         );
         service.shutdown.cancel();
@@ -285,4 +309,158 @@ async fn cancelling_a_writer_caller_still_notifies_after_its_commit() {
         .unwrap()
         .unwrap();
     assert_eq!(store.kv("committed").await.unwrap(), Some(json!(true)));
+}
+
+#[tokio::test]
+async fn rolled_back_state_and_events_never_publish_a_store_revision() {
+    let root = tempfile::TempDir::new().unwrap();
+    let store = Store::open(root.path()).unwrap();
+    store
+        .transaction(|db| {
+            db.add_run_fixture(
+                &json!({"id": "run", "taskId": "task", "status": "running"}),
+                None,
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let changes = store.subscribe();
+    let result = store
+        .transaction(|db| {
+            db.change_run(
+                "run",
+                cairn_installation::runs::RunChanges {
+                    session_id: Some(Some("must-roll-back".into())),
+                    ..Default::default()
+                },
+            )?;
+            db.event("run", &cairn_contracts::EventKind::TurnStarted, "", None)?;
+            Err::<(), _>(cairn_installation::error::Error::conflict(
+                "Abort publication",
+            ))
+        })
+        .await;
+    assert!(result.is_err());
+    assert!(!changes.has_changed().unwrap());
+    assert!(store.run_state("run").await.unwrap().session_id.is_none());
+    assert!(
+        store
+            .read(|db| db.event_page("run", 0, 100))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    store.transaction(|_| Ok(())).await.unwrap();
+    assert!(!changes.has_changed().unwrap());
+    store
+        .transaction(|db| {
+            db.change_run(
+                "run",
+                cairn_installation::runs::RunChanges {
+                    session_id: Some(Some("committed".into())),
+                    ..Default::default()
+                },
+            )?;
+            db.event("run", &cairn_contracts::EventKind::TurnStarted, "", None)
+        })
+        .await
+        .unwrap();
+    assert!(changes.has_changed().unwrap());
+    assert_eq!(
+        store.run_state("run").await.unwrap().session_id.as_deref(),
+        Some("committed")
+    );
+    assert_eq!(
+        store
+            .read(|db| db.event_page("run", 0, 100))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_caught_transition_rollback_only_notifies_for_retained_work() {
+    let root = tempfile::TempDir::new().unwrap();
+    let store = Store::open(root.path()).unwrap();
+    store
+        .transaction(|db| {
+            db.add_run_fixture(
+                &json!({"id": "run", "taskId": "task", "status": "running"}),
+                None,
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let mut changes = store.subscribe();
+    for retain_event in [false, true] {
+        store
+            .transaction(move |db| {
+                let rejected = db.change_run(
+                    "run",
+                    cairn_installation::runs::RunChanges {
+                        session_id: Some(Some("discarded".into())),
+                        boundary: Some(json!({"status": "failed"})),
+                        ..Default::default()
+                    },
+                );
+                assert!(rejected.is_err());
+                if retain_event {
+                    db.event("run", &cairn_contracts::EventKind::TurnStarted, "", None)?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(changes.has_changed().unwrap(), retain_event);
+        assert!(store.run_state("run").await.unwrap().session_id.is_none());
+        changes.borrow_and_update();
+    }
+    assert_eq!(
+        store
+            .read(|db| db.event_page("run", 0, 100))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_rejected_message_attachment_write_restores_the_message_and_publishes_no_change() {
+    let root = tempfile::tempdir().unwrap();
+    let store = cairn_installation::store::Store::open(root.path()).unwrap();
+    store.transaction(|db| {
+        db.save_conversation(&serde_json::from_value(serde_json::json!({"id":"chat"}))?)?;
+        db.put_message(&serde_json::json!({
+            "id":"message", "chatId":"chat", "text":"initial",
+            "attachments":[{"id":"attachment", "chatId":"chat", "name":"file.txt", "size":10, "mediaType":"text/plain", "kind":"file", "digest":"digest", "createdAt":1}],
+        }))?;
+        Ok(())
+    }).await.unwrap();
+    let before = store.revision();
+    store
+        .transaction(|db| {
+            let mut message = db.conversation_message("chat", "message")?.unwrap();
+            message.text = "must roll back".into();
+            let duplicate = message.attachments[0].clone();
+            message.attachments.push(duplicate);
+            assert!(db.save_message(&message).is_err());
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(store.revision(), before);
+    store
+        .read(|db| {
+            let message = db.conversation_message("chat", "message")?.unwrap();
+            assert_eq!(message.text, "initial");
+            assert_eq!(message.attachments.len(), 1);
+            Ok(())
+        })
+        .await
+        .unwrap();
 }

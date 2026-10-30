@@ -8,6 +8,7 @@ use crate::{
     store::Db,
     validation::text,
 };
+use cairn_contracts::EventKind;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -93,7 +94,7 @@ struct MoveRequest<'a> {
 
 async fn run_agent(s: &Service, run: &Value) -> Result<Value> {
     s.store
-        .get("agents", super::run_agent(run))
+        .agent_snapshot(super::run_agent(run))
         .await?
         .ok_or_else(|| Error::forbidden("Agent removed."))
 }
@@ -172,6 +173,11 @@ fn validate_destination(args: &Value) -> Result<()> {
 }
 
 async fn requested(s: &Service, run: &Value, args: &Value, by_agent: bool) -> Result<Value> {
+    if run["environmentState"].is_string() {
+        return Err(Error::conflict(
+            "The working environment expired. Send a new message before moving it.",
+        ));
+    }
     if ["cpu", "memoryMiB", "diskMiB"]
         .iter()
         .any(|key| args.get(key).is_some())
@@ -204,8 +210,7 @@ async fn requested(s: &Service, run: &Value, args: &Value, by_agent: bool) -> Re
         return Err(Error::conflict("A movement is already pending."));
     }
     let checkpoint = super::checkpoint(s, run_id).await?;
-    let deadline =
-        (now() + wait as i64 * 1000).min(checkpoint["deadline"].as_i64().unwrap_or(i64::MAX));
+    let deadline = now() + wait as i64 * 1000;
     // A finished conversation with a VM session moves without being resumed.
     let idle = run["status"] == RunStatus::Succeeded
         && run["sessionId"].is_string()
@@ -248,7 +253,9 @@ async fn requested(s: &Service, run: &Value, args: &Value, by_agent: bool) -> Re
     } else {
         format!("Moving the conversation to {destination}. Running commands are interrupted.")
     };
-    s.store.event(run_id, "status", &message, None).await?;
+    s.store
+        .event(run_id, &EventKind::Status, &message, None)
+        .await?;
     Ok(json!({
         "status": "moving",
         "nodeId": selected["nodeId"],
@@ -257,7 +264,13 @@ async fn requested(s: &Service, run: &Value, args: &Value, by_agent: bool) -> Re
 
 async fn set_capacity_wait(s: &Service, run_id: &str, until: Option<i64>) -> Result<()> {
     s.store
-        .patch_run(run_id, json!({ "capacityWaitUntil": until }))
+        .change_run(
+            run_id,
+            crate::runs::RunChanges {
+                capacity_wait_until: Some(until),
+                ..Default::default()
+            },
+        )
         .await?;
     Ok(())
 }
@@ -334,7 +347,8 @@ async fn record_request(
                     "Finish the mission wait before requesting a node move.",
                 ));
             }
-            if current["moveRequest"].is_object()
+            if current["environmentState"].is_string()
+                || current["moveRequest"].is_object()
                 || !current["cancelRequestedAt"].is_null()
                 || current["status"] != expected
                 || (expected == RunStatus::Queued && current["pinnedNodeId"].is_string())
@@ -348,7 +362,7 @@ async fn record_request(
                 let directed = db.run(&owner)?.unwrap_or_default();
                 if crate::native::policy::native(&directed["snapshot"]["agent"]) {
                     let node = db
-                        .get("nodes", text(&move_request, "nodeId"))?
+                        .node_boundary(text(&move_request, "nodeId"))?
                         .unwrap_or_default();
                     if !crate::native::policy::allows(db, &directed, &node)? {
                         return Err(Error::forbidden(
@@ -357,17 +371,16 @@ async fn record_request(
                     }
                 }
             }
-            let mut patch = json!({
-                "movementError": null,
-                "capacityWaitUntil": null,
-                "moveRequest": move_request,
-                "nodeState": NodeState::Pausing,
-            });
+            let mut patch = crate::runs::RunChanges {
+                capacity_wait_until : Some(None),
+                boundary: Some(serde_json::json!({"movementError": null,"moveRequest": move_request,"nodeState": NodeState::Pausing})),
+                ..Default::default()
+            };
             if idle || expected == RunStatus::Queued {
-                patch["status"] = RunStatus::Queued.into();
-                patch["recoveryPending"] = true.into();
+                patch.status = Some(RunStatus::Queued);
+                patch.recovery_pending = Some(true);
             }
-            db.patch_run(&owner, &patch)?;
+            db.change_run(&owner, patch)?;
             Ok(())
         })
         .await
@@ -375,7 +388,7 @@ async fn record_request(
 
 async fn node_name(s: &Service, node: &str) -> Result<String> {
     Ok(s.store
-        .get("nodes", node)
+        .node_boundary(node)
         .await?
         .and_then(|n| n["name"].as_str().map(str::to_owned))
         .unwrap_or_else(|| "another node".into()))
@@ -441,7 +454,7 @@ fn source_mode_unconfirmed(db: &Db<'_>, run: &str) -> Result<bool> {
     let Some(source) = checkpoint["nodeId"].as_str() else {
         return Ok(false);
     };
-    let node = db.get("nodes", source)?.unwrap_or_default();
+    let node = db.node_boundary(source)?.unwrap_or_default();
     Ok(super::native_mode::unconfirmed(&node))
 }
 
@@ -505,8 +518,7 @@ pub async fn queue_capacity_move(s: &Service, run: &Value) -> Result<bool> {
         return Err(error);
     }
     s.store.event(
-        run_id,
-        "status",
+        run_id, &EventKind::Status,
         "The current node has no capacity. Saving the full environment before resuming on another authorized node.",
         None,
     ).await?;
@@ -524,11 +536,11 @@ async fn plan_recovery(s: &Service, current: &Value) -> Result<Recovery> {
         // A stale local record only delays recovery until the next attempt.
         let _ = super::refresh_local(s).await;
     }
-    let node = s.get("nodes", source).await?;
+    let node = s.node_boundary(source).await?;
     if super::native_mode::unconfirmed(&node) {
         return Ok(Recovery::Waiting);
     }
-    let agent = s.get("agents", super::run_agent(current)).await?;
+    let agent = s.agent_snapshot(super::run_agent(current)).await?;
     let available = super::seen_within(&node, super::HEARTBEAT_TIMEOUT_MS)
         && node["revoked"] != true
         && node["executionReady"] == true
@@ -542,19 +554,20 @@ async fn plan_recovery(s: &Service, current: &Value) -> Result<Recovery> {
         return Ok(Recovery::Waiting);
     }
     let Some(backup) = latest(s, run_id).await? else {
-        let patch = json!({
-            "nodeState": NodeState::WaitingForNode,
-            "accountWaitReason": "Original node unavailable; no usable recovery point exists.",
-        });
-        s.store.patch_run(run_id, patch).await?;
+        let patch = crate::runs::RunChanges {
+            account_wait_reason: Some(Some(
+                "Original node unavailable; no usable recovery point exists.".into(),
+            )),
+            boundary: Some(serde_json::json!({"nodeState": NodeState::WaitingForNode})),
+            ..Default::default()
+        };
+        s.store.change_run(run_id, patch).await?;
         let body = "The node running this conversation is unavailable and no recovery point can resume it elsewhere. It resumes when the node returns.";
         super::alerts::raise(s, run_id, "waiting", WAITING_TITLE, body).await?;
         return Ok(Recovery::Waiting);
     };
     let mut selecting = current.clone();
     selecting["placementTransition"] = true.into();
-    selecting["requiredRuntime"] =
-        super::publication::manifest(s, &backup).await?["runtime"]["runtimeId"].clone();
     let reservation = id();
     let Ok(selected) = super::placement::reserve(s, &selecting, &reservation).await else {
         let body = "The node running this conversation is unavailable and no other authorized node can resume it yet.";
@@ -613,7 +626,7 @@ pub async fn advance(s: &Service, run: &Value) -> Result<bool> {
                         {
                             return Ok(false);
                         }
-                        db.patch_run(&owner, &json!({ "moveRequest": pending }))?;
+                        db.update_run_boundary(&owner, &json!({ "moveRequest": pending }))?;
                         Ok(true)
                     })
                     .await;
@@ -644,13 +657,13 @@ async fn transfer(s: &Service, current: &Value) -> Result<Value> {
         s.get("node-backups", id).await?
     } else {
         s.store
-            .patch_run(run_id, json!({ "nodeState": NodeState::Saving }))
+            .update_run_boundary(run_id, json!({ "nodeState": NodeState::Saving }))
             .await?;
         let point = super::publication::capture(s, current).await?;
         s.get("node-backups", text(&point, "id")).await?
     };
     s.store
-        .patch_run(run_id, json!({ "nodeState": NodeState::Restoring }))
+        .update_run_boundary(run_id, json!({ "nodeState": NodeState::Restoring }))
         .await?;
     super::placement::materialize(s, text(movement, "reservation")).await?;
     let source = super::checkpoint(s, run_id).await?;
@@ -665,15 +678,15 @@ async fn fail_transfer(s: &Service, current: &Value, error: &Error) -> Result<()
     release_destination(s, current).await?;
     let idle = current["moveRequest"]["idle"] == true;
     let node_state = (!idle).then_some(NodeState::WaitingForNode);
-    let mut patch = json!({
-        "moveRequest": null,
-        "moveReservation": null,
-        "nodeState": node_state,
-        "movementError": error.message,
-        "recoveryPending": !idle,
-    });
+    let mut patch = crate::runs::RunChanges {
+        recovery_pending: Some(!idle),
+        boundary: Some(
+            serde_json::json!({"moveRequest": null,"moveReservation": null,"nodeState": node_state,"movementError": error.message}),
+        ),
+        ..Default::default()
+    };
     if idle {
-        patch["status"] = RunStatus::Succeeded.into();
+        patch.status = Some(RunStatus::Succeeded);
     }
     let owner = run_id.to_owned();
     s.store
@@ -683,14 +696,19 @@ async fn fail_transfer(s: &Service, current: &Value, error: &Error) -> Result<()
                 .ok_or_else(|| Error::not_found("Conversation removed."))?;
             let cancelled = !current["cancelRequestedAt"].is_null();
             if cancelled {
-                patch["status"] = RunStatus::Cancelled.into();
-                patch["recoveryPending"] = false.into();
-                patch["nodeState"] = Value::Null;
+                patch.status = Some(RunStatus::Cancelled);
+                patch.recovery_pending = Some(false);
+                patch.boundary.as_mut().unwrap()["nodeState"] = Value::Null;
             }
-            db.patch_run(&owner, &patch)?;
+            db.change_run(&owner, patch)?;
             // A run waiting for an automatic retry shows the stop in its conversation.
             if cancelled && current["retry"]["nextAttemptAt"].is_number() {
-                db.event(&owner, "status", RunStatus::Cancelled.as_str(), None)?;
+                db.event(
+                    &owner,
+                    &EventKind::Status,
+                    RunStatus::Cancelled.as_str(),
+                    None,
+                )?;
             }
             Ok(())
         })
@@ -698,7 +716,7 @@ async fn fail_transfer(s: &Service, current: &Value, error: &Error) -> Result<()
     s.store
         .event(
             run_id,
-            "status",
+            &EventKind::Status,
             "Environment transfer failed. The original disk is retained.",
             None,
         )
@@ -742,31 +760,29 @@ async fn resume_at_destination(s: &Service, current: &Value, backup: &Value) -> 
     } else {
         RunStatus::Queued
     };
-    // Publication validated this manifest before the move; an unreadable one keeps the default.
-    let manifest = super::publication::manifest(s, backup)
-        .await
-        .unwrap_or_default();
-    let patch = json!({
-        "storage": { "mode": restored_storage_mode(&manifest) },
-        "movementError": null,
-        "accountWaitReason": null,
-        "nodeId": node,
-        "nodeState": node_state,
-        "resources": movement["resources"],
-        "requiredTags": required_tags,
-        "moveRequest": null,
-        "moveReservation": reservation,
-        "sessionId": backup["sessionId"],
-        "restoredAt": captured_at,
-        "recoveryPending": !idle,
-        "status": status,
-    });
+    let patch = crate::runs::RunChanges {
+        account_wait_reason: Some(None),
+        session_id: Some(serde_json::from_value(backup["sessionId"].clone())?),
+        recovery_pending: Some(!idle),
+        status: Some(status),
+        boundary: Some(serde_json::json!({
+            "storage": { "mode": super::ON_DEMAND },
+            "movementError": null,
+            "nodeId": node,
+            "nodeState": node_state,
+            "resources": movement["resources"],
+            "requiredTags": required_tags,
+            "moveRequest": null,
+            "moveReservation": reservation,
+            "restoredAt": captured_at,
+        })),
+        ..Default::default()
+    };
     let owner = run_id.clone();
     s.store
         .transaction(move |db| {
-            let key = super::checkpoint_key(&owner);
             let mut checkpoint = db
-                .kv(&key)?
+                .checkpoint_boundary(&owner)?
                 .ok_or_else(|| Error::conflict("Missing resume checkpoint."))?;
             let current = db
                 .run(&owner)?
@@ -778,11 +794,10 @@ async fn resume_at_destination(s: &Service, current: &Value, backup: &Value) -> 
             checkpoint["process"] = Value::Null;
             checkpoint["settled"] = Value::Null;
             checkpoint["controllerRecoveries"] = 0.into();
-            db.set(&key, &checkpoint, None)?;
-            db.patch_run(&owner, &patch)?;
+            db.save_checkpoint_boundary(&owner, &checkpoint)?;
+            db.change_run(&owner, patch)?;
             db.event(
-                &owner,
-                "status",
+                &owner, &EventKind::Status,
                 "Restoring conversation from a dated recovery point; newer chat remains visible. Verify external effects before repeating actions.",
                 Some(&json!({ "capturedAt": captured_at })),
             )?;
@@ -820,17 +835,6 @@ pub async fn latest(s: &Service, run: &str) -> Result<Option<Value>> {
     }
 }
 
-/// The storage a restored point mounts until the next launch records its own: a
-/// legacy native file checkpoint restores a file workspace, every other point an
-/// on-demand journal disk.
-fn restored_storage_mode(manifest: &Value) -> &'static str {
-    if manifest["kind"] == "native-files-v1" {
-        "native"
-    } else {
-        super::ON_DEMAND
-    }
-}
-
 async fn release_destination(s: &Service, run: &Value) -> Result<()> {
     for reservation in [
         run["moveRequest"]["reservation"].as_str(),
@@ -842,25 +846,4 @@ async fn release_destination(s: &Service, run: &Value) -> Result<()> {
         super::placement::release(s, reservation).await?;
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::restored_storage_mode;
-    use serde_json::json;
-
-    #[test]
-    fn only_legacy_native_file_checkpoints_restore_without_a_journal() {
-        assert_eq!(
-            restored_storage_mode(&json!({ "kind": "native-files-v1" })),
-            "native"
-        );
-        for manifest in [
-            json!({ "kind": "native-ext4-v1" }),
-            json!({ "layout": { "kind": "paired-ext4-v2" } }),
-            json!(null),
-        ] {
-            assert_eq!(restored_storage_mode(&manifest), "on-demand");
-        }
-    }
 }

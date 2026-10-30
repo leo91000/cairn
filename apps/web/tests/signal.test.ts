@@ -17,6 +17,16 @@ import {
 
 function chat(id: string, values: Partial<ChatView> = {}): ChatView {
   return {
+    questions: [],
+    run: null,
+    messages: [],
+    slug: '',
+    revision: '',
+    lifecycle: 'active',
+    sessionRestartRequested: false,
+    canRequestNewSession: false,
+    unread: false,
+
     id,
     title: id,
     agentId: 'main',
@@ -26,6 +36,9 @@ function chat(id: string, values: Partial<ChatView> = {}): ChatView {
     createdAt: 1,
     updatedAt: 1,
     pendingQuestions: 0,
+    pendingSideQuestions: 0,
+    canAskSideQuestion: false,
+    sideQuestions: [],
     agentName: 'Cairn',
     projectName: null,
     status: 'idle',
@@ -35,6 +48,18 @@ function chat(id: string, values: Partial<ChatView> = {}): ChatView {
 
 function task(id: string, values: Partial<Task> = {}): Task {
   return {
+    revision: 'fixture',
+    authorId: null,
+    authorAccessId: null,
+    authorRemoved: false,
+    scheduleWaitReason: null,
+    scheduleFailure: null,
+    nativePrincipals: [],
+    nativeAuthorityNodes: [],
+    nativeParentRunId: null,
+    nativeParentAccess: null,
+    nativeProvenanceUnknown: true,
+    nativePluginGrants: null,
     id,
     name: id,
     prompt: 'Do it',
@@ -68,6 +93,12 @@ function run(id: string, taskId: string, values: Partial<RunListItem> = {}): Run
     usage: null,
     taskName: taskId,
     agentName: 'Ops',
+    isolated: false,
+    workspaces: [],
+    unread: false,
+    recoveryPending: false,
+    resumeAvailable: false,
+    resumeCount: 0,
     ...values,
   }
 }
@@ -280,6 +311,37 @@ describe('the Fil', () => {
       ['later', 'waiting', 900],
     ])
     expect(fil.waiting[0]).toMatchObject({ key: 'task:watch', subtitle: 'Wait for CI', runId: 'watch-1' })
+  })
+
+  it('places automatic quota waits after dated resumptions and keeps attention and suspension priorities', () => {
+    const quota = { status: 'running' as const, accountWaitReason: 'Usage exhausted. Waiting for an available Codex account to resume.' }
+    const fil = filOf([
+      chat('quota', quota),
+      chat('admission', { status: 'queued', accountWaitReason: 'Waiting for a Claude Code account with available usage.' }),
+      chat('question', { ...quota, pendingQuestions: 1 }),
+      chat('paused', { ...quota, paused: true }),
+      chat('failed', { ...quota, status: 'failed' }),
+      chat('reconnect', { ...quota, accountRequired: 'codex' }),
+      chat('suspended', { ...quota, suspendedByExclusive: reservation }),
+      chat('runner', { status: 'queued', accountWaitReason: 'Waiting for a free runner.' }),
+      chat('dated', {
+        status: 'succeeded',
+        wakeup: {
+          id: 'wake',
+          messageId: null,
+          reason: '',
+          seconds: 60,
+          createdAt: 1,
+          wakeAt: 300,
+        },
+      }),
+    ], [task('mission')], [run('mission-1', 'mission', quota)])
+    expect(fil.waiting.map(item => item.title)).toEqual(['dated', 'quota', 'admission', 'mission'])
+    expect(fil.waiting.slice(1).every(item => item.subtitle === 'Waiting for quota' && item.wakeAt === undefined)).toBe(true)
+    expect(fil.forYou.map(item => item.title)).toEqual(['question', 'failed'])
+    expect(fil.recent.map(item => item.title)).toEqual(['paused'])
+    expect(fil.live.map(item => item.title)).toEqual(['reconnect', 'suspended', 'runner'])
+    expect(filOf([chat('quota', { ...quota, accountWaitReason: null })], [], []).live[0].kind).toBe('running')
   })
 
   describe('a blocked mission', () => {

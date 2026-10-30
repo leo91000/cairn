@@ -14,13 +14,18 @@ class SignalPresentationTest {
         val reservation = ExclusiveReservation("reservation", "node", "owner", "Build", "acquired")
         val chat =
             Chat(
-                "suspended",
+                id = "suspended",
                 status = "running",
                 agentName = "Cairn",
                 suspendedByExclusive = reservation,
             )
         val mission =
-            Run("mission", taskId = "task", status = "running", suspendedByExclusive = reservation)
+            Run(
+                id = "mission",
+                taskId = "task",
+                status = "running",
+                suspendedByExclusive = reservation,
+            )
         val feed =
             buildFeed(
                 listOf(
@@ -39,6 +44,84 @@ class SignalPresentationTest {
         assertEquals("Erreur prioritaire", feed.forYou.last().subtitle)
     }
 
+    @Test
+    fun `automatic quota waits follow dated resumptions and preserve attention and suspension`() {
+        val quota =
+            Chat(
+                id = "quota",
+                status = "running",
+                accountWaitReason =
+                    "Usage exhausted. Waiting for an available Codex account to resume.",
+            )
+        val feed =
+            buildFeed(
+                listOf(
+                    quota,
+                    quota.copy(
+                        id = "admission",
+                        status = "queued",
+                        accountWaitReason =
+                            "Waiting for a Claude Code account with available usage.",
+                    ),
+                    quota.copy(id = "question", pendingQuestions = 1),
+                    quota.copy(id = "paused", paused = true),
+                    quota.copy(id = "failed", status = "failed"),
+                    quota.copy(id = "reconnect", accountRequired = "codex"),
+                    quota.copy(
+                        id = "suspended",
+                        suspendedByExclusive =
+                            ExclusiveReservation(
+                                "reservation",
+                                "node",
+                                "owner",
+                                "Build",
+                                "acquired",
+                            ),
+                    ),
+                    Chat(
+                        id = "dated",
+                        status = "succeeded",
+                        wakeup =
+                            wakeupFixture(
+                                id = "wake",
+                                reason = "",
+                                seconds = 60,
+                                createdAt = 1,
+                                wakeAt = 300,
+                            ),
+                    ),
+                ),
+                listOf(
+                    Run(
+                        id = "mission-run",
+                        taskId = "mission",
+                        status = "queued",
+                        accountWaitReason = quota.accountWaitReason,
+                    )
+                ),
+                emptyList(),
+            )
+        assertEquals(
+            listOf("chat:dated", "chat:quota", "chat:admission", "run:mission-run"),
+            feed.waiting.map { it.key },
+        )
+        assertTrue(
+            feed.waiting.drop(1).all {
+                it.subtitle == "En attente de quota" && it.wakeAt == null && !it.working
+            }
+        )
+        assertEquals(listOf("chat:question", "chat:failed"), feed.forYou.map { it.key })
+        assertEquals(listOf("chat:paused"), feed.recent.map { it.key })
+        assertEquals(listOf("chat:reconnect", "chat:suspended"), feed.running.map { it.key })
+        assertEquals(
+            FeedKind.RUNNING_CHAT,
+            buildFeed(listOf(quota.copy(accountWaitReason = null)), emptyList(), emptyList())
+                .running
+                .single()
+                .kind,
+        )
+    }
+
     private val zone = ZoneId.of("Europe/Paris")
 
     private fun at(year: Int, month: Int, day: Int, hour: Int, minute: Int = 0) =
@@ -49,72 +132,129 @@ class SignalPresentationTest {
         val chats =
             listOf(
                 Chat(
-                    "question",
-                    "Choisir la pagination",
+                    id = "question",
+                    title = "Choisir la pagination",
                     agentName = "Designer",
                     pendingQuestions = 2,
                     updatedAt = 5,
                 ),
                 Chat(
-                    "running",
-                    "Refonte Android",
+                    id = "running",
+                    title = "Refonte Android",
                     agentName = "Cairn",
                     projectName = "Manager",
                     status = "running",
-                    run = Run("r1", status = "running", startedAt = 100),
+                    run =
+                        Run(
+                            id = "r1",
+                            status = "running",
+                            startedAt = 100,
+                            taskId = "",
+                        ),
                     updatedAt = 4,
                 ),
-                Chat("queued", "En file", agentName = "Cairn", status = "queued", updatedAt = 3),
                 Chat(
-                    "paused",
-                    "Mise en pause",
+                    id = "queued",
+                    title = "En file",
+                    agentName = "Cairn",
+                    status = "queued",
+                    updatedAt = 3,
+                ),
+                Chat(
+                    id = "paused",
+                    title = "Mise en pause",
                     agentName = "Cairn",
                     status = "running",
                     paused = true,
                     updatedAt = 2,
                 ),
                 Chat(
-                    "failed",
-                    "Échec du build",
+                    id = "failed",
+                    title = "Échec du build",
                     agentName = "Ops",
                     status = "failed",
                     error = "Tests rouges\ndétail",
                     updatedAt = 1,
                 ),
                 Chat(
-                    "reconnect",
-                    "Attente Claude",
+                    id = "reconnect",
+                    title = "Attente Claude",
                     agentName = "Claude",
                     status = "queued",
                     updatedAt = 6,
                     run =
                         Run(
-                            "r2",
+                            id = "r2",
                             status = "queued",
                             accountWaitReason =
                                 "Connect a Claude Code account in Connections before running this agent.",
                             accountRequired = "claude",
+                            taskId = "",
                         ),
                 ),
-                Chat("idle", "Ancienne conversation", agentName = "Cairn", updatedAt = 0),
+                Chat(
+                    id = "idle",
+                    title = "Ancienne conversation",
+                    agentName = "Cairn",
+                    updatedAt = 0,
+                ),
             )
         val tasks =
             listOf(
-                Task("daily", "Revue quotidienne", agentId = "agent"),
-                Task("old", "Archivée", archived = true),
+                Task(
+                    "a05f5991-ec1e-57a2-a8e5-ec314581a110",
+                    "Revue quotidienne",
+                    agentId = "d3153f9f-724b-59c3-9614-ab78f231c4d3",
+                ),
+                Task("456fb838-d909-52a8-8fd7-8e95f2792cad", "Archivée", archived = true),
             )
         val activity =
             listOf(
                 Run(
-                    "t1",
-                    taskId = "daily",
+                    id = "t1",
+                    taskId = "a05f5991-ec1e-57a2-a8e5-ec314581a110",
                     status = "failed",
                     trigger = "manual",
                     finishedAt = 50,
-                    snapshot = Snapshot(agent = Agent("agent", "Reviewer")),
+                    snapshot =
+                        Snapshot(
+                            agent =
+                                Agent(
+                                    exclusiveNodes = emptyList(),
+                                    plugins = emptyList(),
+                                    revision = "",
+                                    createdAt = 0,
+                                    access =
+                                        AccessPolicy(
+                                            mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                                            projects = null,
+                                            skills = null,
+                                            mcps = null,
+                                        ),
+                                    id = "d3153f9f-724b-59c3-9614-ab78f231c4d3",
+                                    name = "Reviewer",
+                                ),
+                            task =
+                                build.cairn.contracts.RunTaskSnapshot(
+                                    agentId = build.cairn.app.data.MAIN_AGENT_ID,
+                                    id = "00000000-0000-4000-8000-000000000003",
+                                    name = "Fixture",
+                                    prompt = "Fixture",
+                                ),
+                        ),
                 ),
-                Run("t2", taskId = "old", status = "failed", trigger = "manual"),
-                Run("t3", taskId = "chat-task", status = "failed", trigger = "chat"),
+                Run(
+                    id = "t2",
+                    taskId = "456fb838-d909-52a8-8fd7-8e95f2792cad",
+                    status = "failed",
+                    trigger = "manual",
+                ),
+                Run(
+                    id = "t3",
+                    taskId = "chat-task",
+                    status = "failed",
+                    trigger = "chat",
+                ),
             )
         val feed = buildFeed(chats, activity, tasks)
         assertEquals(
@@ -130,7 +270,7 @@ class SignalPresentationTest {
         assertEquals("Tests rouges", feed.forYou[2].subtitle)
         val failedTask = feed.forYou.last()
         assertEquals("Revue quotidienne", failedTask.title)
-        assertEquals("daily", failedTask.taskId)
+        assertEquals("a05f5991-ec1e-57a2-a8e5-ec314581a110", failedTask.taskId)
         assertEquals("Reviewer", failedTask.agent)
         // Archived missions and chat runs never surface as missions.
         assertTrue(feed.forYou.none { it.runId == "t2" || it.runId == "t3" })
@@ -149,17 +289,22 @@ class SignalPresentationTest {
             buildFeed(
                 listOf(
                     Chat(
-                        "switched",
+                        id = "switched",
                         status = "running",
                         provider = "claude",
-                        requester = ChatRequester("parent", "Review request"),
+                        requester = ChatRequester(chatId = "parent", title = "Review request"),
                     ),
-                    Chat("new"),
+                    Chat(id = "new"),
                 ),
                 listOf(
-                    Run("audit-run", taskId = "audit", status = "running", provider = "opencode")
+                    Run(
+                        id = "audit-run",
+                        taskId = "b7ec3b50-62dd-530b-8060-bd5700fb7eb6",
+                        status = "running",
+                        provider = "opencode",
+                    )
                 ),
-                listOf(Task("audit", "Audit")),
+                listOf(Task("b7ec3b50-62dd-530b-8060-bd5700fb7eb6", "Audit")),
             )
         assertEquals(
             listOf("chat:switched" to "claude", "run:audit-run" to "opencode"),
@@ -174,16 +319,25 @@ class SignalPresentationTest {
 
     @Test
     fun `missions that need review and running missions are surfaced`() {
-        val tasks = listOf(Task("a", "Audit"), Task("b", "Veille"))
+        val tasks =
+            listOf(
+                Task("8a025d72-4937-53c0-a41d-820414dc655d", "Audit"),
+                Task("00eada4d-84f3-57cb-837e-3c023a643647", "Veille"),
+            )
         val activity =
             listOf(
                 Run(
-                    "r1",
-                    taskId = "a",
+                    id = "r1",
+                    taskId = "8a025d72-4937-53c0-a41d-820414dc655d",
                     status = "succeeded",
                     outcome = TaskOutcome("blocked", "Accès manquant"),
                 ),
-                Run("r2", taskId = "b", status = "running", startedAt = 10),
+                Run(
+                    id = "r2",
+                    taskId = "00eada4d-84f3-57cb-837e-3c023a643647",
+                    status = "running",
+                    startedAt = 10,
+                ),
             )
         val feed = buildFeed(emptyList(), activity, tasks)
         assertEquals(FeedKind.REVIEW_TASK, feed.forYou.single().kind)
@@ -197,42 +351,55 @@ class SignalPresentationTest {
     fun `blocked missions ask only when they wait on the user`() {
         val tasks =
             listOf(
-                Task("proof", "Preuve appareil"),
-                Task("ci", "Checks PR315"),
-                Task("deploy", "Déploiement staging"),
-                Task("orphan", "Orpheline"),
+                Task("2db836ee-ce2e-552d-b9fa-2fef2030546c", "Preuve appareil"),
+                Task("3c7c4abf-37d8-5123-814f-356a0797b145", "Checks PR315"),
+                Task("888f7003-e15b-5b1f-a1b3-a221bc92ec3a", "Déploiement staging"),
+                Task("0a0e9fbd-72fd-586d-b159-15ebbd5e1070", "Orpheline"),
             )
         fun blocked(waitingOn: String? = null) =
             TaskOutcome("blocked", "La CI revient au parent", waitingOn = waitingOn)
         val activity =
             listOf(
-                Run("proof-1", taskId = "proof", status = "succeeded", outcome = blocked("user")),
                 Run(
-                    "ci-1",
-                    taskId = "ci",
+                    id = "proof-1",
+                    taskId = "2db836ee-ce2e-552d-b9fa-2fef2030546c",
+                    status = "succeeded",
+                    outcome = blocked("user"),
+                ),
+                Run(
+                    id = "ci-1",
+                    taskId = "3c7c4abf-37d8-5123-814f-356a0797b145",
                     status = "succeeded",
                     finishedAt = 3,
                     outcome = blocked("requester"),
-                    requestedBy = RunRequester("parent-run", chatId = "parent"),
+                    requestedBy =
+                        RunRequester(
+                            runId = "parent-run",
+                            chatId = "parent",
+                        ),
                 ),
                 Run(
-                    "deploy-1",
-                    taskId = "deploy",
+                    id = "deploy-1",
+                    taskId = "888f7003-e15b-5b1f-a1b3-a221bc92ec3a",
                     status = "succeeded",
                     outcome = blocked("external"),
                 ),
                 // Its requester is gone: the user is the one left to act.
                 Run(
-                    "orphan-1",
-                    taskId = "orphan",
+                    id = "orphan-1",
+                    taskId = "0a0e9fbd-72fd-586d-b159-15ebbd5e1070",
                     status = "succeeded",
                     outcome = blocked("requester"),
-                    requestedBy = RunRequester("gone", chatId = "deleted"),
+                    requestedBy =
+                        RunRequester(
+                            runId = "gone",
+                            chatId = "deleted",
+                        ),
                 ),
             )
         val feed =
             buildFeed(
-                listOf(Chat("parent", title = "Orchestrer F8", updatedAt = 1)),
+                listOf(Chat(id = "parent", title = "Orchestrer F8", updatedAt = 1)),
                 activity,
                 tasks,
             )
@@ -251,19 +418,23 @@ class SignalPresentationTest {
 
     @Test
     fun `a dismissed mission leaves For you and a snoozed one waits for its time`() {
-        val tasks = listOf(Task("a", "Preuve"), Task("b", "Notes"))
+        val tasks =
+            listOf(
+                Task("8a025d72-4937-53c0-a41d-820414dc655d", "Preuve"),
+                Task("00eada4d-84f3-57cb-837e-3c023a643647", "Notes"),
+            )
         val activity =
             listOf(
                 Run(
-                    "r1",
-                    taskId = "a",
+                    id = "r1",
+                    taskId = "8a025d72-4937-53c0-a41d-820414dc655d",
                     status = "succeeded",
                     outcome = TaskOutcome("blocked", "CI"),
                     dismissal = OutcomeDismissal(),
                 ),
                 Run(
-                    "r2",
-                    taskId = "b",
+                    id = "r2",
+                    taskId = "00eada4d-84f3-57cb-837e-3c023a643647",
                     status = "succeeded",
                     outcome = TaskOutcome("needs_input", "Choisir"),
                     dismissal = OutcomeDismissal(until = 100),
@@ -302,8 +473,8 @@ class SignalPresentationTest {
         val chats =
             listOf(
                 Chat(
-                    "done",
-                    "Notes de version",
+                    id = "done",
+                    title = "Notes de version",
                     agentName = "Rédacteur",
                     status = "succeeded",
                     finishedAt = 40,
@@ -311,21 +482,32 @@ class SignalPresentationTest {
                     unread = true,
                     preview = "J'ai publié les notes.",
                 ),
-                Chat("read", "Relecture", status = "succeeded", finishedAt = 50, updatedAt = 50),
-                Chat("question", "Choisir", pendingQuestions = 1, updatedAt = 1),
+                Chat(
+                    id = "read",
+                    title = "Relecture",
+                    status = "succeeded",
+                    finishedAt = 50,
+                    updatedAt = 50,
+                ),
+                Chat(id = "question", title = "Choisir", pendingQuestions = 1, updatedAt = 1),
             )
         val activity =
             listOf(
                 Run(
-                    "digest-1",
-                    taskId = "d",
+                    id = "digest-1",
+                    taskId = "22db892f-1069-55df-8435-9b003528bdcf",
                     status = "succeeded",
                     finishedAt = 60,
                     unread = true,
                     preview = "Trois sujets aujourd'hui.",
                 )
             )
-        val feed = buildFeed(chats, activity, listOf(Task("d", "Veille")))
+        val feed =
+            buildFeed(
+                chats,
+                activity,
+                listOf(Task("22db892f-1069-55df-8435-9b003528bdcf", "Veille")),
+            )
         assertEquals(
             listOf(
                 FeedKind.QUESTION to "Choisir",
@@ -334,7 +516,10 @@ class SignalPresentationTest {
             ),
             feed.forYou.map { it.kind to it.title },
         )
-        assertEquals(listOf("task:d" to 60L, "chat:done" to 40L), feed.unread.map { it.read })
+        assertEquals(
+            listOf("task:22db892f-1069-55df-8435-9b003528bdcf" to 60L, "chat:done" to 40L),
+            feed.unread.map { it.read },
+        )
         assertEquals("J'ai publié les notes.", feed.forYou.last().preview)
         assertEquals(listOf("read"), feed.recent.map { it.chatId })
         assertEquals(
@@ -352,16 +537,35 @@ class SignalPresentationTest {
     fun `swipes move through conversations and missions in the order of the Fil`() {
         val chats =
             listOf(
-                Chat("question", "Choisir", pendingQuestions = 1, updatedAt = 5),
-                Chat("live", "Refonte", status = "running", updatedAt = 4),
-                Chat("idle", "Relecture", updatedAt = 3),
+                Chat(id = "question", title = "Choisir", pendingQuestions = 1, updatedAt = 5),
+                Chat(id = "live", title = "Refonte", status = "running", updatedAt = 4),
+                Chat(id = "idle", title = "Relecture", updatedAt = 3),
             )
         val activity =
             listOf(
-                Run("failed", taskId = "a", status = "failed", finishedAt = 6),
-                Run("running", taskId = "b", status = "running", startedAt = 1),
+                Run(
+                    id = "failed",
+                    taskId = "8a025d72-4937-53c0-a41d-820414dc655d",
+                    status = "failed",
+                    finishedAt = 6,
+                ),
+                Run(
+                    id = "running",
+                    taskId = "00eada4d-84f3-57cb-837e-3c023a643647",
+                    status = "running",
+                    startedAt = 1,
+                ),
             )
-        val fil = buildFeed(chats, activity, listOf(Task("a", "Audit"), Task("b", "Veille"))).keys()
+        val fil =
+            buildFeed(
+                    chats,
+                    activity,
+                    listOf(
+                        Task("8a025d72-4937-53c0-a41d-820414dc655d", "Audit"),
+                        Task("00eada4d-84f3-57cb-837e-3c023a643647", "Veille"),
+                    ),
+                )
+                .keys()
         assertEquals(
             listOf("chat:question", "run:failed", "run:running", "chat:live", "chat:idle"),
             fil,
@@ -378,9 +582,21 @@ class SignalPresentationTest {
     fun `read acknowledgement keeps the open conversation before the next unread page`() {
         val chats =
             listOf(
-                Chat("a", "First result", unread = true, finishedAt = 30, updatedAt = 30),
-                Chat("b", "Second result", unread = true, finishedAt = 20, updatedAt = 20),
-                Chat("c", "Recent", updatedAt = 10),
+                Chat(
+                    id = "a",
+                    title = "First result",
+                    unread = true,
+                    finishedAt = 30,
+                    updatedAt = 30,
+                ),
+                Chat(
+                    id = "b",
+                    title = "Second result",
+                    unread = true,
+                    finishedAt = 20,
+                    updatedAt = 20,
+                ),
+                Chat(id = "c", title = "Recent", updatedAt = 10),
             )
         val before = buildFeed(chats, emptyList(), emptyList()).keys()
         val after =
@@ -400,8 +616,8 @@ class SignalPresentationTest {
     fun `navigation badge distinguishes action from reading and clears optimistic reads`() {
         val chats =
             listOf(
-                Chat("a", "Result", unread = true, finishedAt = 30),
-                Chat("b", "Question", pendingQuestions = 1),
+                Chat(id = "a", title = "Result", unread = true, finishedAt = 30),
+                Chat(id = "b", title = "Question", pendingQuestions = 1),
             )
         assertEquals(FilAttention(1, 1), filAttention(buildFeed(chats, emptyList(), emptyList())))
         assertEquals(1, FilAttention(1, 4).count)
@@ -453,27 +669,83 @@ class SignalPresentationTest {
 
     @Test
     fun `mission filters and ordering keep running and failing missions on top`() {
-        val scheduled = Task("s", "B planifiée", cron = "0 9 * * *", nextRun = 200)
-        val soon = Task("n", "C planifiée", cron = "0 8 * * *", nextRun = 100)
-        val once = Task("o", "A ponctuelle")
-        val paused = Task("p", "En pause", cron = "0 9 * * *", enabled = false)
-        val archived = Task("x", "Archivée", archived = true, enabled = false)
+        val scheduled =
+            Task(
+                "e186f830-3e88-53ba-943f-b926bb27f37f",
+                "B planifiée",
+                cron = "0 9 * * *",
+                nextRun = 200,
+            )
+        val soon =
+            Task(
+                "fd0107f8-a9c6-5b5e-ba66-5d3baf41211f",
+                "C planifiée",
+                cron = "0 8 * * *",
+                nextRun = 100,
+            )
+        val once = Task("87d969a4-be62-5c7e-bacd-4917b8604bed", "A ponctuelle")
+        val paused =
+            Task(
+                "5bfed223-205d-577b-a9eb-2561157d92ff",
+                "En pause",
+                cron = "0 9 * * *",
+                enabled = false,
+            )
+        val archived =
+            Task(
+                "a8498a70-9bbc-557a-aa09-574c5d35021a",
+                "Archivée",
+                archived = true,
+                enabled = false,
+            )
         val all = listOf(scheduled, soon, once, paused, archived)
         assertEquals(
-            listOf("s", "n", "o", "p"),
+            listOf(
+                "e186f830-3e88-53ba-943f-b926bb27f37f",
+                "fd0107f8-a9c6-5b5e-ba66-5d3baf41211f",
+                "87d969a4-be62-5c7e-bacd-4917b8604bed",
+                "5bfed223-205d-577b-a9eb-2561157d92ff",
+            ),
             all.filter { missionFilter(it, "all") }.map { it.id },
         )
-        assertEquals(listOf("s", "n"), all.filter { missionFilter(it, "scheduled") }.map { it.id })
-        assertEquals(listOf("o"), all.filter { missionFilter(it, "once") }.map { it.id })
-        assertEquals(listOf("p"), all.filter { missionFilter(it, "paused") }.map { it.id })
-        assertEquals(listOf("x"), all.filter { missionFilter(it, "archived") }.map { it.id })
+        assertEquals(
+            listOf("e186f830-3e88-53ba-943f-b926bb27f37f", "fd0107f8-a9c6-5b5e-ba66-5d3baf41211f"),
+            all.filter { missionFilter(it, "scheduled") }.map { it.id },
+        )
+        assertEquals(
+            listOf("87d969a4-be62-5c7e-bacd-4917b8604bed"),
+            all.filter { missionFilter(it, "once") }.map { it.id },
+        )
+        assertEquals(
+            listOf("5bfed223-205d-577b-a9eb-2561157d92ff"),
+            all.filter { missionFilter(it, "paused") }.map { it.id },
+        )
+        assertEquals(
+            listOf("a8498a70-9bbc-557a-aa09-574c5d35021a"),
+            all.filter { missionFilter(it, "archived") }.map { it.id },
+        )
         val latest =
             mapOf(
-                "o" to Run("r1", taskId = "o", status = "failed"),
-                "p" to Run("r2", taskId = "p", status = "running"),
+                "87d969a4-be62-5c7e-bacd-4917b8604bed" to
+                    Run(
+                        id = "r1",
+                        taskId = "87d969a4-be62-5c7e-bacd-4917b8604bed",
+                        status = "failed",
+                    ),
+                "5bfed223-205d-577b-a9eb-2561157d92ff" to
+                    Run(
+                        id = "r2",
+                        taskId = "5bfed223-205d-577b-a9eb-2561157d92ff",
+                        status = "running",
+                    ),
             )
         assertEquals(
-            listOf("p", "o", "n", "s"),
+            listOf(
+                "5bfed223-205d-577b-a9eb-2561157d92ff",
+                "87d969a4-be62-5c7e-bacd-4917b8604bed",
+                "fd0107f8-a9c6-5b5e-ba66-5d3baf41211f",
+                "e186f830-3e88-53ba-943f-b926bb27f37f",
+            ),
             missionOrder(listOf(scheduled, soon, once, paused), latest).map { it.id },
         )
     }
@@ -484,21 +756,75 @@ class SignalPresentationTest {
             Workspace(
                 agents =
                     listOf(
-                        Agent("rev", "Revue de code", description = "Relit les PR"),
-                        Agent("ops", "Ops", description = "Revue des déploiements"),
+                        Agent(
+                            exclusiveNodes = emptyList(),
+                            plugins = emptyList(),
+                            revision = "",
+                            createdAt = 0,
+                            access =
+                                AccessPolicy(
+                                    mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                                    projects = null,
+                                    skills = null,
+                                    mcps = null,
+                                ),
+                            id = "5ca9d6c5-caa1-5234-8069-c22f7aa2da85",
+                            name = "Revue de code",
+                            description = "Relit les PR",
+                        ),
+                        Agent(
+                            exclusiveNodes = emptyList(),
+                            plugins = emptyList(),
+                            revision = "",
+                            createdAt = 0,
+                            access =
+                                AccessPolicy(
+                                    mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                                    projects = null,
+                                    skills = null,
+                                    mcps = null,
+                                ),
+                            id = "ae334e0d-2067-57a0-8791-222ba70e89e8",
+                            name = "Ops",
+                            description = "Revue des déploiements",
+                        ),
                     ),
-                projects = listOf(Project("p", "Cairn", description = "Revue continue")),
+                projects =
+                    listOf(
+                        Project(
+                            "5bfed223-205d-577b-a9eb-2561157d92ff",
+                            "Cairn",
+                            description = "Revue continue",
+                        )
+                    ),
                 tasks =
                     listOf(
-                        Task("t", "Revue hebdomadaire", cron = "0 9 * * 1"),
-                        Task("z", "Revue archivée", archived = true),
+                        Task(
+                            "7525d1be-5613-5715-96b1-145b0f8b9c78",
+                            "Revue hebdomadaire",
+                            cron = "0 9 * * 1",
+                        ),
+                        Task(
+                            "d2de3a5c-f8c6-5276-b029-b4e459546f28",
+                            "Revue archivée",
+                            archived = true,
+                        ),
                     ),
                 skills = listOf(Skill("revue", "Guide de revue")),
             )
         val chats =
             listOf(
-                Chat("c", "Relecture PR", agentName = "Revue de code", agentId = "rev"),
-                Chat("d", "Autre", agentName = "Cairn"),
+                Chat(
+                    id = "c",
+                    title = "Relecture PR",
+                    agentName = "Revue de code",
+                    agentId = "5ca9d6c5-caa1-5234-8069-c22f7aa2da85",
+                ),
+                Chat(
+                    id = "22db892f-1069-55df-8435-9b003528bdcf",
+                    title = "Autre",
+                    agentName = "Cairn",
+                ),
             )
         val hits = searchWorkspace("revue", chats, state)
         assertEquals(
@@ -511,9 +837,17 @@ class SignalPresentationTest {
             ),
             hits.map { it.kind }.toSet(),
         )
-        assertTrue(hits.none { it.id == "z" || it.id == "d" })
+        assertTrue(
+            hits.none {
+                it.id == "d2de3a5c-f8c6-5276-b029-b4e459546f28" ||
+                    it.id == "22db892f-1069-55df-8435-9b003528bdcf"
+            }
+        )
         // Title matches first: the agent named "Revue de code" before "Ops" (description only).
-        assertTrue(hits.indexOfFirst { it.id == "rev" } < hits.indexOfFirst { it.id == "ops" })
+        assertTrue(
+            hits.indexOfFirst { it.id == "5ca9d6c5-caa1-5234-8069-c22f7aa2da85" } <
+                hits.indexOfFirst { it.id == "ae334e0d-2067-57a0-8791-222ba70e89e8" }
+        )
         assertEquals("Chaque lundi · 09:00", hits.first { it.kind == SearchKind.MISSION }.detail)
         assertEquals("Revue de code", hits.first { it.kind == SearchKind.CHAT }.avatar)
         assertTrue(searchWorkspace("   ", chats, state).isEmpty())
@@ -567,12 +901,24 @@ class SignalPresentationTest {
     fun `connection summary reports coding agents without a usable account and the best capacity`() {
         val codex =
             listOf(
-                Account("a", "codex", "Perso", state = "ready", remainingPercent = 40.0),
-                Account("b", "codex", "Pro", state = "ready", remainingPercent = 70.0),
                 Account(
-                    "c",
-                    "codex",
-                    "Off",
+                    id = "a",
+                    provider = "codex",
+                    name = "Perso",
+                    state = "ready",
+                    remainingPercent = 40.0,
+                ),
+                Account(
+                    id = "b",
+                    provider = "codex",
+                    name = "Pro",
+                    state = "ready",
+                    remainingPercent = 70.0,
+                ),
+                Account(
+                    id = "c",
+                    provider = "codex",
+                    name = "Off",
                     enabled = false,
                     state = "ready",
                     remainingPercent = 99.0,
@@ -600,12 +946,12 @@ class SignalPresentationTest {
     @Test
     fun `account statuses, windows and resets read naturally in French`() {
         val now = 1_790_000_000_000
-        assertEquals("Prochain", accountStatusLabel(Account("a", name = "A", status = "next")))
-        assertNull(accountStatusLabel(Account("a", name = "A", status = "ready")))
+        assertEquals("Prochain", accountStatusLabel(Account(id = "a", name = "A", status = "next")))
+        assertNull(accountStatusLabel(Account(id = "a", name = "A", status = "ready")))
         assertEquals(
             "Reprise dans 48 min",
             accountStatusLabel(
-                Account("a", name = "A", status = "waiting", resetsAt = now / 1000 + 48 * 60),
+                Account(id = "a", name = "A", status = "waiting", resetsAt = now / 1000 + 48 * 60),
                 now,
             ),
         )
@@ -613,24 +959,33 @@ class SignalPresentationTest {
         assertEquals("maintenant", resetsIn(now / 1000 - 5, now))
         assertEquals(
             "5 heures",
-            windowLabel(AccountWindow("w", "5-hour window", durationMins = 300)),
+            windowLabel(AccountWindow(id = "w", label = "5-hour window", durationMins = 300)),
         )
-        assertEquals("Semaine", windowLabel(AccountWindow("w", "Weekly", durationMins = 10080)))
+        assertEquals(
+            "Semaine",
+            windowLabel(AccountWindow(id = "w", label = "Weekly", durationMins = 10080)),
+        )
         assertEquals(
             "Semaine · Opus",
             windowLabel(
-                AccountWindow("w", "Weekly · Opus", durationMins = 10080, models = listOf("opus"))
+                AccountWindow(
+                    id = "w",
+                    label = "Weekly · Opus",
+                    durationMins = 10080,
+                    models = listOf("opus"),
+                )
             ),
         )
-        assertEquals(40.0, AccountWindow("w", usedPercent = 60.0).remaining, 0.0)
-        assertEquals(0.0, AccountWindow("w", usedPercent = 105.0).remaining, 0.0)
+        assertEquals(40.0, AccountWindow(id = "w", usedPercent = 60.0).remaining, 0.0)
+        assertEquals(0.0, AccountWindow(id = "w", usedPercent = 105.0).remaining, 0.0)
         val usage =
             AccountUsage(
-                listOf(
-                    AccountWindow("week", durationMins = 10080),
-                    AccountWindow("opus", models = listOf("opus")),
-                    AccountWindow("five", durationMins = 300),
-                )
+                windows =
+                    listOf(
+                        AccountWindow(id = "week", durationMins = 10080),
+                        AccountWindow(id = "opus", models = listOf("opus")),
+                        AccountWindow(id = "five", durationMins = 300),
+                    )
             )
         assertEquals(listOf("five", "week"), usage.general.map { it.id })
     }

@@ -1,6 +1,13 @@
 package build.cairn.app.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
@@ -10,7 +17,9 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
@@ -18,18 +27,17 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import build.cairn.app.data.Chat
-import build.cairn.app.data.ChatWakeup
-import build.cairn.app.data.RunEvent
-import build.cairn.app.data.wireJson
+import build.cairn.app.data.*
 import kotlinx.coroutines.delay
 import kotlinx.serialization.json.*
 
-/** What a conversation waits for: a timer, a plugin's condition or another Cairn run. */
+/** What a conversation waits for: a timer, a plugin's condition, another Cairn run or several. */
 internal enum class WaitKind {
     TIMER,
     CONDITION,
     RUN,
+    TASK,
+    GROUP,
 }
 
 internal enum class WaitTone {
@@ -48,6 +56,25 @@ internal data class WaitTarget(
 )
 
 internal data class WaitOutcome(val tone: WaitTone, val title: String, val detail: String)
+
+/** One condition of a group, as its card lists it. */
+internal data class WaitMember(
+    /** A native run/task, or a plugin condition. */
+    val kind: WaitKind,
+    val title: String,
+    val details: List<String>,
+    /** The run it waits for, which its row opens. */
+    val runId: String? = null,
+    /** Its result, once it has one; failures included. */
+    val outcome: WaitOutcome? = null,
+    /**
+     * A plugin condition Cairn still checks: when it checks again, and why its last check failed.
+     */
+    val nextCheckAt: Long? = null,
+    val lastError: String? = null,
+    /** The delegated conversation, available before its first run starts. */
+    val chatId: String? = null,
+)
 
 /** A durable wait the agent scheduled with `sleep` or `wait_for`, then how it ended. */
 internal data class ActivityWait(
@@ -81,6 +108,9 @@ internal data class LiveWait(
     val busy: Boolean = false,
     /** Missions cancel their run instead of pausing a conversation. */
     val canPause: Boolean = true,
+    /** Opens a run a grouped wait waits for. */
+    val openRun: ((String) -> Unit)? = null,
+    val openChat: ((String) -> Unit)? = null,
 )
 
 internal val LocalLiveWait = compositionLocalOf<LiveWait?> { null }
@@ -104,16 +134,6 @@ private val failures = setOf("failure", "failed", "error", "startup_failure", "t
 private val workspaceWaitTool = Regex("^(?:mcp__)?cairn_workspace(?:__|_|\\.)(?:sleep|wait_for)$")
 
 /** A tool call's arguments, which some providers record as JSON text. */
-internal fun toolArguments(item: JsonObject?): JsonObject? =
-    when (val value = item?.get("arguments")) {
-        is JsonObject -> value
-        is JsonPrimitive ->
-            value.contentOrNull?.let {
-                runCatching { wireJson.parseToJsonElement(it).jsonObject }.getOrNull()
-            }
-        else -> null
-    }
-
 internal fun isWaitTool(item: JsonObject?): Boolean {
     val tool = item.string("tool")
     return workspaceWaitTool.matches(tool) ||
@@ -156,9 +176,120 @@ internal fun waited(ms: Long): String {
     return if (minutes < 1) "moins d’une minute" else timeLeft(minutes * 60_000)
 }
 
+/** A group's mode, `all` or `any`; null for a single condition. */
+internal fun waitGroupMode(condition: JsonObject?): String? =
+    condition
+        ?.takeIf { it.string("type") == "group" && it["conditions"] is JsonArray }
+        ?.string("mode")
+        ?.takeIf { it == "all" || it == "any" }
+
+/** The results of a group's observation, each beside its condition. */
+private fun groupResults(observation: JsonObject?): JsonArray? =
+    observation?.takeIf { it.string("type") == "group" }?.get("members").asArray()
+
+/**
+ * The conditions of a group, each with its result as soon as it has one: from the final result when
+ * the wait ended, otherwise from the progress Cairn records on the pending wakeup.
+ */
+internal fun waitMembers(wakeup: ChatWakeup?, observation: JsonObject? = null): List<WaitMember> {
+    val final = groupResults(observation)
+    val conditions: List<JsonElement> =
+        wakeup?.conditionJson?.takeIf { waitGroupMode(it) != null }?.get("conditions").asArray()
+            ?: final?.map { it.asObject()?.get("condition") ?: JsonNull }
+            ?: return emptyList()
+    return conditions.mapIndexed { index, element ->
+        val condition = element.asObject()
+        val progress = wakeup?.membersJson?.getOrNull(index).asObject()
+        val result =
+            (if (final != null) final.getOrNull(index).asObject()?.get("result")
+                else progress?.get("observation"))
+                .asObject()
+        val outcome = result?.takeIf { it.string("state").isNotEmpty() }?.let(::waitOutcome)
+        if (condition.string("type") == "run_finished") {
+            val runId = condition.string("runId")
+            WaitMember(
+                WaitKind.RUN,
+                "Exécution Cairn",
+                listOfNotNull(runId.take(8).ifBlank { null }),
+                runId.ifBlank { null },
+                outcome,
+            )
+        } else if (condition.string("type") == "task_finished") {
+            val chatId = condition.string("chatId")
+            WaitMember(
+                WaitKind.TASK,
+                "Tâche déléguée",
+                listOfNotNull(chatId.take(8).ifBlank { null }),
+                outcome = outcome,
+                chatId = chatId.ifBlank { null },
+            )
+        } else {
+            // A plugin condition reads as its plugin words it, or by its type.
+            val display = progress?.get("display").asObject()
+            val title =
+                display
+                    ?.get("short")
+                    .text()
+                    .ifBlank { display?.get("title").text() }
+                    .ifBlank {
+                        condition
+                            .string("type")
+                            .ifBlank { "condition" }
+                            .replace('_', ' ')
+                            .replaceFirstChar {
+                                it.uppercase()
+                            }
+                    }
+            WaitMember(
+                WaitKind.CONDITION,
+                title,
+                display
+                    ?.get("details")
+                    .asArray()
+                    .orEmpty()
+                    .map { it.text() }
+                    .filter {
+                        it.isNotBlank()
+                    },
+                outcome = outcome,
+                nextCheckAt =
+                    if (outcome == null)
+                        (progress?.get("nextCheckAt") as? JsonPrimitive)?.longOrNull
+                    else null,
+                lastError =
+                    if (outcome == null) progress?.get("lastError").text().ifBlank { null }
+                    else null,
+            )
+        }
+    }
+}
+
+/** A group's words: how many conditions, and whether it waits for each of them or the first. */
+private fun groupTarget(mode: String, wakeup: ChatWakeup): WaitTarget {
+    val members = waitMembers(wakeup)
+    val count = members.size
+    val received = members.count { it.outcome != null }
+    return if (mode == "any")
+        WaitTarget(
+            WaitKind.GROUP,
+            "Attente du premier de $count résultats",
+            "Premier de $count résultats",
+            emptyList(),
+        )
+    else
+        WaitTarget(
+            WaitKind.GROUP,
+            "Attente de $count résultats",
+            if (received > 0) "$received sur $count résultats" else "$count résultats",
+            emptyList(),
+        )
+}
+
 internal fun waitTarget(wakeup: ChatWakeup, now: Long = System.currentTimeMillis()): WaitTarget {
-    val condition = wakeup.condition
+    val condition = wakeup.conditionJson
+    val mode = waitGroupMode(condition)
     return when {
+        mode != null -> groupTarget(mode, wakeup)
         condition.string("type") == "run_finished" ->
             WaitTarget(
                 WaitKind.RUN,
@@ -166,9 +297,16 @@ internal fun waitTarget(wakeup: ChatWakeup, now: Long = System.currentTimeMillis
                 "Autre exécution",
                 emptyList(),
             )
+        condition.string("type") == "task_finished" ->
+            WaitTarget(
+                WaitKind.TASK,
+                "Attente de la fin d’une tâche déléguée",
+                "Tâche déléguée",
+                emptyList(),
+            )
         // A plugin condition reads as its plugin words it.
         condition != null -> {
-            val display = wakeup.display
+            val display = wakeup.displayJson
             WaitTarget(
                 WaitKind.CONDITION,
                 display?.get("title").text().ifBlank { "Attente d’une condition" },
@@ -235,7 +373,6 @@ internal fun waitStatus(wakeup: ChatWakeup, now: Long = System.currentTimeMillis
     }
 
 /** Historical marker for events that predate the explicit immediate boolean. */
-internal const val IMMEDIATE_WAIT_RESULT = "Wait condition already completed"
 
 /** A plugin's words for a result, when it gave a title. */
 private fun resultDisplay(observation: JsonObject): WaitOutcome? {
@@ -258,6 +395,9 @@ internal fun waitOutcome(observation: JsonObject?): WaitOutcome {
     }
     if (state == "completed" && observation.string("type") == "time")
         return WaitOutcome(WaitTone.NEUTRAL, "Échéance atteinte", "")
+    groupResults(observation)?.let {
+        return groupOutcome(observation, it)
+    }
     when (state) {
         "timed_out" -> return WaitOutcome(WaitTone.WARNING, "Échéance atteinte sans résultat", "")
         "unavailable" ->
@@ -266,6 +406,32 @@ internal fun waitOutcome(observation: JsonObject?): WaitOutcome {
                 "Résultat indisponible",
                 observation.string("message"),
             )
+    }
+    if (observation.string("type") == "task_finished") {
+        val status = observation.string("status")
+        if (status == "succeeded")
+            return WaitOutcome(
+                WaitTone.OK,
+                "La tâche est terminée",
+                when (observation.string("outcomeStatus")) {
+                    "blocked" -> "Bloquée"
+                    "needs_input" -> "Attend votre réponse"
+                    else -> ""
+                },
+            )
+        val title =
+            when (status) {
+                "failed" -> "La tâche a échoué"
+                "cancelled" -> "La tâche a été annulée"
+                "deleted" -> "La tâche a été supprimée"
+                "interrupted" -> "La tâche a été interrompue"
+                else -> "La tâche s’est arrêtée"
+            }
+        return WaitOutcome(
+            if (status == "failed") WaitTone.ERROR else WaitTone.WARNING,
+            title,
+            observation.string("error"),
+        )
     }
     if (observation.string("type") == "run_finished")
         return when (val status = observation.string("status")) {
@@ -302,6 +468,53 @@ internal fun waitOutcome(observation: JsonObject?): WaitOutcome {
     }
 }
 
+/**
+ * A group's result: the first result for `any`, every result for `all`, with the most serious tone
+ * among them. Results that did not arrive before the deadline are counted, never assumed.
+ */
+private fun groupOutcome(observation: JsonObject, members: JsonArray): WaitOutcome {
+    val received = members.mapNotNull { member ->
+        member
+            .asObject()
+            ?.get("result")
+            .asObject()
+            ?.takeIf { it.string("state").isNotEmpty() }
+            ?.let(::waitOutcome)
+    }
+    val count = members.size
+    if (observation.string("state") == "timed_out")
+        return WaitOutcome(
+            WaitTone.WARNING,
+            "Échéance atteinte",
+            if (received.isEmpty()) "Aucun résultat" else "${received.size} sur $count résultats",
+        )
+    if (observation.string("mode") == "any")
+        return received.firstOrNull()?.let {
+            WaitOutcome(it.tone, "Premier résultat · ${it.title}", "")
+        } ?: WaitOutcome(WaitTone.NEUTRAL, "Attente terminée", "")
+    val failed = received.count { it.tone == WaitTone.ERROR }
+    val warned = received.count { it.tone == WaitTone.WARNING }
+    val succeeded = received.count { it.tone == WaitTone.OK }
+    val tone =
+        when {
+            failed > 0 -> WaitTone.ERROR
+            warned > 0 -> WaitTone.WARNING
+            succeeded == count -> WaitTone.OK
+            else -> WaitTone.NEUTRAL
+        }
+    return WaitOutcome(
+        tone,
+        "Les $count résultats sont arrivés",
+        listOf(
+                if (failed > 0) "$failed en échec" else "",
+                if (warned > 0) "$warned à vérifier" else "",
+                if (failed + warned > 0) "$succeeded réussis" else "",
+            )
+            .filter { it.isNotEmpty() }
+            .joinToString(" · "),
+    )
+}
+
 private data class WaitView(
     val tone: WaitTone?,
     val paused: Boolean,
@@ -314,7 +527,9 @@ private fun waitIcon(kind: WaitKind) =
     when (kind) {
         WaitKind.TIMER -> CairnIcons.Hourglass
         WaitKind.CONDITION -> CairnIcons.Workflow
-        WaitKind.RUN -> CairnIcons.Orbit
+        WaitKind.RUN,
+        WaitKind.TASK -> CairnIcons.Orbit
+        WaitKind.GROUP -> CairnIcons.Layers
     }
 
 /**
@@ -324,6 +539,12 @@ private fun waitIcon(kind: WaitKind) =
 internal fun observedTarget(observation: JsonObject?): String =
     when {
         observation == null -> ""
+        groupResults(observation) != null ->
+            groupResults(observation)!!.size.let {
+                if (observation.string("mode") == "any") "Premier de $it résultats"
+                else "$it résultats"
+            }
+        observation.string("type") == "task_finished" -> "Tâche déléguée"
         observation.string("type") == "run_finished" -> "Autre exécution"
         observation.string("type") == "time" -> "Heure prévue"
         else ->
@@ -363,7 +584,8 @@ internal fun waitProgress(wait: ActivityWait, live: LiveWait?): WaitProgress {
     // Plugin condition polling records the result on the pending wakeup too, which matters when
     // its event is unloaded. Another run's result is only computed when the conversation resumes.
     val observation =
-        if (wait.observed) wait.observation else if (current) live?.wakeup?.observation else null
+        if (wait.observed) wait.observation
+        else if (current) live?.wakeup?.observationJson else null
     val finished = wait.finished || observation != null
     val replaced = wait.ended == "replaced"
     // Live state, when known, is authoritative: stopping a wait leaves no event in the history.
@@ -421,6 +643,18 @@ internal fun WaitCard(wait: ActivityWait) {
     // Cairn updates the pending wakeup, and its plugin's words, as it polls; the event keeps the
     // original.
     val latest = if (current) live?.wakeup else wakeup
+    // A grouped wait lists its conditions: the final results once it ended, else Cairn's progress.
+    val groupMode =
+        waitGroupMode(latest?.conditionJson ?: wakeup?.conditionJson)
+            ?: observation
+                ?.takeIf { it.string("type") == "group" }
+                ?.string("mode")
+                ?.takeIf {
+                    it == "all" || it == "any"
+                }
+    val members =
+        if (groupMode == null) emptyList()
+        else waitMembers(latest ?: wakeup, if (finished) observation else null)
     fun duration() =
         if (wakeup != null && wait.resumedAt != null)
             "Attente de ${waited(wait.resumedAt - wakeup.createdAt)}"
@@ -461,7 +695,9 @@ internal fun WaitCard(wait: ActivityWait) {
                     // A finished card still says why, above this, and what it waited for; a
                     // timer's outcome says the latter.
                     listOf(
-                            if (wakeup == null) observedTarget(observation)
+                            // A group's outcome counts its results already.
+                            if (groupMode != null) ""
+                            else if (wakeup == null) observedTarget(observation)
                             else if (wakeup.condition != null)
                                 waitTarget(latest ?: wakeup, now).short
                             else "",
@@ -566,7 +802,8 @@ internal fun WaitCard(wait: ActivityWait) {
                             !waitDue(latest, now) &&
                             !retrying &&
                             wakeup?.condition != null &&
-                            wakeup.condition.string("type") != "run_finished"
+                            // A group times each of its conditions in its own list.
+                            wakeup.conditionJson.string("type") !in setOf("run_finished", "group")
                     val next = latest?.nextCheckAt
                     val checked =
                         if (!polled) ""
@@ -634,6 +871,19 @@ internal fun WaitCard(wait: ActivityWait) {
                     )
                 }
             }
+            if (groupMode != null && members.isNotEmpty())
+                WaitMembers(
+                    members,
+                    groupMode,
+                    live = pending,
+                    finished = finished,
+                    timedOut = observation.string("state") == "timed_out",
+                    folded = finished && !current,
+                    now = now,
+                    openRun = live?.openRun,
+                    openChat = live?.openChat,
+                    modifier = Modifier.padding(start = 58.dp, end = 12.dp, bottom = 12.dp),
+                )
             if (pausable && live != null)
                 TextButton(
                     onClick = live.pause,
@@ -697,4 +947,300 @@ private fun WaitReason(reason: String) {
                 Modifier.clickable(role = Role.Button) { expanded = !expanded }
                     .padding(vertical = 4.dp),
         )
+}
+
+/**
+ * The conditions of a grouped wait, each with its own result as it arrives. A segmented meter sums
+ * them up; the list stays open until the conversation moves past the wait.
+ */
+@Composable
+private fun WaitMembers(
+    members: List<WaitMember>,
+    mode: String,
+    live: Boolean,
+    finished: Boolean,
+    timedOut: Boolean,
+    folded: Boolean,
+    now: Long,
+    openRun: ((String) -> Unit)?,
+    openChat: ((String) -> Unit)?,
+    modifier: Modifier = Modifier,
+) {
+    var open by rememberSaveable(folded) { mutableStateOf(!folded) }
+    val received = remember(members) { members.count { it.outcome != null } }
+    val pageSize = 10
+    var selectedPage by rememberSaveable { mutableIntStateOf(0) }
+    val pageCount = (members.size - 1) / pageSize + 1
+    val page = selectedPage.coerceIn(0, pageCount - 1)
+    val start = page * pageSize
+    val visible = members.subList(start, minOf(start + pageSize, members.size))
+    // Small groups retain individual segments; large groups aggregate by outcome.
+    val segments =
+        remember(members) {
+            if (members.size <= pageSize) members.map { it.outcome?.tone to 1 }
+            else members.groupingBy { it.outcome?.tone }.eachCount().map { it.key to it.value }
+        }
+    // With `any`, the first result in the agent's order is the one that resumed the conversation.
+    val first =
+        remember(members, mode, finished) {
+            if (mode == "any" && finished) members.indexOfFirst { it.outcome != null } else -1
+        }
+    val pulse by
+        rememberInfiniteTransition(label = "wait-members")
+            .animateFloat(
+                0.25f,
+                0.7f,
+                infiniteRepeatable(tween(1200), RepeatMode.Reverse),
+                label = "pending",
+            )
+    Column(modifier.testTag("wait-members")) {
+        Row(
+            Modifier.fillMaxWidth()
+                .clip(RoundedCornerShape(8.dp))
+                .clickable(
+                    role = Role.Button,
+                    onClickLabel =
+                        if (open) "Masquer les conditions" else "Afficher les conditions",
+                ) {
+                    open = !open
+                }
+                .padding(vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            if (mode == "any") WaitChip("Un seul", signal.attentionSoft, signal.attention)
+            else
+                WaitChip(
+                    "Tous",
+                    MaterialTheme.colorScheme.primaryContainer,
+                    MaterialTheme.colorScheme.onPrimaryContainer,
+                )
+            Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                segments.forEachIndexed { index, (tone, count) ->
+                    val color =
+                        when (tone) {
+                            WaitTone.OK -> signal.success
+                            WaitTone.ERROR -> MaterialTheme.colorScheme.error
+                            WaitTone.WARNING -> signal.warning
+                            WaitTone.NEUTRAL -> MaterialTheme.colorScheme.outline
+                            null ->
+                                if (live) MaterialTheme.colorScheme.primary.copy(alpha = pulse)
+                                else MaterialTheme.colorScheme.surfaceContainerHighest
+                        }
+                    Box(
+                        Modifier.weight(count.toFloat())
+                            .height(6.dp)
+                            .clip(CircleShape)
+                            .background(color)
+                            .then(
+                                if (members.size <= pageSize && index == first)
+                                    Modifier.border(1.dp, signal.attention, CircleShape)
+                                else Modifier
+                            )
+                    )
+                }
+            }
+            Text(
+                "$received/${members.size}",
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Icon(
+                CairnIcons.Down,
+                null,
+                Modifier.size(16.dp).rotate(if (open) 180f else 0f),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        AnimatedVisibility(open) {
+            Surface(
+                Modifier.fillMaxWidth().padding(top = 4.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerLow,
+                shape = RoundedCornerShape(12.dp),
+                border =
+                    androidx.compose.foundation.BorderStroke(
+                        1.dp,
+                        MaterialTheme.colorScheme.outlineVariant,
+                    ),
+            ) {
+                Column {
+                    visible.forEachIndexed { index, member ->
+                        if (index > 0)
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        WaitMemberRow(
+                            member,
+                            live,
+                            finished,
+                            timedOut,
+                            start + index == first,
+                            now,
+                            openRun,
+                            openChat,
+                        )
+                    }
+                    if (pageCount > 1) {
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            TextButton(onClick = { selectedPage = page - 1 }, enabled = page > 0) {
+                                Text("Précédent")
+                            }
+                            Text(
+                                "${start + 1}–${minOf(start + pageSize, members.size)} sur ${members.size}",
+                                style = MaterialTheme.typography.labelSmall,
+                            )
+                            TextButton(
+                                onClick = { selectedPage = page + 1 },
+                                enabled = page + 1 < pageCount,
+                            ) {
+                                Text("Suivant")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun WaitMemberRow(
+    member: WaitMember,
+    live: Boolean,
+    finished: Boolean,
+    timedOut: Boolean,
+    first: Boolean,
+    now: Long,
+    openRun: ((String) -> Unit)?,
+    openChat: ((String) -> Unit)?,
+) {
+    val outcome = member.outcome
+    val status =
+        when {
+            outcome != null ->
+                listOf(outcome.title, outcome.detail).filter { it.isNotBlank() }.joinToString(" · ")
+            finished ->
+                if (timedOut) "Aucun résultat avant l’échéance"
+                else "Inutile : un autre résultat est arrivé avant"
+            !live -> "Résultat attendu"
+            member.lastError != null -> "Contrôle échoué · nouvel essai"
+            member.kind in setOf(WaitKind.RUN, WaitKind.TASK) -> "Attente de sa fin"
+            member.nextCheckAt != null ->
+                if (member.nextCheckAt > now) "Contrôle dans ${timeLeft(member.nextCheckAt - now)}"
+                else "Contrôle en cours…"
+            else -> "Résultat attendu"
+        }
+    val tint =
+        when {
+            outcome?.tone == WaitTone.OK -> signal.success
+            outcome?.tone == WaitTone.ERROR -> MaterialTheme.colorScheme.error
+            outcome?.tone == WaitTone.WARNING -> signal.warning
+            live && member.lastError != null -> signal.warning
+            else -> MaterialTheme.colorScheme.onSurfaceVariant
+        }
+    val openTarget =
+        when {
+            member.chatId != null && openChat != null -> ({ openChat(member.chatId) })
+            member.runId != null && openRun != null -> ({ openRun(member.runId) })
+            else -> null
+        }
+    val openLabel = if (member.chatId != null) "Ouvrir la tâche" else "Ouvrir l’exécution"
+    Row(
+        Modifier.fillMaxWidth()
+            .testTag("wait-member")
+            .then(
+                if (openTarget != null)
+                    Modifier.clickable(
+                        role = Role.Button,
+                        onClickLabel = openLabel,
+                        onClick = openTarget,
+                    )
+                else Modifier
+            )
+            .alpha(if (finished && outcome == null) 0.6f else 1f)
+            .padding(horizontal = 12.dp, vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Box(Modifier.size(22.dp), contentAlignment = Alignment.Center) {
+            when {
+                outcome == null && live ->
+                    CircularProgressIndicator(
+                        Modifier.size(18.dp),
+                        strokeWidth = 2.dp,
+                        trackColor = MaterialTheme.colorScheme.outlineVariant,
+                    )
+                outcome == null ->
+                    Box(
+                        Modifier.size(18.dp)
+                            .border(1.dp, MaterialTheme.colorScheme.outline, CircleShape)
+                    )
+                else -> {
+                    val (container, content, icon) =
+                        when (outcome.tone) {
+                            WaitTone.OK ->
+                                Triple(
+                                    signal.success,
+                                    MaterialTheme.colorScheme.surface,
+                                    CairnIcons.Check,
+                                )
+                            WaitTone.ERROR ->
+                                Triple(
+                                    MaterialTheme.colorScheme.error,
+                                    MaterialTheme.colorScheme.onError,
+                                    CairnIcons.Close,
+                                )
+                            WaitTone.WARNING ->
+                                Triple(signal.warningSoft, signal.warning, CairnIcons.Alert)
+                            WaitTone.NEUTRAL ->
+                                Triple(
+                                    MaterialTheme.colorScheme.surfaceContainerHighest,
+                                    MaterialTheme.colorScheme.onSurfaceVariant,
+                                    CairnIcons.Check,
+                                )
+                        }
+                    Box(
+                        Modifier.size(22.dp).clip(CircleShape).background(container),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(icon, null, Modifier.size(13.dp), tint = content)
+                    }
+                }
+            }
+        }
+        Column(Modifier.weight(1f)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Text(
+                    member.title,
+                    Modifier.weight(1f, fill = false),
+                    style = MaterialTheme.typography.labelLarge,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                member.details.take(2).forEach { WaitChip(it) }
+                if (first) WaitChip("Premier", signal.attentionSoft, signal.attention)
+            }
+            Text(
+                status,
+                style = MaterialTheme.typography.bodySmall,
+                color = tint,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        if (openTarget != null)
+            Icon(
+                CairnIcons.Right,
+                null,
+                Modifier.size(16.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+    }
 }

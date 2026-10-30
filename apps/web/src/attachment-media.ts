@@ -265,16 +265,7 @@ export function canCopyImages() {
 export async function attachmentFile(attachment: ChatAttachment) {
   const scope = cacheKey(attachment)
   const path = attachmentPath(attachment)
-  let blob: Blob
-  try {
-    blob = await apiBlob(`${path}/stream`)
-  }
-  catch (error) {
-    // Old installations lack the alias; protocol v1 rejects streaming routes.
-    if (!(error instanceof ApiError && (error.status === 404 || error.status === 501)) || scope !== cacheKey(attachment))
-      throw error
-    blob = await apiBlob(path)
-  }
+  const blob = await apiBlob(`${path}/stream`)
 
   if (scope !== cacheKey(attachment))
     throw new ApiError('The active installation changed. Please try again.', 0)

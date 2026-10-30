@@ -1,3 +1,13 @@
+use cairn_contracts::EventKind;
+#[allow(unused_imports)]
+use common::{PluginServiceFixture as _, PluginStoreFixture as _};
+
+use crate::common::run_fixture::DbRunFixture;
+use common::AgentFixture;
+use common::MissionFixture;
+use common::StoreAgentFixture;
+use common::StoreMissionFixture;
+
 mod common;
 
 use axum::{body::Body, http::StatusCode};
@@ -17,7 +27,7 @@ async fn fixture() -> (TempDir, Arc<Service>, Value) {
     let s = Service::new(common::config(root.path())).await.unwrap();
     common::relay_fixture::claimed(&s).await.unwrap();
     let source = s
-        .agent(json!({ "name": "Claude", "provider": "claude" }), None)
+        .agent_fixture(json!({ "name": "Claude", "provider": "claude" }), None)
         .await
         .unwrap();
     (root, s, source)
@@ -27,8 +37,8 @@ fn input(source: &Value) -> Value {
     json!({ "sourceId": source["id"], "targetId": MAIN_AGENT_ID, "confirm": true })
 }
 
-async fn task(s: &Service, source: &Value) -> Value {
-    s.task(
+async fn task(s: &Arc<Service>, source: &Value) -> Value {
+    s.task_fixture(
         json!({ "name": "Existing task", "prompt": "Inspect", "agentId": source["id"] }),
         None,
     )
@@ -55,7 +65,7 @@ async fn mcp(s: &Arc<Service>, endpoint: &str, token: &str, args: Value) -> (Sta
 #[tokio::test]
 async fn merge_transfers_archived_tasks_trash_chats_and_resumable_run_identities() {
     let (root, s, source) = fixture().await;
-    let target = s.get("agents", MAIN_AGENT_ID).await.unwrap();
+    let target = s.agent_snapshot(MAIN_AGENT_ID).await.unwrap();
     let task = task(&s, &source).await;
     let chat = s
         .chat_create(json!({ "agentId": source["id"] }))
@@ -67,11 +77,13 @@ async fn merge_transfers_archived_tasks_trash_chats_and_resumable_run_identities
         .unwrap();
     let mut original_snapshot = run["snapshot"].clone();
     s.store
-        .patch_run(
+        .change_run(
             run["id"].as_str().unwrap(),
-            json!({
-                "status": "failed", "chatExecution": { "messageId": id() },
-            }),
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Failed),
+                boundary: Some(serde_json::json!({"chatExecution": { "messageId": id() }})),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
@@ -83,34 +95,42 @@ async fn merge_transfers_archived_tasks_trash_chats_and_resumable_run_identities
         move |db| {
             task["archived"] = true.into();
             task["enabled"] = false.into();
-            db.put("tasks", &task)?;
-            chat["deletedAt"] = 1.into();
-            db.put("chats", &chat)?;
+            db.save_mission(&serde_json::from_value(task.clone())?)?;
+            chat["lifecycle"] = "trash".into();
+            chat["trashedAt"] = 1.into();
+            db.save_conversation_boundary(&chat)?;
             db.put_message(&json!({ "id": id(), "chatId": chat["id"], "createdAt": 1, "text": "Keep this message" }))?;
-            db.event(run["id"].as_str().unwrap(), "status", "Keep this history", None)?;
+            db.event(run["id"].as_str().unwrap(), &EventKind::Status, "Keep this history", None)?;
             db.set(&format!("agent-avatar:{}", source["id"].as_str().unwrap()), &json!({ "fixture": true }), None)
         }
     }).await.unwrap();
 
-    let result = s.merge_agents(input(&source)).await.unwrap();
+    let result = s.merge_agents_fixture(input(&source)).await.unwrap();
     assert_eq!(
         result["transferred"],
         json!({ "tasks": 1, "chats": 1, "runs": 1 })
     );
     assert!(
         s.store
-            .get("agents", source["id"].as_str().unwrap())
+            .agent_snapshot(source["id"].as_str().unwrap())
             .await
             .unwrap()
             .is_none()
     );
-    assert_eq!(s.get("agents", MAIN_AGENT_ID).await.unwrap(), target);
-    let transferred_task = s.get("tasks", task["id"].as_str().unwrap()).await.unwrap();
+    assert_eq!(s.agent_snapshot(MAIN_AGENT_ID).await.unwrap(), target);
+    let transferred_task = s
+        .mission_snapshot_fixture(task["id"].as_str().unwrap())
+        .await
+        .unwrap();
     assert_eq!(transferred_task["agentId"], MAIN_AGENT_ID);
     assert_eq!(transferred_task["archived"], true);
-    let transferred_chat = s.get("chats", chat["id"].as_str().unwrap()).await.unwrap();
+    let transferred_chat = s
+        .conversation_boundary(chat["id"].as_str().unwrap())
+        .await
+        .unwrap();
     assert_eq!(transferred_chat["agentId"], MAIN_AGENT_ID);
-    assert_eq!(transferred_chat["deletedAt"], 1);
+    assert_eq!(transferred_chat["lifecycle"], "trash");
+    assert_eq!(transferred_chat["trashedAt"], 1);
     let transferred = s.store.run(run["id"].as_str().unwrap()).await.unwrap();
     original_snapshot["agent"]["id"] = MAIN_AGENT_ID.into();
     original_snapshot["task"]["agentId"] = MAIN_AGENT_ID.into();
@@ -130,7 +150,7 @@ async fn merge_transfers_archived_tasks_trash_chats_and_resumable_run_identities
             move |db| {
                 assert_eq!(db.messages(chat["id"].as_str().unwrap())?.len(), 1);
                 assert_eq!(
-                    db.events(run["id"].as_str().unwrap(), 0, 100)?
+                    db.events_fixture(run["id"].as_str().unwrap(), 0, 100)?
                         .last()
                         .unwrap()["text"],
                     "Keep this history"
@@ -153,7 +173,7 @@ async fn merge_transfers_archived_tasks_trash_chats_and_resumable_run_identities
     let reopened = Service::new(common::config(root.path())).await.unwrap();
     assert_eq!(
         reopened
-            .get("tasks", task["id"].as_str().unwrap())
+            .mission_snapshot_fixture(task["id"].as_str().unwrap())
             .await
             .unwrap()["agentId"],
         MAIN_AGENT_ID
@@ -169,41 +189,10 @@ async fn merge_transfers_archived_tasks_trash_chats_and_resumable_run_identities
 }
 
 #[tokio::test]
-async fn legacy_restricted_sessions_keep_their_mcp_denial_after_merge_and_resume() {
-    let (_root, s, source) = fixture().await;
-    let task = task(&s, &source).await;
-    let mut run = s.snapshot(task, "manual").await.unwrap();
-    run["status"] = "failed".into();
-    run["chatExecution"] = json!({ "messageId": id() });
-    run["snapshot"]["agent"]["access"] = json!({
-        "projects": [], "skills": [], "sandbox": "read-only",
-    });
-    let legacy = s
-        .store
-        .transaction(move |db| db.add_run(&run, None))
-        .await
-        .unwrap();
-    let original_policy = cairn_installation::service::policy(&legacy["snapshot"]["agent"]);
-    assert_eq!(original_policy["mcps"], json!([]));
-    s.merge_agents(input(&source)).await.unwrap();
-    let resumed = s
-        .worker
-        .resume(&s, legacy["id"].as_str().unwrap())
-        .await
-        .unwrap();
-    assert_eq!(resumed["snapshot"]["agent"]["id"], MAIN_AGENT_ID);
-    assert_eq!(
-        cairn_installation::service::policy(&resumed["snapshot"]["agent"]),
-        original_policy
-    );
-    assert_eq!(resumed["snapshot"]["agent"]["access"]["mcps"], json!([]));
-}
-
-#[tokio::test]
 async fn same_engine_merge_keeps_the_conversation_model_on_implicit_follow_up() {
     let (_root, s, original) = fixture().await;
-    let source = s.agent(json!({ "name": "Claude", "provider": "claude", "model": "opus", "reasoning": "medium" }), original["id"].as_str()).await.unwrap();
-    s.agent(
+    let source = s.agent_fixture(json!({ "name": "Claude", "provider": "claude", "model": "opus", "reasoning": "medium" }), original["id"].as_str()).await.unwrap();
+    s.agent_fixture(
         json!({ "name": "Omni", "provider": "claude", "model": "haiku", "reasoning": "low" }),
         Some(MAIN_AGENT_ID),
     )
@@ -223,14 +212,10 @@ async fn same_engine_merge_keeps_the_conversation_model_on_implicit_follow_up() 
             let mut chat = chat.clone();
             let run = run.clone();
             move |db| {
-                db.add_run(&run, None)?;
-                db.set(
-                    &format!("run-checkpoint:{}", run["id"].as_str().unwrap()),
-                    &json!({}),
-                    None,
-                )?;
+                db.add_run_fixture(&run, None)?;
+                db.save_checkpoint_boundary(run["id"].as_str().unwrap(), &json!({}))?;
                 chat["runId"] = run["id"].clone();
-                db.put("chats", &chat)?;
+                db.save_conversation_boundary(&chat)?;
                 Ok(())
             }
         })
@@ -242,7 +227,7 @@ async fn same_engine_merge_keeps_the_conversation_model_on_implicit_follow_up() 
     )
     .await
     .unwrap();
-    s.merge_agents(input(&source)).await.unwrap();
+    s.merge_agents_fixture(input(&source)).await.unwrap();
     s.chat_tick(&std::collections::HashSet::new())
         .await
         .unwrap();
@@ -258,45 +243,6 @@ async fn same_engine_merge_keeps_the_conversation_model_on_implicit_follow_up() 
 }
 
 #[tokio::test]
-async fn merge_waits_for_scheduled_admission_instead_of_dropping_a_due_occurrence() {
-    use std::{future::Future, task::Poll};
-
-    let (_root, s, source) = fixture().await;
-    let mut task = task(&s, &source).await;
-    task["cron"] = "* * * * *".into();
-    task["nextRun"] = 1.into();
-    s.store.put("tasks", task.clone()).await.unwrap();
-    let authors = s.task_author_lock.lock().await;
-    let scheduled = s.schedule();
-    tokio::pin!(scheduled);
-    std::future::poll_fn(|cx| {
-        assert!(scheduled.as_mut().poll(cx).is_pending());
-        Poll::Ready(())
-    })
-    .await;
-    let merging = s.merge_agents(input(&source));
-    tokio::pin!(merging);
-    std::future::poll_fn(|cx| {
-        assert!(merging.as_mut().poll(cx).is_pending());
-        Poll::Ready(())
-    })
-    .await;
-    drop(authors);
-    scheduled.await.unwrap();
-    assert_eq!(merging.await.unwrap_err().status, 409);
-    let runs = s.store.read(|db| db.active()).await.unwrap();
-    assert_eq!(runs.len(), 1);
-    assert_eq!(runs[0]["snapshot"]["agent"]["id"], source["id"]);
-    assert_eq!(runs[0]["taskId"], task["id"]);
-    assert!(
-        s.get("tasks", task["id"].as_str().unwrap()).await.unwrap()["nextRun"]
-            .as_i64()
-            .unwrap()
-            > 1
-    );
-}
-
-#[tokio::test]
 async fn merge_rejects_busy_recovering_and_unsettled_workers_without_mutation() {
     for state in ["queued", "running", "recovering", "settling"] {
         let (_root, s, source) = fixture().await;
@@ -305,25 +251,43 @@ async fn merge_rejects_busy_recovering_and_unsettled_workers_without_mutation() 
             .enqueue(task["id"].as_str().unwrap(), "manual", None)
             .await
             .unwrap();
-        s.store.patch_run(run["id"].as_str().unwrap(), json!({
-            "status": if state == "queued" || state == "running" { state } else { "succeeded" },
-            "recoveryPending": state == "recovering",
-        })).await.unwrap();
+        s.store
+            .change_run(
+                run["id"].as_str().unwrap(),
+                cairn_installation::runs::RunChanges {
+                    status: Some(
+                        cairn_contracts::RunStatus::parse(
+                            if state == "queued" || state == "running" {
+                                state
+                            } else {
+                                "succeeded"
+                            },
+                        )
+                        .unwrap(),
+                    ),
+                    recovery_pending: Some(state == "recovering"),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
         if state == "settling" {
             s.worker.active.lock().await.insert(
                 run["id"].as_str().unwrap().to_owned(),
                 tokio_util::sync::CancellationToken::new(),
             );
         }
-        let error = s.merge_agents(input(&source)).await.unwrap_err();
+        let error = s.merge_agents_fixture(input(&source)).await.unwrap_err();
         assert_eq!(error.status, 409, "{state}");
         assert!(error.message.contains("active work"), "{state}: {error}");
         assert_eq!(
-            s.get("tasks", task["id"].as_str().unwrap()).await.unwrap()["agentId"],
+            s.mission_snapshot_fixture(task["id"].as_str().unwrap())
+                .await
+                .unwrap()["agentId"],
             source["id"]
         );
         assert_eq!(
-            s.get("agents", source["id"].as_str().unwrap())
+            s.agent_snapshot(source["id"].as_str().unwrap())
                 .await
                 .unwrap(),
             source
@@ -342,33 +306,38 @@ async fn merge_rejects_invalid_targets_permissions_credentials_and_delegations()
         json!({ "sourceId": MAIN_AGENT_ID, "targetId": source["id"], "confirm": true }),
         json!({ "sourceId": source["id"], "targetId": id(), "confirm": true }),
     ] {
-        assert!(s.merge_agents(args).await.is_err());
+        assert!(s.merge_agents_fixture(args).await.is_err());
     }
+    let granted_instance = id();
+    s.store
+        .put_instance_fixture(json!({ "id": granted_instance, "pluginId": "fixture" }))
+        .await
+        .unwrap();
     for change in [
         json!({ "access": { "installation": true } }),
         json!({ "access": { "nodes": null } }),
         json!({ "access": { "backend": "native" } }),
-        json!({ "plugins": [id()] }),
+        json!({ "plugins": [granted_instance] }),
         json!({ "exclusiveNodes": [id()] }),
     ] {
         let mut changed = source.clone();
         cairn_installation::store::merge(&mut changed, &change);
-        s.store.put("agents", changed).await.unwrap();
+        s.store.put_agent_fixture(changed).await.unwrap();
         assert_eq!(
-            s.merge_agents(input(&source)).await.unwrap_err().status,
+            s.merge_agents_fixture(input(&source))
+                .await
+                .unwrap_err()
+                .status,
             409
         );
     }
-    s.store.put("agents", source.clone()).await.unwrap();
+    s.store.put_agent_fixture(source.clone()).await.unwrap();
     s.store
-        .put(
-            "plugin-connections",
-            json!({ "id": id(), "agentId": source["id"], "enabled": false }),
-        )
+        .put_instance_fixture(json!({ "id": id(), "agentId": source["id"], "enabled": false }))
         .await
         .unwrap();
     assert!(
-        s.merge_agents(input(&source))
+        s.merge_agents_fixture(input(&source))
             .await
             .unwrap_err()
             .message
@@ -376,7 +345,7 @@ async fn merge_rejects_invalid_targets_permissions_credentials_and_delegations()
     );
     assert!(
         s.store
-            .get("agents", source["id"].as_str().unwrap())
+            .agent_snapshot(source["id"].as_str().unwrap())
             .await
             .unwrap()
             .is_some()
@@ -392,24 +361,29 @@ async fn merge_keeps_preapproved_live_grants_and_rolls_back_a_failed_delete() {
         let mut source = source.clone();
         let instance = instance.clone();
         move |db| {
-            let mut target = db.get("agents", MAIN_AGENT_ID)?.unwrap();
+            let mut target = db.agent_snapshot(MAIN_AGENT_ID)?.unwrap();
             source["plugins"] = json!([instance]);
             target["plugins"] = json!([instance]);
-            db.put("agents", &source)?;
-            db.put("agents", &target)?;
-            db.put("plugin-connections", &json!({ "id": instance, "agentIds": [source["id"], MAIN_AGENT_ID] }))?;
-            db.0.execute_batch("CREATE TRIGGER reject_merge BEFORE DELETE ON records WHEN old.kind='agents' BEGIN SELECT RAISE(ABORT, 'fixture failure'); END;")?;
+            let mut account = cairn_installation::plugins::connections::Connection::draft(&instance,"fixture",json!({}),Vec::new());
+            account.name = "Fixture".into();
+            account.revision = "r1".into();
+            { db.save_plugin_version(&account.plugin_id,"fixture",&"0".repeat(64))?; db.save_plugin_instance(&account) }?;
+            db.save_agent(&serde_json::from_value(source.clone())?)?;
+            db.save_agent(&serde_json::from_value(target.clone())?)?;
+            db.0.execute_batch("CREATE TRIGGER reject_merge BEFORE DELETE ON agents BEGIN SELECT RAISE(ABORT, 'fixture failure'); END;")?;
             Ok(())
         }
     }).await.unwrap();
-    assert!(s.merge_agents(input(&source)).await.is_err());
+    assert!(s.merge_agents_fixture(input(&source)).await.is_err());
     assert_eq!(
-        s.get("tasks", task["id"].as_str().unwrap()).await.unwrap()["agentId"],
+        s.mission_snapshot_fixture(task["id"].as_str().unwrap())
+            .await
+            .unwrap()["agentId"],
         source["id"]
     );
     assert_eq!(
-        s.get("plugin-connections", &instance).await.unwrap()["agentIds"],
-        json!([source["id"], MAIN_AGENT_ID])
+        s.instance_fixture(&instance).await.unwrap()["agentIds"],
+        json!([MAIN_AGENT_ID, source["id"]])
     );
     s.store
         .write(|db| {
@@ -418,13 +392,13 @@ async fn merge_keeps_preapproved_live_grants_and_rolls_back_a_failed_delete() {
         })
         .await
         .unwrap();
-    s.merge_agents(input(&source)).await.unwrap();
+    s.merge_agents_fixture(input(&source)).await.unwrap();
     assert_eq!(
-        s.get("agents", MAIN_AGENT_ID).await.unwrap()["plugins"],
+        s.agent_snapshot(MAIN_AGENT_ID).await.unwrap()["plugins"],
         json!([instance])
     );
     assert_eq!(
-        s.get("plugin-connections", &instance).await.unwrap()["agentIds"],
+        s.instance_fixture(&instance).await.unwrap()["agentIds"],
         json!([MAIN_AGENT_ID])
     );
 }
@@ -467,7 +441,7 @@ async fn merge_http_is_owner_only_and_both_mcp_interfaces_have_the_same_effect()
                 );
                 assert!(
                     s.store
-                        .get("agents", source["id"].as_str().unwrap())
+                        .agent_snapshot(source["id"].as_str().unwrap())
                         .await
                         .unwrap()
                         .is_some()
@@ -475,7 +449,7 @@ async fn merge_http_is_owner_only_and_both_mcp_interfaces_have_the_same_effect()
                 ("/mcp", common::relay_fixture::grant(&s, &["manage"]).await)
             } else {
                 let main = s
-                    .agent(
+                    .agent_fixture(
                         json!({ "name": "Omni", "access": { "installation": true } }),
                         Some(MAIN_AGENT_ID),
                     )
@@ -488,12 +462,16 @@ async fn merge_http_is_owner_only_and_both_mcp_interfaces_have_the_same_effect()
                     .unwrap();
                 let caller = s
                     .store
-                    .patch_run(
+                    .change_run(
                         caller["id"].as_str().unwrap(),
-                        json!({ "status": RunStatus::Running }),
+                        cairn_installation::runs::RunChanges {
+                            status: Some(RunStatus::Running),
+                            ..Default::default()
+                        },
                     )
                     .await
                     .unwrap();
+                let caller = s.store.run(&caller.id).await.unwrap();
                 let configuration = s.mcps.run_configuration(&s, &caller).await.unwrap();
                 (
                     "/mcp-installation",
@@ -510,17 +488,79 @@ async fn merge_http_is_owner_only_and_both_mcp_interfaces_have_the_same_effect()
         };
         assert_eq!(response["deleted"], true, "{transport}: {response}");
         assert_eq!(
-            s.get("tasks", existing["id"].as_str().unwrap())
+            s.mission_snapshot_fixture(existing["id"].as_str().unwrap())
                 .await
                 .unwrap()["agentId"],
             MAIN_AGENT_ID
         );
         assert!(
             s.store
-                .get("agents", source["id"].as_str().unwrap())
+                .agent_snapshot(source["id"].as_str().unwrap())
                 .await
                 .unwrap()
                 .is_none()
         );
     }
+}
+
+#[tokio::test]
+async fn merge_waits_for_scheduled_admission_instead_of_dropping_a_due_occurrence() {
+    use std::{future::Future, task::Poll};
+
+    let (_root, s, source) = fixture().await;
+    let mut task = task(&s, &source).await;
+    task["cron"] = "* * * * *".into();
+    task["nextRun"] = 1.into();
+    s.store.put_mission_fixture(task.clone()).await.unwrap();
+    let entered = Arc::new(tokio::sync::Semaphore::new(0));
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let first = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let app = axum::Router::new().route("/api/relay/fixture/task-authors", axum::routing::get({
+        let entered = entered.clone(); let release = release.clone();
+        move || { let entered=entered.clone(); let release=release.clone(); let first=first.clone(); async move {
+            if first.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                entered.add_permits(1); release.acquire().await.unwrap().forget();
+            }
+            axum::Json(json!({"owner":{"account_id":"fixture-owner","access_id":"fixture-owner"},"members":[]}))
+        } }
+    }));
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    tokio::fs::write(
+        s.config.data_dir.join("installation-relay/identity.json"),
+        json!({"origin":origin,"installationId":"fixture","token":"fixture-only"}).to_string(),
+    )
+    .await
+    .unwrap();
+    let scheduled = {
+        let service = s.clone();
+        tokio::spawn(async move { service.schedule().await })
+    };
+    entered.acquire().await.unwrap().forget();
+    let merging = s.merge_agents_fixture(input(&source));
+    tokio::pin!(merging);
+    std::future::poll_fn(|cx| {
+        assert!(merging.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    release.add_permits(1);
+    scheduled.await.unwrap().unwrap();
+    assert_eq!(merging.await.unwrap_err().status, 409);
+    server.abort();
+    let runs = s.store.read(|db| db.active()).await.unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0]["snapshot"]["agent"]["id"], source["id"]);
+    assert_eq!(runs[0]["taskId"], task["id"]);
+    assert!(
+        s.mission_snapshot_fixture(task["id"].as_str().unwrap())
+            .await
+            .unwrap()["nextRun"]
+            .as_i64()
+            .unwrap()
+            > 1
+    );
 }

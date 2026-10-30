@@ -15,14 +15,16 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
+import build.cairn.contracts.AgentInput
+import build.cairn.contracts.ListAgentsInput
+import build.cairn.contracts.generateAgentAvatar
+import build.cairn.contracts.getAgentAvatarConfiguration
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 
 internal class PortraitLoader(private val api: CairnApi) {
     private val cache = LruCache<String, ImageBitmap>(48)
@@ -90,12 +92,7 @@ internal fun AgentPortraitEditor(vm: CairnViewModel, state: Workspace, initial: 
     val context = LocalContext.current
     LaunchedEffect(vm.api) {
         try {
-            configured =
-                wireJson
-                    .parseToJsonElement(vm.api.request("GET", "/agent-avatars"))
-                    .jsonObject["configured"]
-                    ?.jsonPrimitive
-                    ?.content == "true"
+            configured = vm.api.getAgentAvatarConfiguration(ListAgentsInput()).configured
         } catch (e: Exception) {
             if (e is CancellationException) throw e
         }
@@ -139,7 +136,7 @@ internal fun AgentPortraitEditor(vm: CairnViewModel, state: Workspace, initial: 
                         enabled = !state.busy && agent.avatar?.status != "generating",
                         onClick = {
                             vm.perform {
-                                api.request("POST", "/agents/${segment(agent.id)}/avatar/generate")
+                                api.generateAgentAvatar(AgentInput(agent.id))
                                 refreshAgentPortraits()
                             }
                         },

@@ -49,8 +49,16 @@ abstract class CacheRefreshCases {
             fun frame(id: Long): String {
                 val batch =
                     LiveBatch(
-                        listOf(RunEvent(id, id, "chat.user", "Output $id", runId = "fixture")),
-                        LiveState(chat = Chat("cache-refresh")),
+                        listOf(
+                            RunEvent(
+                                id = id,
+                                createdAt = id,
+                                type = "chat.user",
+                                text = "Output $id",
+                                runId = "fixture",
+                            )
+                        ),
+                        LiveState(chat = Chat(id = "f59b275f-667e-58c8-a788-33a78b29fa25")),
                         false,
                         false,
                         "v1:fixture:1",
@@ -64,7 +72,9 @@ abstract class CacheRefreshCases {
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val endpoint = request.requestUrl!!.encodedPath
-                        if (endpoint.endsWith("/chats/cache-refresh/stream")) {
+                        if (
+                            endpoint.endsWith("/chats/f59b275f-667e-58c8-a788-33a78b29fa25/stream")
+                        ) {
                             if (streams.getAndIncrement() == 0)
                                 return MockResponse()
                                     .setHeader("Content-Type", "text/event-stream")
@@ -82,7 +92,29 @@ abstract class CacheRefreshCases {
                                 "/api/account/session" -> beaconAccountFixture()
                                 "/api/installations" -> beaconInstallationsFixture()
                                 "/api/installations/fixture/api/overview" -> "{}"
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
+                                    else "[]"
                             }
                         return MockResponse().setBody(body)
                     }
@@ -118,7 +150,12 @@ abstract class CacheRefreshCases {
                             ready = true
                         }
                         if (ready) {
-                            val live = rememberLive(vm, workspace, "/chats/cache-refresh/stream")
+                            val live =
+                                rememberLive(
+                                    vm,
+                                    workspace,
+                                    "/chats/f59b275f-667e-58c8-a788-33a78b29fa25/stream",
+                                )
                             Text(live.events.lastOrNull()?.text ?: "Waiting")
                         }
                     }

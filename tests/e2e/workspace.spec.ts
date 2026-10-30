@@ -14,6 +14,7 @@ test('sign in, author skills, schedule work, inspect results, and sign out', asy
   page,
   workspace,
 }) => {
+  test.setTimeout(120000)
   const errors: string[] = []
   page.on('pageerror', error => errors.push(error.message))
   page.on('console', (message) => {
@@ -30,6 +31,7 @@ test('sign in, author skills, schedule work, inspect results, and sign out', asy
   })
   await page.goto(workspacePath('/'))
   await page.emulateMedia({ colorScheme: 'dark' })
+  await page.waitForFunction(() => performance.getEntriesByType('paint').some(entry => entry.name === 'first-paint'))
   await page.screenshot({ path: 'test-results/theme-setup-desktop.png', fullPage: true, animations: 'disabled' })
   await page.setViewportSize({ width: 320, height: 568 })
   await page.screenshot({ path: 'test-results/theme-setup-mobile.png', fullPage: true, animations: 'disabled' })
@@ -48,9 +50,13 @@ test('sign in, author skills, schedule work, inspect results, and sign out', asy
     .getByRole('dialog')
     .getByLabel('Name', { exact: true })
     .fill('Design system')
+  await page.getByLabel('Base branch').fill('')
+  await expect(page.getByLabel('Base branch')).toHaveValue('')
+  await page.getByLabel('Base branch').fill('main')
   await page.getByLabel('Project directory').fill('/does-not-exist')
   await page.getByRole('button', { name: 'Save project' }).click()
-  await expect(page.getByRole('alert')).toContainText('does not exist')
+  // Direct requests have a 35s deadline; await the business error, not a latency target.
+  await expect(page.getByRole('alert')).toContainText('does not exist', { timeout: 40000 })
   await page.emulateMedia({ colorScheme: 'dark' })
   await page.screenshot({ path: 'test-results/theme-validation-error.png', animations: 'disabled' })
   await page.emulateMedia({ colorScheme: 'light' })
@@ -282,10 +288,29 @@ test('approves a scoped OAuth connector and revokes its grant', async ({
 
 test('appearance follows the device, persists overrides, syncs tabs and paints before the app', async ({ page, context }, testInfo) => {
   await page.emulateMedia({ colorScheme: 'dark' })
+  await page.route('**/assets/*.js', route => route.abort())
   await page.goto(workspacePath('/'))
   const root = page.locator('html')
   await expect(root).toHaveAttribute('data-theme', 'dark')
   await expect(root).toHaveAttribute('data-theme-preference', 'system')
+  await expect(page.locator('#app')).toBeEmpty()
+  await page.waitForFunction(() => performance.getEntriesByType('paint').some(entry => entry.name === 'first-paint'))
+  expect(await root.evaluate(el => getComputedStyle(el).backgroundColor)).toBe('rgb(15, 15, 20)')
+  const beforeApp = await page.screenshot({ path: testInfo.outputPath('dark-before-app.png'), fullPage: true, animations: 'disabled' })
+  const canvasPixel = await page.evaluate(async (png) => {
+    const image = await createImageBitmap(new Blob([new Uint8Array(png)], { type: 'image/png' }))
+    const canvas = new OffscreenCanvas(1, 1)
+    const context = canvas.getContext('2d')!
+    context.drawImage(image, 0, 0)
+    const pixel = Array.from(context.getImageData(0, 0, 1, 1).data)
+    image.close()
+    return pixel
+  }, Array.from(beforeApp))
+  expect(canvasPixel).toEqual([15, 15, 20, 255])
+
+  await page.unroute('**/assets/*.js')
+  await page.reload()
+  await expect(page.getByLabel('Email address')).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('login-dark-desktop.png'), fullPage: true, animations: 'disabled' })
   await page.setViewportSize({ width: 320, height: 568 })
   await page.screenshot({ path: testInfo.outputPath('login-dark-mobile.png'), fullPage: true, animations: 'disabled' })
@@ -340,7 +365,7 @@ test('dark appearance settings, empty states and connection sign-in feedback', a
   await page.keyboard.press('Escape')
   await expect(page.locator('.theme-popover')).not.toBeVisible()
   await expect(page.getByRole('button', { name: 'Appearance: dark', exact: true })).toBeFocused()
-  await page.route('**/api/tasks', route => route.fulfill({ json: [] }))
+  await page.route('**/api/tasks', route => route.fulfill({ json: { tasks: [] } }))
   await page.goto(workspacePath('/tasks'))
   await expect(page.getByRole('heading', { name: 'No missions yet', exact: true })).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('empty-tasks.png'), fullPage: true, animations: 'disabled' })

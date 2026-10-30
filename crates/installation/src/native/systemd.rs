@@ -66,6 +66,17 @@ pub async fn identity() -> Result<Identity> {
         ));
     }
     require_controllers(Path::new("/sys/fs/cgroup")).await?;
+    let version = output("/usr/bin/systemctl", &["--version"]).await?;
+    let supported = String::from_utf8_lossy(&version.stdout)
+        .split_whitespace()
+        .nth(1)
+        .and_then(|value| value.parse::<u32>().ok())
+        .is_some_and(|version| version >= 255);
+    if !version.status.success() || !supported {
+        return Err(Error::unavailable(
+            "Native rootless enclaves require systemd 255 or newer; older versions force NoNewPrivileges on the identity-mapping bootstrap.",
+        ));
+    }
     let user = std::env::var("CAIRN_NATIVE_USER").unwrap_or_else(|_| "cairn-workload".into());
     if !user
         .bytes()
@@ -134,19 +145,9 @@ pub(super) async fn apply_budget(budget: &crate::microvm::budget::Budget) -> Res
             "Could not start the shared native workload slice.",
         ));
     }
-    let usage = output(
-        "/usr/bin/systemctl",
-        &["show", &slice, "--property=MemoryCurrent", "--value"],
-    )
-    .await?;
-    let current = std::str::from_utf8(&usage.stdout)
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok());
-    let current = current
-        .filter(|value| *value != u64::MAX)
-        .ok_or_else(|| Error::unavailable("Native shared memory usage is unavailable."))?;
+    let current = memory_current().await?;
     let memory = budget.limits.memory_mi_b.saturating_mul(1_048_576);
-    if !usage.status.success() || current > memory {
+    if current > memory {
         return Err(Error::conflict(
             "Shared native RAM budget is below current usage.",
         ));
@@ -160,6 +161,46 @@ pub(super) async fn apply_budget(budget: &crate::microvm::budget::Budget) -> Res
         ));
     }
     Ok(())
+}
+
+/// Actual aggregate workload RAM; freezing peers does not free their memory.
+pub(super) async fn memory_current() -> Result<u64> {
+    let slice = workload_slice()?;
+    let usage = output(
+        "/usr/bin/systemctl",
+        &["show", &slice, "--property=MemoryCurrent", "--value"],
+    )
+    .await?;
+    if !usage.status.success() {
+        return Err(Error::unavailable(
+            "Native shared memory usage is unavailable.",
+        ));
+    }
+    std::str::from_utf8(&usage.stdout)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value != u64::MAX)
+        .ok_or_else(|| Error::unavailable("Native shared memory usage is unavailable."))
+}
+
+pub(super) async fn wait_started(
+    attempt: &str,
+    stop: &tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    let unit = unit(attempt)?;
+    let arguments = ["show", &unit, "--property=ActiveState", "--value"];
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            tokio::select! {
+                () = stop.cancelled() => return Err(Error::conflict("Native execution stopped before CPU control was ready.")),
+                result = output("/usr/bin/systemctl", &arguments) => {
+                    let result = result?;
+                    if result.status.success() && result.stdout == b"active\n" { return Ok(()); }
+                },
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }).await.map_err(|_| Error::timeout("Native workload startup was not confirmed."))?
 }
 
 fn budget_properties(budget: &crate::microvm::budget::Budget) -> Vec<String> {
@@ -309,6 +350,9 @@ pub struct Launch<'a> {
     pub workspace: &'a Path,
     pub output: &'a Path,
     pub identity: &'a Identity,
+    pub conversation: Option<&'a super::identity::Identity>,
+    pub docker_data: Option<&'a Path>,
+    pub docker_runtime: Option<&'a Path>,
     pub temporary: &'a Path,
     pub auth: Option<&'a Path>,
 }
@@ -330,7 +374,14 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
         "--collect".into(),
         "--service-type=exec".into(),
         format!("--unit={}", unit(launch.id)?),
-        format!("--uid={}", launch.identity.user),
+        format!(
+            "--uid={}",
+            launch
+                .conversation
+                .map_or(launch.identity.user.as_str(), |identity| identity
+                    .user
+                    .as_str())
+        ),
     ];
     let administrator = launch.plan["nativeMode"]["mode"] == "administrator";
     let mut property = |value: String| args.push(format!("--property={value}"));
@@ -338,13 +389,6 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
         "KillMode=control-group",
         "TimeoutStopSec=10s",
         "SendSIGKILL=yes",
-        "NoNewPrivileges=yes",
-        "CapabilityBoundingSet=",
-        "RestrictSUIDSGID=yes",
-        "ProtectKernelTunables=yes",
-        "ProtectKernelModules=yes",
-        "ProtectControlGroups=yes",
-        "ProtectClock=yes",
         "ProtectProc=invisible",
         "ProtectSystem=strict",
         "MountAPIVFS=yes",
@@ -368,6 +412,36 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
             property(value.into());
         }
     }
+    if launch.conversation.is_some() {
+        // RootlessKit's newuidmap/newgidmap need their standard setuid transition
+        // under the unique host account. The immutable namespace entrypoint sets
+        // NNP before any daemon or engine is launched and empties the engine's
+        // bounding set. Proc/sys/cgroup read-only mounts are installed inside
+        // the new namespace: inherited locked masks prevent a private procfs.
+        property("NoNewPrivileges=no".into());
+        property("CapabilityBoundingSet=~CAP_SYS_MODULE CAP_SYS_RAWIO CAP_SYS_TIME CAP_WAKE_ALARM CAP_SYS_BOOT".into());
+        property("SystemCallFilter=~@clock @module @raw-io @reboot @swap".into());
+        for group in ["render", "video"] {
+            if std::fs::read_to_string("/etc/group")?
+                .lines()
+                .any(|line| line.starts_with(&format!("{group}:")))
+            {
+                property(format!("SupplementaryGroups={group}"));
+            }
+        }
+    } else if !administrator {
+        for value in [
+            "ProtectKernelTunables=yes",
+            "ProtectKernelModules=yes",
+            "ProtectControlGroups=yes",
+            "ProtectClock=yes",
+        ] {
+            property(value.into());
+        }
+        property("NoNewPrivileges=yes".into());
+        property("CapabilityBoundingSet=".into());
+        property("RestrictSUIDSGID=yes".into());
+    }
     property(format!(
         "BindsTo={} {}",
         supervisor_unit()?,
@@ -384,27 +458,19 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
     if !administrator {
         property(format!("RootDirectory={}", path_property(launch.root)?));
     } else {
-        // The entrypoint exists only after BindReadOnlyPaths is applied. Tell
-        // systemd-run to leave executable resolution to the service manager,
-        // as it already does for protected units with RootDirectory.
         property("ExecSearchPath=/run/cairn-entrypoint".into());
-        // Keep the same logical workspace/session paths even when their host
-        // ancestors are owner-private. Administrator already grants full host
-        // access; read/search capability avoids changing those directories or
-        // replacing them with a namespace scaffold. Writes still use sudo.
         property("AmbientCapabilities=CAP_DAC_READ_SEARCH".into());
     }
-    if administrator {
-        // Ambient capabilities become effective at execve, after systemd's
-        // own chdir. runner-entry then uses the unchanged plan.cwd when it
-        // starts the engine, with read/search capability already effective.
-        property("WorkingDirectory=/".into());
-    } else {
-        property(format!(
-            "WorkingDirectory={}",
+    // Namespace entry and administrator ambient capabilities require chdir
+    // after exec; runner-entry ultimately uses the unchanged agent-visible cwd.
+    property(format!(
+        "WorkingDirectory={}",
+        if administrator || launch.conversation.is_some() {
+            "/".into()
+        } else {
             path_property(Path::new(text(launch.plan, "cwd")))?
-        ));
-    }
+        }
+    ));
     for source in [
         "/usr",
         "/bin",
@@ -419,6 +485,8 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
         "/etc/nsswitch.conf",
         "/etc/passwd",
         "/etc/group",
+        "/etc/subuid",
+        "/etc/subgid",
         "/etc/hosts",
         "/etc/resolv.conf",
         "/etc/vulkan",
@@ -485,6 +553,37 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
         path_property(launch.temporary)?
     ));
     property("ReadWritePaths=+/tmp".into());
+    if let (Some(docker_data), Some(docker_runtime)) = (launch.docker_data, launch.docker_runtime) {
+        for (source, target) in [
+            (docker_data.to_owned(), "/var/lib/cairn-docker"),
+            (docker_runtime.join("runtime"), "/run/cairn-docker"),
+            (docker_runtime.join("rootlesskit"), "/run/cairn-rootlesskit"),
+            (docker_runtime.join("plugins"), "/run/docker/plugins"),
+        ] {
+            property(format!("BindPaths={}:{}", path_property(&source)?, target));
+            property(format!("ReadWritePaths=+{target}"));
+        }
+        let tools = std::env::var("CAIRN_NATIVE_DOCKER_TOOLS")
+            .unwrap_or_else(|_| "/opt/cairn-native/docker-tools/v2".into());
+        property(format!(
+            "BindReadOnlyPaths={}:/opt/cairn-docker",
+            path_property(Path::new(&tools))?
+        ));
+        let channel = launch
+            .data
+            .join("runs")
+            .join(text(launch.plan, "runId"))
+            .join("home")
+            .join(crate::microvm::mcp::SOCKET);
+        if channel.exists() {
+            property(format!(
+                "BindReadOnlyPaths={}:/run/cairn-mcp.sock",
+                path_property(&channel)?
+            ));
+        }
+        property("DeviceAllow=/dev/net/tun rw".into());
+        property("BindPaths=/dev/net/tun".into());
+    }
     let bindings: Vec<super::home::Binding> = serde_json::from_value(
         launch
             .plan
@@ -568,14 +667,44 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
             property(format!("DeviceAllow={} rw", path_property(&device)?));
         }
     }
-    args.extend([
-        "--setenv=HOME=/home/node",
-        "--setenv=CAIRN_AUTH_SOCKET=/run/cairn-auth.sock",
-        "--setenv=PATH=/opt/cairn-native-tools/bin:/run/cairn-entrypoint:/home/node/.local/bin:/usr/local/bin:/usr/bin:/bin",
-        "--",
-        "/run/cairn-entrypoint/cairn",
-        "runner-entry",
-    ].map(String::from));
+    args.extend(
+        [
+            "--setenv=HOME=/home/node",
+            "--setenv=CAIRN_AUTH_SOCKET=/run/cairn-auth.sock",
+        ]
+        .map(String::from),
+    );
+    if launch.conversation.is_some() {
+        args.extend(
+            [
+                // Helpers execute before namespace entry and before NNP. Never
+                // search agent-writable directories, including for iptables.
+                "--setenv=PATH=/opt/cairn-docker/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "--setenv=HOME=/run/cairn-docker",
+                "--setenv=XDG_RUNTIME_DIR=/run/cairn-docker",
+                "--",
+                "/opt/cairn-docker/bin/rootlesskit",
+                "--state-dir=/run/cairn-rootlesskit",
+                "--subid-source=static",
+                "--net=slirp4netns",
+                "--disable-host-loopback",
+                "--port-driver=none",
+                "--pidns",
+                "--ipcns",
+                "--utsns",
+                "--copy-up=/etc",
+                "--propagation=rslave",
+                "/run/cairn-entrypoint/cairn",
+                "native-enclave",
+            ]
+            .map(String::from),
+        );
+    } else {
+        args.extend([
+            "--setenv=PATH=/opt/cairn-native-tools/bin:/run/cairn-entrypoint:/home/node/.local/bin:/usr/local/bin:/usr/bin:/bin",
+            "--", "/run/cairn-entrypoint/cairn", "runner-entry",
+        ].map(String::from));
+    }
     Ok(args)
 }
 
@@ -589,53 +718,32 @@ pub fn spawn(launch: &Launch<'_>) -> Result<Child> {
         .map_err(Error::from)
 }
 
-pub fn runtimes() -> Result<Vec<String>> {
-    Ok(installed_tools()?
-        .into_iter()
-        .map(|(runtime, _)| runtime)
-        .collect())
-}
-
 pub fn tools(runtime: &str) -> Result<PathBuf> {
-    installed_tools()?
-        .into_iter()
-        .find(|(candidate, _)| candidate == runtime)
-        .map(|(_, path)| path)
-        .ok_or_else(|| {
-            Error::unavailable(
-                "The pinned coding-engine runtime is not installed on this native node.",
-            )
-        })
-}
-
-fn installed_tools() -> Result<Vec<(String, PathBuf)>> {
     let current = PathBuf::from(
         std::env::var("CAIRN_NATIVE_TOOLS")
-            .map_err(|_| Error::bad("Missing pinned native tool bundle."))?,
+            .map_err(|_| Error::bad("Missing native tool bundle."))?,
     );
-    let versions = current
+    let release_path = current
         .parent()
-        .and_then(Path::parent)
-        .ok_or_else(|| Error::bad("Invalid native tool bundle path."))?;
-    let mut runtimes = Vec::new();
-    for entry in std::fs::read_dir(versions)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() || entry.file_name().to_string_lossy().starts_with('.') {
-            continue;
-        }
-        let release: Value = match std::fs::read(entry.path().join("release.json")) {
-            Ok(bytes) => serde_json::from_slice(&bytes)?,
-            Err(_) => continue,
-        };
-        if release["os"] != "linux" || release["arch"] != "x86_64" {
-            continue;
-        }
-        let path = entry.path().join("tools");
-        if path.join("manifest.json").is_file() {
-            runtimes.push((text(&release, "runtimeId").to_owned(), path));
-        }
+        .ok_or_else(|| Error::bad("Invalid native tool bundle path."))?
+        .join("release.json");
+    let release: Value = serde_json::from_slice(&std::fs::read(release_path)?)?;
+    let expected_runtime = crate::nodes::component_runtime();
+    if release["runtimeId"] != expected_runtime
+        || release["os"] != "linux"
+        || release["arch"] != "x86_64"
+        || !current.join("manifest.json").is_file()
+    {
+        return Err(Error::conflict(
+            "Native tool version mismatch; reinstall the current component bundle.",
+        ));
     }
-    Ok(runtimes)
+    if runtime != expected_runtime {
+        return Err(Error::unavailable(
+            "The pinned coding-engine runtime is not installed on this native node.",
+        ));
+    }
+    Ok(current)
 }
 
 /// Freeze the entire workload, including descendants. An acknowledged command

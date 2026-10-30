@@ -1,4 +1,4 @@
-import type { ChatView, ChatWakeup } from '../../../packages/contracts/chats'
+import type { ChatView, ChatWakeup, WaitCondition } from '../../../packages/contracts/chats'
 import type { RunEvent } from '../../../packages/contracts/contracts'
 import { describe, expect, it } from 'vitest'
 import sample from '../../../tests/fixtures/activity-events.json'
@@ -10,6 +10,7 @@ import {
   timeLeft,
   waitCountdown,
   waitLeft,
+  waitMembers,
   waitOutcome,
   waitProgress,
   waitStatus,
@@ -18,12 +19,12 @@ import {
 import { filOf } from '../src/signal'
 
 const sha = '0b2ddce3a1b2c3d4e5f60718293a4b5c6d7e8f90'
-const checks = {
-  type: 'github_pr_checks',
+const checks: Extract<WaitCondition, { type: 'plugin' }> = {
+  type: 'plugin',
+  conditionType: 'github_pr_checks',
   pluginId: 'github',
   projectId: 'project',
-  prNumber: 193,
-  headSha: sha,
+  input: { prNumber: 193, headSha: sha },
 }
 const display = {
   title: 'Waiting for required checks on PR #193',
@@ -45,6 +46,16 @@ function wakeup(values: Partial<ChatWakeup> = {}): ChatWakeup {
 
 function chat(id: string, values: Partial<ChatView> = {}): ChatView {
   return {
+    questions: [],
+    run: null,
+    messages: [],
+    slug: '',
+    revision: '',
+    lifecycle: 'active',
+    sessionRestartRequested: false,
+    canRequestNewSession: false,
+    unread: false,
+
     id,
     title: id,
     agentId: 'main',
@@ -54,6 +65,9 @@ function chat(id: string, values: Partial<ChatView> = {}): ChatView {
     createdAt: 1,
     updatedAt: 1,
     pendingQuestions: 0,
+    pendingSideQuestions: 0,
+    canAskSideQuestion: false,
+    sideQuestions: [],
     agentName: 'Cairn',
     projectName: null,
     status: 'succeeded',
@@ -230,6 +244,7 @@ describe('scheduled waits', () => {
       type: 'github_workflow',
       runId: 99,
       conclusion: 'success',
+      immediate: true,
     }
     const entries = activityEntries([
       event('chat.wait', scheduled as unknown as Record<string, unknown>),
@@ -279,7 +294,12 @@ describe('scheduled waits', () => {
 
   it('keeps an immediate result apart from the wait it replaced', () => {
     const replaced = wakeup({ condition: { type: 'run_finished', runId: 'first' } })
-    const immediate = { state: 'completed', type: 'run_finished', status: 'succeeded' }
+    const immediate = {
+      state: 'completed',
+      type: 'run_finished',
+      status: 'succeeded',
+      immediate: true,
+    }
     const entries = activityEntries([
       event('chat.wait', replaced as unknown as Record<string, unknown>),
       event('chat.wait_ready', immediate, 'Wait condition already completed'),
@@ -288,26 +308,6 @@ describe('scheduled waits', () => {
       { wakeup: replaced, ended: 'replaced' },
       { wakeup: null, observation: immediate },
     ])
-    // Its hidden call still gives the card the agent's reason, whichever way the provider records it.
-    for (const args of [{ reason: 'Merge after CI' }, JSON.stringify({ reason: 'Merge after CI' })]) {
-      const [card] = activityEntries([
-        toolCall('wait_for', 'cairn_workspace', { arguments: args }),
-        event('chat.wait_ready', immediate, 'Wait condition already completed'),
-      ], true)
-      expect(card).toMatchObject({ kind: 'wait', wait: { wakeup: null, reason: 'Merge after CI' } })
-    }
-
-    // A call announced without its arguments never borrows an earlier call's reason.
-    const later = activityEntries([
-      toolCall('sleep', 'cairn_workspace', { arguments: { reason: 'Earlier delay' } }),
-      event('chat.sleep', wakeup() as unknown as Record<string, unknown>),
-      event('chat.wakeup', wakeup() as unknown as Record<string, unknown>),
-      toolCall('wait_for', 'cairn_workspace', { arguments: {} }),
-      event('chat.wait_ready', immediate, 'Wait condition already completed'),
-    ], true)
-    expect(later.at(-1)).toMatchObject({ kind: 'wait', wait: { wakeup: null } })
-    expect(later.at(-1)).not.toHaveProperty('wait.reason')
-    // A call's later update cannot lend its reason again once a card used it.
     const call = (type: string, callId: string, reason: string) => event(type, {
       item: {
         id: callId,
@@ -318,14 +318,6 @@ describe('scheduled waits', () => {
         arguments: { reason },
       },
     })
-    const raced = activityEntries([
-      call('item.started', 'c1', 'First'),
-      event('chat.wait_ready', immediate, 'Wait condition already completed'),
-      call('item.completed', 'c1', 'First'),
-      event('chat.wait_ready', immediate, 'Wait condition already completed'),
-      call('item.started', 'c2', 'Second'),
-    ], true)
-    expect(raced.map(entry => entry.kind === 'wait' ? entry.wait.reason : undefined)).toEqual(['First', undefined])
     // Recorded with the result, the reason no longer depends on when the call is reported.
     const recorded = activityEntries([
       event('chat.wait_ready', { ...immediate, reason: 'First' }, 'Wait condition already completed'),
@@ -334,16 +326,6 @@ describe('scheduled waits', () => {
       call('item.started', 'c2', 'Second'),
     ], true)
     expect(recorded.map(entry => entry.kind === 'wait' ? entry.wait.reason : undefined)).toEqual(['First', 'Second'])
-    // Item IDs may repeat in a later turn, whose call lends its own reason again.
-    const repeated = activityEntries([
-      call('item.started', 'item_1', 'First'),
-      event('chat.wait', wakeup() as unknown as Record<string, unknown>),
-      event('chat.wakeup', wakeup() as unknown as Record<string, unknown>),
-      event('turn.started', {}),
-      call('item.started', 'item_1', 'Second'),
-      event('chat.wait_ready', immediate, 'Wait condition already completed'),
-    ], true)
-    expect(repeated.at(-1)).toMatchObject({ kind: 'wait', wait: { wakeup: null, reason: 'Second' } })
     // A resumption whose scheduling is unloaded keeps one card, even if it repeats.
     const resumed = activityEntries([
       event('chat.wakeup', wakeup() as unknown as Record<string, unknown>),
@@ -458,7 +440,7 @@ describe('scheduled waits', () => {
 })
 
 describe('shared wait_ready corpus', () => {
-  const immediate = [true, true, false, false, true, false]
+  const immediate = [true, false]
   for (const [index, raw] of sample.slice(15).entries()) {
     it(`normalizes case ${index + 1} and preserves the pending wait`, () => {
       const ready: RunEvent = {
@@ -509,4 +491,108 @@ it('keeps mission wait events in one live card and resumes without a conversatio
     settled: true,
     canPause: false,
   })).toMatchObject({ current: true, pending: true, pausable: false })
+})
+
+describe('grouped waits', () => {
+  const runId = '11111111-2222-4333-8444-555555555555'
+  const group = {
+    type: 'group' as const,
+    mode: 'all' as const,
+    conditions: [{ type: 'run_finished' as const, runId }, checks],
+  }
+  const failed = {
+    state: 'completed',
+    type: 'run_finished',
+    runId,
+    status: 'failed',
+  }
+  const passed = {
+    state: 'completed',
+    type: 'github_pr_checks',
+    pluginId: 'github',
+    display: { tone: 'ok', title: 'Required checks passed', detail: '' },
+  }
+
+  it('names the group by its size and how many results arrived', () => {
+    const pending = wakeup({ condition: group, members: [{ observation: failed }, { display, nextCheckAt: 30_000 }] })
+    expect(waitTarget(pending)).toEqual({
+      kind: 'group',
+      title: 'Waiting for 2 results',
+      short: '1 of 2 results',
+      details: [],
+    })
+    expect(waitTarget(wakeup({ condition: group, members: [{}, {}] })).short).toBe('2 results')
+    const any = wakeup({ condition: { ...group, mode: 'any' }, members: [{}, {}] })
+    expect(waitTarget(any)).toMatchObject({ title: 'Waiting for the first of 2 results', short: 'First of 2 results' })
+    expect(waitCountdown(pending, 0)).toBe('up to 30 min')
+  })
+
+  it('lists each condition with its own progress', () => {
+    const members = waitMembers(wakeup({ condition: group, members: [{ observation: failed }, { display, nextCheckAt: 30_000, lastError: 'Temporarily unavailable' }] }))
+    expect(members).toEqual([
+      {
+        kind: 'run',
+        title: 'Cairn run',
+        details: ['11111111'],
+        runId,
+        outcome: { tone: 'error', title: 'The run failed', detail: '' },
+      },
+      {
+        kind: 'condition',
+        title: 'PR #193 checks',
+        details: ['0b2ddce'],
+        outcome: null,
+        nextCheckAt: 30_000,
+        lastError: 'Temporarily unavailable',
+      },
+    ])
+    // Without its plugin's words, a condition reads as its type.
+    expect(waitMembers(wakeup({ condition: group, members: [] }))[1]!.title).toBe('Github pr checks')
+  })
+
+  it('reads the final results from the observation, also without a wakeup', () => {
+    const observation = {
+      state: 'completed',
+      type: 'group',
+      mode: 'all',
+      members: [{ condition: group.conditions[0], result: failed }, { condition: checks, result: passed }],
+    }
+    const members = waitMembers(wakeup({ condition: group, members: [{}, { display }] }), observation)
+    expect(members.map(member => member.outcome?.title)).toEqual(['The run failed', 'Required checks passed'])
+    expect(waitMembers(null, observation).map(member => member.title)).toEqual(['Cairn run', 'Github pr checks'])
+    expect(observedTarget(observation)).toBe('2 results')
+    expect(observedTarget({ ...observation, mode: 'any' })).toBe('First of 2 results')
+  })
+
+  it('sums up a group by its most serious result, and never assumes missing ones', () => {
+    const observation = (state: string, mode: string, results: unknown[]) => ({
+      state,
+      type: 'group',
+      mode,
+      members: results.map(result => ({ condition: checks, result })),
+    })
+    expect(waitOutcome(observation('completed', 'all', [failed, passed]))).toEqual({ tone: 'error', title: 'All 2 results in', detail: '1 failed · 1 succeeded' })
+    expect(waitOutcome(observation('completed', 'all', [passed, passed]))).toEqual({ tone: 'ok', title: 'All 2 results in', detail: '' })
+    expect(waitOutcome(observation('completed', 'any', [null, passed]))).toEqual({ tone: 'ok', title: 'First result · Required checks passed', detail: '' })
+    expect(waitOutcome(observation('timed_out', 'all', [passed, null]))).toEqual({ tone: 'warning', title: 'Deadline reached', detail: '1 of 2 results' })
+    expect(waitOutcome(observation('timed_out', 'any', [null, null]))).toEqual({ tone: 'warning', title: 'Deadline reached', detail: 'No results yet' })
+  })
+})
+
+it('includes delegated task failures in group summaries and distinguishes deleted tasks', () => {
+  const failed = {
+    state: 'completed',
+    type: 'task_finished',
+    status: 'failed',
+    error: 'Review failed',
+  }
+  expect(waitOutcome(failed)).toEqual({ tone: 'error', title: 'The task failed', detail: 'Review failed' })
+  expect(waitOutcome({
+    state: 'completed',
+    type: 'group',
+    mode: 'all',
+    members: [{ result: failed }, { result: { ...failed, status: 'succeeded' } }],
+  }))
+    .toEqual({ tone: 'error', title: 'All 2 results in', detail: '1 failed · 1 succeeded' })
+  expect(waitOutcome({ ...failed, status: 'deleted', error: null })).toEqual({ tone: 'warning', title: 'The task was deleted', detail: '' })
 })

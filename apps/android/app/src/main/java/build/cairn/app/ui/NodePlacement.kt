@@ -49,7 +49,8 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
     var saved by remember(run.id) { mutableStateOf<String?>(null) }
     var privilegeError by remember(run.id) { mutableStateOf(false) }
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(run.id) {
+    var placementRevision by remember(run.id) { mutableIntStateOf(0) }
+    LaunchedEffect(run.id, placementRevision) {
         try {
             placement = vm.api.get("/nodes/placement/${run.id}")
             mode =
@@ -125,7 +126,11 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
         run.backup?.error != null ||
             run.movementError != null ||
             run.storage?.waitingFor == "integrity"
-    val pending = dirty > 0 || run.backup?.status == "saving" || run.storage?.waitingFor != null
+    val pending =
+        dirty > 0 ||
+            run.backup?.status == "saving" ||
+            run.storage?.waitingFor != null ||
+            run.storage?.backupDegraded == true
     val sync =
         when {
             run.movementError != null -> "Déplacement en échec"
@@ -134,6 +139,8 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
             exclusive != null -> "Suspendue pour une réservation exclusive"
             run.nodeState != null -> nodeStates[run.nodeState] ?: run.nodeState
             run.capacityWaitUntil != null -> "En attente de capacité"
+            run.storage?.backupDegraded == true ->
+                "Synchronisation en retard · travail conservé sur cette node"
             run.backup?.status == "saving" -> "Synchronisation…"
             dirty > 0 -> "${formatBytes(dirty)} non synchronisés"
             // Native ublk disks synchronize while running like VM disks; only legacy file
@@ -266,7 +273,7 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
                     "Node fixe : aucune bascule automatique ailleurs.",
                     style = MaterialTheme.typography.bodySmall,
                 )
-            BackendMigration(vm, run.id)
+            BackendMigration(vm, run.id) { placementRevision++ }
             Text("Où elle tournera la prochaine fois", style = MaterialTheme.typography.titleSmall)
             SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
                 listOf("automatic" to "Automatique", "preferred" to "Préférer", "fixed" to "Fixer")

@@ -1,8 +1,10 @@
 use super::*;
+use crate::account_fixture::AccountFixtures;
 use crate::config::Config;
+use crate::run_fixture::DbRunFixture;
 use axum::{
-    Router,
-    body::Body,
+    Json, Router,
+    body::{Body, to_bytes},
     http::{Request, StatusCode},
     routing::post,
 };
@@ -25,7 +27,10 @@ fn tokens(endpoint: &str) -> Value {
 
 /// A queued conversation, which background work yields to.
 fn foreground_run() -> Value {
-    json!({ "id": "foreground", "taskId": "chat", "status": "queued", "createdAt": 1 })
+    json!({
+        "id": "foreground", "taskId": "chat", "status": "queued", "createdAt": 1,
+        "snapshot": { "agent": { "provider": "codex" } },
+    })
 }
 
 struct Fixture {
@@ -81,11 +86,13 @@ impl Fixture {
         let s = Service::new(config).await.unwrap();
         s.accounts.initialize(&s).await.unwrap();
         if configured {
-            let account = s
-                .accounts
-                .create(&s, Provider::Codex, "Portrait fixture")
-                .await
-                .unwrap();
+            let account = serde_json::to_value(
+                s.accounts
+                    .create(&s, Provider::Codex, "Portrait fixture")
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
             s.vault
                 .set(
                     &format!("codex-account:{}", text(&account, "id")),
@@ -107,6 +114,19 @@ impl Fixture {
     }
 
     async fn request(&self, method: &str, path: &str, bytes: Vec<u8>) -> Response {
+        let (method, path, bytes) = if method == "PUT" && path.ends_with("/avatar") {
+            let agent_id = path
+                .trim_start_matches("/api/agents/")
+                .trim_end_matches("/avatar");
+            (
+                "POST",
+                format!("{path}/upload"),
+                serde_json::to_vec(&json!({ "agentId": agent_id, "data": STANDARD.encode(bytes) }))
+                    .unwrap(),
+            )
+        } else {
+            (method, path.to_owned(), bytes)
+        };
         self.app
             .clone()
             .oneshot(
@@ -140,13 +160,16 @@ impl Fixture {
             "description": "Ship tested software",
             "instructions": "PRIVATE INSTRUCTIONS NEVER SENT",
         });
-        self.json("POST", "/api/agents", agent).await
+        self.json("POST", "/api/agents", json!({
+            "settings": { "exclusiveNodes": [], "plugins": [], "access": cairn_contracts::AccessPolicy::default(), "name": agent["name"], "description": agent["description"], "instructions": agent["instructions"] },
+            "review": {},
+        })).await
     }
 
     async fn wait(&self, id: &str, status: &str) -> Value {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                let agent = self.s.get("agents", id).await.unwrap();
+                let agent = self.s.agent_snapshot(id).await.unwrap();
                 if agent["avatar"]["status"] == status {
                     return agent;
                 }
@@ -205,23 +228,58 @@ async fn creation_is_nonblocking_and_portrait_survives_edits_with_private_authen
             .status(),
         409
     );
+    let mut rename = cairn_contracts::ReplaceAgentInput {
+        agent_id: serde_json::from_value(agent["id"].clone()).unwrap(),
+        revision: text(&agent, "revision").into(),
+        settings: serde_json::from_value::<Agent>(agent.clone())
+            .unwrap()
+            .settings,
+        review: cairn_contracts::AgentReview::default(),
+    };
+    rename.settings.name = "Renamed agent".into();
     f.json(
         "PUT",
         &format!("/api/agents/{id}"),
-        json!({ "name": "Renamed agent" }),
+        serde_json::to_value(rename).unwrap(),
     )
     .await;
     reply.send(generated(png([50, 100, 180]))).unwrap();
     let ready = f.wait(id, "ready").await;
     assert_eq!(ready["name"], "Renamed agent");
-    for account in f.s.accounts.list(&f.s).await.unwrap() {
-        assert!(f.s.accounts.active(text(&account, "id")).await.is_empty());
+    for account in crate::account_fixture::account_values(f.s.accounts.list(&f.s).await.unwrap()) {
+        assert!(
+            f.s.accounts
+                .active(&f.s, text(&account, "id"))
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
+    let current: Agent = serde_json::from_value(ready.clone()).unwrap();
+    let mut input = cairn_contracts::ReplaceAgentInput {
+        agent_id: current.id,
+        revision: current.revision,
+        settings: current.settings,
+        review: cairn_contracts::AgentReview::default(),
+    };
+    input.settings.name = "New role".into();
+    let mut malicious = serde_json::to_value(&input).unwrap();
+    malicious["settings"]["avatar"] = json!({ "url": "https://evil.invalid" });
+    assert_eq!(
+        f.request(
+            "PUT",
+            &format!("/api/agents/{id}"),
+            serde_json::to_vec(&malicious).unwrap()
+        )
+        .await
+        .status(),
+        400
+    );
     let edited = f
         .json(
             "PUT",
             &format!("/api/agents/{id}"),
-            json!({ "name": "New role", "avatar": { "url": "https://evil.invalid" } }),
+            serde_json::to_value(input).unwrap(),
         )
         .await;
     assert_eq!(edited["avatar"], ready["avatar"]);
@@ -288,7 +346,7 @@ async fn upload_wins_over_generation_and_invalid_images_preserve_the_previous_po
     .await
     .unwrap();
     assert_eq!(
-        f.s.get("agents", id).await.unwrap()["avatar"],
+        f.s.agent_snapshot(id).await.unwrap()["avatar"],
         uploaded["avatar"]
     );
     for bytes in [
@@ -366,7 +424,7 @@ async fn regeneration_failure_keeps_the_image_and_does_not_expose_provider_error
     f.json("DELETE", &format!("/api/agents/{id}"), Value::Null)
         .await;
     reply.send(generated(png([0, 0, 0]))).unwrap();
-    assert!(f.s.store.get("agents", id).await.unwrap().is_none());
+    assert!(f.s.store.agent_snapshot(id).await.unwrap().is_none());
     assert!(
         f.s.store
             .kv(&format!("agent-avatar:{id}"))
@@ -396,9 +454,12 @@ async fn uploads_work_without_provider_configuration_and_restart_never_rebills()
     let uploaded = body(f.request("PUT", &path, png([120, 80, 40])).await).await;
     let mut interrupted = uploaded.clone();
     interrupted["avatar"]["status"] = "generating".into();
-    f.s.store.put("agents", interrupted).await.unwrap();
+    f.s.store
+        .transaction(move |db| db.save_agent(&serde_json::from_value(interrupted.clone())?))
+        .await
+        .unwrap();
     let restarted = Service::new(f.s.config.clone()).await.unwrap();
-    let recovered = restarted.get("agents", id).await.unwrap();
+    let recovered = restarted.agent_snapshot(id).await.unwrap();
     assert_eq!(recovered["avatar"]["status"], "failed");
     assert_eq!(recovered["avatar"]["url"], uploaded["avatar"]["url"]);
     assert!(
@@ -435,8 +496,16 @@ async fn missing_or_invalid_images_fail_without_retry_and_release_the_account() 
         let failed = f.wait(text(&agent, "id"), "failed").await;
         assert!(failed["avatar"]["url"].is_null());
         assert!(f.requests.try_recv().is_err());
-        for account in f.s.accounts.list(&f.s).await.unwrap() {
-            assert!(f.s.accounts.active(text(&account, "id")).await.is_empty());
+        for account in
+            crate::account_fixture::account_values(f.s.accounts.list(&f.s).await.unwrap())
+        {
+            assert!(
+                f.s.accounts
+                    .active(&f.s, text(&account, "id"))
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
         }
     }
 }
@@ -454,7 +523,7 @@ async fn close_drains_running_and_queued_portraits_and_rejects_new_jobs() {
         .unwrap();
     // close itself must wait for metadata, process exit and lease release; do not poll.
     for agent in [&first, &second, &queued] {
-        let failed = f.s.get("agents", text(agent, "id")).await.unwrap();
+        let failed = f.s.agent_snapshot(text(agent, "id")).await.unwrap();
         assert_eq!(failed["avatar"]["status"], "failed");
         assert_eq!(failed["avatar"]["error"], INTERRUPTED);
     }
@@ -466,8 +535,14 @@ async fn close_drains_running_and_queued_portraits_and_rejects_new_jobs() {
             "Codex process is still alive after close"
         );
     }
-    for account in f.s.store.list(crate::accounts::KIND).await.unwrap() {
-        assert!(f.s.accounts.active(text(&account, "id")).await.is_empty());
+    for account in f.s.store.account_fixtures().await.unwrap() {
+        assert!(
+            f.s.accounts
+                .active(&f.s, text(&account, "id"))
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
     assert!(
         tokio::fs::read_dir(f.s.config.data_dir.join("runs"))
@@ -496,15 +571,10 @@ async fn close_drains_running_and_queued_portraits_and_rejects_new_jobs() {
 #[tokio::test]
 async fn occupied_account_capacity_does_not_start_a_second_codex_session() {
     let mut f = Fixture::new(true).await;
-    let mut account =
-        f.s.store
-            .list(crate::accounts::KIND)
-            .await
-            .unwrap()
-            .remove(0);
+    let mut account = f.s.store.account_fixtures().await.unwrap().remove(0);
     account["maxConcurrentRuns"] = 1.into();
     f.s.store
-        .put(crate::accounts::KIND, account.clone())
+        .save_account_fixture(account.clone())
         .await
         .unwrap();
     let foreground =
@@ -517,19 +587,21 @@ async fn occupied_account_capacity_does_not_start_a_second_codex_session() {
     let failed = f.wait(text(&agent, "id"), "failed").await;
     assert!(text(&failed["avatar"], "error").contains("No Codex account is available"));
     assert!(f.requests.try_recv().is_err());
-    assert_eq!(f.s.accounts.active(text(&account, "id")).await.len(), 1);
-    f.s.accounts.release(&foreground).await.unwrap();
+    assert_eq!(
+        f.s.accounts
+            .active(&f.s, text(&account, "id"))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    f.s.accounts.release(&f.s, &foreground).await.unwrap();
 }
 
 #[tokio::test]
 async fn portrait_selection_respects_the_explicit_models_quota() {
     let mut f = Fixture::new(true).await;
-    let mut limited =
-        f.s.store
-            .list(crate::accounts::KIND)
-            .await
-            .unwrap()
-            .remove(0);
+    let mut limited = f.s.store.account_fixtures().await.unwrap().remove(0);
     limited["usage"]["windows"]
         .as_array_mut()
         .unwrap()
@@ -540,14 +612,16 @@ async fn portrait_selection_respects_the_explicit_models_quota() {
             "reached": true,
         }));
     f.s.store
-        .put(crate::accounts::KIND, limited.clone())
+        .save_account_fixture(limited.clone())
         .await
         .unwrap();
-    let available =
+    let available = serde_json::to_value(
         f.s.accounts
             .create(&f.s, Provider::Codex, "Available")
             .await
-            .unwrap();
+            .unwrap(),
+    )
+    .unwrap();
     f.s.vault
         .set(
             &format!("codex-account:{}", text(&available, "id")),
@@ -562,8 +636,18 @@ async fn portrait_selection_respects_the_explicit_models_quota() {
     let agent = f.create().await;
     let (request, reply) = f.next().await;
     assert_eq!(request["model"], "gpt-6-astra");
-    assert!(f.s.accounts.active(text(&limited, "id")).await.is_empty());
-    let leases = f.s.accounts.active(text(&available, "id")).await;
+    assert!(
+        f.s.accounts
+            .active(&f.s, text(&limited, "id"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let leases =
+        f.s.accounts
+            .active(&f.s, text(&available, "id"))
+            .await
+            .unwrap();
     assert_eq!(leases.len(), 1);
     assert_eq!(leases[0].model, "gpt-6-astra");
     reply.send(generated(png([10, 20, 30]))).unwrap();
@@ -573,22 +657,17 @@ async fn portrait_selection_respects_the_explicit_models_quota() {
 #[tokio::test]
 async fn queued_conversation_interrupts_portrait_and_gets_the_single_account_slot() {
     let mut f = Fixture::new(true).await;
-    let mut account =
-        f.s.store
-            .list(crate::accounts::KIND)
-            .await
-            .unwrap()
-            .remove(0);
+    let mut account = f.s.store.account_fixtures().await.unwrap().remove(0);
     account["maxConcurrentRuns"] = 1.into();
     f.s.store
-        .put(crate::accounts::KIND, account.clone())
+        .save_account_fixture(account.clone())
         .await
         .unwrap();
     let agent = f.create().await;
     let (_, reply) = f.next().await;
     f.s.store
         .transaction(|db| {
-            db.add_run(&foreground_run(), None)?;
+            db.add_run_fixture(&foreground_run(), None)?;
             Ok(())
         })
         .await
@@ -602,7 +681,7 @@ async fn queued_conversation_interrupts_portrait_and_gets_the_single_account_slo
             .unwrap()
             .unwrap();
     assert_eq!(foreground.account_id, account["id"].as_str().unwrap());
-    f.s.accounts.release(&foreground).await.unwrap();
+    f.s.accounts.release(&f.s, &foreground).await.unwrap();
     let _ = reply.send(generated(png([0, 0, 0])));
     assert!(f.requests.try_recv().is_err());
 }
@@ -619,7 +698,7 @@ async fn foreground_queue_and_deployment_prevent_starting_a_portrait() {
         } else {
             f.s.store
                 .transaction(|db| {
-                    db.add_run(&foreground_run(), None)?;
+                    db.add_run_fixture(&foreground_run(), None)?;
                     Ok(())
                 })
                 .await
@@ -629,8 +708,14 @@ async fn foreground_queue_and_deployment_prevent_starting_a_portrait() {
         let failed = f.wait(text(&agent, "id"), "failed").await;
         assert!(text(&failed["avatar"], "error").contains("yielded"));
         assert!(f.requests.try_recv().is_err());
-        for account in f.s.store.list(crate::accounts::KIND).await.unwrap() {
-            assert!(f.s.accounts.active(text(&account, "id")).await.is_empty());
+        for account in f.s.store.account_fixtures().await.unwrap() {
+            assert!(
+                f.s.accounts
+                    .active(&f.s, text(&account, "id"))
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
         }
     }
 }

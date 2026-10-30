@@ -143,10 +143,9 @@ async fn render_instance(
 async fn instances(s: &Service) -> Result<Vec<(Package, Vec<Connection>)>> {
     let mut connections = s
         .store
-        .list(connections::KIND)
+        .plugin_instances()
         .await?
         .into_iter()
-        .filter_map(|value| serde_json::from_value::<Connection>(value).ok())
         .filter(|connection| connection.enabled)
         .collect::<Vec<_>>();
     connections.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));

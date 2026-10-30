@@ -1,6 +1,5 @@
 use super::Disk;
 use super::*;
-use sha2::{Digest, Sha256};
 use std::{
     io,
     sync::{
@@ -11,6 +10,123 @@ use std::{
 
 mod discard;
 mod group_commit;
+
+#[test]
+#[ignore = "explicit local journal recovery measurement; run alone"]
+fn journal_reopen_measurement() {
+    use std::os::unix::fs::MetadataExt;
+    use std::time::Instant;
+
+    fn cpu_micros() -> u64 {
+        let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+        assert_eq!(
+            unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) },
+            0
+        );
+        let usage = unsafe { usage.assume_init() };
+        ((usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) * 1_000_000
+            + usage.ru_utime.tv_usec
+            + usage.ru_stime.tv_usec) as u64
+    }
+
+    fn read_bytes() -> u64 {
+        std::fs::read_to_string("/proc/self/io")
+            .unwrap()
+            .lines()
+            .find_map(|line| line.strip_prefix("rchar: "))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    }
+
+    let gib: u64 =
+        std::env::var("CAIRN_REOPEN_BENCH_GIB").map_or(16, |value| value.parse().unwrap());
+    let frame: u64 = std::env::var("CAIRN_REOPEN_BENCH_FRAME_KIB")
+        .map_or(BLOCK, |value| value.parse::<u64>().unwrap() * 1024);
+    assert!(frame > 0 && frame <= BLOCK && BLOCK.is_multiple_of(frame));
+    let root = tempfile::tempdir_in("/var/tmp").unwrap();
+    let source = Arc::new(Source {
+        reads: AtomicUsize::new(0),
+    });
+    let disk = LazyDisk::create(
+        root.path(),
+        &single_block(BLOCK, BLOCK, &Value::Null),
+        source.clone(),
+    )
+    .unwrap();
+    let zeros = vec![0; frame as usize];
+    // Repeated sparse discards model accumulated obsolete append history while
+    // allocating only headers. Every zero write follows a nonzero byte so it
+    // cannot be suppressed by the live zero-range optimization.
+    let count = gib * 1024 * 1024 * 1024 / frame;
+    let pairs_per_batch = (MAX_IO / (frame as usize + 1)).min(64);
+    for first in (0..count).step_by(pairs_per_batch) {
+        let mut writes = Vec::new();
+        for index in first..(first + pairs_per_batch as u64).min(count) {
+            let offset = index % (BLOCK / frame) * frame;
+            writes.push(DiskWrite {
+                offset,
+                bytes: b"x",
+            });
+            writes.push(DiskWrite {
+                offset,
+                bytes: &zeros,
+            });
+        }
+        disk.write_batch(&writes).unwrap();
+    }
+    disk.sync().unwrap();
+    let logical = disk.accounting().unwrap()["journalBytes"].as_u64().unwrap();
+    drop(disk);
+    let physical = std::fs::read_dir(root.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().metadata().unwrap().blocks() * 512)
+        .sum::<u64>();
+
+    for trial in 0..3 {
+        let before_reads = read_bytes();
+        let before_cpu = cpu_micros();
+        let started = Instant::now();
+        let disk = LazyDisk::open(root.path(), source.clone()).unwrap();
+        let open_us = started.elapsed().as_micros();
+        let open_cpu_us = cpu_micros() - before_cpu;
+        let open_read_bytes = read_bytes() - before_reads;
+        let mut bytes = [1; 4096];
+        let started = Instant::now();
+        disk.read_at(0, &mut bytes).unwrap();
+        assert_eq!(bytes, [if trial == 0 { 0 } else { 7 }; 4096]);
+        let cold_read_us = started.elapsed().as_micros();
+        let started = Instant::now();
+        for _ in 0..256 {
+            disk.read_at(0, &mut bytes).unwrap();
+        }
+        let warm_reads_us = started.elapsed().as_micros();
+        let started = Instant::now();
+        for _ in 0..16 {
+            disk.write_at(0, &[7; 4096]).unwrap();
+        }
+        disk.sync().unwrap();
+        let write_us = started.elapsed().as_micros();
+        println!(
+            "REOPEN_PERF {}",
+            serde_json::json!({
+                "gib": gib,
+                "frameKiB": frame / 1024,
+                "trial": trial,
+                "journalLogicalBytes": logical,
+                "journalAllocatedBytes": physical,
+                "openUs": open_us,
+                "openCpuUs": open_cpu_us,
+                "openReadBytes": open_read_bytes,
+                "coldReadUs": cold_read_us,
+                "warmReads256Us": warm_reads_us,
+                "writes16AndSyncUs": write_us,
+                "remoteEncodedBytes": 0
+            })
+        );
+    }
+}
 
 struct Source {
     reads: AtomicUsize,
@@ -99,40 +215,6 @@ fn publication_cache_failure_or_zero_budget_never_prevents_publication() {
     }
 }
 
-#[test]
-fn old_sha256_segment_and_new_blake3_frames_can_share_a_journal() {
-    let root = tempfile::tempdir().unwrap();
-    let source = Arc::new(Source {
-        reads: AtomicUsize::new(0),
-    });
-    let disk = LazyDisk::create(
-        root.path(),
-        &single_block(4096, BLOCK, &Value::Null),
-        source.clone(),
-    )
-    .unwrap();
-    disk.write_at(0, b"old payload").unwrap();
-    drop(disk);
-    let path = root.path().join("payload-1-1.segment");
-    let mut frame = std::fs::read(&path).unwrap();
-    frame[..8].copy_from_slice(b"CAIRNJ02");
-    let header = Sha256::digest(&frame[..48]);
-    frame[48..80].copy_from_slice(&header);
-    let mut digest = Sha256::new();
-    digest.update(&frame[..80]);
-    digest.update(&frame[112..]);
-    frame[80..112].copy_from_slice(&digest.finalize());
-    std::fs::write(&path, frame).unwrap();
-    let disk = LazyDisk::open(root.path(), source.clone()).unwrap();
-    disk.write_at(20, b"new payload").unwrap();
-    drop(disk);
-    let disk = LazyDisk::open(root.path(), source).unwrap();
-    let mut bytes = [0; 31];
-    disk.read_at(0, &mut bytes).unwrap();
-    assert_eq!(&bytes[..11], b"old payload");
-    assert_eq!(&bytes[20..], b"new payload");
-}
-
 /// A single-block manifest; a `null` hash is an empty (zero) block.
 fn single_block(size: u64, block_size: u64, hash: &serde_json::Value) -> serde_json::Value {
     serde_json::json!({
@@ -195,7 +277,7 @@ fn publication_retires_obsolete_clean_cache_without_evicting_current_blocks() {
     });
     let disk = LazyDisk::create(&directory, &manifest, source).unwrap();
     disk.read_at(0, &mut [0]).unwrap();
-    let obsolete = "a".repeat(64);
+    let obsolete = format!("b3-{}", "a".repeat(64));
     let old_file = directory.join("cache").join(&obsolete);
     std::fs::write(&old_file, b"obsolete verified cache").unwrap();
     // Register the historical file as an existing clean cache entry.
@@ -223,65 +305,6 @@ fn publication_retires_obsolete_clean_cache_without_evicting_current_blocks() {
     assert_eq!(&bytes, b"unpublished");
 }
 
-#[test]
-fn legacy_journal_conversion_waits_for_all_unpublished_writes() {
-    let root = tempfile::tempdir().unwrap();
-    let source = Arc::new(Source {
-        reads: AtomicUsize::new(0),
-    });
-    let manifest = single_block(BLOCK, BLOCK, &serde_json::Value::Null);
-    legacy_fixture(root.path(), &manifest);
-    let disk = LazyDisk::open(root.path(), source.clone()).unwrap();
-    assert!(root.path().join("journal.sqlite").exists());
-    assert_eq!(disk.accounting().unwrap()["dirtyBytes"], BLOCK);
-    let first = disk.seal().unwrap();
-    disk.capture(first).unwrap();
-    disk.write_at(1, &[7]).unwrap();
-    disk.commit_published(first, "first").unwrap();
-    assert!(
-        std::fs::metadata(root.path().join("journal.sqlite"))
-            .unwrap()
-            .len()
-            < 4096,
-        "published legacy payloads should be unlinked"
-    );
-    assert_eq!(disk.accounting().unwrap()["dirtyBytes"], 1);
-    let second = disk.seal().unwrap();
-    disk.capture(second).unwrap();
-    disk.commit_published(second, "second").unwrap();
-    assert_eq!(disk.accounting().unwrap()["dirtyBytes"], 0);
-    drop(disk);
-    let reopened = LazyDisk::open(root.path(), source).unwrap();
-    let mut bytes = [0; 8];
-    reopened.read_at(0, &mut bytes).unwrap();
-    assert_eq!(bytes, [7; 8]);
-}
-
-fn legacy_fixture(directory: &Path, manifest: &Value) {
-    let db = Connection::open(directory.join("journal.sqlite")).unwrap();
-    db.execute_batch("CREATE TABLE state(id INTEGER PRIMARY KEY,manifest TEXT,generation INTEGER,next_sequence INTEGER);
-        CREATE TABLE sealed(generation INTEGER PRIMARY KEY,manifest TEXT);
-        CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT);
-        CREATE TABLE epochs(generation INTEGER PRIMARY KEY,written_at INTEGER);
-        CREATE TABLE writes(seq INTEGER PRIMARY KEY AUTOINCREMENT,generation INTEGER,start INTEGER,end INTEGER,data BLOB,checksum TEXT);
-        INSERT INTO epochs VALUES (1,0);").unwrap();
-    db.execute(
-        "INSERT INTO state VALUES (1,?1,1,2)",
-        [manifest.to_string()],
-    )
-    .unwrap();
-    let bytes = vec![7; manifest["size"].as_u64().unwrap().min(BLOCK) as usize];
-    db.execute(
-        "INSERT INTO writes VALUES (1,1,0,?1,?2,?3)",
-        params![
-            bytes.len() as i64,
-            bytes,
-            LazyDisk::checksum(1, 1, 0, &bytes)
-        ],
-    )
-    .unwrap();
-}
-
 impl BlockSource for Source {
     fn fetch(&self, _hash: &str) -> io::Result<Vec<u8>> {
         self.reads.fetch_add(1, Ordering::SeqCst);
@@ -302,7 +325,6 @@ fn node_cache_evicts_the_oldest_clean_block_after_a_verified_read() {
     }
     let root = tempfile::tempdir().unwrap();
     let policy = serde_json::json!({
-        "enabled": true,
         "cacheMiB": 8,
         "reserveMiB": 64,
         "reservePercent": 1,
@@ -314,7 +336,7 @@ fn node_cache_evicts_the_oldest_clean_block_after_a_verified_read() {
     let mut disks = Vec::new();
     for (name, value) in [("first", 1_u8), ("second", 2), ("third", 3)] {
         let bytes = vec![value; 4 * 1024 * 1024];
-        let hash = hex::encode(Sha256::digest(&bytes));
+        let hash = block_digest(&bytes);
         blocks.insert(hash.clone(), bytes);
         let namespace = if name == "second" {
             "environments"
@@ -413,6 +435,71 @@ fn crash_writer() {
 }
 
 #[test]
+fn reopening_indexes_headers_and_verifies_payload_only_when_used() {
+    use std::os::unix::fs::FileExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let source = Arc::new(Source {
+        reads: AtomicUsize::new(0),
+    });
+    let disk = LazyDisk::create(
+        root.path(),
+        &single_block(4096, BLOCK, &Value::Null),
+        source.clone(),
+    )
+    .unwrap();
+    disk.write_at(0, b"retained").unwrap();
+    disk.sync().unwrap();
+    drop(disk);
+
+    let segment = std::fs::OpenOptions::new()
+        .write(true)
+        .open(root.path().join("payload-1-1.segment"))
+        .unwrap();
+    segment.write_all_at(b"damaged!", 112).unwrap();
+    segment.sync_all().unwrap();
+
+    let disk = LazyDisk::open(root.path(), source).expect("opening must not read frame payloads");
+    let mut output = [0; 8];
+    assert!(disk.read_at(0, &mut output).is_err());
+    let generation = disk.seal().unwrap();
+    assert!(disk.capture(generation).is_err());
+}
+
+#[test]
+fn recovery_does_not_read_obsolete_overwritten_payloads() {
+    use std::os::unix::fs::FileExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let source = Arc::new(Source {
+        reads: AtomicUsize::new(0),
+    });
+    let disk = LazyDisk::create(
+        root.path(),
+        &single_block(4096, BLOCK, &Value::Null),
+        source.clone(),
+    )
+    .unwrap();
+    disk.write_at(0, b"obsolete").unwrap();
+    disk.write_at(0, b"current!").unwrap();
+    disk.sync().unwrap();
+    drop(disk);
+
+    let segment = std::fs::OpenOptions::new()
+        .write(true)
+        .open(root.path().join("payload-1-1.segment"))
+        .unwrap();
+    segment.write_all_at(b"damaged!", 112).unwrap();
+    segment.sync_all().unwrap();
+
+    let disk = LazyDisk::open(root.path(), source).unwrap();
+    let mut output = [0; 8];
+    disk.read_at(0, &mut output).unwrap();
+    assert_eq!(&output, b"current!");
+    assert_eq!(disk.accounting().unwrap()["dirtyBytes"], 16);
+}
+
+#[test]
 fn journal_integrity_covers_the_write_location() {
     use std::os::unix::fs::FileExt;
     let root = tempfile::tempdir().unwrap();
@@ -456,7 +543,7 @@ fn interrupted_tail_is_trimmed_and_missing_acknowledged_segments_are_rejected() 
         .append(true)
         .open(&path)
         .unwrap();
-    tail.write_all(b"CAIRNJ02partial").unwrap();
+    tail.write_all(b"CAIRNJ03partial").unwrap();
     tail.sync_all().unwrap();
     let disk = LazyDisk::open(root.path(), source.clone()).unwrap();
     assert_eq!(std::fs::metadata(&path).unwrap().len(), length);
@@ -582,7 +669,7 @@ fn unavailable_or_corrupt_base_never_becomes_a_zero_block() {
         }
     }
     let root = tempfile::tempdir().unwrap();
-    let hash = hex::encode(Sha256::digest(vec![8; 4 * 1024 * 1024]));
+    let hash = block_digest(&vec![8; 4 * 1024 * 1024]);
     let manifest = single_block(4194304, 4194304, &hash.as_str().into());
     let disk = LazyDisk::create(root.path(), &manifest, Arc::new(Missing)).unwrap();
     assert_eq!(
@@ -653,7 +740,7 @@ fn partial_write_is_durable_without_fetching_its_remote_base() {
     let source = Arc::new(Source {
         reads: AtomicUsize::new(0),
     });
-    let hash = hex::encode(Sha256::digest(vec![7; 4 * 1024 * 1024]));
+    let hash = block_digest(&vec![7; 4 * 1024 * 1024]);
     let manifest = single_block(4194304, 4194304, &hash.as_str().into());
     let disk = LazyDisk::create(root.path(), &manifest, source.clone()).unwrap();
     disk.write_at(123, b"retained").unwrap();
@@ -802,7 +889,7 @@ fn concurrent_cold_reads_share_one_verified_transfer() {
     assert_eq!(
         source.calls.load(Ordering::SeqCst),
         1,
-        "overlapping FUSE reads must share their cold block"
+        "overlapping disk reads must share their cold block"
     );
 }
 

@@ -80,16 +80,29 @@ abstract class SubagentCases {
             val now = System.currentTimeMillis()
             val chat =
                 Chat(
-                    "chat",
+                    id = "6cc6efab-10af-54c7-a91b-dcff664166a1",
                     title = "Audit des webhooks",
                     agentId = MAIN_AGENT_ID,
                     agentName = "Agent principal",
                     runId = "run",
-                    run = Run("run", status = "running", startedAt = now - 90_000),
+                    run =
+                        Run(
+                            id = "run",
+                            status = "running",
+                            startedAt = now - 90_000,
+                            taskId = "",
+                        ),
                 )
             var serial = 0L
             fun event(type: String, at: Long, payload: JsonObject) =
-                RunEvent(++serial, now - at, type, "", payload, runId = "run")
+                RunEvent(
+                    id = ++serial,
+                    createdAt = now - at,
+                    type = type,
+                    text = "",
+                    payload = (payload)?.let { kotlinx.serialization.json.JsonObject(it) },
+                    runId = "run",
+                )
             fun item(type: String, at: Long, body: JsonObjectBuilder.() -> Unit) =
                 event(type, at, buildJsonObject { put("item", buildJsonObject(body)) })
             fun subagent(name: String, at: Long, prompt: String) =
@@ -139,7 +152,10 @@ abstract class SubagentCases {
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path!!.substringBefore('?')
-                        if (path == "/api/installations/fixture/api/chats/chat/stream") {
+                        if (
+                            path ==
+                                "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/stream"
+                        ) {
                             val first = initial.getAndSet(false)
                             val batch =
                                 wireJson.encodeToString(
@@ -161,12 +177,55 @@ abstract class SubagentCases {
                                 "/api/installations" -> beaconInstallationsFixture()
                                 "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(
-                                        listOf(Agent(MAIN_AGENT_ID, "Agent principal"))
+                                        build.cairn.contracts.ListAgentsOutput(
+                                            listOf(
+                                                Agent(
+                                                    exclusiveNodes = emptyList(),
+                                                    plugins = emptyList(),
+                                                    revision = "",
+                                                    createdAt = 0,
+                                                    access =
+                                                        AccessPolicy(
+                                                            mcpTools =
+                                                                build.cairn.contracts.McpTools(
+                                                                    emptyMap()
+                                                                ),
+                                                            projects = null,
+                                                            skills = null,
+                                                            mcps = null,
+                                                        ),
+                                                    id = MAIN_AGENT_ID,
+                                                    name = "Agent principal",
+                                                )
+                                            )
+                                        )
                                     )
-                                "/api/installations/fixture/api/chats/chat" ->
+                                "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1" ->
                                     wireJson.encodeToString(chat)
                                 "/api/installations/fixture/api/overview" -> "{}"
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
+                                    else "[]"
                             }
                         return MockResponse()
                             .setHeader("Content-Type", "application/json")
@@ -188,7 +247,14 @@ abstract class SubagentCases {
                 }
                 CairnTheme {
                     if (state.session.authenticated)
-                        ChatScreen(vm, state, "chat", openChat = {}, openRun = {}, back = {})
+                        ChatScreen(
+                            vm,
+                            state,
+                            "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                            openChat = {},
+                            openRun = {},
+                            back = {},
+                        )
                 }
             }
             compose.waitUntil(20000) {

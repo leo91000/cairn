@@ -12,8 +12,17 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
+import build.cairn.contracts.CreateProjectInput
+import build.cairn.contracts.ListPluginPackagesInput
+import build.cairn.contracts.ProjectInput
+import build.cairn.contracts.ProjectSettings
+import build.cairn.contracts.ReplaceProjectInput
+import build.cairn.contracts.createProject
+import build.cairn.contracts.deleteProject
+import build.cairn.contracts.listPluginPackages
+import build.cairn.contracts.replaceProject
+import kotlinx.serialization.json.*
 import kotlinx.serialization.json.decodeFromJsonElement
-import kotlinx.serialization.json.encodeToJsonElement
 
 @Composable
 fun ResourcesScreen(
@@ -77,10 +86,7 @@ fun ResourcesScreen(
                             }
                             if (agent.description.isNotBlank()) Text(agent.description)
                             Text(
-                                agentAccessSummary(
-                                    agent,
-                                    older = olderInstallation(state.agents),
-                                ),
+                                agentAccessSummary(agent),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -103,7 +109,7 @@ fun ResourcesScreen(
                         Text(
                             "${project.baseBranch} · ${if (project.sourceMode == "local") "Branche locale" else "Branche distante"}"
                         )
-                        project.origin?.let { Code(it) }
+                        if (project.origin.isNotEmpty()) Code(project.origin)
                         Row {
                             ActionIcon(
                                 "Démarrer une conversation",
@@ -134,7 +140,7 @@ fun ResourcesScreen(
     }
     editing?.let { id ->
         if (!agents)
-            ProjectEditor(vm, state, state.projects.find { it.id == id } ?: Project()) {
+            ProjectEditor(vm, state, state.projects.find { it.id == id }) {
                 editing = null
             }
     }
@@ -147,7 +153,8 @@ fun ResourcesScreen(
             { deleting = null },
         ) {
             vm.perform {
-                delete("/$kind/${segment(id)}")
+                if (kind == "projects") api.deleteProject(ProjectInput(id))
+                else delete("/$kind/${segment(id)}")
                 deleting = null
             }
         }
@@ -158,11 +165,22 @@ fun ResourcesScreen(
 internal fun ProjectEditor(
     vm: CairnViewModel,
     state: Workspace,
-    initial: Project,
+    initial: Project?,
     close: () -> Unit,
 ) {
-    var form by rememberForm(initial)
-    val saving = rememberResourceSave(initial.id)
+    var form by
+        rememberForm(
+            ProjectSettings(
+                name = initial?.name.orEmpty(),
+                path = initial?.path.orEmpty(),
+                description = initial?.description.orEmpty(),
+                baseBranch = initial?.baseBranch ?: "main",
+                sourceMode = initial?.sourceMode ?: "remote",
+            )
+        )
+    var baseBranch by rememberSaveable { mutableStateOf(initial?.baseBranch ?: "main") }
+    var revision by rememberSaveable { mutableStateOf(initial?.revision.orEmpty()) }
+    val saving = rememberResourceSave(initial?.takeIf { it.revision.isNotEmpty() }?.id.orEmpty())
     var saveError by rememberSaveable { mutableStateOf<String?>(null) }
     // "local", or the key of a plugin's project source to import from.
     var mode by rememberSaveable { mutableStateOf("local") }
@@ -173,7 +191,8 @@ internal fun ProjectEditor(
     if (creating)
         LaunchedEffect(Unit) {
             // Without the catalogue, projects can still be added from a server folder.
-            catalog = runCatching { vm.api.get<PluginCatalog>("/plugins") }.getOrNull()
+            catalog =
+                runCatching { vm.api.listPluginPackages(ListPluginPackagesInput()) }.getOrNull()
         }
     val sources = catalog?.projectSources().orEmpty()
     val source = sources.find { it.key == mode }?.takeIf { creating }
@@ -183,6 +202,7 @@ internal fun ProjectEditor(
             instances.find { it.id == instanceChoice } ?: instances.firstOrNull()
         }
     val importing = source != null
+    fun currentSettings() = form.copy(baseBranch = baseBranch)
     Editor(
         if (saving.id.isEmpty()) "Ajouter un projet" else "Modifier le projet",
         state.busy,
@@ -198,12 +218,19 @@ internal fun ProjectEditor(
             vm.perform {
                 saveError = null
                 try {
+                    currentSettings()
+                } catch (_: IllegalArgumentException) {
+                    saveError = "Saisissez un nom de branche de base valide."
+                    return@perform
+                }
+                try {
                     saving.save(
                         api,
                         "/projects",
-                        value = { wireJson.encodeToJsonElement(form) },
+                        value = { wireJson.encodeToJsonElement(currentSettings()) },
                         createPath = if (importing) "/projects/import" else "/projects",
                         createValue = {
+                            val settings = currentSettings()
                             if (source != null && instance != null)
                                 body(
                                     "pluginId" to source.entry.id,
@@ -212,16 +239,48 @@ internal fun ProjectEditor(
                                     "id" to item,
                                     "name" to form.name,
                                     "description" to form.description,
-                                    "baseBranch" to form.baseBranch,
+                                    "baseBranch" to settings.baseBranch,
                                 )
-                            else wireJson.encodeToJsonElement(form)
+                            else wireJson.encodeToJsonElement(settings)
+                        },
+                        request = { method, route, payload ->
+                            if (route == "/projects/import")
+                                api.send<JsonElement>(method, route, payload)
+                            else {
+                                val saved =
+                                    if (method == "PUT")
+                                        api.replaceProject(
+                                            ReplaceProjectInput(
+                                                saving.id,
+                                                revision,
+                                                currentSettings(),
+                                            )
+                                        )
+                                    else {
+                                        val original = JsonObject(payload.jsonObject - "creationId")
+                                        api.createProject(
+                                            CreateProjectInput(
+                                                creationId =
+                                                    payload.jsonObject["creationId"]
+                                                        ?.jsonPrimitive
+                                                        ?.content,
+                                                settings =
+                                                    wireJson.decodeFromJsonElement<ProjectSettings>(
+                                                        original
+                                                    ),
+                                            )
+                                        )
+                                    }
+                                revision = saved.revision
+                                wireJson.encodeToJsonElement(saved)
+                            }
                         },
                         onCreated = {
+                            val saved = wireJson.decodeFromJsonElement<Project>(it)
+                            revision = saved.revision
                             if (importing) {
-                                val saved = wireJson.decodeFromJsonElement<Project>(it)
                                 form =
                                     form.copy(
-                                        id = saved.id,
                                         path = saved.path,
                                         sourceMode = saved.sourceMode,
                                     )
@@ -229,7 +288,7 @@ internal fun ProjectEditor(
                         },
                     )
                 } catch (error: Exception) {
-                    if (saving.id.isNotBlank() && saving.id != initial.id)
+                    if (saving.id.isNotBlank() && saving.id != initial?.id)
                         saveError =
                             "Projet enregistré, mais les dernières modifications n’ont pas été enregistrées. Réessayez."
                     throw error
@@ -248,7 +307,7 @@ internal fun ProjectEditor(
                 form.name.length <= 100 &&
                 (if (importing) instance != null && item.isNotBlank()
                 else form.path.isNotBlank()) &&
-                form.baseBranch.isNotBlank(),
+                baseBranch.isNotBlank(),
     ) {
         if (creating) {
             val editable = !state.busy && !saving.pendingCreation
@@ -281,8 +340,8 @@ internal fun ProjectEditor(
                         form.copy(
                             name = (it.projectName?.ifBlank { null } ?: it.name).take(100),
                             description = it.description.take(500),
-                            baseBranch = it.defaultBranch.ifBlank { form.baseBranch },
                         )
+                    if (it.defaultBranch.isNotBlank()) baseBranch = it.defaultBranch
                 }
             }
         }
@@ -314,8 +373,11 @@ internal fun ProjectEditor(
         }
         Field(
             "Branche de base",
-            form.baseBranch,
-            { form = form.copy(baseBranch = it) },
+            baseBranch,
+            {
+                baseBranch = it
+                saveError = null
+            },
             keyboardOptions = InputKeyboards.Literal,
         )
     }

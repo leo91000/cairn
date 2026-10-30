@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { IconName } from '../icons'
+
 import {
   computed,
   nextTick,
@@ -9,6 +10,7 @@ import {
   watch,
 } from 'vue'
 import { useRouter } from 'vue-router'
+import { runMission as queueMission } from '../../../../packages/contracts/generated/runMission'
 import { api, notify, state } from '../api'
 import { chatList } from '../chat-list'
 import {
@@ -64,7 +66,7 @@ const go = (to: string) => () => router.push(to)
 
 async function runMission(id: string, name: string) {
   try {
-    await api(`/tasks/${id}/run`, { method: 'POST' })
+    await queueMission(api, { taskId: id })
     notify(`${name} started`)
     await refreshMissionRuns()
   }

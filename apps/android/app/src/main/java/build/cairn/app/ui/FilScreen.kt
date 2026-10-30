@@ -29,8 +29,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import build.cairn.app.R
 import build.cairn.app.data.*
+import build.cairn.contracts.MissionStateInput
+import build.cairn.contracts.RunMissionInput
+import build.cairn.contracts.runMission
+import build.cairn.contracts.setMissionState
 import kotlinx.coroutines.delay
-import kotlinx.serialization.json.encodeToJsonElement
 
 internal enum class FeedKind {
     QUESTION,
@@ -196,7 +199,7 @@ internal fun buildFeed(
                     forYou +=
                         item(
                             FeedKind.QUESTION,
-                            if (chat.pendingQuestions == 1) "Une question vous attend"
+                            if (chat.pendingQuestions == 1L) "Une question vous attend"
                             else "${chat.pendingQuestions} questions vous attendent",
                         )
                 wait?.account != null ->
@@ -209,6 +212,13 @@ internal fun buildFeed(
                             chat.error?.lineSequence()?.firstOrNull()?.ifBlank { null }
                                 ?: statusLabel(chat.status),
                         )
+                !chat.paused &&
+                    !chat.exclusiveSuspended &&
+                    isQuotaWait(
+                        chat.status,
+                        chat.accountWaitReason ?: chat.run?.accountWaitReason,
+                        chat.accountRequired ?: chat.run?.accountRequired,
+                    ) -> waiting += item(FeedKind.WAITING_CHAT, "En attente de quota")
                 !chat.paused && chat.status in setOf("running", "queued") ->
                     running +=
                         item(
@@ -271,8 +281,9 @@ internal fun buildFeed(
         .forEach { run ->
             val task = names[run.taskId]
             if (task?.archived == true) return@forEach
-            val agent = run.snapshot.agent.name.ifBlank { "Agent" }
-            val agentKey = run.snapshot.agent.id.ifBlank { task?.agentId.orEmpty() }
+            val agent =
+                run.agentName.ifBlank { run.snapshot?.agent?.name.orEmpty() }.ifBlank { "Agent" }
+            val agentKey = run.snapshot?.agent?.id ?: task?.agentId.orEmpty()
             fun item(kind: FeedKind, subtitle: String) =
                 FeedItem(
                     "run:${run.id}",
@@ -301,6 +312,9 @@ internal fun buildFeed(
                                 condition = run.wakeup?.condition != null,
                                 resolved = run.wakeup?.observation != null,
                             )
+                run.suspendedByExclusive == null &&
+                    isQuotaWait(run.status, run.accountWaitReason, run.accountRequired) ->
+                    waiting += item(FeedKind.WAITING_TASK, "En attente de quota")
                 run.active ->
                     running +=
                         item(
@@ -368,7 +382,7 @@ internal fun buildFeed(
         running.sortedBy { it.startedAt ?: Long.MAX_VALUE },
         recent.sortedByDescending { it.stamp },
         // A wait whose result arrived resumes first, before any deadline.
-        waiting.sortedWith(compareBy({ !it.resolved }, { it.wakeAt })),
+        waiting.sortedWith(compareBy({ !it.resolved }, { it.wakeAt ?: Long.MAX_VALUE })),
     )
 }
 
@@ -459,7 +473,7 @@ fun FilScreen(
     val feed = buildFeed(chats.orEmpty(), activity, state.tasks, vm.localReads, now)
     fun retry(item: FeedItem) {
         val task = item.taskId ?: return
-        vm.perform { openRun(api.send<Run>("POST", "/tasks/${segment(task)}/run").id) }
+        vm.perform { openRun(api.runMission(RunMissionInput(task)).id) }
     }
     fun setAside(item: FeedItem, until: Long? = null) {
         vm.setAside(item.runId ?: return, item.taskId ?: return, item.stamp, until)
@@ -467,11 +481,16 @@ fun FilScreen(
     fun archive(item: FeedItem) {
         val task = state.tasks.find { it.id == item.taskId } ?: return
         vm.perform {
-            save(
-                "tasks",
-                task.id,
-                wireJson.encodeToJsonElement(task.copy(archived = true, enabled = false)),
+            api.setMissionState(
+                MissionStateInput(
+                    taskId = task.id,
+                    revision = task.revision,
+                    enabled = false,
+                    archived = true,
+                )
             )
+            refresh()
+            notify("Modifications enregistrées")
         }
     }
     fun open(item: FeedItem) {
@@ -576,7 +595,8 @@ fun FilScreen(
                 onDelete = item.chatId?.let { id -> { trash.trash(id) } },
             ) {
                 Text(
-                    waitLeft(item.wakeAt ?: now, item.condition, item.resolved, now),
+                    item.wakeAt?.let { waitLeft(it, item.condition, item.resolved, now) }
+                        ?: "Selon disponibilité",
                     style = MaterialTheme.typography.labelLarge,
                     fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.primary,

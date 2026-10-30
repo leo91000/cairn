@@ -15,8 +15,7 @@ use cairn_plugin_api::Manifest;
 use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 
-pub const EVENTS: &str = "plugin-events";
-pub const DELIVERIES: &str = "plugin-deliveries";
+use super::queues::{Delivery, Event};
 
 /// Event names the host sends itself; packages can't admit messages under them.
 pub const RESERVED: &[&str] = &[
@@ -65,20 +64,17 @@ pub(crate) fn enqueue(
     payload: &Value,
     author: Option<&str>,
 ) -> Result<()> {
-    db.put(
-        EVENTS,
-        &json!({
-            "id": id(),
-            "connectionId": connection.id,
-            "revision": connection.revision,
-            "name": name,
-            "payload": payload,
-            "authorId": author,
-            "attempts": 0,
-            "createdAt": now(),
-            "nextAttemptAt": now(),
-        }),
-    )?;
+    db.save_plugin_event(&Event {
+        id: id(),
+        instance_id: connection.id.clone(),
+        revision: connection.revision.clone(),
+        name: name.into(),
+        payload: payload.clone(),
+        author_id: author.map(str::to_owned),
+        attempts: 0,
+        created_at: now(),
+        next_attempt_at: now(),
+    })?;
     Ok(())
 }
 
@@ -111,11 +107,7 @@ pub async fn accept(s: &Service, connection: &Connection, inbound: Inbound) -> R
             if db.kv(&dedupe)?.is_some() {
                 return Ok(false);
             }
-            let pending = db
-                .list(EVENTS)?
-                .iter()
-                .filter(|value| value["connectionId"] == current.id)
-                .count();
+            let pending = db.plugin_events(&current.id, i64::MAX)?.len();
             if pending >= 50 {
                 return Ok(false);
             }
@@ -139,40 +131,37 @@ fn request(
     author: &super::connections::Label,
     payload: &Value,
 ) -> Result<()> {
-    let requests = db.list("plugin-requests")?;
+    let requests = db.plugin_requests()?;
     if let Some(mut existing) = requests
         .iter()
-        .find(|value| value["connectionId"] == connection.id && value["userId"] == author.id)
+        .find(|value| value.instance_id == connection.id && value.user_id == author.id)
         .cloned()
     {
-        if existing["status"] == "pending" {
-            existing["mentions"] = json!(existing["mentions"].as_u64().unwrap_or(1) + 1);
-            existing["updatedAt"] = json!(now());
-            db.put("plugin-requests", &existing)?;
+        if existing.status == super::state::RequestStatus::Pending {
+            existing.mentions = existing.mentions.saturating_add(1);
+            existing.updated_at = now();
+            db.save_plugin_request(&existing)?;
         }
         return Ok(());
     }
     if requests
         .iter()
-        .filter(|value| value["connectionId"] == connection.id)
+        .filter(|value| value.instance_id == connection.id)
         .count()
         >= 50
     {
         return Ok(());
     }
-    db.put(
-        "plugin-requests",
-        &json!({
-            "id": id(),
-            "connectionId": connection.id,
-            "userId": author.id,
-            "name": label(&author.name),
-            "status": "pending",
-            "mentions": 1,
-            "createdAt": now(),
-            "updatedAt": now(),
-        }),
-    )?;
+    db.save_plugin_request(&super::state::Request {
+        id: id(),
+        instance_id: connection.id.clone(),
+        user_id: author.id.clone(),
+        name: label(&author.name),
+        status: super::state::RequestStatus::Pending,
+        mentions: 1,
+        created_at: now(),
+        updated_at: now(),
+    })?;
     enqueue(db, connection, "access_requested", payload, None)?;
     db.audit(
         "plugin.access.requested",
@@ -257,6 +246,23 @@ fn admit(db: &Db<'_>, expected: &Connection, event: &Value) -> Result<(Connectio
     Ok((connection, author))
 }
 
+fn origin(context: &Context) -> crate::native::policy::Origin {
+    use crate::native::policy::{Origin, PluginOrigin};
+    if context
+        .connection
+        .native_authority
+        .as_ref()
+        .is_none_or(|grant| grant.native_provenance_unknown)
+    {
+        return Origin::Unknown;
+    }
+    Origin::Plugin(PluginOrigin {
+        connection: context.connection.id.clone(),
+        revision: context.connection.revision.clone(),
+        author: text(&context.event, "authorId").to_owned(),
+    })
+}
+
 /// Hourly counters to increment when the submission is accepted.
 struct Counters(Vec<(String, u64)>);
 
@@ -292,11 +298,7 @@ fn limits(db: &Db<'_>, connection: &Connection, author: &str) -> Result<Counters
         }
         counters.push((key, personal));
     }
-    let outstanding = db
-        .list(DELIVERIES)?
-        .iter()
-        .filter(|value| value["connectionId"] == connection.id)
-        .count();
+    let outstanding = db.plugin_deliveries(&connection.id, i64::MAX)?.len();
     if outstanding >= 20 {
         return Err(Error::too_many_requests(
             "Connection has too much pending work.",
@@ -366,6 +368,8 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
         ));
     }
     ensure_owner(s, expected).await?;
+    let origin = origin(context);
+    crate::native::policy::refresh_agent(s, &expected.agent_id).await?;
     let content = text(args, "text").trim().to_owned();
     let thread = text(args, "thread").to_owned();
     let shared = args["shared"] == true;
@@ -386,11 +390,12 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
 
     // Resolve (or start) the conversation first, so attachments can be stored in it.
     let resolved = {
-        let (expected, event, dedupe, thread) = (
+        let (expected, event, dedupe, thread, origin) = (
             expected.clone(),
             event.clone(),
             dedupe.clone(),
             thread.clone(),
+            origin.clone(),
         );
         s.store
             .transaction(move |db| {
@@ -403,7 +408,7 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
                 let bound = db.kv(&binding_key)?.and_then(|value| value.as_str().map(str::to_owned));
                 let usable = bound
                     .as_deref()
-                    .and_then(|id| db.get("chats", id).ok().flatten())
+                    .and_then(|id| db.conversation_boundary(id).ok().flatten())
                     .filter(|chat| {
                         crate::conversation_lifecycle::is_active(chat)
                             && chat["agentId"] == connection.agent_id
@@ -413,20 +418,22 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
                 let usable = match usable {
                     Some(chat) => {
                         let previous = db.run(text(&chat, "runId"))?;
-                        let agent = db.get("agents", &connection.agent_id)?
+                        let agent = db.agent_snapshot(&connection.agent_id)?
                             .ok_or_else(|| Error::forbidden("Agent no longer exists."))?;
                         let compatible = previous.as_ref().is_none_or(|run| {
                             crate::service::covers(&agent, &run["snapshot"]["agent"])
-                        });
+                        }) && (!crate::native::policy::supports(&agent, "native")
+                            || crate::native::policy::chat_grant(db, &chat, &origin).is_ok());
                         compatible.then_some(chat)
                     }
                     None => None,
                 };
                 let chat = match usable {
                     Some(chat) => chat,
-                    None => crate::chats::create_in(
+                    None => crate::chats::create_as(
                         db,
                         json!({ "agentId": connection.agent_id, "projectId": connection.project_id }),
+                        &origin,
                     )?,
                 };
                 let chat_id = text(&chat, "id").to_owned();
@@ -451,7 +458,7 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
     };
     // Follow Cairn's resume path for a stopped run; merely clearing `paused` would
     // make chat_tick pause it again. Resume also restores the checkpoint budget.
-    let chat = s.get("chats", &chat_id).await?;
+    let chat = s.conversation_boundary(&chat_id).await?;
     if let Some(run_id) = chat["runId"].as_str() {
         let run = s.store.run(run_id).await?;
         if crate::run_status::RunStatus::of(&run)
@@ -461,9 +468,12 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
         {
             let expected = expected.clone();
             let event = event.clone();
+            let origin = origin.clone();
+            let resumed = run_id.to_owned();
             s.worker
                 .resume_authorized(s, run_id, move |db| {
-                    admit(db, &expected, &event).map(|_| ())
+                    admit(db, &expected, &event)?;
+                    crate::native::policy::authorize_run_in(db, &resumed, &origin)
                 })
                 .await?;
         }
@@ -484,63 +494,35 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
             if let Some(receipt) = db.kv(&dedupe)? {
                 return Ok(receipt);
             }
-            let mut chat = db.get("chats", &chat_id)?
+            let mut chat = db.conversation_boundary(&chat_id)?
                 .ok_or_else(|| Error::not_found("Conversation no longer exists."))?;
             crate::conversation_lifecycle::require_active(&chat)?;
             chat["paused"] = json!(false);
-            db.put("chats", &chat)?;
+            db.save_conversation_boundary(&chat)?;
             let counters = limits(db, &connection, &author)?;
             let message_id = id();
-            let queued = crate::chats::send_in(
+            let queued = crate::chats::send_as_in(
                 db,
                 &chat_id,
                 json!({ "id": message_id, "text": content, "attachmentIds": attachment_ids }),
+                &origin,
             )?;
             counters.increment(db)?;
             let receipt = json!({ "chatId": chat_id, "messageId": queued["id"] });
             db.set(&dedupe, &receipt, Some(now() + 30 * 86_400_000))?;
-            db.put(
-                DELIVERIES,
-                &json!({
-                    "id": message_id,
-                    "connectionId": connection.id,
-                    "revision": connection.revision,
-                    "chatId": chat_id,
-                    "thread": thread,
-                    "userId": author,
-                    "reply": reply,
-                    "asked": [],
-                    "attempts": 0,
-                    "createdAt": now(),
-                    "nextAttemptAt": now(),
-                }),
-            )?;
+            db.save_plugin_delivery(&Delivery {
+                id: message_id.clone(), instance_id: connection.id.clone(), revision: connection.revision.clone(),
+                chat_id: chat_id.clone(), thread, user_id: author.clone(), reply,
+                state: Value::Null, asked: Vec::new(), question_retry_at: std::collections::BTreeMap::new(), progress_at: 0,
+                attempts: 0, created_at: now(), next_attempt_at: now(),
+            })?;
             let preview = if content.is_empty() { "(attachment)".to_owned() } else { content.chars().take(200).collect() };
-            db.put(
-                "plugin-activity",
-                &json!({
-                    // Record IDs are unique across kinds; link to the delivery separately.
-                    "id": id(),
-                    "deliveryId": message_id,
-                    "connectionId": connection.id,
-                    "chatId": chat_id,
-                    "userId": author,
-                    "name": event["payload"]["author"]["name"],
-                    "preview": preview,
-                    "status": "working",
-                    "createdAt": now(),
-                    "updatedAt": now(),
-                }),
-            )?;
-            let mut recent = db
-                .list("plugin-activity")?
-                .into_iter()
-                .filter(|value| value["connectionId"] == connection.id)
-                .collect::<Vec<_>>();
-            recent.sort_by_key(|value| -value["createdAt"].as_i64().unwrap_or(0));
-            for stale in recent.iter().skip(30) {
-                db.remove("plugin-activity", text(stale, "id"))?;
-            }
+            db.save_plugin_activity(&super::state::Activity {
+                id: id(), delivery_id: message_id.clone(), instance_id: connection.id.clone(),
+                chat_id: chat_id.clone(), user_id: author.clone(), name: text(&event["payload"]["author"], "name").into(),
+                preview, status: cairn_contracts::PluginActivityStatus::Working,
+                created_at: now(), updated_at: now(),
+            })?;
             db.audit(
                 "plugin.message.admitted",
                 &json!({ "connectionId": connection.id, "chatId": chat_id, "messageId": message_id }),
@@ -636,10 +618,13 @@ pub async fn answer(s: &Service, context: &Context, args: &Value) -> Result<Valu
         {
             return Err(Error::bad("Invalid answer."));
         }
-        answers.insert(field.clone(), json!([value]));
+        answers.insert(field.clone(), json!({ "selected": [], "comment": value }));
     }
-    let answered = s
-        .question_answer(&chat, question, json!({ "id": id(), "answers": answers }))
+    let answered = crate::native::policy::DELEGATION
+        .scope(
+            origin(context),
+            s.question_answer(&chat, question, json!({ "id": id(), "answers": answers })),
+        )
         .await?;
     Ok(json!({ "status": answered["status"] }))
 }
@@ -663,7 +648,7 @@ pub async fn cancel(s: &Service, context: &Context, args: &Value) -> Result<Valu
             conversation(db, &connection, &author, &input)
         })
         .await?;
-    let detail = s.get("chats", &chat).await?;
+    let detail = s.conversation_boundary(&chat).await?;
     s.chat_pause(&chat, true).await?;
     if let Some(run) = detail["runId"].as_str()
         && crate::run_status::RunStatus::of(&s.store.run(run).await?)
@@ -699,12 +684,12 @@ enum Turn {
 /// How long an account wait lasts before a failed turn answers the person.
 const ACCOUNT_WAIT_REPLY_MS: i64 = 2 * 60_000;
 
-fn turn(db: &Db<'_>, connection: &Connection, delivery: &Value) -> Result<Turn> {
-    if delivery["revision"] != connection.revision || !connection.allows(text(delivery, "userId")) {
+fn turn(db: &Db<'_>, connection: &Connection, delivery: &Delivery) -> Result<Turn> {
+    if delivery.revision != connection.revision || !connection.allows(&delivery.user_id) {
         return Err(Error::forbidden("Reply authorization was revoked."));
     }
     let chat = db
-        .get("chats", text(delivery, "chatId"))?
+        .conversation_boundary(&delivery.chat_id)?
         .ok_or_else(|| Error::not_found("Conversation no longer exists."))?;
     if !crate::conversation_lifecycle::is_active(&chat) {
         return Err(Error::forbidden("Conversation is no longer active."));
@@ -715,7 +700,7 @@ fn turn(db: &Db<'_>, connection: &Connection, delivery: &Value) -> Result<Turn> 
     }
     let delivered: Option<i64> = db.0.query_row(
         "SELECT id FROM events WHERE run_id=?1 AND type='chat.user' AND json_extract(payload,'$.messageId')=?2 ORDER BY id LIMIT 1",
-        rusqlite::params![run_id, delivery["id"].as_str()], |row| row.get(0),
+        rusqlite::params![run_id, delivery.id.as_str()], |row| row.get(0),
     ).optional()?;
     let Some(delivered) = delivered else {
         let run = db.run(&run_id)?;
@@ -742,7 +727,7 @@ fn turn(db: &Db<'_>, connection: &Connection, delivery: &Value) -> Result<Turn> 
     // message.
     let current = run
         .as_ref()
-        .is_some_and(|run| run["chatExecution"]["messageId"] == delivery["id"]);
+        .is_some_and(|run| run["chatExecution"]["messageId"] == delivery.id);
     let active = run
         .as_ref()
         .and_then(crate::run_status::RunStatus::of)
@@ -845,7 +830,11 @@ pub struct Reply {
     pub files: Vec<Value>,
 }
 
-pub async fn reply(s: &Service, expected: &Connection, delivery: &Value) -> Result<Option<Reply>> {
+pub async fn reply(
+    s: &Service,
+    expected: &Connection,
+    delivery: &Delivery,
+) -> Result<Option<Reply>> {
     ensure_owner(s, expected).await?;
     let expected = expected.clone();
     let delivery = delivery.clone();
@@ -896,7 +885,7 @@ pub async fn reply(s: &Service, expected: &Connection, delivery: &Value) -> Resu
 pub async fn progress(
     s: &Service,
     expected: &Connection,
-    delivery: &Value,
+    delivery: &Delivery,
 ) -> Result<Option<Value>> {
     let expected = expected.clone();
     let delivery = delivery.clone();
@@ -932,10 +921,13 @@ fn step(item: &Value) -> String {
 }
 
 /// Questions the agent is waiting on in this conversation.
-pub async fn questions(s: &Service, expected: &Connection, delivery: &Value) -> Result<Vec<Value>> {
+pub async fn questions(
+    s: &Service,
+    expected: &Connection,
+    delivery: &Delivery,
+) -> Result<Vec<Value>> {
     let expected = expected.clone();
     let delivery = delivery.clone();
-    let prefix = crate::chats::questions::question_prefix(text(&delivery, "chatId"));
     s.store
         .read(move |db| {
             let connection = authorize(db, &expected)?;
@@ -943,19 +935,20 @@ pub async fn questions(s: &Service, expected: &Connection, delivery: &Value) -> 
                 return Ok(Vec::new());
             };
             let execution = db.run(&run)?.unwrap_or(Value::Null);
-            if execution["chatExecution"]["messageId"] != delivery["id"] {
+            if execution["chatExecution"]["messageId"] != delivery.id {
                 return Ok(Vec::new());
             }
             Ok(db
-                .keys(&prefix)?
+                .questions(&delivery.chat_id)?
                 .into_iter()
-                .map(|(_, question)| question)
-                .filter(|question| question["status"] == "pending" && question["runId"] == run)
+                .filter(|question| {
+                    question.status == cairn_contracts::QuestionStatus::Pending
+                        && question.run_id == run
+                })
                 .filter_map(|question| {
                     match db.kv(&format!(
                         "plugin-question-seen:{}:{}",
-                        connection.id,
-                        text(&question, "id")
+                        connection.id, question.id
                     )) {
                         Ok(None) => Some(Ok(question)),
                         Ok(Some(_)) => None,
@@ -966,9 +959,9 @@ pub async fn questions(s: &Service, expected: &Connection, delivery: &Value) -> 
                 .into_iter()
                 .map(|question| {
                     json!({
-                        "id": question["id"],
-                        "blocking": question["blocking"],
-                        "fields": question["fields"],
+                        "id": question.id,
+                        "blocking": question.blocking,
+                        "fields": question.fields,
                     })
                 })
                 .collect())
@@ -977,18 +970,19 @@ pub async fn questions(s: &Service, expected: &Connection, delivery: &Value) -> 
 }
 
 /// Removes a delivery and records how its exchange ended.
-pub async fn finish(s: &Service, delivery: &Value, status: &'static str) -> Result<()> {
-    let id = text(delivery, "id").to_owned();
+pub async fn finish(s: &Service, delivery: &Delivery, status: &'static str) -> Result<()> {
+    let id = delivery.id.clone();
     s.store
         .transaction(move |db| {
-            db.remove(DELIVERIES, &id)?;
-            for mut value in db.list("plugin-activity")? {
-                if value["deliveryId"] == id {
-                    value["status"] = json!(status);
-                    value["updatedAt"] = json!(now());
-                    db.put("plugin-activity", &value)?;
-                }
-            }
+            db.remove_plugin_delivery(&id)?;
+            db.finish_plugin_activity(
+                &id,
+                match status {
+                    "replied" => cairn_contracts::PluginActivityStatus::Replied,
+                    "stopped" => cairn_contracts::PluginActivityStatus::Stopped,
+                    _ => cairn_contracts::PluginActivityStatus::Failed,
+                },
+            )?;
             Ok(())
         })
         .await

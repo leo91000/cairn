@@ -432,7 +432,32 @@ pub struct MountedDisk {
     thread: Option<JoinHandle<stdio::Result<()>>>,
 }
 
+pub(crate) fn supports_growth() -> bool {
+    libublk::ctrl::UblkCtrl::get_features().unwrap_or_default()
+        & u64::from(libublk::sys::UBLK_F_UPDATE_SIZE)
+        != 0
+}
+
 impl MountedDisk {
+    /// Serialize with close/abort through the handle's lifecycle mutex. Some
+    /// kernels cannot safely accept UPDATE_SIZE concurrently with STOP_DEV.
+    pub(crate) fn grow(&mut self, size: u64) -> stdio::Result<()> {
+        if self.stopped.load(Ordering::Acquire) || self.failed() || !supports_growth() {
+            return Err(stdio::Error::other("Live ublk growth is unavailable"));
+        }
+        let control = UblkCtrlBuilder::default()
+            .id(self.record.device_id()?)
+            .build()
+            .map_err(error)?;
+        if control.dev_info().ublksrv_flags != self.record.token
+            || self.record.boot_id != boot_id()?
+        {
+            return Err(stdio::Error::other("ublk ownership changed"));
+        }
+        control.update_size(size).map_err(error)?;
+        Ok(())
+    }
+
     pub fn failed(&self) -> bool {
         self.failed.load(Ordering::Acquire)
             || self.thread.as_ref().is_some_and(JoinHandle::is_finished)
@@ -499,17 +524,7 @@ pub fn mount_disk(
     jail: &Path,
     uid: u32,
 ) -> stdio::Result<MountedDisk> {
-    mount_named_disk(disk, state, jail, uid, "disk.blk")
-}
-
-pub(crate) fn mount_named_disk(
-    disk: Arc<dyn Disk>,
-    state: &Path,
-    jail: &Path,
-    uid: u32,
-    name: &str,
-) -> stdio::Result<MountedDisk> {
-    mount_named(disk, state, jail, uid, name, None)
+    mount(disk, state, jail, uid, None)
 }
 
 /// Host consumers must not share the backend's mount namespace: namespace exit
@@ -521,7 +536,7 @@ pub(crate) fn mount_host_disk(
     jail: &Path,
     inherited_mounts: Vec<PathBuf>,
 ) -> stdio::Result<MountedDisk> {
-    mount_named(disk, state, jail, 0, "disk.blk", Some(inherited_mounts))
+    mount(disk, state, jail, 0, Some(inherited_mounts))
 }
 
 pub(crate) fn private_mount_namespace(inherited_mounts: &[PathBuf]) -> stdio::Result<()> {
@@ -552,17 +567,13 @@ pub(crate) fn private_mount_namespace(inherited_mounts: &[PathBuf]) -> stdio::Re
     Ok(())
 }
 
-fn mount_named(
+fn mount(
     disk: Arc<dyn Disk>,
     state: &Path,
     jail: &Path,
     uid: u32,
-    name: &str,
     private_namespace: Option<Vec<PathBuf>>,
 ) -> stdio::Result<MountedDisk> {
-    if !matches!(name, "disk.blk" | "workspace.blk") {
-        return Err(stdio::Error::other("Invalid VM block node name"));
-    }
     if disk.size() == 0 || !disk.size().is_multiple_of(512) {
         return Err(stdio::Error::other("Invalid ublk disk size"));
     }
@@ -684,7 +695,7 @@ fn mount_named(
             _ => return Err(stdio::Error::other("ublk startup did not complete")),
         }
         node(
-            &jail.join(name),
+            &jail.join("disk.blk"),
             &PathBuf::from(format!(
                 "/sys/class/block/ublkb{}",
                 mounted.record.device_id()?

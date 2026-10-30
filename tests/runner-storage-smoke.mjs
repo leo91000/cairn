@@ -13,6 +13,7 @@ import path from 'node:path'
 import process from 'node:process'
 import { setTimeout } from 'node:timers/promises'
 import { blockDigest } from './block-digest.mjs'
+import { storageProbeCommand } from './storage-probe-command.mjs'
 
 export async function prepareStorageOrigin({
   root,
@@ -36,9 +37,10 @@ export async function prepareStorageOrigin({
     const root='/data/storage-fixture';
     http.createServer((req,res)=>{
       if(req.headers.authorization!=='Bearer fixture-storage-grant'){res.writeHead(403).end();return;}
-      if(req.url==='/internal/node-restore/renew'){res.end('{}');return;}
+      const pathname=new URL(req.url,'http://storage-fixture.test').pathname;
+      if(pathname==='/internal/node-restore/renew'){res.end('{}');return;}
       if(fs.existsSync(root+'/offline')){res.writeHead(503).end();return;}
-      const hash=req.url.split('/').at(-1);
+      const hash=pathname.split('/').at(-1);
       if(!/^(?:b3-)?[a-f0-9]{64}$/.test(hash)||!fs.existsSync(root+'/'+hash)){res.writeHead(404).end();return;}
       const delay=Number(fs.existsSync(root+'/latency')?fs.readFileSync(root+'/latency','utf8'):0);
       setTimeout(()=>{const bytes=fs.readFileSync(root+'/'+hash);
@@ -57,8 +59,19 @@ export async function prepareStorageOrigin({
     maxDirtySeconds,
   }
   const storage = { master: master.href, grant: 'fixture-storage-grant', policy }
-  await api('/storage-policy', 'POST', policy)
-  return { origin, policy, storage }
+  let generation = 0
+
+  async function applyPolicy(policy) {
+    await api('/storage-policy', 'POST', { generation: generation++, policy })
+  }
+
+  await applyPolicy(policy)
+  return {
+    origin,
+    policy,
+    storage,
+    applyPolicy,
+  }
 }
 
 export async function storageSmoke({
@@ -73,7 +86,12 @@ export async function storageSmoke({
   const runId = randomUUID()
   const workspace = `/data/runs/${runId}/workspace`
   await mkdir(path.join(root, 'data/runs', runId, 'workspace'), { recursive: true })
-  const { origin, policy, storage } = storageFixture || await prepareStorageOrigin({
+  const {
+    origin,
+    policy,
+    storage,
+    applyPolicy,
+  } = storageFixture || await prepareStorageOrigin({
     root,
     docker,
     name,
@@ -84,49 +102,12 @@ export async function storageSmoke({
 
   async function start(first, { benchmark = false, soak = false } = {}) {
     const id = randomUUID()
-    const code = `
-      const fs=require('node:fs'),assert=require('node:assert/strict'),cp=require('node:child_process');
-      const file=${JSON.stringify(`${workspace}/saved`)};
-      const unused=${JSON.stringify(`${workspace}/unused`)};
-      const hash=bytes=>require('node:crypto').createHash('sha256').update(bytes).digest('hex');
-      if(${first}) {fs.writeFileSync(file,'journal survives'); fs.writeFileSync(${JSON.stringify(`${workspace}/unused`)},require('node:crypto').randomBytes(32*1024*1024)); fs.writeFileSync(unused+'.sha256',hash(fs.readFileSync(unused))); cp.execFileSync('sync');}
-      const started=performance.now();
-      assert.equal(fs.readFileSync(file,'utf8'),'journal survives');
-      const savedReadMs=performance.now()-started;
-      console.log('storage.ready'); setInterval(()=>console.log('storage.tick'),1000);
-      if(${soak}) {
-        const fd=fs.openSync(file+'.load','w+'), data=Buffer.alloc(4096), read=Buffer.alloc(4096);
-        let sequence=0, maximumMs=0;const latencies=[];
-        setInterval(()=>{
-          sequence++;data.fill(sequence%251);
-          const offset=(sequence%128)*4096,at=performance.now();
-          assert.equal(fs.writeSync(fd,data,0,data.length,offset),data.length);fs.fsyncSync(fd);
-          assert.equal(fs.readSync(fd,read,0,read.length,offset),read.length);assert.deepEqual(read,data);
-          const ms=performance.now()-at;maximumMs=Math.max(maximumMs,ms);latencies.push(ms);
-          if(latencies.length>5000)latencies.shift();
-        },10);
-        setInterval(()=>{
-          const sorted=[...latencies].sort((a,b)=>a-b);
-          console.log('storage.soak '+JSON.stringify({writes:sequence,maximumMs,p99Ms:sorted[Math.floor(sorted.length*.99)]||0}));
-        },1000);
-      }
-      if(${benchmark}) {
-        const control=setInterval(()=>{
-          if(!fs.readFileSync('/run/cairn-chat/messages.json','utf8').includes('measure'))return;
-          clearInterval(control);
-          const fd=fs.openSync(unused,'r'), buffer=Buffer.alloc(4096), firstReadsMs=[];
-          for(const offset of [0,8*1024*1024,16*1024*1024]) {
-            const at=performance.now(); assert.equal(fs.readSync(fd,buffer,0,buffer.length,offset),4096);
-            firstReadsMs.push(performance.now()-at);
-          }
-          fs.closeSync(fd);
-          const at=performance.now(), bytes=fs.readFileSync(unused), elapsedMs=performance.now()-at;
-          assert.equal(bytes.length,32*1024*1024);
-          assert.equal(hash(bytes),fs.readFileSync(unused+'.sha256','utf8'));
-          console.log('storage.metrics '+JSON.stringify({savedReadMs,firstReadsMs,sequentialMs:elapsedMs,mibPerSecond:32/(elapsedMs/1000)}));
-        },50);
-      }
-    `
+    const code = storageProbeCommand({
+      workspace,
+      first,
+      benchmark,
+      soak,
+    })
     const plan = {
       id,
       runId,
@@ -173,7 +154,7 @@ export async function storageSmoke({
   }
 
   async function publish(id) {
-    const point = await (await api(`/runs/${id}/snapshot`, 'POST', {})).json()
+    const point = await (await api(`/runs/${id}/snapshot`, 'POST', { consistency: 'filesystem' })).json()
     const hashes = new Set()
     for (const block of point.manifest.blocks) {
       if (!block.hash || hashes.has(block.hash))
@@ -279,7 +260,7 @@ export async function storageSmoke({
   const fetched = new Set((await readFile(path.join(origin, 'reads'), 'utf8')).trim().split('\n').filter(Boolean))
   assert.ok(fetched.size < hashes.size, 'unused data stays remote during boot')
   // Verify a real CPU pause and automatic resume when the reserve changes.
-  await api('/storage-policy', 'POST', { ...policy, reserveMiB: 16777216 })
+  await applyPolicy({ ...policy, reserveMiB: 16777216 })
   await until(async () => (await status()).waitingFor === 'disk-space')
   await setTimeout(2000)
   const ticks = (await logs(resumed)).split('storage.tick').length
@@ -287,7 +268,7 @@ export async function storageSmoke({
   assert.equal((await logs(resumed)).split('storage.tick').length, ticks)
   // Emergency publication while paused must not strand CPUs after pressure clears.
   await publish(resumed)
-  await api('/storage-policy', 'POST', policy)
+  await applyPolicy(policy)
   await until(async () => (await logs(resumed)).split('storage.tick').length > ticks)
   await stop(resumed)
   // Identical snapshot, guest command and read workload; each sample gets a new

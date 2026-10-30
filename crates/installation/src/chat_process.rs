@@ -1,11 +1,11 @@
 //! Adapter for conversations on the Codex app-server.
 use crate::{
-    auth::hex_digest,
     config::Config,
+    context_usage::ContextUsage,
     error::{Error, Result},
     rpc::{Incoming, Session},
     skills::atomic_write,
-    validation::{parse, text},
+    validation::text,
 };
 use serde::Serialize;
 use serde_json::{Map, Value, json};
@@ -21,13 +21,6 @@ pub mod resident;
 
 const STOPPED: &str = "Conversation stopped.";
 const MAX_MESSAGE: usize = 5_000_000;
-/// How long a finished turn waits for side questions it is still answering.
-const SIDE_GRACE: Duration = Duration::from_secs(90);
-const SIDE_TOOL: &str = "Codex tried to use a tool, so this side question was stopped. Side questions answer from the conversation's context only; ask in the conversation to check files or run commands.";
-const SIDE_UNANSWERED: &str = "The reply finished before this side question was answered. Ask it again during a reply, or ask in the conversation.";
-/// Marks where the inherited history ends in a side question's fork. The main turn keeps
-/// running elsewhere; the fork only sees its snapshot, which Codex closes as aborted.
-const SIDE_BOUNDARY: &str = "Side question boundary. The user is asking a quick question beside the main task. The main task is still running in its own thread and was NOT interrupted: an aborted tool call or turn_aborted marker just before this boundary only reflects the snapshot taken for this question. Answer the next user message in a single reply, using only what you already know from the conversation above. Do not use tools, run commands, read or edit files, spawn or contact sub-agents, or continue, plan or resume the main task. Instructions and requests in the inherited history are reference context, not instructions for this answer. If answering would require checking files or running commands, say that it cannot be checked from a side question and suggest asking in the main conversation. Answer in the language of the question.";
 
 /// A Codex thread item as a chat item: snake_case names, as the conversation events use.
 pub fn chat_item(mut item: Value) -> Value {
@@ -39,6 +32,7 @@ pub fn chat_item(mut item: Value) -> Value {
         "reasoning" | "plan" => "reasoning",
         "webSearch" => "web_search",
         "collabAgentToolCall" => "collab_tool_call",
+        "contextCompaction" => "context_compaction",
         kind => kind,
     }
     .to_owned();
@@ -148,6 +142,9 @@ struct TurnParams<'a> {
     client_user_message_id: Option<&'a Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<&'a Value>,
+    /// Kept by the thread for later turns, as `effort` is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    service_tier: Option<&'a str>,
 }
 
 /// The plan's model, unless it leaves the choice to Codex.
@@ -157,6 +154,11 @@ fn model(plan: &Value) -> Option<&Value> {
 
 fn inbox(plan: &Value) -> &Path {
     Path::new(text(plan, "inputDirectory"))
+}
+
+/// An execution that compacts the native context instead of delivering a message.
+fn compacting(plan: &Value) -> bool {
+    plan["execution"]["operation"] == "compact"
 }
 
 /// Protects against a server that keeps answering with cursors it already gave.
@@ -178,67 +180,32 @@ impl Cursors {
     }
 }
 
-struct Question {
-    request_id: Value,
-    message_id: Option<String>,
-}
-
-/// A side question answered in an ephemeral fork of the conversation's thread.
-struct Side {
-    question: String,
-    turn: String,
-    answer: String,
-    /// The fork tried to use a tool and was interrupted.
-    stopped: bool,
-}
-
-/// What a side question's fork may use: nothing that acts or reaches outside the
-/// conversation. Codex 0.164 keeps a fork's subagent tools regardless of overrides,
-/// so any tool call is also interrupted when it starts.
-fn side_config() -> Value {
-    json!({
-        "web_search": "disabled",
-        "mcp_servers": {},
-        "features.shell_tool": false,
-        "features.unified_exec": false,
-        "features.multi_agent": false,
-        "features.multi_agent_v2": false,
-        "features.apps": false,
-        "features.plugins": false,
-        "features.browser_use": false,
-        "features.computer_use": false,
-        "features.code_mode": false,
-        "features.code_mode_host": false,
-        "features.goals": false,
-        "features.view_image": false,
-        "features.image_generation": false,
-        "features.sleep_tool": false,
-        "features.tool_suggest": false,
-        "features.skill_search": false,
-        "features.memories": false,
-        "features.hooks": false,
-        "features.default_mode_request_user_input": false,
-    })
-}
+// Codex persists client IDs in history. A reserved wire namespace preserves
+// operational identity across turns without changing provider message UUIDs.
+const OPERATIONAL_ID: &str = "cairn-runtime-disk:";
 
 struct Chat<'a> {
     session: &'a mut Session,
     events: mpsc::Sender<Value>,
     cancel: CancellationToken,
     thread: String,
+    /// The model Codex reports for the thread, which a plan without one runs.
+    thread_model: String,
     turn: String,
     completed: Option<Value>,
     last_message: String,
     seen: HashSet<String>,
     attempted: HashSet<String>,
+    turn_submitted: bool,
     texts: HashMap<String, String>,
-    questions: HashMap<String, Question>,
     /// Subagents this conversation started, by the ID of the item that started them.
     subagents: HashMap<String, Value>,
     /// The subagent each spawned thread works for.
     children: HashMap<String, String>,
-    /// Side questions being answered, by the ID of their fork.
-    sides: HashMap<String, Side>,
+    /// The latest context usage shown, so unchanged reports are not repeated.
+    context: Option<ContextUsage>,
+    /// Whether Codex reported a completed compaction during this execution.
+    compacted: bool,
 }
 
 impl Chat<'_> {
@@ -274,7 +241,7 @@ impl Chat<'_> {
     }
 
     async fn acknowledge(&mut self, id: &str) -> Result<()> {
-        if self.seen.insert(id.to_owned()) {
+        if self.seen.insert(id.to_owned()) && !id.starts_with(OPERATIONAL_ID) {
             self.emit(json!({ "type": "chat.delivered", "messageId": id }))
                 .await?;
         }
@@ -299,16 +266,35 @@ impl Chat<'_> {
             }
             return Ok(());
         }
-        if item["type"] == "agentMessage" {
-            if !text(&item, "text").is_empty() {
-                self.last_message = text(&item, "text").to_owned();
-            }
-            if kind == "item.completed" {
-                self.ask_in_message(&item).await?;
-            }
+        if item["type"] == "agentMessage" && !text(&item, "text").is_empty() {
+            self.last_message = text(&item, "text").to_owned();
         }
-        self.emit(json!({ "type": kind, "item": chat_item(item) }))
-            .await
+        let mut item = chat_item(item);
+        if item["type"] == "context_compaction" {
+            // Codex reports only the lifecycle; the visible transcript is never rewritten.
+            let completed = kind == "item.completed";
+            self.compacted |= completed;
+            item["status"] = if completed {
+                "completed"
+            } else {
+                "in_progress"
+            }
+            .into();
+        }
+        self.emit(json!({ "type": kind, "item": item })).await
+    }
+
+    /// `thread/tokenUsage/updated`, also replayed when a saved thread is resumed.
+    async fn token_usage(&mut self, params: &Value) -> Result<()> {
+        let Some(usage) = ContextUsage::codex(&params["tokenUsage"]) else {
+            return Ok(());
+        };
+        if self.context.as_ref() == Some(&usage) {
+            return Ok(());
+        }
+        let event = usage.event();
+        self.context = Some(usage);
+        self.emit(event).await
     }
 
     /// Codex's subagent tools as the subagents they start and the statuses they report. Waiting
@@ -564,97 +550,6 @@ impl Chat<'_> {
         }
     }
 
-    /// Questions an agent message asks, shown without blocking the conversation.
-    async fn ask_in_message(&self, item: &Value) -> Result<()> {
-        let Some(questions) = item["questions"].as_array() else {
-            return Ok(());
-        };
-        let fields = questions
-            .iter()
-            .enumerate()
-            .map(|(index, question)| {
-                let options = question["options"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .map(|label| json!({ "label": label }))
-                    .collect::<Vec<_>>();
-                json!({ "id": index.to_string(), "title": question["title"], "options": options })
-            })
-            .collect::<Vec<_>>();
-        let Ok(fields) = parse("questions", fields.into()) else {
-            return Ok(());
-        };
-        let id = hex_digest(&format!("{}:{}", self.thread, text(item, "id")));
-        self.emit(json!({
-            "type": "chat.question",
-            "question": { "id": id, "blocking": false, "fields": fields },
-        }))
-        .await
-    }
-
-    /// `item/tool/requestUserInput`: a question the user answers through the inbox.
-    async fn request_user_input(&mut self, request_id: Value, params: &Value) -> Result<()> {
-        let ours = !text(params, "itemId").is_empty()
-            && (self.thread.is_empty() || params["threadId"] == self.thread.as_str());
-        if !ours {
-            return self.session.rpc.reject(request_id).await;
-        }
-        let fields = params["questions"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|question| {
-                json!({
-                    "id": question["id"],
-                    "title": question["question"],
-                    "secret": question["isSecret"].as_bool().unwrap_or(false),
-                    "options": question["options"].as_array().cloned().unwrap_or_default(),
-                })
-            })
-            .collect::<Vec<_>>();
-        let Ok(fields) = parse("questions", fields.into()) else {
-            return self.session.rpc.reject(request_id).await;
-        };
-        let thread = if self.thread.is_empty() {
-            text(params, "threadId")
-        } else {
-            &self.thread
-        };
-        let id = hex_digest(&format!("{thread}:{}", text(params, "itemId")));
-        self.questions.insert(
-            id.clone(),
-            Question {
-                request_id,
-                message_id: None,
-            },
-        );
-        self.emit(json!({
-            "type": "chat.question",
-            "question": { "id": id, "blocking": params["isBlocking"] != false, "fields": fields },
-        }))
-        .await
-    }
-
-    /// `serverRequest/resolved`: closes the questions of a request that no longer waits.
-    async fn resolved(&mut self, params: &Value) -> Result<()> {
-        let ids = self
-            .questions
-            .iter()
-            .filter(|(_, q)| q.request_id == params["requestId"])
-            .map(|(id, _)| id.clone())
-            .collect::<Vec<_>>();
-        for id in ids {
-            let question = self.questions.remove(&id).unwrap();
-            if let Some(message) = question.message_id {
-                self.acknowledge(&message).await?;
-            }
-            self.emit(json!({ "type": "chat.question.closed", "questionId": id }))
-                .await?;
-        }
-        Ok(())
-    }
-
     async fn message_delta(&mut self, params: &Value) -> Result<()> {
         let delta = text(params, "delta");
         let value = self
@@ -679,14 +574,15 @@ impl Chat<'_> {
         let params = incoming.params;
         if let Some(request_id) = incoming.id {
             if incoming.method == "item/tool/requestUserInput" {
-                return self.request_user_input(request_id, &params).await;
+                return self
+                    .session
+                    .rpc
+                    .reject_with_message(request_id, crate::chats::questions::NATIVE_DENIED)
+                    .await;
             }
             return self.session.rpc.reject(request_id).await;
         }
         let thread = text(&params, "threadId");
-        if self.sides.contains_key(thread) {
-            return self.side_activity(&incoming.method, &params).await;
-        }
         let other_thread = params["threadId"].is_string()
             && !self.thread.is_empty()
             && params["threadId"] != self.thread.as_str();
@@ -699,7 +595,7 @@ impl Chat<'_> {
                 .await;
         }
         match incoming.method.as_str() {
-            "serverRequest/resolved" => self.resolved(&params).await?,
+            "serverRequest/resolved" => {}
             "turn/started" => {
                 self.turn = text(&params["turn"], "id").to_owned();
                 self.emit(json!({ "type": "turn.started" })).await?;
@@ -709,6 +605,7 @@ impl Chat<'_> {
                 self.item(params["item"].clone(), &kind).await?;
             }
             "item/agentMessage/delta" => self.message_delta(&params).await?,
+            "thread/tokenUsage/updated" => self.token_usage(&params).await?,
             // Each update replaces the turn's whole plan.
             "turn/plan/updated" => {
                 let id = format!("plan:{}", text(&params, "turnId"));
@@ -786,7 +683,7 @@ impl Chat<'_> {
             developer_instructions: &plan["instructions"],
             config: ThreadConfig {
                 overrides: plan["codexConfig"].as_object().unwrap_or(&empty),
-                request_user_input: true,
+                request_user_input: false,
                 sandbox_workspace_write: WorkspaceWrite {
                     network_access: true,
                     writable_roots: &plan["writableRoots"],
@@ -804,6 +701,7 @@ impl Chat<'_> {
         };
         let result = self.request(method, serde_json::to_value(params)?).await?;
         self.thread = text(&result["thread"], "id").to_owned();
+        self.thread_model = text(&result, "model").to_owned();
         if self.thread.is_empty() {
             return Err(Error::bad_gateway(
                 "Codex returned an invalid conversation.",
@@ -812,7 +710,6 @@ impl Chat<'_> {
         self.emit(json!({ "type": "chat.question.closed" })).await?;
         self.emit(json!({ "type": "thread.started", "thread_id": self.thread }))
             .await?;
-        self.emit(json!({ "type": "chat.side.available" })).await?;
         Ok(result)
     }
 
@@ -938,7 +835,15 @@ impl Chat<'_> {
     async fn execute(&mut self, plan: &Value) -> Result<()> {
         let effort = self.effort(plan).await;
         let resume = plan["sessionId"].is_string();
+        if compacting(plan) && !resume {
+            return Err(Error::conflict(
+                "This conversation has no saved Codex session to compact.",
+            ));
+        }
         let result = self.open_thread(plan, &effort, resume).await?;
+        if compacting(plan) {
+            return self.compact(plan).await;
+        }
         let (turns, paginated) = self.history(&result, resume).await?;
         for turn in &turns {
             for item in turn["items"].as_array().into_iter().flatten() {
@@ -979,6 +884,10 @@ impl Chat<'_> {
     }
 
     async fn start_turn(&mut self, plan: &Value, effort: &str, continuing: bool) -> Result<()> {
+        // A turn can complete before the first steering tick. Reject an oversized
+        // inbox before submitting any input, independently of provider timing.
+        crate::chat_inbox::read(inbox(plan), crate::chat_inbox::ADAPTER_LIMIT).await?;
+
         let message = if continuing {
             format!(
                 "Continue the interrupted conversation from its last completed step. Preserve completed work and verify external effects before repeating any action. The pending user request is:\n{}",
@@ -989,34 +898,109 @@ impl Chat<'_> {
         };
         let input =
             crate::attachments::input(&message, &plan["execution"]["attachments"], inbox(plan));
+        let (service_tier, speed_notice) = self.service_tier(plan).await?;
         let params = TurnParams {
             thread_id: &self.thread,
             input,
             effort: (!effort.is_empty()).then_some(effort),
             client_user_message_id: (!continuing).then(|| &plan["execution"]["messageId"]),
             model: model(plan),
+            service_tier: Some(service_tier.as_str()).filter(|tier| !tier.is_empty()),
         };
         let params = serde_json::to_value(params)?;
+        self.turn_submitted = true;
         let started = self.request("turn/start", params).await?;
         self.turn = text(&started["turn"], "id").to_owned();
         self.acknowledge(text(&plan["execution"], "messageId"))
-            .await
+            .await?;
+        // Only an attempt Codex accepted says how it asks for the speed, after its message.
+        if let Some(notice) = speed_notice {
+            self.emit(notice).await?;
+        }
+        Ok(())
+    }
+
+    /// The tier sent with the turn, and the speed notice to record once Codex accepts it. Codex
+    /// silently runs Standard for a tier its own catalog lacks, so a faster tier is checked against
+    /// this process's model list first, and against the account's recent cached catalog. Codex
+    /// silently answers both with its built-in list, which offers Fast, when it cannot fetch the
+    /// account's: a list naming the model without the tier is the account's, and decides Standard;
+    /// a list naming the tier is only a request, which the account's plan may still not run.
+    async fn service_tier(&mut self, plan: &Value) -> Result<(String, Option<Value>)> {
+        let tier = text(plan, "serviceTier").to_owned();
+        if tier.is_empty() || tier == crate::models::CODEX_STANDARD_TIER {
+            return Ok((tier, None));
+        }
+
+        // Without a chosen model, Codex runs the thread's, which its configuration may set
+        // rather than the catalog's default.
+        let model = match text(plan, "model") {
+            "" => self.thread_model.clone(),
+            model => model.to_owned(),
+        };
+        let check = if model.is_empty() {
+            // No model is known for the turn, so its catalog row cannot be found.
+            crate::models::TierCheck::Unconfirmed
+        } else {
+            tokio::select! {
+                () = self.cancel.cancelled() => return Err(Error::conflict(STOPPED)),
+                check = crate::models::check_tier(self.session, &model, &tier) => check,
+            }
+        };
+        let account = plan["accountTiers"][&model]
+            .as_array()
+            .map(|tiers| tiers.iter().any(|listed| listed == tier.as_str()));
+        let check = match (check, account) {
+            (_, Some(false)) => crate::models::TierCheck::Lacking,
+            (crate::models::TierCheck::Offered, None) => crate::models::TierCheck::Unconfirmed,
+            (check, _) => check,
+        };
+        let speed = match check {
+            crate::models::TierCheck::Offered => json!({
+                "requested": tier,
+                "confirmed": true,
+            }),
+            crate::models::TierCheck::Lacking => json!({
+                "requested": tier,
+                "applied": crate::models::STANDARD_SPEED,
+            }),
+            crate::models::TierCheck::Unconfirmed => json!({
+                "requested": tier,
+                "unconfirmed": true,
+            }),
+        };
+        let notice = json!({
+            "type": "turn.speed",
+            "messageId": plan["execution"]["messageId"],
+            "speed": speed,
+        });
+        let sent = if check == crate::models::TierCheck::Lacking {
+            crate::models::CODEX_STANDARD_TIER.to_owned()
+        } else {
+            tier
+        };
+        Ok((sent, Some(notice)))
+    }
+
+    /// Compacts the resumed thread. Codex replaces any running turn with its compaction
+    /// turn, so Cairn only starts one while the conversation is idle. A restarted attempt
+    /// compacts again: compaction has no external effects and keeps the thread usable.
+    async fn compact(&mut self, plan: &Value) -> Result<()> {
+        self.request(
+            "thread/compact/start",
+            json!({
+                "threadId": self.thread,
+            }),
+        )
+        .await?;
+        self.wait(plan).await
     }
 
     /// Steers the turn with the user's new messages until it completes.
     async fn wait(&mut self, plan: &Value) -> Result<()> {
         let mut interval = tokio::time::interval(Duration::from_millis(250));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut finished_at = None;
-        loop {
-            if self.completed.is_some() {
-                // A finished turn still delivers the side questions it is answering,
-                // for a bounded time. New messages wait for the next turn.
-                let finished = *finished_at.get_or_insert_with(tokio::time::Instant::now);
-                if self.sides.is_empty() || finished.elapsed() >= SIDE_GRACE {
-                    break;
-                }
-            }
+        while self.completed.is_none() {
             tokio::select! {
                 () = self.cancel.cancelled() => return Err(Error::conflict(STOPPED)),
                 incoming = self.session.incoming.recv() => {
@@ -1028,7 +1012,6 @@ impl Chat<'_> {
                 _ = interval.tick() => self.steer(plan).await?,
             }
         }
-        self.abandon_sides().await?;
         let turn = self.completed.take().unwrap();
         if turn["status"] != "completed" {
             // Keep the provider's error codes: they decide retries and account switches.
@@ -1044,10 +1027,20 @@ impl Chat<'_> {
                 .await?;
             return Err(Error::conflict(text(&error, "message")));
         }
+        if compacting(plan) && !self.compacted {
+            let message = "Codex finished without reporting a context compaction.";
+            self.emit(json!({ "type": "turn.failed", "error": { "message": message } }))
+                .await?;
+            return Err(Error::bad_gateway(message));
+        }
         self.finish(plan).await
     }
 
     async fn steer(&mut self, plan: &Value) -> Result<()> {
+        // Messages sent meanwhile stay queued for the next turn.
+        if compacting(plan) {
+            return Ok(());
+        }
         let Some(bytes) =
             crate::chat_inbox::read(inbox(plan), crate::chat_inbox::ADAPTER_LIMIT).await?
         else {
@@ -1058,49 +1051,18 @@ impl Chat<'_> {
         };
         for message in messages {
             let id = text(&message, "id");
-            if message["sideQuestionCancelled"] == true {
-                if self.attempted.insert(id.to_owned()) {
-                    self.withdraw_side(text(&message, "sideQuestionId")).await?;
-                }
-                continue;
-            }
+            let client_id = if message["operationalNotice"] == true {
+                format!("{OPERATIONAL_ID}{id}")
+            } else {
+                id.to_owned()
+            };
             if self.completed.is_some()
-                || self.seen.contains(id)
+                || self.seen.contains(&client_id)
                 || !self.attempted.insert(id.to_owned())
             {
                 continue;
             }
-            if message["sideQuestion"].is_object() {
-                self.ask_side(&message["sideQuestion"]).await?;
-                continue;
-            }
             if message["questionCancelled"] == true {
-                if let Some(question) = self.questions.remove(text(&message, "questionId")) {
-                    self.session
-                        .rpc
-                        .reply(question.request_id, json!({ "answers": {} }))
-                        .await?;
-                    self.emit(json!({
-                        "type": "chat.question.closed",
-                        "questionId": message["questionId"],
-                    }))
-                    .await?;
-                }
-                continue;
-            }
-            if let Some(question) = self.questions.get_mut(text(&message, "questionId"))
-                && let Some(answers) = message["answers"].as_object()
-            {
-                question.message_id = Some(id.to_owned());
-                let answers = answers
-                    .iter()
-                    .map(|(id, answers)| (id.clone(), json!({ "answers": answers })))
-                    .collect::<Map<_, _>>();
-                let request_id = question.request_id.clone();
-                self.session
-                    .rpc
-                    .reply(request_id, json!({ "answers": answers }))
-                    .await?;
                 continue;
             }
             let input = crate::attachments::input(
@@ -1111,205 +1073,15 @@ impl Chat<'_> {
             let params = json!({
                 "threadId": self.thread,
                 "expectedTurnId": self.turn,
-                "clientUserMessageId": id,
+                "clientUserMessageId": client_id,
                 "input": input,
             });
             if self.request("turn/steer", params).await.is_err() {
                 break;
             }
-            self.acknowledge(id).await?;
+            self.acknowledge(&client_id).await?;
         }
         Ok(())
-    }
-
-    /// Answers a side question in an ephemeral fork of the thread, on the same
-    /// app-server and account. The fork shares the history up to now, including the
-    /// running turn's progress, and never writes to the conversation's rollout.
-    async fn ask_side(&mut self, side: &Value) -> Result<()> {
-        let question = text(side, "id").to_owned();
-        let fork = self
-            .request(
-                "thread/fork",
-                json!({
-                    "threadId": self.thread,
-                    "ephemeral": true,
-                    "excludeTurns": true,
-                    "approvalPolicy": "never",
-                    "sandbox": "read-only",
-                    "config": side_config(),
-                }),
-            )
-            .await;
-        let fork = match fork {
-            Ok(fork) => text(&fork["thread"], "id").to_owned(),
-            Err(error) if error.message == STOPPED => return Err(error),
-            Err(_) => String::new(),
-        };
-        if fork.is_empty() {
-            return self
-                .side_failed(&question, "Codex could not open a side conversation.")
-                .await;
-        }
-        self.sides.insert(
-            fork.clone(),
-            Side {
-                question: question.clone(),
-                turn: String::new(),
-                answer: String::new(),
-                stopped: false,
-            },
-        );
-
-        let boundary = json!({
-            "threadId": fork,
-            "items": [{
-                "type": "message",
-                "role": "developer",
-                "content": [{ "type": "input_text", "text": SIDE_BOUNDARY }],
-            }],
-        });
-        let turn = json!({
-            "threadId": fork,
-            "input": [{ "type": "text", "text": text(side, "text") }],
-        });
-        let started = match self.request("thread/inject_items", boundary).await {
-            Ok(_) => self.request("turn/start", turn).await,
-            Err(error) => Err(error),
-        };
-        match started {
-            Ok(started) => {
-                if let Some(side) = self.sides.get_mut(&fork)
-                    && side.turn.is_empty()
-                {
-                    side.turn = text(&started["turn"], "id").to_owned();
-                }
-                Ok(())
-            }
-            Err(error) if error.message == STOPPED => Err(error),
-            Err(_) => {
-                if self.sides.remove(&fork).is_some() {
-                    self.release_fork(&fork, "");
-                    self.side_failed(&question, "Codex could not answer this side question.")
-                        .await?;
-                }
-                Ok(())
-            }
-        }
-    }
-
-    /// Activity of a side question's fork. Only its answer leaves the fork; anything
-    /// else it starts is a tool, which interrupts it.
-    async fn side_activity(&mut self, method: &str, params: &Value) -> Result<()> {
-        let fork = text(params, "threadId").to_owned();
-        let Some(side) = self.sides.get_mut(&fork) else {
-            return Ok(());
-        };
-        match method {
-            "turn/started" => {
-                side.turn = text(&params["turn"], "id").to_owned();
-            }
-            "item/started" | "item/completed" => {
-                let item = &params["item"];
-                let kind = text(item, "type");
-                if kind == "agentMessage" && method == "item/completed" {
-                    text(item, "text").clone_into(&mut side.answer);
-                }
-                let tool = !matches!(kind, "userMessage" | "agentMessage" | "reasoning");
-                if tool && !side.stopped {
-                    side.stopped = true;
-                    let turn = if side.turn.is_empty() {
-                        text(params, "turnId").to_owned()
-                    } else {
-                        side.turn.clone()
-                    };
-                    self.interrupt_fork(&fork, &turn);
-                }
-            }
-            "turn/completed" => {
-                let side = self.sides.remove(&fork).unwrap();
-                self.release_fork(&fork, "");
-                let completed = params["turn"]["status"] == "completed";
-                if side.stopped {
-                    return self.side_failed(&side.question, SIDE_TOOL).await;
-                }
-                if completed && !side.answer.trim().is_empty() {
-                    return self
-                        .emit(json!({
-                            "type": "chat.side.answered",
-                            "sideQuestionId": side.question,
-                            "text": side.answer,
-                        }))
-                        .await;
-                }
-                let message = text(&params["turn"]["error"], "message");
-                let message = if message.is_empty() {
-                    "Codex could not answer this side question."
-                } else {
-                    message
-                };
-                return self.side_failed(&side.question, message).await;
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    /// The user withdrew a side question: stop its fork without reporting it.
-    async fn withdraw_side(&mut self, question: &str) -> Result<()> {
-        let fork = self
-            .sides
-            .iter()
-            .find(|(_, side)| side.question == question)
-            .map(|(fork, _)| fork.clone());
-        if let Some(fork) = fork {
-            let side = self.sides.remove(&fork).unwrap();
-            self.release_fork(&fork, &side.turn);
-        }
-        Ok(())
-    }
-
-    /// Side questions still unanswered when the turn stops waiting for them.
-    async fn abandon_sides(&mut self) -> Result<()> {
-        let sides = std::mem::take(&mut self.sides);
-        for (fork, side) in sides {
-            self.release_fork(&fork, &side.turn);
-            self.side_failed(&side.question, SIDE_UNANSWERED).await?;
-        }
-        Ok(())
-    }
-
-    async fn side_failed(&self, question: &str, error: &str) -> Result<()> {
-        self.emit(json!({
-            "type": "chat.side.failed",
-            "sideQuestionId": question,
-            "error": error,
-        }))
-        .await
-    }
-
-    /// Interrupts a fork's turn without waiting, so its notifications keep flowing.
-    fn interrupt_fork(&self, fork: &str, turn: &str) {
-        let rpc = self.session.rpc.clone();
-        let params = json!({ "threadId": fork, "turnId": turn });
-        tokio::spawn(async move {
-            let _ = rpc.request("turn/interrupt", params).await;
-        });
-    }
-
-    /// Stops a fork's turn if one is given, then unloads the ephemeral fork.
-    fn release_fork(&self, fork: &str, turn: &str) {
-        let rpc = self.session.rpc.clone();
-        let fork = fork.to_owned();
-        let turn = turn.to_owned();
-        tokio::spawn(async move {
-            if !turn.is_empty() {
-                let params = json!({ "threadId": fork, "turnId": turn });
-                let _ = rpc.request("turn/interrupt", params).await;
-            }
-            let _ = rpc
-                .request("thread/unsubscribe", json!({ "threadId": fork }))
-                .await;
-        });
     }
 
     async fn finish(&self, plan: &Value) -> Result<()> {
@@ -1357,7 +1129,15 @@ pub async fn run(
         .map(str::to_owned)
         .collect::<Vec<_>>();
     let mut session =
-        Session::codex(config, home, &args, Some(Path::new(text(&plan, "cwd")))).await?;
+        match Session::codex(config, home, &args, Some(Path::new(text(&plan, "cwd")))).await {
+            Ok(session) => session,
+            Err(error) => {
+                if let Some(failure) = crate::run_retry::startup_failure(&error) {
+                    let _ = events.send(failure).await;
+                }
+                return Err(error);
+            }
+        };
     let result = run_session(&mut session, home, plan, events, cancel, false).await;
     crate::performance::wait("codex_shutdown", session.close()).await;
     result
@@ -1382,6 +1162,9 @@ async fn run_session(
     if let Some(auth) = &mut auth
         && let Err(error) = auth.login(session).await
     {
+        if let Some(failure) = crate::run_retry::startup_failure(&error) {
+            let _ = events.send(failure).await;
+        }
         return Err(error);
     }
     session.auth = auth;
@@ -1390,18 +1173,26 @@ async fn run_session(
         events,
         cancel,
         thread: String::new(),
+        thread_model: String::new(),
         turn: String::new(),
         completed: None,
         last_message: String::new(),
         seen: HashSet::new(),
         attempted: HashSet::new(),
+        turn_submitted: false,
         texts: HashMap::new(),
         subagents: HashMap::new(),
         children: HashMap::new(),
-        questions: HashMap::new(),
-        sides: HashMap::new(),
+        context: None,
+        compacted: false,
     };
     let mut result = chat.execute(&plan).await;
+    if let Err(error) = &result
+        && !chat.turn_submitted
+        && let Some(failure) = crate::run_retry::startup_failure(error)
+    {
+        chat.emit(failure).await?;
+    }
     if result.is_ok() && reusable {
         result = chat.release().await;
     }

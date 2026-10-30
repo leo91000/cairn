@@ -44,9 +44,26 @@ class HistoryScrollDeviceTest {
                     put("exit_code", 0)
                 }
                 listOf(
-                    RunEvent(id, id, "item.started", "", mapOf("item" to item)),
-                    RunEvent(id + 1, id + 1, "diagnostic", "heartbeat"),
-                    RunEvent(id + 2, id + 2, "item.completed", "", mapOf("item" to item)),
+                    RunEvent(
+                        id = id,
+                        createdAt = id,
+                        type = "item.started",
+                        text = "",
+                        payload = kotlinx.serialization.json.JsonObject(mapOf("item" to item)),
+                    ),
+                    RunEvent(
+                        id = id + 1,
+                        createdAt = id + 1,
+                        type = "diagnostic",
+                        text = "heartbeat",
+                    ),
+                    RunEvent(
+                        id = id + 2,
+                        createdAt = id + 2,
+                        type = "item.completed",
+                        text = "",
+                        payload = kotlinx.serialization.json.JsonObject(mapOf("item" to item)),
+                    ),
                 )
             }
         val entries = TimelineKeys().stabilize("grouping", timelineEntries(events, chat = true))
@@ -77,50 +94,56 @@ class HistoryScrollDeviceTest {
             val base = (turn - 1) * 10L
             listOf(
                 RunEvent(
-                    base + 1,
-                    base + 1,
-                    "chat.user",
-                    "Question $turn : peux-tu vérifier l’étape $turn ?",
-                    runId = "long",
+                    id = base + 1,
+                    createdAt = base + 1,
+                    type = "chat.user",
+                    text = "Question $turn : peux-tu vérifier l’étape $turn ?",
+                    runId = "ec1fdad0-11d4-5c4c-9cbe-0e5f6fed7090",
                 )
             ) +
                 (1..8).map { step ->
                     RunEvent(
-                        base + 1 + step,
-                        base + 1 + step,
-                        "item.completed",
-                        "",
-                        mapOf(
-                            "item" to
-                                buildJsonObject {
-                                    put("id", "cmd-$turn-$step")
-                                    put("type", "command_execution")
-                                    put("command", "./gradlew check --step $step")
-                                    put("status", "completed")
-                                    put("aggregated_output", "ok")
-                                    put("exit_code", 0)
-                                }
-                        ),
-                        runId = "long",
+                        id = base + 1 + step,
+                        createdAt = base + 1 + step,
+                        type = "item.completed",
+                        text = "",
+                        payload =
+                            kotlinx.serialization.json.JsonObject(
+                                mapOf(
+                                    "item" to
+                                        buildJsonObject {
+                                            put("id", "cmd-$turn-$step")
+                                            put("type", "command_execution")
+                                            put("command", "./gradlew check --step $step")
+                                            put("status", "completed")
+                                            put("aggregated_output", "ok")
+                                            put("exit_code", 0)
+                                        }
+                                )
+                            ),
+                        runId = "ec1fdad0-11d4-5c4c-9cbe-0e5f6fed7090",
                     )
                 } +
                 RunEvent(
-                    base + 10,
-                    base + 10,
-                    "item.completed",
-                    "",
-                    mapOf(
-                        "item" to
-                            buildJsonObject {
-                                put("id", "answer-$turn")
-                                put("type", "agent_message")
-                                put(
-                                    "text",
-                                    "Réponse $turn. L’étape $turn est vérifiée : les commandes passent et rien d’autre n’a changé.",
-                                )
-                            }
-                    ),
-                    runId = "long",
+                    id = base + 10,
+                    createdAt = base + 10,
+                    type = "item.completed",
+                    text = "",
+                    payload =
+                        kotlinx.serialization.json.JsonObject(
+                            mapOf(
+                                "item" to
+                                    buildJsonObject {
+                                        put("id", "answer-$turn")
+                                        put("type", "agent_message")
+                                        put(
+                                            "text",
+                                            "Réponse $turn. L’étape $turn est vérifiée : les commandes passent et rien d’autre n’a changé.",
+                                        )
+                                    }
+                            )
+                        ),
+                    runId = "ec1fdad0-11d4-5c4c-9cbe-0e5f6fed7090",
                 )
         }
 
@@ -134,7 +157,12 @@ class HistoryScrollDeviceTest {
                     LiveBatch(
                         window,
                         LiveState(
-                            chat = Chat("long", "Longue conversation", agentName = "Main agent")
+                            chat =
+                                Chat(
+                                    id = "ec1fdad0-11d4-5c4c-9cbe-0e5f6fed7090",
+                                    title = "Longue conversation",
+                                    agentName = "Main agent",
+                                )
                         ),
                         reset = true,
                         more = false,
@@ -159,16 +187,19 @@ class HistoryScrollDeviceTest {
                                 .setBody(
                                     wireJson.encodeToString(
                                         HistoryPage(
-                                            page,
-                                            history,
-                                            page.first().id,
-                                            page.first().id > 1,
+                                            events = page,
+                                            history = history,
+                                            oldest = page.first().id,
+                                            hasOlder = page.first().id > 1,
                                         )
                                     )
                                 )
                         }
                         // A reconnect resumes after the cursor: nothing new to send.
-                        if (path == "/api/installations/fixture/api/chats/long/stream")
+                        if (
+                            path ==
+                                "/api/installations/fixture/api/chats/ec1fdad0-11d4-5c4c-9cbe-0e5f6fed7090/stream"
+                        )
                             return MockResponse()
                                 .setHeader("Content-Type", "text/event-stream")
                                 .setBody(
@@ -191,13 +222,13 @@ class HistoryScrollDeviceTest {
                                 .throttleBody(13, 1, TimeUnit.SECONDS)
                         val body =
                             when (path) {
+                                "/api/installations/fixture/api/tasks" -> """{"tasks":[]}"""
                                 "/api/installations" -> beaconInstallationsFixture()
                                 "/api/account/session" -> beaconAccountFixture("fixture")
-                                "/api/installations/fixture/api/agents",
-                                "/api/installations/fixture/api/projects",
-                                "/api/installations/fixture/api/tasks",
-                                "/api/installations/fixture/api/skills",
-                                "/api/installations/fixture/api/mcps" -> "[]"
+                                "/api/installations/fixture/api/projects" -> """{"projects":[]}"""
+                                "/api/installations/fixture/api/agents" -> """{"agents":[]}"""
+                                "/api/installations/fixture/api/skills" -> "[]"
+                                "/api/installations/fixture/api/mcps" -> """{"mcps":[]}"""
                                 else -> "{}"
                             }
                         return MockResponse()
@@ -219,7 +250,13 @@ class HistoryScrollDeviceTest {
                     if (visible && workspace.session.authenticated)
                         CairnTheme("dark") {
                             Surface(Modifier.fillMaxSize()) {
-                                ChatScreen(vm, workspace, "long", openChat = {}, openRun = {})
+                                ChatScreen(
+                                    vm,
+                                    workspace,
+                                    "ec1fdad0-11d4-5c4c-9cbe-0e5f6fed7090",
+                                    openChat = {},
+                                    openRun = {},
+                                )
                             }
                         }
                 }

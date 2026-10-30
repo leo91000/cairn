@@ -1,76 +1,16 @@
-// Coding-agent accounts, as served by /api/accounts.
-export type Provider = 'codex' | 'claude' | 'opencode'
+import type { AccountUsage as Usage } from './generated/typescript/AccountUsage'
+import type { AccountWindow as UsageWindow } from './generated/typescript/AccountWindow'
+// Coding-agent account wire models are generated from Rust.
+import type { AgentProvider as Provider } from './generated/typescript/AgentProvider'
 
-export interface ApiKeyProvider { id: string, name: string }
-
-/** What the account needs or does, computed by the server's selection rules. */
-export type AccountStatus = 'signIn' | 'reconnect' | 'paused' | 'unavailable' | 'waiting' | 'full' | 'next' | 'low' | 'ready'
-
-export interface UsageWindow {
-  id: string
-  label: string
-  usedPercent: number
-  resetsAt: number | null
-  durationMins: number | null
-  /** Empty when the window limits every model. */
-  models: string[]
-  reached?: boolean
-}
-export interface Usage {
-  allowed: boolean
-  windows: UsageWindow[]
-  checkedAt: number | null
-  error?: string | null
-  /** OpenCode Go may use paid Zen credits once its subscription quotas are exhausted. */
-  useBalance?: boolean
-  /** Codex banked resets. */
-  resets: { available: number } | null
-}
-export interface Account {
-  id: string
-  provider: Provider
-  name: string
-  enabled: boolean
-  email: string | null
-  plan: string | null
-  modelProvider?: string
-  modelProviderName?: string
-  /** The user's order among accounts of a coding agent that orders them. */
-  priority?: number
-  state: 'pending' | 'ready' | 'error'
-  status: AccountStatus
-  error: string
-  resetError?: string
-  createdAt: number
-  checkedAt: number | null
-  lastUsedAt: number | null
-  maxConcurrentRuns: number
-  activeRunIds: string[]
-  usage: Usage | null
-  remainingPercent: number | null
-  resetsAt: number | null
-  stale: boolean
-  exhausted: boolean
-}
-export interface SignIn {
-  accountId: string
-  provider: Provider
-  state: 'pending' | 'complete' | 'failed' | 'cancelled'
-  phase: 'starting' | 'authorizing' | 'verifying'
-  url: string | null
-  /** A code to enter on the sign-in page (Codex). */
-  code: string | null
-  /** Whether the sign-in page shows a code to paste back here (Claude Code). */
-  acceptsCode: boolean
-  expiresAt: number | null
-  error: string | null
-}
-export interface Accounts {
-  accounts: Account[]
-  signIn: SignIn | null
-  /** Coding agents whose runs wait for the user to connect, reconnect or resume an account. */
-  required: Provider[]
-}
+export type { AccountSignIn as SignIn } from './generated/typescript/AccountSignIn'
+export type { AccountStatus } from './generated/typescript/AccountStatus'
+export type { AccountUsage as Usage } from './generated/typescript/AccountUsage'
+export type { AccountWindow as UsageWindow } from './generated/typescript/AccountWindow'
+export type { AgentProvider as Provider } from './generated/typescript/AgentProvider'
+export type { ApiKeyProvider } from './generated/typescript/ApiKeyProvider'
+export type { CodingAgentAccount as Account } from './generated/typescript/CodingAgentAccount'
+export type { CodingAgentAccounts as Accounts } from './generated/typescript/CodingAgentAccounts'
 
 export const providers: Record<Provider, {
   label: string
@@ -116,5 +56,5 @@ export function generalWindows(usage: Usage | null) {
 }
 
 export function remainingPercent(window: UsageWindow) {
-  return Math.max(0, Math.min(100, 100 - window.usedPercent))
+  return Math.max(0, Math.min(100, 100 - (window.usedPercent ?? 0)))
 }

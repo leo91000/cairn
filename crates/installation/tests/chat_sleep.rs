@@ -1,3 +1,7 @@
+use crate::common::run_fixture::DbRunFixture;
+use common::MissionFixture;
+use common::StoreAgentFixture;
+
 mod common;
 
 use cairn_installation::{
@@ -44,7 +48,13 @@ impl Fixture {
         let run_id = text(&run, "id").to_owned();
         service
             .store
-            .patch_run(&run_id, json!({ "status": "running" }))
+            .change_run(
+                &run_id,
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Running),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         service.chat_acknowledge(&run_id, &message).await.unwrap();
@@ -56,11 +66,7 @@ impl Fixture {
         let token = text(&config["env"], "CAIRN_MCP_RUN_TOKEN").to_owned();
         service
             .store
-            .set(
-                &format!("run-checkpoint:{run_id}"),
-                json!({ "completed": true, "launched": true }),
-                None,
-            )
+            .save_checkpoint_boundary(&run_id, json!({ "completed": true, "launched": true }))
             .await
             .unwrap();
         Self {
@@ -76,7 +82,7 @@ impl Fixture {
         wait_for::schedule(
             &self.service,
             &self.token,
-            &json!({ "condition": { "type": "delay", "seconds": 420 }, "reason": "Wait for CI" }),
+            &json!({ "conditions": [{ "type": "delay", "seconds": 420 }], "reason": "Wait for CI" }),
         )
         .await
         .unwrap()["wakeup"]
@@ -84,15 +90,34 @@ impl Fixture {
     }
 
     async fn finish(&self) {
-        self.service.store.patch_run(&self.run, json!({
-            "status": "succeeded", "recoveryPending": false, "sessionId": "saved-session", "workspace": "/saved/workspace",
-        })).await.unwrap();
+        self.service
+            .store
+            .change_run(
+                &self.run,
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Succeeded),
+                    recovery_pending: Some(false),
+                    session_id: Some(Some("saved-session".into())),
+                    workspace: Some(Some("/saved/workspace".into())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
     }
 
     async fn due(&self) {
-        let mut chat = self.service.get("chats", &self.chat).await.unwrap();
+        let mut chat = self
+            .service
+            .conversation_boundary(&self.chat)
+            .await
+            .unwrap();
         chat["wakeup"]["wakeAt"] = (now() - 1000).into();
-        self.service.store.put("chats", chat).await.unwrap();
+        self.service
+            .store
+            .save_conversation_boundary(chat)
+            .await
+            .unwrap();
     }
 
     async fn tick(&self) -> Value {
@@ -152,7 +177,7 @@ async fn delay_is_idempotent_durable_and_resumes_same_workspace_once_without_use
         .store
         .read(move |db| {
             Ok(db
-                .events(&run, 0, 100)?
+                .events_fixture(&run, 0, 100)?
                 .iter()
                 .filter(|event| event["type"] == "chat.wakeup")
                 .count())
@@ -164,7 +189,7 @@ async fn delay_is_idempotent_durable_and_resumes_same_workspace_once_without_use
         wait_for::schedule(
             &restarted,
             &f.token,
-            &json!({ "condition": { "type": "delay", "seconds": 1 }, "reason": "stale" })
+            &json!({ "conditions": [{ "type": "delay", "seconds": 1 }], "reason": "stale" })
         )
         .await
         .is_err()
@@ -193,7 +218,7 @@ async fn replacing_waits_and_expired_turn_grants_cannot_reschedule_the_next_turn
     let integral_float = wait_for::schedule(
         &f.service,
         &f.token,
-        &json!({ "condition": { "type": "delay", "seconds": 420.0 }, "reason": "Wait for CI" }),
+        &json!({ "conditions": [{ "type": "delay", "seconds": 420.0 }], "reason": "Wait for CI" }),
     )
     .await
     .unwrap()["wakeup"]
@@ -202,7 +227,7 @@ async fn replacing_waits_and_expired_turn_grants_cannot_reschedule_the_next_turn
     let replacement = wait_for::schedule(
         &f.service,
         &f.token,
-        &json!({ "condition": { "type": "delay", "seconds": 1 }, "reason": "Wait for review" }),
+        &json!({ "conditions": [{ "type": "delay", "seconds": 1 }], "reason": "Wait for review" }),
     )
     .await
     .unwrap()["wakeup"]
@@ -217,7 +242,13 @@ async fn replacing_waits_and_expired_turn_grants_cannot_reschedule_the_next_turn
     );
     f.service
         .store
-        .patch_run(&f.run, json!({ "status": "running" }))
+        .change_run(
+            &f.run,
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Running),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let configuration = f
@@ -230,7 +261,7 @@ async fn replacing_waits_and_expired_turn_grants_cannot_reschedule_the_next_turn
     let next = wait_for::schedule(
         &f.service,
         token,
-        &json!({ "condition": { "type": "delay", "seconds": 420 }, "reason": "Next wait" }),
+        &json!({ "conditions": [{ "type": "delay", "seconds": 420 }], "reason": "Next wait" }),
     )
     .await
     .unwrap()["wakeup"]
@@ -239,7 +270,7 @@ async fn replacing_waits_and_expired_turn_grants_cannot_reschedule_the_next_turn
         wait_for::schedule(
             &f.service,
             &f.token,
-            &json!({ "condition": { "type": "delay", "seconds": 1 }, "reason": "Old turn" })
+            &json!({ "conditions": [{ "type": "delay", "seconds": 1 }], "reason": "Old turn" })
         )
         .await
         .is_err()
@@ -258,11 +289,11 @@ async fn scheduled_continuation_rechecks_permissions_before_reusing_the_workspac
     f.due().await;
     let mut agent = f
         .service
-        .get("agents", cairn_installation::config::MAIN_AGENT_ID)
+        .agent_snapshot(cairn_installation::config::MAIN_AGENT_ID)
         .await
         .unwrap();
     agent["access"]["sandbox"] = "read-only".into();
-    f.service.store.put("agents", agent).await.unwrap();
+    f.service.store.put_agent_fixture(agent).await.unwrap();
     let detail = f.tick().await;
     assert_eq!(detail["paused"], true);
     assert_eq!(detail["run"]["status"], "succeeded");
@@ -302,7 +333,13 @@ async fn user_input_cancel_and_trash_prevent_obsolete_wakeups() {
             "failure" => {
                 f.service
                     .store
-                    .patch_run(&f.run, json!({ "status": "failed" }))
+                    .change_run(
+                        &f.run,
+                        cairn_installation::runs::RunChanges {
+                            status: Some(cairn_contracts::RunStatus::Failed),
+                            ..Default::default()
+                        },
+                    )
                     .await
                     .unwrap();
             }
@@ -336,26 +373,26 @@ async fn failed_paused_turn_cannot_replay_its_wakeup_after_manual_resume() {
         f.due().await;
         f.service
             .store
-            .patch_run(
+            .change_run(
                 &f.run,
-                json!({
-                    "status": "failed",
-                    "resumeAvailable": true,
-                    "recoveryPending": false,
-                }),
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Failed),
+                    resume_available: Some(true),
+                    recovery_pending: Some(false),
+                    ..Default::default()
+                },
             )
             .await
             .unwrap();
         f.service
             .store
-            .set(
-                &format!("run-checkpoint:{}", f.run),
+            .save_checkpoint_boundary(
+                &f.run,
                 json!({
                     "completed": true,
                     "launched": true,
                     "prepared": { "backend": "fixture" },
                 }),
-                None,
             )
             .await
             .unwrap();
@@ -375,7 +412,13 @@ async fn failed_paused_turn_cannot_replay_its_wakeup_after_manual_resume() {
         f.finish().await;
         f.service
             .store
-            .patch_run(&f.run, json!({ "recoveryPending": false }))
+            .change_run(
+                &f.run,
+                cairn_installation::runs::RunChanges {
+                    recovery_pending: Some(false),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
 
@@ -429,9 +472,13 @@ async fn queued_follow_ups_are_not_held_by_a_wakeup_that_cannot_resume() {
         .unwrap();
     f.schedule().await;
     f.finish().await;
-    let mut chat = f.service.get("chats", &f.chat).await.unwrap();
+    let mut chat = f.service.conversation_boundary(&f.chat).await.unwrap();
     chat["sessionRestartRequested"] = true.into();
-    f.service.store.put("chats", chat).await.unwrap();
+    f.service
+        .store
+        .save_conversation_boundary(chat)
+        .await
+        .unwrap();
 
     let detail = f.tick().await;
     assert_eq!(detail["run"]["chatExecution"]["messageId"], follow_up);
@@ -442,11 +489,11 @@ async fn queued_follow_ups_are_not_held_by_a_wakeup_that_cannot_resume() {
 async fn delay_rejects_invalid_inputs_and_pending_steering_but_accepts_missions() {
     let f = Fixture::new().await;
     for input in [
-        json!({ "condition": { "type": "delay", "seconds": 0 }, "reason": "CI" }),
-        json!({ "condition": { "type": "delay", "seconds": 86401 }, "reason": "CI" }),
-        json!({ "condition": { "type": "delay", "seconds": 1.5 }, "reason": "CI" }),
-        json!({ "condition": { "type": "delay", "seconds": 1 }, "reason": " " }),
-        json!({ "condition": { "type": "delay", "seconds": 1 }, "reason": "CI", "extra": true }),
+        json!({ "conditions": [{ "type": "delay", "seconds": 0 }], "reason": "CI" }),
+        json!({ "conditions": [{ "type": "delay", "seconds": 86401 }], "reason": "CI" }),
+        json!({ "conditions": [{ "type": "delay", "seconds": 1.5 }], "reason": "CI" }),
+        json!({ "conditions": [{ "type": "delay", "seconds": 1 }], "reason": " " }),
+        json!({ "conditions": [{ "type": "delay", "seconds": 1 }], "reason": "CI", "extra": true }),
     ] {
         assert!(
             wait_for::schedule(&f.service, &f.token, &input)
@@ -466,15 +513,19 @@ async fn delay_rejects_invalid_inputs_and_pending_steering_but_accepts_missions(
         wait_for::schedule(
             &f.service,
             &f.token,
-            &json!({ "condition": { "type": "delay", "seconds": 1 }, "reason": "CI" })
+            &json!({ "conditions": [{ "type": "delay", "seconds": 1 }], "reason": "CI" })
         )
         .await
         .is_err()
     );
     let task = f
         .service
-        .task(
-            json!({ "name": "Scheduled task", "prompt": "Do work", "agentId": cairn_installation::config::MAIN_AGENT_ID }),
+        .task_fixture(
+            json!({
+                "name": "Scheduled task",
+                "prompt": "Do work",
+                "agentId": cairn_installation::config::MAIN_AGENT_ID,
+            }),
             None,
         )
         .await
@@ -486,7 +537,13 @@ async fn delay_rejects_invalid_inputs_and_pending_steering_but_accepts_missions(
         .unwrap();
     f.service
         .store
-        .patch_run(text(&run, "id"), json!({ "status": "running" }))
+        .change_run(
+            text(&run, "id"),
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Running),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let config = f
@@ -500,7 +557,7 @@ async fn delay_rejects_invalid_inputs_and_pending_steering_but_accepts_missions(
         &f.service,
         token,
         &json!({
-            "condition": { "type": "delay", "seconds": 1 }, "reason": "CI",
+            "conditions": [{ "type": "delay", "seconds": 1 }], "reason": "CI",
         }),
     )
     .await
@@ -513,12 +570,12 @@ async fn delay_rejects_invalid_inputs_and_pending_steering_but_accepts_missions(
 }
 
 #[tokio::test]
-async fn replacing_a_native_session_retires_its_pending_questions_before_startup() {
+async fn common_questionnaires_survive_replacing_the_native_session() {
     for (provider, fresh_session, expected_pending) in [
         ("codex", false, 1),
-        ("opencode", false, 0),
-        ("claude", false, 0),
-        ("codex", true, 0),
+        ("opencode", false, 1),
+        ("claude", false, 1),
+        ("codex", true, 1),
     ] {
         let f = Fixture::new().await;
         let question = "a".repeat(64);
@@ -535,17 +592,16 @@ async fn replacing_a_native_session_retires_its_pending_questions_before_startup
             .unwrap();
         f.service
             .store
-            .patch_run(&f.run, json!({ "outcome": { "status": "needs_input" } }))
+            .update_run_boundary(&f.run, json!({ "outcome": { "status": "needs_input" } }))
             .await
             .unwrap();
         f.finish().await;
         if fresh_session {
             f.service
                 .store
-                .set(
-                    &format!("run-checkpoint:{}", f.run),
+                .save_checkpoint_boundary(
+                    &f.run,
                     json!({ "completed": true, "launched": true, "freshSession": true }),
-                    None,
                 )
                 .await
                 .unwrap();
@@ -579,20 +635,17 @@ async fn replacing_a_native_session_retires_its_pending_questions_before_startup
             detail["pendingQuestions"], expected_pending,
             "provider={provider}, fresh_session={fresh_session}"
         );
-        if expected_pending == 0 {
-            assert_eq!(detail["questions"][0]["status"], "cancelled");
-            assert!(detail["run"]["sessionId"].is_null());
-            assert!(
-                f.service
-                    .question_answer(
-                        &f.chat,
-                        &question,
-                        json!({ "id": id(), "answers": { "scope": ["Obsolete answer"] } }),
-                    )
-                    .await
-                    .is_err()
-            );
-        }
+        assert_eq!(detail["questions"][0]["status"], "pending");
+        f.service
+            .question_answer(
+                &f.chat,
+                &question,
+                json!({
+                    "id": id(), "answers": { "scope": { "comment": "Continue after the switch" } },
+                }),
+            )
+            .await
+            .unwrap();
     }
 }
 
@@ -601,16 +654,26 @@ async fn time_conditions_are_available_without_plugin_or_installation_access() {
     let f = Fixture::new().await;
     let mut agent = f
         .service
-        .get("agents", cairn_installation::config::MAIN_AGENT_ID)
+        .agent_snapshot(cairn_installation::config::MAIN_AGENT_ID)
         .await
         .unwrap();
     agent["access"]["installation"] = false.into();
-    f.service.store.put("agents", agent.clone()).await.unwrap();
+    f.service
+        .store
+        .put_agent_fixture(agent.clone())
+        .await
+        .unwrap();
     let mut run = f.service.store.run(&f.run).await.unwrap();
     run["snapshot"]["agent"] = agent;
     f.service
         .store
-        .patch_run(&f.run, json!({ "snapshot": run["snapshot"] }))
+        .change_run(
+            &f.run,
+            cairn_installation::runs::RunChanges {
+                snapshot: Some(serde_json::from_value(run["snapshot"].clone()).unwrap()),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let listing = project_workspaces::rpc(&f.service, &f.token, "tools/list", &json!({}))
@@ -636,7 +699,7 @@ async fn time_conditions_are_available_without_plugin_or_installation_access() {
         json!({ "type": "delay", "seconds": 60 }),
         json!({ "type": "at", "date": "2026-01-01T00:00:00Z" }),
     ] {
-        let input = json!({ "condition": condition, "reason": "Resume later" });
+        let input = json!({ "conditions": [condition], "reason": "Resume later" });
         assert!(jsonschema::is_valid(schema, &input));
         let result = project_workspaces::rpc(
             &f.service,
@@ -649,8 +712,8 @@ async fn time_conditions_are_available_without_plugin_or_installation_access() {
         assert_ne!(result["isError"], true, "{result}");
     }
     for input in [
-        json!({ "condition": { "type": "delay", "seconds": 60 }, "reason": "Wait", "timeoutSeconds": 100 }),
-        json!({ "condition": { "type": "run_finished", "runId": id() }, "reason": "Wait" }),
+        json!({ "conditions": [{ "type": "delay", "seconds": 60 }], "reason": "Wait", "timeoutSeconds": 100 }),
+        json!({ "conditions": [{ "type": "run_finished", "runId": id() }], "reason": "Wait" }),
     ] {
         assert!(!jsonschema::is_valid(schema, &input));
         assert!(
@@ -666,7 +729,7 @@ async fn dates_are_absolute_timezone_aware_and_repeated_calls_keep_the_deadline(
     let f = Fixture::new().await;
     let deadline = now() + 3_600_000;
     let date = chrono::DateTime::from_timestamp_millis(deadline).unwrap();
-    let request = json!({ "condition": { "type": "at", "date": date.to_rfc3339() }, "reason": "Wait until date" });
+    let request = json!({ "conditions": [{ "type": "at", "date": date.to_rfc3339() }], "reason": "Wait until date" });
     let result = wait_for::schedule(&f.service, &f.token, &request)
         .await
         .unwrap();
@@ -678,7 +741,10 @@ async fn dates_are_absolute_timezone_aware_and_repeated_calls_keep_the_deadline(
         "Keep the legacy timer shape for older binaries"
     );
     let offset = chrono::FixedOffset::east_opt(7200).unwrap();
-    let equivalent = json!({ "condition": { "type": "at", "date": date.with_timezone(&offset).to_rfc3339() }, "reason": "Wait until date" });
+    let equivalent = json!({
+        "conditions": [{ "type": "at", "date": date.with_timezone(&offset).to_rfc3339() }],
+        "reason": "Wait until date",
+    });
     assert_eq!(
         wait_for::schedule(&f.service, &f.token, &equivalent)
             .await
@@ -695,14 +761,17 @@ async fn dates_are_absolute_timezone_aware_and_repeated_calls_keep_the_deadline(
         json!({ "type": "at", "date": "tomorrow" }),
         json!({ "type": "at", "date": "2026-10-23T09:00:00" }),
         json!({ "type": "at", "date": "2026-02-30T09:00:00Z" }),
-        json!({ "type": "at", "date": chrono::DateTime::from_timestamp_millis(now() + 86_500_000).unwrap().to_rfc3339() }),
+        json!({
+            "type": "at",
+            "date": chrono::DateTime::from_timestamp_millis(now() + 86_500_000).unwrap().to_rfc3339(),
+        }),
         json!({ "type": "at", "date": date.to_rfc3339(), "seconds": 10 }),
     ] {
         assert!(
             wait_for::schedule(
                 &f.service,
                 &f.token,
-                &json!({ "condition": condition, "reason": "Wait" })
+                &json!({ "conditions": [condition], "reason": "Wait" })
             )
             .await
             .is_err()
@@ -716,7 +785,7 @@ async fn past_dates_complete_immediately_and_replace_pending_waits() {
     f.schedule().await;
     let deadline = now() - 1000;
     let result = wait_for::schedule(&f.service, &f.token, &json!({
-        "condition": { "type": "at", "date": chrono::DateTime::from_timestamp_millis(deadline).unwrap().to_rfc3339() },
+        "conditions": [{ "type": "at", "date": chrono::DateTime::from_timestamp_millis(deadline).unwrap().to_rfc3339() }],
         "reason": "Time already reached",
     })).await.unwrap();
     assert_eq!(
@@ -733,13 +802,17 @@ async fn timer_completion_is_a_result_and_existing_timer_records_still_resume() 
     let f = Fixture::new().await;
     let wake = f.schedule().await;
     // Exact persisted shape used by sleep before the unified interface.
-    let mut chat = f.service.get("chats", &f.chat).await.unwrap();
+    let mut chat = f.service.conversation_boundary(&f.chat).await.unwrap();
     let deadline = now() - 1000;
     chat["wakeup"] = json!({
         "id": wake["id"], "messageId": wake["messageId"], "reason": wake["reason"],
         "createdAt": deadline - 420_000, "wakeAt": deadline, "seconds": 420,
     });
-    f.service.store.put("chats", chat).await.unwrap();
+    f.service
+        .store
+        .save_conversation_boundary(chat)
+        .await
+        .unwrap();
     f.finish().await;
     let restarted = Service::new(f.service.config.clone()).await.unwrap();
     restarted.chat_tick(&HashSet::new()).await.unwrap();
@@ -748,7 +821,7 @@ async fn timer_completion_is_a_result_and_existing_timer_records_still_resume() 
     let run = f.run.clone();
     let events = restarted
         .store
-        .read(move |db| db.events(&run, 0, 100))
+        .read(move |db| db.events_fixture(&run, 0, 100))
         .await
         .unwrap();
     let event = events
@@ -767,7 +840,7 @@ async fn fractional_dates_never_schedule_before_the_requested_instant() {
     let millis = now() + 60_000;
     let date =
         chrono::DateTime::from_timestamp_millis(millis).unwrap() + chrono::Duration::nanoseconds(1);
-    let result = wait_for::schedule(&f.service, &f.token, &json!({ "condition": { "type": "at", "date": date.to_rfc3339() }, "reason": "Precise date" })).await.unwrap();
+    let result = wait_for::schedule(&f.service, &f.token, &json!({ "conditions": [{ "type": "at", "date": date.to_rfc3339() }], "reason": "Precise date" })).await.unwrap();
     assert_eq!(result["wakeup"]["wakeAt"], millis + 1);
 }
 
@@ -779,7 +852,7 @@ async fn switching_between_a_date_and_duration_replaces_the_request() {
         &f.service,
         &f.token,
         &json!({
-            "condition": { "type": "at", "date": date.to_rfc3339() }, "reason": "Wait for CI",
+            "conditions": [{ "type": "at", "date": date.to_rfc3339() }], "reason": "Wait for CI",
         }),
     )
     .await
@@ -793,7 +866,70 @@ async fn switching_between_a_date_and_duration_replaces_the_request() {
     let same_instant =
         chrono::DateTime::from_timestamp_millis(delay["wakeAt"].as_i64().unwrap()).unwrap();
     let at = wait_for::schedule(&f.service, &f.token, &json!({
-        "condition": { "type": "at", "date": same_instant.to_rfc3339() }, "reason": "Wait for CI",
+        "conditions": [{ "type": "at", "date": same_instant.to_rfc3339() }], "reason": "Wait for CI",
     })).await.unwrap();
     assert_ne!(at["wakeup"]["id"], delay["id"]);
+}
+
+#[tokio::test]
+async fn idle_questionnaire_answers_continue_while_ordinary_followups_stay_paused() {
+    let f = Fixture::new().await;
+    let question = "a".repeat(64);
+    f.service
+        .question_receive(
+            &f.run,
+            json!({
+                "id": question,
+                "blocking": false,
+                "fields": [{ "id": "scope", "title": "Which scope?" }],
+            }),
+        )
+        .await
+        .unwrap();
+    f.finish().await;
+    f.service.chat_pause(&f.chat, true).await.unwrap();
+    let followup = id();
+    f.service
+        .chat_send(&f.chat, json!({ "id": followup, "text": "Later task" }))
+        .await
+        .unwrap();
+    let answer = id();
+    f.service
+        .question_answer(
+            &f.chat,
+            &question,
+            json!({
+                "id": answer,
+                "answers": { "scope": { "selected": [], "comment": "Everything" } },
+            }),
+        )
+        .await
+        .unwrap();
+    let detail = f.tick().await;
+    assert_eq!(detail["paused"], true);
+    assert_eq!(detail["run"]["status"], "queued");
+    assert_eq!(detail["run"]["chatExecution"]["messageId"], answer);
+    let messages = detail["messages"].as_array().unwrap();
+    assert_eq!(
+        messages.iter().find(|m| m["id"] == followup).unwrap()["status"],
+        "queued"
+    );
+    f.service.chat_acknowledge(&f.run, &answer).await.unwrap();
+    f.finish().await;
+    let detail = f.tick().await;
+    assert_eq!(detail["run"]["status"], "succeeded");
+    assert_eq!(detail["paused"], true);
+    let events = f
+        .service
+        .store
+        .read({
+            let run = f.run.clone();
+            move |db| db.events_fixture(&run, 0, 100)
+        })
+        .await
+        .unwrap();
+    let answer_event = events
+        .iter()
+        .find(|event| event["type"] == "chat.user" && event["payload"]["questionId"] == question);
+    assert!(answer_event.is_some());
 }

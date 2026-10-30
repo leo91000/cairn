@@ -7,13 +7,19 @@ import { join } from 'node:path'
 import process from 'node:process'
 import { expect, test } from '@playwright/test'
 import { beaconRelayFixture, executeBeaconSql } from './beacon-relay-fixture'
+import { relayProtocolVersion } from './relay-protocol'
 
-test('installation subdomains preserve browser drafts and canonical account access', async ({ page: initialPage, browser, browserName }) => {
+test('installation subdomains preserve browser drafts and canonical account access', async ({ page: initialPage, browser, browserName }, testInfo) => {
   let page = initialPage
   let proxyContext: Awaited<ReturnType<typeof browser.newContext>> | undefined
   test.setTimeout(120000)
   page.setDefaultTimeout(10000)
-  const fixture = await beaconRelayFixture(4489)
+  // Different browser projects can run this journey at the same time.
+  const portBase = Number(process.env.CAIRN_BROWSER_PORT_BASE ?? 4322)
+  const beaconPort = portBase + 200 + testInfo.parallelIndex
+  if (!Number.isInteger(portBase) || portBase < 1024 || beaconPort > 65535)
+    throw new Error('CAIRN_BROWSER_PORT_BASE must select valid unprivileged fixture ports.')
+  const fixture = await beaconRelayFixture(beaconPort)
   const database = new URL(process.env.CAIRN_BEACON_TEST_DATABASE_URL!)
   const schema = `subdomains_${crypto.randomUUID().replaceAll('-', '')}`
   executeBeaconSql(database, `CREATE SCHEMA ${schema}`)
@@ -44,7 +50,7 @@ test('installation subdomains preserve browser drafts and canonical account acce
 
     const upstream = httpRequest({
       hostname: '127.0.0.1',
-      port: 4489,
+      port: beaconPort,
       method: request.method,
       path: request.url,
       headers: { ...request.headers, host: forwardHost(request.headers.host || '') },
@@ -52,13 +58,19 @@ test('installation subdomains preserve browser drafts and canonical account acce
       response.writeHead(source.statusCode || 502, source.headers)
       source.pipe(response)
     })
-    upstream.on('error', () => response.writeHead(502).end())
+    upstream.on('error', () => {
+      if (!response.destroyed)
+        response.writeHead(502).end()
+    })
+    // A closed browser stream must release its Beacon and installation stream slots.
+    response.on('close', () => upstream.destroy())
+    request.on('aborted', () => upstream.destroy())
     request.pipe(upstream)
   })
   proxy.on('upgrade', (request, socket, head) => {
     upgraded.add(socket)
     socket.on('close', () => upgraded.delete(socket))
-    const upstream = connect(4489, '127.0.0.1', () => {
+    const upstream = connect(beaconPort, '127.0.0.1', () => {
       const headers = Object.entries({ ...request.headers, host: forwardHost(request.headers.host || '') })
         .map(([key, value]) => `${key}: ${Array.isArray(value) ? value.join(', ') : value}`)
         .join('\r\n')
@@ -232,19 +244,19 @@ test('installation subdomains preserve browser drafts and canonical account acce
     await page.getByRole('button', { name: 'Confirm with a passkey', exact: true }).click()
     await expect(page).toHaveURL(`${hostedOrigin}/settings/sensitive`)
     await page.goto(`${origin}/installations/${installation.slug}/settings/account`)
-    const extra = await page.evaluate(async () => {
+    const extra = await page.evaluate(async (protocol) => {
       const session = await (await fetch('/api/account/session')).json()
       const headers = { 'X-CSRF-Token': session.csrf, 'Content-Type': 'application/json' }
       const claimed: string[] = []
       for (const name of ['Detached installation', 'Shared installation']) {
         const code = await (await fetch('/api/installations/claim-code', { method: 'POST', headers, body: '{}' })).json()
-        const identity = await (await fetch('/api/relay/claim', { method: 'POST', headers, body: JSON.stringify({ code: code.code, name, protocol: 4 }) })).json()
+        const identity = await (await fetch('/api/relay/claim', { method: 'POST', headers, body: JSON.stringify({ code: code.code, name, protocol }) })).json()
         claimed.push(identity.installationId)
       }
 
       const listed = await (await fetch('/api/account/session')).json()
       return listed.installations.filter((item: { id: string }) => claimed.includes(item.id))
-    })
+    }, relayProtocolVersion)
     const detached = extra.find((item: { name: string }) => item.name === 'Detached installation')
     const shared = extra.find((item: { name: string }) => item.name === 'Shared installation')
     const secondOwner = crypto.randomUUID()

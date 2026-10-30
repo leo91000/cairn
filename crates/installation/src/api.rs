@@ -1,10 +1,7 @@
 use crate::{
-    config::now,
     error::{Error, Result},
     http::Input,
-    service::{Service, next_occurrences},
-    store::RUN_SUMMARY,
-    validation::text,
+    service::Service,
 };
 use serde_json::{Value, json};
 use std::{
@@ -38,7 +35,7 @@ async fn dispatch_inner(s: &Arc<Service>, input: &Input) -> Result<Value> {
         return crate::nodes::admin(s, input).await;
     }
     if under(&input.path, "/api/accounts") {
-        return crate::accounts::routes(s, input).await;
+        return crate::capabilities::accounts::routes(s, input).await;
     }
     if under(&input.path, "/api/plugins") {
         return crate::plugins::routes(s, input).await;
@@ -82,9 +79,9 @@ async fn overview(s: &Service) -> Result<Value> {
         .read(move |db| {
             Ok(json!({
                 "counts": db.stats()?,
-                "agents": db.list("agents")?.len(),
-                "projects": db.list("projects")?.len(),
-                "tasks": db.list("tasks")?,
+                "agents": db.agent_snapshots()?.len(),
+                "projects": db.projects()?.len(),
+                "tasks": db.missions()?,
                 "runs": db.runs(None, None, 8, 0, false)?,
                 "concurrency": concurrency,
             }))
@@ -94,6 +91,111 @@ async fn overview(s: &Service) -> Result<Value> {
 
 /// Agents, projects, tasks and their scheduling.
 async fn record_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Result<Option<Value>> {
+    let agent_command = match route {
+        ("GET", ["agents"]) => Some(("list_agents", json!({}))),
+        ("GET", ["agents", id]) => Some(("get_agent", json!({ "agentId": id }))),
+        ("POST", ["agents"]) => Some(("save_agent", input.body.clone())),
+        ("PUT", ["agents", id]) | ("POST", ["agents", id, "preview"]) => {
+            if input.body["agentId"] != *id {
+                return Err(Error::bad("Agent identity does not match the path."));
+            }
+            Some((
+                if route.0 == "PUT" {
+                    "replace_agent"
+                } else {
+                    "preview_agent"
+                },
+                input.body.clone(),
+            ))
+        }
+        ("POST", ["agents", id, "merge"]) => {
+            if input.body["sourceId"] != *id {
+                return Err(Error::bad("Agent identity does not match the path."));
+            }
+            Some(("merge_agents", input.body.clone()))
+        }
+        ("DELETE", ["agents", id]) => Some(("delete_agent", json!({ "agentId": id }))),
+        ("GET", ["agent-avatars"]) => Some(("get_agent_avatar_configuration", json!({}))),
+        ("POST", ["agents", id, "avatar", "upload"]) => {
+            if input.body["agentId"] != *id {
+                return Err(Error::bad("Agent identity does not match the path."));
+            }
+            Some(("set_agent_avatar", input.body.clone()))
+        }
+        ("POST", ["agents", id, "avatar", "generate"]) => {
+            Some(("generate_agent_avatar", json!({ "agentId": id })))
+        }
+        _ => None,
+    };
+    if let Some((name, body)) = agent_command {
+        let context = crate::capabilities::ResumeContext::http(input)?;
+        return Ok(Some(
+            crate::capabilities::agent_operation(name)
+                .expect("agent operation")
+                .invoke(s, body, context)
+                .await?,
+        ));
+    }
+    let project_command = match route {
+        ("GET", ["projects"]) => Some(("list_projects", json!({}))),
+        ("GET", ["projects", id]) => Some(("get_project", json!({ "projectId": id }))),
+        ("POST", ["projects"]) => Some(("save_project", input.body.clone())),
+        ("PUT", ["projects", id]) => {
+            if input.body["projectId"] != *id {
+                return Err(Error::bad("Project identity does not match the path."));
+            }
+            Some(("replace_project", input.body.clone()))
+        }
+        ("DELETE", ["projects", id]) => Some(("delete_project", json!({ "projectId": id }))),
+        _ => None,
+    };
+    if let Some((name, body)) = project_command {
+        let context = crate::capabilities::ResumeContext::http(input)?;
+        let output = crate::capabilities::project_operation(name)
+            .expect("project operation")
+            .invoke(s, body, context)
+            .await?;
+        return Ok(Some(output));
+    }
+    let mission_command = match route {
+        ("GET", ["tasks"]) => Some(("list_tasks", json!({}))),
+        ("GET", ["tasks", "activity"]) => Some(("list_task_activity", json!({}))),
+        ("GET", ["tasks", id]) => Some(("get_task", json!({ "taskId": id }))),
+        ("POST", ["tasks"]) => Some(("create_task", input.body.clone())),
+        ("PUT", ["tasks", id]) | ("POST", ["tasks", id, "state"]) => {
+            if input.body["taskId"] != *id {
+                return Err(Error::bad("Mission identity does not match the path."));
+            }
+            Some((
+                if route.0 == "PUT" {
+                    "replace_task"
+                } else {
+                    "set_task_state"
+                },
+                input.body.clone(),
+            ))
+        }
+        ("DELETE", ["tasks", id]) => Some(("delete_task", json!({ "taskId": id }))),
+        ("POST", ["schedule", "preview"]) => Some(("preview_schedule", input.body.clone())),
+        _ => None,
+    };
+    if let Some((name, body)) = mission_command {
+        let operation = crate::capabilities::mission_operation(name).expect("mission operation");
+        let identity = input
+            .identity
+            .as_ref()
+            .ok_or_else(|| Error::unauthorized("A verified identity is required."))?;
+        let result = if identity.mcp_scopes.is_some() {
+            operation
+                .invoke(s, body, crate::capabilities::ResumeContext::http(input)?)
+                .await?
+        } else {
+            operation
+                .invoke_as(s, body, crate::missions::Actor::Human(identity.clone()))
+                .await?
+        };
+        return Ok(Some(result));
+    }
     let result = match route {
         ("POST", ["projects", "import"]) => {
             static IMPORT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -103,76 +205,23 @@ async fn record_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Res
             crate::plugins::projects::import(s, &input.body).await?
         }
         ("GET", ["overview"]) => overview(s).await?,
-        ("GET", ["agent-avatars"]) => json!({ "configured": s.avatars.configured(s).await? }),
-        ("POST", ["agents", id, "avatar", "generate"]) => s.avatars.generate(s, id).await?,
-        ("POST", ["agents", id, "preview"]) => s.agent_preview(input.body.clone(), id).await?,
-        ("POST", ["agents", id, "merge"]) => {
-            let mut args = input.body.clone();
-            if !args.is_object() {
-                return Err(Error::bad(
-                    "Enter a destination agent and confirm the merge.",
-                ));
-            }
-            args["sourceId"] = (*id).into();
-            s.merge_agents(args).await?
-        }
-        ("GET", ["agents"]) => {
-            // Never stored: clients tell this release from an earlier or rolled-back one,
-            // which does not keep grants on agents.
-            let mut agents = s.store.list("agents").await?;
-            for agent in &mut agents {
-                agent["grantsOnAgent"] = true.into();
-            }
-            agents.into()
-        }
-        ("GET", [kind @ ("projects" | "tasks")]) => s.store.list(kind).await?.into(),
         ("POST", ["task-authors", "refresh"]) => {
             s.synchronize_task_authors().await?;
             json!({ "updated": true })
         }
-        ("POST", [kind @ ("agents" | "projects" | "tasks")]) => save(s, kind, input, None).await?,
-        ("PUT", [kind @ ("agents" | "projects" | "tasks"), id]) => {
-            save(s, kind, input, Some(id)).await?
+        ("POST", ["tasks", id, "run"]) => {
+            crate::capabilities::run_operation("run_task")
+                .unwrap()
+                .invoke(
+                    s,
+                    json!({ "taskId": id }),
+                    crate::capabilities::ResumeContext::http(input)?,
+                )
+                .await?
         }
-        ("DELETE", [kind @ ("agents" | "projects" | "tasks"), id]) => {
-            s.remove(kind, id).await?;
-            json!({ "deleted": true })
-        }
-        ("POST", ["tasks", id, "run"]) => s.enqueue(id, "manual", None).await?,
-        ("POST", ["schedule", "preview"]) => {
-            let occurrences = next_occurrences(
-                input.string("cron", 500)?,
-                input.string("timezone", 100)?,
-                now(),
-                3,
-            )?;
-            json!({ "occurrences": occurrences })
-        }
-        ("GET", ["tasks", "activity"]) => task_activity(s, crate::reads::account(input)?).await?,
         _ => return Ok(None),
     };
     Ok(Some(result))
-}
-
-/// The latest run of every task, with what the account has not read yet.
-async fn task_activity(s: &Service, account: &str) -> Result<Value> {
-    let query = format!(
-        "SELECT {RUN_SUMMARY} FROM runs
-         WHERE id IN (
-           SELECT (SELECT id FROM runs WHERE task_id=records.id ORDER BY created_at DESC,id DESC LIMIT 1)
-           FROM records WHERE kind='tasks'
-         )
-         ORDER BY created_at DESC,id DESC"
-    );
-    crate::reads::begin(s, account).await?;
-    let account = account.to_owned();
-    s.store
-        .read(move |db| {
-            let mut runs = db.json_rows(&query, [])?;
-            crate::reads::Reads::load(db, &account)?.runs(db, &mut runs)?;
-            Ok(runs.into())
-        })
-        .await
 }
 
 async fn run_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Result<Option<Value>> {
@@ -193,24 +242,27 @@ async fn run_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Result
             crate::live::history(s, kind, id, input).await?
         }
         ("GET", ["runs", id]) => s.store.run(id).await?,
-        ("POST", ["runs", id, "chat"]) => s.chat_from_run(id).await?,
+        ("POST", ["runs", id, "chat"]) => {
+            chat_command(s, input, "convert_run_to_chat", json!({ "runId": id })).await?
+        }
         ("GET", ["runs", id, "events"]) => {
             s.store.run(id).await?;
             let after = input.number("after", 0, 0, i64::MAX)?;
             let limit = input.number("limit", 100, 1, 500)?;
             let id = (*id).to_owned();
             s.store
-                .read(move |db| Ok(db.events(&id, after, limit)?.into()))
+                .read(move |db| Ok(serde_json::to_value(db.event_page(&id, after, limit)?)?))
                 .await?
         }
-        ("POST", ["runs", id, "retry"]) => {
-            let run = s.store.run(id).await?;
-            s.enqueue(text(&run, "taskId"), "retry", None).await?
-        }
         ("GET", [provider, "models"]) => {
-            crate::provider::Provider::parse(provider)?
-                .adapter()
-                .model_catalog(s)
+            let provider = crate::provider::Provider::parse(provider)?;
+            crate::capabilities::account_operation("list_models")
+                .expect("registered model catalog")
+                .invoke(
+                    s,
+                    json!({ "provider": provider }),
+                    crate::capabilities::ResumeContext::http(input)?,
+                )
                 .await?
         }
         _ => return Ok(None),
@@ -220,38 +272,22 @@ async fn run_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Result
 
 /// Queued messages only, with answers to secret questions redacted.
 async fn chat_detail(s: &Service, id: &str) -> Result<Value> {
-    let mut detail = s.chat_detail(id).await?;
-    let private = detail["questions"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|q| {
-            q["fields"]
-                .as_array()
-                .is_some_and(|fields| fields.iter().any(|f| f["secret"] == true))
-        })
-        .map(|q| q["id"].clone())
-        .collect::<Vec<_>>();
+    let chat_id = id.to_owned();
+    let mut detail = s
+        .store
+        .read(move |db| crate::chats::public_detail(db, &chat_id))
+        .await?;
     if let Some(messages) = detail["messages"].as_array_mut() {
         messages.retain(|m| m["status"] != crate::chats::MessageStatus::Delivered);
-        for message in messages {
-            if private.contains(&message["questionId"]) {
-                message["text"] = "Private answer".into();
-                if let Some(message) = message.as_object_mut() {
-                    message.remove("answers");
-                }
-            }
-        }
     }
-    detail["error"] = if crate::conversation_lifecycle::is_active(&detail) {
-        s.store
-            .kv(&format!("chat-error:{id}"))
-            .await?
-            .unwrap_or(Value::Null)
-    } else {
-        Value::Null
-    };
     Ok(detail)
+}
+
+async fn chat_command(s: &Arc<Service>, input: &Input, name: &str, args: Value) -> Result<Value> {
+    crate::capabilities::chat_operation(name)
+        .expect("registered conversation command")
+        .invoke(s, args, crate::capabilities::ResumeContext::http(input)?)
+        .await
 }
 
 async fn chat_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Result<Option<Value>> {
@@ -263,46 +299,141 @@ async fn chat_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resul
                 .await?
                 .into()
         }
-        ("DELETE", ["chats", id]) => s.chat_trash(id, confirmed).await?,
-        ("POST", ["chats", id, "new-session"]) => {
-            s.chat_new_session_authorized(
-                id,
-                confirmed,
-                crate::native::policy::chat_authorization(id),
+        ("DELETE", ["chats", id]) => {
+            chat_command(
+                s,
+                input,
+                "delete_chat",
+                json!({ "chatId": id, "confirm": confirmed }),
             )
             .await?
         }
+        ("POST", ["chats", id, "new-session"]) => {
+            chat_command(
+                s,
+                input,
+                "restart_chat_session",
+                json!({ "chatId": id, "confirm": confirmed }),
+            )
+            .await?
+        }
+        ("POST", ["chats", id, "compact"]) => {
+            chat_command(s, input, "compact_chat", json!({ "chatId": id })).await?
+        }
         ("POST", ["chats", id, "restore"]) => {
-            s.chat_restore_authorized(id, crate::native::policy::chat_authorization(id))
-                .await?
+            chat_command(s, input, "restore_chat", json!({ "chatId": id })).await?
         }
-        ("POST", ["chats"]) => s.chat_create(input.body.clone()).await?,
+        ("POST", ["chats", id, "pause"]) => {
+            chat_command(
+                s,
+                input,
+                "set_chat_paused",
+                json!({ "chatId": id, "paused": input.body["paused"] }),
+            )
+            .await?
+        }
+        ("POST", ["chats", id, "stop"]) => {
+            chat_command(s, input, "stop_chat", json!({ "chatId": id })).await?
+        }
+        ("POST", ["chats"]) => chat_command(s, input, "create_chat", input.body.clone()).await?,
+        ("PUT", ["chats", id]) => {
+            let mut args = input.body.clone();
+            args["chatId"] = (*id).into();
+            chat_command(s, input, "rename_chat", args).await?
+        }
         ("GET", ["chats", id]) => chat_detail(s, id).await?,
-        ("POST", ["chats", id, "messages"]) => s.chat_send(id, input.body.clone()).await?,
-        ("PUT", ["chats", id, "messages", message]) => {
-            s.chat_edit(id, message, Some(input.body.clone())).await?
+        ("GET", ["chats", id, "coding-agent"]) => {
+            chat_command(
+                s,
+                input,
+                "get_chat_coding_agent_options",
+                json!({ "chatId": id }),
+            )
+            .await?
         }
-        ("DELETE", ["chats", id, "messages", message]) => s.chat_edit(id, message, None).await?,
+        ("POST", ["chats", id, "coding-agent"]) => {
+            let mut args = input.body.clone();
+            args["chatId"] = (*id).into();
+            chat_command(s, input, "switch_chat_coding_agent", args).await?
+        }
+        ("POST", ["chats", id, "messages"]) => {
+            let message = input.body.get("message").unwrap_or(&input.body);
+            chat_command(
+                s,
+                input,
+                "send_chat_message",
+                json!({ "chatId": id, "message": message }),
+            )
+            .await?
+        }
+        ("PUT", ["chats", id, "messages", message_id]) => {
+            let mut message = input.body.get("message").unwrap_or(&input.body).clone();
+            // The existing UI editor submits a displayed message; only command settings
+            // enter the shared typed editor, with the path supplying its identity.
+            if let Some(fields) = message.as_object_mut() {
+                fields.retain(|key, _| {
+                    matches!(
+                        key.as_str(),
+                        "text"
+                            | "attachmentIds"
+                            | "mode"
+                            | "provider"
+                            | "model"
+                            | "reasoning"
+                            | "speed"
+                    )
+                });
+            }
+            chat_command(
+                s,
+                input,
+                "edit_chat_message",
+                json!({ "chatId": id, "messageId": message_id, "message": message }),
+            )
+            .await?
+        }
+        ("DELETE", ["chats", id, "messages", message]) => {
+            chat_command(
+                s,
+                input,
+                "delete_chat_message",
+                json!({ "chatId": id, "messageId": message }),
+            )
+            .await?
+        }
         ("POST", ["chats", id, "questions", question, "cancel"]) => {
-            s.question_cancel_authorized(
-                id,
-                question,
-                crate::native::policy::chat_authorization(id),
+            chat_command(
+                s,
+                input,
+                "cancel_chat_question",
+                json!({"chatId":id,"questionId":question}),
             )
             .await?
         }
         ("POST", ["chats", id, "questions", question, "answer"]) => {
-            s.question_answer(id, question, input.body.clone()).await?
+            chat_command(
+                s,
+                input,
+                "answer_chat_question",
+                json!({"chatId":id,"questionId":question,"answer":input.body}),
+            )
+            .await?
         }
         ("POST", ["chats", id, "side-questions"]) => {
-            s.side_question_ask_authorized(id, input.body.clone(), |_| Ok(()))
-                .await?
+            chat_command(
+                s,
+                input,
+                "ask_chat_side_question",
+                json!({ "chatId": id, "question": input.body }),
+            )
+            .await?
         }
         ("POST", ["chats", id, "side-questions", question, "cancel"]) => {
-            s.side_question_cancel_authorized(
-                id,
-                question,
-                crate::native::policy::chat_authorization(id),
+            chat_command(
+                s,
+                input,
+                "cancel_chat_side_question",
+                json!({ "chatId": id, "sideQuestionId": question }),
             )
             .await?
         }
@@ -316,11 +447,12 @@ async fn skill_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resu
     let result = match route {
         ("GET", ["skills"]) => {
             let mut items = s.skills.list("global", None).await?;
-            for project in s.store.list("projects").await? {
-                let path = Path::new(text(&project, "path"));
-                items.extend(s.skills.list(text(&project, "id"), Some(path)).await?);
+            for project in s.store.projects().await? {
+                let path = Path::new(&project.settings.path);
+                items.extend(s.skills.list(&project.id.to_string(), Some(path)).await?);
             }
             sources::attach(s, &mut items).await?;
+            s.attach_skill_usage(&mut items).await?;
             items.into()
         }
         ("POST", ["skills", scope, "import"]) => {
@@ -475,10 +607,11 @@ async fn delete_skill(
     project: Option<&Path>,
 ) -> Result<Value> {
     let key = format!("{scope}/{name}");
-    let selected = s.store.list("tasks").await?.iter().any(|task| {
-        task["skills"]
-            .as_array()
-            .is_some_and(|skills| skills.iter().any(|skill| skill == &key))
+    let selected = s.store.missions().await?.iter().any(|task| {
+        task.settings
+            .skills
+            .as_ref()
+            .is_some_and(|skills| skills.contains(&key))
     });
     if selected {
         return Err(Error::conflict(
@@ -516,9 +649,9 @@ async fn settings_routes(
 ) -> Result<Option<Value>> {
     let result = match route {
         ("GET", ["settings"]) => settings(s),
-        ("GET", ["settings", "conversations"]) => s.conversation_retention().await?,
+        ("GET", ["settings", "conversations"]) => chat_command(s, input, "get_conversation_retention", json!({})).await?,
         ("PUT", ["settings", "conversations"]) => {
-            s.save_conversation_retention(input.body.clone()).await?
+            chat_command(s, input, "set_conversation_retention", input.body.clone()).await?
         }
         ("GET", ["settings", "storage"]) => crate::object_storage::settings(s)?,
         ("PUT", ["settings", "storage"]) => {
@@ -545,23 +678,11 @@ async fn settings_routes(
     Ok(Some(result))
 }
 
-async fn save(s: &Arc<Service>, kind: &str, input: &Input, id: Option<&str>) -> Result<Value> {
-    match kind {
-        "agents" => s.agent(input.body.clone(), id).await,
-        "projects" => s.project(input.body.clone(), id).await,
-        _ => {
-            s.task_as(input.body.clone(), id, input.identity.as_ref())
-                .await
-        }
-    }
-}
-
 async fn skill_project(s: &Service, scope: &str) -> Result<Option<PathBuf>> {
     if scope == "global" {
         return Ok(None);
     }
-    Ok(Some(PathBuf::from(text(
-        &s.get("projects", scope).await?,
-        "path",
-    ))))
+    Ok(Some(PathBuf::from(
+        s.get_project(scope).await?.settings.path,
+    )))
 }

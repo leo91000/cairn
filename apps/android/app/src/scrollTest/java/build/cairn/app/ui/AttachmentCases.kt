@@ -65,11 +65,42 @@ abstract class AttachmentCases {
         MockWebServer().use { server ->
             val app = ApplicationProvider.getApplicationContext<Application>()
             val requested = CopyOnWriteArrayList<String>()
-            val agent = Agent(MAIN_AGENT_ID, "Agent principal")
-            val run = Run("run", status = "succeeded", snapshot = Snapshot(agent = agent))
+            val agent =
+                Agent(
+                    exclusiveNodes = emptyList(),
+                    plugins = emptyList(),
+                    revision = "",
+                    createdAt = 0,
+                    access =
+                        AccessPolicy(
+                            mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                            projects = null,
+                            skills = null,
+                            mcps = null,
+                        ),
+                    id = MAIN_AGENT_ID,
+                    name = "Agent principal",
+                )
+            val run =
+                Run(
+                    id = "run",
+                    status = "succeeded",
+                    snapshot =
+                        Snapshot(
+                            agent = agent,
+                            task =
+                                build.cairn.contracts.RunTaskSnapshot(
+                                    agentId = build.cairn.app.data.MAIN_AGENT_ID,
+                                    id = "00000000-0000-4000-8000-000000000003",
+                                    name = "Fixture",
+                                    prompt = "Fixture",
+                                ),
+                        ),
+                    taskId = "",
+                )
             val chat =
                 Chat(
-                    "chat",
+                    id = "6cc6efab-10af-54c7-a91b-dcff664166a1",
                     title = "Refonte page tarifs",
                     runId = "run",
                     agentName = agent.name,
@@ -78,37 +109,47 @@ abstract class AttachmentCases {
             val files =
                 listOf(
                     ChatAttachment(
-                        "shot",
-                        "chat",
-                        "Screenshot_20261017-142133_Chrome.png",
-                        1_900_000,
-                        "image/png",
-                        "image",
+                        id = "shot",
+                        chatId = "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                        name = "Screenshot_20261017-142133_Chrome.png",
+                        size = 1_900_000,
+                        mediaType = "image/png",
+                        kind = "image",
                     ),
                     ChatAttachment(
-                        "hdr",
-                        "chat",
-                        "IMG_20261017_141502_HDR.jpg",
-                        3_400_000,
-                        "image/jpeg",
-                        "image",
+                        id = "hdr",
+                        chatId = "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                        name = "IMG_20261017_141502_HDR.jpg",
+                        size = 3_400_000,
+                        mediaType = "image/jpeg",
+                        kind = "image",
                     ),
                     ChatAttachment(
-                        "park",
-                        "chat",
-                        "IMG_20261017_141733.jpg",
-                        2_100_000,
-                        "image/jpeg",
-                        "image",
+                        id = "park",
+                        chatId = "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                        name = "IMG_20261017_141733.jpg",
+                        size = 2_100_000,
+                        mediaType = "image/jpeg",
+                        kind = "image",
                     ),
                     ChatAttachment(
-                        "brief",
-                        "chat",
-                        "Brief_refonte_page_tarifs_v3_FINAL_relu.pdf",
-                        831_488,
+                        id = "brief",
+                        chatId = "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                        name = "Brief_refonte_page_tarifs_v3_FINAL_relu.pdf",
+                        size = 831_488,
                     ),
-                    ChatAttachment("export", "chat", "export_clients_2026-10-17.csv", 253_952),
-                    ChatAttachment("sources", "chat", "maquettes-sources.zip", 6_200_000),
+                    ChatAttachment(
+                        id = "export",
+                        chatId = "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                        name = "export_clients_2026-10-17.csv",
+                        size = 253_952,
+                    ),
+                    ChatAttachment(
+                        id = "sources",
+                        chatId = "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                        name = "maquettes-sources.zip",
+                        size = 6_200_000,
+                    ),
                 )
             val pictures =
                 mapOf(
@@ -121,14 +162,17 @@ abstract class AttachmentCases {
             val events =
                 listOf(
                     RunEvent(
-                        1,
-                        System.currentTimeMillis() - 60_000,
-                        "chat.user",
-                        message,
-                        mapOf(
-                            "text" to JsonPrimitive(message),
-                            "attachments" to wireJson.encodeToJsonElement(files),
-                        ),
+                        id = 1,
+                        createdAt = System.currentTimeMillis() - 60_000,
+                        type = "chat.user",
+                        text = message,
+                        payload =
+                            kotlinx.serialization.json.JsonObject(
+                                mapOf(
+                                    "text" to JsonPrimitive(message),
+                                    "attachments" to wireJson.encodeToJsonElement(files),
+                                )
+                            ),
                         runId = "run",
                     )
                 )
@@ -137,8 +181,12 @@ abstract class AttachmentCases {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path!!.substringBefore('?')
                         val query = request.path!!.substringAfter('?', "")
-                        val prefix = "/api/installations/fixture/api/chats/chat/attachments/"
-                        if (path == "/api/installations/fixture/api/chats/chat/stream") {
+                        val prefix =
+                            "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/attachments/"
+                        if (
+                            path ==
+                                "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/stream"
+                        ) {
                             val frame =
                                 "event: batch\nid: 1\ndata: ${wireJson.encodeToString(LiveBatch(events, LiveState(chat = chat, run = run), true, false))}\n\n"
                             return MockResponse()
@@ -153,9 +201,6 @@ abstract class AttachmentCases {
                         if (path.startsWith(prefix)) {
                             val id = path.removePrefix(prefix).removeSuffix("/stream")
                             requested += "${path.removePrefix(prefix)}?$query"
-                            if (path.endsWith("/stream") && id in listOf("shot", "hdr"))
-                                return MockResponse()
-                                    .setResponseCode(if (id == "shot") 404 else 501)
                             val picture = pictures[id]
                             return when {
                                 query == "summary" ->
@@ -186,10 +231,34 @@ abstract class AttachmentCases {
                                 "/api/installations" -> beaconInstallationsFixture()
                                 "/api/account/session" -> beaconAccountFixture("fixture")
                                 "/api/installations/fixture/api/agents" ->
-                                    wireJson.encodeToString(listOf(agent))
+                                    wireJson.encodeToString(
+                                        build.cairn.contracts.ListAgentsOutput(listOf(agent))
+                                    )
                                 "/api/installations/fixture/api/codex/models" -> """{"models":[]}"""
                                 "/api/installations/fixture/api/overview" -> "{}"
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
+                                    else "[]"
                             }
                         return MockResponse().setBody(body)
                     }
@@ -206,7 +275,13 @@ abstract class AttachmentCases {
                 }
                 CairnTheme {
                     if (state.session.authenticated && show)
-                        ChatScreen(vm, state, "chat", openChat = {}, openRun = {})
+                        ChatScreen(
+                            vm,
+                            state,
+                            "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                            openChat = {},
+                            openRun = {},
+                        )
                 }
             }
             compose.waitUntil(20000) {
@@ -239,12 +314,11 @@ abstract class AttachmentCases {
             }
             assertNotNull(clipboard.primaryClip?.getItemAt(0)?.uri)
             assertTrue("shot/stream?" in requested)
-            assertTrue("shot?" in requested)
 
             compose.onNodeWithContentDescription("IMG_20261017_141502_HDR.jpg").performClick()
             compose.onNodeWithTag("attachment-viewer").assertExists()
             compose.onNodeWithText("JPG · 3,2 Mo · 2 / 6").assertExists()
-            compose.waitUntil(10000) { "hdr/stream?" in requested && "hdr?" in requested }
+            compose.waitUntil(10000) { "hdr/stream?" in requested }
             capture("02-viewer")
             // The filmstrip jumps between files (Robolectric cannot render PDF pages, so the
             // journey stays among the pictures).
@@ -286,7 +360,9 @@ abstract class AttachmentCases {
                 compose.runOnIdle {
                     assertEquals(
                         listOf("export"),
-                        vm.chatDrafts["chat"]!!.attachments.map { it.attachment.id },
+                        vm.chatDrafts["6cc6efab-10af-54c7-a91b-dcff664166a1"]!!.attachments.map {
+                            it.attachment.id
+                        },
                     )
                 }
             } finally {
@@ -311,7 +387,10 @@ abstract class AttachmentCases {
             compose.onNodeWithTag("conversation-send").assertIsNotEnabled()
             compose.runOnIdle { show = false }
             compose.waitForIdle()
-            assertEquals("oversized.png", vm.chatDrafts["chat"]!!.rejected.single().name)
+            assertEquals(
+                "oversized.png",
+                vm.chatDrafts["6cc6efab-10af-54c7-a91b-dcff664166a1"]!!.rejected.single().name,
+            )
             compose.runOnIdle { show = true }
             compose.onNodeWithText("Trop lourd", substring = true).assertExists()
             compose.onNodeWithTag("conversation-send").assertIsNotEnabled()

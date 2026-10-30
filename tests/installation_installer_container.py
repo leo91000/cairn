@@ -95,7 +95,7 @@ def main(mode):
 
     # Devices are inert character placeholders: no ioctl or VM boot is performed.
     Path('/dev/net').mkdir(exist_ok=True)
-    for device in ('/dev/kvm', '/dev/net/tun', '/dev/fuse'):
+    for device in ('/dev/kvm', '/dev/net/tun'):
         if not Path(device).exists():
             os.mknod(device, stat.S_IFCHR | 0o600, os.makedev(1, 3))
     Path('/etc/systemd/system').mkdir(parents=True, exist_ok=True)
@@ -211,7 +211,7 @@ sys.exit(subprocess.run(['/usr/bin/curl', *args]).returncode)
                 result = run_installer()
                 assert result.returncode != 0 and message in result.stderr, result.stderr
                 del os.environ[variable]
-            for device, message in [('/dev/kvm', 'KVM'), ('/dev/net/tun', 'TUN'), ('/dev/fuse', 'FUSE')]:
+            for device, message in [('/dev/kvm', 'KVM'), ('/dev/net/tun', 'TUN')]:
                 Path(device).unlink()
                 result = run_installer()
                 assert result.returncode != 0 and message in result.stderr, result.stderr
@@ -234,7 +234,7 @@ sys.exit(subprocess.run(['/usr/bin/curl', *args]).returncode)
             result = run_installer()
             assert result.returncode == 0, result.stderr
             assert (ROOT / 'data/storage-s3.json').stat().st_uid == 1000, 'Rerun must repair an interrupted storage chown'
-            print('Container: KVM/TUN/FUSE diagnostics, automatic private Garage configuration passed')
+            print('Container: KVM/TUN diagnostics, automatic private Garage configuration passed')
         finally:
             server.shutdown()
         return
@@ -370,6 +370,7 @@ sys.exit(subprocess.run(['/usr/bin/curl', *args]).returncode)
                         'existing_disks_keep_publishing_reading_and_purging_on_their_original_storage',
                         '--nocapture'], check=True, env={
                             **os.environ,
+                            'DATA_DIR': str(ROOT / 'data'),
                             'CAIRN_INSTALLER_TEST_STORAGE_CONFIG': str(ROOT / 'data/storage-s3.json.integrated'),
                             'CAIRN_INSTALLER_TEST_EXTERNAL_ENDPOINT': endpoint,
                         })
@@ -421,20 +422,28 @@ sys.exit(subprocess.run(['/usr/bin/curl', *args]).returncode)
                 update_env['INSTALLER_FAIL_IMAGE'] = digit * 64
             result = subprocess.run(['python3', str(ROOT / 'host.py'), ORIGIN, '--update'],
                                     env=update_env, capture_output=True, text=True, timeout=120)
+            if fail:
+                assert result.returncode != 0, 'A wrong-runtime candidate must not be committed or rolled back'
+                pending = json.loads((ROOT / 'installation.json').read_text())
+                assert pending['image'].endswith('b' * 64)
+                assert pending['pendingImage'] == candidate and pending['leaseAcquired']
+                deployment = json.loads((ROOT / 'compose.json').read_text())
+                assert all(deployment['services'][name]['image'] == candidate for name in ('manager', 'runner'))
+                update_env.pop('INSTALLER_FAIL_IMAGE')
+                result = subprocess.run(['python3', str(ROOT / 'host.py'), ORIGIN, '--update'],
+                                        env=update_env, capture_output=True, text=True, timeout=120)
             assert result.returncode == 0, result.stderr
             committed = json.loads((ROOT / 'installation.json').read_text())
-            assert committed['image'].endswith('b' * 64)
+            assert committed['image'] == candidate
             assert not committed.get('pendingImage') and not committed.get('leaseOwner')
             health = json.loads(urllib.request.urlopen('http://127.0.0.1:48152/health').read())
-            assert health['runtimeId'] == 'b' * 64 and not health['maintenance']
+            assert health['runtimeId'] == digit * 64 and not health['maintenance']
             assert identity == (ROOT / 'data/installation-relay/identity.json').read_bytes()
             assert credentials == (ROOT / 'garage.env').read_bytes()
             wait_for(lambda: request(base + '/settings/storage', cookie=cookie)[0]['endpoint'] == endpoint)
             checked, _ = request(base + '/settings/storage/check', {}, cookie, csrf)
             assert checked == {'ok': True}
-            if fail:
-                assert committed['failedImage'] == candidate
-        print('Container: approved update, wrong-runtime rollback, real deployment lease, retained identity and S3 passed')
+        print('Container: approved update, wrong-runtime candidate retry, real deployment lease, retained identity and S3 passed')
     finally:
         pid = ROOT / 'manager.pid'
         if pid.exists():

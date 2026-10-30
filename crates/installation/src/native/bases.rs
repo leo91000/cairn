@@ -218,7 +218,7 @@ impl Bases {
         policy: &storage::policy::Policy,
         stop: &CancellationToken,
     ) -> Result<()> {
-        policy.validate()?;
+        policy.validate().map_err(Error::bad)?;
         if self.stored(archives, disk_mib).await?.is_some() {
             return Ok(());
         }
@@ -406,7 +406,7 @@ impl Bases {
         );
         let runtime = json!({
             "backend": "native",
-            "storage": "ublk",
+            "storage": super::block::STORAGE,
             "os": "linux",
             "arch": "x86_64",
             "runtimeId": plan["runtimeId"]
@@ -429,9 +429,8 @@ impl Bases {
         })
         .await
         .map_err(Error::internal)??;
-        // Publish directly into the conventional native disk. Older native
-        // controllers do not recover environment claims, so no pointer/owner
-        // pair may become authoritative here. Runtime identity is durable before
+        // Publish directly into the conventional native disk.
+        // Runtime identity is durable before
         // the journal rename commits; before then this is an ordinary empty disk.
         let runtime_path = lease.directory.join("runtime.json");
         match tokio::fs::read(&runtime_path).await {
@@ -490,7 +489,7 @@ fn base_signature(root: &Path) -> std::io::Result<String> {
     for entry in std::fs::read_dir(root)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name == "journal-v2.sqlite" || name == "journal.sqlite" || name.starts_with("payload-") {
+        if name == "journal-v2.sqlite" || name.starts_with("payload-") {
             paths.push((name, entry.path()));
         }
     }

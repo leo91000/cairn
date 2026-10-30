@@ -535,11 +535,6 @@
   margin: 10px 0;
 }
 
-.operation-history .ui-icon {
-  flex-shrink: 0;
-  margin-top: 2px;
-}
-
 .read-preview-tabs button {
   border: 0;
   border-radius: 5px;

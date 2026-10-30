@@ -18,6 +18,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
+import build.cairn.contracts.ResumeRunInput
+import build.cairn.contracts.RunInput
+import build.cairn.contracts.cancelRun
+import build.cairn.contracts.convertRunToChat
+import build.cairn.contracts.resumeRun
+import build.cairn.contracts.retryRun
 
 @Composable
 fun RunsScreen(vm: CairnViewModel, state: Workspace, open: (String) -> Unit) {
@@ -270,7 +276,7 @@ fun RunScreen(
                                     enabled = !state.busy,
                                     onClick = {
                                         menu = false
-                                        vm.perform { api.request("POST", "/runs/$id/resume") }
+                                        vm.perform { api.resumeRun(ResumeRunInput(id)) }
                                     },
                                 )
                             if (!current.active && current.trigger != "chat")
@@ -280,7 +286,7 @@ fun RunScreen(
                                     onClick = {
                                         menu = false
                                         vm.perform {
-                                            openRun(api.send<Run>("POST", "/runs/$id/retry").id)
+                                            openRun(api.retryRun(RunInput(id)).id)
                                         }
                                     },
                                 )
@@ -306,7 +312,7 @@ fun RunScreen(
                                     onClick = {
                                         menu = false
                                         vm.perform {
-                                            val chat = api.send<Chat>("POST", "/runs/$id/chat")
+                                            val chat = api.convertRunToChat(RunInput(runId = id))
                                             openChat(chat.id)
                                         }
                                     },
@@ -347,7 +353,9 @@ fun RunScreen(
                         title = if (error != null && ended) statusLabel(current.status) else null,
                         maxLines = 4,
                     )
-                RunWaitingReason(current)
+                RunWaitingReason(current, state.busy || current.cancelRequestedAt != null) {
+                    vm.perform { api.cancelRun(RunInput(id)) }
+                }
                 if (current.status == "waiting")
                     current.wakeup?.let { wakeup ->
                         Notice(
@@ -416,7 +424,7 @@ fun RunScreen(
                                 ?.let {
                                     CompletionEvidence(
                                         it,
-                                        current.snapshot.agent.name,
+                                        current.snapshot?.agent?.name.orEmpty(),
                                         outcomeActions,
                                     )
                                 }
@@ -443,12 +451,16 @@ fun RunScreen(
                                                 paused = false,
                                                 settled = current.status == "waiting",
                                                 canPause = false,
+                                                openRun = openRun,
+                                                openChat = openChat,
                                             )
                                     ) {
                                         TimelineRow(
                                             vm,
                                             entry,
-                                            current.snapshot.agent.name.ifBlank { "Cairn" },
+                                            current.snapshot?.agent?.name.orEmpty().ifBlank {
+                                                "Cairn"
+                                            },
                                             rendering,
                                             hideRunning = current.status == "running",
                                             active = current.active && current.status != "waiting",
@@ -463,7 +475,7 @@ fun RunScreen(
                                             item(key = "outcome:${outcome.reportedAt}") {
                                                 CompletionEvidence(
                                                     outcome,
-                                                    current.snapshot.agent.name,
+                                                    current.snapshot?.agent?.name.orEmpty(),
                                                     outcomeActions,
                                                 )
                                             }
@@ -493,7 +505,7 @@ fun RunScreen(
                                                 else
                                                     workingStep(
                                                         events,
-                                                        current.snapshot.agent.name,
+                                                        current.snapshot?.agent?.name.orEmpty(),
                                                         current.startedAt,
                                                     )
                                             }
@@ -521,23 +533,25 @@ fun RunScreen(
                 if (details)
                     DetailSheet("Mission et détails", { details = false }) {
                         Text(
-                            current.snapshot.agent.name,
+                            current.snapshot?.agent?.name.orEmpty(),
                             style = MaterialTheme.typography.titleMedium,
                         )
                         Text(
-                            "${current.snapshot.project?.name ?: current.snapshot.projects.joinToString { it.name }.ifBlank { "Projets autorisés" }} · ${current.snapshot.agent.model.ifBlank { "Modèle par défaut" }}",
+                            "${current.snapshot?.project?.name ?: current.snapshot?.projects?.joinToString { it.name }.orEmpty().ifBlank { "Projets autorisés" }} · ${current.snapshot?.agent?.model.orEmpty().ifBlank { "Modèle par défaut" }}",
                             style = MaterialTheme.typography.bodySmall,
                         )
                         current.accountName?.let {
                             Text("Compte : $it", style = MaterialTheme.typography.bodySmall)
                         }
                         Heading("Instructions d’origine")
-                        Markdown(current.snapshot.task.prompt)
+                        Markdown(current.snapshot?.task?.prompt.orEmpty())
                         Panel {
                             Text("Espace de travail", style = MaterialTheme.typography.titleMedium)
                             current.workspaces.forEach { workspace ->
                                 Text(
-                                    current.snapshot.projects
+                                    current.snapshot
+                                        ?.projects
+                                        .orEmpty()
                                         .find { it.id == workspace.projectId }
                                         ?.name ?: workspace.projectId
                                 )
@@ -553,7 +567,7 @@ fun RunScreen(
                                 !current.active &&
                                     current.workspace != null &&
                                     !current.isolated &&
-                                    current.snapshot.task.worktree
+                                    (current.snapshot?.task?.worktree == true)
                             ) {
                                 OutlinedButton(
                                     onClick = {
@@ -577,10 +591,10 @@ fun RunScreen(
                                 "Créée : ${date(current.createdAt)}\nDébut : ${date(current.startedAt)}\nFin : ${date(current.finishedAt)}"
                             )
                             Text(
-                                "Accès : ${current.snapshot.agent.access.sandbox} · ${if (current.snapshot.agent.timeoutMinutes == 0) "Sans limite de temps" else "${current.snapshot.agent.timeoutMinutes} minutes maximum"}"
+                                "Accès : ${current.snapshot?.agent?.access?.sandbox.orEmpty()} · ${if ((current.snapshot?.agent?.timeoutMinutes ?: 0) == 0) "Sans limite de temps" else "${(current.snapshot?.agent?.timeoutMinutes ?: 0)} minutes maximum"}"
                             )
                             Text(
-                                "Skills : ${current.snapshot.skills.joinToString { it.name }.ifEmpty { "Aucun" }}"
+                                "Skills : ${current.snapshot?.skills?.joinToString { it.name }.orEmpty().ifEmpty { "Aucun" }}"
                             )
                             current.usage?.forEach { (key, value) -> Text("$key : $value") }
                             Code("Exécution : ${current.id}\nSession : ${current.sessionId ?: "—"}")

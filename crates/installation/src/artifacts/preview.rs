@@ -114,6 +114,10 @@ pub(crate) async fn image_thumbnail(path: &Path, target: &Path) -> Result<bool> 
             "-y",
             "-protocol_whitelist",
             "file,pipe",
+            // Codec thread limits do not bound the complex filter graph's pool.
+            // Its automatic per-core workers can exceed the process address limit.
+            "-filter_complex_threads",
+            "1",
             "-threads",
             "1",
             "-i",

@@ -19,7 +19,7 @@ import Icon from './Icon.vue'
 
 defineOptions({ inheritAttrs: false })
 const props = defineProps<{ skills: SkillOption[] }>()
-const emit = defineEmits<{ keydown: [KeyboardEvent] }>()
+const emit = defineEmits<{ keydown: [KeyboardEvent], skillsOpen: [] }>()
 const model = defineModel<string>({ required: true })
 const textarea = ref<HTMLTextAreaElement>()
 const caret = ref(0)
@@ -33,6 +33,17 @@ const highlighted = computed(() => segments.value.some(segment => segment.skill)
 const mention = computed<Mention | null>(() => mentionAt(model.value, caret.value))
 const matches = computed(() => mention.value ? matchSkills(props.skills, mention.value.query) : [])
 const open = computed(() => !!mention.value && dismissed.value !== mention.value.start && (matches.value.length > 0 || !/^\d/.test(mention.value.query)))
+watch(open, (value) => {
+  if (value)
+    emit('skillsOpen')
+})
+watch(matches, (next, previous) => {
+  if (active.value === 0)
+    return
+  const selected = previous[active.value]?.name
+  const index = next.findIndex(skill => skill.name === selected)
+  active.value = Math.max(0, index)
+})
 watch(() => mention.value?.query, () => {
   active.value = 0
 })

@@ -17,6 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends clang libclang-
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
+COPY crates/contracts/Cargo.toml ./crates/contracts/Cargo.toml
 COPY vendor ./vendor
 COPY crates/installation/Cargo.toml ./crates/installation/Cargo.toml
 COPY crates/beacon/Cargo.toml ./crates/beacon/Cargo.toml
@@ -24,25 +25,26 @@ COPY crates/protocol/Cargo.toml ./crates/protocol/Cargo.toml
 COPY crates/plugin-api/Cargo.toml ./crates/plugin-api/Cargo.toml
 COPY crates/plugin-host/Cargo.toml ./crates/plugin-host/Cargo.toml
 COPY crates/plugin-runtime/Cargo.toml ./crates/plugin-runtime/Cargo.toml
+COPY crates/node-gateway/Cargo.toml ./crates/node-gateway/Cargo.toml
 # A separate dependency layer survives application edits in remote BuildKit
 # caches. Cargo cache mounts alone do not persist on fresh GitHub runners.
 # Cargo's package lock lives outside this mount. Serialize registry writers
 # across build stages, including the independently pinned Firecracker toolchain.
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    mkdir -p crates/installation/src crates/installation/examples crates/beacon/src crates/protocol/src crates/plugin-api/src crates/plugin-host/src crates/plugin-runtime/src \
+    mkdir -p crates/contracts/src crates/installation/src crates/installation/examples crates/beacon/src crates/protocol/src crates/plugin-api/src crates/plugin-host/src crates/plugin-runtime/src crates/node-gateway/src \
+    && printf '' > crates/contracts/src/lib.rs \
+    && printf '' > crates/node-gateway/src/lib.rs \
+    && printf 'fn main() {}\n' > crates/node-gateway/src/main.rs \
     && printf '' > crates/plugin-api/src/lib.rs \
     && printf '' > crates/plugin-host/src/lib.rs \
     && printf '' > crates/plugin-runtime/src/lib.rs \
     && printf 'fn main() {}\n' > crates/installation/src/main.rs \
-    && printf 'fn main() {}\n' > crates/installation/examples/ublk_probe.rs \
     && printf 'fn main() {}\n' > crates/installation/examples/native_storage_qualifier.rs \
     && printf '' > crates/installation/src/lib.rs \
     && printf 'fn main() {}\n' > crates/beacon/src/main.rs \
     && printf '' > crates/protocol/src/lib.rs \
-    && printf '' > crates/beacon/src/lib.rs && cargo build --locked --release --bin cairn --features ublk
-# Workspace tuning must not invalidate the third-party dependency layer.
-COPY .cargo/config.toml ./.cargo/config.toml
-COPY --chmod=755 scripts/rust-release-inline75-v1.sh ./scripts/rust-release-inline75-v1.sh
+    && printf '' > crates/beacon/src/lib.rs && cargo build --locked --release --bin cairn
+COPY crates/contracts ./crates/contracts
 COPY crates/plugin-api ./crates/plugin-api
 COPY crates/plugin-host ./crates/plugin-host
 COPY crates/plugin-runtime ./crates/plugin-runtime
@@ -50,17 +52,24 @@ COPY plugins ./plugins
 COPY crates/installation ./crates/installation
 COPY crates/protocol ./crates/protocol
 COPY deploy/nodes ./deploy/nodes
-COPY deploy/installations/data-compatibility.json ./deploy/installations/data-compatibility.json
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    touch crates/installation/src/main.rs crates/installation/src/lib.rs crates/protocol/src/lib.rs \
+    touch crates/contracts/src/lib.rs crates/installation/src/main.rs crates/installation/src/lib.rs crates/protocol/src/lib.rs \
     crates/plugin-api/src/lib.rs crates/plugin-host/src/lib.rs crates/plugin-runtime/src/lib.rs && \
-    cargo build --locked --release --bin cairn --features ublk && cp target/release/cairn /usr/local/bin/cairn
+    cargo build --locked --release --bin cairn && cp target/release/cairn /usr/local/bin/cairn
 
 # Beacon builds independently: no worker CLI, VM or kernel layers.
 FROM rust:1.97.1-bookworm AS beacon-backend
-ENV CARGO_BUILD_JOBS=4
+ENV CARGO_BUILD_JOBS=4 CC_x86_64_unknown_linux_musl=musl-gcc
+# The node gateway Beacon serves is static: it runs on any x86-64 Linux node.
+RUN apt-get update && apt-get install -y --no-install-recommends musl-tools \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -s /usr/include/linux /usr/include/x86_64-linux-musl/linux \
+    && ln -s /usr/include/asm-generic /usr/include/x86_64-linux-musl/asm-generic \
+    && ln -s /usr/include/x86_64-linux-gnu/asm /usr/include/x86_64-linux-musl/asm \
+    && rustup target add x86_64-unknown-linux-musl
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
+COPY crates/contracts/Cargo.toml ./crates/contracts/Cargo.toml
 COPY vendor ./vendor
 COPY crates/installation/Cargo.toml ./crates/installation/Cargo.toml
 COPY crates/beacon/Cargo.toml ./crates/beacon/Cargo.toml
@@ -68,29 +77,38 @@ COPY crates/protocol/Cargo.toml ./crates/protocol/Cargo.toml
 COPY crates/plugin-api/Cargo.toml ./crates/plugin-api/Cargo.toml
 COPY crates/plugin-host/Cargo.toml ./crates/plugin-host/Cargo.toml
 COPY crates/plugin-runtime/Cargo.toml ./crates/plugin-runtime/Cargo.toml
+COPY crates/node-gateway/Cargo.toml ./crates/node-gateway/Cargo.toml
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    mkdir -p crates/installation/src crates/installation/examples crates/beacon/src crates/protocol/src crates/plugin-api/src crates/plugin-host/src crates/plugin-runtime/src \
+    mkdir -p crates/contracts/src crates/installation/src crates/installation/examples crates/beacon/src crates/protocol/src crates/plugin-api/src crates/plugin-host/src crates/plugin-runtime/src crates/node-gateway/src \
+    && printf '' > crates/contracts/src/lib.rs \
+    && printf '' > crates/node-gateway/src/lib.rs \
+    && printf 'fn main() {}\n' > crates/node-gateway/src/main.rs \
     && printf '' > crates/plugin-api/src/lib.rs \
     && printf '' > crates/plugin-host/src/lib.rs \
     && printf '' > crates/plugin-runtime/src/lib.rs \
     && printf 'fn main() {}\n' > crates/installation/src/main.rs \
     && printf '' > crates/installation/src/lib.rs \
-    && printf 'fn main() {}\n' > crates/installation/examples/ublk_probe.rs \
     && printf 'fn main() {}\n' > crates/installation/examples/native_storage_qualifier.rs \
     && printf 'fn main() {}\n' > crates/beacon/src/main.rs \
     && printf '' > crates/beacon/src/lib.rs \
     && printf '' > crates/protocol/src/lib.rs \
-    && cargo build --locked --release --bin cairn-beacon
-COPY .cargo/config.toml ./.cargo/config.toml
-COPY --chmod=755 scripts/rust-release-inline75-v1.sh ./scripts/rust-release-inline75-v1.sh
+    && cargo build --locked --release --bin cairn-beacon \
+    && cargo build --locked --release --target x86_64-unknown-linux-musl --bin cairn-node-gateway
+COPY crates/contracts ./crates/contracts
+COPY crates/plugin-api ./crates/plugin-api
 COPY crates/beacon ./crates/beacon
 COPY crates/protocol ./crates/protocol
+COPY crates/node-gateway ./crates/node-gateway
 COPY deploy/installations ./deploy/installations
 COPY deploy/nodes ./deploy/nodes
+# Beacon serves the node gateway to machines added without a manager address.
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    touch crates/beacon/src/main.rs crates/beacon/src/lib.rs crates/protocol/src/lib.rs \
+    touch crates/contracts/src/lib.rs crates/plugin-api/src/lib.rs crates/beacon/src/main.rs crates/beacon/src/lib.rs crates/protocol/src/lib.rs \
+    crates/node-gateway/src/main.rs crates/node-gateway/src/lib.rs \
     && cargo build --locked --release --bin cairn-beacon \
-    && cp target/release/cairn-beacon /usr/local/bin/cairn-beacon
+    && cargo build --locked --release --target x86_64-unknown-linux-musl --bin cairn-node-gateway \
+    && cp target/release/cairn-beacon /usr/local/bin/cairn-beacon \
+    && install -D -m 0755 target/x86_64-unknown-linux-musl/release/cairn-node-gateway /usr/local/lib/cairn/cairn-node-gateway
 
 FROM debian:bookworm-slim AS beacon
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
@@ -98,6 +116,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && groupadd --gid 1000 cairn && useradd --uid 1000 --gid cairn cairn
 WORKDIR /app
 COPY --from=beacon-backend /usr/local/bin/cairn-beacon /usr/local/bin/cairn-beacon
+COPY --from=beacon-backend /usr/local/lib/cairn/cairn-node-gateway /usr/local/lib/cairn/cairn-node-gateway
 COPY --from=build /app/dist ./dist
 ARG VCS_REF=development
 ENV APP_COMMIT=$VCS_REF APP_RUNTIME_ID=$VCS_REF CAIRN_BEACON_LISTEN=0.0.0.0:4311 CAIRN_BEACON_WEB_DIR=/app/dist
@@ -135,7 +154,7 @@ ARG PLAYWRIGHT_VERSION=1.63.0
 # Keep this layer independent of application code and package versions.
 RUN npm exec --yes --package="playwright@${PLAYWRIGHT_VERSION}" -- playwright install-deps chromium firefox webkit \
     && rm -rf /var/lib/apt/lists/* /root/.npm
-ENV NODE_ENV=production HOST=0.0.0.0 PORT=4310 DATA_DIR=/data AGENT_HOME=/home/node WORKSPACE_ROOTS=/workspaces
+ENV HOST=0.0.0.0 PORT=4310 DATA_DIR=/data AGENT_HOME=/home/node WORKSPACE_ROOTS=/workspaces
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl wget git git-lfs openssh-client python3 awscli build-essential bubblewrap socat \
     zip unzip xz-utils zstd bzip2 rsync file less tree sqlite3 postgresql-client util-linux \
     dnsutils iproute2 iputils-ping netcat-openbsd procps lsof strace patch diffutils \
@@ -144,10 +163,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 # Resolve stable tool versions before building, then validate this exact image.
 ARG GH_VERSION
 ARG CODEX_VERSION
-ARG CLAUDE_VERSION=2.1.280
-ARG OPENCODE_VERSION=1.19.0
+ARG CLAUDE_VERSION
+ARG OPENCODE_VERSION
 ARG TARGETARCH
-RUN test -n "$CODEX_VERSION" && test -n "$GH_VERSION"
+RUN test -n "$CODEX_VERSION" && test -n "$GH_VERSION" && test -n "$CLAUDE_VERSION" && test -n "$OPENCODE_VERSION"
 RUN arch="${TARGETARCH:-amd64}" \
     && curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${arch}.tar.gz" -o /tmp/gh.tar.gz \
     && curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_checksums.txt" -o /tmp/gh-checksums.txt \
@@ -158,9 +177,10 @@ RUN arch="${TARGETARCH:-amd64}" \
     && rm -rf /tmp/gh*
 # Claude's pinned postinstall places the native executable; pnpm otherwise skips it.
 RUN pnpm add --global --allow-build @anthropic-ai/claude-code "@openai/codex@${CODEX_VERSION}" "@anthropic-ai/claude-code@${CLAUDE_VERSION}" \
-    && claude --version
+    && test "$(claude --version)" = "${CLAUDE_VERSION} (Claude Code)" \
+    && test "$(codex --version)" = "codex-cli ${CODEX_VERSION}"
 RUN pnpm add --global --allow-build opencode-ai "opencode-ai@${OPENCODE_VERSION}" \
-    && opencode --version
+    && test "$(opencode --version)" = "$OPENCODE_VERSION"
 COPY deploy/codex-state/prepare.mjs /opt/cairn-codex-state-builder.mjs
 RUN --network=none node /opt/cairn-codex-state-builder.mjs /opt/cairn-codex-state
 COPY deploy/toolkit /opt/cairn-toolkit
@@ -176,7 +196,7 @@ COPY --from=build --chown=node:node /app/dist ./dist
 COPY --from=build --chown=node:node /app/package.json ./package.json
 RUN install -d -o node -g node /data /workspaces /home/node/.agents /home/node/.agents/skills /home/node/.codex \
     && chown node:node /home/node /app
-ENV APP_CODEX_VERSION=$CODEX_VERSION APP_GH_VERSION=$GH_VERSION
+ENV APP_CODEX_VERSION=$CODEX_VERSION APP_GH_VERSION=$GH_VERSION APP_CLAUDE_VERSION=$CLAUDE_VERSION APP_OPENCODE_VERSION=$OPENCODE_VERSION
 USER node
 VOLUME ["/data", "/home/node", "/workspaces"]
 EXPOSE 4310
@@ -194,7 +214,7 @@ COPY deploy/microvm/kernel.config /tmp/cairn.config
 # Guests use virtio and a serial console; omit unused physical-device families.
 RUN make x86_64_defconfig && scripts/kconfig/merge_config.sh -m .config /tmp/cairn.config \
     && scripts/config --disable USB --disable DRM --disable FB --disable SOUND --disable MEDIA_SUPPORT \
-        --disable WLAN --disable WIRELESS --disable BT --disable HID --disable INPUT \
+        --disable WLAN --disable WIRELESS --disable BT --disable HID --disable INPUT --disable FUSE_FS \
         --disable SCSI --disable ATA --disable BLK_DEV_MD --disable MMC --disable FIREWIRE \
         --disable MODULES --disable DEBUG_INFO --disable DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT \
     && make olddefconfig \
@@ -225,7 +245,7 @@ RUN mksquashfs /control /control.squashfs -comp xz -processors 2 -noappend -all-
 
 FROM runtime AS final
 USER root
-RUN apt-get update && apt-get install -y --no-install-recommends iptables e2fsprogs fakeroot util-linux fuse3 \
+RUN apt-get update && apt-get install -y --no-install-recommends iptables e2fsprogs fakeroot util-linux \
     && rm -rf /var/lib/apt/lists/* \
     && curl -fsSL https://github.com/firecracker-microvm/firecracker/releases/download/v1.17.0/firecracker-v1.17.0-x86_64.tgz -o /tmp/firecracker.tgz \
     && echo '06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade558  /tmp/firecracker.tgz' | sha256sum -c - \

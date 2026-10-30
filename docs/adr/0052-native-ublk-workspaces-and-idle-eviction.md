@@ -1,3 +1,5 @@
+> Statut : Remplacée par [ADR-0054](0054-explicit-conversation-backend-migration.md) pour l’interdiction de conversion native/VM ; le stockage ublk natif reste applicable.
+
 # Native workspaces use the VM journal through host ublk
 
 Native Linux execution keeps its host drivers and systemd process boundary. Its
@@ -58,6 +60,20 @@ An explicitly aborted I/O path records only the durable crash prefix after fenci
 and non-lazy unmount; it does not claim a successful filesystem flush. Publication
 can then run asynchronously across a following turn under the stable disk grant.
 
+A fenced filesystem whose flush reports `EIO` or `EROFS`, or that became read-only,
+follows that explicit
+abort path. Retrying a terminal ext4 journal error must not retain execution slots
+forever. The controller reports a failed execution, retains the durable crash
+prefix, and still requires non-lazy unmount and device retirement before ownership
+release. Other flush errors remain retryable with ownership held.
+
+Before opening native storage, the daemon provisions a soft open-file limit of
+at least 65,536 within its inherited hard limit. This also applies when an older
+installed systemd unit launches an updated binary. New units explicitly configure
+that budget; an insufficient hard limit prevents startup with a diagnostic.
+Segment handles remain retained until publication retirement, so this budget does
+not remove the need to monitor unpublished journal accumulation.
+
 Generated runtime configuration, credentials and frozen skills stay in per-attempt
 staging and are bound into the workload. Their underlying disk mount targets contain
 no generated secret bytes. Claude's broker atomically refreshes its credential
@@ -90,22 +106,3 @@ connector still transfers the original checkout in attempt staging, as for VMs;
 that transfer is separate from journal demand loading and remains a startup cost. Chat history, published artifacts and shared pinned engine bundles
 are retained. The one-hour policy and live storage behavior apply equally to web
 and Android; no new client setting is introduced.
-
-## Compatibility and recovery
-
-The reviewed installation data epoch advances from 6 to 7; the legacy tree remains
-unchanged. Existing VM data is unchanged. Existing stopped native file workspaces
-and `native-files-v1` S3 points remain readable. Migration copies durable file/session
-contents into the new filesystem while retaining the original source until its new
-S3 publication is acknowledged. Failed preparation/restore never discards that source
-or silently selects a different checkpoint. Migration and filesystem growth can need
-extra temporary local capacity; ordinary remounts use block demand loading.
-
-Epoch-6 native binaries cannot interpret the new native disk state. Do not run them
-against an installation that has advanced. Automatic rollout must stop at the epoch
-boundary; a separately reviewed rollout provisions ublk/ext4 support and updates the
-manager and native controllers. Rollback needs matching prepared data and binaries;
-a forward fix is preferable after new native disks have been created. No release or
-deployment is part of this change. Keep failed restore journals and ownership records
-for a retry of the same recovery point; never remove locks or force/lazy unmount a
-filesystem to bypass uncertain ownership.

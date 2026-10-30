@@ -5,6 +5,11 @@ import { chatDelivery, chatWaitNotice, scheduledWakeup } from '../src/chat-deliv
 
 function message(id: string, overrides: Partial<ChatMessage> = {}): ChatMessage {
   return {
+    revision: '',
+    provider: '',
+    reasoning: '',
+    speed: '',
+    attachments: [],
     id,
     chatId: 'chat',
     text: id,
@@ -18,6 +23,13 @@ function message(id: string, overrides: Partial<ChatMessage> = {}): ChatMessage 
 
 function chat(messages: ChatMessage[], run: Partial<Run> | null = null, paused = false): ChatDetail {
   return {
+    slug: '',
+    revision: '',
+    lifecycle: 'active',
+    sessionRestartRequested: false,
+    canRequestNewSession: false,
+    unread: false,
+
     id: 'chat',
     title: 'Chat',
     agentId: 'agent',
@@ -30,13 +42,25 @@ function chat(messages: ChatMessage[], run: Partial<Run> | null = null, paused =
     updatedAt: 1,
     status: run?.status ?? 'idle',
     pendingQuestions: 0,
+    pendingSideQuestions: 0,
+    canAskSideQuestion: false,
+    sideQuestions: [],
     questions: [],
     messages,
     run: run as Run | null,
   }
 }
 
-const running = { id: 'run', status: 'running' as const, chatExecution: { messageId: 'first', text: 'first', recovery: false } }
+const running = {
+  id: 'run',
+  status: 'running' as const,
+  chatExecution: {
+    attachments: [],
+    messageId: 'first',
+    text: 'first',
+    recovery: false,
+  },
+}
 
 describe('chat delivery presentation', () => {
   it('shows the durable wakeup only while the completed conversation waits', () => {

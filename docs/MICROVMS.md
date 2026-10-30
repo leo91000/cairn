@@ -21,14 +21,10 @@ while live inbox updates are delivered.
 It can prepare anonymous VMs with native Codex initialized, within those same
 slots and shared budgets. The manager can update both through authenticated
 `/node-budget`. `CAIRN_READY_VM_POOL=false` disables speculative preparation;
-the default is `true`. Guests without the readiness capability keep booting cold.
+the default is `true`. Host and guest run the same build.
 `CAIRN_READY_VM_POOL_SIZE=1..4` controls the target size (default one). The node
 supervisor preserves the equivalent `readyVmPoolSize` in its `config.json`.
 The same file accepts `readyVmPool: false` to disable preparation entirely.
-Setting `cacheApprovedRuntimes` to `false` in that file disables background
-downloads of historical runtime packages. The current image and locally pinned
-environments remain available; moving an older environment to this node can
-require re-enabling preloading. The default remains `true`.
 Additional spares need measured resident RAM plus 2 GiB of startup headroom
 within one quarter of the node's RAM budget, bounded between 2 and 8 GiB.
 Actual RAM is checked again after preparation; an oversized pool shrinks oldest
@@ -77,19 +73,17 @@ read cancellation token. The persisted disk, journal and acknowledged publicatio
 remain the recovery authority after eviction or a controller crash. RAM retention
 is only an optimization. See [the retention decision](adr/0020-paused-conversation-retention.md).
 
-Archive imports negotiate `binaryImports` through guest status. Supporting guests
-receive length-prefixed binary chunks of at most 64 KiB and an explicit zero-length
-end marker, avoiding Base64 expansion and JSON encoding of repository contents.
-Control messages remain bounded JSON. Both sides retain the legacy JSON/Base64
-path for compatibility with older images. Imports still stream directly to guest
-extraction and preserve the existing authorization, atomic publication and
-read-only policy. See [startup measurements](STARTUP-PERFORMANCE.md).
+Archive imports use length-prefixed binary chunks of at most 64 KiB and an
+explicit zero-length end marker. Control messages remain bounded JSON. Imports
+stream directly to guest extraction and preserve authorization, atomic
+publication and read-only policy.
 
-Each VM boots a pinned kernel and a read-only root image. A sparse 32 GiB ext4
+Each VM boots the current controller’s kernel and read-only root image. A sparse 32 GiB ext4
 private disk supplies the writable overlay, repositories, home, sessions, installed
 tools and Docker cache. Docker and containerd data are mounted directly from that disk. The daemon
 starts only when the `docker` command first needs it. VM recreation retains the disk;
-RAM snapshots are not part of correctness or recovery.
+VMs boot normally or come from the ready VM pool. RAM snapshots are not supported;
+disk checkpoints and publication provide recovery.
 Docker Engine, Buildx and Compose come from Docker's signed Debian repository.
 The CLI-update guest build refreshes those packages as well.
 
@@ -217,7 +211,7 @@ transport details the manager would then discard. The limit still applies to
 the transmitted output. Controller failures also emit a structured
 `runner.failed` event so their cause survives an exhausted diagnostic-log budget;
 the failure starts on its own line even after truncated guest JSON, and ordinary
-stderr remains available for older managers.
+stderr remains available for diagnostics.
 This preserves the output-limit cause in the failed run. The existing recovery
 policy and final wording for unavailable controllers are unchanged. A controller
 diagnostic after `turn.completed` preserves the completed-turn checkpoint, so
@@ -225,10 +219,8 @@ worker recovery can settle it without relaunching the agent.
 
 The `chat_binary_compacts_large_mcp_pages_before_guest_transport` regression
 test sends 160 synthetic MCP pages with 350,000-byte text and structured results.
-On 2026-10-18 the local debug binary emitted 112,050,698 bytes before this change
-and 60,408 bytes afterward, with all 160 outcomes and the final turn marker
-preserved. The test also verifies that the native result remains complete. These
-are serialized transport bytes, not production network-latency measurements.
+It verifies that all outcomes and the final turn marker survive compaction while
+the coding agent's native result remains complete.
 Run it with `pnpm test:backend -p cairn-installation --test codex
 chat_binary_compacts_large_mcp_pages_before_guest_transport`.
 
@@ -268,11 +260,9 @@ CLI-update images rebuild the embedded guest root as well. Tag deployment migrat
 Coolify's stored Compose configuration, preserving generated network names and
 labels. `/health` only succeeds once the Firecracker runner is ready.
 
-Before the first upgrade, back up application volumes and saved workspaces and
-wait for active work to finish. Retain the previous Compose document with its image
-for rollback: an old container-runner image needs its old Docker-socket setup.
-After agents have made changes in VM disks, a rollback must preserve those disks;
-old releases cannot interpret their guest storage as host worktrees.
+Existing version-11 manager databases support the
+[data-preserving upgrade](PRODUCTION-CAIRN.md#data-preserving-upgrades).
+Manager, runner, nodes and guests use the same release.
 
 Controller restarts fence its container PID namespace. Interrupted attempts are
 recorded as exited; the manager recreates VMs against their retained disks. Graceful
@@ -331,22 +321,21 @@ cannot compensate for unavailable host capabilities.
 
 The image CI requires a nested `KVM_RUN` probe and an actual Android boot/tap and
 restart scenario. The supported lifecycle remains fresh guest boot from disk;
-we do not serialize Firecracker snapshots containing running nested VMs. See
-[research and limitations](NESTED-KVM-RESEARCH.md).
+VM suspension keeps the live process and nested KVM state; it does not serialize
+Firecracker memory snapshots.
 
 ## Required block transport
 
 VM data disks use managed ublk devices through Firecracker native virtio-blk Async.
-Flat and paired ext4 layouts keep their existing journals, manifests, publication
+A single flat ext4 filesystem keeps the existing journal, manifest, publication
 receipts and recovery rules. Transport changes do not convert persisted disks.
 Native host execution continues to mount ext4 on the same managed ublk backend.
 
 Every VM host needs `ublk_drv`, `/dev/ublk-control`, enabled io_uring and the
 runner's `SYS_RESOURCE` capability for I/O flusher progress. The host supervisors
 check these requirements and detect the character and block device classes before
-stopping an existing workload. They upgrade the former `blockTransport` selection
-to ublk. A manually configured runner must remove a stale
-`CAIRN_BLOCK_TRANSPORT=vhost-user` setting; unset and `ublk` both select ublk.
+stopping an existing workload. Block transport and filesystem layout have no selector: VM disks always use
+ublk and a single flat ext4 filesystem.
 There is no fallback backend.
 
 For direct Compose deployments, load `ublk_drv` and set `CAIRN_UBLK_CHAR_MAJOR`

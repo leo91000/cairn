@@ -1,3 +1,7 @@
+use cairn_contracts::EventKind;
+use common::McpFixture;
+use common::MissionFixture;
+
 mod common;
 
 use common::relay_fixture::router;
@@ -50,7 +54,7 @@ async fn manual_run(s: &Service, name: &str, prompt: &str) -> Value {
         "prompt": prompt,
         "worktree": false,
     });
-    let task = s.task(task, None).await.unwrap();
+    let task = s.task_fixture(task, None).await.unwrap();
     s.enqueue(task["id"].as_str().unwrap(), "manual", None)
         .await
         .unwrap()
@@ -118,7 +122,9 @@ async fn read_every_page(mcp: &Mcp, run: &str, output: &str) -> i64 {
             .await;
         assert_ne!(response["result"]["isError"], true);
         let page = result(&response);
-        for event in page["events"].as_array().unwrap() {
+        assert!(serde_json::to_vec(&page["events"]).unwrap().len() <= 256 * 1024);
+        for record in page["events"].as_array().unwrap() {
+            let event = &record["event"];
             if event["type"] == "item.completed" {
                 assert_eq!(event["payload"]["item"]["aggregated_output"], output);
                 seen.push(event["payload"]["item"]["id"].as_i64().unwrap());
@@ -169,7 +175,13 @@ async fn assert_large_metadata_is_chunked_consistently(
     cursor: &Value,
 ) {
     s.store
-        .patch_run(run, json!({ "summary": "\0".repeat(800_000) }))
+        .change_run(
+            run,
+            cairn_installation::runs::RunChanges {
+                summary: Some(("\0".repeat(800_000)).to_owned()),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let response = mcp
@@ -179,14 +191,20 @@ async fn assert_large_metadata_is_chunked_consistently(
     assert_eq!(empty["events"], json!([]));
     assert_eq!(empty["nextAfter"], *cursor);
     assert_eq!(empty["hasMore"], false);
-    assert_eq!(empty["run"]["truncated"], true);
+    assert_eq!(empty["run"]["kind"], "truncated");
     let response = mcp
         .call("read_run_content", json!({ "runId": run, "offset": 0 }))
         .await;
     let chunk = result(&response);
     assert!(chunk["nextOffset"].as_u64().unwrap() > 0);
     s.store
-        .patch_run(run, json!({ "summary": "Updated result" }))
+        .change_run(
+            run,
+            cairn_installation::runs::RunChanges {
+                summary: Some(("Updated result").to_owned()),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let continuation = json!({
@@ -199,6 +217,76 @@ async fn assert_large_metadata_is_chunked_consistently(
         true,
         "changed metadata must require a fresh read"
     );
+}
+
+#[tokio::test]
+async fn run_history_includes_the_engine_retries_limits_and_notices() {
+    let root = TempDir::new().unwrap();
+    std::fs::create_dir(root.path().join("home")).unwrap();
+    let (s, origin, server) = served(&root).await;
+    let token = common::relay_fixture::grant(&s, &["read"]).await;
+    let run = manual_run(&s, "Engine", "Engine reports").await;
+    let run_id = run["id"].as_str().unwrap();
+    let reports = [
+        json!({ "type": "engine.retry", "attempt": 1, "maxRetries": 10, "delayMs": 500, "reason": "overloaded" }),
+        json!({
+            "type": "provider.limit",
+            "status": "allowed_warning",
+            "window": "five_hour",
+            "resetsAt": 1_893_499_200_000_i64,
+            "blocked": false,
+        }),
+        json!({ "type": "engine.notice", "level": "warning", "message": "Context is almost full." }),
+    ];
+    for report in &reports {
+        let kind = report["type"].as_str().unwrap();
+        s.store
+            .event(
+                run_id,
+                &EventKind::from_adapter(kind),
+                kind,
+                Some(report.clone()),
+            )
+            .await
+            .unwrap();
+    }
+    let mcp = Mcp {
+        http: reqwest::Client::new(),
+        endpoint: format!("{origin}/mcp"),
+        token,
+    };
+    let response = mcp.call("get_run", json!({ "runId": run_id })).await;
+    let payloads: Vec<_> = result(&response)["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|record| record["event"]["type"] != "status")
+        .map(|record| record["event"]["payload"].clone())
+        .collect();
+    assert_eq!(payloads, reports);
+    let first = result(&response)["events"][0]["event"]["id"]
+        .as_i64()
+        .unwrap();
+    let revision = result(&response)["history"].as_str().unwrap().to_owned();
+    assert_eq!(revision, format!("v1:{run_id}:{first}"));
+    let window = mcp
+        .call(
+            "read_run_history",
+            json!({"runId":run_id,"history":revision}),
+        )
+        .await;
+    assert_ne!(window["result"]["isError"], true);
+    let page = result(&window);
+    assert_eq!(page["history"], revision);
+    assert_eq!(page["events"].as_array().unwrap().len(), 4);
+    let stale = mcp
+        .call(
+            "read_run_history",
+            json!({"runId":run_id,"history":"stale"}),
+        )
+        .await;
+    assert_eq!(stale["result"]["isError"], true);
+    server.abort();
 }
 
 #[tokio::test]
@@ -215,7 +303,7 @@ async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
             "item": { "id": index, "type": "command_execution", "aggregated_output": output },
         });
         s.store
-            .event(run_id, "item.completed", "tool output", Some(item))
+            .event(run_id, &EventKind::ItemCompleted, "tool output", Some(item))
             .await
             .unwrap();
     }
@@ -233,14 +321,14 @@ async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
     s.store
         .event(
             run_id,
-            "item.completed",
+            &EventKind::ItemCompleted,
             "Large answer",
             Some(payload.clone()),
         )
         .await
         .unwrap();
     s.store
-        .event(run_id, "turn.completed", "Done", None)
+        .event(run_id, &EventKind::TurnCompleted, "Done", None)
         .await
         .unwrap();
     let response = mcp
@@ -248,8 +336,54 @@ async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
         .await;
     let page = result(&response);
     let event = &page["events"][0];
-    assert_eq!(event["truncated"], true);
-    let event_id = event["id"].as_i64().unwrap();
+    assert_eq!(event["kind"], "truncated");
+    let event_id = event["preview"]["id"].as_i64().unwrap();
+    let expected_run = run_id.to_owned();
+    let expected = s
+        .store
+        .read(move |db| {
+            Ok(db
+                .event_page(&expected_run, 0, 1000)?
+                .into_iter()
+                .map(|event| event.id)
+                .collect::<Vec<_>>())
+        })
+        .await
+        .unwrap();
+    let revision = page["history"].as_str().unwrap().to_owned();
+    assert_eq!(revision, format!("v1:{run_id}:{}", expected[0]));
+    let mut before = 9_007_199_254_740_991_i64;
+    let mut backwards = Vec::new();
+    let mut saw_preview = false;
+    loop {
+        let response = mcp
+            .bounded(
+                "read_run_history",
+                json!({"runId":run_id,"before":before,"history":revision}),
+            )
+            .await;
+        assert_ne!(response["result"]["isError"], true);
+        let page = result(&response);
+        assert!(serde_json::to_vec(&page["events"]).unwrap().len() <= 256 * 1024);
+        for record in page["events"].as_array().unwrap() {
+            let event = if record["kind"] == "truncated" {
+                saw_preview = true;
+                &record["preview"]
+            } else {
+                &record["event"]
+            };
+            backwards.push(event["id"].as_i64().unwrap());
+        }
+        let next = page["oldest"].as_i64().unwrap();
+        assert!(next < before);
+        before = next;
+        if page["hasOlder"] == false {
+            break;
+        }
+    }
+    assert!(saw_preview);
+    backwards.sort_unstable();
+    assert_eq!(backwards, expected);
     let (original, digest) = read_whole_event(&mcp, run_id, event_id).await;
     assert_eq!(
         serde_json::from_str::<Value>(&original).unwrap()["payload"],
@@ -273,7 +407,7 @@ async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
         )
         .await;
     let last = result(&response);
-    assert_eq!(last["events"][0]["type"], "turn.completed");
+    assert_eq!(last["events"][0]["event"]["type"], "turn.completed");
     assert_eq!(last["hasMore"], false);
 
     let other_run = manual_run(&s, "Other history", "Other run").await;
@@ -300,14 +434,25 @@ async fn stdio_discovers_and_calls_the_beacon_sdk_fixture() {
         "args": [fixture],
         "env": { "TEST_PREFIX": "configured:" },
     });
-    let item = s.mcps.save(&s, connection, None).await.unwrap();
+    let item = s.mcp_fixture(connection, None).await.unwrap();
     let id = item["id"].as_str().unwrap();
     let tested = s.mcps.test(&s, id).await.unwrap();
-    assert_eq!(tested["state"], "connected", "{tested}");
-    assert_eq!(tested["tools"][0]["name"], "fixture_echo");
-    assert_eq!(tested["envKeys"], json!(["TEST_PREFIX"]));
-    assert!(!tested.to_string().contains("configured:"));
-    let mut client = Client::connect(&s, &s.mcps.get(&s, id).await.unwrap())
+    assert_eq!(
+        serde_json::to_value(tested.server.state).unwrap(),
+        "connected",
+        "{tested:?}"
+    );
+    assert_eq!(
+        serde_json::to_value(&tested.server.tools).unwrap()[0]["name"],
+        "fixture_echo"
+    );
+    assert_eq!(tested.env_keys, vec!["TEST_PREFIX"]);
+    assert!(
+        !serde_json::to_string(&tested)
+            .unwrap()
+            .contains("configured:")
+    );
+    let mut client = Client::connect_server(&s, &s.mcps.server(&s, id).await.unwrap())
         .await
         .unwrap();
     let result = client
@@ -320,14 +465,9 @@ async fn stdio_discovers_and_calls_the_beacon_sdk_fixture() {
     assert_eq!(result["content"][0]["text"], "configured:hello");
     client.close().await;
     s.mcps.disconnect(&s, id, false).await.unwrap();
-    assert!(
-        s.mcps
-            .secrets(&s, id)
-            .await
-            .unwrap()
-            .as_object()
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        s.mcps.server_secrets(&s, id).await.unwrap(),
+        cairn_installation::mcps::record::McpSecrets::default()
     );
 }
 
@@ -356,8 +496,16 @@ async fn legacy_stdio_servers_can_exit_on_the_modern_probe() {
         "command": "node",
         "args": ["-e", LEGACY_SERVER],
     });
-    let item = s.mcps.save(&s, connection, None).await.unwrap();
-    let mut client = Client::connect(&s, &item).await.unwrap();
+    let item = s.mcp_fixture(connection, None).await.unwrap();
+    let mut client = Client::connect_server(
+        &s,
+        &s.mcps
+            .server(&s, item["id"].as_str().unwrap())
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap();
     let tools = client.discover().await.unwrap();
     assert_eq!(tools[0]["name"], "legacy_tool");
     client.close().await;
@@ -420,11 +568,17 @@ async fn agents_manage_connections_through_the_self_gateway_without_deadlocks_or
         "token": owner,
         "allowPrivateNetwork": true,
     });
-    let connection = s.mcps.save(&s, self_connection, None).await.unwrap();
+    let connection = s.mcp_fixture(self_connection, None).await.unwrap();
     let run = manual_run(&s, "Manage", "Manage connections").await;
     let run_id = run["id"].as_str().unwrap();
     s.store
-        .patch_run(run_id, json!({ "status": RunStatus::Running }))
+        .change_run(
+            run_id,
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Running),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let configuration = s.mcps.run_configuration(&s, &run).await.unwrap();
@@ -492,7 +646,7 @@ for (const version of ['2026-07-28', '2025-11-25', '2025-06-18']) {
     const catalog = await client.listTools();
     if (catalog.tools.map(t => t.name).join(',') !== 'search,execute') throw Error('invalid compact tools');
     const agents = await client.callTool({ name: 'execute', arguments: {code: 'return await cairn.list_agents({});'} });
-    if (agents.isError || agents.structuredContent.result.length !== 1) throw Error('invalid result ' + JSON.stringify(agents));
+    if (agents.isError || agents.structuredContent.result.agents.length !== 1) throw Error('invalid result ' + JSON.stringify(agents));
     const denied = await client.callTool({ name: 'execute', arguments: {code: 'return await cairn.create_task(input);', input: { name: 'Denied', prompt: 'No' }} });
     if (!denied.isError || !denied._meta['mcp/www_authenticate']) throw Error('scope bypass');
     await client.close();
@@ -594,7 +748,7 @@ async fn oauth_consent_pkce_callback_replay_and_refresh_use_the_existing_provide
         "auth": "oauth",
         "allowPrivateNetwork": true,
     });
-    let item = s.mcps.save(&s, connection, None).await.unwrap();
+    let item = s.mcp_fixture(connection, None).await.unwrap();
     let id = item["id"].as_str().unwrap();
     let consent = s.mcps.connect(&s, id, "fixture-session").await.unwrap();
     let http = reqwest::Client::builder()
@@ -623,7 +777,11 @@ async fn oauth_consent_pkce_callback_replay_and_refresh_use_the_existing_provide
     };
     assert_eq!(command(b"expire\n").await, "expired");
     let tested = s.mcps.test(&s, id).await.unwrap();
-    assert_eq!(tested["state"], "connected", "{tested}");
+    assert_eq!(
+        serde_json::to_value(tested.server.state).unwrap(),
+        "connected",
+        "{tested:?}"
+    );
     let stats: Value = serde_json::from_str(&command(b"stats\n").await).unwrap();
     assert_eq!(stats, json!({ "refreshes": 1, "exchanges": 1 }));
     // A native session can complete OAuth despite an unrelated (or absent) browser cookie.
@@ -675,6 +833,46 @@ async fn oauth_consent_pkce_callback_replay_and_refresh_use_the_existing_provide
     );
     assert!(!s.mcps.capture_native_callback(&s, &params).await.unwrap());
     assert_eq!(finish("native-account").await["result"], "expired");
+    // Cancellation is durable: a captured native response can no longer be exchanged.
+    let pending = s
+        .mcps
+        .connect_native(&s, id, "cancel-session")
+        .await
+        .unwrap();
+    let parameters = consent_callback(&http, &pending).await;
+    assert!(
+        s.mcps
+            .capture_native_callback(&s, &parameters)
+            .await
+            .unwrap()
+    );
+    let mut cancel = common::request("POST", &format!("/api/mcps/{id}/cancel"))
+        .body(Body::empty())
+        .unwrap();
+    cancel
+        .extensions_mut()
+        .insert(InstallationIdentity::trusted(
+            InstallationRole::Owner,
+            "native-account",
+        ));
+    assert_eq!(common::send(&app, cancel).await.status(), StatusCode::OK);
+    assert_eq!(
+        s.mcps
+            .finish_native_callback(&s, id, "cancel-session")
+            .await
+            .unwrap()["result"],
+        "expired"
+    );
+    assert!(
+        s.mcps
+            .server_secrets(&s, id)
+            .await
+            .unwrap()
+            .verifier()
+            .is_empty()
+    );
+    let stats: Value = serde_json::from_str(&command(b"stats\n").await).unwrap();
+    assert_eq!(stats["exchanges"], 2);
     stdin.write_all(b"stop\n").await.unwrap();
     drop(stdin);
     if tokio::time::timeout(Duration::from_secs(2), provider.wait())
@@ -683,4 +881,218 @@ async fn oauth_consent_pkce_callback_replay_and_refresh_use_the_existing_provide
     {
         provider.kill().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn current_mcp_sql_roundtrips_selections_and_keeps_credentials_encrypted() {
+    let root = TempDir::new().unwrap();
+    let s = Service::new(config(&root)).await.unwrap();
+    let saved = s
+        .mcp_fixture(
+            json!({
+                "name":"Command fixture",
+                "transport":"stdio",
+                "command":"node",
+                "args":["server.js","","one\ntwo"],
+                "enabledTools":[],
+                "env":{"TOKEN":"synthetic-private-value"}
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let id = saved["id"].as_str().unwrap().to_owned();
+    let server = s.store.mcp_server(&id).await.unwrap().unwrap();
+    assert_eq!(server.args, vec!["server.js", "", "one\ntwo"]);
+    assert_eq!(server.enabled_tools, Some(vec![]));
+    assert!(s.store.get("mcps", &id).await.unwrap().is_none());
+    assert!(s.store.put("mcps", saved.clone()).await.is_err());
+    let key = id.clone();
+    s.store
+        .read(move |db| {
+            let bytes = db.mcp_credentials(&key)?.unwrap();
+            assert!(
+                !bytes
+                    .windows(b"synthetic-private-value".len())
+                    .any(|part| part == b"synthetic-private-value")
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let key = id.clone();
+    assert!(
+        s.store
+            .transaction(move |db| {
+                db.0.execute("UPDATE mcp_servers SET enabled=2 WHERE id=?", [key])?;
+                Ok(())
+            })
+            .await
+            .is_err()
+    );
+    let reopened = cairn_installation::store::Store::open(&s.config.data_dir).unwrap();
+    assert_eq!(reopened.mcp_server(&id).await.unwrap().unwrap(), server);
+    assert_eq!(reopened.mcp_servers().await.unwrap(), vec![server]);
+    s.mcps.disconnect(&s, &id, true).await.unwrap();
+    assert!(reopened.mcp_server(&id).await.unwrap().is_none());
+    assert!(
+        reopened
+            .read(move |db| Ok(db.mcp_credentials(&id)?.is_none()))
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn public_questionnaire_answers_preserve_choices_comments_and_withdrawal_authority() {
+    let root = TempDir::new().unwrap();
+    std::fs::create_dir(root.path().join("home")).unwrap();
+    let (s, origin, server) = served(&root).await;
+    let token = common::relay_fixture::grant(&s, &["read", "run"]).await;
+    let reader = common::relay_fixture::grant(&s, &["read"]).await;
+    let mcp = Mcp {
+        http: reqwest::Client::new(),
+        endpoint: format!("{origin}/mcp"),
+        token,
+    };
+    let reader = Mcp {
+        http: reqwest::Client::new(),
+        endpoint: format!("{origin}/mcp"),
+        token: reader,
+    };
+    let run = manual_run(&s, "Questionnaire", "Ask about platforms").await;
+    let mut chat = s.chat_create(json!({})).await.unwrap();
+    chat["runId"] = run["id"].clone();
+    let chat_id = chat["id"].as_str().unwrap().to_owned();
+    s.store.save_conversation_boundary(chat).await.unwrap();
+    let question = "e".repeat(64);
+    s.question_receive(
+        run["id"].as_str().unwrap(),
+        json!({
+            "id": question,
+            "blocking": false,
+            "fields": [
+                {
+                    "id": "platforms",
+                    "title": "Which platforms?",
+                    "mode": "multiple",
+                    "minChoices": 2,
+                    "maxChoices": 2,
+                    "options": [
+                        {
+                            "id": "android",
+                            "label": "Android",
+                        },
+                        {
+                            "id": "web",
+                            "label": "Web",
+                        },
+                    ],
+                },
+            ],
+        }),
+    )
+    .await
+    .unwrap();
+    let listed = mcp
+        .call(
+            "list_chat_questions",
+            json!({
+                "chatId": chat_id,
+            }),
+        )
+        .await;
+    assert_eq!(
+        result(&listed)["questions"][0]["fields"][0]["mode"],
+        "multiple"
+    );
+    let invalid = mcp
+        .call(
+            "answer_chat_question",
+            json!({
+                "chatId": chat_id,
+                "questionId": question,
+                "answer": {
+                    "id": uuid::Uuid::new_v4(),
+                    "answers": {
+                        "platforms": {
+                            "selected": [
+                                "android",
+                            ],
+                            "comment": "Android first",
+                        },
+                    },
+                },
+            }),
+        )
+        .await;
+    assert_eq!(invalid["result"]["isError"], true);
+    let input = json!({
+        "chatId": chat_id,
+        "questionId": question,
+        "answer": {
+            "id": uuid::Uuid::new_v4(),
+            "answers": {
+                "platforms": {
+                    "selected": [
+                        "android",
+                        "web",
+                    ],
+                    "comment": "Android first",
+                },
+            },
+        },
+    });
+    let answered = mcp.call("answer_chat_question", input.clone()).await;
+    assert_eq!(result(&answered)["status"], "answering", "{answered}");
+    let repeated = mcp.call("answer_chat_question", input).await;
+    assert_eq!(result(&answered), result(&repeated));
+    let detail = s.chat_detail(&chat_id).await.unwrap();
+    assert_eq!(detail["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        detail["messages"][0]["answers"]["platforms"],
+        json!({
+            "selected": [
+                "android",
+                "web",
+            ],
+            "comment": "Android first",
+        })
+    );
+    let pending = "f".repeat(64);
+    s.question_receive(
+        run["id"].as_str().unwrap(),
+        json!({
+            "id": pending,
+            "blocking": false,
+            "fields": [
+                {
+                    "id": "note",
+                    "title": "Anything else?",
+                },
+            ],
+        }),
+    )
+    .await
+    .unwrap();
+    let args = json!({
+        "chatId": chat_id,
+        "questionId": pending,
+    });
+    let forbidden = reader.call("cancel_chat_question", args.clone()).await;
+    assert!(forbidden["error"].is_object() || forbidden["result"]["isError"] == true);
+    let withdrawn = mcp.call("cancel_chat_question", args.clone()).await;
+    assert_eq!(result(&withdrawn)["status"], "cancelled", "{withdrawn}");
+    assert_eq!(
+        result(&mcp.call("cancel_chat_question", args).await)["status"],
+        "cancelled"
+    );
+    assert_eq!(
+        s.chat_detail(&chat_id).await.unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    server.abort();
 }

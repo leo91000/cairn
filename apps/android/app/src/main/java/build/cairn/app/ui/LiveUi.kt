@@ -20,6 +20,8 @@ import androidx.lifecycle.repeatOnLifecycle
 import build.cairn.app.data.*
 import build.cairn.app.diagnostics.PerfOperation
 import build.cairn.app.diagnostics.Performance
+import build.cairn.contracts.ReadRunHistoryInput
+import build.cairn.contracts.readRunHistory
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -180,11 +182,22 @@ fun rememberLive(
                 scope.launch {
                     var pageApplied = false
                     try {
+                        val runId =
+                            Regex("^/runs/([^/]+)/stream$").matchEntire(path)?.groupValues?.get(1)
                         val page =
-                            api.get<HistoryPage>(
-                                path.removeSuffix("/stream") +
-                                    "/history?before=$before&history=${segment(history)}"
-                            )
+                            if (runId != null) {
+                                api.readRunHistory(
+                                    ReadRunHistoryInput(
+                                        runId = runId,
+                                        before = before,
+                                        history = history,
+                                    )
+                                )
+                            } else
+                                api.get<HistoryPage>(
+                                    path.removeSuffix("/stream") +
+                                        "/history?before=$before&history=${segment(history)}"
+                                )
 
                         val applied = pages.apply(page, value, requested)
                         if (applied != null) {
@@ -593,9 +606,7 @@ internal fun JsonObject?.string(key: String) =
     this?.get(key)?.let { it as? JsonPrimitive }?.contentOrNull.orEmpty()
 
 internal fun RunEvent.isMessage(): Boolean =
-    type == "chat.user" ||
-        item().string("type") == "agent_message" ||
-        (activityData() == null && type == "item.completed" && item() == null)
+    type == "chat.user" || item().string("type") == "agent_message"
 
 internal data class TimelineEntry(
     val key: String,
@@ -615,6 +626,8 @@ internal data class TimelineEntry(
     val plan: AgentPlan? = null,
     /** Where an update changed the plan. */
     val planUpdate: PlanUpdate? = null,
+    /** The coding agent compacted its context; the history above stays as it was. */
+    val compaction: ContextCompaction? = null,
     /** A failure notice's own title, such as Cairn's automatic retry. */
     val noticeTitle: String = "",
     /** Cairn retries this failure itself: the notice is a warning, not a dead end. */
@@ -632,9 +645,9 @@ internal fun timelineEntries(
         val sources = mutableListOf<MutableList<Long>>()
         val positions = mutableMapOf<String, Int>()
         val subagents = subagentTimeline(events)
-        var legacyTool: Int? = null
         for (event in events) {
-            if (event.type == "artifact") continue
+            // Context usage is a measurement the conversation header shows, not an activity.
+            if (event.type == "artifact" || event.type == "context.usage") continue
             if (event.id in subagents.captured) {
                 if (event.id in subagents.anchors) {
                     folded.add(event)
@@ -644,32 +657,7 @@ internal fun timelineEntries(
             }
             if (event.type == "turn.started") {
                 positions.clear()
-                legacyTool = null
             }
-            val legacy =
-                (event.type == "item.started" || event.type == "item.completed") &&
-                    event.activityData() == null
-            if (legacy && event.type == "item.completed" && legacyTool != null) {
-                val index = legacyTool
-                val original = folded[index]
-                sources[index].add(event.id)
-                folded[index] =
-                    event.copy(
-                        id = original.id,
-                        createdAt = original.createdAt,
-                        payload =
-                            mapOf(
-                                "item" to
-                                    buildJsonObject {
-                                        put("type", "saved_output")
-                                        put("text", event.text)
-                                    }
-                            ),
-                    )
-                legacyTool = null
-                continue
-            }
-            if (legacy && event.type == "item.started") legacyTool = folded.size
             val item = event.item()
             val id = item.string("id")
             // Each plan update keeps its place: it shows what changed at that moment.
@@ -716,17 +704,16 @@ internal fun timelineEntries(
                     folded.filter { it.isMessage() }.map { it.id }.toSet(),
                 )
             else emptySet()
+        val hiddenEngine = if (chat) hiddenEngineNotices(events) else emptySet()
+        val recoveredRetries = if (chat) emptySet() else recoveredEngineRetries(events)
         var via = ""
         // The plan its updates change, until the agent finishes it or writes another one.
         var planIndex: Int? = null
+        // By run and item: a compaction's start and end update one divider.
+        val compactions = mutableMapOf<String, Int>()
         // The wait still pending, by its wakeup ID, so that its result and resumption complete it.
         val waits = mutableMapOf<String, Int>()
         var openWait: Int? = null
-        // The current wait call's reason: its tool row is hidden, and an immediate result omits
-        // it. Only that call may lend it, so it resets once used, once a wakeup carries it, and
-        // each turn.
-        var waitCall = ""
-        var waitReason = ""
         fun updateWait(index: Int, change: (ActivityWait) -> ActivityWait) {
             result[index] = result[index].copy(wait = change(result[index].wait!!))
         }
@@ -753,13 +740,24 @@ internal fun timelineEntries(
             scheduled = null
         }
         for ((eventIndex, event) in folded.withIndex()) {
+            // A compaction still running when its turn or run ends did not complete.
+            compactionEnd(event.type, event.text)?.let { end ->
+                for ((key, index) in compactions) {
+                    val compaction = result[index].compaction ?: continue
+                    if (
+                        compaction.state == "running" &&
+                            key.startsWith("compaction:${event.runId}:")
+                    )
+                        result[index] =
+                            result[index].copy(compaction = compaction.copy(state = end))
+                }
+            }
             if (
                 event.type in WAIT_BOUNDARIES ||
                     (event.type == "status" && event.text in TERMINAL_STATUSES)
             )
                 placeScheduled()
             if (event.type == "turn.started") {
-                waitReason = ""
                 connections.clear()
             }
             val failure = failureReason(event)
@@ -816,7 +814,6 @@ internal fun timelineEntries(
                     openWait = result.size
                     scheduled = result.size
                     waits[wakeup.id] = result.size
-                    waitReason = ""
                     result.add(
                         TimelineEntry(
                             "wait:${wakeup.id}",
@@ -830,14 +827,9 @@ internal fun timelineEntries(
                 // The condition completed: right away (the agent never waited) or while it waited.
                 "chat.wait_ready",
                 "run.wait_ready" -> {
-                    val observation = event.activityData()
+                    val observation = event.activityData()?.let(::presentWaitObservation)
                     // Right away, the agent never waited, and this call replaced any wait.
-                    val immediate =
-                        when (observation?.get("immediate")) {
-                            JsonPrimitive(true) -> true
-                            JsonPrimitive(false) -> false
-                            else -> event.text == IMMEDIATE_WAIT_RESULT
-                        }
+                    val immediate = observation?.get("immediate") == JsonPrimitive(true)
                     if (immediate) {
                         openWait?.let { index -> updateWait(index) { it.copy(ended = "replaced") } }
                         openWait = null
@@ -852,7 +844,9 @@ internal fun timelineEntries(
                             }
                             .firstOrNull {
                                 it.type in listOf("chat.wakeup", "run.wakeup") &&
-                                    it.payload?.get("observation") == observation
+                                    (it.payload?.get("observation") as? JsonObject)?.let(
+                                        ::presentWaitObservation
+                                    ) == observation
                             }
                             ?.wakeupPayload()
                     val open =
@@ -889,17 +883,13 @@ internal fun timelineEntries(
                                         null,
                                         observation,
                                         observed = true,
-                                        // Cairn records the reason with the result; older
-                                        // histories only kept it on the call.
+                                        // The result carries the reason.
                                         reason =
-                                            if (immediate)
-                                                observation.string("reason").ifBlank { waitReason }
-                                            else "",
+                                            if (immediate) observation.string("reason") else "",
                                     ),
                             )
                         )
                     }
-                    if (immediate) waitReason = ""
                     continue
                 }
                 "chat.wakeup",
@@ -923,7 +913,7 @@ internal fun timelineEntries(
                             }
                     updateWait(index) {
                         it.copy(
-                            observation = wakeup?.observation ?: it.observation,
+                            observation = wakeup?.observationJson ?: it.observation,
                             observed = true,
                             resumedAt = event.createdAt,
                         )
@@ -958,12 +948,6 @@ internal fun timelineEntries(
             if (delegateTool && !presentActivity(event).failed) continue
             // The wait shows as its own card; only a call that failed stays among the tools.
             if (waitTool && !presentActivity(event).failed) {
-                // A provider may announce the call before its arguments: keep what the same call
-                // said.
-                val callId = event.item().string("id")
-                val reason = toolArguments(event.item()).string("reason")
-                if (callId != waitCall || reason.isNotBlank()) waitReason = reason
-                waitCall = callId
                 continue
             }
             val route = event.activityData()?.get("route") as? JsonObject
@@ -977,6 +961,27 @@ internal fun timelineEntries(
             if (event.type == "status" && route.string("providerName").isNotBlank()) {
                 via = route.string("providerName")
                 if (chat) continue
+            }
+            val compactionItem =
+                event.item()?.takeIf {
+                    it.string("type") == "context_compaction" && event.type.startsWith("item.")
+                }
+            if (compactionItem != null) {
+                val key =
+                    "compaction:${event.runId}:${compactionItem.string("id").ifBlank { event.id.toString() }}"
+                val index = compactions[key]
+                val compaction =
+                    contextCompaction(
+                        compactionItem,
+                        event.type,
+                        index?.let { result[it].compaction },
+                    )
+                if (index == null) {
+                    flushActivity()
+                    result.add(TimelineEntry(key, listOf(event), false, compaction = compaction))
+                    compactions[key] = result.lastIndex
+                } else result[index] = result[index].copy(compaction = compaction)
+                continue
             }
             // The agent's own plan shows apart from its tools. A call that failed did not change
             // it.
@@ -1109,8 +1114,20 @@ internal fun timelineEntries(
                     val interrupted =
                         event.type == "status" &&
                             event.text.lowercase() in listOf("cancelled", "interrupted")
+                    // The engine's own retries, usage limit and warnings are not failures.
+                    val engine =
+                        event.type in ENGINE_EVENTS &&
+                            event.id !in hiddenEngine &&
+                            engineAttention(event.type, presentation.data)
+                    // A speed Codex does not offer or cannot confirm for the model says so.
+                    val speed =
+                        event.type == "status" &&
+                            (speedFallback(presentation.data) ||
+                                speedUnconfirmed(presentation.data) ||
+                                speedConfirmed(presentation.data))
                     if (
-                        event.id !in recovered && (presentation.failed || interrupted || connection)
+                        event.id !in recovered &&
+                            (presentation.failed || interrupted || connection || engine || speed)
                     ) {
                         flushActivity()
                         if (connection) {
@@ -1148,7 +1165,11 @@ internal fun timelineEntries(
                     team = null
                     activity.add(
                         if (!chat && repeated && event.type == "status")
-                            event.copy(payload = event.payload?.minus("error"))
+                            event.copy(
+                                payload = event.payload?.let { JsonObject(it.minus("error")) }
+                            )
+                        else if (event.id in recoveredRetries)
+                            event.copy(payload = JsonObject(event.payload.orEmpty() + RECOVERED))
                         else event
                     )
                 }
@@ -1160,7 +1181,7 @@ internal fun timelineEntries(
         if (knownWait != null && pendingWakeup.observation != null) {
             updateWait(knownWait) {
                 if (it.observed) it
-                else it.copy(observation = pendingWakeup.observation, observed = true)
+                else it.copy(observation = pendingWakeup.observationJson, observed = true)
             }
         }
         if (pendingWakeup != null && knownWait == null) {
@@ -1172,7 +1193,7 @@ internal fun timelineEntries(
                     wait =
                         ActivityWait(
                             pendingWakeup,
-                            pendingWakeup.observation,
+                            pendingWakeup.observationJson,
                             observed = pendingWakeup.observation != null,
                         ),
                 )
@@ -1208,7 +1229,7 @@ private val WAIT_BOUNDARIES =
         "run.wait_ready",
         "run.wakeup",
     )
-private val TERMINAL_STATUSES = setOf("succeeded", "failed", "cancelled", "interrupted")
+internal val TERMINAL_STATUSES = setOf("succeeded", "failed", "cancelled", "interrupted")
 
 /**
  * Match the web feed: attach each publication beside its response, keeping versions per message.
@@ -1285,6 +1306,7 @@ internal fun TimelineRow(
     else if (entry.wait != null) WaitCard(entry.wait)
     else if (entry.plan != null) PlanCard(entry.plan, live = active && livePlan == entry.key)
     else if (entry.planUpdate != null) PlanUpdateRow(entry.planUpdate)
+    else if (entry.compaction != null) ContextCompactionRow(entry.compaction)
     else if (entry.notice)
         entry.events.single().let { event ->
             val presentation = presentActivity(event)
@@ -1307,7 +1329,11 @@ fun EventRow(vm: CairnViewModel, event: RunEvent, agent: String = "Cairn") {
     val user = event.type == "chat.user"
     if (event.isMessage()) {
         val content =
-            if (user) (event.payload?.get("text") as? JsonPrimitive)?.contentOrNull ?: event.text
+            if (user)
+                questionAnswerText(
+                    (event.payload?.get("text") as? JsonPrimitive)?.contentOrNull ?: event.text,
+                    (event.payload?.get("questionId") as? JsonPrimitive)?.contentOrNull,
+                )
             else item.string("text").ifEmpty { event.text }
         val attachments =
             if (!user) emptyList()

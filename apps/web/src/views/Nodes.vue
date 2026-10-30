@@ -1,45 +1,63 @@
 <script setup lang="ts">
-import type { ExecutionNode, NodeEnrollment, NodeSyncSettings } from '../../../../packages/contracts/nodes'
+import type { NodeConfiguration } from '../../../../packages/contracts/generated/typescript/NodeConfiguration'
+import type {
+  ExecutionNode,
+  NodeEnrollment,
+  NodeSyncSettings,
+  RunnerObservation,
+  UnreadyObservations,
+} from '../../../../packages/contracts/nodes'
 import {
   computed,
+  nextTick,
   onBeforeUnmount,
   onMounted,
   ref,
+  watch,
 } from 'vue'
-import { diskCapacity, formatMiB, nodeDiagnostics } from '../../../../packages/contracts/nodes'
+import { createNodeEnrollment } from '../../../../packages/contracts/generated/createNodeEnrollment'
+import { revokeNode } from '../../../../packages/contracts/generated/revokeNode'
+import {
+  diskCapacity,
+  fleetClock,
+  fleetSummary,
+  formatMiB,
+  observeRunner,
+  observeUnready,
+} from '../../../../packages/contracts/nodes'
 import { nodeBackend } from '../agent-access'
 import {
   api,
-  ApiError,
   notify,
   refresh,
   state,
 } from '../api'
 import Icon from '../components/Icon.vue'
 import Modal from '../components/Modal.vue'
-import NativeNodeMode from '../components/NativeNodeMode.vue'
-import NodeStorage from '../components/NodeStorage.vue'
+import NodeDetail from '../components/NodeDetail.vue'
+import NodeRow from '../components/NodeRow.vue'
 import UiAlert from '../components/UiAlert.vue'
 import UiButton from '../components/UiButton.vue'
 import VirtualSelect from '../components/VirtualSelect.vue'
 import {
   Plus,
-  Server,
   Settings2,
 } from '../icons'
 
 const nodes = ref<ExecutionNode[]>([])
 const nativeCallers = ref<Array<{ id: string, email: string }>>([])
 const enrollmentBackend = ref<'firecracker' | 'native'>('firecracker')
+
 // Stops before deleting while a conversation disk is mounted and keeps the unit until the rest is gone, so it can be rerun.
-const nativeUninstallCommand = `sudo sh -c 'if [ -e /etc/systemd/system/cairn-native-node.service ]; then systemctl disable --now cairn-native-node || exit; fi; mounts=$(findmnt -rno TARGET) || { echo "findmnt could not list mounts." >&2; exit 1; }; printf "%s\\n" "$mounts" | grep ^/var/lib/cairn-native/; match=$?; if [ "$match" -ne 1 ]; then echo "Mount safety could not be confirmed. Run sudo systemctl start cairn-native-node to release owned conversation disks, then retry." >&2; exit 1; fi; cairn_policy() { grep -Fqx "# Cairn native administrator; protected units retain NoNewPrivileges." "$1" || return $?; grep -Fqx "cairn-workload ALL=(ALL:ALL) NOPASSWD: ALL" "$1"; }; for policy in /etc/sudoers.d/cairn-native-*; do [ -e "$policy" ] || [ -L "$policy" ] || continue; case "$policy" in */cairn-native-*[!0-9]*|*/cairn-native-) continue ;; esac; if [ -L "$policy" ] || [ ! -f "$policy" ]; then echo "Unrecognized native sudo policy: host-owner review required." >&2; exit 1; fi; if cairn_policy "$policy"; then rm -f -- "$policy" || exit; else policy_status=$?; [ "$policy_status" -eq 1 ] || exit "$policy_status"; fi; done; rm -rf /opt/cairn-native /var/lib/cairn-native && { userdel cairn-workload || ! id cairn-workload >/dev/null 2>&1; } && rm -f /etc/systemd/system/cairn-native-node.service && systemctl daemon-reload'`
+// Both runtimes share the gateway to Cairn; the last one on the machine removes it.
+const nativeUninstallCommand = `sudo sh -c 'if [ -e /etc/systemd/system/cairn-native-node.service ]; then systemctl disable --now cairn-native-node || exit; fi; mounts=$(findmnt -rno TARGET) || { echo "findmnt could not list mounts." >&2; exit 1; }; printf "%s\\n" "$mounts" | grep ^/var/lib/cairn-native/; match=$?; if [ "$match" -ne 1 ]; then echo "Mount safety could not be confirmed. Run sudo systemctl start cairn-native-node to release owned conversation disks, then retry." >&2; exit 1; fi; cairn_policy() { grep -Fqx "# Cairn native administrator; protected units retain NoNewPrivileges." "$1" || return $?; grep -Fqx "cairn-workload ALL=(ALL:ALL) NOPASSWD: ALL" "$1"; }; for policy in /etc/sudoers.d/cairn-native-*; do [ -e "$policy" ] || [ -L "$policy" ] || continue; case "$policy" in */cairn-native-*[!0-9]*|*/cairn-native-) continue ;; esac; if [ -L "$policy" ] || [ ! -f "$policy" ]; then echo "Unrecognized native sudo policy: host-owner review required." >&2; exit 1; fi; if cairn_policy "$policy"; then rm -f -- "$policy" || exit; else policy_status=$?; [ "$policy_status" -eq 1 ] || exit "$policy_status"; fi; done; rm -rf /opt/cairn-native /var/lib/cairn-native && { userdel cairn-workload || ! id cairn-workload >/dev/null 2>&1; } && rm -f /etc/systemd/system/cairn-native-node.service && systemctl daemon-reload && { if [ ! -e /var/lib/cairn-node ]; then systemctl disable --now cairn-node-gateway 2>/dev/null; rm -rf /etc/systemd/system/cairn-node-gateway.service /opt/cairn-gateway /var/lib/cairn-gateway; systemctl daemon-reload; fi; }'`
 // The node a guided backend switch replaces, while the new runtime's enrollment is pending.
 const replacing = ref<ExecutionNode | null>(null)
 // Once the replacement connects and its setup steps end, retiring the previous node is offered.
 let replacement: { previous: string, next: string } | null = null
 const retiring = ref<{ previous: ExecutionNode, next: ExecutionNode } | null>(null)
 const uninstallCommands = {
-  firecracker: 'sudo systemctl disable --now cairn-node; sudo docker rm -f cairn-execution-node; sudo rm -rf /etc/systemd/system/cairn-node.service /opt/cairn-node /var/lib/cairn-node',
+  firecracker: `sudo systemctl disable --now cairn-node; sudo docker rm -f cairn-execution-node; sudo rm -rf /etc/systemd/system/cairn-node.service /opt/cairn-node /var/lib/cairn-node; sudo sh -c 'if [ ! -e /var/lib/cairn-native ]; then systemctl disable --now cairn-node-gateway 2>/dev/null; rm -rf /etc/systemd/system/cairn-node-gateway.service /opt/cairn-gateway /var/lib/cairn-gateway; systemctl daemon-reload; fi'`,
   native: nativeUninstallCommand,
 }
 const backendNames = { firecracker: 'Firecracker VM', native: 'native process' }
@@ -57,7 +75,6 @@ const enrollmentCommand = computed(() => {
   return origin ? `sudo cairn node-enroll '${origin.replaceAll('\'', '\'\\\'\'')}' /var/lib/cairn-node/data/node` : ''
 })
 // Machines known when the code was created, to recognise the newly connected one.
-let knownBeforeEnrollment = new Set<string>()
 const error = ref('')
 const busy = ref(false)
 const recovery = ref<NodeSyncSettings | null>(null)
@@ -75,33 +92,104 @@ const granting = computed({
 const cleaning = ref<ExecutionNode | null>(null)
 const granted = ref<string[]>([])
 const showRevoked = ref(false)
+// The machine shown in the side panel, followed through polling by its id.
+const openedId = ref<string | null>(null)
+const machinesHeading = ref<HTMLElement>()
+const loaded = ref(false)
+// A failed inventory refresh concerns the page, not the machine whose panel is open; the next success clears it.
+const refreshError = ref('')
+// Trusted people load separately; their failure concerns native configuration, not the inventory.
+const callersError = ref('')
+// Action dialogs show their own errors; adding a machine also shows refresh failures, as it waits on refreshes.
+const shownError = computed(() => error.value || refreshError.value)
+const errorNodeId = ref<string | null>(null)
+// Behind dialogs and panels, the page names the machine an action error concerns.
+const pageError = computed(() => {
+  const machine = errorNodeId.value && nodes.value.find(node => node.id === errorNodeId.value)
+  const action = error.value && machine ? `${machine.name}: ${error.value}` : error.value
+  return [action, refreshError.value, callersError.value].filter(Boolean).join(' · ')
+})
+const opened = computed(() => nodes.value.find(node => node.id === openedId.value) ?? null)
 const active = computed(() => nodes.value.filter(node => !node.revoked))
 const revoked = computed(() => nodes.value.filter(node => node.revoked))
 const visible = computed(() => showRevoked.value ? nodes.value : active.value)
+// When the built-in runner's contact last changed, as seen by this device: an unchanged contact means it went stale.
+const runner = ref<RunnerObservation | null>(null)
+const clock = computed(() => fleetClock(nodes.value, runner.value))
+// How long each machine has stayed unready without a reported error, across successful listings.
+const unready = ref<UnreadyObservations>({})
+const summary = computed(() => fleetSummary(nodes.value, Date.now(), clock.value, runner.value, unready.value))
 let timer: ReturnType<typeof setInterval> | undefined
+
+// A machine that leaves the listing while its panel is open closes it; focus returns to the list.
+watch(opened, async (now, before) => {
+  if (!before || now || openedId.value !== before.id)
+    return
+  openedId.value = null
+  await nextTick()
+  if (!document.activeElement || document.activeElement === document.body)
+    machinesHeading.value?.focus()
+})
+
+// A dialog opens on a clean slate: errors from earlier actions are not its own.
+watch(() => [adding.value, editing.value?.id, grantingId.value, cleaning.value?.id, revoking.value?.id, retiring.value?.previous.id, recovery.value !== null], (current, previous) => {
+  if (current.some((value, index) => value && !previous?.[index])) {
+    error.value = ''
+    errorNodeId.value = null
+  }
+})
 // The newly enrolled native node whose "Who can use it?" step follows its configuration.
 let grantAfterConfigure: string | null = null
 
+// Polls and post-action refreshes can overlap: an answer older than one already applied is dropped.
+// Slow answers still apply when nothing newer arrived first, so slow listings keep the page current.
+let started = 0
+let applied = 0
+let failed = 0
+
 async function load() {
+  const request = ++started
   try {
-    nodes.value = await api<ExecutionNode[]>('/nodes')
-    if (nodes.value.some(node => node.capabilities.backend === 'native'))
-      nativeCallers.value = await api('/nodes/native-callers')
+    const listed = await api<ExecutionNode[]>('/nodes')
+    if (request < applied)
+      return
+    applied = request
+    nodes.value = listed
+    runner.value = observeRunner(nodes.value, runner.value)
+    unready.value = observeUnready(nodes.value, unready.value, Date.now(), fleetClock(nodes.value, runner.value), runner.value)
+    loaded.value = true
+    // An older answer does not hide a newer listing's failure.
+    if (request > failed)
+      refreshError.value = ''
   }
   catch (e) {
-    error.value = (e as Error).message
+    if (request > applied) {
+      refreshError.value = (e as Error).message
+      failed = request
+    }
+
     return
+  }
+
+  if (nodes.value.some(node => node.capabilities.backend === 'native')) {
+    try {
+      nativeCallers.value = await api('/nodes/native-callers')
+      callersError.value = ''
+    }
+    catch (e) {
+      callersError.value = `Trusted people could not be loaded: ${(e as Error).message}`
+    }
+  }
+  else {
+    callersError.value = ''
   }
 
   if (!enrollment.value)
     return
   const invitation = enrollment.value
-  // Older installations cannot safely associate a guided switch with its replacement.
-  if (replacing.value && !invitation.nodeId)
-    return
   const connected = nodes.value.find(node => !node.local && !node.revoked
     && nodeBackend(node) === (invitation.backend ?? 'firecracker')
-    && (invitation.nodeId ? node.id === invitation.nodeId : !knownBeforeEnrollment.has(node.id)))
+    && node.id === invitation.nodeId)
   if (connected) {
     enrollment.value = null
     adding.value = false
@@ -128,17 +216,20 @@ onMounted(() => {
 })
 onBeforeUnmount(() => clearInterval(timer))
 
-async function action(operation: () => Promise<void>) {
+// `nodeId` names the machine an action concerns, so its panel shows only its own errors.
+async function action(operation: () => Promise<void>, nodeId: string | null = null) {
   if (busy.value)
     return
   busy.value = true
   error.value = ''
+  errorNodeId.value = null
   try {
     await operation()
     await load()
   }
   catch (e) {
     error.value = (e as Error).message
+    errorNodeId.value = nodeId
   }
   finally {
     busy.value = false
@@ -147,10 +238,10 @@ async function action(operation: () => Promise<void>) {
 
 function enroll() {
   return action(async () => {
-    knownBeforeEnrollment = new Set(nodes.value.map(node => node.id))
-    enrollment.value = await api<NodeEnrollment>('/nodes/enrollments', {
-      method: 'POST',
-      body: JSON.stringify({ name: name.value, managerUrl: managerUrl.value.trim(), backend: enrollmentBackend.value }),
+    enrollment.value = await createNodeEnrollment(api, {
+      name: name.value,
+      managerUrl: managerUrl.value.trim() || null,
+      backend: enrollmentBackend.value,
     })
   })
 }
@@ -170,6 +261,24 @@ function switchBackend(node: ExecutionNode) {
   adding.value = true
 }
 
+// Reopening a machine starts clean: its earlier error was seen. Other machines' errors stay on the page.
+function openNode(node: ExecutionNode) {
+  if (errorNodeId.value === node.id) {
+    error.value = ''
+    errorNodeId.value = null
+  }
+
+  openedId.value = node.id
+}
+
+// The switch continues in its own steps; the panel would show the node being replaced.
+// The panel closes first, so it returns focus to the row before the next dialog opens.
+async function switchFromPanel(node: ExecutionNode) {
+  openedId.value = null
+  await nextTick()
+  switchBackend(node)
+}
+
 // The last step of a guided switch, once the replacement's setup is done or skipped.
 function offerRetirement(node: string) {
   if (replacement?.next !== node)
@@ -186,11 +295,11 @@ function retire() {
   if (!pair)
     return
   return action(async () => {
-    const result = await api<{ releasedPlacements?: number }>(`/nodes/${pair.previous.id}/revoke`, { method: 'POST', body: JSON.stringify({ releasePlacements: true }) })
+    const result = await revokeNode(api, { nodeId: pair.previous.id, releasePlacements: true })
     retiring.value = null
     const released = result.releasedPlacements ?? 0
     notify(released ? `${pair.previous.name} revoked; ${released} ${released === 1 ? 'conversation returns' : 'conversations return'} to automatic placement` : `${pair.previous.name} revoked`)
-  })
+  }, pair.previous.id)
 }
 
 function edit(node: ExecutionNode) {
@@ -211,25 +320,25 @@ function save() {
     return
   const limits = { cpu: node.limits.cpu, memoryMiB: Math.round(memoryGiB.value * 1024), diskMiB: Math.round(diskGiB.value * 1024) }
   return action(async () => {
-    await api(`/nodes/${node.id}`, {
-      method: 'PUT',
-      body: JSON.stringify({
-        name: node.name,
-        tags: tags.value.split(',').map(tag => tag.trim()).filter(Boolean),
-        limits,
-        slots: node.slots,
-        // Exclusive reservations are granted on each agent's page; omitting them keeps them.
-        accepting: node.accepting,
-        ...(node.capabilities.backend === 'native' ? { nativeEnabled: node.nativeEnabled, nativeAccounts: node.nativeAccounts, confirmNativeAdministration: node.nativeModeRequest?.mode === 'administrator' } : {}),
-      }),
-    })
+    const configuration: NodeConfiguration = {
+      revision: node.revision,
+      name: node.name,
+      tags: tags.value.split(',').map(tag => tag.trim()).filter(Boolean),
+      limits,
+      slots: node.slots ?? null,
+      accepting: node.accepting,
+      nativeEnabled: node.capabilities.backend === 'native' ? node.nativeEnabled : null,
+      nativeAccounts: node.capabilities.backend === 'native' ? node.nativeAccounts : null,
+      confirmNativeAdministration: node.capabilities.backend === 'native' && node.nativeModeRequest?.mode === 'administrator',
+    }
+    await api(`/nodes/${node.id}`, { method: 'PUT', body: JSON.stringify(configuration) })
     editing.value = null
     notify('Node saved')
     if (grantAfterConfigure === node.id) {
       grantAfterConfigure = null
       grant(node)
     }
-  })
+  }, node.id)
 }
 
 function closeEditor() {
@@ -261,7 +370,7 @@ function releaseExclusive(node: ExecutionNode) {
   return action(async () => {
     await api(`/nodes/${node.id}/exclusive/${reservation.id}/release`, { method: 'POST', body: '{}' })
     notify('Exclusive release requested; suspended work resumes after confirmation')
-  })
+  }, node.id)
 }
 
 function saveGrants() {
@@ -272,23 +381,14 @@ function saveGrants() {
   const agentIds = granted.value.filter(agentId => !allowed(agentId) && !mismatch(agentId))
   return action(async () => {
     if (agentIds.length) {
-      try {
-        await api(`/nodes/${node.id}/agents`, { method: 'PUT', body: JSON.stringify({ agentIds, add: true, ...(node.nativeModeRequest?.mode === 'administrator' ? { confirmNativeAdministration: true } : {}) }) })
-      }
-      catch (e) {
-        // An older installation only replaces the list: send the agents already allowed with the new ones.
-        if (!(e instanceof ApiError && e.status === 400 && (e.message === 'Invalid node request.' || /unknown field/i.test(e.message))))
-          throw e
-        const kept = (node.agents ?? []).filter(agent => !agent.allNodes).map(agent => agent.id)
-        await api(`/nodes/${node.id}/agents`, { method: 'PUT', body: JSON.stringify({ agentIds: [...new Set([...kept, ...agentIds])] }) })
-      }
+      await api(`/nodes/${node.id}/agents`, { method: 'PUT', body: JSON.stringify({ agentIds, add: true, ...(node.nativeModeRequest?.mode === 'administrator' ? { confirmNativeAdministration: true } : {}) }) })
     }
 
     granting.value = null
     notify(`${node.name} is ready`)
     await refresh()
     offerRetirement(node.id)
-  })
+  }, node.id)
 }
 
 function freeStaleDisks() {
@@ -299,14 +399,14 @@ function freeStaleDisks() {
     const result = await api<{ freedMiB: number, failed: number }>(`/nodes/${node.id}/stale-disks/delete`, { method: 'POST', body: '{}' })
     cleaning.value = null
     notify(result.failed ? `Freed ${formatMiB(result.freedMiB)}; ${result.failed} disks are in use or the node is unreachable` : `Freed ${formatMiB(result.freedMiB)}`)
-  })
+  }, node.id)
 }
 
 /** Why an agent cannot run on the node being granted: the server only accepts agents of its backend. */
 function mismatch(agentId: string) {
   const agent = state.agents.find(item => item.id === agentId)
   const native = granting.value?.capabilities.backend === 'native'
-  if (!agent || (agent.access?.backend === 'native') === native)
+  if (!agent || agent.access?.backend === 'auto' || (agent.access?.backend === 'native') === native)
     return ''
   return native ? 'Runs in a Firecracker VM: set it to native execution on its page first' : 'Uses native execution: only native nodes can run it'
 }
@@ -347,29 +447,71 @@ function saveRecovery() {
   })
 }
 
-function statusLabel(node: ExecutionNode) {
-  return node.status === 'local' ? 'master runner' : node.status
+function revoke() {
+  const node = revoking.value
+  if (!node)
+    return
+  return action(async () => {
+    await revokeNode(api, { nodeId: node.id, releasePlacements: false })
+    // The revoked row leaves the list: once the panel is gone, the dialog returns focus to the list.
+    if (openedId.value === node.id) {
+      openedId.value = null
+      await nextTick()
+    }
+
+    revoking.value = null
+  }, node.id)
 }
 </script>
 
 <template>
   <div class="mx-auto max-w-240 px-8 py-8 phone:px-4">
-    <header class="nodes-heading">
+    <header class="page-heading mb-6 flex items-end justify-between gap-5 phone:mb-5 phone:items-center">
       <div>
-        <p class="eyebrow">
-          Infrastructure
-        </p><h1>Nodes</h1><p class="mt-2 text-muted">
-          A home for your agents’ work. Manage machines, capacity and access.
+        <h1>Nodes</h1>
+        <p class="mt-2 text-[13px] text-muted phone:hidden">
+          Machines that run your agents’ conversations.
         </p>
-      </div><UiButton @click="addMachine">
-        <Icon :name="Plus" :size="16" /> Add a machine
-      </UiButton>
+      </div>
+      <div class="flex shrink-0 gap-2 phone:flex-none!">
+        <UiButton aria-label="Synchronization settings" title="Synchronization settings" @click="configureRecovery">
+          <Icon :name="Settings2" :size="15" /><span class="phone:hidden">Synchronization</span>
+        </UiButton>
+        <UiButton variant="primary" aria-label="Add a machine" @click="addMachine">
+          <Icon :name="Plus" :size="16" /><span class="phone:hidden">Add a machine</span>
+        </UiButton>
+      </div>
     </header>
-    <div class="fleet-summary">
-      <span class="inline-flex gap-1"><strong>{{ active.length }}</strong><span>{{ active.length === 1 ? 'machine' : 'machines' }}</span></span><span class="inline-flex gap-1"><strong>{{ active.filter(n => n.local || n.status === 'online').length }}</strong><span>connected</span></span><span>Linux · managed executions</span>
-    </div>
-    <UiAlert v-if="error && !adding" class="mt-4">
-      {{ error }}
+    <section v-if="loaded" aria-label="Fleet summary">
+      <dl class="mb-5 grid grid-cols-3 gap-3 phone:gap-2">
+        <div class="rounded-xl border border-line bg-surface flex flex-col-reverse px-4 py-3 phone:px-3">
+          <dt class="text-xs text-muted">
+            connected
+          </dt>
+          <dd class="font-heading text-xl font-bold tabular-nums">
+            {{ summary.connected }}<span class="text-sm font-normal text-muted"> / {{ summary.machines }}</span>
+          </dd>
+        </div>
+        <div class="rounded-xl border border-line bg-surface flex flex-col-reverse px-4 py-3 phone:px-3">
+          <dt class="text-xs text-muted">
+            slots in use
+          </dt>
+          <dd class="font-heading text-xl font-bold tabular-nums">
+            {{ summary.usedSlots }}<span class="text-sm font-normal text-muted"> / {{ summary.totalSlots }}</span>
+          </dd>
+        </div>
+        <div class="rounded-xl border bg-surface flex flex-col-reverse px-4 py-3 phone:px-3" :class="summary.attention ? 'border-coral/40' : 'border-line'">
+          <dt class="text-xs text-muted">
+            {{ summary.attention === 1 ? 'needs attention' : 'need attention' }}
+          </dt>
+          <dd class="font-heading text-xl font-bold tabular-nums" :class="{ 'text-coral': summary.attention }">
+            {{ summary.attention }}
+          </dd>
+        </div>
+      </dl>
+    </section>
+    <UiAlert v-if="pageError && !adding" class="mb-4">
+      {{ pageError }}
     </UiAlert>
     <Modal
       v-if="adding"
@@ -385,10 +527,10 @@ function statusLabel(node: ExecutionNode) {
           Connect a trusted Linux machine, then choose its execution backend and authorized agents.
         </p>
         <p class="text-sm text-muted">
-          The node must reach the manager directly over your local network, VPN or an optional public URL. It does not use the relay. Disk blocks never pass through the relay.
+          Cairn introduces the machine to the manager: no manager address, certificate or open port is needed. They connect directly when the networks allow it. Otherwise their traffic, including conversation disks, passes through Cairn’s servers encrypted end to end, so Cairn cannot read it.
         </p>
-        <UiAlert v-if="error">
-          {{ error }}
+        <UiAlert v-if="shownError">
+          {{ shownError }}
         </UiAlert>
         <form class="mt-3 grid gap-3" @submit.prevent="enroll">
           <VirtualSelect
@@ -409,16 +551,20 @@ function statusLabel(node: ExecutionNode) {
             maxlength="100"
             required
           ></label>
-          <label>Direct manager address<input
-            v-model="managerUrl"
-            type="url"
-            placeholder="https://manager.vpn.example:4310"
-            aria-describedby="node-manager-address-help"
-            required
-          ></label>
-          <p id="node-manager-address-help" class="text-sm text-muted">
-            Use HTTPS with a certificate trusted by the node. HTTP is allowed only on loopback for local tests. This is the manager’s address, not the beacon app’s address.
-          </p>
+          <details class="text-sm" :open="managerUrl !== ''">
+            <summary class="cursor-pointer text-muted">
+              Connect directly instead
+            </summary>
+            <label class="mt-2 block">Direct manager address<input
+              v-model="managerUrl"
+              type="url"
+              placeholder="https://manager.vpn.example:4310"
+              aria-describedby="node-manager-address-help"
+            ></label>
+            <p id="node-manager-address-help" class="mt-1 text-muted">
+              Optional. A LAN or VPN address keeps node traffic off Cairn’s servers even when the networks prevent a direct connection. Use HTTPS with a certificate trusted by the node; HTTP is allowed only on loopback for local tests. This is the manager’s address, not the beacon app’s address.
+            </p>
+          </details>
           <UiButton type="submit" :disabled="busy">
             Create enrollment code
           </UiButton>
@@ -431,14 +577,13 @@ function statusLabel(node: ExecutionNode) {
           </template>
           <template v-else>
             <p>Assisted installation is unavailable: the manager has no pinned node image. Set <code>CAIRN_NODE_IMAGE</code> on the manager to the deployed image with its digest (<code>image@sha256:…</code>) and create a new code.</p>
-            <p>Meanwhile, on a machine with the matching <code>cairn</code> binary, run:</p>
-            <code v-if="enrollmentCommand" class="block break-all select-all" aria-label="Node enrollment command">{{ enrollmentCommand }}</code>
-            <p>Paste this single-use code, press Enter, then Ctrl+D to finish standard input. It expires {{ new Date(enrollment.expiresAt).toLocaleString() }}:</p>
+            <template v-if="enrollmentCommand">
+              <p>Meanwhile, on a machine with the matching <code>cairn</code> binary, run:</p>
+              <code class="block break-all select-all" aria-label="Node enrollment command">{{ enrollmentCommand }}</code>
+              <p>Paste this single-use code, press Enter, then Ctrl+D to finish standard input. It expires {{ new Date(enrollment.expiresAt).toLocaleString() }}:</p>
+            </template>
           </template>
           <code class="block break-all select-all" aria-label="Single-use enrollment code">{{ enrollment.code }}</code>
-          <UiAlert v-if="replacing && !enrollment.nodeId">
-            Update this installation to track the replacement and finish the guided switch. The previous node is kept.
-          </UiAlert>
           <p class="text-sm text-muted">
             <strong>3.</strong> {{ enrollment.backend === 'native' ? 'This page detects the machine once it connects, opens its configuration to enable native execution and choose trusted people, then asks which agents may use it.' : 'This page detects the machine once it connects and asks which agents may use it, as the last step.' }}
           </p>
@@ -450,125 +595,37 @@ function statusLabel(node: ExecutionNode) {
         </div>
       </section>
     </Modal>
-    <div class="grid gap-4">
-      <article v-for="node in visible" :key="node.id" class="node-card">
-        <div class="flex items-center justify-between gap-4">
-          <div class="flex min-w-0 items-center gap-3">
-            <span class="node-symbol"><Icon :name="Server" :size="20" /></span><h2 class="break-words">
-              {{ node.name }}
-            </h2>
-          </div><span class="node-status" :class="{ connected: !node.revoked && (node.local || node.status === 'online') }">{{ statusLabel(node) }}</span>
-        </div>
-        <p class="mt-2 text-sm text-muted">
-          {{ node.capabilities.backend === 'native' ? 'Native process · shared host GPU · trusted people only' : 'Firecracker VM' }}
-        </p>
-        <NativeNodeMode v-if="node.capabilities.backend === 'native'" :node="node" @changed="load" />
-        <UiButton v-if="!node.revoked && node.nativeModeRequest?.mode === 'administrator'" @click="grant(node)">
-          Review agent access to this host
-        </UiButton>
-        <template v-if="!node.revoked">
-          <div class="capacity-grid" aria-label="Shared capacity">
-            <div><span>Slots available</span><strong>{{ node.availableSlots ?? node.slots }} <small>of {{ node.slots }}</small></strong><span>{{ node.occupiedSlots ?? 0 }} active or reserved</span></div>
-            <div><span>Shared CPU</span><strong>{{ node.limits.cpu }} <small>cores</small></strong><span>shared by all slots</span></div>
-            <div><span>Shared RAM</span><strong>{{ formatMiB(node.limits.memoryMiB) }}</strong><span>{{ node.usage ? `${formatMiB(node.usage.memoryMiB)} in use` : 'usage unavailable' }}</span></div>
-            <div><span>Shared disk</span><strong>{{ formatMiB(node.limits.diskMiB) }}</strong><span>{{ node.usage ? `${formatMiB(node.usage.diskMiB)} on this node` : 'usage unavailable' }}</span></div>
-          </div>
-          <section class="mt-2 grid gap-1 rounded-xl border border-line px-4 py-3 text-sm" :aria-label="`Agents on ${node.name}`">
-            <p>
-              <template v-if="node.agents?.length">
-                {{ node.agents.length }} {{ node.agents.length === 1 ? 'agent can' : 'agents can' }} run here: <span class="text-muted">{{ node.agents.map(agent => agent.allNodes ? `${agent.name} (all nodes)` : agent.name).join(', ') }}</span>
-              </template>
-              <template v-else>
-                No agent can run here yet.
-              </template>
-            </p>
-            <p v-if="node.exclusiveAgents?.length">
-              {{ node.exclusiveAgents.length }} can reserve it exclusively: <span class="text-muted">{{ agentNames(node.exclusiveAgents) }}</span>
-            </p>
-            <p class="text-xs text-muted">
-              Access is set on each agent’s page. <RouterLink to="/agents" class="text-accent hover:underline">
-                Manage access from the agents ›
-              </RouterLink>
-            </p>
-          </section>
-          <div v-if="node.exclusiveReservation" role="status" class="mt-3 rounded-lg border border-line p-3 text-sm">
-            <p><strong>Exclusive reservation · {{ node.exclusiveReservation.state }}</strong></p>
-            <p>{{ node.exclusiveReservation.reason }}</p>
-            <p>{{ node.exclusiveReservation.pausedRunIds.length }} conversations suspended<span v-if="node.exclusiveReservation.expiresAt"> · until {{ new Date(node.exclusiveReservation.expiresAt).toLocaleTimeString() }}</span></p>
-            <RouterLink :to="`/runs/${node.exclusiveReservation.ownerRunId}`">
-              View reservation owner
-            </RouterLink>
-            <UiButton
-              class="ml-2"
-              size="small"
-              variant="default"
-              :disabled="busy || node.exclusiveReservation.state === 'releasing'"
-              @click="releaseExclusive(node)"
-            >
-              Release reservation
-            </UiButton>
-          </div>
-          <p v-if="node.staleDisks?.count" class="mt-2 text-sm">
-            Old disks: {{ formatMiB(node.staleDisks.diskMiB) }} kept from {{ node.staleDisks.count }} conversation{{ node.staleDisks.count > 1 ? 's' : '' }}
-            <UiButton
-              class="ml-2"
-              size="small"
-              variant="default"
-              @click="cleaning = node"
-            >
-              Free old disks
-            </UiButton>
-          </p>
-          <p v-if="node.maintenance" role="status" class="mt-2">
-            {{ node.maintenance === 'draining' ? 'Pausing and saving conversations for an update' : 'Ready to restart for the update' }}
-          </p>
-          <p v-if="node.maintenance && node.maintenanceError" role="alert" class="mt-1 text-coral">
-            {{ node.maintenanceError }}
-          </p>
-          <ul v-if="nodeDiagnostics(node).length" class="mt-2 list-disc pl-5 text-sm text-coral" :aria-label="`Why ${node.name} cannot take new work`">
-            <li v-for="reason in nodeDiagnostics(node)" :key="reason">
-              {{ reason }}
-            </li>
-          </ul>
-          <p v-if="node.tags.length || node.systemTags?.length" class="mt-2 text-sm">
-            <template v-if="node.tags.length">
-              {{ node.tags.join(' · ') }}
-            </template>
-            <span v-if="node.systemTags?.length" class="text-muted"> Detected tags: {{ node.systemTags.join(' · ') }}</span>
-          </p>
-          <details class="mt-2 text-xs text-muted">
-            <summary>Technical details</summary>
-            <p class="mt-2">
-              Detected {{ node.capabilities.cpu }} CPU · {{ formatMiB(node.capabilities.memoryMiB) }} RAM · {{ formatMiB(node.capabilities.diskMiB) }} disk · {{ node.capabilities.os }} {{ node.capabilities.arch }} · {{ node.capabilities.backend === 'native' ? `ublk ${node.capabilities.ublk ? 'available' : 'unavailable'}` : `KVM ${node.capabilities.kvm ? 'available' : 'unavailable'}` }}
-            </p>
-            <p v-if="node.lastSeen">
-              Last contact {{ new Date(node.lastSeen).toLocaleString() }}
-            </p>
-            <p v-if="node.imageDigest" class="break-all">
-              Version: {{ node.imageDigest }}
-            </p>
-            <p v-if="node.runtimeId" class="break-all">
-              Runtime: {{ node.runtimeId }}
-            </p>
-          </details>
-          <div class="node-actions">
-            <UiButton variant="default" @click="edit(node)">
-              <Icon :name="Settings2" :size="15" /> Configure
-            </UiButton>
-            <NodeStorage :node="node" @saved="load" />
-            <UiButton v-if="!node.local" variant="default" @click="switchBackend(node)">
-              {{ nodeBackend(node) === 'native' ? 'Switch to VM' : 'Switch to native' }}
-            </UiButton>
-            <UiButton v-if="!node.local" variant="default" @click="revoking = node">
-              Revoke
-            </UiButton>
-          </div>
-        </template>
-        <p v-else class="mt-2 text-sm text-muted">
-          This machine no longer has access. Register it again with a new code to reconnect it.
-        </p>
-      </article>
-    </div>
+    <h2
+      id="machines-heading"
+      ref="machinesHeading"
+      class="eyebrow mb-3 rounded focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+      tabindex="-1"
+    >
+      Machines
+    </h2>
+    <section class="overflow-hidden rounded-2xl border border-line bg-surface shadow-arcade" aria-labelledby="machines-heading">
+      <div class="grid grid-cols-[minmax(0,1fr)_7rem_5.5rem_8.5rem_5rem_1rem] gap-4 bg-inset px-4.5 py-2 text-[10.5px] tracking-[.06em] text-muted uppercase max-[1024px]:grid-cols-[minmax(0,1fr)_7rem_5.5rem_1rem] phone:hidden" aria-hidden="true">
+        <span>Machine</span><span>Runtime</span><span>Slots</span><span class="max-[1024px]:hidden">Usage</span><span class="max-[1024px]:hidden">Agents</span><span />
+      </div>
+      <ul aria-label="Machines" class="[&>li:first-child>button]:border-t-0">
+        <li v-for="node in visible" :key="node.id">
+          <NodeRow
+            :node="node"
+            :clock="clock"
+            :runner="runner"
+            :unready="unready"
+            :selected="node.id === openedId"
+            @open="openNode(node)"
+          />
+        </li>
+      </ul>
+      <p v-if="!loaded && !shownError" class="px-4.5 py-6 text-sm text-muted" role="status">
+        Loading machines…
+      </p>
+      <p v-else-if="loaded && !visible.length" class="px-4.5 py-6 text-sm text-muted">
+        {{ revoked.length ? 'No active machine. Revoked machines are hidden.' : 'No machine yet. Add one to run your agents’ conversations on it.' }}
+      </p>
+    </section>
     <UiButton
       v-if="revoked.length"
       class="mt-4"
@@ -578,15 +635,26 @@ function statusLabel(node: ExecutionNode) {
     >
       {{ showRevoked ? 'Hide revoked machines' : `Show revoked machines (${revoked.length})` }}
     </UiButton>
-    <details class="mt-6 rounded-xl border border-line bg-surface p-5">
-      <summary>Advanced: S3 synchronization and timeouts</summary>
-      <p class="mt-2 text-sm text-muted">
-        How often disk changes are published to S3 and how long nodes wait before pausing. The defaults suit most setups.
-      </p>
-      <UiButton class="mt-3" variant="default" @click="configureRecovery">
-        Configure synchronization
-      </UiButton>
-    </details>
+    <NodeDetail
+      v-if="opened"
+      :key="opened.id"
+      :node="opened"
+      :clock="clock"
+      :runner="runner"
+      :unready="unready"
+      :return-focus="visible.some(node => node.id === opened!.id) ? undefined : machinesHeading"
+      :busy="busy"
+      :error="errorNodeId === opened.id ? error : ''"
+      :refresh-error="refreshError"
+      @close="openedId = null"
+      @changed="load"
+      @configure="edit(opened)"
+      @grant="grant(opened)"
+      @clean="cleaning = opened"
+      @release="releaseExclusive(opened)"
+      @switch="switchFromPanel(opened)"
+      @revoke="revoking = opened"
+    />
     <Modal
       v-if="recovery"
       sheet
@@ -594,6 +662,9 @@ function statusLabel(node: ExecutionNode) {
       @close="recovery = null"
     >
       <form class="node-form" @submit.prevent="saveRecovery">
+        <p class="text-sm text-muted">
+          How often disk changes are published to S3 and how long nodes wait before pausing. The defaults suit most setups.
+        </p>
         <p>Changed disk blocks upload in the background after a coherent capture. Chat history is streamed separately. Each conversation shows its last completed synchronization.</p>
         <p v-if="!recovery.s3Configured" class="text-sm text-muted">
           Configure S3 on the server to publish disk changes.
@@ -755,6 +826,9 @@ function statusLabel(node: ExecutionNode) {
               <label v-for="person in nativeCallers" :key="person.id" class="access-row"><input v-model="editing.nativeAccounts" type="checkbox" :value="person.id"><span class="min-w-0 break-all">{{ person.email }}</span></label>
             </div>
           </template>
+          <UiAlert v-if="callersError">
+            {{ callersError }}
+          </UiAlert>
           <p v-if="!nativeCallers.length" class="text-sm text-muted">
             No current people are available. Refresh the installation connection before granting access.
           </p>
@@ -808,7 +882,7 @@ function statusLabel(node: ExecutionNode) {
           <p v-if="editing.exclusiveAgents?.length">
             {{ editing.exclusiveAgents.length }} can reserve it exclusively: {{ agentNames(editing.exclusiveAgents) }}
           </p>
-          <p v-if="!editing.exclusiveReservations && editing.capabilities.backend !== 'native'">
+          <p v-if="!editing.exclusiveReservations">
             This runtime needs an update before exclusive reservations can be acquired.
           </p>
           <p class="text-xs">
@@ -826,6 +900,7 @@ function statusLabel(node: ExecutionNode) {
       v-if="revoking"
       sheet
       title="Revoke node"
+      :return-focus="opened ? undefined : machinesHeading"
       @close="revoking = null"
     >
       <div class="node-form">
@@ -841,8 +916,11 @@ function statusLabel(node: ExecutionNode) {
         <p v-if="revoking.capabilities.backend === 'native'" class="text-sm text-muted">
           If a conversation disk is still mounted, the command lists it and stops before deleting anything: start cairn-native-node so its recovery releases owned disks, then run the command again.
         </p>
+        <UiAlert v-if="error">
+          {{ error }}
+        </UiAlert>
         <div>
-          <UiButton variant="danger" :disabled="busy" @click="action(async () => { await api(`/nodes/${revoking!.id}/revoke`, { method: 'POST', body: '{}' }); revoking = null })">
+          <UiButton variant="danger" :disabled="busy" @click="revoke">
             Revoke node
           </UiButton>
         </div>
@@ -891,20 +969,6 @@ function statusLabel(node: ExecutionNode) {
 </template>
 
 <style scoped>
-.nodes-heading { display: flex; align-items: center; justify-content: space-between; gap: 24px; }
-.eyebrow { text-transform: uppercase; letter-spacing: .12em; font-size: 10px; color: var(--color-muted); margin-bottom: 6px; }
-.fleet-summary { display: flex; flex-wrap: wrap; gap: 12px 24px; padding: 24px 0; color: var(--color-muted); font-size: 12px; }
-.fleet-summary strong { color: var(--color-ink); }
-.node-card { border: 1px solid var(--color-line); border-radius: 18px; background: var(--color-surface); padding: 24px; }
-.node-symbol { display: grid; place-items: center; padding: 10px; border-radius: 12px; background: var(--color-inset); color: var(--color-accent); }
-.node-status { border: 1px solid var(--color-line); border-radius: 100px; padding: 4px 10px; font-size: 11px; white-space: nowrap; color: var(--color-muted); }
-.node-status.connected { color: var(--color-accent); background: var(--color-inset); }
-.capacity-grid { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 1px; margin: 22px 0; border: 1px solid var(--color-line); border-radius: 12px; overflow: hidden; background: var(--color-line); }
-.capacity-grid > div { display: grid; gap: 5px; background: var(--color-inset); padding: 14px; }
-.capacity-grid span { font-size: 11px; color: var(--color-muted); }
-.capacity-grid strong { font-size: 19px; font-weight: 600; }
-.capacity-grid small { font-size: 11px; font-weight: 400; color: var(--color-muted); }
-.node-actions { display: flex; flex-wrap: wrap; gap: 8px; border-top: 1px solid var(--color-line); padding-top: 16px; margin-top: 18px; }
 .node-form { display: grid; gap: 20px; padding: 24px; }
 .node-form label:not(.access-row) { display: grid; gap: 6px; font-size: 12px; color: var(--color-muted); }
 .node-form input:not([type=checkbox]) { width: 100%; min-width: 0; color: var(--color-ink); }
@@ -915,5 +979,5 @@ function statusLabel(node: ExecutionNode) {
 .form-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; }
 .access-row { display: flex; flex-direction: row; align-items: center; gap: 12px; border: 1px solid var(--color-line); background: var(--color-inset); border-radius: 10px; padding: 14px; font-size: 13px; color: var(--color-ink); }
 .access-row input { width: 16px; height: 16px; flex-shrink: 0; margin: 0; }
-@media (max-width: 640px) { .nodes-heading { align-items: start; flex-direction: column; gap: 16px; } .node-card { padding: 16px; } .capacity-grid { grid-template-columns: repeat(2,minmax(0,1fr)); } .capacity-grid strong { font-size: 15px; } .capacity-grid > div { padding: 10px; } .node-form { padding: 20px; } .form-grid { grid-template-columns: 1fr; } }
+@media (max-width: 640px) { .node-form { padding: 20px; } .form-grid { grid-template-columns: 1fr; } }
 </style>

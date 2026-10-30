@@ -1,4 +1,7 @@
 //! Opt-in local C5 experiment; no production cleanup policy or latency gate.
+use crate::common::run_fixture::DbRunFixture;
+use cairn_contracts::EventKind;
+
 mod common;
 
 use cairn_installation::{config::id, service::Service, store::Store};
@@ -70,7 +73,7 @@ async fn populate(service: &Service, count: usize) -> Value {
                 let artifact = chat.as_object_mut().unwrap().remove("artifactId").unwrap();
                 let cid = chat["id"].as_str().unwrap();
                 let run = chat["runId"].as_str().unwrap();
-                db.add_run(
+                db.add_run_fixture(
                     &json!({
                         "id": run,
                         "taskId": cid,
@@ -79,10 +82,11 @@ async fn populate(service: &Service, count: usize) -> Value {
                     }),
                     None,
                 )?;
+                db.save_conversation_boundary(&chat)?;
                 for event in 0..16 {
                     db.event(
                         run,
-                        "agent.message",
+                        &EventKind::from_adapter("agent.message"),
                         &format!("{event}:{}", "x".repeat(1024)),
                         None,
                     )?;
@@ -105,25 +109,16 @@ async fn populate(service: &Service, count: usize) -> Value {
                     }),
                     None,
                 )?;
-                db.set(
-                    &format!("run-checkpoint:{run}"),
-                    &json!({ "completed": true }),
-                    None,
-                )?;
-                db.put("chats", &chat)?;
+                db.save_checkpoint_boundary(run, &json!({ "completed": true }))?;
             }
             Ok(())
         })
         .await
         .unwrap();
     service.store.read(|db| {
-        let chats = db.list("chats")?;
+        let chats = db.conversations_boundary()?;
         let bytes = db.0.query_row(
-            "SELECT (SELECT coalesce(sum(length(CAST(data AS BLOB))),0) FROM records WHERE kind='chats') +
-             (SELECT coalesce(sum(length(CAST(data AS BLOB))),0) FROM runs) +
-             (SELECT coalesce(sum(length(CAST(data AS BLOB))),0) FROM chat_messages) +
-             (SELECT coalesce(sum(length(CAST(text AS BLOB))),0) FROM events) +
-             (SELECT coalesce(sum(length(CAST(data AS BLOB))),0) FROM kv WHERE key LIKE 'artifact:%' OR key LIKE 'run-checkpoint:%')",
+            "SELECT coalesce(sum(payload),0) FROM dbstat WHERE name IN ('conversations','chat_messages','message_attachments','runs','events','kv','run_checkpoints')",
             [], |row| row.get::<_, i64>(0),
         )?;
         Ok(json!({
@@ -156,29 +151,40 @@ async fn writer_cpu(store: &Store) -> f64 {
 }
 
 async fn read_write_reference(service: &Service) -> Value {
-    let chat = service.store.list("chats").await.unwrap().remove(0);
-    let cid = chat["id"].as_str().unwrap();
+    let mut chat = service
+        .store
+        .conversations_boundary()
+        .await
+        .unwrap()
+        .remove(0);
+    let cid = chat["id"].as_str().unwrap().to_owned();
     let mut warm = Vec::new();
     let mut cold = Vec::new();
     let mut writes = Vec::new();
     for _ in 0..20 {
         let start = Instant::now();
-        service.store.get("chats", cid).await.unwrap().unwrap();
+        service
+            .store
+            .conversation_boundary(&cid)
+            .await
+            .unwrap()
+            .unwrap();
         warm.push(ms(start));
         // A fresh reader connection, without flushing the host's page cache.
         let connection =
             rusqlite::Connection::open(service.config.data_dir.join("manager.db")).unwrap();
         let start = Instant::now();
-        let _: String = connection
-            .query_row(
-                "SELECT data FROM records WHERE id=? AND kind='chats'",
-                [cid],
-                |row| row.get(0),
-            )
+        cairn_installation::store::Db(&connection)
+            .conversation(&cid)
+            .unwrap()
             .unwrap();
         cold.push(ms(start));
         let start = Instant::now();
-        service.store.put("chats", chat.clone()).await.unwrap();
+        chat = service
+            .store
+            .save_conversation_boundary(chat.clone())
+            .await
+            .unwrap();
         writes.push(ms(start));
     }
     json!({
@@ -252,12 +258,12 @@ async fn trial(count: usize, chained: bool, repeat: usize) {
     let (queue, writes) = probes.await.unwrap();
     let remaining = service.store.read(|db| {
         Ok(json!({
-            "chats": db.list("chats")?.len(),
+            "chats": db.conversations_boundary()?.len(),
             "runs": db.0.query_row("SELECT count(*) FROM runs", [], |row| row.get::<_, i64>(0))?,
             "events": db.0.query_row("SELECT count(*) FROM events", [], |row| row.get::<_, i64>(0))?,
             "messages": db.0.query_row("SELECT count(*) FROM chat_messages", [], |row| row.get::<_, i64>(0))?,
             "artifacts": db.keys("artifact:")?.len(),
-            "checkpoints": db.keys("run-checkpoint:")?.len(),
+            "checkpoints": db.0.query_row("SELECT count(*) FROM run_checkpoints", [], |row| row.get::<_, i64>(0))?,
         }))
     }).await.unwrap();
     for (kind, value) in remaining.as_object().unwrap() {

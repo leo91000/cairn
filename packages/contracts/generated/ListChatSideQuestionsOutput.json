@@ -1,0 +1,119 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "ChatSideQuestion": {
+      "properties": {
+        "answer": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "chatId": {
+          "type": "string"
+        },
+        "createdAt": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "error": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "itemId": {
+          "default": "",
+          "description": "The agent message the question refers to.",
+          "type": "string"
+        },
+        "provider": {
+          "default": null,
+          "pattern": "^(codex|claude|opencode)$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "quote": {
+          "default": "",
+          "description": "The passage of a reply the question is about.",
+          "type": "string"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "settledAt": {
+          "default": null,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "status": {
+          "pattern": "^(pending|answered|failed|cancelled)$",
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "chatId",
+        "runId",
+        "text",
+        "status",
+        "createdAt"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "canAskSideQuestion": {
+      "description": "The running reply's coding agent can answer a side question now.",
+      "type": "boolean"
+    },
+    "hasMore": {
+      "type": "boolean"
+    },
+    "nextOffset": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "sideQuestionReason": {
+      "description": "Why a side question cannot be asked now, when it cannot.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "sideQuestions": {
+      "items": {
+        "$ref": "#/definitions/ChatSideQuestion"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "sideQuestions",
+    "hasMore",
+    "canAskSideQuestion"
+  ],
+  "title": "ListChatSideQuestionsOutput",
+  "type": "object"
+}

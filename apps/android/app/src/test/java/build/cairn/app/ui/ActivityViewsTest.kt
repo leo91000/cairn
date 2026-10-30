@@ -26,21 +26,44 @@ class ActivityViewsTest {
 
     private fun item(id: Long, json: String) =
         RunEvent(
-            id,
-            1789375200000,
-            "item.completed",
-            "",
-            mapOf("item" to wireJson.parseToJsonElement(json)),
+            id = id,
+            createdAt = 1789375200000,
+            type = "item.completed",
+            text = "",
+            payload =
+                kotlinx.serialization.json.JsonObject(
+                    mapOf("item" to wireJson.parseToJsonElement(json))
+                ),
         )
 
     @Test
     fun `chat problems expose details without expanding a session group`() {
         val events =
             listOf(
-                RunEvent(1, 1000, "turn.started", ""),
-                RunEvent(2, 2000, "error", "Permission denied"),
-                RunEvent(3, 3000, "status", "interrupted"),
-                RunEvent(4, 4000, "status", "succeeded"),
+                RunEvent(
+                    id = 1,
+                    createdAt = 1000,
+                    type = "turn.started",
+                    text = "",
+                ),
+                RunEvent(
+                    id = 2,
+                    createdAt = 2000,
+                    type = "error",
+                    text = "Permission denied",
+                ),
+                RunEvent(
+                    id = 3,
+                    createdAt = 3000,
+                    type = "status",
+                    text = "interrupted",
+                ),
+                RunEvent(
+                    id = 4,
+                    createdAt = 4000,
+                    type = "status",
+                    text = "succeeded",
+                ),
             )
         compose.setContent {
             ActivityFixture {
@@ -63,9 +86,24 @@ class ActivityViewsTest {
     fun `session notices are readable and JSON is only shown on request`() {
         val events =
             listOf(
-                RunEvent(1, 1000, "turn.completed", """{"type":"turn.completed"}"""),
-                RunEvent(2, 1000, "status", "succeeded"),
-                RunEvent(3, 1000, "status", "Using Codex account: Compte principal"),
+                RunEvent(
+                    id = 1,
+                    createdAt = 1000,
+                    type = "turn.completed",
+                    text = """{"type":"turn.completed"}""",
+                ),
+                RunEvent(
+                    id = 2,
+                    createdAt = 1000,
+                    type = "status",
+                    text = "succeeded",
+                ),
+                RunEvent(
+                    id = 3,
+                    createdAt = 1000,
+                    type = "status",
+                    text = "Using Codex account: Compte principal",
+                ),
             )
         compose.setContent { ActivityFixture { Page { events.forEach { ActivityCard(it) } } } }
         compose.onNodeWithText("Compte Codex sélectionné").assertExists()

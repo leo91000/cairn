@@ -21,11 +21,9 @@ fn base_metadata(source: &Path, db: &Connection) -> io::Result<(u64, Vec<String>
         )
         .map_err(failure)?;
     let context: Value = serde_json::from_str(&context).map_err(failure)?;
-    let legacy: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM settings WHERE key='legacyThrough' AND CAST(value AS INTEGER)>0)", [], |row| row.get(0)).map_err(failure)?;
     if context["unassigned"] != true
         || context.get("master").is_some()
         || context.get("grant").is_some()
-        || legacy
         || manifest["blocks"]
             .as_array()
             .unwrap()
@@ -100,7 +98,7 @@ impl LazyDisk {
     pub(crate) fn verify_sealed(source: &Path) -> io::Result<()> {
         let (_lock, db) = offline(source)?;
         let (size, _) = base_metadata(source, &db)?;
-        let _journal = journal::Journal::open(source, &db, size)?;
+        let _journal = journal::Journal::open_verified(source, &db, size)?;
         Ok(())
     }
 
@@ -113,7 +111,8 @@ impl LazyDisk {
             .create_new(true)
             .mode(0o600)
             .open(target.join("journal.lock"))?;
-        for name in ["journal-v2.sqlite", "journal.sqlite"] {
+        {
+            let name = "journal-v2.sqlite";
             let mut input = File::options()
                 .read(true)
                 .custom_flags(libc::O_NOFOLLOW)
@@ -149,7 +148,7 @@ impl LazyDisk {
         let (_lock, db) = offline(target)?;
         base_metadata(target, &db)?;
         drop(db);
-        super::super::policy::Policy::for_node(&context["policy"]).map_err(failure)?;
+        crate::storage::policy::for_node(&context["policy"]).map_err(failure)?;
         let encoded = super::state::encode_context(context)?;
         let db = journal::metadata(target, None)?;
         db.execute(

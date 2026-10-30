@@ -1,0 +1,258 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "MissionPluginGrant": {
+      "additionalProperties": false,
+      "properties": {
+        "authorId": {
+          "type": "string"
+        },
+        "connectionId": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "connectionId",
+        "revision",
+        "authorId"
+      ],
+      "type": "object"
+    },
+    "ScheduleFailure": {
+      "additionalProperties": false,
+      "properties": {
+        "at": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "message": {
+          "type": "string"
+        },
+        "scheduledFor": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "message",
+        "scheduledFor",
+        "at"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "Presentation of task settings in a run snapshot. Chats synthesize the same typed\nsettings without creating a mission or a scheduled commitment.",
+  "properties": {
+    "agentId": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "archived": {
+      "default": false,
+      "type": "boolean"
+    },
+    "authorAccessId": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "authorId": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "authorRemoved": {
+      "default": false,
+      "type": "boolean"
+    },
+    "createdAt": {
+      "default": null,
+      "format": "int64",
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "cron": {
+      "default": null,
+      "maxLength": 100,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "enabled": {
+      "default": true,
+      "type": "boolean"
+    },
+    "id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "name": {
+      "maxLength": 100,
+      "minLength": 1,
+      "type": "string"
+    },
+    "nativeAuthorityNodes": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "nativeParentAccess": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "nativeParentRunId": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "nativePluginGrants": {
+      "default": null,
+      "items": {
+        "$ref": "#/definitions/MissionPluginGrant"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "nativePrincipals": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "nativeProvenanceUnknown": {
+      "default": false,
+      "type": "boolean"
+    },
+    "nextRun": {
+      "default": null,
+      "format": "int64",
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "projectId": {
+      "default": null,
+      "format": "uuid",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "prompt": {
+      "maxLength": 50000,
+      "minLength": 1,
+      "type": "string"
+    },
+    "revision": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "scheduleFailure": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ScheduleFailure"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "scheduleWaitReason": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "skills": {
+      "default": null,
+      "items": {
+        "maxLength": 160,
+        "type": "string"
+      },
+      "maxItems": 100,
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "tags": {
+      "default": [],
+      "items": {
+        "maxLength": 30,
+        "type": "string"
+      },
+      "maxItems": 10,
+      "type": "array"
+    },
+    "timezone": {
+      "default": "Europe/Paris",
+      "maxLength": 100,
+      "minLength": 1,
+      "type": "string"
+    },
+    "worktree": {
+      "default": true,
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "id",
+    "name",
+    "prompt",
+    "agentId",
+    "projectId",
+    "skills",
+    "tags",
+    "cron",
+    "timezone",
+    "enabled",
+    "archived",
+    "worktree",
+    "revision",
+    "createdAt",
+    "nextRun",
+    "authorId",
+    "authorAccessId",
+    "authorRemoved",
+    "scheduleWaitReason",
+    "scheduleFailure",
+    "nativePrincipals",
+    "nativeAuthorityNodes",
+    "nativeParentRunId",
+    "nativeParentAccess",
+    "nativeProvenanceUnknown",
+    "nativePluginGrants"
+  ],
+  "title": "RunTaskSnapshot",
+  "type": "object"
+}

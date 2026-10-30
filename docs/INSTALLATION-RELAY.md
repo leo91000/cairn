@@ -42,6 +42,8 @@ replacement. Do not delete `rotation.json` to retry. Claim and rotation share an
 exclusive machine lock. A pending rotation from a different identity generation
 is refused; back it up before recovering that installation.
 
+### Revoke and reclaim
+
 The owner can instead choose **Revoke and forget installation** in the beacon
 app, including for an offline or orphaned installation. Confirmation permanently
 invalidates the machine credential and recovery proofs, removes sharing and the
@@ -111,20 +113,38 @@ file is saved, detach in the app and retry with that file to recover the same ID
 This proof remains solely for reclamation of an unowned record; it cannot connect
 while unclaimed. Successful reclamation rotates it and keeps the same ID.
 
-For deployment migration, interrupted claims and recovery after losing the
-private identity file, follow [DEPLOYMENT.md](DEPLOYMENT.md). Execution nodes
-continue to use their authenticated direct manager channel.
-Additional execution nodes use the reachable manager address selected during
-enrollment (LAN, VPN or optional public HTTPS origin), independently of the
-beacon app’s origin. Their disk traffic never uses the beacon relay.
-See [additional execution nodes](DEPLOYMENT.md#additional-execution-nodes)
-for TLS and network setup.
+For interrupted CLI claims, follow [fallback claim and detachment](#fallback-claim-and-detachment).
+If the private identity file is lost, follow [revoke and reclaim](#revoke-and-reclaim).
+For Compose setup, see [manual Compose claim](DEPLOYMENT.md#manual-compose-claim).
+
+Execution nodes keep their own node credentials on every request, whatever path carries them.
+Beacon introduces a node enrolled without an address to its manager (protocol 5,
+[ADR-0069](adr/0069-nodes-introduced-by-beacon.md)):
+
+- **Direct.** The node's gateway posts a complete WebRTC offer to
+  `/api/relay/{installation}/nodes/direct`. Beacon sends `NodeOffer { id, sdp,
+  address }` on this tunnel and returns the installation's complete
+  `NodeAnswer { id, sdp }`, or 503 when it has none. The node and the manager
+  then exchange UDP without Beacon, one DataChannel per HTTP connection.
+- **Node channel.** Otherwise the gateway opens
+  `/api/relay/{installation}/nodes/connect`, Beacon sends `NodeChannel { id,
+  address }` on this tunnel, the installation opens
+  `/api/relay/{installation}/nodes/{id}/accept` with its bearer credential, and
+  Beacon copies binary WebSocket messages between the two sockets. These
+  channels are separate from the tunnel and close with it.
+
+Both paths carry raw HTTP/1.1 for the node routes only, never `/api/*`, and end
+on the manager's node certificate: DTLS directly, TLS inside the node channel.
+The node pins that certificate from its install command, so Beacon only ever
+relays ciphertext. A node enrolled with a reachable manager address (LAN, VPN or
+public HTTPS origin) bypasses Beacon. See
+[additional execution nodes](DEPLOYMENT.md#additional-execution-nodes).
 
 The installation initiates a TLS WebSocket at
-`/api/relay/{installation}/connect` with its bearer credential. `Hello` offers
-protocol versions; `Welcome` chooses a supported version before API traffic.
+`/api/relay/{installation}/connect` with its bearer credential. `Hello` declares the current version; `Welcome`
+confirms it before API traffic.
 An incompatible peer is disconnected before API traffic; its authenticated installation is marked `updateRequired` in the beacon database. The shared `cairn-protocol` crate
-owns the frames, limits and transport header rules. Version 1 multiplexes finite
+owns the frames, limits and transport header rules. The relay multiplexes finite
 API requests and responses by request ID, carrying method, encoded path/query,
 selected headers and binary bodies. Account identity and owner/member role come from the beacon
 session and installation access record, then enters the installation's
@@ -163,14 +183,11 @@ in-memory registry. No inter-process notification or distributed connection
 routing is implemented; sticky routing per installation is insufficient for
 immediate session revocation across installations.
 
-Version 2 adds SSE response headers, binary chunks, completion, credit and
-cancellation frames using the same request IDs. Hello offers `[4, 3, 2, 1]`; Welcome
-selects the highest shared version. The claim HTTP request declares the minimum
-supported version (1), so a new installation can still claim against a v1 service;
-the WebSocket handshake remains authoritative for the actual tunnel version.
-A v1 installation keeps finite API access;
-stream requests return 501 without sending unknown frames or closing its tunnel.
-A peer with no shared version is disconnected before it becomes online.
+The current relay protocol is version 5. Hello declares `{ "type": "hello",
+"version": 5 }` and Welcome confirms version 5. Claims declare that same version.
+There is no negotiation: any different or missing version is rejected before the
+installation becomes online, with an update-required WebSocket close reason.
+All peers support credited streams, notifications, direct control and node channels.
 
 Each stream gets one credit per downstream body read. Installation body polling
 pauses until credit arrives, chunks are limited to 64 KiB, and each beacon HTTP
@@ -190,7 +207,7 @@ installation run. During beacon shutdown, relay bodies close before HTTP
 draining, allowing restart without waiting for infinite SSE bodies.
 
 The beacon session and authenticated `GET /api/installations` expose `online`
-from the local relay registry. Availability changes after successful negotiation
+from the local relay registry. Availability changes after a successful handshake
 and on disconnect; dead peers are detected by the existing heartbeat. The web
 shows each installation's status and refreshes only this small account-level
 list while visible, with backoff when the Beacon is unavailable.
@@ -198,10 +215,8 @@ The same list and account session expose `updateRequired`. An incompatible Hello
 persists this state even after the refused socket closes or the beacon process
 restarts; a compatible authenticated Hello clears it. The web displays
 **Mise à jour nécessaire** and replaces the inaccessible workspace with that
-explanation. The selector and account actions remain available. Protocols 4 and 3
-are the current and previous supported versions. Versions 1 and 2 retain their
-finite API and stream contracts respectively; push events require v3 and direct
-control requires v4.
+explanation. The selector and account actions remain available. Only the current
+version is accepted for API requests, streams, push and direct control.
 
 Access management uses the same `Relay` handle supplied to `router_with_relay`.
 After committing a detachment, call `revoke_access(installation, None)`; after
@@ -249,9 +264,8 @@ the claim contract (trimmed, 1–100 characters, no control characters). Renamin
 works even while the installation is offline and preserves its identity.
 
 Reading views use the scoped SSE connection for updates and cursor-based replay.
-One initial finite snapshot keeps a v1 installation readable during a deployment;
-there is no recurring conversation snapshot polling. The existing live client
-retains its reconnect backoff and history cache.
+The live client retains reconnect backoff and its history cache; no separate finite
+compatibility snapshot or recurring conversation polling is used.
 
 ## Shared-installation limits
 
@@ -300,7 +314,7 @@ not consume the 32 authenticated API slots or the 24 live-stream slots. The
 relay cancels a public download after 30 seconds without delivered file chunks,
 even if the recipient no longer polls the HTTP body. Public GET/HEAD payloads
 are ignored so a slow anonymous upload cannot hold an untracked slot. The
-version-2 frame format is unchanged.
+current frame format is unchanged.
 
 MCP upload admission is separate from installation request capacity: one grant
 (including its rotated access tokens) may hold four uploads or remote calls in
@@ -310,12 +324,10 @@ revocation before reserving a tunnel slot. A slow MCP upload cannot consume the
 grant permit follows the pending installation request until completion, like
 its tunnel permit. The per-grant HTTP rate limit is persisted in Postgres.
 
-## Notification events (version 3)
+## Notification events
 
-Version 3 adds installation-to-beacon
-`notification` frames and beacon-to-installation `notification_ack` frames.
-Versions 1 and 2 retain their finite API and SSE contracts and never receive
-notification frames.
+Installation-to-beacon `notification` frames are acknowledged with
+beacon-to-installation `notification_ack` frames.
 
 Questions and node alerts enter a single installation outbox independently of
 registered browsers. The connector keeps at most four notification events in
@@ -346,13 +358,11 @@ The existing `delivered` wire field means the event can leave the outbox; an
 invalid event or revoked installation can therefore receive a positive ack
 without calling the provider.
 
-## Version 4: direct authorization and signaling (#100)
+## Direct authorization and signaling (#100)
 
-Hello now offers `[4, 3, 2, 1]`. A v1/v2/v3 tunnel receives no direct-control frames
-and retains its existing API/stream behavior. Clients that do not advertise v4
-receive `available: false` and keep using the relay.
+All current relay peers support direct authorization and signaling.
 
-After Welcome(v4), the Beacon sends `DirectKey` over the authenticated
+After Welcome(5), the Beacon sends `DirectKey` over the authenticated
 installation tunnel. Its Ed25519 key is ephemeral and specific to that tunnel;
 no signing credential or conversation data is stored in Postgres. A new tunnel
 uses a new key, invalidating the previous direct leases at the installation.
@@ -415,8 +425,7 @@ existing relay request, credited-stream or public-download allowances.
 The installation WebRTC peer is described in
 [DIRECT-CONNECTION.md](DIRECT-CONNECTION.md#delivered-installation-peer-101),
 including its reliable ordered channel, 16 KiB envelopes, bounded reassembly,
-STUN source and disable setting. `DirectKey` carries an optional `stun_url`
-(backward-compatible metadata), derived from the beacon origin or configured by
+STUN source and disable setting. `DirectKey` carries the required `stun_url`, derived from the beacon origin or configured by
 the Beacon. Authorize/renew responses expose the same `iceServers`.
 A signal dequeued before its authorization was accepted is refused immediately,
 releasing its acknowledgement slot instead of waiting the five-second deadline.

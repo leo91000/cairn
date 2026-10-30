@@ -1,4 +1,8 @@
+use common::MissionFixture;
+
 mod common;
+
+use common::ProjectFixture;
 
 use axum::{Router, body::Body, http::StatusCode};
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -20,6 +24,104 @@ use tempfile::TempDir;
 
 const SKILL: &str =
     "---\nname: review\ndescription: Review the current changes\n---\nRun scripts/check.sh.\n";
+
+#[tokio::test]
+async fn skill_usage_is_bounded_counts_delivered_mentions_once_and_is_shared_with_mcp() {
+    let api = Api::new().await;
+    for name in ["review", "deploy", "unused"] {
+        api.ok(
+            "PUT",
+            &format!("/skills/global/{name}"),
+            Some(json!({
+                "content": SKILL.replace("name: review", &format!("name: {name}")),
+            })),
+        )
+        .await;
+    }
+    api.service
+        .store
+        .write(|db| {
+            db.save_conversation_boundary(&json!({ "id": "other-device" }))?;
+            db.put_message(&json!({
+                "id": "old",
+                "chatId": "other-device",
+                "text": "$unused",
+                "status": "delivered",
+                "createdAt": 0,
+            }))?;
+            for index in 0..1000 {
+                let (status, message) = match index {
+                    0 => ("delivered", "$review $review and `$deploy`"),
+                    1 => ("delivered", "$review, $deploy and $unknown"),
+                    2 => ("queued", "$unused"),
+                    3 => ("sending", "$unused"),
+                    4 => ("cancelled", "$unused"),
+                    _ => (
+                        "delivered",
+                        "```\n$unused\n``` \\$unused a$unused $unused_extra",
+                    ),
+                };
+                let message = json!({
+                    "id": format!("message-{index}"),
+                    "chatId": "other-device",
+                    "text": message,
+                    "status": status,
+                    "createdAt": index,
+                });
+                db.put_message(&message)?;
+                // Status updates/retries keep the same row and must not inflate usage.
+                db.put_message(&message)?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let listed = api.ok("GET", "/skills", None).await;
+    let counts = |items: &Value| -> Vec<(String, u64)> {
+        items
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|skill| {
+                (
+                    text(skill, "name").to_owned(),
+                    skill["usageCount"].as_u64().unwrap(),
+                )
+            })
+            .collect()
+    };
+    assert_eq!(
+        counts(&listed),
+        vec![
+            ("deploy".into(), 1),
+            ("review".into(), 2),
+            ("unused".into(), 0)
+        ]
+    );
+
+    let token = relay_fixture::grant(&api.service, &["read"]).await;
+    let request = common::request("POST", "/mcp")
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .body(Body::from(
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": common::mcp_arguments("list_skills", &json!({})),
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let response = common::send(&api.router, request).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = common::read_json(response).await;
+    assert_eq!(
+        counts(&response["result"]["structuredContent"]["result"]),
+        counts(&listed)
+    );
+}
 
 #[tokio::test]
 async fn unusable_visible_files_mark_a_skill_invalid_in_the_library() {
@@ -412,7 +514,7 @@ async fn skill_bundle_storage_measurements() {
     }
     let task = api
         .service
-        .task(
+        .task_fixture(
             json!({
                 "name": "Storage measurement",
                 "agentId": MAIN_AGENT_ID,
@@ -844,7 +946,7 @@ async fn runs_install_the_files_frozen_when_they_were_created() {
     )
     .await;
     let task = s
-        .task(
+        .task_fixture(
             json!({
                 "name": "Review",
                 "agentId": MAIN_AGENT_ID,
@@ -971,27 +1073,22 @@ async fn runs_install_the_files_frozen_when_they_were_created() {
         .is_err()
     );
 
-    // Only snapshots predating bundle revisions may use the live directory.
+    // Missing revisions cannot silently read a live skill folder.
     let mut legacy = next;
     legacy["snapshot"]["skills"][0]
         .as_object_mut()
         .unwrap()
         .remove("bundle");
-    let prepared = cairn_installation::execution::prepare(
-        &legacy,
-        &s.config,
-        &RunCredentials::default(),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        prepared["skills"][0]["path"],
-        api.skill_dir("review")
-            .join("SKILL.md")
-            .to_string_lossy()
-            .as_ref()
+    assert!(
+        cairn_installation::execution::prepare(
+            &legacy,
+            &s.config,
+            &RunCredentials::default(),
+            None,
+            None,
+        )
+        .await
+        .is_err()
     );
 }
 
@@ -1013,7 +1110,7 @@ async fn snapshots_describe_the_manifest_version_that_was_frozen() {
         .await;
     let task = api
         .service
-        .task(
+        .task_fixture(
             json!({
                 "name": "Review",
                 "agentId": MAIN_AGENT_ID,
@@ -1031,16 +1128,7 @@ async fn snapshots_describe_the_manifest_version_that_was_frozen() {
     let gate_path = std::ffi::CString::new(gate.as_os_str().as_encoded_bytes()).unwrap();
     assert_eq!(unsafe { libc::mkfifo(gate_path.as_ptr(), 0o600) }, 0);
     api.service
-        .store
-        .save(
-            "projects",
-            json!({
-                "id": cairn_installation::config::id(),
-                "name": "Listing trigger",
-                "path": project.to_string_lossy(),
-            }),
-            "project.saved",
-        )
+        .project_fixture(json!({ "name": "Listing trigger", "path": project }), None)
         .await
         .unwrap();
     let service = api.service.clone();

@@ -1,0 +1,65 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "NativeModeRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "generation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "pattern": "^(protected|administrator)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "error": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "generation": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "mode": {
+      "pattern": "^(protected|administrator)$",
+      "type": "string"
+    },
+    "status": {
+      "pattern": "^(pending|applied|failed)$",
+      "type": "string"
+    },
+    "target": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/NativeModeRequest"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "mode",
+    "status"
+  ],
+  "title": "NativeModeObserved",
+  "type": "object"
+}

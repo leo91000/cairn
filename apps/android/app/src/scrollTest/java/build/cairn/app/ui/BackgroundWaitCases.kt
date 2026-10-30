@@ -28,6 +28,100 @@ abstract class BackgroundWaitCases {
     protected open fun capture(name: String) {}
 
     @Test
+    fun rejectedQuotaSwitchRemainsVisibleAfterOptionsRefresh() =
+        conversation("running", quota = true, codingAgentChoices = true, rejectSwitch = true) {
+            compose.waitUntil(5000) {
+                compose
+                    .onAllNodesWithText("Continuer avec Codex")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Continuer avec Codex").performScrollTo().performClick()
+            // The changed label proves the options response after the POST was rendered.
+            compose.waitUntil(5000) {
+                compose
+                    .onAllNodesWithText("Continuer avec Codex disponible")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Switch refused. Review the accounts.").assertExists()
+        }
+
+    @Test
+    fun quotaAlternativesRefreshWhenCodexBecomesAvailable() =
+        conversation(
+            "running",
+            quota = true,
+            codingAgentChoices = true,
+            initialAlternatives = "unavailable",
+        ) {
+            compose.waitUntil(15000) {
+                compose
+                    .onAllNodesWithText("Continuer avec Codex")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Continuer avec Codex").performScrollTo().assertIsDisplayed()
+        }
+
+    @Test
+    fun quotaAlternativesRetryAfterAReadFailure() =
+        conversation(
+            "running",
+            quota = true,
+            codingAgentChoices = true,
+            initialAlternatives = "error",
+        ) {
+            compose.waitUntil(15000) {
+                compose
+                    .onAllNodesWithText("Continuer avec Codex")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Continuer avec Codex").performScrollTo().assertIsDisplayed()
+            compose.onNodeWithText("Alternatives temporarily unavailable.").assertDoesNotExist()
+        }
+
+    @Test
+    fun quotaOffersOneClickCodingAgentSwitchForTheCurrentTurn() =
+        conversation("running", quota = true, codingAgentChoices = true) { server ->
+            compose.waitUntil(5000) {
+                compose
+                    .onAllNodesWithText("Continuer avec Codex")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Continuer avec Codex").performScrollTo().assertIsDisplayed()
+            capture("quota-switch-android")
+            compose.onNodeWithText("Continuer avec Codex").performClick()
+            val request = generateSequence {
+                server.takeRequest(5, TimeUnit.SECONDS)
+            }
+                .first { it.method == "POST" && it.path?.endsWith("/coding-agent") == true }
+            val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+            assertTrue(body["provider"] == JsonPrimitive("codex"))
+            assertTrue(body["runId"] == JsonPrimitive(SAVED_RUN_ID))
+            assertTrue(body["turnId"] == JsonPrimitive("quota-turn"))
+            assertTrue(body["requestId"]!!.jsonPrimitive.content.isNotBlank())
+            compose.waitUntil(5000) {
+                compose
+                    .onAllNodes(hasText("Annuler le changement") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Annuler le changement").performScrollTo().performClick()
+            compose.waitUntil(5000) {
+                compose
+                    .onAllNodes(hasText("Continuer avec Codex") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithTag("model-picker").performClick()
+            compose.onNodeWithText("Claude Code").assertIsSelected()
+            compose.onNodeWithText("Codex").assertIsNotSelected()
+        }
+
+    @Test
     fun recoveredQuotaDoesNotRestoreDuplicateErrors() =
         conversation("succeeded", quota = true) {
             compose.onNodeWithTag("chat-quota").assertDoesNotExist()
@@ -40,7 +134,9 @@ abstract class BackgroundWaitCases {
     fun quotaWaitFoldsDuplicateErrorsAndExpandsOneTechnicalMessage() =
         conversation("running", quota = true) {
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
-            compose.onAllNodesWithText("Quota Claude Code atteint").assertCountEquals(1)
+            compose
+                .onAllNodesWithText("Limite de dépense Claude Code atteinte")
+                .assertCountEquals(1)
             compose
                 .onNodeWithText("Reprise automatique dès qu’un compte est disponible.")
                 .assertIsDisplayed()
@@ -64,14 +160,32 @@ abstract class BackgroundWaitCases {
             history = { _, now ->
                 quotaEvents(now) +
                     listOf(
-                        RunEvent(7, now, "turn.started", "", runId = "run"),
-                        RunEvent(8, now, "turn.completed", "", runId = "run"),
-                        RunEvent(9, now, "status", "succeeded", runId = "run"),
+                        RunEvent(
+                            id = 7,
+                            createdAt = now,
+                            type = "turn.started",
+                            text = "",
+                            runId = SAVED_RUN_ID,
+                        ),
+                        RunEvent(
+                            id = 8,
+                            createdAt = now,
+                            type = "turn.completed",
+                            text = "",
+                            runId = SAVED_RUN_ID,
+                        ),
+                        RunEvent(
+                            id = 9,
+                            createdAt = now,
+                            type = "status",
+                            text = "succeeded",
+                            runId = SAVED_RUN_ID,
+                        ),
                     )
             },
         ) {
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
-            compose.onNodeWithText("La limite d’usage du compte est atteinte.").assertIsDisplayed()
+            compose.onNodeWithText("Quota Claude Code atteint").assertIsDisplayed()
             compose
                 .onNodeWithText("La limite de dépense du compte est atteinte.")
                 .assertDoesNotExist()
@@ -126,8 +240,8 @@ abstract class BackgroundWaitCases {
                         request.method == "POST" &&
                             path in
                                 listOf(
-                                    "/api/installations/fixture/api/runs/run/resume",
-                                    "/api/installations/fixture/api/chats/chat/pause",
+                                    "/api/installations/fixture/api/runs/$SAVED_RUN_ID/resume",
+                                    "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/pause",
                                 )
                     )
                         effects.add(path)
@@ -137,8 +251,8 @@ abstract class BackgroundWaitCases {
             }
             org.junit.Assert.assertEquals(
                 listOf(
-                    "/api/installations/fixture/api/runs/run/resume",
-                    "/api/installations/fixture/api/chats/chat/pause",
+                    "/api/installations/fixture/api/runs/$SAVED_RUN_ID/resume",
+                    "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/pause",
                 ),
                 effects,
             )
@@ -250,31 +364,49 @@ abstract class BackgroundWaitCases {
             history = { wakeup, now ->
                 fun message(id: Long, text: String) =
                     RunEvent(
-                        id,
-                        now - 20_000 + id,
-                        "item.completed",
-                        "",
-                        mapOf(
-                            "item" to
-                                buildJsonObject {
-                                    put("id", "message-$id")
-                                    put("type", "agent_message")
-                                    put("text", text)
-                                }
-                        ),
+                        id = id,
+                        createdAt = now - 20_000 + id,
+                        type = "item.completed",
+                        text = "",
+                        payload =
+                            kotlinx.serialization.json.JsonObject(
+                                mapOf(
+                                    "item" to
+                                        buildJsonObject {
+                                            put("id", "message-$id")
+                                            put("type", "agent_message")
+                                            put("text", text)
+                                        }
+                                )
+                            ),
                     )
                 listOf(
-                    RunEvent(1, now - 30_000, "turn.started", "", emptyMap()),
+                    RunEvent(
+                        id = 1,
+                        createdAt = now - 30_000,
+                        type = "turn.started",
+                        text = "",
+                        payload = kotlinx.serialization.json.JsonObject(emptyMap()),
+                    ),
                     message(2, "Lot poussé dans la PR."),
                     RunEvent(
-                        3,
-                        now - 15_000,
-                        "chat.wait",
-                        reason,
-                        wireJson.encodeToJsonElement(wakeup!!).jsonObject,
+                        id = 3,
+                        createdAt = now - 15_000,
+                        type = "chat.wait",
+                        text = reason,
+                        payload =
+                            kotlinx.serialization.json.JsonObject(
+                                wireJson.encodeToJsonElement(wakeup!!).jsonObject
+                            ),
                     ),
                     message(4, "CI en cours, reprise programmée pour la vérifier."),
-                    RunEvent(5, now - 5_000, "turn.completed", "", emptyMap()),
+                    RunEvent(
+                        id = 5,
+                        createdAt = now - 5_000,
+                        type = "turn.completed",
+                        text = "",
+                        payload = kotlinx.serialization.json.JsonObject(emptyMap()),
+                    ),
                 )
             },
         ) {
@@ -296,7 +428,7 @@ abstract class BackgroundWaitCases {
     @Test
     fun longWaitReasonIsClampedUntilExpanded() {
         val reason = List(40) { "Vérifier la CI puis poursuivre le lot suivant." }.joinToString(" ")
-        val wakeup = ChatWakeup("wait", "message", reason, 60, 1, 60001)
+        val wakeup = wakeupFixture("wait", "message", reason, 60, 1, 60001)
         compose.setContent {
             CairnTheme {
                 CompositionLocalProvider(LocalLiveWait provides LiveWait(wakeup, paused = false)) {
@@ -312,7 +444,7 @@ abstract class BackgroundWaitCases {
     @Test
     fun resolvedWaitHonorsPauseAndCancellationUntilItResumes() {
         val wakeup =
-            ChatWakeup(
+            wakeupFixture(
                 "wait",
                 "message",
                 "Attendre les checks",
@@ -329,6 +461,7 @@ abstract class BackgroundWaitCases {
                     buildJsonObject {
                         put("title", "Waiting for required checks on PR #1")
                         put("short", "PR #1 checks")
+                        putJsonArray("details") {}
                     },
             )
         // The plugin words its result; the app shows it as given.
@@ -398,7 +531,7 @@ abstract class BackgroundWaitCases {
     @Test
     fun explicitImmediateResultReplacesPendingWaitWithChangedWording() {
         val wakeup =
-            ChatWakeup(
+            wakeupFixture(
                 "wake",
                 "message",
                 "Attente initiale",
@@ -423,13 +556,22 @@ abstract class BackgroundWaitCases {
             timelineEntries(
                     listOf(
                         RunEvent(
-                            1,
-                            1,
-                            "chat.wait",
-                            "",
-                            wireJson.encodeToJsonElement(wakeup).jsonObject,
+                            id = 1,
+                            createdAt = 1,
+                            type = "chat.wait",
+                            text = "",
+                            payload =
+                                kotlinx.serialization.json.JsonObject(
+                                    wireJson.encodeToJsonElement(wakeup).jsonObject
+                                ),
                         ),
-                        RunEvent(2, 2, "chat.wait_ready", "Result available", observation),
+                        RunEvent(
+                            id = 2,
+                            createdAt = 2,
+                            type = "chat.wait_ready",
+                            text = "Result available",
+                            payload = kotlinx.serialization.json.JsonObject(observation),
+                        ),
                     ),
                     chat = true,
                 )
@@ -453,6 +595,9 @@ abstract class BackgroundWaitCases {
         sleeping: Boolean = false,
         conditional: Boolean = false,
         quota: Boolean = false,
+        codingAgentChoices: Boolean = false,
+        initialAlternatives: String? = null,
+        rejectSwitch: Boolean = false,
         paused: Boolean = false,
         reason: String = "Attendre la CI",
         history: ((ChatWakeup?, Long) -> List<RunEvent>)? = null,
@@ -462,20 +607,44 @@ abstract class BackgroundWaitCases {
             val now = System.currentTimeMillis()
             val chat =
                 Chat(
-                    "chat",
+                    id = "6cc6efab-10af-54c7-a91b-dcff664166a1",
                     title = "Conversation de test",
                     agentId = MAIN_AGENT_ID,
                     agentName = "Agent principal",
                     paused = paused,
-                    runId = "run",
+                    runId = SAVED_RUN_ID,
                     run =
                         Run(
-                            "run",
+                            id = SAVED_RUN_ID,
                             status = status,
                             startedAt = now - 60_000,
                             snapshot =
                                 Snapshot(
-                                    agent = Agent(provider = if (quota) "claude" else "codex")
+                                    agent =
+                                        Agent(
+                                            exclusiveNodes = emptyList(),
+                                            plugins = emptyList(),
+                                            id = "00000000-0000-4000-8000-000000000000",
+                                            name = "",
+                                            revision = "",
+                                            createdAt = 0,
+                                            access =
+                                                AccessPolicy(
+                                                    mcpTools =
+                                                        build.cairn.contracts.McpTools(emptyMap()),
+                                                    projects = null,
+                                                    skills = null,
+                                                    mcps = null,
+                                                ),
+                                            provider = if (quota) "claude" else "codex",
+                                        ),
+                                    task =
+                                        build.cairn.contracts.RunTaskSnapshot(
+                                            agentId = build.cairn.app.data.MAIN_AGENT_ID,
+                                            id = "00000000-0000-4000-8000-000000000003",
+                                            name = "Fixture",
+                                            prompt = "Fixture",
+                                        ),
                                 ),
                             accountWaitReason =
                                 when {
@@ -486,10 +655,11 @@ abstract class BackgroundWaitCases {
                                     else -> null
                                 },
                             error = if (quota && status == "failed") SPEND_LIMIT else null,
+                            taskId = "",
                         ),
                     wakeup =
                         if (sleeping || conditional)
-                            ChatWakeup(
+                            wakeupFixture(
                                 "wake",
                                 "message",
                                 reason,
@@ -508,16 +678,19 @@ abstract class BackgroundWaitCases {
                 )
             val waiting =
                 RunEvent(
-                    1,
-                    now - 30_000,
-                    "turn.waiting",
-                    "",
-                    mapOf(
-                        "tasks" to
-                            buildJsonArray {
-                                addJsonObject { put("description", "Vérifier la CI") }
-                            }
-                    ),
+                    id = 1,
+                    createdAt = now - 30_000,
+                    type = "turn.waiting",
+                    text = "",
+                    payload =
+                        kotlinx.serialization.json.JsonObject(
+                            mapOf(
+                                "tasks" to
+                                    buildJsonArray {
+                                        addJsonObject { put("description", "Vérifier la CI") }
+                                    }
+                            )
+                        ),
                 )
             val batch =
                 wireJson.encodeToString(
@@ -531,9 +704,59 @@ abstract class BackgroundWaitCases {
                 )
             server.dispatcher =
                 object : Dispatcher() {
+                    @Volatile var switching = false
+                    @Volatile var switchRejected = false
+                    var alternativesReads = 0
+
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path!!.substringBefore('?')
-                        if (path == "/api/installations/fixture/api/chats/chat/stream")
+                        if (codingAgentChoices && path.endsWith("/stop")) {
+                            switching = false
+                            return MockResponse()
+                                .setHeader("Content-Type", "application/json")
+                                .setBody("{}")
+                        }
+                        if (codingAgentChoices && path.endsWith("/coding-agent")) {
+                            if (request.method == "POST" && rejectSwitch) {
+                                switchRejected = true
+                                return MockResponse()
+                                    .setResponseCode(409)
+                                    .setHeader("Content-Type", "application/json")
+                                    .setBody("""{"error":"Switch refused. Review the accounts."}""")
+                            }
+                            if (request.method == "GET" && alternativesReads++ == 0) {
+                                if (initialAlternatives == "error")
+                                    return MockResponse()
+                                        .setResponseCode(500)
+                                        .setHeader("Content-Type", "application/json")
+                                        .setBody(
+                                            """{"error":"Alternatives temporarily unavailable."}"""
+                                        )
+                                if (initialAlternatives == "unavailable")
+                                    return MockResponse()
+                                        .setHeader("Content-Type", "application/json")
+                                        .setBody(
+                                            """{"runId":"$SAVED_RUN_ID","turnId":"quota-turn","provider":"claude","choices":[]}"""
+                                        )
+                            }
+                            if (request.method == "POST") switching = true
+                            val progress =
+                                if (switching) ""","switching":{"provider":"codex","error":null}"""
+                                else ""
+                            val label = if (switchRejected) "Codex disponible" else "Codex"
+                            return MockResponse()
+                                .setHeader("Content-Type", "application/json")
+                                .setBody(
+                                    if (request.method == "POST") "{}"
+                                    else
+                                        """{"runId":"$SAVED_RUN_ID","turnId":"quota-turn","provider":"claude","choices":[{"provider":"codex","label":"$label"}]$progress}"""
+                                )
+                        }
+
+                        if (
+                            path ==
+                                "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/stream"
+                        )
                             return MockResponse()
                                 .setHeader("Content-Type", "text/event-stream")
                                 .apply {
@@ -556,12 +779,59 @@ abstract class BackgroundWaitCases {
                                 "/api/installations" -> beaconInstallationsFixture()
                                 "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(
-                                        listOf(Agent(MAIN_AGENT_ID, "Agent principal"))
+                                        build.cairn.contracts.ListAgentsOutput(
+                                            listOf(
+                                                Agent(
+                                                    exclusiveNodes = emptyList(),
+                                                    plugins = emptyList(),
+                                                    revision = "",
+                                                    createdAt = 0,
+                                                    access =
+                                                        AccessPolicy(
+                                                            mcpTools =
+                                                                build.cairn.contracts.McpTools(
+                                                                    emptyMap()
+                                                                ),
+                                                            projects = null,
+                                                            skills = null,
+                                                            mcps = null,
+                                                        ),
+                                                    id = MAIN_AGENT_ID,
+                                                    name = "Agent principal",
+                                                )
+                                            )
+                                        )
                                     )
-                                "/api/installations/fixture/api/chats/chat" ->
+                                "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1" ->
                                     wireJson.encodeToString(chat)
                                 "/api/installations/fixture/api/overview" -> "{}"
-                                else -> "[]"
+                                "/api/installations/fixture/api/runs/$SAVED_RUN_ID/resume" ->
+                                    wireJson.encodeToString(
+                                        build.cairn.contracts.ResumeRunOutput(SAVED_RUN_ID)
+                                    )
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
+                                    else "[]"
                             }
                         return MockResponse()
                             .setHeader("Content-Type", "application/json")
@@ -591,7 +861,7 @@ abstract class BackgroundWaitCases {
                                 ChatScreen(
                                     vm,
                                     state,
-                                    "chat",
+                                    "6cc6efab-10af-54c7-a91b-dcff664166a1",
                                     openChat = {},
                                     openRun = {},
                                     back = {},
@@ -630,7 +900,15 @@ private fun quotaEvents(now: Long): List<RunEvent> {
         type: String,
         text: String = "",
         payload: Map<String, JsonElement>? = null,
-    ) = RunEvent(id, now - 30_000 + id * 1000, type, text, payload, runId = "run")
+    ) =
+        RunEvent(
+            id = id,
+            createdAt = now - 30_000 + id * 1000,
+            type = type,
+            text = text,
+            payload = (payload)?.let { kotlinx.serialization.json.JsonObject(it) },
+            runId = SAVED_RUN_ID,
+        )
     fun message(id: Long, text: String) =
         event(
             id,
@@ -672,3 +950,5 @@ private class BackgroundWaitVault : SessionVault {
 
     override fun write(origin: String, cookie: String?) = Unit
 }
+
+private const val SAVED_RUN_ID = "123e4567-e89b-42d3-a456-426614174000"

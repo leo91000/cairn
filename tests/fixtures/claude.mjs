@@ -12,6 +12,7 @@ import {
 import path from 'node:path'
 import process from 'node:process'
 import { createInterface } from 'node:readline'
+import { askCairn } from './cairn-questions.mjs'
 
 const home = process.env.CLAUDE_CONFIG_DIR
 if (!home)
@@ -100,20 +101,42 @@ else {
   let question
   let serial = 0
   const sides = new Map()
+  // The first message of a reply that keeps working until a steering message arrives.
+  let working
+  // Like Claude Code 2.1.280: the last response's prompt (cached or not) is the context,
+  // and a local estimate stands in before the first response or after `/compact`.
+  let lastUsage = null
+  // The transcript's local estimate shrinks once compacted.
+  let estimate = 18000
+  let compacted = false
+  const contextReport = () => ({
+    totalTokens: lastUsage ? lastUsage.input_tokens + lastUsage.cache_creation_input_tokens + lastUsage.cache_read_input_tokens : estimate,
+    maxTokens: 200000,
+    rawMaxTokens: 200000,
+    percentage: 9,
+    apiUsage: lastUsage,
+  })
   const complete = (text = 'Claude fixture completed', thinking = false, correlation = {}) => {
     const id = `assistant-${process.pid}-${++serial}`
+    lastUsage = {
+      input_tokens: 200 * serial,
+      cache_creation_input_tokens: 2000,
+      cache_read_input_tokens: 40000,
+      output_tokens: 7,
+    }
+    const usage = { ...lastUsage, output_tokens: 1 }
     out({ type: 'stream_event', event: { type: 'message_start', message: { id } } })
     // Like Claude Code, stream real block indexes but emit one assistant event per block.
     if (thinking) {
       out({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } } })
       out({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'Fixture reasoning' } } })
-      out({ type: 'assistant', message: { id, content: [{ type: 'thinking', thinking: 'Fixture reasoning' }] } })
+      out({ type: 'assistant', message: { id, content: [{ type: 'thinking', thinking: 'Fixture reasoning' }], usage } })
     }
 
     const index = thinking ? 1 : 0
     out({ type: 'stream_event', event: { type: 'content_block_start', index, content_block: { type: 'text', text: '' } } })
     out({ type: 'stream_event', event: { type: 'content_block_delta', index, delta: { type: 'text_delta', text } } })
-    out({ type: 'assistant', message: { id, content: [{ type: 'text', text }] } })
+    out({ type: 'assistant', message: { id, content: [{ type: 'text', text }], usage } })
     out({
       type: 'result',
       subtype: 'success',
@@ -141,7 +164,7 @@ else {
     }
 
     if (value.type === 'control_request' && value.request.subtype === 'side_question') {
-      // Like Claude Code 2.1.280: answered beside the turn, never written to the transcript.
+      // Like Claude Code 2.1.308: answered beside the turn, never written to the transcript.
       appendFileSync(path.join(home, 'side-questions.jsonl'), `${JSON.stringify(value)}\n`)
       out({
         type: 'system',
@@ -162,6 +185,14 @@ else {
     }
 
     if (value.type === 'control_request') {
+      if (value.request.subtype === 'get_context_usage') {
+        appendFileSync(path.join(home, 'context-requests.jsonl'), `${JSON.stringify(value.request)}\n`)
+        if (compacted && existsSync(path.join(home, 'fixture-context-unanswered')))
+          return
+        out({ type: 'control_response', response: { subtype: 'success', request_id: value.request_id, response: contextReport() } })
+        return
+      }
+
       if (value.request.subtype === 'get_usage') {
         appendFileSync(path.join(home, 'usage-requests.jsonl'), `${JSON.stringify(value.request)}\n`)
         const custom = path.join(home, 'fixture-usage.json')
@@ -254,6 +285,107 @@ else {
     appendFileSync(path.join(home, 'inputs.jsonl'), `${JSON.stringify(value)}\n`)
     const prompt = value.message.content.filter(b => b.type === 'text').map(b => b.text).join('\n')
     const correlation = { user_message_uuid: value.uuid }
+    if (working) {
+      const first = working
+      working = undefined
+      complete('Finished after steering', false, { user_message_uuids: [first, value.uuid], user_message_uuid: value.uuid })
+      return
+    }
+
+    if (prompt.includes('fixture:chat-hang') && !prompt.startsWith('Continue the interrupted')) {
+      // Like a reply still running tools: its first message streams, and no result follows.
+      working = value.uuid
+      const id = `assistant-${process.pid}-${++serial}`
+      const text = 'I’ll trace the component boundaries and keyboard handling, then propose a focused change.'
+      out({ type: 'stream_event', event: { type: 'message_start', message: { id } } })
+      out({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } } })
+      out({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } } })
+      out({ type: 'assistant', message: { id, content: [{ type: 'text', text }] } })
+      return
+    }
+
+    if (prompt === '/compact') {
+      // The local command: never a model turn, and nothing to compact in a new session.
+      out({ type: 'command_lifecycle', command_uuid: value.uuid, state: 'started' })
+      if (existsSync(path.join(home, 'fixture-empty-session'))) {
+        out({
+          type: 'assistant',
+          message: {
+            id: `synthetic-${process.pid}`,
+            model: '<synthetic>',
+            content: [{ type: 'text', text: 'Error: No messages to compact' }],
+            usage: {
+              input_tokens: 0,
+              output_tokens: 0,
+              cache_creation_input_tokens: 0,
+              cache_read_input_tokens: 0,
+            },
+          },
+        })
+      }
+      else {
+        out({
+          type: 'system',
+          subtype: 'status',
+          status: 'compacting',
+          session_id: session,
+        })
+        out({
+          type: 'system',
+          subtype: 'status',
+          status: null,
+          compact_result: 'success',
+          session_id: session,
+        })
+        out({ type: 'system', subtype: 'init', session_id: session })
+        out({
+          type: 'system',
+          subtype: 'compact_boundary',
+          session_id: session,
+          compact_metadata: { trigger: 'manual', pre_tokens: 42310, post_tokens: 695 },
+        })
+        out({ type: 'user', message: { role: 'user', content: 'This session is being continued from a previous conversation. Fixture summary.' }, session_id: session })
+        lastUsage = null
+        estimate = 6200
+        compacted = true
+      }
+
+      out({
+        type: 'user',
+        message: { role: 'user', content: '<command-name>/compact</command-name>' },
+        uuid: value.uuid,
+        isReplay: true,
+      })
+      out({
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        num_turns: 0,
+        result: '',
+        session_id: session,
+      })
+      out({ type: 'command_lifecycle', command_uuid: value.uuid, state: 'completed' })
+      return
+    }
+
+    if (prompt.includes('fixture:autocompact')) {
+      out({
+        type: 'system',
+        subtype: 'status',
+        status: 'compacting',
+        session_id: session,
+      })
+      out({
+        type: 'system',
+        subtype: 'compact_boundary',
+        session_id: session,
+        compact_metadata: { trigger: 'auto', pre_tokens: 167500, post_tokens: 9100 },
+      })
+      lastUsage = null
+      estimate = 9800
+      compacted = true
+    }
+
     if (prompt.includes('fixture:spend-limit') || prompt.includes('Corrige le dialogue de révocation.')) {
       const message = 'You\'ve hit your individual spend limit · run /usage-credits to ask your admin for a higher limit · your weekly limit resets 3pm (UTC)'
       out(value)
@@ -489,6 +621,575 @@ else {
       return
     }
 
+    if (prompt.includes('fixture:engine-retry')) {
+      // Claude Code retries API requests itself, and reports the subscription limit and its
+      // notices. None of them ends the turn.
+      out(value)
+      out({ type: 'system', subtype: 'session_state_changed', state: 'running' })
+      out({ type: 'rate_limit_event', rate_limit_info: { status: 'allowed', rateLimitType: 'five_hour', resetsAt: 1893499200 } })
+      out({
+        type: 'system',
+        subtype: 'api_retry',
+        attempt: 1,
+        max_retries: 10,
+        retry_delay_ms: 600,
+        error_status: 529,
+        error: 'overloaded',
+      })
+      if (prompt.includes('engine-retry-slow')) {
+        // Long enough for a reader to see the retry before work continues.
+        setTimeout(() => {
+          out({
+            type: 'system',
+            subtype: 'informational',
+            level: 'warning',
+            content: 'Context is almost full.',
+          })
+          complete('Answered after the retries', false, correlation)
+        }, 5000)
+        return
+      }
+
+      out({
+        type: 'system',
+        subtype: 'api_retry',
+        attempt: 2,
+        max_retries: 1,
+        retry_delay_ms: 1200,
+        error_status: null,
+        error: 'unknown',
+        no_response: { waited_ms: 30000, retry_wait_ms: 60000 },
+      })
+      out({ type: 'system', subtype: 'future_frame', detail: 'ignored by older adapters' })
+      out({
+        type: 'rate_limit_event',
+        rate_limit_info: {
+          status: 'allowed_warning',
+          rateLimitType: 'five_hour',
+          resetsAt: 1893499200,
+          utilization: 0.9,
+        },
+      })
+      out({
+        type: 'rate_limit_event',
+        rate_limit_info: {
+          status: 'allowed_warning',
+          rateLimitType: 'five_hour',
+          resetsAt: 1893499200,
+          utilization: 0.92,
+        },
+      })
+      out({
+        type: 'system',
+        subtype: 'informational',
+        level: 'warning',
+        content: 'Context is almost full.',
+      })
+      out({
+        type: 'system',
+        subtype: 'informational',
+        level: 'info',
+        content: '   ',
+      })
+      out({ type: 'rate_limit_event', rate_limit_info: { status: 'allowed', rateLimitType: 'five_hour', resetsAt: 1893517200 } })
+      complete('Answered after the retries', false, correlation)
+      return
+    }
+
+    if (prompt.includes('fixture:usage-limit')) {
+      const extra = prompt.includes('extra-usage')
+      const reset = prompt.includes('reset-passed')
+      // A limit on one model's window: Claude Code answers on another model, then fails for an
+      // unrelated reason.
+      const answered = prompt.includes('answered')
+      out(value)
+      out({
+        type: 'rate_limit_event',
+        rate_limit_info: {
+          status: 'rejected',
+          rateLimitType: answered ? 'seven_day_opus' : 'five_hour',
+          resetsAt: reset ? 1000000000 : 1893499200,
+          overageStatus: extra ? 'allowed' : 'rejected',
+          isUsingOverage: extra,
+        },
+      })
+      if (extra) {
+        complete('Finished on extra usage', false, correlation)
+        return
+      }
+
+      if (answered) {
+        out({ type: 'stream_event', parent_tool_use_id: null, event: { type: 'message_start', message: { id: 'fallback' } } })
+        if (prompt.includes('refused-again')) {
+          // A later request is refused again: Claude Code repeats the unchanged limit.
+          out({
+            type: 'rate_limit_event',
+            rate_limit_info: {
+              status: 'rejected',
+              rateLimitType: 'seven_day_opus',
+              resetsAt: 1893499200,
+              overageStatus: 'rejected',
+              isUsingOverage: false,
+            },
+          })
+          const message = 'Your usage allowance is used up for now.'
+          out({ type: 'assistant', error: 'rate_limit', message: { id: 'refused-again', content: [{ type: 'text', text: message }] } })
+          out({
+            type: 'result',
+            subtype: 'success',
+            is_error: true,
+            result: message,
+          })
+          return
+        }
+
+        out({
+          type: 'result',
+          subtype: 'success',
+          is_error: true,
+          result: 'API Error: 500 Internal server error',
+        })
+        return
+      }
+
+      if (prompt.includes('unrelated')) {
+        // The limit refused a subagent's request; the agent's own request fails for another reason.
+        const error = 'API Error: 500 Internal server error'
+        out({
+          type: 'assistant',
+          parent_tool_use_id: null,
+          error: 'server_error',
+          message: { id: 'server-error', content: [{ type: 'text', text: error }] },
+        })
+        out({
+          type: 'result',
+          subtype: 'success',
+          is_error: true,
+          result: error,
+        })
+        return
+      }
+
+      const message = 'Your usage allowance is used up for now.'
+      out({ type: 'assistant', error: 'rate_limit', message: { id: 'limit-message', content: [{ type: 'text', text: message }] } })
+      out({
+        type: 'result',
+        subtype: 'success',
+        is_error: true,
+        result: message,
+      })
+      return
+    }
+
+    if (prompt.includes('fixture:resumed-later')) {
+      // A later execution resumes a subagent an earlier one started: this process never saw the
+      // tool use that started it. An agent a workflow starts is not one the agent resumed.
+      out(value)
+      out({
+        type: 'assistant',
+        parent_tool_use_id: null,
+        message: {
+          id: 'workflow',
+          content: [{
+            type: 'tool_use',
+            id: 'workflow-call',
+            name: 'Workflow',
+            input: { script: 'agent()' },
+          }],
+        },
+      })
+      out({
+        type: 'user',
+        parent_tool_use_id: null,
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'workflow-call', content: [{ type: 'text', text: 'Workflow started.' }] }] },
+      })
+      out({
+        type: 'assistant',
+        parent_tool_use_id: null,
+        message: {
+          id: 'send',
+          content: [{
+            type: 'tool_use',
+            id: 'send-later',
+            name: 'SendMessage',
+            input: { to: 'task-old', message: 'Go on.' },
+          }],
+        },
+      })
+      for (const seconds of [5, 10]) {
+        out({
+          type: 'system',
+          subtype: 'informational',
+          level: 'info',
+          tool_use_id: 'send-later',
+          content: `Tool SendMessage running for ${seconds}s…`,
+        })
+      }
+
+      out({
+        type: 'system',
+        subtype: 'informational',
+        level: 'warning',
+        tool_use_id: 'send-later',
+        content: 'SendMessage is slow.',
+      })
+
+      out({
+        type: 'system',
+        subtype: 'task_started',
+        task_id: 'task-old',
+        run_id: 'run-3',
+        tool_use_id: 'send-later',
+        description: 'Review the change',
+        subagent_type: 'general-purpose',
+        is_backgrounded: true,
+        task_type: 'local_agent',
+      })
+      out({
+        type: 'system',
+        subtype: 'task_started',
+        task_id: 'task-workflow',
+        tool_use_id: 'workflow-call',
+        description: 'Workflow step',
+        task_type: 'local_agent',
+      })
+      // Claude Code resumes another subagent itself: its run names the earlier execution's call.
+      out({
+        type: 'system',
+        subtype: 'task_started',
+        task_id: 'task-orphan',
+        run_id: 'run-5',
+        tool_use_id: 'agent-earlier',
+        description: 'Finish the migration',
+        subagent_type: 'general-purpose',
+        is_backgrounded: true,
+        spawn_depth: 1,
+        task_type: 'local_agent',
+      })
+      out({
+        type: 'assistant',
+        parent_tool_use_id: 'agent-earlier',
+        message: { id: 'orphan-1', content: [{ type: 'text', text: 'Migration done.' }] },
+      })
+      // Nor is a new agent started without a call, such as a forked slash command.
+      out({
+        type: 'system',
+        subtype: 'task_started',
+        task_id: 'task-forked',
+        description: 'Forked command',
+        task_type: 'local_agent',
+      })
+      // Nor is an agent a subagent starts from work this execution does not see.
+      out({
+        type: 'system',
+        subtype: 'task_started',
+        task_id: 'task-unseen',
+        tool_use_id: 'unseen-call',
+        description: 'Nested work',
+        spawn_depth: 2,
+        task_type: 'local_agent',
+      })
+      // Nor is a housekeeping agent Claude Code starts itself.
+      out({
+        type: 'system',
+        subtype: 'task_started',
+        task_id: 'task-housekeeping',
+        description: 'Summarize the session',
+        task_type: 'local_agent',
+        skip_transcript: true,
+        ambient: true,
+      })
+      out({
+        type: 'assistant',
+        parent_tool_use_id: null,
+        agent_id: 'task-old',
+        message: { id: 'old-1', content: [{ type: 'text', text: 'Picked up again.' }] },
+      })
+      // Before 2.1.292, its messages may name the call that resumed it instead.
+      out({
+        type: 'assistant',
+        parent_tool_use_id: 'send-later',
+        message: { id: 'old-2', content: [{ type: 'text', text: 'Still on it.' }] },
+      })
+      out({
+        type: 'system',
+        subtype: 'task_notification',
+        task_id: 'task-old',
+        run_id: 'run-3',
+        tool_use_id: 'send-later',
+        status: 'completed',
+        summary: 'Picked up again.',
+        output_file: '',
+      })
+      out({
+        type: 'user',
+        parent_tool_use_id: null,
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'send-later', content: [{ type: 'text', text: 'Message delivered.' }] }] },
+      })
+      complete('Resumed in a later turn', false, correlation)
+      return
+    }
+
+    if (prompt.includes('fixture:resumed-before-result')) {
+      // A foreground subagent reports, and is resumed before the call that started it returns.
+      out(value)
+      out({
+        type: 'assistant',
+        parent_tool_use_id: null,
+        message: {
+          id: 'spawn',
+          content: [{
+            type: 'tool_use',
+            id: 'agent-a',
+            name: 'Agent',
+            input: { description: 'Check A', subagent_type: 'general-purpose', prompt: 'Check A' },
+          }],
+        },
+      })
+      out({
+        type: 'system',
+        subtype: 'task_started',
+        task_id: 'task-a',
+        run_id: 'run-1',
+        tool_use_id: 'agent-a',
+        description: 'Check A',
+        task_type: 'local_agent',
+      })
+      out({
+        type: 'system',
+        subtype: 'task_notification',
+        task_id: 'task-a',
+        run_id: 'run-1',
+        tool_use_id: 'agent-a',
+        status: 'completed',
+        summary: 'A done.',
+        output_file: '',
+      })
+      out({
+        type: 'assistant',
+        parent_tool_use_id: null,
+        message: {
+          id: 'send',
+          content: [{
+            type: 'tool_use',
+            id: 'send-a',
+            name: 'SendMessage',
+            input: { to: 'task-a', message: 'One more thing.' },
+          }],
+        },
+      })
+      out({
+        type: 'system',
+        subtype: 'task_started',
+        task_id: 'task-a',
+        run_id: 'run-2',
+        tool_use_id: 'send-a',
+        description: 'Check A',
+        is_backgrounded: true,
+        task_type: 'local_agent',
+      })
+      const firstResult = () => out({
+        type: 'user',
+        parent_tool_use_id: null,
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'agent-a', content: [{ type: 'text', text: 'A done.' }] }] },
+        tool_use_result: {
+          status: 'completed',
+          agentId: 'task-a',
+          totalTokens: 10,
+          content: [{ type: 'text', text: 'A done.' }],
+        },
+      })
+      // The call may return while the new run works, or only once it reported too.
+      const late = prompt.includes('after-report')
+      if (!late)
+        firstResult()
+      out({
+        type: 'system',
+        subtype: 'task_notification',
+        task_id: 'task-a',
+        run_id: 'run-2',
+        tool_use_id: 'send-a',
+        status: 'completed',
+        summary: 'A second report.',
+        output_file: '',
+        usage: { total_tokens: 700, tool_uses: 2, duration_ms: 400 },
+      })
+      if (late)
+        firstResult()
+      out({
+        type: 'user',
+        parent_tool_use_id: null,
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'send-a', content: [{ type: 'text', text: 'Message delivered.' }] }] },
+      })
+      complete('Both checks done', false, correlation)
+      return
+    }
+
+    if (prompt.includes('fixture:subagents-resumed')) {
+      // Mirrors Claude Code 2.1.292 and later: task frames carry run and parent task IDs, and a
+      // subagent's messages carry its agent ID, which stays the same when it is resumed.
+      const agentCall = (id, description, parent, agent) => out({
+        type: 'assistant',
+        parent_tool_use_id: parent,
+        ...agent ? { agent_id: agent } : {},
+        message: {
+          id: `spawn-${id}`,
+          content: [{
+            type: 'tool_use',
+            id,
+            name: 'Agent',
+            input: { description, subagent_type: 'general-purpose', prompt: description },
+          }],
+        },
+      })
+      const said = (parent, agent, id, text) => out({
+        type: 'assistant',
+        parent_tool_use_id: parent,
+        agent_id: agent,
+        message: { id, content: [{ type: 'text', text }] },
+      })
+      const result = (parent, agent, toolId, text, outcome) => out({
+        type: 'user',
+        parent_tool_use_id: parent,
+        ...agent ? { agent_id: agent } : {},
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: toolId, content: [{ type: 'text', text }] }] },
+        ...outcome ? { tool_use_result: outcome } : {},
+      })
+
+      agentCall('agent-review', 'Review the change', null)
+      out({
+        type: 'system',
+        subtype: 'task_started',
+        task_id: 'task-review',
+        run_id: 'run-1',
+        tool_use_id: 'agent-review',
+        description: 'Review the change',
+        subagent_type: 'general-purpose',
+        is_backgrounded: false,
+        spawn_depth: 1,
+        task_type: 'local_agent',
+      })
+      agentCall('agent-nested', 'Check the tests', 'agent-review', 'task-review')
+      out({
+        type: 'system',
+        subtype: 'task_started',
+        task_id: 'task-nested',
+        run_id: 'run-n1',
+        tool_use_id: 'agent-nested',
+        parent_task_id: 'task-review',
+        description: 'Check the tests',
+        subagent_type: 'general-purpose',
+        is_backgrounded: false,
+        spawn_depth: 2,
+        task_type: 'local_agent',
+      })
+      said('agent-nested', 'task-nested', 'nested-1', 'Tests pass.')
+      out({
+        type: 'system',
+        subtype: 'task_notification',
+        task_id: 'task-nested',
+        run_id: 'run-n1',
+        tool_use_id: 'agent-nested',
+        status: 'completed',
+        summary: 'Tests pass.',
+        output_file: '',
+      })
+      result('agent-review', 'task-review', 'agent-nested', 'Tests pass.', { status: 'completed', agentId: 'task-nested', content: [{ type: 'text', text: 'Tests pass.' }] })
+      said('agent-review', 'task-review', 'review-1', 'Looks good.')
+      out({
+        type: 'system',
+        subtype: 'task_notification',
+        task_id: 'task-review',
+        run_id: 'run-1',
+        tool_use_id: 'agent-review',
+        status: 'completed',
+        summary: 'Looks good.',
+        output_file: '',
+      })
+      // A repeated start of the run that reported, before its tool result, does not resume it.
+      out({
+        type: 'system',
+        subtype: 'task_started',
+        task_id: 'task-review',
+        run_id: 'run-1',
+        tool_use_id: 'agent-review',
+        description: 'Review the change',
+        task_type: 'local_agent',
+      })
+      result(null, null, 'agent-review', 'Looks good.', { status: 'completed', agentId: 'task-review', content: [{ type: 'text', text: 'Looks good.' }] })
+      // Frames of the first run may still arrive after it reported back.
+      out({
+        type: 'system',
+        subtype: 'task_progress',
+        task_id: 'task-review',
+        run_id: 'run-1',
+        tool_use_id: 'agent-review',
+        description: 'Late progress of the first run',
+        usage: { total_tokens: 1, tool_uses: 0, duration_ms: 1 },
+      })
+      out({
+        type: 'system',
+        subtype: 'task_started',
+        task_id: 'task-review',
+        run_id: 'run-1',
+        tool_use_id: 'agent-review',
+        description: 'Review the change',
+        task_type: 'local_agent',
+      })
+
+      // The agent resumes the reviewer through another call. Its new run names that call, and
+      // its messages only its agent ID.
+      out({
+        type: 'assistant',
+        parent_tool_use_id: null,
+        message: {
+          id: 'send',
+          content: [{
+            type: 'tool_use',
+            id: 'send-review',
+            name: 'SendMessage',
+            input: { to: 'task-review', message: 'Check the docs too.' },
+          }],
+        },
+      })
+      out({
+        type: 'system',
+        subtype: 'task_started',
+        task_id: 'task-review',
+        run_id: 'run-2',
+        tool_use_id: 'send-review',
+        description: 'Review the change',
+        is_backgrounded: true,
+        task_type: 'local_agent',
+      })
+      out({
+        type: 'system',
+        subtype: 'task_progress',
+        task_id: 'task-review',
+        run_id: 'run-1',
+        tool_use_id: 'agent-review',
+        description: 'Late progress of the first run',
+        usage: { total_tokens: 1, tool_uses: 0, duration_ms: 1 },
+      })
+      said(null, 'task-review', 'review-2', 'Docs are fine too.')
+      // Without an agent ID (before 2.1.292), its messages may name the call that resumed it.
+      said('send-review', undefined, 'review-3', 'Changelog too.')
+      out({
+        type: 'system',
+        subtype: 'task_notification',
+        task_id: 'task-review',
+        run_id: 'run-2',
+        tool_use_id: 'send-review',
+        status: 'completed',
+        summary: 'Docs are fine too.',
+        output_file: '',
+        usage: { total_tokens: 700, tool_uses: 2, duration_ms: 400 },
+      })
+      result(null, null, 'send-review', 'Message delivered.')
+      complete('Review resumed and finished', false, correlation)
+      return
+    }
+
     if (prompt.includes('fixture:subagents')) {
       // Mirrors Claude Code 2.1.280: one subagent in the foreground, one in the background.
       // Both stream their own messages, tagged with the tool use that started them.
@@ -625,6 +1326,17 @@ else {
         is_error: true,
         result: 'Fixture usage limit reached',
       })
+      return
+    }
+
+    if (prompt.includes('fixture:cairn-question')) {
+      const config = JSON.parse(args[args.indexOf('--mcp-config') + 1])
+      askCairn(config.mcpServers.cairn_workspace, [{ id: 'approach', title: 'Which approach?', options: [{ id: 'small', label: 'Small change' }] }])
+        .then(() => complete('Awaiting input'))
+        .catch((error) => {
+          process.stderr.write(`${error.message}\n`)
+          process.exit(1)
+        })
       return
     }
 

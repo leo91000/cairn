@@ -25,10 +25,25 @@ class FilPagerDeviceTest {
     @get:Rule val compose = createComposeRule()
 
     private val now = System.currentTimeMillis()
-    private val main = Agent(MAIN_AGENT_ID, "Agent principal")
+    private val main =
+        Agent(
+            exclusiveNodes = emptyList(),
+            plugins = emptyList(),
+            revision = "",
+            createdAt = 0,
+            access =
+                AccessPolicy(
+                    mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                    projects = null,
+                    skills = null,
+                    mcps = null,
+                ),
+            id = MAIN_AGENT_ID,
+            name = "Agent principal",
+        )
     private val daily =
         Task(
-            "daily",
+            "a05f5991-ec1e-57a2-a8e5-ec314581a110",
             "Revue quotidienne",
             "Relire les changements du jour.",
             MAIN_AGENT_ID,
@@ -37,30 +52,36 @@ class FilPagerDeviceTest {
         )
     private val failed =
         Run(
-            "failed-run",
-            taskId = "daily",
+            id = "failed-run",
+            taskId = "a05f5991-ec1e-57a2-a8e5-ec314581a110",
             status = "failed",
             trigger = "schedule",
             startedAt = now - 7_200_000,
             finishedAt = now - 7_000_000,
-            snapshot = Snapshot(task = daily, agent = main),
+            snapshot = Snapshot(task = daily.runTaskSnapshot(), agent = main),
         )
     private val chats =
         listOf(
             Chat(
-                "question",
-                "Choisir la pagination",
+                id = "765886cd-efa2-5d30-bdce-99340ee87a3d",
+                title = "Choisir la pagination",
                 agentName = "Agent principal",
                 pendingQuestions = 1,
                 updatedAt = now - 60_000,
             ),
             Chat(
-                "live",
-                "Refonte de l’application",
+                id = "451f26a2-b83b-5559-b07e-9a031e6de7cb",
+                title = "Refonte de l’application",
                 agentName = "Agent principal",
                 status = "running",
                 runId = "live-run",
-                run = Run("live-run", status = "running", startedAt = now - 14 * 60_000),
+                run =
+                    Run(
+                        id = "live-run",
+                        status = "running",
+                        startedAt = now - 14 * 60_000,
+                        taskId = "",
+                    ),
                 updatedAt = now - 120_000,
             ),
         )
@@ -117,9 +138,17 @@ class FilPagerDeviceTest {
                             path == "/api/installations" -> json(beaconInstallationsFixture())
                             path == "/api/account/session" -> json(beaconAccountFixture("fixture"))
                             path == "/api/installations/fixture/api/agents" ->
-                                json(wireJson.encodeToString(listOf(main)))
+                                json(
+                                    wireJson.encodeToString(
+                                        build.cairn.contracts.ListAgentsOutput(listOf(main))
+                                    )
+                                )
                             path == "/api/installations/fixture/api/tasks" ->
-                                json(wireJson.encodeToString(listOf(daily)))
+                                json(
+                                    wireJson.encodeToString(
+                                        build.cairn.contracts.ListMissionsOutput(listOf(daily))
+                                    )
+                                )
                             path == "/api/installations/fixture/api/tasks/activity" ->
                                 json(wireJson.encodeToString(listOf(failed)))
                             path == "/api/installations/fixture/api/runs" ->
@@ -143,7 +172,31 @@ class FilPagerDeviceTest {
                             path == "/api/installations/fixture/api/overview" ||
                                 path.endsWith("/models") ||
                                 path == "/api/installations/fixture/api/accounts" -> json("{}")
-                            else -> json("[]")
+                            else ->
+                                json(
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
+                                    else "[]"
+                                )
                         }
                     }
                 }
@@ -169,13 +222,13 @@ class FilPagerDeviceTest {
                 waitText("Lancer maintenant")
                 // Pour vous: the question, then this mission; then the live conversation.
                 swipe(left = true)
-                waitPage("chat-page:live")
+                waitPage("chat-page:451f26a2-b83b-5559-b07e-9a031e6de7cb")
                 compose.runOnIdle { assertEquals(PerfScreen.CHAT, Performance.screen) }
                 swipe(left = false)
                 waitPage("run-page:failed-run")
                 compose.runOnIdle { assertEquals(PerfScreen.RUN, Performance.screen) }
                 swipe(left = false)
-                waitPage("chat-page:question")
+                waitPage("chat-page:765886cd-efa2-5d30-bdce-99340ee87a3d")
                 compose.runOnIdle { assertEquals(PerfScreen.CHAT, Performance.screen) }
                 compose.onNodeWithContentDescription("Retour").performClick()
                 compose.waitUntil(10000) {

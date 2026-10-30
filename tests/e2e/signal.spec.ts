@@ -103,6 +103,40 @@ test('delegated conversations keep their requester in attention cards and live r
   }
 })
 
+test('automatic quota waits appear with scheduled resumptions without a deadline', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  const quota = {
+    ...chat,
+    title: 'Waiting on Codex quota',
+    status: 'running',
+    accountWaitReason: 'Usage exhausted. Waiting for an available Codex account to resume.',
+    accountRequired: null,
+    agentName: 'Ops',
+    pendingQuestions: 0,
+  }
+  await page.route('**/api/chats/stream?**', route => route.fulfill({
+    contentType: 'text/event-stream',
+    body: `id: 0\nevent: batch\ndata: ${JSON.stringify({
+      events: [],
+      state: {
+        run: null,
+        chat: null,
+        chats: [quota],
+        artifacts: [],
+      },
+      reset: true,
+      more: false,
+    })}\n\n`,
+  }))
+  await signIn(page)
+  const waiting = page.getByRole('region', { name: 'Waiting', exact: true })
+  const row = waiting.locator(`[data-fil-key="chat:${chat.id}"]`)
+  await expect(row.getByText('Waiting for quota', { exact: true })).toBeVisible()
+  await expect(row.getByText('Awaiting availability', { exact: true })).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Live', exact: true })).toHaveCount(0)
+})
+
 test('exclusive suspension stays live and suppresses working indicators until release', async ({ page, workspace }) => {
   test.setTimeout(90000)
   const chat = await workspace.api('/api/chats', 'POST', {})
@@ -400,6 +434,11 @@ test('blocked missions ask only when they wait on the user, and can be set aside
   await expect(card(proof.task)).toBeVisible()
   await page.goto(workspacePath('/'))
   await expect(card(proof.task)).toBeVisible()
+  // Mission activity can arrive before the requester conversation list after a reload.
+  // Wait for its placement too, so J/K navigate the complete attention order.
+  await expect(recent.locator(`[data-fil-key="task:${handedBack.task.id}"]`)).toContainText('Waiting on Orchestrate the F8 architecture work')
+  await expect(recent.locator(`[data-fil-key="task:${external.task.id}"]`)).toContainText('Waiting on an outside check')
+  await expect(forYou.locator(`[data-fil-key="task:${handedBack.task.id}"], [data-fil-key="task:${external.task.id}"]`)).toHaveCount(0)
   // K climbs to the top of the Fil; what needs an answer comes newest first, then the device proof.
   for (let step = 0; step < 6; step++)
     await page.keyboard.press('k')
@@ -407,14 +446,21 @@ test('blocked missions ask only when they wait on the user, and can be set aside
   await expect(forYou.locator('article.border-accent')).toContainText(proof.task.name)
   await page.keyboard.press('e')
   await expect(recent.locator(`[data-fil-key="task:${proof.task.id}"]`)).toContainText('Dismissed')
+
+  // Archiving from the feed uses the revisioned state command, just like Missions.
+  await card(scope.task).getByRole('button', { name: `More actions for “${scope.task.name}”` }).click()
+  await page.getByRole('menuitem', { name: 'Archive mission', exact: true }).click()
+  await expect.poll(() => workspace.service.store.get('tasks', scope.task.id)).toMatchObject({ archived: true, enabled: false })
 })
 
 test('a waiting mission sits in Waiting, shows its wait and can be stopped', async ({ page, workspace }) => {
   const task = await workspace.api('/api/tasks', 'POST', {
-    agentId: MAIN_AGENT_ID,
-    name: 'Mission waiting for CI',
-    prompt: 'Watch CI',
-    worktree: false,
+    settings: {
+      agentId: MAIN_AGENT_ID,
+      name: 'Mission waiting for CI',
+      prompt: 'Watch CI',
+      worktree: false,
+    },
   })
   const run = await workspace.api(`/api/tasks/${task.id}/run`, 'POST')
   await expect.poll(() => workspace.service.store.run(run.id)?.status).toBe('succeeded')

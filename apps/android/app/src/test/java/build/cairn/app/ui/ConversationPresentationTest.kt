@@ -11,27 +11,77 @@ class ConversationPresentationTest {
         val old = "You've hit your individual spend limit · resets Monday 3pm (UTC)"
         fun failure(id: Long, message: String) =
             RunEvent(
-                id,
-                id,
-                "turn.failed",
-                "",
-                buildJsonObject { put("error", buildJsonObject { put("message", message) }) },
+                id = id,
+                createdAt = id,
+                type = "turn.failed",
+                text = "",
+                payload =
+                    kotlinx.serialization.json.JsonObject(
+                        buildJsonObject {
+                            put("error", buildJsonObject { put("message", message) })
+                        }
+                    ),
                 runId = "run",
             )
         val failed = listOf(failure(1, old))
         val recovered =
             failed +
                 listOf(
-                    RunEvent(2, 2, "turn.started", "", runId = "run"),
-                    RunEvent(3, 3, "turn.completed", "", runId = "run"),
-                    RunEvent(4, 4, "status", "succeeded", runId = "run"),
+                    RunEvent(
+                        id = 2,
+                        createdAt = 2,
+                        type = "turn.started",
+                        text = "",
+                        runId = "run",
+                    ),
+                    RunEvent(
+                        id = 3,
+                        createdAt = 3,
+                        type = "turn.completed",
+                        text = "",
+                        runId = "run",
+                    ),
+                    RunEvent(
+                        id = 4,
+                        createdAt = 4,
+                        type = "status",
+                        text = "succeeded",
+                        runId = "run",
+                    ),
                 )
         val admission =
             Run(
-                "run",
+                id = "run",
                 status = "queued",
                 accountWaitReason = "Waiting for a Codex account with available usage.",
-                snapshot = Snapshot(agent = Agent(provider = "codex")),
+                snapshot =
+                    Snapshot(
+                        agent =
+                            Agent(
+                                exclusiveNodes = emptyList(),
+                                plugins = emptyList(),
+                                id = "00000000-0000-4000-8000-000000000000",
+                                name = "",
+                                revision = "",
+                                createdAt = 0,
+                                access =
+                                    AccessPolicy(
+                                        mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                                        projects = null,
+                                        skills = null,
+                                        mcps = null,
+                                    ),
+                                provider = "codex",
+                            ),
+                        task =
+                            build.cairn.contracts.RunTaskSnapshot(
+                                agentId = build.cairn.app.data.MAIN_AGENT_ID,
+                                id = "00000000-0000-4000-8000-000000000003",
+                                name = "Fixture",
+                                prompt = "Fixture",
+                            ),
+                    ),
+                taskId = "",
             )
         val quota = chatQuota(admission, recovered)!!
         assertEquals("Codex", quota.provider)
@@ -54,10 +104,17 @@ class ConversationPresentationTest {
     }
 
     @Test
-    fun `quota history supports structured failures retry notices and plain legacy replies`() {
+    fun `quota history supports structured failures and retry notices`() {
         val text = "Account usage is exhausted."
         fun event(id: Long, type: String, payload: JsonObject? = null, raw: String = "") =
-            RunEvent(id, id, type, raw, payload, runId = "run")
+            RunEvent(
+                id = id,
+                createdAt = id,
+                type = type,
+                text = raw,
+                payload = (payload)?.let { kotlinx.serialization.json.JsonObject(it) },
+                runId = "run",
+            )
         val reply =
             event(
                 2,
@@ -81,37 +138,33 @@ class ConversationPresentationTest {
             }
             val history = listOf(event(1, "turn.started"), reply, event(3, "error", failure))
             assertEquals(setOf(2L, 3L), quotaHiddenEvents(history))
-            val waiting = Run("run", status = "running", accountWaitReason = "Usage exhausted.")
+            val waiting =
+                Run(
+                    id = "run",
+                    status = "running",
+                    accountWaitReason = "Usage exhausted.",
+                    taskId = "",
+                )
             assertEquals(text, chatQuota(waiting, history)!!.message)
             val retrying =
                 history.dropLast(1) +
                     event(3, "error", JsonObject(failure + ("willRetry" to JsonPrimitive(true))))
             assertTrue(quotaHiddenEvents(retrying).isEmpty())
         }
-        val message = "You've hit your individual spend limit"
-        val legacy =
-            listOf(
-                event(1, "turn.started"),
-                event(2, "item.started", raw = "cat log"),
-                event(3, "item.completed", raw = message),
-                event(4, "item.completed", raw = message),
-                event(
-                    5,
-                    "turn.failed",
-                    raw = """{"type":"turn.failed","error":{"message":"$message"}}""",
-                ),
-            )
-        assertEquals(setOf(4L, 5L), quotaHiddenEvents(legacy))
-        val entries = quotaTimeline(timelineEntries(legacy, chat = true), legacy)
-        assertEquals(1, entries.size)
-        assertFalse(entries.single().message)
     }
 
     @Test
     fun `a reply that only repeats the turn failure folds into its notice`() {
         val overloaded = "API Error: 529 Overloaded"
         fun event(id: Long, type: String, payload: JsonObject? = null, raw: String = "") =
-            RunEvent(id, id, type, raw, payload, runId = "run")
+            RunEvent(
+                id = id,
+                createdAt = id,
+                type = type,
+                text = raw,
+                payload = (payload)?.let { kotlinx.serialization.json.JsonObject(it) },
+                runId = "run",
+            )
         fun reply(id: Long, text: String) =
             event(
                 id,
@@ -147,12 +200,13 @@ class ConversationPresentationTest {
         val message = "You've hit your individual spend limit · your weekly limit resets 3pm (UTC)"
         val run =
             Run(
-                "run",
+                id = "run",
                 status = "running",
                 accountWaitReason =
                     "Usage exhausted. Waiting for an available Claude Code account to resume.",
+                taskId = "",
             )
-        val chat = Chat("chat", run = run)
+        val chat = Chat(id = "chat", run = run)
         assertEquals(
             ConversationState("En attente de quota", null),
             conversationState(chat, "Agent", null),
@@ -176,16 +230,29 @@ class ConversationPresentationTest {
         val capacity = "Selected model is at capacity. Please try a different model."
         val failure =
             RunEvent(
-                1,
-                1,
-                "turn.failed",
-                capacity,
-                buildJsonObject {
-                    put("error", buildJsonObject { put("message", capacity) })
-                },
+                id = 1,
+                createdAt = 1,
+                type = "turn.failed",
+                text = capacity,
+                payload =
+                    kotlinx.serialization.json.JsonObject(
+                        buildJsonObject {
+                            put("error", buildJsonObject { put("message", capacity) })
+                        }
+                    ),
                 runId = "run",
             )
-        val chat = Chat("chat", run = Run("run", status = "failed", error = capacity))
+        val chat =
+            Chat(
+                id = "chat",
+                run =
+                    Run(
+                        id = "run",
+                        status = "failed",
+                        error = capacity,
+                        taskId = "",
+                    ),
+            )
         assertTrue(failureShown(chat, listOf(failure)))
         assertFalse(failureShown(chat, emptyList()))
         assertFalse(failureShown(chat, listOf(failure.copy(runId = "other"))))
@@ -199,7 +266,8 @@ class ConversationPresentationTest {
             failure.copy(
                 text = stop,
                 payload =
-                    buildJsonObject { put("error", buildJsonObject { put("message", stop) }) },
+                    (buildJsonObject { put("error", buildJsonObject { put("message", stop) }) })
+                        ?.let { kotlinx.serialization.json.JsonObject(it) },
             )
         assertFalse(failureShown(chat.copy(run = chat.run!!.copy(error = stop)), listOf(echo)))
         // A run records at most 10,000 characters of its error.
@@ -211,43 +279,70 @@ class ConversationPresentationTest {
         val timeLimit = "Run exceeded its time limit."
         val exhausted =
             listOf(
-                RunEvent(1, 1, "turn.started", "", runId = "run"),
                 RunEvent(
-                    2,
-                    2,
-                    "turn.failed",
-                    limit,
-                    buildJsonObject { put("error", buildJsonObject { put("message", limit) }) },
+                    id = 1,
+                    createdAt = 1,
+                    type = "turn.started",
+                    text = "",
                     runId = "run",
                 ),
                 RunEvent(
-                    3,
-                    3,
-                    "status",
-                    "failed",
-                    buildJsonObject { put("error", buildJsonObject { put("message", timeLimit) }) },
+                    id = 2,
+                    createdAt = 2,
+                    type = "turn.failed",
+                    text = limit,
+                    payload =
+                        kotlinx.serialization.json.JsonObject(
+                            buildJsonObject {
+                                put("error", buildJsonObject { put("message", limit) })
+                            }
+                        ),
+                    runId = "run",
+                ),
+                RunEvent(
+                    id = 3,
+                    createdAt = 3,
+                    type = "status",
+                    text = "failed",
+                    payload =
+                        kotlinx.serialization.json.JsonObject(
+                            buildJsonObject {
+                                put("error", buildJsonObject { put("message", timeLimit) })
+                            }
+                        ),
                     runId = "run",
                 ),
             )
         assertFalse(failureShown(chat.copy(run = chat.run!!.copy(error = timeLimit)), exhausted))
     }
 
-    private val first = ChatMessage("one", text = "Bonjour")
-    private val second = ChatMessage("two", text = "Ensuite")
+    private val first = ChatMessage(id = "one", text = "Bonjour")
+    private val second = ChatMessage(id = "two", text = "Ensuite")
 
     private val retryRun =
         Run(
-            "retry",
+            id = "retry",
             status = "queued",
-            accountWaitReason = "Temporary agent error. Retrying in 30 seconds (attempt 1/3).",
-            retry = RunRetry(1, 3, 31_000, RunRetryCause("timeout", "Temporary timeout")),
+            accountWaitReason = "Temporary agent error. Retrying in 30 seconds (attempt 1/5).",
+            retry =
+                RunRetry(
+                    attempt = 1,
+                    limit = 5,
+                    nextAttemptAt = 31_000,
+                    cause =
+                        RunRetryCause(
+                            kind = "timeout",
+                            message = "Temporary timeout",
+                        ),
+                ),
+            taskId = "",
         )
 
     @Test
     fun `retry counts down locally with ceiling and never shows negative seconds`() {
         assertEquals(retryRun.accountWaitReason, retryNotice(retryRun, 1000))
         assertEquals(
-            "Temporary agent error. Retrying in 20 seconds (attempt 1/3).",
+            "Temporary agent error. Retrying in 20 seconds (attempt 1/5).",
             chatWaitNotice(retryRun, 11_100)!!.message,
         )
         assertTrue(retryNotice(retryRun, 30_999)!!.contains("in 1 seconds"))
@@ -288,21 +383,30 @@ class ConversationPresentationTest {
     fun `retry shared contract decodes nullable and absent records and deadlines`() {
         val decoded =
             wireJson.decodeFromString<Run>(
-                """{"id":"retry","status":"queued","retry":{"attempt":2,"limit":3,"nextAttemptAt":31000,"cause":{"kind":"timeout","message":"Temporary timeout"}}}"""
+                """{"id":"retry","status":"queued","retry":{"attempt":2,"limit":5,"nextAttemptAt":31000,"cause":{"kind":"timeout","message":"Temporary timeout"}},"taskId":"fixture-task"}"""
             )
         assertEquals(31_000L, decoded.retry!!.nextAttemptAt)
         assertEquals("timeout", decoded.retry.cause.kind)
-        assertTrue(retryNotice(decoded, 1000)!!.contains("attempt 2/3"))
-        assertEquals(null, wireJson.decodeFromString<Run>("""{"id":"r","status":"queued"}""").retry)
+        assertTrue(retryNotice(decoded, 1000)!!.contains("attempt 2/5"))
         assertEquals(
             null,
-            wireJson.decodeFromString<Run>("""{"id":"r","status":"queued","retry":null}""").retry,
+            wireJson
+                .decodeFromString<Run>("""{"id":"r","status":"queued","taskId":"fixture-task"}""")
+                .retry,
         )
         assertEquals(
             null,
             wireJson
                 .decodeFromString<Run>(
-                    """{"id":"r","status":"queued","retry":{"attempt":1,"limit":3,"nextAttemptAt":null,"cause":{"kind":"server","message":"Busy"}}}"""
+                    """{"id":"r","status":"queued","retry":null,"taskId":"fixture-task"}"""
+                )
+                .retry,
+        )
+        assertEquals(
+            null,
+            wireJson
+                .decodeFromString<Run>(
+                    """{"id":"r","status":"queued","retry":{"attempt":1,"limit":5,"nextAttemptAt":null,"cause":{"kind":"server","message":"Busy"}},"taskId":"fixture-task"}"""
                 )
                 .retry!!
                 .nextAttemptAt,
@@ -312,8 +416,14 @@ class ConversationPresentationTest {
     @Test
     fun `exclusive suspension stops working presentation without replacing failures or a user pause`() {
         val reservation = ExclusiveReservation("reservation", "node", "owner", "Build", "acquired")
-        val running = Run("run", status = "running", suspendedByExclusive = reservation)
-        val chat = Chat("chat", status = "running", run = running)
+        val running =
+            Run(
+                id = "run",
+                status = "running",
+                suspendedByExclusive = reservation,
+                taskId = "",
+            )
+        val chat = Chat(id = "chat", status = "running", run = running)
         assertEquals(
             ConversationState("Suspendue (exclusivité)", null),
             conversationState(chat, "Cairn", BackgroundWait(listOf("Build"), 1), "Maison"),
@@ -347,10 +457,15 @@ class ConversationPresentationTest {
         }
         val chat =
             Chat(
-                "chat",
-                run = Run("run", status = "succeeded"),
+                id = "chat",
+                run =
+                    Run(
+                        id = "run",
+                        status = "succeeded",
+                        taskId = "",
+                    ),
                 wakeup =
-                    ChatWakeup(
+                    wakeupFixture(
                         "wake",
                         "one",
                         "Attendre la CI",
@@ -373,9 +488,14 @@ class ConversationPresentationTest {
     fun `scheduled wait names the wakeup without inventing a user message`() {
         val chat =
             Chat(
-                "chat",
-                run = Run("run", status = "succeeded"),
-                wakeup = ChatWakeup("wake", "one", "Attendre la CI", 420, 1, 420001),
+                id = "chat",
+                run =
+                    Run(
+                        id = "run",
+                        status = "succeeded",
+                        taskId = "",
+                    ),
+                wakeup = wakeupFixture("wake", "one", "Attendre la CI", 420, 1, 420001),
             )
         assertEquals(chat.wakeup, scheduledWakeup(chat))
         assertEquals("Reprise dans 7 min", conversationState(chat, "Agent", null, now = 1).status)
@@ -386,7 +506,18 @@ class ConversationPresentationTest {
         assertTrue(chatDelivery(chat, emptyList()).sending.isEmpty())
         assertNull(scheduledWakeup(chat.copy(paused = true)))
         assertNull(scheduledWakeup(chat.copy(lifecycle = "trash")))
-        assertNull(scheduledWakeup(chat.copy(run = Run("run", status = "running"))))
+        assertNull(
+            scheduledWakeup(
+                chat.copy(
+                    run =
+                        Run(
+                            id = "run",
+                            status = "running",
+                            taskId = "",
+                        )
+                )
+            )
+        )
         assertNull(scheduledWakeup(chat.copy(wakeup = null)))
     }
 
@@ -394,10 +525,15 @@ class ConversationPresentationTest {
     fun `follow-ups stay queued behind a scheduled wait`() {
         val chat =
             Chat(
-                "chat",
-                run = Run("run", status = "succeeded"),
+                id = "chat",
+                run =
+                    Run(
+                        id = "run",
+                        status = "succeeded",
+                        taskId = "",
+                    ),
                 messages = listOf(second),
-                wakeup = ChatWakeup("wake", "one", "Attendre la CI", 420, 1, 420001),
+                wakeup = wakeupFixture("wake", "one", "Attendre la CI", 420, 1, 420001),
             )
         assertEquals(ChatDelivery(emptyList(), listOf(second)), chatDelivery(chat, emptyList()))
         assertEquals(
@@ -410,14 +546,15 @@ class ConversationPresentationTest {
     fun `queued Claude message explains the missing account and clears notice when running`() {
         val run =
             Run(
-                "run",
+                id = "run",
                 status = "queued",
-                chatExecution = ChatExecution("one"),
+                chatExecution = ChatExecution(messageId = "one"),
                 accountWaitReason =
                     "Reconnect your Claude Code account in Connections to continue.",
                 accountRequired = "claude",
+                taskId = "",
             )
-        val chat = Chat("chat", run = run, messages = listOf(first))
+        val chat = Chat(id = "chat", run = run, messages = listOf(first))
         assertEquals("Claude Code", chatWaitNotice(run)!!.account)
         assertEquals(
             "En attente d’un compte Claude Code",
@@ -438,15 +575,16 @@ class ConversationPresentationTest {
         val reason = "Waiting for the previous execution to stop before recovery."
         val run =
             Run(
-                "run",
+                id = "run",
                 status = "queued",
                 accountWaitReason = reason,
-                chatExecution = ChatExecution("one"),
+                chatExecution = ChatExecution(messageId = "one"),
+                taskId = "",
             )
         assertEquals(ChatWaitNotice(reason), chatWaitNotice(run))
         assertEquals(
             "En attente de l’agent…",
-            chatDelivery(Chat("chat", run = run, messages = listOf(first)), emptyList())
+            chatDelivery(Chat(id = "chat", run = run, messages = listOf(first)), emptyList())
                 .sending
                 .single()
                 .label,
@@ -457,23 +595,44 @@ class ConversationPresentationTest {
 
     @Test
     fun `idle send is in the transcript but later followups wait`() {
-        val delivery = chatDelivery(Chat("chat", messages = listOf(first, second)), emptyList())
+        val delivery =
+            chatDelivery(Chat(id = "chat", messages = listOf(first, second)), emptyList())
         assertEquals(listOf("one"), delivery.sending.map { it.message.id })
         assertEquals(listOf("two"), delivery.queued.map { it.id })
     }
 
     @Test
     fun `dispatch of the first message does not turn it into a queued followup`() {
-        val run = Run("run", status = "running", chatExecution = ChatExecution("one"))
+        val run =
+            Run(
+                id = "run",
+                status = "running",
+                chatExecution = ChatExecution(messageId = "one"),
+                taskId = "",
+            )
         val delivery =
-            chatDelivery(Chat("chat", run = run, messages = listOf(first, second)), emptyList())
+            chatDelivery(
+                Chat(id = "chat", run = run, messages = listOf(first, second)),
+                emptyList(),
+            )
         assertEquals("Démarrage de l’agent…", delivery.sending.single().label)
         assertEquals("two", delivery.queued.single().id)
     }
 
     @Test
     fun `paused and failed runs keep messages waiting`() {
-        listOf(Chat("chat", paused = true), Chat("chat", run = Run("r", status = "failed")))
+        listOf(
+                Chat(id = "chat", paused = true),
+                Chat(
+                    id = "chat",
+                    run =
+                        Run(
+                            id = "r",
+                            status = "failed",
+                            taskId = "",
+                        ),
+                ),
+            )
             .forEach {
                 val result = chatDelivery(it.copy(messages = listOf(first)), emptyList())
                 assertTrue(result.sending.isEmpty())
@@ -483,19 +642,38 @@ class ConversationPresentationTest {
 
     @Test
     fun `steering and acknowledgements do not duplicate or expose private replies`() {
-        val run = Run("run", status = "running")
+        val run =
+            Run(
+                id = "run",
+                status = "running",
+                taskId = "",
+            )
         val privateAnswer =
             first.copy(id = "private", questionId = "question", mode = "steer", text = "secret")
         val chat =
-            Chat("chat", run = run, messages = listOf(first.copy(mode = "steer"), privateAnswer))
+            Chat(
+                id = "chat",
+                run = run,
+                messages = listOf(first.copy(mode = "steer"), privateAnswer),
+            )
         assertEquals(listOf("one"), chatDelivery(chat, emptyList()).sending.map { it.message.id })
-        val ack = RunEvent(1, 1, "chat.user", "Bonjour", mapOf("messageId" to JsonPrimitive("one")))
+        val ack =
+            RunEvent(
+                id = 1,
+                createdAt = 1,
+                type = "chat.user",
+                text = "Bonjour",
+                payload =
+                    kotlinx.serialization.json.JsonObject(
+                        mapOf("messageId" to JsonPrimitive("one"))
+                    ),
+            )
         assertTrue(chatDelivery(chat, listOf(ack), first).sending.isEmpty())
     }
 
     @Test
     fun `local optimistic send and saved message share one identity`() {
-        val chat = Chat("chat", messages = listOf(first))
+        val chat = Chat(id = "chat", messages = listOf(first))
         assertEquals(1, chatDelivery(chat, emptyList(), first).sending.size)
     }
 
@@ -503,12 +681,15 @@ class ConversationPresentationTest {
     fun `run outcomes and project revisions survive decoding and task attention grouping`() {
         val run =
             wireJson.decodeFromString<Run>(
-                """{"id":"r","status":"succeeded","outcome":{"status":"blocked","reason":"Missing access","evidence":["403"],"reportedAt":10},"workspaces":[{"projectId":"p","path":"/p","revision":"abcdef"}]}"""
+                """{"id":"r","status":"succeeded","outcome":{"status":"blocked","reason":"Missing access","evidence":["403"],"reportedAt":10},"workspaces":[{"projectId":"p","path":"/p","revision":"abcdef","kind":"worktree"}],"taskId":"fixture-task"}"""
             )
         assertEquals("À examiner", taskGroup(Task(), run))
         assertEquals("abcdef", run.workspaces.single().revision)
         assertEquals(listOf("403"), run.outcome!!.evidence)
-        val project = wireJson.decodeFromString<Project>("""{"sourceMode":"local"}""")
+        val project =
+            wireJson.decodeFromString<Project>(
+                """{"id":"00000000-0000-4000-8000-000000000001","name":"Project","path":"/project","origin":"","revision":"fixture","createdAt":0,"sourceMode":"local"}"""
+            )
         assertEquals("local", project.sourceMode)
         assertEquals(
             "Terminées",
@@ -519,8 +700,14 @@ class ConversationPresentationTest {
     @Test
     fun `the header names a background wait, a failure or an interruption`() {
         // The subtitle names the agent and its installation; the project moved to the sheet.
-        val run = Run("run", status = "running", startedAt = 1)
-        val chat = Chat("chat", agentName = "Cairn", projectName = "Site", run = run)
+        val run =
+            Run(
+                id = "run",
+                status = "running",
+                startedAt = 1,
+                taskId = "",
+            )
+        val chat = Chat(id = "chat", agentName = "Cairn", projectName = "Site", run = run)
         assertEquals(
             ConversationState("Cairn · Maison", "Cairn travaille"),
             conversationState(chat, "Cairn", null, "Maison"),
@@ -569,11 +756,23 @@ class ConversationPresentationTest {
 
     @Test
     fun `the header names only the agent while no installation is known`() {
-        val chat = Chat("chat", agentName = "Cairn", projectName = "Site")
+        val chat = Chat(id = "chat", agentName = "Cairn", projectName = "Site")
         assertEquals(ConversationState("Cairn", null), conversationState(chat, "Cairn", null, null))
         assertEquals(
             "Échec · Cairn",
-            conversationState(chat.copy(run = Run("run", status = "failed")), "Cairn", null).status,
+            conversationState(
+                    chat.copy(
+                        run =
+                            Run(
+                                id = "run",
+                                status = "failed",
+                                taskId = "",
+                            )
+                    ),
+                    "Cairn",
+                    null,
+                )
+                .status,
         )
         assertEquals(
             ConversationState("Cairn", null),
@@ -583,24 +782,35 @@ class ConversationPresentationTest {
 
     @Test
     fun `a failed run explains why the response stopped`() {
-        val run = Run("run", status = "failed")
+        val run =
+            Run(
+                id = "run",
+                status = "failed",
+                taskId = "",
+            )
         assertEquals(
             "La réponse s’est arrêtée avant la fin. Reprenez la conversation pour continuer.",
-            conversationError(Chat("chat", run = run)),
+            conversationError(Chat(id = "chat", run = run)),
         )
         assertEquals(
             "Usage limit reached",
-            conversationError(Chat("chat", run = run.copy(error = "Usage limit reached"))),
+            conversationError(Chat(id = "chat", run = run.copy(error = "Usage limit reached"))),
         )
         // The conversation's own error comes first.
         assertEquals(
             "Upload failed",
             conversationError(
-                Chat("chat", run = run.copy(error = "Usage limit reached"), error = "Upload failed")
+                Chat(
+                    id = "chat",
+                    run = run.copy(error = "Usage limit reached"),
+                    error = "Upload failed",
+                )
             ),
         )
-        assertNull(conversationError(Chat("chat", run = run.copy(status = "succeeded"))))
-        assertNull(conversationError(Chat("chat", run = run.copy(error = " ", status = "running"))))
+        assertNull(conversationError(Chat(id = "chat", run = run.copy(status = "succeeded"))))
+        assertNull(
+            conversationError(Chat(id = "chat", run = run.copy(error = " ", status = "running")))
+        )
         assertNull(conversationError(null))
     }
 }

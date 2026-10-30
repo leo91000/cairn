@@ -1,0 +1,21 @@
+{
+  "commands": [
+    { "runId": "00000000-0000-4000-8000-000000000001" }
+  ],
+  "invalidCommands": [
+    {},
+    { "runId": "" },
+    { "runId": "not-a-uuid" },
+    { "runId": "00000000-0000-4000-8000-000000000001", "status": "succeeded" }
+  ],
+  "lists": [{}, { "limit": 100, "offset": 9007199254740991, "status": "waiting", "taskId": null }],
+  "invalidLists": [{ "limit": 0 }, { "limit": 101 }, { "offset": -1 }, { "offset": 9007199254740992 }, { "offset": "1" }, { "status": "pending" }],
+  "states": [
+    { "id": "run", "taskId": "mission", "status": "queued" },
+    { "id": "run", "taskId": "mission", "status": "interrupted", "sessionId": "saved-session", "resumeAvailable": true, "resumeCount": 2, "cancelRequestedAt": null, "requestedBy": { "runId": "parent", "chatId": "conversation" } }
+  ],
+  "retries": [
+    { "attempt": 1, "limit": 5, "nextAttemptAt": 9007199254740991, "cause": { "kind": "timeout", "message": "Temporary timeout" } },
+    { "attempt": 5, "limit": 5, "nextAttemptAt": null, "startedAt": 100, "deadlineAt": 600100, "cause": { "kind": "connection", "message": "Controller unavailable", "startup": true } }
+  ]
+}

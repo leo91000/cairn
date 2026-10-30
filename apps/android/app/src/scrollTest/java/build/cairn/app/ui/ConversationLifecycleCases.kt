@@ -49,13 +49,19 @@ abstract class ConversationLifecycleCases {
             val restarts = CopyOnWriteArrayList<String>()
             val chat =
                 Chat(
-                    "chat",
+                    id = "6cc6efab-10af-54c7-a91b-dcff664166a1",
                     title = "Conversation à conserver",
                     agentName = "Agent principal",
                     updatedAt = System.currentTimeMillis(),
                     status = if (working) "running" else "succeeded",
                     run =
-                        if (freshSession != null) Run("run", status = "failed", restoredAt = 10)
+                        if (freshSession != null)
+                            Run(
+                                id = "run",
+                                status = "failed",
+                                restoredAt = 10,
+                                taskId = "",
+                            )
                         else null,
                     restoredAt = if (freshSession == false) 10 else null,
                     canRequestNewSession = freshSession == true,
@@ -78,7 +84,10 @@ abstract class ConversationLifecycleCases {
                                 .setHeader("Content-Type", "text/event-stream")
                                 .setBody(frame)
                         }
-                        if (path == "/api/installations/fixture/api/chats/chat/stream") {
+                        if (
+                            path ==
+                                "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/stream"
+                        ) {
                             val current =
                                 (if (restarts.size == 2) restarted else chat).copy(
                                     lifecycle = if (deleted.get()) "trash" else "active",
@@ -94,7 +103,8 @@ abstract class ConversationLifecycleCases {
                         }
                         val body =
                             when {
-                                path == "/api/installations/fixture/api/chats/chat/new-session" -> {
+                                path ==
+                                    "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/new-session" -> {
                                     restarts += request.body.readUtf8()
                                     if (restarts.size == 1)
                                         return MockResponse()
@@ -104,30 +114,31 @@ abstract class ConversationLifecycleCases {
                                             )
                                     wireJson.encodeToString(restarted)
                                 }
-                                path == "/api/installations/fixture/api/chats/chat/restore" &&
+                                path ==
+                                    "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/restore" &&
                                     request.method == "POST" -> {
                                     restores += request.body.readUtf8()
                                     deleted.set(false)
                                     wireJson.encodeToString(chat)
                                 }
-                                path == "/api/installations/fixture/api/chats/chat" &&
+                                path ==
+                                    "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1" &&
                                     request.method == "DELETE" -> {
                                     val payload = request.body.readUtf8()
                                     deletes += payload
                                     if (
                                         working &&
-                                            !wireJson
+                                            wireJson
                                                 .parseToJsonElement(payload)
-                                                .jsonObject
-                                                .getValue("confirm")
-                                                .jsonPrimitive
-                                                .boolean
+                                                .jsonObject["confirm"]
+                                                ?.jsonPrimitive
+                                                ?.boolean != true
                                     )
                                         return MockResponse()
                                             .setResponseCode(409)
                                             .setBody("""{"error":"Confirmation requise"}""")
                                     deleted.set(true)
-                                    "{}"
+                                    wireJson.encodeToString(chat.copy(lifecycle = "trash"))
                                 }
                                 path == "/api/installations/fixture/api/chats" &&
                                     request.path!!.contains("view=trash") -> {
@@ -140,11 +151,54 @@ abstract class ConversationLifecycleCases {
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
                                 path == "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(
-                                        listOf(Agent(MAIN_AGENT_ID, "Agent principal"))
+                                        build.cairn.contracts.ListAgentsOutput(
+                                            listOf(
+                                                Agent(
+                                                    exclusiveNodes = emptyList(),
+                                                    plugins = emptyList(),
+                                                    revision = "",
+                                                    createdAt = 0,
+                                                    access =
+                                                        AccessPolicy(
+                                                            mcpTools =
+                                                                build.cairn.contracts.McpTools(
+                                                                    emptyMap()
+                                                                ),
+                                                            projects = null,
+                                                            skills = null,
+                                                            mcps = null,
+                                                        ),
+                                                    id = MAIN_AGENT_ID,
+                                                    name = "Agent principal",
+                                                )
+                                            )
+                                        )
                                     )
                                 path == "/api/installations/fixture/api/overview" -> "{}"
                                 path.endsWith("/models") -> """{"models":[]}"""
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
+                                    else "[]"
                             }
                         return MockResponse().setBody(body)
                     }

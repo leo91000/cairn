@@ -5,6 +5,7 @@ import { readFile } from 'node:fs/promises'
 import process from 'node:process'
 import { setTimeout } from 'node:timers/promises'
 import { promisify } from 'node:util'
+import agentWire from '../packages/contracts/generated/agent-wire.json' with { type: 'json' }
 import { startBeacon } from './beacon-smoke.mjs'
 
 const exec = promisify(execFile)
@@ -77,11 +78,25 @@ async function main() {
       await setTimeout(200)
     }
 
-    const claudeVersion = (await docker('exec', name, 'claude', '--version')).stdout.trim()
-    assert.match(claudeVersion, /^2\.1\.280\b/, 'official Claude Code CLI is installed')
     const health = await fetch(`${url}/health`)
     assert.equal(health.headers.get('cache-control'), 'no-store')
     const version = await health.json()
+    // CI passes the versions it resolved; the image must report and run exactly those.
+    for (const [tool, variable] of Object.entries({
+      codex: 'CODEX_VERSION',
+      gh: 'GH_VERSION',
+      claude: 'CLAUDE_VERSION',
+      opencode: 'OPENCODE_VERSION',
+    })) {
+      assert.match(version.tools[tool] ?? '', /^\d+\.\d+\.\d+$/, `${tool} version is recorded`)
+      if (process.env[variable])
+        assert.equal(version.tools[tool], process.env[variable], `${tool} is the resolved release`)
+    }
+
+    const claudeVersion = (await docker('exec', name, 'claude', '--version')).stdout.trim()
+    assert.equal(claudeVersion, `${version.tools.claude} (Claude Code)`, 'official Claude Code CLI is installed')
+    const opencodeVersion = (await docker('exec', name, 'opencode', '--version')).stdout.trim()
+    assert.equal(opencodeVersion, version.tools.opencode, 'official OpenCode CLI is installed')
     assert.equal(typeof version.commit, 'string')
     const expectedCommit = process.env.SMOKE_COMMIT || process.env.GITHUB_SHA
     if (expectedCommit)
@@ -106,7 +121,11 @@ async function main() {
     const saved = await fetch(`${api}/agents`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ name: 'Persistent profile' }),
+      body: JSON.stringify({
+        ...agentWire.creates[0],
+        creationId: randomUUID(),
+        settings: { ...agentWire.creates[0].settings, name: 'Persistent profile' },
+      }),
     })
     assert.equal(saved.status, 200)
     const savedAgent = await saved.json()
@@ -138,7 +157,7 @@ async function main() {
     for (let attempt = 0; ; attempt++) {
       const response = await fetch(`${api}/agents`, { headers })
       if (response.ok) {
-        agents = await response.json()
+        agents = (await response.json()).agents
         break
       }
 

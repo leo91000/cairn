@@ -1,11 +1,10 @@
 <script setup lang="ts">
-import type { z } from 'zod'
 import type {
   Agent,
   PluginProject,
   Project,
-  projectInput,
 } from '../../../../packages/contracts/contracts'
+import type { ProjectSettings } from '../../../../packages/contracts/generated/typescript/ProjectSettings'
 import type { Catalog } from '../plugins'
 import {
   computed,
@@ -15,7 +14,12 @@ import {
 } from 'vue'
 import { providers as codingAgents } from '../../../../packages/contracts/accounts'
 import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
-import { accessSummary, olderInstallation } from '../agent-access'
+import { createProject } from '../../../../packages/contracts/generated/createProject'
+import { deleteAgent } from '../../../../packages/contracts/generated/deleteAgent'
+import { deleteProject } from '../../../../packages/contracts/generated/deleteProject'
+import { listPluginPackages } from '../../../../packages/contracts/generated/listPluginPackages'
+import { replaceProject } from '../../../../packages/contracts/generated/replaceProject'
+import { accessSummary } from '../agent-access'
 import {
   api,
   notify,
@@ -83,10 +87,11 @@ const pendingCreation = resourceSave.pendingCreation
 let openedId: string | null = null
 const saveAlert = ref<InstanceType<typeof UiAlert>>()
 const open = ref(false)
+const revision = ref('')
 const deleting = ref<Agent | Project | null>(null)
 const busy = ref(false)
 const error = ref('')
-const form = ref<z.infer<typeof projectInput>>({
+const form = ref<ProjectSettings>({
   name: '',
   description: '',
   path: '',
@@ -112,7 +117,7 @@ const instanceLabel = computed(() => instanceNoun(catalog.value.packages.find(en
 
 async function loadCatalog() {
   if (state.installationRole === 'owner')
-    catalog.value = await api<Catalog>('/plugins').catch(() => catalog.value)
+    catalog.value = await listPluginPackages(api, {}).catch(() => catalog.value)
 }
 
 onMounted(loadCatalog)
@@ -141,10 +146,17 @@ function edit(item?: Project) {
   // Instances may have been added or paused since the page opened.
   if (!item)
     void loadCatalog()
+  revision.value = item?.revision ?? ''
   openedId = item?.id ?? null
   resourceSave.reset(openedId)
   form.value = item
-    ? structuredClone(JSON.parse(JSON.stringify(item)))
+    ? {
+        name: item.name,
+        path: item.path,
+        description: item.description,
+        baseBranch: item.baseBranch,
+        sourceMode: item.sourceMode,
+      }
     : {
         name: '',
         description: '',
@@ -157,6 +169,26 @@ function edit(item?: Project) {
   open.value = true
 }
 
+async function projectRequest<T>(path: string, options: RequestInit): Promise<T> {
+  if (path === '/projects/import')
+    return api<T>(path, options)
+  const payload = JSON.parse(options.body as string)
+  const saved = options.method === 'PUT'
+    ? await replaceProject(api, { projectId: editing.value!, revision: revision.value, settings: form.value })
+    : await createProject(api, {
+        creationId: payload.creationId,
+        settings: {
+          name: payload.name,
+          path: payload.path,
+          description: payload.description,
+          baseBranch: payload.baseBranch,
+          sourceMode: payload.sourceMode,
+        },
+      })
+  revision.value = saved.revision
+  return saved as T
+}
+
 async function save() {
   if (busy.value || (importSource.value && !picked.value))
     return
@@ -167,6 +199,7 @@ async function save() {
     const importing = importSource.value
     await resourceSave.save<Project>(`/${props.kind}`, {
       body: () => form.value,
+      request: projectRequest,
       createPath: importing ? '/projects/import' : undefined,
       createBody: importing
         ? () => ({
@@ -180,6 +213,7 @@ async function save() {
           })
         : undefined,
       onCreated: (created) => {
+        revision.value = created.revision
         if (importing) {
           form.value.path = created.path
           form.value.sourceMode = created.sourceMode
@@ -218,7 +252,10 @@ async function remove() {
     return
 
   try {
-    await api(`/${props.kind}/${deleting.value.id}`, { method: 'DELETE' })
+    if (isAgent.value)
+      await deleteAgent(api, { agentId: deleting.value.id })
+    else
+      await deleteProject(api, { projectId: deleting.value.id })
     await refresh()
     deleting.value = null
     notify('Removed')
@@ -285,7 +322,7 @@ async function remove() {
         </div>
         <div v-if="'reasoning' in item" class="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-muted">
           <span class="max-w-full truncate" :title="item.model || 'Provider default'">{{ `${codingAgents[item.provider || 'codex'].label} · ${item.model || 'Provider default'}` }}</span>
-          <span class="inline-flex min-w-0 items-center gap-1.5"><Icon :name="ShieldCheck" :size="13" class="shrink-0" /><span class="min-w-0">{{ accessSummary(item, catalog, olderInstallation(state.agents)) }}</span></span>
+          <span class="inline-flex min-w-0 items-center gap-1.5"><Icon :name="ShieldCheck" :size="13" class="shrink-0" /><span class="min-w-0">{{ accessSummary(item, catalog) }}</span></span>
         </div>
         <div v-else-if="'path' in item" class="flex shrink-0 items-center gap-5 pr-6 text-xs text-muted phone:mt-2 phone:gap-4 phone:pr-0">
           <span class="inline-flex max-w-36 items-center gap-1.5" :title="item.baseBranch"><Icon :name="GitBranch" :size="13" /><span class="truncate">{{ item.baseBranch }}</span></span>

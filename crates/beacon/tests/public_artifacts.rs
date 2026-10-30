@@ -1,3 +1,5 @@
+use common::MissionFixture;
+
 mod common;
 
 use common::RelayedInstallation;
@@ -11,7 +13,7 @@ async fn seeded_artifact(
 ) -> (String, String) {
     let installation = &relay.installation;
     let task = installation
-        .task(
+        .task_fixture(
             json!({
                 "name": "Report",
                 "prompt": "Make a report",
@@ -82,7 +84,7 @@ async fn public_file_is_an_beacon_read_only_link_with_security_headers_revocatio
     assert!(
         public.starts_with(&format!(
             "{}/api/public/installations/{id}/artifacts/",
-            relay.app.url
+            relay.beacon_origin
         )),
         "The share URL must use the Beacon"
     );

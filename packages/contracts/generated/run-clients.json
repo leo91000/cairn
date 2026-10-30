@@ -1,0 +1,41 @@
+[
+  {
+    "input": "ReadRunHistoryInput",
+    "method": "GET",
+    "name": "readRunHistory",
+    "output": "HistoryPage",
+    "path": "/runs/{runId}/history",
+    "query": [
+      "before",
+      "history"
+    ]
+  },
+  {
+    "input": "RunMissionInput",
+    "method": "POST",
+    "name": "runMission",
+    "output": "Run",
+    "path": "/tasks/{taskId}/run"
+  },
+  {
+    "input": "RunInput",
+    "method": "POST",
+    "name": "retryRun",
+    "output": "Run",
+    "path": "/runs/{runId}/retry"
+  },
+  {
+    "input": "RunInput",
+    "method": "POST",
+    "name": "cancelRun",
+    "output": "CancelRunOutput",
+    "path": "/runs/{runId}/cancel"
+  },
+  {
+    "input": "RunInput",
+    "method": "POST",
+    "name": "cleanupRun",
+    "output": "CleanupRunOutput",
+    "path": "/runs/{runId}/cleanup"
+  }
+]

@@ -44,12 +44,18 @@ abstract class UnifiedHeaderCases {
     private val now = System.currentTimeMillis()
     private val chat =
         Chat(
-            "chat",
-            "Orchestration de la release",
+            id = "6cc6efab-10af-54c7-a91b-dcff664166a1",
+            title = "Orchestration de la release",
             agentName = "Agent principal",
             projectName = "Cairn",
             runId = "run",
-            run = Run("run", status = "succeeded", startedAt = now - 60_000),
+            run =
+                Run(
+                    id = "run",
+                    status = "succeeded",
+                    startedAt = now - 60_000,
+                    taskId = "",
+                ),
             updatedAt = now,
             provider = "claude",
         )
@@ -74,7 +80,7 @@ abstract class UnifiedHeaderCases {
                     when (path) {
                         "/api/installations/fixture/api/chats/stream" ->
                             return stream(LiveState(chats = listOf(chat)))
-                        "/api/installations/fixture/api/chats/chat/stream" ->
+                        "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/stream" ->
                             return stream(
                                 LiveState(
                                     chat = chat,
@@ -87,19 +93,46 @@ abstract class UnifiedHeaderCases {
                     }
                     val body =
                         when (path) {
+                            "/api/installations/fixture/api/tasks" -> """{"tasks":[]}"""
                             "/api/installations" -> installations
                             "/api/account/session" ->
                                 """{"authenticated":true,"csrf":"fixture","account":{"id":"fixture-account","email":"owner@example.test"},"installations":$installations}"""
                             "/api/installations/fixture/api/agents" ->
                                 wireJson.encodeToString(
-                                    listOf(Agent(MAIN_AGENT_ID, "Agent principal"))
+                                    build.cairn.contracts.ListAgentsOutput(
+                                        listOf(
+                                            Agent(
+                                                exclusiveNodes = emptyList(),
+                                                plugins = emptyList(),
+                                                revision = "",
+                                                createdAt = 0,
+                                                access =
+                                                    AccessPolicy(
+                                                        mcpTools =
+                                                            build.cairn.contracts.McpTools(
+                                                                emptyMap()
+                                                            ),
+                                                        projects = null,
+                                                        skills = null,
+                                                        mcps = null,
+                                                    ),
+                                                id = MAIN_AGENT_ID,
+                                                name = "Agent principal",
+                                            )
+                                        )
+                                    )
                                 )
                             "/api/installations/fixture/api/projects" ->
-                                wireJson.encodeToString(listOf(Project("project", "Cairn")))
-                            "/api/installations/fixture/api/tasks",
+                                wireJson.encodeToString(
+                                    build.cairn.contracts.ListProjectsOutput(
+                                        listOf(
+                                            Project("46d045dd-9bce-51e3-8a99-65aa9384efc9", "Cairn")
+                                        )
+                                    )
+                                )
                             "/api/installations/fixture/api/tasks/activity",
-                            "/api/installations/fixture/api/skills",
-                            "/api/installations/fixture/api/mcps" -> "[]"
+                            "/api/installations/fixture/api/skills" -> "[]"
+                            "/api/installations/fixture/api/mcps" -> """{"mcps":[]}"""
                             else -> "{}"
                         }
                     return MockResponse()
@@ -221,7 +254,7 @@ abstract class UnifiedHeaderCases {
                         "Changer de conversation : ${chat.title} · Dernier harness : Claude Code"
                     )
                     .assertExists()
-                capture("chat")
+                capture("6cc6efab-10af-54c7-a91b-dcff664166a1")
                 val header = compose.onNodeWithTag("conversation-header")
                 assertTopsUnderSystemInsets(header)
                 val height = header.fetchSemanticsNode().boundsInRoot.height / density

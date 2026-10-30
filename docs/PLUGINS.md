@@ -35,8 +35,6 @@ crates/installation/src/plugins/
   programs.rs           `exec`: declared programs without a shell
   work.rs               Admission, access requests, event queue, replies
   cli.rs                `cairn plugin <plugin> <command> …` inside conversations
-  legacy.rs             Moves earlier 1Password accounts into instances
-  legacy_github.rs      Moves the earlier GitHub connection and tokens into instances
 crates/installation/src/skills/sources.rs
                         `skillSources`: skills imported from a package's source
 plugins/                Bundled packages (1Password, Discord, GitHub), embedded by build.rs
@@ -125,7 +123,7 @@ Every plugin uses the same connection model: name, settings, optional credential
 (encrypted in the vault), and, when the package can start conversations, an owner
 delegation: the agent that answers, the people allowed (listed, approved as they ask,
 or anyone), and an hourly message limit. Any agent can answer
-([ADR-0059](adr/0059-owner-chosen-agents-for-bot-delegation.md)); the setup assistant
+([ADR-0068](adr/0068-owner-chosen-agents-for-bot-delegation.md)); the setup assistant
 warns when it can manage the installation or open several projects, and, for anyone,
 when it can also write, run commands or use MCP connections or plugins (GitHub,
 1Password…). The agent must be able to open the delegation's project. “Anyone” is
@@ -336,6 +334,27 @@ More capabilities:
   set. Returns `{ status, stdout, stderr }`. Programs run outside the Luau sandbox with
   whatever files and network they can reach: the review screen names each path or
   installer.
+- A program may opt into a managed foreground cache daemon with
+  `cache = { daemonArgs = ["daemon", "--timeout", "0"], socketEnv = "OP_SOCK" }`.
+  Cairn starts the same approved executable with those static arguments, an empty
+  environment and a private home/socket. No instance secrets enter the daemon's
+  environment. Clients receive the socket through the reserved `socketEnv` variable,
+  which scripts cannot override. The socket must belong to the foreground child;
+  background-only daemons are rejected. Other programs keep their per-call home.
+  Saved, enabled instances reuse a daemon across authorized calls to the same program,
+  revision, package, executable and environment digest. Draft/disabled instance tests
+  use a transient daemon. Cache reuse never replaces the caller's authorization or
+  the post-I/O grant check. Changes, disabling, deletion, disconnection and installation
+  shutdown invalidate caches and interrupt their active calls. The supervisor also
+  reconciles enabled instances/package approvals every two seconds.
+  Acquisition and reconciliation reject snapshots superseded by configuration
+  invalidation, so a delayed old call cannot replace a current revision's cache.
+  A different environment/executable waits for active leases to finish rather than
+  interrupting their reads.
+  Unused daemons expire after ten minutes; at most 64 reside in an installation,
+  evicting the least recently used idle entry first. When all are busy, new instances
+  receive a retryable capacity error. Cache contents and freshness are the declared
+  program's responsibility: Cairn does not store command output in a cache or database.
 - `cairn.http.request{ …, auth = { secret = "<setting key>", header?, prefix? } }`
   adds a secret field to one header of a declared host.
 - `cairn.json.decode(text)` and `cairn.json.encode(value)` convert JSON.
@@ -421,8 +440,8 @@ talk to it` and `Agents` when they apply. The effort defaults to `app` for OAuth
 `signin` for a device sign-in and `token` for another credential or a required
 secret setting. `GET /api/plugins` returns the resolved `setup` beside each
 `manifest` (and each version), and `manage_plugin`'s `setup` action returns it too.
-Clients of an older installation resolve it from the manifest the same way; the
-shared corpus `tests/fixtures/plugin-setup.json` checks Rust, web and Android.
+Clients use this resolved setup. The shared corpus
+`tests/fixtures/plugin-setup.json` checks server derivation and client presentation.
 
 The package's `form` view appears on the credential step, on steps with dynamic or
 `refresh` fields, and on the first step when there is no credential. A new instance
@@ -437,11 +456,6 @@ management agent may only reuse an instance it is granted.
 Required secrets must be present; an absent optional secret remains absent,
 replacing any typed draft value for that shared field. Sources with secret fields
 remain individually selectable: equal visible labels cannot prove equal secrets.
-
-Installed manifests with `[setup]` require epoch 12 / SQLite version 11, which
-fences previous readers before plugin loading. Existing package files, approvals,
-connections and vault entries are preserved. See the
-[forward migration and recovery plan](AUTOMATIC-MIGRATIONS.md#current-transition-epochs-311-to-12).
 
 The assistant's last step can grant agents to a new instance with the save's
 `agentIds`: creation only grants, never removes. A saved instance shows its agents
@@ -565,8 +579,7 @@ a `message/rfc822` handle and its `messageId`. `messageKey` produces a determini
 Message-ID scoped to the instance, useful for reconciling uncertain sends.
 `contentDigest` hashes the stable composition input and the actual attachment
 bytes, excluding generated MIME boundaries and dates. A changed attachment cannot
-silently replay an earlier send receipt. Local byte/I/O/CPU measurements and their
-limits are recorded in [the transfer measurements](PLUGIN-TRANSFER-MEASUREMENTS.md).
+silently replay an earlier send receipt.
 
 The run-local CLI transfers conversation files with any approved files-capable
 package: `cairn plugin PACKAGE --upload INSTANCE PATH`, `--download INSTANCE HANDLE
@@ -673,7 +686,9 @@ properties.sha = { type = "string", pattern = "^[0-9a-f]{40}$" }
 `wait_for` provides native `delay`, `at` and `run_finished` conditions. Plugins add
 service-specific conditions through the same `condition` handler; no host-side
 service-specific dispatch is needed. Temporal waits take no `timeoutSeconds`;
-plugin conditions require it.
+plugin conditions require it. Agents can group a plugin condition with other
+external conditions (`mode: all` or `any`); each grouped condition is observed and
+scheduled on its own, so the handler is unchanged.
 
 Granted agents see each condition in `wait_for` as type `<plugin>_<name>` (plugin
 IDs have no `_`, so types never collide), with `projectId` when `project = true`; Cairn records the plugin
@@ -730,9 +745,9 @@ instance falls back to another enabled one.
 Keep exactly one `manifest.json` or `manifest.toml` at the package root. Both
 formats use the same field names, defaults, validation and approval digest. The
 upload endpoint accepts a JSON manifest object as before, or manifest text with
-`manifestFormat: "json" | "toml"`; it persists canonical JSON. The web accepts
-both formats. Android reviews both formats through the normalized interface;
-package file uploads continue to use the web.
+`manifestFormat: "json" | "toml"`; it persists canonical JSON. Both apps accept and review both formats through the normalized interface.
+The web selects package files; Android uses the system folder picker. Cancelling
+the picker does not upload anything.
 
 For a managed executable, declare:
 
@@ -797,46 +812,86 @@ active version. Bundled programs prepare on first use. Preparation is shared by
 all instances and serialized; no instance secrets are available. Web and Android
 show installed/candidate versions and offer Check, Install and Restore. Package
 and program updates are independent. There is no periodic check or automatic
-upgrade in this initial implementation. Owner-only routes are:
+upgrade in this initial implementation. The owner controls approval of executable
+code and explicit program changes; installation access alone cannot grant that
+system authority. Program commands are:
 
 - `GET /api/plugins/<id>/programs`: installed, previous and candidate releases.
-- `POST …/programs/<name>/check`: resolve and save a candidate and its digest.
-- `POST …/programs/<name>/install` with `{ digest }`: install that candidate.
-- `POST …/programs/<name>/rollback`: restore the retained previous executable.
+- `POST /api/plugins/programs/prepare` with a closed command containing `pluginId`,
+  `program` and `kind`: `check` resolves a candidate, `install` also requires its
+  reviewed `digest`, and `rollback` restores the retained previous executable.
 
-These program actions return `{ operation: ID }` immediately. Poll
-`GET /api/plugins/packages/operations/ID` for `{ state, result?, error? }`, where
-state is `running`, `completed` or `failed`. Approval/activation of an uploaded
-installer-backed package uses the same operation response; ordinary packages keep
-their synchronous summary response. This keeps downloads independent of the
-30-second HTTP relay deadline. Operations have a nine-minute total budget, four
-concurrent slots, and 64 recent in-memory results. A server restart loses operation
-status, not the atomic program/package locks; refresh the plugin and retry if
-needed. Web and Android perform this polling, including approval failures. Cold instance tests, views/actions and form handlers
-also use this response when they may prepare an executable; once prepared, their
-ordinary synchronous responses are unchanged. Instance saves without a form
-handler remain synchronous and do not download programs.
+All package approval and activation commands, including packages without an
+installer, and all explicit program preparations return `{ operation: ID }`
+immediately. Poll `GET /api/plugins/packages/operations/ID` for
+`{ id, state, result, error }`. State is `running`, `completed`, `failed` or
+`cancelled`; pending results and errors are null. A completed result is tagged:
+`{ kind: "package", version }`, `{ kind: "program", program }` or
+`{ kind: "management", output, wrapped }`, using the generated contracts.
+`DELETE /api/plugins/packages/operations/ID` cancels a pending preparation and
+returns its status. Cancellation fences publication still queued on the database
+writer; it does not undo an already admitted publication or external effect.
 
-Locks and executables live under `<data>/plugin-programs/`, scoped by package
-digest and server platform. Failed preparation preserves the current version;
-older files remain available for rollback. See ADR-0049 for the epoch-3 migration
-and deployment recovery contract.
+This keeps downloads independent of the 30-second HTTP relay deadline.
+Operations have a nine-minute total budget, four concurrent slots and 64 recent
+in-memory results. A server restart loses operation status, not the atomic
+program/package locks; refresh the plugin and retry if needed. Web and Android
+perform this polling, including approval failures. The public MCP and
+`cairn_installation` expose the same package/program/status/cancellation commands
+with their scope, installation grant and owner checks. Agents cannot inspect owner
+instance preparations or operations belonging to another installation bearer.
+
+Cold instance tests, views/actions and form handlers also use this operation
+response when they may prepare an executable; once prepared, their ordinary
+synchronous responses are unchanged. Instance saves without a form handler remain
+synchronous and do not download programs.
 
 ## 1Password
 
 The bundled 1Password package is an ordinary package (`plugins/onepassword/`):
 service accounts are instances with a secret token and agent grants, `op` is a
 declared program, and its commands, `onepassword` tool, instructions, panel and test
-are declared in its manifest. Accounts saved before plugins existed move into instances at
-startup with the same IDs, grants and tokens. Metadata is available through the tool;
+are declared in its manifest. Metadata is available through the tool;
 secret reads only through the CLI, consumed inside a pipe or script:
 
 ```sh
 cairn plugin onepassword accounts
+cairn plugin onepassword limits --account ACCOUNT_ID
 cairn plugin onepassword fields --account ACCOUNT_ID --vault VAULT_ID --item ITEM_ID
 cairn plugin onepassword read --account ACCOUNT_ID op://vault/item/password |
   docker login --username example --password-stdin
 ```
+
+For related credentials, `read-fields --account ACCOUNT_ID --vault VAULT_ID
+--item ITEM_ID --fields '["username","credential"]'` fetches the item once and
+writes a secret JSON object keyed by the requested field IDs or labels. Pipe it
+into the consuming script, then reuse the values in memory for that bounded
+script's API calls. Cairn does not retain the plaintext values. Ambiguous labels
+require unique field IDs; TOTP fields use `read` instead, so the grouped command
+cannot accidentally return their seeds. Metadata tools never expose either
+secret command.
+
+The official CLI runs with `OP_CACHE=true` and an installation-managed encrypted
+in-memory cache daemon per service-account connection. Conversations and agents with
+access to that connection reuse it; different connections and installations do not
+share a home or socket. It starts lazily, expires after ten idle minutes and is
+discarded on token/settings changes, disabling/deletion or manager restart. Item and
+vault refresh behavior remains the official CLI's responsibility; Cairn adds no
+plaintext secret TTL. This reduces repeated CLI work but does not raise the upstream
+quota or guarantee that a warm read makes no API calls. See the
+[official CLI cache reference](https://www.1password.dev/cli/reference).
+
+`limits` is also available through the metadata tool. It reports the CLI's
+hourly token and daily account limits, usage, remaining requests and `reset` in
+seconds. A rate-limited read reports the exhausted quota and the longest reset
+among exhausted limits that apply to reads (hourly write limits are independent).
+If the diagnostic query fails, it returns a safe rate-limit
+message rather than forwarding program output. Other errors retain the generic
+message, since arbitrary CLI diagnostics can contain secrets.
+
+Daily limits are shared by all service accounts of the same 1Password account.
+Stop repeated reads until reset; reconnecting or rotating a token does not reset
+the daily budget. See [1Password's quota documentation](https://www.1password.dev/service-accounts/rate-limits).
 
 The CLI uses the same private VM channel and run grant, including remote nodes.
 It never authenticates `op` inside the conversation VM. The service-account token
@@ -849,10 +904,6 @@ records its output. Already delivered secrets cannot be revoked.
 The CLI expects an active conversation VM with the current Cairn binary and guest
 channel; VMs started by an earlier binary must restart to use it. Non-VM development
 commands do not acquire a new manager network route.
-
-Existing 1Password accounts migrate to plugin instances at startup. This is a data
-compatibility break (epoch 2); follow the [migration and rollback plan](PLUGIN-V2-MIGRATION.md)
-before deploying the first plugin API v2 release.
 
 ## GitHub
 
@@ -885,9 +936,6 @@ The bundled GitHub package (`plugins/github/`) is an ordinary package built on t
 Plugin HTTP follows no redirects: a repository renamed or transferred on GitHub answers
 with a redirect, which the package reports as unavailable. Register the project again
 with its new name.
-
-Installations that had the earlier built-in GitHub move into this package at startup:
-see the [migration](GITHUB-PLUGIN-MIGRATION.md).
 
 ## Discord
 
@@ -924,7 +972,9 @@ The transport worker follows Discord's Gateway lifecycle, checked against
   instances, and Identify writes are paced five seconds apart without blocking
   heartbeats. Failed budget lookups retry without identifying, and resets trigger a
   fresh lookup. Observation expiry includes the time spent dialing and waiting for
-  Hello, so an old window never lowers the new window’s balance. Resumes use the session's `resume_gateway_url`;
+  Hello, so an old window never lowers the new window’s balance. An unused bot's
+  positive budget with `reset_after: 0` can identify immediately, with a bounded
+  daily reservation until Discord reports its reset countdown. Resumes use the session's `resume_gateway_url`;
 - Hello must arrive within 60 seconds and READY within 15 seconds of Identify,
   otherwise it reconnects (starting over after a missing READY);
 - heartbeats start after a random part of the interval and carry the last sequence;
@@ -1052,32 +1102,6 @@ required text cannot trim to empty, and nonempty URLs must use HTTP(S). Optional
 empty text retains the existing pattern exemption. Secret defaults and dynamic
 choice defaults remain forbidden. A null default on a non-secret field means
 no default. No values are truncated.
-
-This tightens the set of persisted manifests that the registry can read. The
-installation compatibility epoch advances from 3 to 4. The subsequently reviewed
-[automatic transition to epoch 9](AUTOMATIC-MIGRATIONS.md) now covers this boundary
-under [the production compatibility contract](PRODUCTION-CAIRN.md#installation-data-compatibility).
-Both bundled manifests and ordinary valid installed packages
-retain their settings, serialized form and approval digests; no database, secret
-or instance record is rewritten.
-
-When qualifying an epoch transition, inspect installed manifest settings
-for negative, zero, fractional or oversized `maxLength`, reversed numeric bounds,
-and defaults that fail the rules above. The registry revalidates every version on
-read: an incompatible installed version fails with a validation error, remains on
-disk, and cannot run; catalog version errors identify it. Do not silently clamp,
-normalize or reapprove its contents.
-
-Forward repair: publish a corrected package with a new version under the same
-plugin ID, upload it, review and approve that version. Choose bounds that cover
-existing instance values, or deliberately correct those values when editing the
-instance. The registry then activates the approved version; existing instance IDs,
-settings, encrypted secrets and grants stay in place. If repair or approval fails,
-keep the original files and records and fix the package before retrying. Preserve
-the previous binary and an explicitly prepared pre-transition data backup for a
-reviewed rollback; do not run the previous binary on epoch-4 installation data or
-lower the compatibility epoch to bypass the rollout gate. No automatic data
-backup/restoration or production manifest inventory is claimed here.
 
 The Android `Int?` decoder's behavior for a fractional `maxLength` has not been
 executed on a JVM or device in this change. Backend admission now rejects that

@@ -7,28 +7,59 @@
         "name": "Mail",
         "version": "1",
         "apiVersion": 2,
-        "capabilities": ["http"],
-        "hosts": ["auth.mail.example"],
+        "capabilities": [
+          "http"
+        ],
+        "hosts": [
+          "auth.mail.example"
+        ],
         "credential": {
           "label": "Authorization",
           "header": "authorization",
           "oauth": {
             "authorizationUrl": "https://auth.mail.example/authorize",
             "tokenUrl": "https://auth.mail.example/token",
-            "clientIdSetting": "clientId"
+            "clientIdSetting": "clientId",
+            "authorizationParameters": {},
+            "scopeSettings": {}
           }
         },
         "settings": [
-          { "key": "clientId", "title": "Client ID", "type": "string", "required": true },
-          { "key": "email", "title": "Email", "type": "string", "hidden": true }
+          {
+            "key": "clientId",
+            "title": "Client ID",
+            "type": "string",
+            "required": true
+          },
+          {
+            "key": "email",
+            "title": "Email",
+            "type": "string",
+            "hidden": true
+          }
         ],
         "agentAccess": {}
       },
       "effort": "app",
       "steps": [
-        { "id": "settings", "kind": "settings", "title": "Settings", "settings": ["clientId"] },
-        { "id": "credential", "kind": "credential", "title": "Sign in with Mail" },
-        { "id": "agents", "kind": "agents", "title": "Agents" }
+        {
+          "id": "settings",
+          "kind": "settings",
+          "title": "Settings",
+          "settings": [
+            "clientId"
+          ]
+        },
+        {
+          "id": "credential",
+          "kind": "credential",
+          "title": "Sign in with Mail"
+        },
+        {
+          "id": "agents",
+          "kind": "agents",
+          "title": "Agents"
+        }
       ]
     },
     {
@@ -38,16 +69,45 @@
         "name": "Bot",
         "version": "1",
         "apiVersion": 2,
-        "capabilities": ["http", "conversations.submit"],
-        "hosts": ["api.bot.example"],
-        "credential": { "label": "Bot token", "header": "authorization" },
-        "settings": [{ "key": "channel", "title": "Channel", "type": "string" }]
+        "capabilities": [
+          "http",
+          "conversations.submit"
+        ],
+        "hosts": [
+          "api.bot.example"
+        ],
+        "credential": {
+          "label": "Bot token",
+          "header": "authorization"
+        },
+        "settings": [
+          {
+            "key": "channel",
+            "title": "Channel",
+            "type": "string"
+          }
+        ]
       },
       "effort": "token",
       "steps": [
-        { "id": "credential", "kind": "credential", "title": "Bot token" },
-        { "id": "settings", "kind": "settings", "title": "Settings", "settings": ["channel"] },
-        { "id": "people", "kind": "people", "title": "Who can talk to it" }
+        {
+          "id": "credential",
+          "kind": "credential",
+          "title": "Bot token"
+        },
+        {
+          "id": "settings",
+          "kind": "settings",
+          "title": "Settings",
+          "settings": [
+            "channel"
+          ]
+        },
+        {
+          "id": "people",
+          "kind": "people",
+          "title": "Who can talk to it"
+        }
       ]
     },
     {
@@ -57,8 +117,12 @@
         "name": "Forge",
         "version": "1",
         "apiVersion": 2,
-        "capabilities": ["http"],
-        "hosts": ["forge.example"],
+        "capabilities": [
+          "http"
+        ],
+        "hosts": [
+          "forge.example"
+        ],
         "credential": {
           "label": "Forge token",
           "header": "authorization",
@@ -68,13 +132,28 @@
             "clientId": "public"
           }
         },
-        "settings": [{ "key": "login", "title": "Login", "type": "string", "hidden": true }],
+        "settings": [
+          {
+            "key": "login",
+            "title": "Login",
+            "type": "string",
+            "hidden": true
+          }
+        ],
         "agentAccess": {}
       },
       "effort": "signin",
       "steps": [
-        { "id": "credential", "kind": "credential", "title": "Sign in with Forge" },
-        { "id": "agents", "kind": "agents", "title": "Agents" }
+        {
+          "id": "credential",
+          "kind": "credential",
+          "title": "Sign in with Forge"
+        },
+        {
+          "id": "agents",
+          "kind": "agents",
+          "title": "Agents"
+        }
       ]
     },
     {
@@ -85,13 +164,31 @@
         "version": "1",
         "apiVersion": 2,
         "capabilities": [],
-        "settings": [{ "key": "token", "title": "Token", "type": "secret", "required": true }],
+        "settings": [
+          {
+            "key": "token",
+            "title": "Token",
+            "type": "secret",
+            "required": true
+          }
+        ],
         "agentAccess": {}
       },
       "effort": "token",
       "steps": [
-        { "id": "settings", "kind": "settings", "title": "Settings", "settings": ["token"] },
-        { "id": "agents", "kind": "agents", "title": "Agents" }
+        {
+          "id": "settings",
+          "kind": "settings",
+          "title": "Settings",
+          "settings": [
+            "token"
+          ]
+        },
+        {
+          "id": "agents",
+          "kind": "agents",
+          "title": "Agents"
+        }
       ]
     },
     {
@@ -101,7 +198,9 @@
         "name": "Clock",
         "version": "1",
         "apiVersion": 2,
-        "capabilities": ["timers"]
+        "capabilities": [
+          "timers"
+        ]
       },
       "effort": null,
       "steps": []
@@ -112,96 +211,385 @@
       "id": "permissions",
       "kind": "settings",
       "title": "Permissions",
-      "settings": ["allowSend", "allowDrafts", "allowDelete"],
+      "settings": [
+        "allowSend",
+        "allowDrafts",
+        "allowDelete"
+      ],
       "presets": [
-        { "id": "read", "title": "Read only" },
-        { "id": "send", "title": "Read, draft and send", "values": { "allowDrafts": true, "allowSend": true } }
+        {
+          "id": "read",
+          "title": "Read only"
+        },
+        {
+          "id": "send",
+          "title": "Read, draft and send",
+          "values": {
+            "allowDrafts": true,
+            "allowSend": true
+          }
+        }
       ]
     },
     "fields": [
-      { "key": "allowSend", "title": "Send", "type": "boolean" },
-      { "key": "allowDrafts", "title": "Drafts", "type": "boolean" },
-      { "key": "allowDelete", "title": "Delete", "type": "boolean", "risk": "high" }
+      {
+        "key": "allowSend",
+        "title": "Send",
+        "type": "boolean"
+      },
+      {
+        "key": "allowDrafts",
+        "title": "Drafts",
+        "type": "boolean"
+      },
+      {
+        "key": "allowDelete",
+        "title": "Delete",
+        "type": "boolean",
+        "risk": "high"
+      }
     ],
     "cases": [
-      { "values": {}, "matching": "read" },
-      { "values": { "allowSend": false, "allowDrafts": false, "allowDelete": false }, "matching": "read" },
-      { "values": { "allowSend": true, "allowDrafts": true }, "matching": "send" },
-      { "values": { "allowSend": true, "allowDrafts": true, "allowDelete": true }, "matching": "" },
-      { "values": { "allowSend": true }, "matching": "" }
+      {
+        "values": {},
+        "matching": "read"
+      },
+      {
+        "values": {
+          "allowSend": false,
+          "allowDrafts": false,
+          "allowDelete": false
+        },
+        "matching": "read"
+      },
+      {
+        "values": {
+          "allowSend": true,
+          "allowDrafts": true
+        },
+        "matching": "send"
+      },
+      {
+        "values": {
+          "allowSend": true,
+          "allowDrafts": true,
+          "allowDelete": true
+        },
+        "matching": ""
+      },
+      {
+        "values": {
+          "allowSend": true
+        },
+        "matching": ""
+      }
     ],
     "applied": {
-      "send": { "allowSend": true, "allowDrafts": true, "allowDelete": false },
-      "read": { "allowSend": false, "allowDrafts": false, "allowDelete": false }
+      "send": {
+        "allowSend": true,
+        "allowDrafts": true,
+        "allowDelete": false
+      },
+      "read": {
+        "allowSend": false,
+        "allowDrafts": false,
+        "allowDelete": false
+      }
     }
   },
   "sources": {
     "steps": [
-      { "id": "app", "kind": "settings", "title": "App", "settings": ["clientId", "clientSecret"], "shared": true },
-      { "id": "connect", "kind": "credential", "title": "Sign in" }
+      {
+        "id": "app",
+        "kind": "settings",
+        "title": "App",
+        "settings": [
+          "clientId",
+          "clientSecret"
+        ],
+        "shared": true
+      },
+      {
+        "id": "connect",
+        "kind": "credential",
+        "title": "Sign in"
+      }
     ],
     "fields": [
-      { "key": "clientId", "title": "Client ID", "type": "string", "required": true },
-      { "key": "clientSecret", "title": "Client secret", "type": "secret", "required": true }
+      {
+        "key": "clientId",
+        "title": "Client ID",
+        "type": "string",
+        "required": true
+      },
+      {
+        "key": "clientSecret",
+        "title": "Client secret",
+        "type": "secret",
+        "required": true
+      }
     ],
     "connections": [
-      { "id": "a", "name": "alice@example.test", "settings": { "clientId": "one" }, "secretKeys": ["clientSecret"] },
-      { "id": "b", "name": "bob@example.test", "settings": { "clientId": "one" }, "secretKeys": ["clientSecret"] },
-      { "id": "c", "name": "carol@example.test", "settings": { "clientId": "two" }, "secretKeys": ["clientSecret"] },
-      { "id": "d", "name": "no secret", "settings": { "clientId": "three" }, "secretKeys": [] },
-      { "id": "e", "name": "no client", "settings": {}, "secretKeys": ["clientSecret"] }
+      {
+        "id": "a",
+        "name": "alice@example.test",
+        "settings": {
+          "clientId": "one"
+        },
+        "secretKeys": [
+          "clientSecret"
+        ],
+        "status": {
+          "state": "disconnected",
+          "message": null
+        },
+        "usage": {
+          "hour": 0
+        }
+      },
+      {
+        "id": "b",
+        "name": "bob@example.test",
+        "settings": {
+          "clientId": "one"
+        },
+        "secretKeys": [
+          "clientSecret"
+        ],
+        "status": {
+          "state": "disconnected",
+          "message": null
+        },
+        "usage": {
+          "hour": 0
+        }
+      },
+      {
+        "id": "c",
+        "name": "carol@example.test",
+        "settings": {
+          "clientId": "two"
+        },
+        "secretKeys": [
+          "clientSecret"
+        ],
+        "status": {
+          "state": "disconnected",
+          "message": null
+        },
+        "usage": {
+          "hour": 0
+        }
+      },
+      {
+        "id": "d",
+        "name": "no secret",
+        "settings": {
+          "clientId": "three"
+        },
+        "secretKeys": [],
+        "status": {
+          "state": "disconnected",
+          "message": null
+        },
+        "usage": {
+          "hour": 0
+        }
+      },
+      {
+        "id": "e",
+        "name": "no client",
+        "settings": {},
+        "secretKeys": [
+          "clientSecret"
+        ],
+        "status": {
+          "state": "disconnected",
+          "message": null
+        },
+        "usage": {
+          "hour": 0
+        }
+      }
     ],
     "cases": [
       {
         "except": null,
         "expected": [
-          { "id": "a", "names": ["alice@example.test"], "label": "one" },
-          { "id": "b", "names": ["bob@example.test"], "label": "one" },
-          { "id": "c", "names": ["carol@example.test"], "label": "two" }
+          {
+            "id": "a",
+            "names": [
+              "alice@example.test"
+            ],
+            "label": "one"
+          },
+          {
+            "id": "b",
+            "names": [
+              "bob@example.test"
+            ],
+            "label": "one"
+          },
+          {
+            "id": "c",
+            "names": [
+              "carol@example.test"
+            ],
+            "label": "two"
+          }
         ]
       },
       {
         "except": "a",
         "expected": [
-          { "id": "b", "names": ["bob@example.test"], "label": "one" },
-          { "id": "c", "names": ["carol@example.test"], "label": "two" }
+          {
+            "id": "b",
+            "names": [
+              "bob@example.test"
+            ],
+            "label": "one"
+          },
+          {
+            "id": "c",
+            "names": [
+              "carol@example.test"
+            ],
+            "label": "two"
+          }
         ]
       },
       {
         "except": null,
         "fields": [
-          { "key": "clientId", "title": "Client ID", "type": "string", "required": true },
-          { "key": "clientSecret", "title": "Client secret", "type": "secret" }
+          {
+            "key": "clientId",
+            "title": "Client ID",
+            "type": "string",
+            "required": true
+          },
+          {
+            "key": "clientSecret",
+            "title": "Client secret",
+            "type": "secret"
+          }
         ],
         "expected": [
-          { "id": "a", "names": ["alice@example.test"], "label": "one" },
-          { "id": "b", "names": ["bob@example.test"], "label": "one" },
-          { "id": "c", "names": ["carol@example.test"], "label": "two" },
-          { "id": "d", "names": ["no secret"], "label": "three" }
+          {
+            "id": "a",
+            "names": [
+              "alice@example.test"
+            ],
+            "label": "one"
+          },
+          {
+            "id": "b",
+            "names": [
+              "bob@example.test"
+            ],
+            "label": "one"
+          },
+          {
+            "id": "c",
+            "names": [
+              "carol@example.test"
+            ],
+            "label": "two"
+          },
+          {
+            "id": "d",
+            "names": [
+              "no secret"
+            ],
+            "label": "three"
+          }
         ]
       },
       {
         "except": null,
         "steps": [
-          { "id": "app", "kind": "settings", "title": "App", "settings": ["clientId"], "shared": true }
+          {
+            "id": "app",
+            "kind": "settings",
+            "title": "App",
+            "settings": [
+              "clientId"
+            ],
+            "shared": true
+          }
         ],
         "expected": [
-          { "id": "a", "names": ["alice@example.test"], "label": "one" },
-          { "id": "b", "names": ["bob@example.test"], "label": "one" },
-          { "id": "c", "names": ["carol@example.test"], "label": "two" },
-          { "id": "d", "names": ["no secret"], "label": "three" }
+          {
+            "id": "a",
+            "names": [
+              "alice@example.test"
+            ],
+            "label": "one"
+          },
+          {
+            "id": "b",
+            "names": [
+              "bob@example.test"
+            ],
+            "label": "one"
+          },
+          {
+            "id": "c",
+            "names": [
+              "carol@example.test"
+            ],
+            "label": "two"
+          },
+          {
+            "id": "d",
+            "names": [
+              "no secret"
+            ],
+            "label": "three"
+          }
         ]
       },
       {
         "except": null,
         "steps": [
-          { "id": "app", "kind": "settings", "title": "App", "settings": ["clientSecret"], "shared": true }
+          {
+            "id": "app",
+            "kind": "settings",
+            "title": "App",
+            "settings": [
+              "clientSecret"
+            ],
+            "shared": true
+          }
         ],
         "expected": [
-          { "id": "a", "names": ["alice@example.test"], "label": "" },
-          { "id": "b", "names": ["bob@example.test"], "label": "" },
-          { "id": "c", "names": ["carol@example.test"], "label": "" },
-          { "id": "e", "names": ["no client"], "label": "" }
+          {
+            "id": "a",
+            "names": [
+              "alice@example.test"
+            ],
+            "label": ""
+          },
+          {
+            "id": "b",
+            "names": [
+              "bob@example.test"
+            ],
+            "label": ""
+          },
+          {
+            "id": "c",
+            "names": [
+              "carol@example.test"
+            ],
+            "label": ""
+          },
+          {
+            "id": "e",
+            "names": [
+              "no client"
+            ],
+            "label": ""
+          }
         ]
       }
     ]

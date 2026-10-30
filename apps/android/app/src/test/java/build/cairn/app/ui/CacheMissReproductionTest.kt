@@ -59,10 +59,10 @@ class CacheMissReproductionTest {
                 val output = "x".repeat(if (large) 2200 * 1024 else 100)
                 fun message(n: Int) =
                     RunEvent(
-                        n.toLong(),
-                        n.toLong(),
-                        "chat.user",
-                        if (n == 40) "Message témoin" else "Message %03d".format(n),
+                        id = n.toLong(),
+                        createdAt = n.toLong(),
+                        type = "chat.user",
+                        text = if (n == 40) "Message témoin" else "Message %03d".format(n),
                         runId = "fixture",
                     )
                 val accepted = if (paged) 40 else 2
@@ -71,30 +71,45 @@ class CacheMissReproductionTest {
                     else
                         listOf(
                             RunEvent(
-                                1,
-                                1,
-                                "item.completed",
-                                output,
-                                mapOf(
-                                    "item" to
-                                        buildJsonObject {
-                                            put("id", "tool")
-                                            put("type", "command_execution")
-                                            put("command", "fixture")
-                                            put("status", "completed")
-                                            put("aggregated_output", output)
-                                            put("exit_code", 0)
-                                        }
-                                ),
+                                id = 1,
+                                createdAt = 1,
+                                type = "item.completed",
+                                text = output,
+                                payload =
+                                    kotlinx.serialization.json.JsonObject(
+                                        mapOf(
+                                            "item" to
+                                                buildJsonObject {
+                                                    put("id", "tool")
+                                                    put("type", "command_execution")
+                                                    put("command", "fixture")
+                                                    put("status", "completed")
+                                                    put("aggregated_output", output)
+                                                    put("exit_code", 0)
+                                                }
+                                        )
+                                    ),
                                 runId = "fixture",
                             ),
-                            RunEvent(2, 2, "chat.user", "Message témoin", runId = "fixture"),
+                            RunEvent(
+                                id = 2,
+                                createdAt = 2,
+                                type = "chat.user",
+                                text = "Message témoin",
+                                runId = "fixture",
+                            ),
                         )
                 val batch =
                     wireJson.encodeToString(
                         LiveBatch(
                             events,
-                            LiveState(chat = Chat("diagnostic", title = "Diagnostic cache")),
+                            LiveState(
+                                chat =
+                                    Chat(
+                                        id = "aa61a476-87e5-5034-b813-8a63564107d7",
+                                        title = "Diagnostic cache",
+                                    )
+                            ),
                             reset = false,
                             more = false,
                             history = "v1:fixture:1",
@@ -119,7 +134,7 @@ class CacheMissReproductionTest {
                             }
                             if (
                                 request.requestUrl?.encodedPath ==
-                                    "/api/installations/fixture/api/chats/diagnostic/stream"
+                                    "/api/installations/fixture/api/chats/aa61a476-87e5-5034-b813-8a63564107d7/stream"
                             ) {
                                 requests.add(request.path!!)
                                 // Hold the reconnect indefinitely: visible content must come from
@@ -145,7 +160,12 @@ class CacheMissReproductionTest {
                                     .setHeader("Content-Type", "application/json")
                                     .setBody(
                                         wireJson.encodeToString(
-                                            HistoryPage(emptyList(), "v1:fixture:1", 1, false)
+                                            HistoryPage(
+                                                events = emptyList(),
+                                                history = "v1:fixture:1",
+                                                oldest = 1,
+                                                hasOlder = false,
+                                            )
                                         )
                                     )
                             }
@@ -164,23 +184,24 @@ class CacheMissReproductionTest {
                                     .setBody(
                                         wireJson.encodeToString(
                                             HistoryPage(
-                                                (1..20).map(::message),
-                                                "v1:fixture:1",
-                                                1,
-                                                false,
+                                                events = (1..20).map(::message),
+                                                history = "v1:fixture:1",
+                                                oldest = 1,
+                                                hasOlder = false,
                                             )
                                         )
                                     )
                             }
                             val body =
                                 when (request.path?.substringBefore('?')) {
+                                    "/api/installations/fixture/api/tasks" -> """{"tasks":[]}"""
                                     "/api/installations" -> beaconInstallationsFixture()
                                     "/api/account/session" -> beaconAccountFixture("fixture")
-                                    "/api/installations/fixture/api/agents",
-                                    "/api/installations/fixture/api/projects",
-                                    "/api/installations/fixture/api/tasks",
-                                    "/api/installations/fixture/api/skills",
-                                    "/api/installations/fixture/api/mcps" -> "[]"
+                                    "/api/installations/fixture/api/projects" ->
+                                        """{"projects":[]}"""
+                                    "/api/installations/fixture/api/agents" -> """{"agents":[]}"""
+                                    "/api/installations/fixture/api/skills" -> "[]"
+                                    "/api/installations/fixture/api/mcps" -> """{"mcps":[]}"""
                                     else -> "{}"
                                 }
                             return MockResponse()
@@ -200,7 +221,13 @@ class CacheMissReproductionTest {
                     if (workspace.session.authenticated && opened) {
                         CairnTheme("dark") {
                             Surface(Modifier.fillMaxSize()) {
-                                ChatScreen(vm, workspace, "diagnostic", openChat = {}, openRun = {})
+                                ChatScreen(
+                                    vm,
+                                    workspace,
+                                    "aa61a476-87e5-5034-b813-8a63564107d7",
+                                    openChat = {},
+                                    openRun = {},
+                                )
                             }
                         }
                     }
@@ -221,7 +248,7 @@ class CacheMissReproductionTest {
                         vm.historyCache.key(
                             vm.api.cacheScope,
                             vm.api.csrf,
-                            "/chats/diagnostic/stream",
+                            "/chats/aa61a476-87e5-5034-b813-8a63564107d7/stream",
                         )
                     val cached = runBlocking { vm.historyCache.read(key) }
                     assertNotNull("Both sizes retain recent messages", cached)
@@ -236,7 +263,7 @@ class CacheMissReproductionTest {
                     }
                     compose.waitForIdle()
                     assertEquals(
-                        "/api/installations/fixture/api/chats/diagnostic/stream?after=$accepted&history=v1%3Afixture%3A1&window=1&recent=1",
+                        "/api/installations/fixture/api/chats/aa61a476-87e5-5034-b813-8a63564107d7/stream?after=$accepted&history=v1%3Afixture%3A1&window=1&recent=1",
                         requests[1],
                     )
                     compose.onNodeWithText("Diagnostic cache").assertIsDisplayed()

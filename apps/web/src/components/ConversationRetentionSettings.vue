@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { getConversationRetention } from '../../../../packages/contracts/generated/getConversationRetention'
+import { setConversationRetention } from '../../../../packages/contracts/generated/setConversationRetention'
 import { api, notify } from '../api'
 import Modal from './Modal.vue'
 import UiAlert from './UiAlert.vue'
@@ -14,7 +16,7 @@ const valid = computed(() => days.value !== '' && Number.isInteger(Number(days.v
 
 onMounted(async () => {
   try {
-    days.value = (await api('/settings/conversations')).inactivityDays
+    days.value = (await getConversationRetention(api, {})).inactivityDays
     loaded.value = true
   }
   catch (cause) {
@@ -26,10 +28,7 @@ async function save() {
   busy.value = true
   error.value = ''
   try {
-    const policy = await api('/settings/conversations', {
-      method: 'PUT',
-      body: JSON.stringify({ inactivityDays: Number(days.value) }),
-    })
+    const policy = await setConversationRetention(api, { inactivityDays: Number(days.value) })
     days.value = policy.inactivityDays
     confirming.value = false
     notify('Conversation retention saved')
@@ -45,9 +44,9 @@ async function save() {
 
 <template>
   <section class="panel border-b border-line settings-section mb-5.5 px-0 py-7 phone:py-5">
-    <h2>Automatic conversation deletion</h2>
+    <h2>Automatic environment cleanup</h2>
     <p class="text-sm text-muted my-3">
-      Permanently delete conversations after this many days without activity. Applies to all conversations in this installation, including existing ones. Their history, files and shared links are removed. Use 0 to disable.
+      Remove working environments after this many days without activity, including existing conversations. History, uploaded attachments, all published file versions and shared links are retained. Unpushed changes, tools stored in the environment and other working files are permanently removed. The next message starts a fresh environment and informs the agent. Use 0 to disable.
     </p>
     <p class="text-sm text-muted my-3">
       Running agents, pending messages, open questions and scheduled wakeups are protected. The delay starts from the latest conversation activity or the end of the agent’s work. Reading a conversation does not restart the delay.
@@ -71,7 +70,7 @@ async function save() {
     </form>
     <Modal v-if="confirming" title="Save conversation retention?" @close="!busy && (confirming = false)">
       <p class="my-4">
-        {{ Number(days) === 0 ? 'Automatic deletion will be disabled. Conversations already deleted cannot be recovered.' : `Conversations inactive for ${days} days will be permanently deleted, including existing conversations. This cannot be undone.` }}
+        {{ Number(days) === 0 ? 'Automatic environment cleanup will be disabled. Working files already removed cannot be recovered.' : `Working environments inactive for ${days} days will be permanently removed, including existing conversations. History, uploaded attachments and published files are retained. Unpushed changes cannot be recovered.` }}
       </p>
       <UiAlert v-if="error" class="my-3">
         {{ error }}

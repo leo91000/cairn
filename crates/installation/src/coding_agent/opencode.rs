@@ -11,6 +11,7 @@ use crate::{
     skills::private_dir,
     validation::text,
 };
+use cairn_contracts::EventKind;
 use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
@@ -40,20 +41,6 @@ impl ExecutionAdapter for Opencode {
         crate::opencode::isolate(env, home);
     }
 
-    fn uses_chat(&self, _chat_execution: bool, _managed_account: bool) -> bool {
-        true
-    }
-
-    fn legacy_args(
-        &self,
-        _run: &Value,
-        _mcp: &Value,
-        _output: &str,
-        _session: Option<&str>,
-    ) -> Vec<String> {
-        Vec::new()
-    }
-
     fn validate_agent(&self, agent: &Value) -> Result<()> {
         crate::opencode::model_id(text(agent, "model"))?;
         if crate::service::policy(agent)["sandbox"] != "yolo" {
@@ -76,6 +63,7 @@ impl ExecutionAdapter for Opencode {
         let mut native_names = std::collections::HashSet::new();
         let mut permissions = Map::new();
         permissions.insert("*".into(), "allow".into());
+        permissions.insert("question".into(), "deny".into());
         for (name, server) in &configuration.servers {
             if !native_names.insert(native_tool_name(name)) {
                 return Err(Error::bad(
@@ -189,18 +177,10 @@ impl ExecutionAdapter for Opencode {
         };
         let selected = text(plan, "model").to_owned();
         let record = s.accounts.account(s, &account.account_id).await?;
-        let field = |name: &str| {
-            record
-                .extra
-                .get(name)
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned()
-        };
         let (name, via) = if selected.starts_with(crate::opencode::AUTO) {
             let route = s
                 .opencode
-                .route(s, &selected, &field("modelProvider"))
+                .route(s, &selected, record.model_provider.as_deref().unwrap_or_default())
                 .await?
                 .ok_or_else(|| {
                     Error::conflict(
@@ -226,14 +206,14 @@ impl ExecutionAdapter for Opencode {
                 .opencode
                 .display_name(&selected)
                 .unwrap_or(selected.clone());
-            (name, field("modelProviderName"))
+            (name, record.model_provider_name.unwrap_or_default())
         };
         // Conversations label the replies that follow with the provider that wrote them.
         let payload = json!({ "route": { "model": plan["model"], "providerName": via } });
         s.store
             .event(
                 text(plan, "runId"),
-                "status",
+                &EventKind::Status,
                 &format!("{name} via {via}"),
                 Some(payload),
             )

@@ -1,6 +1,6 @@
 mod common;
 
-use cairn_installation::{chat_process, config::Config, skills::atomic_write};
+use cairn_installation::{chat_process, config::Config, skills::atomic_write, validation::text};
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
@@ -133,6 +133,56 @@ fn manager_chat_plans_keep_mcp_configuration_out_of_process_arguments() {
         cairn_installation::run_output::chat_plan(&claude, &prepared, root.path(), &mcp, None)
             .unwrap();
     assert_eq!(plan["args"], mcp["args"]);
+}
+
+#[tokio::test]
+async fn resident_shell_commands_receive_only_the_current_runs_plugin_channel() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let service = Resident::start(config(&root), home.clone(), &root).await;
+    let run = json!({ "snapshot": { "agent": { "provider": "codex" } } });
+    let prepared = json!({
+        "output": root.path().join("result.md"),
+        "cwd": root.path(),
+    });
+
+    for (index, token) in [Some("first-lease"), Some("second-lease"), None]
+        .into_iter()
+        .enumerate()
+    {
+        let mut env = json!({ "UNRELATED_SECRET": "must-not-reach-shell" });
+        if let Some(token) = token {
+            env["CAIRN_MCP_RUN_TOKEN"] = token.into();
+        }
+        let origin = if index == 1 {
+            env["CAIRN_MCP_ORIGIN"] = "http://127.0.0.1:5523".into();
+            "http://127.0.0.1:5523"
+        } else {
+            "http://127.0.0.1:5202"
+        };
+        let mcp = json!({ "codexConfig": {}, "env": env });
+        let generated =
+            cairn_installation::run_output::chat_plan(&run, &prepared, root.path(), &mcp, None)
+                .unwrap();
+        let mut plan = plan(&root, &format!("message {index}"));
+        plan["execution"]["messageId"] = format!("message-{index}").into();
+        plan["codexConfig"] = generated["codexConfig"].clone();
+        if index > 0 {
+            plan["sessionId"] = "fixture-chat".into();
+        }
+
+        service.run(plan).await;
+        assert_eq!(
+            conversation(&home)["fixtureConfig"]["shell_environment_policy"]["set"],
+            json!({
+                "CAIRN_MCP_RUN_TOKEN": token.unwrap_or(""),
+                "CAIRN_MCP_ORIGIN": origin,
+            }),
+            "A retained process must replace the plugin channel on every attempt, including removal",
+        );
+    }
+
+    service.stop().await;
 }
 
 #[tokio::test]
@@ -405,6 +455,7 @@ async fn oversized_inbox_fails_before_submitting_messages() {
     let root = TempDir::new().unwrap();
     let home = prepare(&root);
     let config = config(&root);
+    std::fs::write(home.join("fixture-lifecycle.jsonl"), "").unwrap();
     std::fs::write(
         root.path().join("inbox/messages.json"),
         vec![b' '; 2_000_001],
@@ -432,6 +483,48 @@ async fn oversized_inbox_fails_before_submitting_messages() {
     events.await.unwrap();
     assert_eq!(error.status, 400);
     assert_eq!(error.message, "Chat inbox is too large.");
+    assert!(
+        lifecycle(&home)
+            .iter()
+            .all(|entry| { entry["method"] != "turn/start" && entry["method"] != "turn/steer" })
+    );
+}
+
+#[tokio::test]
+async fn resident_rejects_an_oversized_inbox_before_submitting_messages() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let service = Resident::start(config(&root), home.clone(), &root).await;
+    std::fs::write(
+        root.path().join("inbox/messages.json"),
+        vec![b' '; 2_000_001],
+    )
+    .unwrap();
+    let mut plan = plan(&root, "Continue the request");
+    plan["codexConfig"] = json!({ "mcp_servers": {} });
+    let (events, mut received) = mpsc::channel::<Value>(64);
+    let output = tokio::spawn(async move {
+        while let Some(event) = received.recv().await {
+            assert_ne!(event["type"], "turn.completed");
+        }
+    });
+    let error = tokio::time::timeout(
+        Duration::from_secs(10),
+        chat_process::resident::run(&service.socket, plan, events, CancellationToken::new()),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    output.await.unwrap();
+    assert_eq!(error.status, 400);
+    assert_eq!(error.message, "Chat inbox is too large.");
+    let error = service.task.await.unwrap().unwrap_err();
+    assert_eq!(error.status, 400);
+    assert!(
+        lifecycle(&home)
+            .iter()
+            .all(|entry| { entry["method"] != "turn/start" && entry["method"] != "turn/steer" })
+    );
 }
 
 #[tokio::test]
@@ -474,55 +567,229 @@ async fn model_and_reasoning_reach_codex_and_model_changes_resolve_the_new_defau
 }
 
 #[tokio::test]
-async fn native_in_flight_question_accepts_answer_and_preserves_receipt() {
+async fn a_faster_tier_is_checked_against_codex_own_model_list_before_the_turn() {
     let root = TempDir::new().unwrap();
     let home = prepare(&root);
     let config = config(&root);
-    let plan = plan(&root, "fixture:question");
+    // Codex's own catalog lists Fast (`priority`) for fixture-fast only; Ultrafast for none here.
+    let cases = [
+        (
+            "fixture-fast",
+            "priority",
+            false,
+            "priority",
+            Some("offered"),
+        ),
+        ("", "priority", false, "priority", Some("offered")),
+        (
+            "fixture-deep",
+            "priority",
+            false,
+            "default",
+            Some("applied"),
+        ),
+        (
+            "fixture-fast",
+            "ultrafast",
+            false,
+            "default",
+            Some("applied"),
+        ),
+        (
+            "custom-alias",
+            "priority",
+            false,
+            "priority",
+            Some("unconfirmed"),
+        ),
+        (
+            "fixture-fast",
+            "priority",
+            true,
+            "priority",
+            Some("unconfirmed"),
+        ),
+        ("fixture-deep", "default", false, "default", None),
+        // A dated version of a listed model: Codex may apply the listed model's tiers to it.
+        (
+            "fixture-fast-2026-10-01",
+            "priority",
+            false,
+            "priority",
+            Some("unconfirmed"),
+        ),
+        // Without a chosen model, Codex runs the one its configuration sets, not the catalog's
+        // default: fixture-deep lists no Fast.
+        ("", "priority", false, "default", Some("applied")),
+        // The process lists Fast, but the account's own catalog names the model without it: the
+        // process fell back to Codex's built-in list, and the account runs Standard.
+        (
+            "fixture-fast",
+            "priority",
+            false,
+            "default",
+            Some("applied"),
+        ),
+        // Without the account's recent catalog, the process list alone confirms nothing.
+        (
+            "fixture-fast",
+            "priority",
+            false,
+            "priority",
+            Some("unconfirmed"),
+        ),
+    ];
+    for (index, (model, tier, list_fails, sent, notice)) in cases.into_iter().enumerate() {
+        let configured = home.join("fixture-config-model");
+        if index == 8 {
+            std::fs::write(&configured, "fixture-deep").unwrap();
+        }
+        let failure = home.join("fixture-model-list-error");
+        if list_fails {
+            std::fs::write(&failure, "").unwrap();
+        } else {
+            let _ = std::fs::remove_file(&failure);
+        }
+        let mut plan = plan(&root, "Check the speed");
+        plan["model"] = model.into();
+        plan["serviceTier"] = tier.into();
+        // The account's recent catalog, as planning passes it: Fast for fixture-fast only.
+        plan["accountTiers"] = match index {
+            9 => json!({ "fixture-fast": [] }),
+            10 => Value::Null,
+            _ => json!({ "fixture-fast": ["priority"], "fixture-deep": [] }),
+        };
+        plan["execution"]["messageId"] = format!("speed-{index}").into();
+        if index > 0 {
+            plan["sessionId"] = "fixture-chat".into();
+        }
+        let (tx, mut rx) = mpsc::channel::<Value>(64);
+        let events = tokio::spawn(async move {
+            let mut speed = Vec::new();
+            while let Some(event) = rx.recv().await {
+                if event["type"] == "turn.speed" {
+                    speed.push(event);
+                }
+            }
+            speed
+        });
+        chat_process::run(&config, &home, plan, tx, CancellationToken::new())
+            .await
+            .unwrap();
+        let speed = events.await.unwrap();
+        let thread = conversation(&home);
+        assert_eq!(thread["turns"][index]["serviceTier"], sent, "case {index}");
+        match notice {
+            None => assert!(speed.is_empty(), "case {index}: {speed:?}"),
+            Some(kind) => {
+                assert_eq!(speed.len(), 1, "case {index}: {speed:?}");
+                assert_eq!(speed[0]["speed"]["requested"], tier);
+                assert_eq!(speed[0]["messageId"], format!("speed-{index}"));
+                match kind {
+                    "offered" => {
+                        assert_eq!(speed[0]["speed"]["confirmed"], true);
+                        assert!(speed[0]["speed"].get("applied").is_none());
+                    }
+                    "applied" => assert_eq!(speed[0]["speed"]["applied"], "standard"),
+                    _ => assert_eq!(speed[0]["speed"]["unconfirmed"], true),
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn resolved_speed_reaches_codex_and_a_plan_without_a_tier_sends_none() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let config = config(&root);
+    for (index, tier) in [Some("priority"), None, Some("default")]
+        .into_iter()
+        .enumerate()
+    {
+        let mut plan = plan(&root, "Check the speed setting");
+        if let Some(tier) = tier {
+            plan["serviceTier"] = tier.into();
+        }
+        plan["execution"]["messageId"] = format!("message-{index}").into();
+        if index > 0 {
+            plan["sessionId"] = "fixture-chat".into();
+        }
+        run_quietly(&config, &home, plan).await;
+        let thread = conversation(&home);
+        assert_eq!(
+            thread["turns"][index]["serviceTier"],
+            tier.map_or(Value::Null, Value::from)
+        );
+    }
+}
+
+#[tokio::test]
+async fn disk_notice_reaches_codex_without_a_user_delivery_receipt() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let config = config(&root);
+    let next_config = config.clone();
+    let next_home = home.clone();
+    let input = plan(&root, "fixture:chat-hang");
+    std::fs::write(
+        root.path().join("inbox/disk-notice.json"),
+        json!({ "id": "disk-notice", "operationalNotice": true,
+            "text": "Runtime disk pressure" })
+        .to_string(),
+    )
+    .unwrap();
     let (tx, mut rx) = mpsc::channel(64);
     let task = tokio::spawn(async move {
-        chat_process::run(&config, &home, plan, tx, CancellationToken::new()).await
+        chat_process::run(&config, &home, input, tx, CancellationToken::new()).await
     });
-    let mut answer_receipts = 0;
-    let mut completed = false;
-    let mut question_id = String::new();
     tokio::time::timeout(Duration::from_secs(10), async {
         while let Some(event) = rx.recv().await {
-            match event["type"].as_str().unwrap_or("") {
-                "chat.question" => {
-                    question_id = event["question"]["id"].as_str().unwrap().to_owned();
-                    assert_eq!(event["question"]["blocking"], false);
-                    let answer = json!([{
-                        "id": "answer-message",
-                        "questionId": question_id,
-                        "answers": { "direction": ["Gradual rollout"] },
-                        "text": "My answer",
-                    }]);
-                    deliver(&root, &answer).await;
-                }
-                "chat.delivered" if event["messageId"] == "answer-message" => answer_receipts += 1,
-                "turn.completed" => completed = true,
-                _ => {}
+            assert!(!(event["type"] == "chat.delivered" && event["messageId"] == "disk-notice"));
+            if event["type"] == "thread.started" {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                deliver(&root, &json!([{ "id": "finish", "text": "finish now" }])).await;
             }
         }
     })
     .await
     .unwrap();
     task.await.unwrap().unwrap();
-    assert_eq!(answer_receipts, 1);
+    let mut next = plan(&root, "Continue after the disk notice");
+    next["execution"]["messageId"] = "next-user-message".into();
+    next["sessionId"] = "fixture-chat".into();
+    // A newer operational notice replaces the file before the next turn.
+    std::fs::write(root.path().join("inbox/disk-notice.json"),
+        json!({ "id": "newer-disk-notice", "operationalNotice": true, "text": "Updated runtime notice" }).to_string()).unwrap();
+    let (tx, mut rx) = mpsc::channel(64);
+    let next_task = tokio::spawn(async move {
+        chat_process::run(&next_config, &next_home, next, tx, CancellationToken::new()).await
+    });
+    let mut completed = false;
+    while let Some(event) = rx.recv().await {
+        if event["type"] == "chat.delivered" {
+            let id = event["messageId"].as_str().unwrap();
+            assert!(!id.contains("disk-notice"), "{event}");
+        }
+        completed |= event["type"] == "turn.completed";
+    }
+    next_task.await.unwrap().unwrap();
     assert!(completed);
-    assert_eq!(question_id.len(), 64);
-    assert!(root.path().join("result.md").exists());
+    assert!(
+        std::fs::read_to_string(root.path().join("codex/fixture-conversation.json"))
+            .unwrap()
+            .contains("Runtime disk pressure")
+    );
 }
 
 #[tokio::test]
-async fn withdrawn_native_questions_resume_without_an_answer_or_user_receipt() {
+async fn native_question_requests_are_refused_in_favor_of_the_common_tool() {
     for blocking in [false, true] {
         let root = TempDir::new().unwrap();
         let home = prepare(&root);
         let observed = home.clone();
         let config = config(&root);
-        let plan = plan(
+        let input = plan(
             &root,
             if blocking {
                 "fixture:question blocking"
@@ -532,30 +799,32 @@ async fn withdrawn_native_questions_resume_without_an_answer_or_user_receipt() {
         );
         let (tx, mut rx) = mpsc::channel(64);
         let task = tokio::spawn(async move {
-            chat_process::run(&config, &home, plan, tx, CancellationToken::new()).await
+            chat_process::run(&config, &home, input, tx, CancellationToken::new()).await
         });
         let mut completed = false;
         tokio::time::timeout(Duration::from_secs(10), async {
             while let Some(event) = rx.recv().await {
-                if event["type"] == "chat.question" {
-                    deliver(&root, &json!([{
-                        "id": "withdrawal", "questionId": event["question"]["id"], "questionCancelled": true,
-                    }])).await;
-                }
-                assert!(!(event["type"] == "chat.delivered" && event["messageId"] == "withdrawal"));
+                assert_ne!(event["type"], "chat.question");
                 completed |= event["type"] == "turn.completed";
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         task.await.unwrap().unwrap();
         assert!(completed);
         let thread = conversation(&observed);
-        let answer = thread["turns"][0]["items"]
+        let rejected = thread["turns"][0]["items"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|i| i["type"] == "fixtureAnswer")
+            .find(|item| item["type"] == "fixtureAnswer")
             .unwrap();
-        assert_eq!(answer["answers"], json!({}));
+        assert!(text(&rejected["error"], "message").contains("cairn_workspace.ask_questions"));
+        assert!(rejected["answers"].is_null());
+        assert_eq!(
+            thread["fixtureConfig"]["features.default_mode_request_user_input"],
+            false
+        );
     }
 }
 
@@ -1004,179 +1273,171 @@ async fn images_and_files_reach_start_and_steer_as_readable_inputs() {
     );
 }
 
-fn side_question(id: &str, text: &str) -> Value {
-    json!({ "id": format!("side-question:{id}"), "sideQuestion": { "id": id, "text": text } })
+/// Runs one execution and returns its events with its result.
+async fn collect(
+    config: &Config,
+    home: &Path,
+    plan: Value,
+) -> (Vec<Value>, cairn_installation::error::Result<()>) {
+    let (tx, mut rx) = mpsc::channel(256);
+    let output = tokio::spawn(async move {
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+        events
+    });
+    let result = tokio::time::timeout(
+        Duration::from_secs(20),
+        chat_process::run(config, home, plan, tx, CancellationToken::new()),
+    )
+    .await
+    .unwrap();
+    (output.await.unwrap(), result)
 }
 
-/// Runs `text`, delivering `inbox` once the adapter announces side questions, and
-/// returns the Codex home with every event.
-async fn with_side_questions(
-    text: &str,
-    inbox: Value,
-    withdraw: Option<&str>,
-) -> (TempDir, PathBuf, Vec<Value>) {
+fn compaction_plan(root: &TempDir) -> Value {
+    let mut plan = plan(root, "");
+    plan["sessionId"] = "fixture-chat".into();
+    plan["execution"] = json!({
+        "messageId": "compact:fixture",
+        "text": "",
+        "attachments": [],
+        "recovery": false,
+        "operation": "compact",
+    });
+    plan
+}
+
+#[tokio::test]
+async fn context_usage_is_the_latest_request_against_the_model_window() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let (events, result) = collect(&config(&root), &home, plan(&root, "Inspect usage")).await;
+    result.unwrap();
+
+    let usage = events
+        .iter()
+        .filter(|event| event["type"] == "context.usage")
+        .collect::<Vec<_>>();
+    assert_eq!(usage.len(), 1);
+    // The thread total (93,000 tokens) is spend, not occupancy, and is never reported.
+    assert_eq!(
+        usage[0]["usage"],
+        json!({
+            "contextTokens": 40_900,
+            "contextWindow": 258_400,
+            "cachedTokens": 36_000,
+            "estimated": false,
+        })
+    );
+}
+
+#[tokio::test]
+async fn compaction_runs_natively_without_a_user_turn_or_steering() {
     let root = TempDir::new().unwrap();
     let home = prepare(&root);
     let config = config(&root);
-    let plan = plan(&root, text);
-    let (tx, mut rx) = mpsc::channel(64);
-    let codex = home.clone();
-    let task = tokio::spawn(async move {
-        chat_process::run(&config, &codex, plan, tx, CancellationToken::new()).await
-    });
-    let mut events = Vec::new();
-    tokio::time::timeout(Duration::from_secs(20), async {
-        while let Some(event) = rx.recv().await {
-            if event["type"] == "chat.side.available" {
-                deliver(&root, &inbox).await;
-                if let Some(id) = withdraw {
-                    // After the adapter has read and asked the question.
-                    tokio::time::sleep(Duration::from_millis(600)).await;
-                    let withdrawal = json!([{
-                        "id": format!("withdraw-side-question:{id}"),
-                        "sideQuestionId": id,
-                        "sideQuestionCancelled": true,
-                    }]);
-                    deliver(&root, &withdrawal).await;
-                }
-            }
-            events.push(event);
-        }
-    })
-    .await
-    .unwrap();
-    task.await.unwrap().unwrap();
-    (root, home, events)
-}
+    run_quietly(&config, &home, plan(&root, "First request")).await;
 
-fn position(events: &[Value], kind: &str) -> usize {
-    events
-        .iter()
-        .position(|event| event["type"] == kind)
-        .unwrap_or_else(|| panic!("missing {kind}"))
-}
-
-fn side_log(home: &Path, name: &str) -> Vec<Value> {
-    std::fs::read_to_string(home.join(name))
-        .unwrap_or_default()
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect()
-}
-
-#[tokio::test]
-async fn side_questions_use_an_ephemeral_read_only_fork_while_the_turn_continues() {
-    let id = "a1b2c3d4-0000-4000-8000-000000000001";
-    let (_root, home, events) = with_side_questions(
-        "fixture:slow-finish",
-        json!([side_question(id, "Why this order?")]),
-        None,
+    // A message written meanwhile is not steered into the compaction.
+    deliver(
+        &root,
+        &json!([{ "id": "later", "text": "Next request", "attachments": [] }]),
     )
     .await;
+    let (events, result) = collect(&config, &home, compaction_plan(&root)).await;
+    result.unwrap();
 
-    let answered = position(&events, "chat.side.answered");
-    assert!(answered < position(&events, "turn.completed"));
-    assert_eq!(events[answered]["sideQuestionId"], id);
-    assert_eq!(events[answered]["text"], "Side answer: Why this order?");
-
-    let forks = side_log(&home, "side-forks.jsonl");
-    assert_eq!(forks.len(), 1);
-    assert_eq!(forks[0]["threadId"], "fixture-chat");
-    assert_eq!(forks[0]["ephemeral"], true);
-    assert_eq!(forks[0]["sandbox"], "read-only");
-    assert_eq!(forks[0]["approvalPolicy"], "never");
-    for feature in [
-        "shell_tool",
-        "unified_exec",
-        "apps",
-        "plugins",
-        "goals",
-        "view_image",
-    ] {
-        assert_eq!(forks[0]["config"][format!("features.{feature}")], false);
-    }
-    assert_eq!(forks[0]["config"]["web_search"], "disabled");
-    let turns = side_log(&home, "side-turns.jsonl");
-    assert_eq!(turns[0]["injected"][0]["role"], "developer");
+    let saved = conversation(&home);
+    let turns = saved["turns"].as_array().unwrap();
+    assert_eq!(turns.len(), 2);
     assert!(
-        turns[0]["injected"][0]["content"][0]["text"]
-            .as_str()
+        turns[1]["items"]
+            .as_array()
             .unwrap()
-            .contains("NOT interrupted")
+            .iter()
+            .all(|item| item["type"] == "contextCompaction")
     );
-    assert_eq!(side_log(&home, "side-releases.jsonl").len(), 1);
+    let compactions = std::fs::read_to_string(home.join("fixture-compactions.jsonl")).unwrap();
+    assert_eq!(compactions.lines().count(), 1);
 
-    // The conversation keeps only its own turn: no side question, no side answer.
-    let thread = conversation(&home);
-    assert_eq!(thread["turns"].as_array().unwrap().len(), 1);
-    let saved = thread.to_string();
-    assert!(!saved.contains("Why this order?"));
-    assert!(!saved.contains("Side answer"));
-    let reply = events
+    let compaction = events
         .iter()
-        .rfind(|event| {
-            event["type"] == "item.completed" && event["item"]["type"] == "agent_message"
-        })
+        .filter(|event| event["item"]["type"] == "context_compaction")
+        .map(|event| (event["type"].clone(), event["item"]["status"].clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        compaction,
+        [
+            (json!("item.started"), json!("in_progress")),
+            (json!("item.completed"), json!("completed")),
+        ]
+    );
+    let usage = events
+        .iter()
+        .rfind(|event| event["type"] == "context.usage")
         .unwrap();
+    assert_eq!(usage["usage"]["contextTokens"], 6_200);
+    assert_eq!(usage["usage"]["estimated"], true);
     assert!(
-        !reply["item"]["text"]
-            .as_str()
-            .unwrap()
-            .contains("Side answer")
-    );
-}
-
-#[tokio::test]
-async fn a_side_question_that_tries_a_tool_is_interrupted_and_reported() {
-    let id = "a1b2c3d4-0000-4000-8000-000000000002";
-    let (_root, home, events) = with_side_questions(
-        "fixture:slow-finish",
-        json!([side_question(id, "fixture:side-tool explain")]),
-        None,
-    )
-    .await;
-
-    let failed = position(&events, "chat.side.failed");
-    assert_eq!(events[failed]["sideQuestionId"], id);
-    assert!(
-        events[failed]["error"]
-            .as_str()
-            .unwrap()
-            .contains("tried to use a tool")
+        !events
+            .iter()
+            .any(|event| event["type"] == "chat.delivered" && event["messageId"] == "later")
     );
     assert!(
         !events
             .iter()
-            .any(|event| event["type"] == "chat.side.answered")
+            .any(|event| event["item"]["type"] == "agent_message")
     );
-    assert_eq!(side_log(&home, "side-interrupts.jsonl").len(), 1);
-    assert!(events.iter().any(|event| event["type"] == "turn.completed"));
+    assert_eq!(events.last().unwrap()["type"], "turn.completed");
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("result.md")).unwrap(),
+        ""
+    );
 }
 
 #[tokio::test]
-async fn a_finished_turn_waits_for_a_side_question_answer_and_withdrawals_stay_silent() {
-    let slow = "a1b2c3d4-0000-4000-8000-000000000003";
-    let (_root, _home, events) = with_side_questions(
-        "Check the workspace",
-        json!([side_question(slow, "fixture:side-slow explain")]),
-        None,
-    )
-    .await;
-    assert!(position(&events, "chat.side.answered") < position(&events, "turn.completed"));
+async fn failed_or_sessionless_compactions_fail_without_completing() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let config = config(&root);
+    let mut sessionless = compaction_plan(&root);
+    sessionless.as_object_mut().unwrap().remove("sessionId");
+    let (events, result) = collect(&config, &home, sessionless).await;
+    assert!(
+        result
+            .unwrap_err()
+            .message
+            .contains("no saved Codex session")
+    );
+    assert!(events.is_empty());
 
-    let withdrawn = "a1b2c3d4-0000-4000-8000-000000000004";
-    let (_root, home, events) = with_side_questions(
-        "fixture:slow-finish",
-        json!([side_question(withdrawn, "fixture:side-slow explain")]),
-        Some(withdrawn),
-    )
-    .await;
-    assert!(events.iter().any(|event| event["type"] == "turn.completed"));
-    assert!(!events.iter().any(|event| {
-        matches!(
-            event["type"].as_str(),
-            Some("chat.side.answered" | "chat.side.failed")
-        )
-    }));
-    assert_eq!(side_log(&home, "side-releases.jsonl").len(), 1);
+    run_quietly(&config, &home, plan(&root, "First request")).await;
+    std::fs::write(home.join("fixture-compaction-fails"), "").unwrap();
+    let (events, result) = collect(&config, &home, compaction_plan(&root)).await;
+    assert_eq!(result.unwrap_err().message, "Fixture compaction failed");
+    assert!(!events.iter().any(|event| event["type"] == "turn.completed"));
+    assert!(events.iter().any(|event| event["type"] == "turn.failed"));
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["item"]["status"] == "completed")
+    );
+}
+
+#[test]
+fn structured_tool_payloads_redact_credentials_and_nested_output() {
+    let event = json!({
+        "arguments": { "access_token": "private-value", "query": "public query" },
+        "result": [{ "text": "Bearer private-token" }, { "nested": ["a configured-secret value"] }],
+    });
+    let redacted = cairn_installation::run_output::payload(&event, &["configured-secret".into()]);
+    assert_eq!(
+        redacted,
+        json!({
+            "arguments": { "access_token": "[redacted]", "query": "public query" },
+            "result": [{ "text": "Bearer [redacted]" }, { "nested": ["a [redacted] value"] }],
+        })
+    );
 }

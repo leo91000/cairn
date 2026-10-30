@@ -1,6 +1,6 @@
 import type { Run } from '../../../packages/contracts/contracts'
 
-type RunState = Pick<Run, 'suspendedByExclusive'> & { status: Run['status'] | 'idle' }
+type RunState = Partial<Pick<Run, 'suspendedByExclusive'>> & { status: Run['status'] | 'idle' }
 
 export const exclusiveSuspensionLabel = 'Suspended for exclusive work'
 

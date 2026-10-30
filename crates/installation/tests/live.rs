@@ -1,3 +1,7 @@
+use crate::common::run_fixture::DbRunFixture;
+use cairn_contracts::EventKind;
+use common::MissionFixture;
+
 mod common;
 
 use common::relay_fixture::router;
@@ -37,7 +41,7 @@ impl Fixture {
         let service = Service::new(config).await.unwrap();
         let token = text(&common::relay_fixture::context(&service).await, "value").to_owned();
         let task = service
-            .task(
+            .task_fixture(
                 json!({ "name": "Live test", "prompt": "Test", "agentId": MAIN_AGENT_ID }),
                 None,
             )
@@ -110,7 +114,7 @@ impl Fixture {
             .store
             .transaction(move |db| {
                 for n in 0..count {
-                    db.event(&run, "output", &format!("event-{n}"), None)?;
+                    db.event(&run, &EventKind::Output, &format!("event-{n}"), None)?;
                 }
                 Ok(())
             })
@@ -205,7 +209,7 @@ async fn ids(f: &Fixture) -> Vec<i64> {
         .store
         .read(move |db| {
             Ok(db
-                .events(&run, 0, 10000)?
+                .events_fixture(&run, 0, 10000)?
                 .iter()
                 .map(|e| e["id"].as_i64().unwrap())
                 .collect())
@@ -219,13 +223,23 @@ async fn cached_resume_drains_backlog_without_waiting_between_live_batches() {
     let f = Fixture::new().await;
     f.service
         .store
-        .patch_run(&f.run, json!({ "trigger": "chat" }))
+        .change_run(
+            &f.run,
+            cairn_installation::runs::RunChanges {
+                trigger: Some(("chat").to_owned()),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let mut chat = f.service.chat_create(json!({})).await.unwrap();
     chat["runId"] = f.run.clone().into();
     let path = format!("/api/chats/{}/stream", text(&chat, "id"));
-    f.service.store.put("chats", chat).await.unwrap();
+    f.service
+        .store
+        .save_conversation_boundary(chat)
+        .await
+        .unwrap();
     let mut initial = f.open_path(&format!("{path}?window=1"), None).await;
     let (cursor, batch) = initial.batch().await;
     let history = batch["history"].as_str().unwrap();
@@ -238,7 +252,7 @@ async fn cached_resume_drains_backlog_without_waiting_between_live_batches() {
         .store
         .read(move |db| {
             Ok(db
-                .events(&run, cursor, 25000)?
+                .events_fixture(&run, cursor, 25000)?
                 .iter()
                 .map(|event| event["id"].as_i64().unwrap())
                 .collect())
@@ -288,14 +302,24 @@ async fn following_viewer_resumes_a_long_backlog_on_the_recent_window() {
     let f = Fixture::new().await;
     f.service
         .store
-        .patch_run(&f.run, json!({ "trigger": "chat" }))
+        .change_run(
+            &f.run,
+            cairn_installation::runs::RunChanges {
+                trigger: Some(("chat").to_owned()),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let mut chat = f.service.chat_create(json!({})).await.unwrap();
     chat["runId"] = f.run.clone().into();
     let chat_id = text(&chat, "id").to_owned();
     let path = format!("/api/chats/{chat_id}/stream");
-    f.service.store.put("chats", chat).await.unwrap();
+    f.service
+        .store
+        .save_conversation_boundary(chat)
+        .await
+        .unwrap();
     let mut initial = f.open_path(&format!("{path}?window=1"), None).await;
     let (cursor, batch) = initial.batch().await;
     let history = batch["history"].as_str().unwrap().to_owned();
@@ -319,7 +343,7 @@ async fn following_viewer_resumes_a_long_backlog_on_the_recent_window() {
         .store
         .read(move |db| {
             Ok(db
-                .events(&run, cursor, 2500)?
+                .events_fixture(&run, cursor, 2500)?
                 .iter()
                 .map(|event| event["id"].as_i64().unwrap())
                 .collect())
@@ -371,7 +395,7 @@ async fn following_viewer_resumes_a_long_backlog_on_the_recent_window() {
         .await
         .unwrap();
     let previous = event_ids(&older["events"]);
-    assert_eq!(previous, backlog[backlog.len() - 200..backlog.len() - 100]);
+    assert_eq!(previous, backlog[backlog.len() - 1100..backlog.len() - 100]);
 
     // The viewer then follows live output without another reset.
     f.append(1).await;
@@ -385,48 +409,63 @@ async fn resuming_past_replaced_text_snapshots_keeps_the_cached_history() {
     let f = Fixture::new().await;
     f.service
         .store
-        .patch_run(&f.run, json!({ "trigger": "chat" }))
+        .change_run(
+            &f.run,
+            cairn_installation::runs::RunChanges {
+                trigger: Some(("chat").to_owned()),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let mut chat = f.service.chat_create(json!({})).await.unwrap();
     chat["runId"] = f.run.clone().into();
     let path = format!("/api/chats/{}/stream", text(&chat, "id"));
-    f.service.store.put("chats", chat).await.unwrap();
+    f.service
+        .store
+        .save_conversation_boundary(chat)
+        .await
+        .unwrap();
     let mut initial = f.open_path(&format!("{path}?window=1"), None).await;
     let (cursor, batch) = initial.batch().await;
     let history = batch["history"].as_str().unwrap().to_owned();
     drop(initial);
 
-    // While the reader was away, an answer streamed as 300 snapshots after a tool call.
+    // While the reader was away, an answer streamed as 1300 snapshots after a tool call.
     let run = f.run.clone();
     f.service
         .store
         .transaction(move |db| {
             let tool =
                 json!({ "item": { "id": "tool", "type": "command_execution", "command": "ls" } });
-            db.event(&run, "item.completed", "ls", Some(&tool))?;
+            db.event(&run, &EventKind::ItemCompleted, "ls", Some(&tool))?;
             let mut answer = String::new();
-            for n in 0..=300 {
+            for n in 0..=1300 {
                 answer.push_str(&format!("word {n} "));
-                let kind = if n == 300 {
+                let kind = if n == 1300 {
                     "item.completed"
                 } else {
                     "item.updated"
                 };
                 let message =
                     json!({ "item": { "id": "answer", "type": "agent_message", "text": answer } });
-                db.event(&run, kind, &answer, Some(&message))?;
+                db.event(
+                    &run,
+                    &EventKind::from_adapter(kind),
+                    &answer,
+                    Some(&message),
+                )?;
             }
-            db.event(&run, "turn.completed", "", None)?;
+            db.event(&run, &EventKind::TurnCompleted, "", None)?;
             Ok(())
         })
         .await
         .unwrap();
     let all = ids(&f).await;
-    let replaced = all[all.len() - 302..all.len() - 2].to_vec();
+    let replaced = all[all.len() - 1302..all.len() - 2].to_vec();
 
     // Following or not, the catch-up is the tool call, the final answer, the turn's
-    // end and any later output: none of the 300 replaced snapshots.
+    // end and any later output: none of the 1300 replaced snapshots.
     for following in ["&recent=1", ""] {
         let expected: Vec<i64> = ids(&f)
             .await
@@ -450,7 +489,7 @@ async fn resuming_past_replaced_text_snapshots_keeps_the_cached_history() {
             batch["events"][1]["payload"]["item"]["text"]
                 .as_str()
                 .unwrap()
-                .ends_with("word 300 ")
+                .ends_with("word 1300 ")
         );
 
         // Live output then continues on the same connection.
@@ -477,11 +516,7 @@ async fn idle_streams_refresh_lists_after_external_database_writes() {
     }
 
     let f = Fixture::new().await;
-    let chat = f
-        .service
-        .chat_create(json!({ "title": "Before maintenance" }))
-        .await
-        .unwrap();
+    let chat = f.service.chat_create(json!({})).await.unwrap();
     let chat_id = text(&chat, "id");
     let mut conversation = f
         .open_path(
@@ -499,8 +534,12 @@ async fn idle_streams_refresh_lists_after_external_database_writes() {
         rusqlite::Connection::open(f.service.config.data_dir.join("manager.db")).unwrap();
     external
         .execute(
-            "UPDATE records SET data=json_set(data,'$.title',?) WHERE kind='chats' AND id=?",
-            ["After maintenance", chat_id],
+            "UPDATE conversations SET title=?,revision=? WHERE id=?",
+            rusqlite::params![
+                "After maintenance",
+                cairn_installation::config::id(),
+                chat_id
+            ],
         )
         .unwrap();
     drop(external);
@@ -515,6 +554,23 @@ async fn idle_streams_refresh_lists_after_external_database_writes() {
 
 #[tokio::test]
 async fn a_conversation_stream_carries_the_conversation_list_only_on_request() {
+    async fn paused_list(stream: &mut Stream, first: Option<Value>) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let mut next = first;
+            loop {
+                let batch = match next.take() {
+                    Some(batch) => batch,
+                    None => stream.batch().await.1,
+                };
+                if batch["state"]["chats"][0]["paused"] == true {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("the list must refresh without another write");
+    }
+
     let f = Fixture::new().await;
     let chat = f.service.chat_create(json!({})).await.unwrap();
     let path = format!("/api/chats/{}/stream?window=1", text(&chat, "id"));
@@ -535,9 +591,13 @@ async fn a_conversation_stream_carries_the_conversation_list_only_on_request() {
     // Both follow changes; the list stream at most every quarter of a second.
     f.service.chat_pause(text(&chat, "id"), true).await.unwrap();
     let (_, batch) = carrying.batch().await;
-    assert_eq!(batch["state"]["chats"][0]["paused"], true);
-    let (_, batch) = list.batch().await;
-    assert_eq!(batch["state"]["chats"][0]["paused"], true);
+    assert_eq!(batch["state"]["chat"]["paused"], true);
+    // The chat's own state is immediate. The shared list may coalesce this
+    // commit, but its deadline must deliver it without another database write.
+    tokio::join!(
+        paused_list(&mut carrying, Some(batch)),
+        paused_list(&mut list, None)
+    );
 }
 
 #[tokio::test]
@@ -587,7 +647,7 @@ async fn writes_during_replay_and_slow_readers_do_not_block_or_lose_events() {
         .store
         .transaction(move |db| {
             for _ in 0..500 {
-                db.event(&run, "output", &"x".repeat(16000), None)?;
+                db.event(&run, &EventKind::Output, &"x".repeat(16000), None)?;
             }
             Ok(())
         })
@@ -605,7 +665,7 @@ async fn writes_during_replay_and_slow_readers_do_not_block_or_lose_events() {
         .service
         .store
         .transaction(move |db| {
-            db.event(&run, "output", "must not escape", None)?;
+            db.event(&run, &EventKind::Output, "must not escape", None)?;
             Err::<(), _>(Error::bad("rollback"))
         })
         .await;
@@ -650,9 +710,13 @@ async fn metadata_shutdown_and_invalid_requests() {
     stream.batch().await;
     f.service
         .store
-        .patch_run(
+        .change_run(
             &f.run,
-            json!({ "status": RunStatus::Succeeded, "result": "Done" }),
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Succeeded),
+                boundary: Some(serde_json::json!({"result": "Done"})),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
@@ -707,20 +771,26 @@ async fn chat_state_questions_and_artifacts_update_without_text_events() {
     assert!(first["state"]["run"].is_null());
     let mut attached = chat.clone();
     attached["runId"] = f.run.clone().into();
-    f.service.store.put("chats", attached).await.unwrap();
+    f.service
+        .store
+        .save_conversation_boundary(attached)
+        .await
+        .unwrap();
     let (_, batch) = stream.batch().await;
     assert_eq!(batch["state"]["run"]["id"], f.run);
     assert_eq!(batch["reset"], true);
     f.service.chat_pause(chat_id, true).await.unwrap();
     assert_eq!(stream.batch().await.1["state"]["chat"]["paused"], true);
     // Mutations of metadata have no event id of their own and still reach every client.
+    let question = serde_json::from_value(json!({
+        "id": "question", "chatId": chat_id, "runId": f.run,
+        "source": "cairn", "blocking": false, "status": "pending",
+        "fields": [{"id":"scope","title":"Pending question"}],
+    }))
+    .unwrap();
     f.service
         .store
-        .set(
-            &format!("chat-question:{chat_id}:question"),
-            json!({ "id": "question", "status": "pending" }),
-            None,
-        )
+        .transaction(move |db| db.save_question(&question))
         .await
         .unwrap();
     assert_eq!(
@@ -790,7 +860,7 @@ async fn wire_deltas_reestablish_baselines_after_reconnect_and_keep_rest_compati
             .store
             .event(
                 &f.run,
-                "item.updated",
+                &EventKind::ItemUpdated,
                 content,
                 Some(json!({
                     "item": { "id": "message", "type": "agent_message", "text": content },
@@ -820,7 +890,7 @@ async fn wire_deltas_reestablish_baselines_after_reconnect_and_keep_rest_compati
     let stored = f
         .service
         .store
-        .read(move |db| db.events(&run, cursor, 10))
+        .read(move |db| db.events_fixture(&run, cursor, 10))
         .await
         .unwrap();
     assert_eq!(stored[0]["payload"]["item"]["text"], "Bonjour 👋 café");
@@ -888,7 +958,7 @@ async fn cache_revision_resumes_valid_history_and_resets_pruned_or_foreign_histo
 #[tokio::test]
 async fn recent_window_pages_backwards_without_gaps_and_keeps_live_cursor() {
     let f = Fixture::new().await;
-    f.append(245).await;
+    f.append(2450).await;
     let all = ids(&f).await;
     let mut stream = f
         .open_path(&format!("/api/runs/{}/stream?window=1", f.run), None)
@@ -942,12 +1012,199 @@ async fn recent_window_pages_backwards_without_gaps_and_keeps_live_cursor() {
 }
 
 #[tokio::test]
+async fn compressed_history_budget_keeps_repetitive_output_and_preserves_trimmed_cursors() {
+    use rand::{RngCore, SeedableRng};
+    let f = Fixture::new().await;
+    let run = f.run.clone();
+    f.service
+        .store
+        .transaction(move |db| {
+            for _ in 0..200 {
+                db.event(
+                    &run,
+                    &EventKind::Output,
+                    &"tool output 🦊 ".repeat(700),
+                    None,
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let before_noise = ids(&f).await;
+    let run = f.run.clone();
+    let window = f
+        .service
+        .store
+        .read(move |db| db.events_before(&run, i64::MAX))
+        .await
+        .unwrap();
+    assert!(!window.1);
+    assert_eq!(window.0.len(), before_noise.len());
+    assert!(serde_json::to_vec(&window.0).unwrap().len() > 256 * 1024);
+
+    let run = f.run.clone();
+    f.service
+        .store
+        .transaction(move |db| {
+            let mut rng = rand::rngs::StdRng::seed_from_u64(19);
+            for _ in 0..24 {
+                let mut noise = vec![0; 96 * 1024];
+                rng.fill_bytes(&mut noise);
+                db.event(
+                    &run,
+                    &EventKind::Output,
+                    "noise",
+                    Some(&json!({"noise": hex::encode(noise)})),
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let expected = ids(&f).await;
+    let mut before = i64::MAX;
+    let mut collected = Vec::new();
+    let mut pages = 0;
+    loop {
+        let run = f.run.clone();
+        let (events, more) = f
+            .service
+            .store
+            .read(move |db| db.events_before(&run, before))
+            .await
+            .unwrap();
+        assert!(!events.is_empty());
+        let bytes = serde_json::to_vec(&events).unwrap();
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        std::io::Write::write_all(&mut encoder, &bytes).unwrap();
+        assert!(encoder.finish().unwrap().len() <= 256 * 1024);
+        before = events[0].id;
+        let mut next: Vec<_> = events.into_iter().map(|event| event.id).collect();
+        next.extend(collected);
+        collected = next;
+        pages += 1;
+        if !more {
+            break;
+        }
+    }
+    assert!(pages > 2);
+    assert_eq!(collected, expected);
+}
+
+#[tokio::test]
+async fn compressed_history_bounds_decoded_json_and_advances_past_oversized_events() {
+    use rand::{RngCore, SeedableRng};
+
+    let f = Fixture::new().await;
+    let run = f.run.clone();
+    f.service
+        .store
+        .transaction(move |db| {
+            // JSON escaping makes each payload much larger than its source string.
+            for _ in 0..5 {
+                db.event(
+                    &run,
+                    &EventKind::Output,
+                    "escaped",
+                    Some(&json!({
+                        "text": "\u{001f}".repeat(300_000),
+                    })),
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let expected = ids(&f).await;
+    let run = f.run.clone();
+    let (events, more) = f
+        .service
+        .store
+        .read(move |db| db.events_before(&run, i64::MAX))
+        .await
+        .unwrap();
+    assert!(more);
+    assert_eq!(events.len(), 2);
+    assert!(serde_json::to_vec(&events).unwrap().len() <= 4 * 1024 * 1024);
+    let before_escaped = events[0].id;
+
+    let run = f.run.clone();
+    f.service
+        .store
+        .transaction(move |db| {
+            // A single event may exceed either ceiling, but must remain readable.
+            db.event(
+                &run,
+                &EventKind::Output,
+                "decoded oversized",
+                Some(&json!({
+                    "text": "q".repeat(5 * 1024 * 1024),
+                })),
+            )?;
+            let mut noise = vec![0; 512 * 1024];
+            rand::rngs::StdRng::seed_from_u64(29).fill_bytes(&mut noise);
+            db.event(
+                &run,
+                &EventKind::Output,
+                "gzip oversized",
+                Some(&json!({
+                    "noise": hex::encode(noise),
+                })),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let mut before = i64::MAX;
+    for text in ["gzip oversized", "decoded oversized"] {
+        let run = f.run.clone();
+        let (events, more) = f
+            .service
+            .store
+            .read(move |db| db.events_before(&run, before))
+            .await
+            .unwrap();
+        assert!(more);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].text, text);
+        assert!(events[0].id < before);
+        before = events[0].id;
+    }
+    let mut collected = Vec::new();
+    loop {
+        let run = f.run.clone();
+        let (events, more) = f
+            .service
+            .store
+            .read(move |db| db.events_before(&run, before))
+            .await
+            .unwrap();
+        assert!(!events.is_empty());
+        assert!(events[0].id < before);
+        before = events[0].id;
+        let mut page: Vec<_> = events.into_iter().map(|event| event.id).collect();
+        page.extend(collected);
+        collected = page;
+        if !more {
+            break;
+        }
+    }
+    assert_eq!(collected, expected);
+    assert!(before < before_escaped);
+}
+
+#[tokio::test]
 async fn paginated_chat_metadata_keeps_pending_messages_without_replaying_delivered_text() {
     let f = Fixture::new().await;
     let mut chat = f.service.chat_create(json!({})).await.unwrap();
     chat["runId"] = f.run.clone().into();
     let id = text(&chat, "id").to_owned();
-    f.service.store.put("chats", chat).await.unwrap();
+    f.service
+        .store
+        .save_conversation_boundary(chat)
+        .await
+        .unwrap();
     let chat_id = id.clone();
     f.service
         .store
@@ -996,7 +1253,7 @@ async fn profile_long_answer_delivery_with_small_wire_deltas() {
                 .store
                 .event(
                     &f.run,
-                    "item.updated",
+                    &EventKind::ItemUpdated,
                     value,
                     Some(json!({
                         "item": { "id": "profile", "type": "agent_message", "text": value },
@@ -1038,23 +1295,23 @@ async fn backwards_pages_skip_superseded_long_answers_but_keep_reused_ids_in_old
     f.service
         .store
         .transaction(move |db| {
-            db.event(&run, "turn.started", "", None)?;
+            db.event(&run, &EventKind::TurnStarted, "", None)?;
             db.event(
                 &run,
-                "item.completed",
+                &EventKind::ItemCompleted,
                 "previous turn",
                 Some(&json!({
                     "item": { "id": "m", "type": "agent_message", "text": "previous turn" },
                 })),
             )?;
-            db.event(&run, "turn.completed", "", None)?;
-            db.event(&run, "turn.started", "", None)?;
-            db.event(&run, "chat.user", "Older question", None)?;
+            db.event(&run, &EventKind::TurnCompleted, "", None)?;
+            db.event(&run, &EventKind::TurnStarted, "", None)?;
+            db.event(&run, &EventKind::ChatUser, "Older question", None)?;
             for n in 0..80 {
                 let text = format!("{}-{n}", "x".repeat(300_000));
                 db.event(
                     &run,
-                    "item.updated",
+                    &EventKind::ItemUpdated,
                     &text,
                     Some(&json!({
                         "item": { "id": "m", "type": "agent_message", "text": text },
@@ -1160,27 +1417,31 @@ async fn profile_conversation_opening() {
                     run["trigger"] = "chat".into();
                     run["summary"] = summary.clone().into();
                     run["finishedAt"] = 1.into();
-                    db.add_run(&run, None)?;
+                    db.add_run_fixture(&run, None)?;
                     id
                 };
                 let mut chat = chat;
                 chat["runId"] = run_id.into();
                 if n > 80 {
                     chat["lifecycle"] = "trash".into();
-                    chat["purgeAt"] = i64::MAX.into();
+                    chat["purgeAt"] = 9_007_199_254_740_991_i64.into();
                 }
-                db.put("chats", &chat)?;
+                db.save_conversation_boundary(&chat)?;
             }
             let output = "test output line\n".repeat(90);
             for turn in 0..40 {
-                db.event(&heavy_run, "turn.started", "", None)?;
-                db.event(&heavy_run, "chat.user", &format!("Question {turn}"), None)?;
+                db.event(&heavy_run, &EventKind::TurnStarted, "", None)?;
+                db.event(&heavy_run, &EventKind::ChatUser, &format!("Question {turn}"), None)?;
                 for call in 0..25 {
                     let item = format!("tool-{turn}-{call}");
-                    let started = json!({ "item": { "id": item, "type": "command_execution", "command": "pnpm test", "status": "in_progress" } });
-                    db.event(&heavy_run, "item.started", "pnpm test", Some(&started))?;
-                    let completed = json!({ "item": { "id": item, "type": "command_execution", "command": "pnpm test", "aggregated_output": output, "exit_code": 0, "status": "completed" } });
-                    db.event(&heavy_run, "item.completed", "pnpm test", Some(&completed))?;
+                    let started = json!({
+                        "item": { "id": item, "type": "command_execution", "command": "pnpm test", "status": "in_progress" },
+                    });
+                    db.event(&heavy_run, &EventKind::ItemStarted, "pnpm test", Some(&started))?;
+                    let completed = json!({
+                        "item": { "id": item, "type": "command_execution", "command": "pnpm test", "aggregated_output": output, "exit_code": 0, "status": "completed" },
+                    });
+                    db.event(&heavy_run, &EventKind::ItemCompleted, "pnpm test", Some(&completed))?;
                 }
                 // The last answer streams as many small snapshots, as a long reply does.
                 let updates = if turn == 39 { 300 } else { 40 };
@@ -1190,9 +1451,9 @@ async fn profile_conversation_opening() {
                     answer.push_str(&"More detail. ".repeat(6));
                     let kind = if update == updates { "item.completed" } else { "item.updated" };
                     let message = json!({ "item": { "id": format!("answer-{turn}"), "type": "agent_message", "text": answer } });
-                    db.event(&heavy_run, kind, &answer, Some(&message))?;
+                    db.event(&heavy_run, &EventKind::from_adapter(kind), &answer, Some(&message))?;
                 }
-                db.event(&heavy_run, "turn.completed", "", None)?;
+                db.event(&heavy_run, &EventKind::TurnCompleted, "", None)?;
             }
             Ok(())
         })
@@ -1315,7 +1576,7 @@ async fn profile_conversation_opening() {
         let run = f.run.clone();
         f.service
             .store
-            .transaction(move |db| db.event(&run, "output", &format!("live {n}"), None))
+            .transaction(move |db| db.event(&run, &EventKind::Output, &format!("live {n}"), None))
             .await
             .unwrap();
         let (_, batch) = follower.batch().await;
@@ -1323,6 +1584,33 @@ async fn profile_conversation_opening() {
         delivery.push(start.elapsed().as_secs_f64() * 1000.0);
     }
 
+    let delivery_cpu = cpu_ms() - cpu;
+    drop(follower);
+    let mut carrying = f
+        .open_path(&format!("{stream_path}?after=0&window=1&list=1"), None)
+        .await;
+    carrying.batch().await;
+    let cpu = cpu_ms();
+    let mut carrying_delivery = Vec::new();
+    for n in 0..60 {
+        let start = Instant::now();
+        let run = f.run.clone();
+        f.service
+            .store
+            .transaction(move |db| {
+                db.event(&run, &EventKind::Output, &format!("carrying {n}"), None)
+            })
+            .await
+            .unwrap();
+        // A list-only refresh may arrive before the newly appended event.
+        loop {
+            let (_, batch) = carrying.batch().await;
+            if !batch["events"].as_array().unwrap().is_empty() {
+                break;
+            }
+        }
+        carrying_delivery.push(start.elapsed().as_secs_f64() * 1000.0);
+    }
     let profile = json!({
         "events": all.len(),
         "cold_open": summary(cold),
@@ -1337,7 +1625,111 @@ async fn profile_conversation_opening() {
         "resume_events": resume_batch["events"].as_array().unwrap().len(),
         "resume_first_batch_bytes": resume_bytes,
         "delivery_with_12_idle_streams": summary(delivery),
-        "delivery_process_cpu_ms": (cpu_ms() - cpu).round(),
+        "delivery_process_cpu_ms": delivery_cpu.round(),
+        "delivery_with_list_and_12_idle_streams": summary(carrying_delivery),
+        "carrying_delivery_process_cpu_ms": (cpu_ms() - cpu).round(),
     });
     println!("CONVERSATION_OPEN_PROFILE {profile}");
+}
+
+#[tokio::test]
+async fn typed_history_get_keeps_native_history_readable_to_members_after_agent_deletion() {
+    use common::run_fixture::RunFixture;
+    let fixture = Fixture::new().await;
+    let missing_agent = id();
+    fixture
+        .service
+        .store
+        .change_run_fixture(
+            &fixture.run,
+            json!({
+                "snapshot": {"task": {"agentId": missing_agent}, "agent": {"id": missing_agent, "access": {"backend": "native"}}},
+            }),
+        )
+        .await
+        .unwrap();
+    let token = common::relay_fixture::member_context(&fixture.service, "history-reader").await;
+    let run = fixture.run.clone();
+    let first = fixture
+        .service
+        .store
+        .read(move |db| Ok(db.event_page(&run, 0, 1)?[0].id))
+        .await
+        .unwrap();
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{}/api/runs/{}/history?history=v1:{}:{first}",
+            fixture.url, fixture.run, fixture.run
+        ))
+        .header("x-test-relay-token", text(&token, "value"))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let page: Value = response.json().await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["events"][0]["id"], first);
+}
+
+#[tokio::test]
+async fn conversation_streams_mask_queued_and_sending_private_answers() {
+    use cairn_installation::chats::MessageStatus;
+    let f = Fixture::new().await;
+    let mut chat = f.service.chat_create(json!({})).await.unwrap();
+    let chat_id = text(&chat, "id").to_owned();
+    chat["runId"] = f.run.clone().into();
+    f.service
+        .store
+        .save_conversation_boundary(chat)
+        .await
+        .unwrap();
+    let question_id = "a".repeat(64);
+    f.service
+        .question_receive(
+            &f.run,
+            json!({
+                "id": question_id, "blocking": false,
+                "fields": [{ "id": "secret", "title": "Private credential", "secret": true }],
+            }),
+        )
+        .await
+        .unwrap();
+    let message_id = id();
+    f.service.question_answer(&chat_id, &question_id, json!({
+        "id": message_id,
+        "answers": { "secret": { "selected": [], "comment": "private-answer-must-never-cross-sse" } },
+    })).await.unwrap();
+
+    for status in [MessageStatus::Queued, MessageStatus::Sending] {
+        let (stored_chat, stored_message) = (chat_id.clone(), message_id.clone());
+        f.service
+            .store
+            .transaction(move |db| {
+                let mut message = db
+                    .conversation_message(&stored_chat, &stored_message)?
+                    .unwrap();
+                assert!(
+                    serde_json::to_string(&message.answers)?
+                        .contains("private-answer-must-never-cross-sse")
+                );
+                message.status = status;
+                db.save_message(&message)
+            })
+            .await
+            .unwrap();
+        for window in [false, true] {
+            let path = format!("/api/chats/{chat_id}/stream?window={}", u8::from(window));
+            let (_, batch) = f.open_path(&path, None).await.batch().await;
+            assert!(
+                !batch
+                    .to_string()
+                    .contains("private-answer-must-never-cross-sse"),
+                "{batch}"
+            );
+            let messages = batch["state"]["chat"]["messages"].as_array().unwrap();
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0]["text"], "Private answer");
+            assert!(messages[0].get("answers").is_none());
+        }
+    }
 }

@@ -54,20 +54,21 @@ class ChatJourneyTest {
             var answered = false
             var edited = false
             val question =
-                ChatQuestion(
+                questionFixture(
                     "question",
                     chatId,
                     blocking = true,
                     fields =
                         listOf(
-                            QuestionField(
+                            fieldFixture(
                                 "scope",
                                 "Quelle portée pour la revue ?",
                                 options =
                                     listOf(
-                                        QuestionOption(
+                                        optionFixture(
                                             "Application entière",
                                             "Inclure le client Android et le serveur",
+                                            id = "application",
                                         )
                                     ),
                             )
@@ -129,21 +130,24 @@ class ChatJourneyTest {
                     .toByteArray()
             val event =
                 RunEvent(
-                    1,
-                    1789315200000,
-                    "item.completed",
-                    "",
-                    mapOf(
-                        "item" to
-                            buildJsonObject {
-                                put("id", "answer")
-                                put("type", "agent_message")
-                                put(
-                                    "text",
-                                    "J’ai terminé la **revue du projet**. Les changements sont cohérents et les vérifications passent.\n\nLes points essentiels :\n- Une conversation plus lisible\n- Les fichiers regroupés au même endroit\n\n[Ouvrir le compte rendu](/api/installations/fixture/api/runs/run/artifacts/report-v2).",
-                                )
-                            }
-                    ),
+                    id = 1,
+                    createdAt = 1789315200000,
+                    type = "item.completed",
+                    text = "",
+                    payload =
+                        kotlinx.serialization.json.JsonObject(
+                            mapOf(
+                                "item" to
+                                    buildJsonObject {
+                                        put("id", "answer")
+                                        put("type", "agent_message")
+                                        put(
+                                            "text",
+                                            "J’ai terminé la **revue du projet**. Les changements sont cohérents et les vérifications passent.\n\nLes points essentiels :\n- Une conversation plus lisible\n- Les fichiers regroupés au même endroit\n\n[Ouvrir le compte rendu](/api/installations/fixture/api/runs/run/artifacts/report-v2).",
+                                        )
+                                    }
+                            )
+                        ),
                 )
             fun stream(state: LiveState, events: List<RunEvent> = emptyList()): MockResponse {
                 val body =
@@ -172,20 +176,26 @@ class ChatJourneyTest {
                         }
                         val chat =
                             Chat(
-                                chatId,
+                                id = chatId,
                                 title = "Revue du projet",
                                 agentName = "Cairn",
                                 status = "running",
                                 runId = "run",
-                                run = Run("run", status = "running", trigger = "chat"),
+                                run =
+                                    Run(
+                                        id = "run",
+                                        status = "running",
+                                        trigger = "chat",
+                                        taskId = "",
+                                    ),
                                 questions = if (answered) emptyList() else listOf(question),
                                 messages =
                                     if (edited) emptyList()
                                     else
                                         listOf(
                                             ChatMessage(
-                                                "queued",
-                                                chatId,
+                                                id = "00000000-0000-4000-8000-000000000089",
+                                                chatId = chatId,
                                                 text = "Vérifier les tests",
                                                 status = "queued",
                                             )
@@ -194,17 +204,38 @@ class ChatJourneyTest {
                             )
                         val value =
                             when (path) {
+                                "/api/installations/fixture/api/tasks" -> """{"tasks":[]}"""
                                 "/api/installations" -> beaconInstallationsFixture()
                                 "/api/account/session" -> beaconAccountFixture("csrf-fixture")
                                 "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(
-                                        listOf(Agent(id = MAIN_AGENT_ID, name = "Cairn"))
+                                        build.cairn.contracts.ListAgentsOutput(
+                                            listOf(
+                                                Agent(
+                                                    exclusiveNodes = emptyList(),
+                                                    plugins = emptyList(),
+                                                    revision = "",
+                                                    createdAt = 0,
+                                                    access =
+                                                        AccessPolicy(
+                                                            mcpTools =
+                                                                build.cairn.contracts.McpTools(
+                                                                    emptyMap()
+                                                                ),
+                                                            projects = null,
+                                                            skills = null,
+                                                            mcps = null,
+                                                        ),
+                                                    id = MAIN_AGENT_ID,
+                                                    name = "Cairn",
+                                                )
+                                            )
+                                        )
                                     )
-                                "/api/installations/fixture/api/projects",
-                                "/api/installations/fixture/api/tasks",
+                                "/api/installations/fixture/api/projects" -> """{"projects":[]}"""
                                 "/api/installations/fixture/api/tasks/activity",
-                                "/api/installations/fixture/api/skills",
-                                "/api/installations/fixture/api/mcps" -> "[]"
+                                "/api/installations/fixture/api/skills" -> "[]"
+                                "/api/installations/fixture/api/mcps" -> """{"mcps":[]}"""
                                 "/api/installations/fixture/api/overview" -> "{}"
                                 "/api/installations/fixture/api/codex/models" ->
                                     wireJson.encodeToString(
@@ -212,14 +243,20 @@ class ChatJourneyTest {
                                             models =
                                                 listOf(
                                                     CodingAgentModel(
-                                                        "gpt-fixture",
+                                                        model = "gpt-fixture",
                                                         displayName = "Modèle du serveur",
                                                         isDefault = true,
                                                         supportedReasoningEfforts =
                                                             listOf(
-                                                                ReasoningOption("low"),
-                                                                ReasoningOption("high"),
-                                                                ReasoningOption("max"),
+                                                                ReasoningOption(
+                                                                    reasoningEffort = "low"
+                                                                ),
+                                                                ReasoningOption(
+                                                                    reasoningEffort = "high"
+                                                                ),
+                                                                ReasoningOption(
+                                                                    reasoningEffort = "max"
+                                                                ),
                                                             ),
                                                     )
                                                 )
@@ -243,57 +280,80 @@ class ChatJourneyTest {
                                         ),
                                         listOf(
                                             RunEvent(
-                                                9,
-                                                1789315189000,
-                                                "chat.user",
-                                                "Peux-tu examiner le projet et préparer un compte rendu ?",
-                                            ),
-                                            RunEvent(10, 1789315190000, "turn.started", ""),
-                                            RunEvent(
-                                                11,
-                                                1789315190100,
-                                                "item.started",
-                                                "",
-                                                mapOf(
-                                                    "item" to
-                                                        buildJsonObject {
-                                                            put("id", "command-1")
-                                                            put("type", "command_execution")
-                                                            put("command", "git status --short")
-                                                            put("status", "in_progress")
-                                                        }
-                                                ),
+                                                id = 9,
+                                                createdAt = 1789315189000,
+                                                type = "chat.user",
+                                                text =
+                                                    "Peux-tu examiner le projet et préparer un compte rendu ?",
                                             ),
                                             RunEvent(
-                                                12,
-                                                1789315190200,
-                                                "item.completed",
-                                                "",
-                                                mapOf(
-                                                    "item" to
-                                                        buildJsonObject {
-                                                            put("id", "command-1")
-                                                            put("type", "command_execution")
-                                                            put("command", "git status --short")
-                                                            put("status", "completed")
-                                                            put(
-                                                                "aggregated_output",
-                                                                "Workspace clean",
-                                                            )
-                                                        }
-                                                ),
+                                                id = 10,
+                                                createdAt = 1789315190000,
+                                                type = "turn.started",
+                                                text = "",
+                                            ),
+                                            RunEvent(
+                                                id = 11,
+                                                createdAt = 1789315190100,
+                                                type = "item.started",
+                                                text = "",
+                                                payload =
+                                                    kotlinx.serialization.json.JsonObject(
+                                                        mapOf(
+                                                            "item" to
+                                                                buildJsonObject {
+                                                                    put("id", "command-1")
+                                                                    put("type", "command_execution")
+                                                                    put(
+                                                                        "command",
+                                                                        "git status --short",
+                                                                    )
+                                                                    put("status", "in_progress")
+                                                                }
+                                                        )
+                                                    ),
+                                            ),
+                                            RunEvent(
+                                                id = 12,
+                                                createdAt = 1789315190200,
+                                                type = "item.completed",
+                                                text = "",
+                                                payload =
+                                                    kotlinx.serialization.json.JsonObject(
+                                                        mapOf(
+                                                            "item" to
+                                                                buildJsonObject {
+                                                                    put("id", "command-1")
+                                                                    put("type", "command_execution")
+                                                                    put(
+                                                                        "command",
+                                                                        "git status --short",
+                                                                    )
+                                                                    put("status", "completed")
+                                                                    put(
+                                                                        "aggregated_output",
+                                                                        "Workspace clean",
+                                                                    )
+                                                                }
+                                                        )
+                                                    ),
                                             ),
                                             event.copy(id = 13),
                                         ),
                                     )
-                                "/api/installations/fixture/api/chats/$chatId/messages" -> "{}"
+                                "/api/installations/fixture/api/chats/$chatId/messages" ->
+                                    wireJson.encodeToString(
+                                        ChatMessage(id = "00000000-0000-4000-8000-000000000089")
+                                    )
                                 "/api/installations/fixture/api/chats/$chatId/questions/question/answer" -> {
                                     answered = true
-                                    "{}"
+                                    wireJson.encodeToString(question.copy(status = "answering"))
                                 }
-                                "/api/installations/fixture/api/chats/$chatId/messages/queued" -> {
+                                "/api/installations/fixture/api/chats/$chatId/messages/00000000-0000-4000-8000-000000000089" -> {
                                     edited = true
-                                    "{}"
+                                    wireJson.encodeToString(
+                                        ChatMessage(id = "00000000-0000-4000-8000-000000000089")
+                                    )
                                 }
                                 "/api/installations/fixture/api/runs/run/artifacts/image" ->
                                     return MockResponse()
@@ -422,8 +482,14 @@ class ChatJourneyTest {
                     .parseToJsonElement(calls.first { it.second.endsWith("/answer") }.third)
                     .jsonObject
             assertEquals(
-                "Application entière",
-                answer["answers"]!!.jsonObject["scope"]!!.jsonArray.single().jsonPrimitive.content,
+                "application",
+                answer["answers"]!!
+                    .jsonObject["scope"]!!
+                    .jsonObject["selected"]!!
+                    .jsonArray
+                    .single()
+                    .jsonPrimitive
+                    .content,
             )
             // Queued follow-ups stay next to the composer, outside the scrolling history.
             compose.onNodeWithTag("conversation-queue").assertIsDisplayed()
@@ -434,7 +500,10 @@ class ChatJourneyTest {
                 .performTextReplacement("Vérifier aussi les fichiers")
             compose.onNodeWithContentDescription("Modifier").performClick()
             compose.waitUntil(10000) {
-                calls.any { it.first == "PUT" && it.second.endsWith("/messages/queued") }
+                calls.any {
+                    it.first == "PUT" &&
+                        it.second.endsWith("/messages/00000000-0000-4000-8000-000000000089")
+                }
             }
             compose.onNodeWithContentDescription("Fichiers · 3").performClick()
             waitText("Compte rendu")

@@ -1,0 +1,61 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "arch": {
+      "type": "string"
+    },
+    "backend": {
+      "default": "firecracker",
+      "pattern": "^(firecracker|native)$",
+      "type": "string"
+    },
+    "cpu": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "diskMiB": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "diskTotalMiB": {
+      "default": 0,
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "kvm": {
+      "type": "boolean"
+    },
+    "memoryMiB": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "nativeModeProtocol": {
+      "default": 0,
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "os": {
+      "type": "string"
+    },
+    "ublk": {
+      "default": false,
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "os",
+    "arch",
+    "kvm",
+    "cpu",
+    "memoryMiB",
+    "diskMiB"
+  ],
+  "title": "NodeCapabilities",
+  "type": "object"
+}

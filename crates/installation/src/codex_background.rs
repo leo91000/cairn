@@ -26,7 +26,7 @@ pub async fn should_yield(s: &Service) -> Result<bool> {
             Ok(db.kv("deployment-lease")?.is_some()
                 || db.0.query_row(
                     "SELECT EXISTS(SELECT 1 FROM runs WHERE status='queued'
-             AND COALESCE(json_extract(data,'$.snapshot.agent.provider'),'codex')='codex')",
+             AND json_extract(data,'$.snapshot.agent.provider')='codex')",
                     [],
                     |row| row.get::<_, bool>(0),
                 )?)
@@ -107,7 +107,7 @@ pub async fn run<T>(
         result
     }
     .await;
-    let released = s.accounts.release(&lease).await;
+    let released = s.accounts.release(s, &lease).await;
     let run = s.config.data_dir.join("runs").join(&lease_id);
     if let Err(error) = crate::accounts::remove_directory(&run).await {
         tracing::warn!(%error, "could not remove background Codex files");

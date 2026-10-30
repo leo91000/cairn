@@ -1,4 +1,15 @@
 pub(crate) mod direct;
+pub(crate) mod nodes;
+
+#[cfg(test)]
+mod response_deadline_tests;
+#[cfg(test)]
+mod session_expiry_tests;
+#[cfg(test)]
+mod session_stream_tests;
+#[cfg(test)]
+#[path = "../tests/common/mod.rs"]
+mod test_common;
 
 use super::{ApiError, Service, digest, installations};
 use axum::{
@@ -10,10 +21,11 @@ use axum::{
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
     response::{Html, IntoResponse, Response},
 };
-use cairn_protocol::direct::{DIRECT_VERSION, DirectRevocation, SignalBudget, unix_time};
+use cairn_protocol::direct::{DirectRevocation, SignalBudget, unix_time};
 use cairn_protocol::{
-    ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, MAX_NOTIFICATION_IN_FLIGHT,
-    MAX_PUBLIC_IN_FLIGHT, MAX_STREAM_CHUNK, REQUEST_TIMEOUT, Role,
+    ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, MAX_NODE_CHANNELS,
+    MAX_NOTIFICATION_IN_FLIGHT, MAX_PUBLIC_IN_FLIGHT, MAX_STREAM_CHUNK, PROTOCOL_VERSION,
+    REQUEST_TIMEOUT, Role,
 };
 use futures_util::{SinkExt, StreamExt};
 use sqlx_core::query_as::query_as;
@@ -53,7 +65,6 @@ struct Tunnel {
     commands: mpsc::Sender<Command>,
     control: mpsc::Sender<Frame>,
     signaling: mpsc::Sender<Frame>,
-    version: u16,
     access: Mutex<Access>,
     access_changed: Notify,
     signing: ring::signature::Ed25519KeyPair,
@@ -62,6 +73,13 @@ struct Tunnel {
     slots: Arc<Semaphore>,
     stream_slots: Arc<Semaphore>,
     public_slots: Arc<Semaphore>,
+    node_requests: mpsc::Sender<Frame>,
+    // Node sockets waiting for the installation to open its side.
+    node_channels: Mutex<HashMap<String, oneshot::Sender<WebSocket>>>,
+    // Node offers waiting for the installation's answer.
+    node_offers: Mutex<HashMap<String, oneshot::Sender<Option<String>>>>,
+    node_slots: Arc<Semaphore>,
+    node_address_slots: Mutex<HashMap<String, Weak<Semaphore>>>,
     // Replacing a connection closes the old generation and its pending replies.
     stop: watch::Sender<bool>,
     installation_revoked: AtomicBool,
@@ -83,6 +101,10 @@ impl Tunnel {
 
 #[derive(Clone, Default)]
 pub struct Relay {
+    #[cfg(test)]
+    identity_checks: Arc<Mutex<session_expiry_tests::IdentityChecks>>,
+    #[cfg(test)]
+    identity_monitor: Arc<Mutex<session_stream_tests::IdentityMonitor>>,
     stun_url: Arc<Mutex<Option<String>>>,
     connections: Arc<Mutex<HashMap<String, Arc<Tunnel>>>>,
     closing: Arc<AtomicBool>,
@@ -192,14 +214,12 @@ impl Relay {
                     true
                 }
             });
-            if tunnel.version >= DIRECT_VERSION {
-                access
-                    .direct_revocations
-                    .push_back(DirectRevocation::Account {
-                        account_id: account.to_owned(),
-                        generation,
-                    });
-            }
+            access
+                .direct_revocations
+                .push_back(DirectRevocation::Account {
+                    account_id: account.to_owned(),
+                    generation,
+                });
             for stream in access
                 .streams
                 .values()
@@ -270,6 +290,9 @@ async fn identity_is_current(
     installation: &str,
     token_digest: &str,
 ) -> Result<bool, ApiError> {
+    #[cfg(test)]
+    let _check = session_expiry_tests::track_identity_check(&service.relay);
+
     let row: Option<(String,)> = query_as(
         "SELECT id FROM installations WHERE id = $1 AND token_digest = $2 AND owner_id IS NOT NULL",
     )
@@ -291,34 +314,43 @@ async fn serve_socket(
     let Ok(Some(Ok(Message::Text(hello)))) = hello else {
         return;
     };
-    let Ok(Frame::Hello { versions }) = serde_json::from_str::<Frame>(&hello) else {
-        return;
-    };
-    let version = cairn_protocol::negotiate(&versions);
-    if version.is_none() && relay.online(&installation) {
-        // A refused second peer does not make a working compatible tunnel unusable.
-        let _ = socket.close().await;
-        return;
+    let update_required = !matches!(
+        serde_json::from_str::<Frame>(&hello),
+        Ok(Frame::Hello {
+            version: PROTOCOL_VERSION
+        })
+    );
+    // Refusing a second peer must not mark an active current tunnel as outdated.
+    if !(update_required && relay.online(&installation)) {
+        let updated_installation: Result<Option<(String,)>, _> = query_as(
+            "UPDATE installations SET update_required = $3 WHERE id = $1 AND token_digest = $2 AND owner_id IS NOT NULL RETURNING id",
+        )
+        .bind(&installation)
+        .bind(&token_digest)
+        .bind(update_required)
+        .fetch_optional(&service.pool)
+        .await;
+        if !matches!(updated_installation, Ok(Some(_))) {
+            let _ = socket.close().await;
+            return;
+        }
     }
 
-    let updated_installation: Result<Option<(String,)>, _> = query_as(
-        "UPDATE installations SET update_required = $3 WHERE id = $1 AND token_digest = $2 AND owner_id IS NOT NULL RETURNING id",
-    )
-    .bind(&installation)
-    .bind(&token_digest)
-    .bind(version.is_none())
-    .fetch_optional(&service.pool)
-    .await;
-    if !matches!(updated_installation, Ok(Some(_))) {
-        let _ = socket.close().await;
+    if update_required {
+        let _ = socket
+            .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                code: 1002,
+                reason:
+                    "Relay protocol mismatch. Update required: update Beacon and the installation."
+                        .into(),
+            })))
+            .await;
         return;
     }
-
-    let Some(version) = version else {
-        let _ = socket.close().await;
-        return;
-    };
-    let welcome = serde_json::to_string(&Frame::Welcome { version }).unwrap();
+    let welcome = serde_json::to_string(&Frame::Welcome {
+        version: PROTOCOL_VERSION,
+    })
+    .unwrap();
     if socket.send(Message::Text(welcome.into())).await.is_err() {
         return;
     }
@@ -328,6 +360,7 @@ async fn serve_socket(
     let (control, mut controls) =
         mpsc::channel::<Frame>((MAX_IN_FLIGHT + MAX_PUBLIC_IN_FLIGHT) * 2);
     let (signaling, mut signals) = mpsc::channel::<Frame>(cairn_protocol::direct::MAX_DIRECT_QUEUE);
+    let (node_requests, mut node_frames) = mpsc::channel::<Frame>(MAX_NODE_CHANNELS);
     let Ok(key) = ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
     else {
         return;
@@ -339,7 +372,6 @@ async fn serve_socket(
         commands,
         control,
         signaling,
-        version,
         access: Mutex::new(Access::default()),
         access_changed: Notify::new(),
         signing,
@@ -348,13 +380,18 @@ async fn serve_socket(
         slots: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
         stream_slots: Arc::new(Semaphore::new(cairn_protocol::MAX_STREAMS)),
         public_slots: Arc::new(Semaphore::new(MAX_PUBLIC_IN_FLIGHT)),
+        node_requests,
+        node_channels: Mutex::new(HashMap::new()),
+        node_offers: Mutex::new(HashMap::new()),
+        node_slots: Arc::new(Semaphore::new(MAX_NODE_CHANNELS)),
+        node_address_slots: Mutex::new(HashMap::new()),
         stop,
         installation_revoked: AtomicBool::new(false),
     });
-    if version >= DIRECT_VERSION {
+    {
         let frame = Frame::DirectKey {
             public_key: direct::public_key(&tunnel),
-            stun_url: Some(service.relay.stun_url(&service.origin)),
+            stun_url: service.relay.stun_url(&service.origin),
         };
         if socket
             .send(Message::Text(serde_json::to_string(&frame).unwrap().into()))
@@ -376,7 +413,7 @@ async fn serve_socket(
     }
 
     // Register before rechecking the persisted identity: detach may have raced
-    // the HTTP upgrade/negotiation. Either it removes this generation or this
+    // the HTTP upgrade/handshake. Either it removes this generation or this
     // check stops it. An old generation never removes a replacement.
     if !matches!(
         identity_is_current(&service, &installation, &token_digest).await,
@@ -402,10 +439,28 @@ async fn serve_socket(
 
                 _ = check_stopped.changed() => break,
                 _ = ticks.tick() => {
+                    #[cfg(test)]
+                    {
+                        check_service.relay.identity_monitor.lock().unwrap().started += 1;
+                    }
+
                     let current = tokio::time::timeout(
                         Duration::from_secs(5),
                         identity_is_current(&check_service, &check_installation, &check_token),
                     ).await;
+
+                    #[cfg(test)]
+                    {
+                        use session_stream_tests::CheckOutcome;
+
+                        let outcome = match &current {
+                            Ok(Ok(true)) => CheckOutcome::Current,
+                            Ok(Ok(false)) => CheckOutcome::Revoked,
+                            Ok(Err(_)) => CheckOutcome::DatabaseError,
+                            Err(_) => CheckOutcome::TimedOut,
+                        };
+                        check_service.relay.identity_monitor.lock().unwrap().completed.push(outcome);
+                    }
 
                     let end_connection = match current {
                         Ok(Ok(true)) => {
@@ -460,7 +515,7 @@ async fn serve_socket(
 
             _ = stopped.changed() => {
                 let revoked = tunnel.installation_revoked.load(Ordering::SeqCst);
-                if version >= DIRECT_VERSION && revoked {
+                if revoked {
                     let frame = Frame::DirectRevoke {
                         scope: DirectRevocation::Installation,
                     };
@@ -525,12 +580,10 @@ async fn serve_socket(
                 let revocations: Vec<_> = tunnel.access.lock().unwrap()
                     .direct_revocations.drain(..).collect();
                 for scope in revocations {
-                    if version >= DIRECT_VERSION {
-                        let frame = Frame::DirectRevoke { scope };
-                        let message = serde_json::to_string(&frame).unwrap();
-                        if socket.send(Message::Text(message.into())).await.is_err() {
-                            break 'connection;
-                        }
+                    let frame = Frame::DirectRevoke { scope };
+                    let message = serde_json::to_string(&frame).unwrap();
+                    if socket.send(Message::Text(message.into())).await.is_err() {
+                        break 'connection;
                     }
                 }
                 let revoked = {
@@ -628,7 +681,7 @@ async fn serve_socket(
                     break;
                 }
             }
-            Some(frame) = controls.recv(), if version >= 2 => {
+            Some(frame) = controls.recv() => {
                 let id = match &frame {
                     Frame::Cancel { id } | Frame::StreamCredit { id } => id,
                     _ => continue,
@@ -644,7 +697,13 @@ async fn serve_socket(
                     break;
                 }
             }
-            Some(frame) = signals.recv(), if version >= DIRECT_VERSION => {
+            Some(frame) = node_frames.recv() => {
+                let message = serde_json::to_string(&frame).unwrap();
+                if socket.send(Message::Text(message.into())).await.is_err() {
+                    break;
+                }
+            }
+            Some(frame) = signals.recv() => {
                 let current = match &frame {
                     Frame::DirectAuthorize { authorization, .. }
                     | Frame::DirectRenew { authorization, .. } => {
@@ -681,7 +740,7 @@ async fn serve_socket(
                             break;
                         };
                         let cancel = match frame {
-                            Frame::Notification(event) if version >= 3 => {
+                            Frame::Notification(event) => {
                                 let duplicate = notification_ids.values().any(|id| id == &event.id);
                                 if notification_jobs.len() >= MAX_NOTIFICATION_IN_FLIGHT || duplicate {
                                     let frame = serde_json::to_string(&Frame::NotificationAck {
@@ -705,18 +764,24 @@ async fn serve_socket(
                                 }
                                 None
                             }
-                            Frame::DirectAuthorized { id, accepted } if version >= DIRECT_VERSION => {
+                            Frame::DirectAuthorized { id, accepted } => {
                                 direct::acknowledge(&tunnel, &id, accepted);
                                 None
                             }
-                            Frame::DirectSignalAck { id, accepted } if version >= DIRECT_VERSION => {
+                            Frame::DirectSignalAck { id, accepted } => {
                                 if let Some(reply) = tunnel.signal_replies.lock().unwrap().remove(&id) {
                                     let _ = reply.send(accepted);
                                 }
                                 None
                             }
-                            Frame::DirectSignal { id, signal, .. } if version >= DIRECT_VERSION => {
+                            Frame::DirectSignal { id, signal, .. } => {
                                 direct::receive_signal(&tunnel, &id, signal);
+                                None
+                            }
+                            Frame::NodeAnswer { id, sdp } => {
+                                if let Some(reply) = tunnel.node_offers.lock().unwrap().remove(&id) {
+                                    let _ = reply.send(sdp);
+                                }
                                 None
                             }
                             Frame::Response(response) => {
@@ -729,7 +794,7 @@ async fn serve_socket(
                                 }
                                 None
                             }
-                            Frame::StreamStart(response) if version >= 2 => {
+                            Frame::StreamStart(response) => {
                                 let id = response.id.clone();
                                 if let Some(request) = pending.get_mut(&id) {
                                     if request.public_activity.is_some() {
@@ -749,7 +814,7 @@ async fn serve_socket(
                                     Some(id)
                                 }
                             }
-                            Frame::StreamChunk { id, body } if version >= 2 => {
+                            Frame::StreamChunk { id, body } => {
                                 let delivered = body.len() <= MAX_STREAM_CHUNK
                                     && pending.get_mut(&id).is_some_and(|request| {
                                         if request.public_activity.is_some() {
@@ -766,7 +831,7 @@ async fn serve_socket(
                                     Some(id)
                                 }
                             }
-                            Frame::StreamEnd { id, failed } if version >= 2 => {
+                            Frame::StreamEnd { id, failed } => {
                                 if let Some(completed) = pending.remove(&id)
                                     && failed
                                     && let Some(stream) = completed.stream
@@ -828,6 +893,9 @@ pub(super) async fn forward(
             .unwrap_or(&0)
     });
     let role = installations::role(&service, &installation, &account).await?;
+    if tunnel.is_none() {
+        require_current_protocol(&service, &installation).await?;
+    }
 
     // Preserve the original encoding and query; Path decoding is only for routing.
     let prefix = format!("/api/installations/{installation}");
@@ -923,6 +991,9 @@ pub(super) async fn mcp(
         .unwrap()
         .get(&grant.installation)
         .cloned();
+    if tunnel.is_none() {
+        require_current_protocol(service, &grant.installation).await?;
+    }
     send(
         service,
         tunnel,
@@ -1030,6 +1101,22 @@ pub(super) async fn public_artifact(
     .await
 }
 
+async fn require_current_protocol(service: &Service, installation: &str) -> Result<(), ApiError> {
+    let status: Option<(bool,)> = query_as(
+        "SELECT update_required FROM installations WHERE id = $1 AND owner_id IS NOT NULL",
+    )
+    .bind(installation)
+    .fetch_optional(&service.pool)
+    .await?;
+    if matches!(status, Some((true,))) {
+        return Err(ApiError::Http(
+            StatusCode::UPGRADE_REQUIRED,
+            "Relay protocol mismatch. Update required: update Beacon and the installation.",
+        ));
+    }
+    Ok(())
+}
+
 async fn send(
     service: &Service,
     tunnel: Option<Arc<Tunnel>>,
@@ -1054,12 +1141,6 @@ async fn send(
         return Err(ApiError::Http(
             StatusCode::SERVICE_UNAVAILABLE,
             "Installation unavailable",
-        ));
-    }
-    if streaming && tunnel.version < 2 {
-        return Err(ApiError::Http(
-            StatusCode::NOT_IMPLEMENTED,
-            "Streaming requires relay protocol 2",
         ));
     }
     let slots = if public_file {
@@ -1140,6 +1221,7 @@ async fn send(
         account_id: account.clone(),
         role,
         mcp_scopes,
+        mcp_credential_digest: mcp_credential.clone(),
         public_artifact,
         method: request.method().to_string(),
         path: target.to_owned(),
@@ -1250,15 +1332,7 @@ async fn send(
                 "Installation busy or unavailable",
             )
         })?;
-    let response = tokio::time::timeout(REQUEST_TIMEOUT, response)
-        .await
-        .map_err(|_| {
-            ApiError::Http(
-                StatusCode::GATEWAY_TIMEOUT,
-                "Installation request timed out",
-            )
-        })?
-        .map_err(|_| ApiError::Http(StatusCode::BAD_GATEWAY, "Installation connection lost"))?;
+    let response = installation_response(response).await?;
     let status = StatusCode::from_u16(response.status)
         .map_err(|_| ApiError::Http(StatusCode::BAD_GATEWAY, "Invalid installation response"))?;
     let is_stream = streaming && response.body.is_empty();
@@ -1323,6 +1397,25 @@ async fn send(
         .insert("cache-control", HeaderValue::from_static("no-store"));
 
     Ok(output)
+}
+
+async fn installation_response(
+    response: oneshot::Receiver<ApiResponse>,
+) -> Result<ApiResponse, ApiError> {
+    // The deadline must win if a stalled runtime observes both expiry and a
+    // response (or connection loss) on the same poll.
+    tokio::select! {
+        biased;
+
+        () = tokio::time::sleep(REQUEST_TIMEOUT) => Err(ApiError::Http(
+            StatusCode::GATEWAY_TIMEOUT,
+            "Installation request timed out",
+        )),
+        result = response => result.map_err(|_| ApiError::Http(
+            StatusCode::BAD_GATEWAY,
+            "Installation connection lost",
+        )),
+    }
 }
 
 // Dropping an HTTP body records cancellation before waking the socket loop.

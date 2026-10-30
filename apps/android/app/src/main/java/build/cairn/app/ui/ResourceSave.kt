@@ -34,8 +34,11 @@ internal class ResourceSave(
         createPath: String = path,
         createValue: () -> JsonElement = value,
         onCreated: (JsonElement) -> Unit = {},
+        request: suspend (String, String, JsonElement) -> JsonElement = { method, route, payload ->
+            api.send(method, route, payload)
+        },
     ): JsonElement {
-        if (id.isNotBlank()) return api.send("PUT", "$path/${segment(id)}", value())
+        if (id.isNotBlank()) return request("PUT", "$path/${segment(id)}", value())
 
         val retry = attempted
         attempted = true
@@ -48,7 +51,7 @@ internal class ResourceSave(
         val creation = JsonObject(original.jsonObject + ("creationId" to JsonPrimitive(creationId)))
         val saved =
             try {
-                val response = api.send<JsonElement>("POST", pendingPath, creation)
+                val response = request("POST", pendingPath, creation)
                 val acquiredId =
                     response.jsonObject["id"]?.jsonPrimitive?.takeIf { it.isString }?.content
                 check(!acquiredId.isNullOrBlank()) {
@@ -72,7 +75,7 @@ internal class ResourceSave(
         onCreated(saved)
 
         val latest = value()
-        return if (retry) api.send("PUT", "$path/${segment(id)}", latest) else saved
+        return if (retry) request("PUT", "$path/${segment(id)}", latest) else saved
     }
 
     companion object {

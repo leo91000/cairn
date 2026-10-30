@@ -25,19 +25,65 @@ class SkillMentionLogicTest {
             )
         assertEquals(
             listOf("$project/deploy", "$project/review"),
-            chatSkills(skills, Agent(), project).map { "${it.scope}/${it.name}" },
+            chatSkills(
+                    skills,
+                    Agent(
+                        exclusiveNodes = emptyList(),
+                        plugins = emptyList(),
+                        id = "00000000-0000-4000-8000-000000000000",
+                        name = "",
+                        revision = "",
+                        createdAt = 0,
+                        access =
+                            AccessPolicy(
+                                mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                                projects = null,
+                                skills = null,
+                                mcps = null,
+                            ),
+                    ),
+                    project,
+                )
+                .map { "${it.scope}/${it.name}" },
         )
         assertEquals(
             listOf("deploy", "review", "secret"),
-            chatSkills(skills, Agent(), null).map { it.name },
+            chatSkills(
+                    skills,
+                    Agent(
+                        exclusiveNodes = emptyList(),
+                        plugins = emptyList(),
+                        id = "00000000-0000-4000-8000-000000000000",
+                        name = "",
+                        revision = "",
+                        createdAt = 0,
+                        access =
+                            AccessPolicy(
+                                mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                                projects = null,
+                                skills = null,
+                                mcps = null,
+                            ),
+                    ),
+                    null,
+                )
+                .map { it.name },
         )
         val limited =
             Agent(
+                exclusiveNodes = emptyList(),
+                plugins = emptyList(),
+                id = "00000000-0000-4000-8000-000000000000",
+                name = "",
+                revision = "",
+                createdAt = 0,
                 access =
                     AccessPolicy(
+                        mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                        mcps = null,
                         projects = listOf(project),
                         skills = listOf("global/review", "$other/secret"),
-                    )
+                    ),
             )
         assertEquals(
             listOf("global/review"),
@@ -96,5 +142,25 @@ class SkillMentionLogicTest {
         val text = "Run \$review, not \$HOME or `\$review` or \$reviewer"
         assertEquals(listOf(4..10), mentionRanges(text, setOf("review")))
         assertEquals(1, highlightSkills(text, setOf("review"), SpanStyle()).spanStyles.size)
+    }
+
+    @Test
+    fun `frequent skills rank within text relevance groups before limiting`() {
+        val skills =
+            listOf(
+                SkillOption("review", "", "global"),
+                SkillOption("reviewer", "", "global", 3),
+                SkillOption("review-code", "", "global", 12),
+                SkillOption("code-review", "", "global", 100),
+                SkillOption("ship", "", "global", 12),
+            )
+        assertEquals(
+            listOf("code-review", "review-code", "ship"),
+            matchSkills(skills, "", 3).map { it.name },
+        )
+        assertEquals(
+            listOf("review", "review-code", "reviewer", "code-review"),
+            matchSkills(skills, "review").map { it.name },
+        )
     }
 }

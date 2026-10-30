@@ -1,6 +1,6 @@
 import type { BrowserContext, Page } from '@playwright/test'
 import type { RunEvent } from '../../packages/contracts/contracts'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import {
   signIn as authenticateWorkspace,
   expect,
@@ -12,6 +12,12 @@ import {
   useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
+
+// Keep these chaining fixtures byte-limited even with a 1,000-event page cap.
+// Output stays inside collapsed tools, so the visible rows still fold tightly.
+function historyNoise(id: string) {
+  return Array.from({ length: 128 }, (_, index) => createHash('sha256').update(`${id}:${index}`).digest('hex')).join('')
+}
 
 test('chat groups visible calls despite diagnostics, updates and global event ID gaps', async ({ page, workspace }) => {
   const original = workspace.service.store.runs().find(run => run.status === 'succeeded')!
@@ -37,9 +43,9 @@ test('chat groups visible calls despite diagnostics, updates and global event ID
   await useRelayForHttpMocks(page)
   await page.route(`**/chats/${chat.id}/stream*`, route => route.fulfill({
     contentType: 'text/event-stream',
-    body: `event: batch\ndata: ${JSON.stringify({
+    body: `id: ${events.at(-1)!.id}\nevent: batch\ndata: ${JSON.stringify({
       events,
-      state: { run, chat },
+      state: { run, chat: workspace.service.chats.detail(chat.id), artifacts: [] },
       reset: true,
       more: false,
       history: `grouping:${run.id}`,
@@ -66,7 +72,7 @@ test('agent diagnostics preserve embedded JSON as terminal text', async ({ page,
     trigger: 'diagnostic-fixture',
   })
   const diagnostic = '2026-10-22T12:08:49Z WARN native: request failed: {"error":{"message":"disk full"}}\npartial result: {"error":\n'
-  workspace.service.store.event(run.id, 'diagnostic', `\x1B[33m${diagnostic}\x1B[0m`)
+  workspace.service.store.event(run.id, 'diagnostic', diagnostic)
   await page.goto(workspacePath(`${workspace.url}/runs/${run.id}`))
   await authenticateWorkspace(page)
   await page.getByTestId('agent-actions').locator(':scope > button').click()
@@ -177,6 +183,7 @@ for (const kind of ['chat', 'task'] as const) {
           type: 'command_execution',
           command: 'cat README.md',
           exit_code: 0,
+          aggregated_output: historyNoise(`fold-${i}`),
         },
       })
     }
@@ -268,6 +275,7 @@ test('automatic history pauses on errors and resumes only after retry', async ({
         type: 'command_execution',
         command: 'cat README.md',
         exit_code: 0,
+        aggregated_output: historyNoise(`retry-${i}`),
       },
     })
   }
@@ -613,6 +621,9 @@ test('a cached run restores the reading offset while its stream is still connect
 })
 
 test('following the latest output resumes a long backlog on the recent window, while a reader keeps its place', async ({ page, workspace }) => {
+  // Each of the 560 durable fixture appends starts the real Rust helper. Keep
+  // that setup time separate from the unchanged per-assertion response limits.
+  test.setTimeout(60_000)
   await useRelayForHttpMocks(page)
   const run = workspace.service.store.runs()[0]
   const write = (from: number, to: number) => {
@@ -692,7 +703,16 @@ test('following the latest output resumes a long backlog on the recent window, w
 
 test('recent history loads older pages without moving the reader and survives a blocked reconnect', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
-  const run = workspace.service.store.runs()[0]
+
+  // Other journeys append to the shared fixture run. Keep this history bounded.
+  const original = workspace.service.store.runs().find(run => run.status === 'succeeded')!
+  const run = workspace.service.store.addRun({
+    ...original,
+    id: randomUUID(),
+    taskId: randomUUID(),
+    trigger: 'history-fixture',
+  })
+
   for (let i = 0; i < 350; i++) {
     const text = `Paged line ${String(i).padStart(3, '0')}. A paragraph to retain a stable reading position.`
     workspace.service.store.event(run.id, 'item.completed', text, { item: { id: `page-${i}`, type: 'agent_message', text } })
@@ -731,7 +751,7 @@ test('recent history loads older pages without moving the reader and survives a 
   await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 050' })).toBeAttached()
   await scroller.evaluate(el => el.scrollTop = 0)
   await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 000' })).toBeAttached()
-  // The run also has fixture events before line 000: load that unread prefix before
+  // Wait for the complete history and pagination boundary to reach disk before
   // asserting that reopening needs no history requests at all.
   await expect.poll(async () => {
     await scroller.evaluate(el => el.scrollTop = 0)

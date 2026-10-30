@@ -10,14 +10,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 
-@Serializable
-data class PluginOption(
-    val value: String = "",
-    val label: String = "",
-    /** Shown under the choice, e.g. why it can't be picked. */
-    val description: String = "",
-    val disabled: Boolean = false,
-)
+typealias PluginOption = build.cairn.contracts.PluginOption
 
 /** One field of a declarative plugin form: instance settings or a view's form. */
 @Serializable
@@ -45,285 +38,110 @@ data class PluginSetting(
 )
 
 /** What a package's `form` handler returns while the owner edits an instance. */
-@Serializable
-data class PluginForm(
-    val options: Map<String, List<PluginOption>> = emptyMap(),
-    val values: JsonObject = JsonObject(emptyMap()),
-    val errors: Map<String, String> = emptyMap(),
-    val view: JsonArray = JsonArray(emptyList()),
-)
+typealias PluginForm = build.cairn.contracts.PluginFormResult
 
-@Serializable
-data class PluginCredential(
-    val label: String = "",
-    val header: String = "",
-    val prefix: String = "",
-    /**
-     * The owner can sign in on the service's page instead of pasting a token. Only its presence
-     * matters to the app, so its shape is not checked here.
-     */
-    val deviceFlow: JsonObject? = null,
-    val oauth: JsonObject? = null,
-)
+typealias PluginCredential = build.cairn.contracts.PluginCredential
 
-/** A named source a package offers, such as a service's repositories. */
-@Serializable
-data class PluginProjectSource(
-    val name: String = "",
-    val title: String = "",
-    val description: String = "",
-)
+typealias PluginProjectSource = build.cairn.contracts.PluginProjectSource
 
-/** Where a package's instances import skills from, with the location's fields. */
-@Serializable
-data class PluginSkillSource(
-    val name: String = "",
-    val title: String = "",
-    val description: String = "",
-    val fields: List<PluginSetting> = emptyList(),
-)
+typealias PluginSkillSource = build.cairn.contracts.PluginSkillSource
 
-/** The package's mark: a background colour and an SVG path on a 24×24 grid. */
-@Serializable data class PluginBrand(val color: String = "", val path: String = "")
+typealias PluginBrand = build.cairn.contracts.PluginBrand
 
-@Serializable data class PluginInstances(val singular: String = "", val plural: String = "")
+typealias PluginInstances = build.cairn.contracts.PluginInstances
 
-@Serializable
-data class PluginProgram(
-    val name: String = "",
-    val path: String = "",
-    val description: String = "",
-    val installer: String = "",
-)
+typealias PluginProgram = build.cairn.contracts.PluginProgram
 
-@Serializable
-data class ProgramRelease(
-    val version: String = "",
-    val url: String = "",
-    val sha256: String? = null,
-)
+typealias ProgramRelease = build.cairn.contracts.ProgramRelease
 
-@Serializable
-data class InstalledProgram(
-    val release: ProgramRelease = ProgramRelease(),
-    val archiveSha256: String = "",
-    val binarySha256: String = "",
-)
+typealias InstalledProgram = build.cairn.contracts.InstalledProgram
 
-@Serializable
-data class ProgramInstallation(
-    val name: String = "",
-    val installer: String = "",
-    val installed: InstalledProgram? = null,
-    val previous: InstalledProgram? = null,
-    val candidate: ProgramRelease? = null,
-    val digest: String? = null,
-)
+typealias ProgramInstallation = build.cairn.contracts.ProgramState
 
-@Serializable data class ProgramInstallations(val programs: List<ProgramInstallation> = emptyList())
+typealias ProgramInstallations = build.cairn.contracts.ListPluginProgramsOutput
 
-@Serializable data class PluginAgentAccess(val description: String = "")
+typealias PluginAgentAccess = build.cairn.contracts.PluginAgentAccess
 
-@Serializable
-data class PluginArgument(
-    val name: String = "",
-    val flag: String? = null,
-    val positional: Boolean = false,
-    val required: Boolean = false,
-    val description: String = "",
-)
+typealias PluginArgument = build.cairn.contracts.PluginArgument
 
-/** A command agents run in their conversation: `cairn plugin <plugin> <name> …`. */
-@Serializable
-data class PluginCommand(
-    val name: String = "",
-    val description: String = "",
-    /** `json`, `text` or `secret`. */
-    val output: String = "json",
-    val arguments: List<PluginArgument> = emptyList(),
-) {
-    fun usage(plugin: String) =
-        (listOf("cairn plugin", plugin, name) +
-                arguments.map { argument ->
-                    val part =
-                        argument.flag?.let { "$it <${argument.name}>" } ?: "<${argument.name}>"
-                    if (argument.required) part else "[$part]"
-                })
-            .joinToString(" ")
-}
+typealias PluginCommand = build.cairn.contracts.PluginCommand
 
-@Serializable data class PluginTool(val name: String = "", val description: String = "")
+typealias PluginTool = build.cairn.contracts.PluginTool
 
-@Serializable
-data class PluginManifest(
-    val id: String = "",
-    val name: String = "",
-    val version: String = "",
-    val description: String = "",
-    val capabilities: List<String> = emptyList(),
-    val hosts: List<String> = emptyList(),
-    val credential: PluginCredential? = null,
-    val settings: List<PluginSetting> = emptyList(),
-    val instances: PluginInstances? = null,
-    val brand: PluginBrand? = null,
-    val programs: List<PluginProgram> = emptyList(),
-    val agentAccess: PluginAgentAccess? = null,
-    val commands: List<PluginCommand> = emptyList(),
-    val tools: List<PluginTool> = emptyList(),
-    val instructions: String = "",
-    val instanceView: Boolean = false,
-    val instanceTest: Boolean = false,
-    val instanceForm: Boolean = false,
-    /** Where its enabled instances import projects from. */
-    val projectSources: List<PluginProjectSource> = emptyList(),
-    /** Where its enabled instances import skills from. */
-    val skillSources: List<PluginSkillSource> = emptyList(),
-    /** Credentials given to agents' runs (`files`, `git`, …); only the kinds matter here. */
-    val runCredentials: JsonObject? = null,
-    /** The package's own setup assistant, when the installation does not resolve it. */
-    val setup: PluginSetup? = null,
-) {
-    /** Instances answer external people through a dedicated agent. */
-    val delegates
-        get() = "conversations.submit" in capabilities
+typealias PluginManifest = build.cairn.contracts.PluginManifest
 
-    /** Packages that react to people, connections or timers keep a worker running. */
-    val needsWorker
-        get() =
-            listOf("socket", "inbound", "conversations.submit", "conversations.control", "timers")
-                .any { it in capabilities }
+typealias PluginFile = build.cairn.contracts.PluginFile
 
-    /** Runs receive the instance's credentials: each agent gets one instance of the package. */
-    val onePerAgent
-        get() = runCredentials?.keys?.any { it == "files" || it == "git" } == true
+typealias PluginVersion = build.cairn.contracts.PackageVersion
 
-    /** The package's own name for one or several instances, e.g. "Service account". */
-    fun noun(count: Int = 1): String =
-        instances?.let { if (count == 1) it.singular else it.plural }
-            ?: if (count == 1) "Instance" else "Instances"
-}
+typealias PluginEntry = build.cairn.contracts.PluginEntry
 
-/** One Luau file of a package, for review. */
-@Serializable data class PluginFile(val path: String = "", val bytes: Int = 0)
-
-@Serializable
-data class PluginVersion(
-    val version: String = "",
-    val digest: String? = null,
-    /** The package's Luau files, `main.luau` first. */
-    val files: List<PluginFile>? = null,
-    val manifest: PluginManifest? = null,
-    /** The steps the owner follows, resolved by the installation. */
-    val setup: PluginSetup? = null,
-    val approved: Boolean? = null,
-    val error: String? = null,
-)
-
-/** A bundled or installed package and the owner's approval state. */
-@Serializable
-data class PluginEntry(
-    val id: String = "",
-    val builtin: Boolean = false,
-    /** `active`, `update`, `needs_approval` or `invalid`. */
-    val status: String = "active",
-    val active: String? = null,
-    val manifest: PluginManifest? = null,
-    /** The steps the owner follows; older installations send only the manifest. */
-    val setup: PluginSetup? = null,
-    val versions: List<PluginVersion> = emptyList(),
-) {
-    val name
-        get() = manifest?.name ?: id
-}
-
-@Serializable data class PluginLabel(val id: String = "", val name: String = "")
-
-@Serializable
-data class PluginRequest(
-    val id: String = "",
-    val userId: String = "",
-    val name: String = "",
-    val mentions: Int = 0,
-    val updatedAt: Long = 0,
-)
-
-@Serializable
-data class PluginActivity(
-    val id: String = "",
-    val chatId: String = "",
-    val userId: String = "",
-    val name: String = "",
-    val preview: String = "",
-    /** `working`, `replied`, `failed` or `stopped`. */
-    val status: String = "",
-    val createdAt: Long = 0,
-)
-
-/** Live state, with the package's own message (e.g. who it is signed in as). */
-@Serializable
-data class PluginStatus(val state: String = "disconnected", val message: String? = null)
-
-@Serializable data class PluginUsage(val hour: Int = 0)
-
-/** One configured instance of a plugin, such as a Discord bot or a service account. */
-@Serializable
-data class PluginConnection(
-    val id: String = "",
-    val pluginId: String = "",
-    val name: String = "",
-    val enabled: Boolean = true,
-    val settings: JsonObject = JsonObject(emptyMap()),
-    val userIds: List<String> = emptyList(),
-    val people: List<PluginLabel> = emptyList(),
-    /** `allowlist`, `requests` or `everyone`. */
-    val accessMode: String = "allowlist",
-    val maxPerPersonPerHour: Int? = null,
-    val agentId: String = "",
-    val projectId: String? = null,
-    val maxMessagesPerHour: Int = 20,
-    /** Agents granted the package's commands and tools on this instance. */
-    val agentIds: List<String> = emptyList(),
-    /** Secret fields saved in the vault; values never reach the app. */
-    val secretKeys: List<String> = emptyList(),
-    val status: PluginStatus = PluginStatus(),
-    val usage: PluginUsage = PluginUsage(),
-    val requests: List<PluginRequest> = emptyList(),
-    val activity: List<PluginActivity> = emptyList(),
-) {
-    fun setting(key: String): String? =
-        (settings[key] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
-
-    fun flag(key: String): Boolean = (settings[key] as? JsonPrimitive)?.booleanOrNull == true
-
-    /** A setting as people read it: lists joined, switches as Oui/Non. */
-    fun display(key: String): String =
-        when (val value = settings[key]) {
-            null -> "—"
-            is JsonArray ->
-                value
-                    .mapNotNull { it.jsonPrimitive.contentOrNull }
-                    .joinToString(", ")
-                    .ifBlank { "—" }
-            is JsonPrimitive ->
-                value.booleanOrNull?.let { if (it) "Oui" else "Non" }
-                    ?: value.contentOrNull?.ifBlank { null }
-                    ?: "—"
-            else -> value.toString()
+val PluginManifest.delegates
+    get() = "conversations.submit" in capabilities
+val PluginManifest.needsWorker
+    get() =
+        listOf("socket", "inbound", "conversations.submit", "conversations.control", "timers").any {
+            it in capabilities
         }
+val PluginManifest.onePerAgent
+    get() = runCredentials?.let { it.files.isNotEmpty() || it.git.isNotEmpty() } == true
 
-    fun personName(id: String) =
-        people.find { it.id == id }?.name?.takeIf { it.isNotBlank() }
-            ?: "Utilisateur ${id.takeLast(4)}"
-}
+fun PluginManifest.noun(count: Int = 1): String =
+    instances?.let { if (count == 1) it.singular else it.plural }
+        ?: if (count == 1) "Instance" else "Instances"
 
-@Serializable data class PluginCapability(val name: String = "", val description: String = "")
+val PluginManifest.settingFields: List<PluginSetting>
+    get() = settings.map { wireJson.decodeFromJsonElement(PluginSetting.serializer(), it!!) }
+val PluginSkillSource.settingFields: List<PluginSetting>
+    get() = fields.map { wireJson.decodeFromJsonElement(PluginSetting.serializer(), it!!) }
+val PluginEntry.name
+    get() = manifest?.name ?: id
 
-@Serializable
-data class PluginCatalog(
-    val packages: List<PluginEntry> = emptyList(),
-    val capabilities: List<PluginCapability> = emptyList(),
-    val connections: List<PluginConnection> = emptyList(),
-)
+fun PluginCommand.usage(plugin: String) =
+    (listOf("cairn plugin", plugin, name) +
+            arguments.map { argument ->
+                val part = argument.flag?.let { "$it <${argument.name}>" } ?: "<${argument.name}>"
+                if (argument.required) part else "[$part]"
+            })
+        .joinToString(" ")
+
+typealias PluginLabel = build.cairn.contracts.PluginLabel
+
+typealias PluginRequest = build.cairn.contracts.PluginRequest
+
+typealias PluginActivity = build.cairn.contracts.PluginActivity
+
+typealias PluginStatus = build.cairn.contracts.PluginStatus
+
+typealias PluginUsage = build.cairn.contracts.PluginUsage
+
+typealias PluginConnection = build.cairn.contracts.PluginConnection
+
+fun PluginConnection.setting(key: String): String? =
+    (settings[key] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+
+fun PluginConnection.flag(key: String): Boolean =
+    (settings[key] as? JsonPrimitive)?.booleanOrNull == true
+
+/** A setting as people read it: lists joined, switches as Oui/Non. */
+fun PluginConnection.display(key: String): String =
+    when (val value = settings[key]) {
+        null -> "—"
+        is JsonArray ->
+            value.mapNotNull { it.jsonPrimitive.contentOrNull }.joinToString(", ").ifBlank { "—" }
+        is JsonPrimitive ->
+            value.booleanOrNull?.let { if (it) "Oui" else "Non" }
+                ?: value.contentOrNull?.ifBlank { null }
+                ?: "—"
+        else -> value.toString()
+    }
+
+fun PluginConnection.personName(id: String) =
+    people.find { it.id == id }?.name?.takeIf { it.isNotBlank() } ?: "Utilisateur ${id.takeLast(4)}"
+
+typealias PluginCapability = build.cairn.contracts.PluginCapability
+
+typealias PluginCatalog = build.cairn.contracts.PluginCatalog
 
 enum class PluginTone {
     OK,
@@ -545,60 +363,20 @@ fun PluginCatalog.grantsOf(agentId: String): List<String> =
         }
 
 /**
- * The grants an edited instance must send back unchanged, or null to omit them. An older
- * installation reads a missing list as "no agents"; a current one keeps the grants when omitted.
- * With the agents not loaded yet (Main always exists) the installation is unknown, so they are kept
- * as for an older one. Only packages giving agents access have grants to keep.
- */
-fun PluginConnection.agentIdsToKeep(agents: List<Agent>, manifest: PluginManifest): List<String>? =
-    agentIds.takeIf {
-        it.isNotEmpty() &&
-            manifest.agentAccess != null &&
-            (agents.isEmpty() || olderInstallation(agents))
-    }
-
-/**
- * The grants to send back on an older or unknown installation, always read again just before saving
- * ([current], null when the instance no longer exists) whatever the editor last saw: a grant
- * revoked meanwhile is never restored, one added meanwhile is never dropped.
- */
-suspend fun PluginConnection.agentIdsToSend(
-    agents: List<Agent>,
-    manifest: PluginManifest,
-    current: suspend () -> List<String>?,
-): List<String>? {
-    val keeps = manifest.agentAccess != null && (agents.isEmpty() || olderInstallation(agents))
-    if (!keeps) return null
-    val fresh = current() ?: return null
-    return copy(agentIds = fresh).agentIdsToKeep(agents, manifest)
-}
-
-/**
  * A plugin's device sign-in as the installation shows it (`POST /plugins/{id}/device-flow`): the
  * token never reaches the app. [state] is `pending`, `completed`, `failed` or `expired`.
  */
-@Serializable
-data class PluginDeviceFlow(
-    val id: String = "",
-    val pluginId: String = "",
-    val state: String = "pending",
-    val userCode: String = "",
-    val verificationUri: String = "",
-    val verificationUriComplete: String? = null,
-    val expiresAt: Long = 0,
-    /** Why it failed, or the service's guidance. */
-    val message: String? = null,
-) {
-    /** The page where the owner enters the code; some services prefill it. */
-    val link
-        get() = verificationUriComplete?.takeIf { it.isNotBlank() } ?: verificationUri
+typealias PluginDeviceFlow = build.cairn.contracts.PluginSigninFlow
 
-    val pending
-        get() = state == "pending" || state == "exchanging"
+/** The page where the owner enters the code; some services prefill it. */
+val PluginDeviceFlow.link
+    get() = verificationUriComplete?.takeIf { it.isNotBlank() } ?: verificationUri
 
-    val completed
-        get() = state == "completed"
-}
+val PluginDeviceFlow.pending
+    get() = state == "pending" || state == "exchanging"
+
+val PluginDeviceFlow.completed
+    get() = state == "completed"
 
 /**
  * What a form call or a save sends for the credential: a completed sign-in replaces a pasted token,

@@ -5,6 +5,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import http from 'node:http'
 import path from 'node:path'
 import process from 'node:process'
+import { askCairn } from './cairn-questions.mjs'
 
 if (process.argv.includes('--version')) {
   process.stdout.write('1.19.0\n')
@@ -14,7 +15,8 @@ if (process.argv.includes('--version')) {
 async function main() {
   const root = path.join(process.env.XDG_DATA_HOME, 'opencode')
   await mkdir(root, { recursive: true })
-  if (JSON.parse(process.env.OPENCODE_CONFIG_CONTENT || '{}').fixtureStartupHang) {
+  const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT || '{}')
+  if (config.fixtureStartupHang) {
     await writeFile(path.join(root, 'startup.pid'), `${process.pid}`)
     setInterval(() => {}, 1000)
     return
@@ -65,6 +67,7 @@ async function main() {
         name: 'OpenCode Go',
         models: {
           'ling-3.1-flash-free': nativeModel('ling-3.1-flash-free', 'Ling 3.1 Flash Free', ['medium', 'high']),
+          'retired-model': { ...nativeModel('retired-model', 'Retired model', []), status: 'deprecated' },
         },
       },
       {
@@ -116,7 +119,8 @@ async function main() {
     await persist()
     emit('message.updated', { info: message.info })
     emit('message.part.updated', { part })
-    emit('session.status', { sessionID: session.id, status: { type: 'idle' } })
+    if (!session.deferIdle)
+      emit('session.status', { sessionID: session.id, status: { type: 'idle' } })
   }
 
   async function prompt(session, input) {
@@ -233,6 +237,13 @@ async function main() {
       return
     }
 
+    if (body.includes('fixture:cairn-question')) {
+      const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT)
+      await askCairn(config.mcp.cairn_workspace, [{ id: 'layout', title: 'Which layout?', options: [{ id: 'compact', label: 'Compact' }] }])
+      await finish(session, input.messageID, 'Awaiting input')
+      return
+    }
+
     if (body.includes('fixture:opencode-question')) {
       const request = id('que')
       questions.set(request, { session, parent: input.messageID })
@@ -292,7 +303,10 @@ async function main() {
     tool.state = { ...tool.state, status: 'completed', output: 'Workspace ready\n' }
     emit('message.part.updated', { part: tool })
     hanging.delete(session.id)
-    await finish(session, input.messageID, 'I checked the workspace and prepared a compact status panel. The model and API key were selected through OpenCode.', body.includes('fixture:opencode-length') ? 'length' : 'stop')
+    const answer = config.fixtureReversePromptCompletion
+      ? body
+      : 'I checked the workspace and prepared a compact status panel. The model and API key were selected through OpenCode.'
+    await finish(session, input.messageID, answer, body.includes('fixture:opencode-length') ? 'length' : 'stop')
   }
 
   const server = http.createServer(async (request, response) => {
@@ -349,7 +363,7 @@ async function main() {
       json(200, true)
       const rejected = question[2] === 'reject'
       emit(rejected ? 'question.rejected' : 'question.replied', { sessionID: pending.session.id, requestID: question[1] })
-      await finish(pending.session, pending.parent, rejected ? 'Question withdrawn without an answer.' : `I will use the ${body.answers[0].join(', ')} layout.`)
+      await finish(pending.session, rejected ? pending.session.questionRefusalParent : pending.parent, rejected ? pending.session.questionRefusal : `I will use the ${body.answers[0].join(', ')} layout.`)
       return
     }
 
@@ -365,10 +379,46 @@ async function main() {
       return
     }
 
+    if (route[2] === '/message' && request.method === 'POST' && body.noReply === true) {
+      session.questionRefusal = body.parts.map(part => part.text).join('\n')
+      session.questionRefusalParent = body.messageID
+      const info = {
+        id: body.messageID,
+        sessionID: session.id,
+        role: 'user',
+        time: { created: Date.now() },
+      }
+      session.messages.push({ info, parts: body.parts })
+      await persist()
+      emit('message.updated', { info })
+      json(200, { info, parts: body.parts })
+      return
+    }
+
     if (route[2] === '/prompt_async') {
       response.writeHead(204)
       response.end()
-      setTimeout(() => void prompt(session, body).catch(() => emit('session.error', { sessionID: session.id, error: { name: 'FixtureError' } })), 20)
+      const fail = () => emit('session.error', { sessionID: session.id, error: { name: 'FixtureError' } })
+      if (config.fixtureReversePromptCompletion) {
+        if (!session.firstPrompt) {
+          session.firstPrompt = body
+          return
+        }
+
+        // Both histories must be visible at idle. Complete the second prompt
+        // first, so assistant creation time disagrees with submission order.
+        session.deferIdle = true
+        void (async () => {
+          await prompt(session, body)
+          await prompt(session, session.firstPrompt)
+          session.deferIdle = false
+          emit('session.status', { sessionID: session.id, status: { type: 'idle' } })
+        })().catch(fail)
+      }
+      else {
+        setTimeout(() => void prompt(session, body).catch(fail), 20)
+      }
+
       return
     }
 

@@ -1,3 +1,5 @@
+import { Buffer } from 'node:buffer'
+import { gzipSync } from 'node:zlib'
 import {
   afterEach,
   beforeEach,
@@ -10,12 +12,13 @@ import { nextTick } from 'vue'
 class Source extends EventTarget {
   static all: Source[] = []
   onerror: (() => void) | null = null
+  closed = false
   constructor(readonly url: string) {
     super()
     Source.all.push(this)
   }
 
-  close() {}
+  close() { this.closed = true }
 }
 
 class Channel extends EventTarget {
@@ -182,6 +185,119 @@ it('reads JSON from the actual direct response instead of relaying its payload',
     body: btoa('{"marker":"direct"}'),
   })
   expect(await response).toEqual({ marker: 'direct' })
+})
+
+it('negotiates and decodes gzip history on the direct channel', async () => {
+  const { api, channel } = await direct()
+  const response = api('/runs/r/history?before=42&history=v1:r:1')
+  const decoded = { events: [{ id: 41, text: 'History 🦊 '.repeat(1000) }], hasOlder: true }
+  await vi.waitFor(() => expect(channel.packets.length).toBe(1))
+  const request = JSON.parse(new TextDecoder().decode(channel.packets[0].subarray(13)))
+  reply(channel, {
+    type: 'response',
+    id: request.id,
+    status: 200,
+    headers: [['content-type', 'application/json'], ['content-encoding', 'gzip']],
+    body: gzipSync(JSON.stringify(decoded)).toString('base64'),
+  })
+  expect(await response).toEqual(decoded)
+  expect(request.headers).toContainEqual(['accept-encoding', 'gzip'])
+})
+
+it('requests identity when browser gzip decompression is unavailable', async () => {
+  vi.stubGlobal('DecompressionStream', undefined)
+  const { api, channel } = await direct()
+  const response = api('/runs/r/history?before=42&history=v1:r:1')
+  await vi.waitFor(() => expect(channel.packets.length).toBe(1))
+  const request = JSON.parse(new TextDecoder().decode(channel.packets[0].subarray(13)))
+  expect(request.headers).toContainEqual(['accept-encoding', 'identity'])
+  reply(channel, {
+    type: 'response',
+    id: request.id,
+    status: 200,
+    headers: [],
+    body: btoa('{"events":[]}'),
+  })
+  expect(await response).toEqual({ events: [] })
+})
+
+it.each(['/api/runs/r/stream?history=invalid', '/api/shared-artifacts/a/file'])('requests identity on streamed route %s so JSON errors remain readable', async (path) => {
+  const { DirectChannel } = await import('../src/direct-channel')
+  const channel = new Channel()
+  channel.readyState = 'open'
+  const transport = new DirectChannel(channel as unknown as RTCDataChannel, { account_id: 'a', role: 'owner' }, () => {})
+  try {
+    const pending = transport.request(path)
+    await vi.waitFor(() => expect(channel.packets.length).toBe(1))
+    const request = JSON.parse(new TextDecoder().decode(channel.packets[0].subarray(13)))
+    expect(request.headers).toContainEqual(['accept-encoding', 'identity'])
+    reply(channel, {
+      type: 'stream_start',
+      id: request.id,
+      status: 400,
+      headers: [['content-type', 'application/json']],
+      body: '',
+    })
+    const response = await pending
+    const content = response.json()
+    await vi.waitFor(() => expect(channel.packets.length).toBe(2))
+    reply(channel, { type: 'stream_chunk', id: request.id, body: btoa('{"error":"Invalid history version."}') })
+    await vi.waitFor(() => expect(channel.packets.length).toBe(3))
+    reply(channel, { type: 'stream_end', id: request.id, failed: false })
+    expect(response.status).toBe(400)
+    expect(await content).toEqual({ error: 'Invalid history version.' })
+  }
+  finally { transport.close() }
+})
+
+it('keeps compressed HEAD heartbeat responses bodyless', async () => {
+  const { DirectChannel } = await import('../src/direct-channel')
+  const channel = new Channel()
+  channel.readyState = 'open'
+  channel.respondToHeartbeats = false
+  const transport = new DirectChannel(channel as unknown as RTCDataChannel, { account_id: 'a', role: 'owner' }, () => {})
+  try {
+    const pending = transport.request('/api/chats', { method: 'HEAD' })
+    await vi.waitFor(() => expect(channel.packets.length).toBe(1))
+    const request = JSON.parse(new TextDecoder().decode(channel.packets[0].subarray(13)))
+    reply(channel, {
+      type: 'response',
+      id: request.id,
+      status: 200,
+      headers: [['content-encoding', 'gzip']],
+      body: '',
+    })
+    const response = await pending
+    expect(response.body).toBeNull()
+    expect(await response.text()).toBe('')
+    expect(response.headers.get('content-encoding')).toBe('gzip')
+  }
+  finally { transport.close() }
+})
+
+it.each(['corrupt', 'too large'])('rejects a %s gzip response on the direct channel', async (kind) => {
+  const { DirectChannel } = await import('../src/direct-channel')
+  const channel = new Channel()
+  channel.readyState = 'open'
+  const transport = new DirectChannel(channel as unknown as RTCDataChannel, { account_id: 'a', role: 'owner' }, () => {})
+  try {
+    const pending = transport.request('/api/runs/r/history')
+    await vi.waitFor(() => expect(channel.packets.length).toBe(1))
+    const request = JSON.parse(new TextDecoder().decode(channel.packets[0].subarray(13)))
+    const body = kind === 'corrupt' ? Buffer.from('invalid gzip') : gzipSync('x'.repeat(8_000_001))
+    reply(channel, {
+      type: 'response',
+      id: request.id,
+      status: 200,
+      headers: [['content-encoding', 'gzip'], ['content-length', String(body.length)]],
+      body: body.toString('base64'),
+    })
+    const response = await pending
+    expect(response.headers.has('content-encoding')).toBe(false)
+    expect(response.headers.has('content-length')).toBe(false)
+    await expect(response.text()).rejects.toThrow()
+  }
+  finally { transport.close() }
 })
 
 it('retries interrupted reads on relay but leaves other mutations visibly failed', async () => {
@@ -853,4 +969,79 @@ it('keeps a session-capped renewal until expiry without issuing one-second renew
   expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url).endsWith('/renew'))).toHaveLength(1)
   await vi.advanceTimersByTimeAsync(1)
   expect(state.transportRoute).toBe('relay')
+})
+
+it('requires an update after a DataChannel version mismatch without relaying the interrupted read', async () => {
+  const { api, channel, state } = await direct()
+  const pending = api('/chats')
+  const rejected = expect(pending).rejects.toMatchObject({ status: 426, message: expect.stringContaining('Update required') })
+  await vi.waitFor(() => expect(channel.packets.length).toBe(1))
+  const packet = new Uint8Array(13)
+  packet[0] = 2
+  channel.dispatchEvent(new MessageEvent('message', { data: packet.buffer }))
+  await rejected
+  expect(state.protocolError).toContain('Update required')
+  const requests = vi.mocked(fetch).mock.calls.length
+  await expect(api('/chats')).rejects.toMatchObject({ status: 426 })
+  await vi.advanceTimersByTimeAsync(300000)
+  expect(fetch).toHaveBeenCalledTimes(requests)
+})
+
+it('requires an update after direct authorization refuses the protocol instead of retrying', async () => {
+  vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(Response.json({ error: 'Update required: update the app and Beacon.' }, { status: 426 }))))
+  const { api, state } = await import('../src/api')
+  state.csrf = 'test-csrf'
+  state.authenticated = true
+  state.ready = true
+  await nextTick()
+  await vi.waitFor(() => expect(state.protocolError).toContain('Update required'))
+  const requests = vi.mocked(fetch).mock.calls.length
+  await expect(api('/chats')).rejects.toMatchObject({ status: 426 })
+  await vi.advanceTimersByTimeAsync(300000)
+  expect(fetch).toHaveBeenCalledTimes(requests)
+})
+
+it('stops live readers and refuses new streams after a DataChannel mismatch', async () => {
+  const { channel, state, installationTransport } = await direct()
+  const { liveConnection } = await import('../src/live-connection')
+  const connection = liveConnection('/chats/stream', vi.fn(), vi.fn())
+  await vi.waitFor(() => expect(channel.packets.length).toBe(1))
+  const packet = new Uint8Array(13)
+  packet[0] = 2
+  channel.dispatchEvent(new MessageEvent('message', { data: packet.buffer }))
+  await vi.waitFor(() => expect(state.protocolError).toContain('Update required'))
+  expect(() => installationTransport.source('/chats/stream', '/api/chats/stream')).toThrow('Update required')
+  await vi.advanceTimersByTimeAsync(300000)
+  expect(Source.all.filter(source => source.url.includes('/api/chats/stream'))).toHaveLength(0)
+  connection.close()
+})
+
+it('closes an existing relay stream when authorization requires an update', async () => {
+  let refuse: (response: Response) => void = () => {}
+  vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(resolve => refuse = resolve)))
+  const { state } = await import('../src/api')
+  const { liveConnection } = await import('../src/live-connection')
+  Object.assign(state, { authenticated: true, ready: true, csrf: 'csrf' })
+  await nextTick()
+  const connection = liveConnection('/chats/stream', vi.fn(), vi.fn())
+  const relay = Source.all.find(source => source.url.includes('/api/chats/stream'))!
+  expect(relay).toBeDefined()
+  refuse(Response.json({ error: 'Update required.' }, { status: 426 }))
+  await vi.waitFor(() => expect(state.protocolError).toContain('Update required'))
+  expect(relay.closed).toBe(true)
+  await vi.advanceTimersByTimeAsync(300000)
+  expect(Source.all.filter(source => source.url.includes('/api/chats/stream'))).toHaveLength(1)
+  connection.close()
+})
+
+it('treats an explicit installation protocol refusal as terminal', async () => {
+  const { api, channel, state } = await direct()
+  const pending = api('/chats')
+  const rejected = expect(pending).rejects.toMatchObject({ status: 426 })
+  await vi.waitFor(() => expect(channel.packets.length).toBe(1))
+  reply(channel, { type: 'update_required', message: 'Update required: update the app and installation.' })
+  await rejected
+  expect(state.protocolError).toContain('Update required')
+  await expect(api('/chats')).rejects.toMatchObject({ status: 426 })
+  expect(vi.mocked(fetch).mock.calls.every(([url]) => String(url).includes('/direct/'))).toBe(true)
 })

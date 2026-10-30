@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS shared_references(publication TEXT NOT NULL REFERENCE
 CREATE INDEX IF NOT EXISTS shared_references_object ON shared_references(object);
 CREATE TABLE IF NOT EXISTS remote_deletions(id TEXT PRIMARY KEY,location TEXT NOT NULL,key TEXT NOT NULL,prefix INTEGER NOT NULL DEFAULT 0,retry_at INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS remote_deletions_due ON remote_deletions(retry_at);
+CREATE TABLE IF NOT EXISTS direct_storage_grants(object TEXT PRIMARY KEY REFERENCES shared_objects(id) ON DELETE CASCADE,expires_at INTEGER NOT NULL,settled INTEGER NOT NULL DEFAULT 0 CHECK(settled IN (0,1)));
+CREATE TABLE IF NOT EXISTS direct_read_authorizations(grant_id TEXT NOT NULL,object TEXT NOT NULL,hash TEXT NOT NULL,run_id TEXT NOT NULL,PRIMARY KEY(grant_id,object));CREATE INDEX IF NOT EXISTS direct_read_authorizations_object ON direct_read_authorizations(object);
 ";
 
 const GRACE_MS: i64 = 300_000;
@@ -40,12 +42,23 @@ pub fn key(hash: &str, object: &str) -> String {
     format!("shared-blocks/v2/{hash}/{object}")
 }
 
+pub fn object_key(envelope: u64, hash: &str, object: &str) -> String {
+    if envelope == 3 {
+        return format!("shared-blocks/v3/{hash}/{object}");
+    }
+    key(hash, object)
+}
+
 fn location(point: &Value) -> Value {
-    json!({
+    let mut location = json!({
         "destination": "s3",
         "bucket": point["bucket"],
         "endpoint": point["endpoint"]
-    })
+    });
+    if point["blockEnvelope"] == 3 {
+        location["blockEnvelope"] = 3.into();
+    }
+    location
 }
 
 /// One transaction and cached statements for the entire candidate manifest. Only
@@ -60,7 +73,7 @@ pub(crate) fn reserve(db: &Db<'_>, point: &Value, manifest: &mut Value) -> Resul
         params![publication, text(point, "runId")],
     )?;
     let mut lookup = db.0.prepare_cached(
-        "SELECT id,size FROM shared_objects WHERE destination=?1 AND hash=?2 AND state='ready'",
+        "SELECT id,size,EXISTS(SELECT 1 FROM direct_object_quarantines q WHERE q.object=shared_objects.id) FROM shared_objects WHERE destination=?1 AND hash=?2 AND state='ready'",
     )?;
     let mut insert = db.0.prepare_cached(
         "INSERT INTO shared_objects(id,destination,hash,size,location,state)
@@ -80,11 +93,20 @@ pub(crate) fn reserve(db: &Db<'_>, point: &Value, manifest: &mut Value) -> Resul
         if !objects.contains_key(&hash) {
             let existing = lookup
                 .query_row(params![destination, hash], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, bool>(2)?,
+                    ))
                 })
                 .optional()?;
             let ready = existing.is_some();
-            let object = if let Some((id, stored_size)) = existing {
+            let object = if let Some((id, stored_size, quarantined)) = existing {
+                if quarantined {
+                    return Err(Error::unavailable(
+                        "Shared block quarantine awaits node acknowledgement fencing.",
+                    ));
+                }
                 if stored_size != size as i64 {
                     return Err(Error::bad("Shared block size mismatch."));
                 }
@@ -111,6 +133,9 @@ pub(crate) fn reserve(db: &Db<'_>, point: &Value, manifest: &mut Value) -> Resul
             return Err(Error::bad("Shared block size mismatch."));
         }
         block["object"] = object.id.clone().into();
+        if point["blockEnvelope"] == 3 {
+            block["envelope"] = 3.into();
+        }
     }
     // Preserve manifest order for contiguous batched reads from the node.
     Ok(manifest["blocks"]
@@ -142,21 +167,30 @@ pub(crate) fn complete_uploads(db: &Db<'_>, publication: &str, manifest: &mut Va
         .collect::<std::result::Result<Vec<_>, _>>()?;
     let mut replacements = HashMap::new();
     let mut lookup = db.0.prepare_cached(
-        "SELECT id,size FROM shared_objects WHERE destination=?1 AND hash=?2 AND state='ready'",
+        "SELECT id,size,EXISTS(SELECT 1 FROM direct_object_quarantines q WHERE q.object=shared_objects.id) FROM shared_objects WHERE destination=?1 AND hash=?2 AND state='ready'",
     )?;
     for (object, destination, hash, size) in objects {
         let existing = lookup
             .query_row(params![destination, hash], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, bool>(2)?,
+                ))
             })
             .optional()?;
-        let Some((canonical, canonical_size)) = existing else {
+        let Some((canonical, canonical_size, quarantined)) = existing else {
             db.0.execute(
                 "UPDATE shared_objects SET state='ready' WHERE id=?1",
                 [object],
             )?;
             continue;
         };
+        if quarantined {
+            return Err(Error::unavailable(
+                "Shared block quarantine awaits node acknowledgement fencing.",
+            ));
+        }
         if size != canonical_size {
             return Err(Error::bad("Shared block size mismatch."));
         }
@@ -191,7 +225,7 @@ pub(crate) fn complete_uploads(db: &Db<'_>, publication: &str, manifest: &mut Va
 pub(crate) fn verified(db: &Db<'_>, publication: &str) -> Result<()> {
     let invalid: bool = db.0.query_row(
         "SELECT EXISTS(SELECT 1 FROM shared_references r JOIN shared_objects o ON o.id=r.object
-         WHERE r.publication=?1 AND o.state<>'ready')",
+         WHERE r.publication=?1 AND (o.state<>'ready' OR EXISTS(SELECT 1 FROM direct_object_quarantines q WHERE q.object=o.id)))",
         [publication],
         |r| r.get(0),
     )?;
@@ -205,6 +239,13 @@ pub(crate) fn verified(db: &Db<'_>, publication: &str) -> Result<()> {
 
 /// Called only after the owner publication has stopped and its readers drained.
 pub(crate) fn release(db: &Db<'_>, publication: &str) -> Result<()> {
+    let retained = db.0.execute(
+        "UPDATE direct_journal_acknowledgements SET retired=1 WHERE publication=?1",
+        [publication],
+    )?;
+    if retained > 0 {
+        return Ok(());
+    }
     // Mark only this publication's objects. A concurrent/new reference clears the
     // timestamp in reserve, in the same SQLite serialization order as GC claims.
     db.0.execute(
@@ -273,6 +314,7 @@ fn claim(db: &Db<'_>, cutoff: i64) -> Result<Vec<Deletion>> {
         "SELECT id,hash,location FROM shared_objects
          WHERE unused_at<=?1 AND retry_at<=?3
          AND NOT EXISTS (SELECT 1 FROM shared_references WHERE object=shared_objects.id)
+         AND NOT EXISTS (SELECT 1 FROM direct_storage_grants g WHERE g.object=shared_objects.id AND g.expires_at>?3)
          ORDER BY retry_at,unused_at LIMIT ?2",
     )?;
     let rows = stmt
@@ -291,7 +333,13 @@ fn claim(db: &Db<'_>, cutoff: i64) -> Result<Vec<Deletion>> {
             params![id, now() + 60_000],
         )?;
         result.push(Deletion {
-            key: key(&hash, &id),
+            key: object_key(
+                serde_json::from_str::<Value>(&location)?["blockEnvelope"]
+                    .as_u64()
+                    .unwrap_or(2),
+                &hash,
+                &id,
+            ),
             id,
             location: serde_json::from_str(&location)?,
             prefix: false,
@@ -325,6 +373,36 @@ fn claim(db: &Db<'_>, cutoff: i64) -> Result<Vec<Deletion>> {
         });
     }
     Ok(result)
+}
+
+fn finish_deletions(db: &Db<'_>, completed: Vec<Deletion>) -> Result<()> {
+    for deletion in completed {
+        if deletion.shared {
+            // A timed-out node may have left a PUT in flight at the provider.
+            // Keep its tombstone and reconcile again: expiry/HEAD absence do
+            // not prove that an already accepted request cannot commit later.
+            let uncertain: bool = db.0.query_row(
+                "SELECT EXISTS(SELECT 1 FROM direct_storage_grants WHERE object=?1 AND settled=0)",
+                [&deletion.id],
+                |row| row.get(0),
+            )?;
+            if uncertain {
+                db.0.execute(
+                    "UPDATE shared_objects SET retry_at=?2 WHERE id=?1",
+                    params![deletion.id, now() + 3_600_000],
+                )?;
+                continue;
+            }
+            db.0.execute(
+                "DELETE FROM shared_objects WHERE id=?1 AND state='deleting'
+                         AND NOT EXISTS (SELECT 1 FROM shared_references WHERE object=?1)",
+                [deletion.id],
+            )?;
+        } else {
+            db.0.execute("DELETE FROM remote_deletions WHERE id=?1", [deletion.id])?;
+        }
+    }
+    Ok(())
 }
 
 /// Bounded network work runs without publication/read locks. The separate worker
@@ -380,20 +458,7 @@ pub async fn collect(s: &Service) -> Result<usize> {
     }
     let count = completed.len();
     s.store
-        .transaction(move |db| {
-            for deletion in completed {
-                if deletion.shared {
-                    db.0.execute(
-                        "DELETE FROM shared_objects WHERE id=?1 AND state='deleting'
-                         AND NOT EXISTS (SELECT 1 FROM shared_references WHERE object=?1)",
-                        [deletion.id],
-                    )?;
-                } else {
-                    db.0.execute("DELETE FROM remote_deletions WHERE id=?1", [deletion.id])?;
-                }
-            }
-            Ok(())
-        })
+        .transaction(move |db| finish_deletions(db, completed))
         .await?;
     if let Some(error) = failure {
         return Err(error);
@@ -402,15 +467,34 @@ pub async fn collect(s: &Service) -> Result<usize> {
 }
 
 pub(crate) async fn maintain(s: Arc<Service>) {
+    maintain_batches(s.shutdown.clone(), move || {
+        let service = s.clone();
+        async move { collect(&service).await }
+    })
+    .await;
+}
+
+async fn maintain_batches<F: std::future::Future<Output = Result<usize>>>(
+    shutdown: tokio_util::sync::CancellationToken,
+    mut collect: impl FnMut() -> F,
+) {
     let mut timer = tokio::time::interval(Duration::from_secs(5));
     timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
-            () = s.shutdown.cancelled() => return,
+            biased;
+            () = shutdown.cancelled() => return,
             _ = timer.tick() => {}
         }
-        if let Err(error) = collect(&s).await {
-            tracing::warn!(message = %error.message, "Shared block cleanup will retry");
+        match collect().await {
+            // Keep each transaction and four-request network batch bounded, but
+            // don't cap a healthy store at 32 objects per five seconds.
+            Ok(count) if count >= BATCH as usize => timer.reset_immediately(),
+            Ok(_) => timer.reset(),
+            Err(error) => {
+                timer.reset();
+                tracing::warn!(message = %error.message, "Shared block cleanup will retry");
+            }
         }
     }
 }
@@ -420,6 +504,97 @@ mod tests {
     use super::*;
     use crate::store::Store;
     use tempfile::TempDir;
+
+    #[tokio::test(start_paused = true)]
+    async fn full_cleanup_batches_continue_before_the_idle_poll_interval() {
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let stop = shutdown.clone();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let worker = tokio::spawn(async move {
+            let mut calls = 0;
+            maintain_batches(stop, move || {
+                sender.send(calls).unwrap();
+                calls += 1;
+                let full = calls <= 2;
+                async move {
+                    if !full {
+                        tokio::time::sleep(Duration::from_secs(6)).await;
+                    }
+                    Ok(if full { BATCH as usize } else { 0 })
+                }
+            })
+            .await;
+        });
+
+        for expected in 0..3 {
+            let observed = tokio::time::timeout(Duration::from_millis(1), receiver.recv())
+                .await
+                .expect("a full batch must not wait five seconds before continuing");
+            assert_eq!(observed, Some(expected));
+        }
+        assert!(receiver.try_recv().is_err());
+        tokio::time::advance(Duration::from_secs(6)).await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(4)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            receiver.try_recv().is_err(),
+            "empty queues keep their idle poll"
+        );
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(receiver.recv().await, Some(3));
+        shutdown.cancel();
+        worker.await.unwrap();
+        assert!(receiver.recv().await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_cleanup_waits_for_the_next_poll_and_can_stop() {
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let stop = shutdown.clone();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let worker = tokio::spawn(async move {
+            maintain_batches(stop, move || {
+                sender.send(()).unwrap();
+                async {
+                    tokio::time::sleep(Duration::from_secs(6)).await;
+                    Err(Error::unavailable("Synthetic storage outage"))
+                }
+            })
+            .await;
+        });
+
+        assert_eq!(receiver.recv().await, Some(()));
+        tokio::time::advance(Duration::from_secs(6)).await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(4)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            receiver.try_recv().is_err(),
+            "storage failures must not spin"
+        );
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(receiver.recv().await, Some(()));
+        shutdown.cancel();
+        worker.await.unwrap();
+        assert!(receiver.recv().await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_stops_between_full_cleanup_batches() {
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let stop = shutdown.clone();
+        let mut calls = 0;
+        maintain_batches(shutdown, || {
+            calls += 1;
+            if calls == 3 {
+                stop.cancel();
+            }
+            std::future::ready(Ok(BATCH as usize))
+        })
+        .await;
+        assert_eq!(calls, 3);
+    }
 
     fn point(run: &str, bucket: &str) -> Value {
         json!({
@@ -447,6 +622,68 @@ mod tests {
             .unwrap()
     }
 
+    #[tokio::test]
+    async fn ambiguous_ack_pins_retired_references_and_quarantine_blocks_reuse_until_fenced() {
+        let root = TempDir::new().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let first = point("disk", "bucket");
+        let hash = "a".repeat(64);
+        let object = reserve_point(&store, &first, &[&hash]).await.remove(0).id;
+        ready(&store, &first).await;
+        let retained = first.clone();
+        let held = object.clone();
+        store
+            .transaction(move |db| {
+                let mut retained = retained;
+                retained["nodeId"] = "node".into();
+                super::super::journal_acknowledgements::begin(db, &retained)?;
+                release(db, text(&retained, "id"))?;
+                assert_eq!(
+                    db.0.query_row(
+                        "SELECT count(*) FROM shared_references WHERE object=?1",
+                        [&held],
+                        |r| r.get::<_, i64>(0)
+                    )?,
+                    1
+                );
+                db.0.execute("INSERT INTO direct_object_quarantines VALUES(?1)", [held])?;
+                assert!(verified(db, text(&retained, "id")).is_err());
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let next = point("other", "bucket");
+        let target = next.clone();
+        let identity = hash.clone();
+        assert!(
+            store
+                .transaction(move |db| reserve(db, &target, &mut manifest(&[&identity])))
+                .await
+                .is_err()
+        );
+        let retained = text(&first, "id").to_owned();
+        store
+            .transaction(move |db| {
+                db.0.execute(
+                    "DELETE FROM direct_journal_acknowledgements WHERE publication=?1",
+                    [&retained],
+                )?;
+                release(db, &retained)?;
+                db.0.execute(
+                    "UPDATE shared_objects SET state='invalid' WHERE id=?1",
+                    [&object],
+                )?;
+                db.0.execute(
+                    "DELETE FROM direct_object_quarantines WHERE object=?1",
+                    [object],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(!reserve_point(&store, &next, &[&hash]).await[0].ready);
+    }
+
     async fn ready(store: &Store, point: &Value) {
         let id = text(point, "id").to_owned();
         store
@@ -462,6 +699,93 @@ mod tests {
 
     async fn garbage(store: &Store) -> Vec<Deletion> {
         store.transaction(|db| claim(db, i64::MAX)).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn direct_grants_protect_live_requests_and_keep_ambiguous_deletion_tombstones() {
+        let dir = TempDir::new().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut legacy = point("legacy", "bucket");
+        let old = reserve_point(&store, &legacy, &["hash"]).await;
+        ready(&store, &legacy).await;
+        legacy["id"] = id().into();
+        legacy["blockEnvelope"] = 3.into();
+        let direct = reserve_point(&store, &legacy, &["hash"]).await;
+        assert_ne!(
+            old[0].id, direct[0].id,
+            "v3 must never reuse root-key v2 objects"
+        );
+        let object = direct[0].id.clone();
+        store
+            .transaction(move |db| {
+                db.0.execute(
+                    "INSERT INTO direct_storage_grants VALUES(?1,?2,0)",
+                    params![object, now() + 300_000],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        retire(&store, &legacy).await;
+        assert!(
+            garbage(&store).await.is_empty(),
+            "a still usable capability pins the object"
+        );
+        store
+            .transaction(|db| {
+                db.0.execute("UPDATE direct_storage_grants SET expires_at=0", [])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let deleted = garbage(&store).await;
+        assert_eq!(deleted.len(), 1);
+        assert!(deleted[0].key.starts_with("shared-blocks/v3/"));
+        store
+            .transaction(move |db| finish_deletions(db, deleted))
+            .await
+            .unwrap();
+        assert!(
+            garbage(&store).await.is_empty(),
+            "ambiguous requests back off after DELETE"
+        );
+        let reopened = Store::open(dir.path()).unwrap();
+        reopened
+            .transaction(|db| {
+                db.0.execute(
+                    "UPDATE shared_objects SET retry_at=0 WHERE state='deleting'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let retry = garbage(&reopened).await;
+        assert_eq!(
+            retry.len(),
+            1,
+            "restart preserves reconciliation for a late PUT"
+        );
+        assert_eq!(retry[0].id, direct[0].id);
+        // A definitive completed receipt permits ordinary metadata reclamation.
+        reopened
+            .transaction(move |db| {
+                db.0.execute("UPDATE direct_storage_grants SET settled=1", [])?;
+                finish_deletions(db, retry)
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened
+                .read(|db| Ok(db.0.query_row(
+                    "SELECT count(*) FROM direct_storage_grants",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )?))
+                .await
+                .unwrap(),
+            0
+        );
     }
 
     #[tokio::test]

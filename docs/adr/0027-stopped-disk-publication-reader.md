@@ -29,8 +29,8 @@ reads; disconnecting a response from a mounted disk does not cancel the VM.
 
 No reader survives in a global cache after its response. S3 dependencies,
 manifest commit, publication receipt, pending-generation ownership and disk
-movement fences retain their existing ordering. Unsupported endpoints fall back
-once to eight-block responses, then to single-block reads on older nodes.
+movement fences retain their existing ordering. Every controller provides the
+publication stream; an unsupported endpoint fails the transfer.
 
 A healthy full-disk transfer can exceed the old two-minute response deadline.
 Individual block reads stay bounded; relay uploads expire after two minutes

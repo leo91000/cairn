@@ -1,0 +1,58 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "data": {
+      "type": "string"
+    },
+    "encoding": {
+      "type": "string"
+    },
+    "eventId": {
+      "format": "int64",
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "format": {
+      "type": "string"
+    },
+    "nextOffset": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "offset": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "runId": {
+      "type": "string"
+    },
+    "sha256": {
+      "type": "string"
+    },
+    "totalBytes": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "runId",
+    "eventId",
+    "encoding",
+    "format",
+    "offset",
+    "totalBytes",
+    "sha256",
+    "data",
+    "nextOffset"
+  ],
+  "title": "RunContentOutput",
+  "type": "object"
+}

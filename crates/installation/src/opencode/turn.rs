@@ -4,7 +4,7 @@ use crate::{
     config::Config,
     error::{Error, Result},
     skills::atomic_write,
-    validation::{parse, text},
+    validation::text,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
@@ -23,19 +23,15 @@ const LIMIT: usize = 2_000_000;
 #[serde(rename_all = "camelCase")]
 struct Receipt {
     message_id: String,
-    #[serde(default)]
     submissions: Vec<(String, String)>,
-    #[serde(default)]
     submitted_at: Option<i64>,
-    #[serde(default)]
     delivered: HashSet<String>,
-    #[serde(default)]
     previously_delivered: HashSet<String>,
+    operational_notices: HashSet<String>,
     #[serde(default)]
+    context_messages: HashSet<String>,
     complete: bool,
-    #[serde(default)]
     answer: String,
-    #[serde(default)]
     items: Vec<Value>,
 }
 
@@ -49,7 +45,8 @@ async fn emit(events: &mpsc::Sender<Value>, value: Value) -> Result<()> {
 impl Receipt {
     fn unexpected_user(&self, info: &Value) -> bool {
         let id = text(info, "id");
-        if self.submissions.iter().any(|(_, wire)| wire == id) {
+        if self.context_messages.contains(id) || self.submissions.iter().any(|(_, wire)| wire == id)
+        {
             return false;
         }
         // Native IDs retain only 48 timestamp bits. Creation times distinguish
@@ -256,7 +253,6 @@ struct Turn<'a> {
     receipt_path: PathBuf,
     submitted: HashSet<String>,
     pending: HashSet<String>,
-    questions: HashMap<String, (String, usize)>,
     user_messages: HashSet<String>,
     items: HashMap<String, Value>,
     finished_items: HashSet<String>,
@@ -266,6 +262,9 @@ struct Turn<'a> {
 
 impl Turn<'_> {
     async fn deliver(&mut self, id: &str) -> Result<()> {
+        if self.receipt.operational_notices.contains(id) {
+            return Ok(());
+        }
         if self.receipt.delivered.insert(id.into()) {
             self.receipt.save(&self.receipt_path).await?;
             emit(
@@ -312,16 +311,18 @@ impl Turn<'_> {
     }
 
     async fn poll_inbox(&mut self) -> Result<()> {
-        let path = Path::new(text(self.plan, "inputDirectory")).join("messages.json");
-        let Ok(file) = tokio::fs::File::open(path).await else {
+        let directory = Path::new(text(self.plan, "inputDirectory"));
+        let Some(bytes) = crate::chat_inbox::read(directory, LIMIT).await? else {
             return Ok(());
         };
-        let bytes = crate::process::read_bounded(file, LIMIT).await?;
         let Ok(messages) = serde_json::from_slice::<Vec<Value>>(&bytes) else {
             return Ok(());
         };
         for message in messages {
             let id = text(&message, "id");
+            if message["operationalNotice"] == true {
+                self.receipt.operational_notices.insert(id.to_owned());
+            }
             if id.is_empty()
                 || self.submitted.contains(id)
                 || self.receipt.delivered.contains(id)
@@ -334,51 +335,12 @@ impl Turn<'_> {
             if message["sideQuestion"].is_object() || message["sideQuestionCancelled"] == true {
                 continue;
             }
-            let question_id = text(&message, "questionId");
             if message["questionCancelled"] == true {
-                if let Some((native_id, _)) = self.questions.get(question_id) {
-                    self.server
-                        .post(&format!("/question/{native_id}/reject"), &json!({}))
-                        .await?;
-                    self.questions.remove(question_id);
-                }
                 self.submitted.insert(id.into());
                 continue;
             }
-            if let Some((native_id, count)) = self.questions.get(question_id).cloned() {
-                let answers = (0..count)
-                    .map(|index| {
-                        message["answers"][index.to_string()]
-                            .as_array()
-                            .cloned()
-                            .unwrap_or_default()
-                    })
-                    .collect::<Vec<_>>();
-                self.server
-                    .post(
-                        &format!("/question/{native_id}/reply"),
-                        &json!({ "answers": answers }),
-                    )
-                    .await?;
-                self.questions.remove(question_id);
-                self.submitted.insert(id.into());
-                self.deliver(id).await?;
-                emit(
-                    &self.events,
-                    json!({
-                        "type": "chat.question.closed",
-                        "questionId": question_id,
-                    }),
-                )
+            self.submit(id, text(&message, "text"), &message["attachments"])
                 .await?;
-            } else if question_id.is_empty() {
-                self.submit(id, text(&message, "text"), &message["attachments"])
-                    .await?;
-            } else {
-                return Err(Error::conflict(
-                    "This OpenCode question has expired. Send a new message to continue; working files were preserved.",
-                ));
-            }
         }
         Ok(())
     }
@@ -507,58 +469,38 @@ impl Turn<'_> {
                 {
                     return Err(Error::bad_gateway("OpenCode returned an invalid question."));
                 }
-                let fields = props["questions"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .enumerate()
-                    .map(|(index, question)| {
-                        let options = question["options"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .map(|option| {
-                                json!({
-                                    "label": option["label"],
-                                    "description": option["description"].as_str().unwrap_or(""),
-                                })
-                            })
-                            .collect::<Vec<_>>();
-                        json!({
-                            "id": index.to_string(),
-                            "title": question["question"],
-                            "options": options,
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                let fields = parse("questions", fields.into())?;
-                let public_id = question_id(text(props, "sessionID"), id);
-                self.questions.insert(
-                    public_id.clone(),
-                    (id.into(), fields.as_array().unwrap().len()),
-                );
-                emit(
-                    &self.events,
-                    json!({
-                        "type": "chat.question",
-                        "question": { "id": public_id, "blocking": true, "fields": fields },
-                    }),
-                )
-                .await?;
-            }
-            "question.replied" | "question.rejected"
-                if self.sessions.contains(text(props, "sessionID")) =>
-            {
-                let id = question_id(text(props, "sessionID"), text(props, "requestID"));
-                self.questions.remove(&id);
-                emit(
-                    &self.events,
-                    json!({
-                        "type": "chat.question.closed",
-                        "questionId": id,
-                    }),
-                )
-                .await?;
+                // The reject endpoint has no feedback field. Add context without
+                // starting another inference, before releasing the native tool.
+                self.wire_counter += 1;
+                let note_id = wire_id(crate::config::now(), self.wire_counter);
+                self.receipt.context_messages.insert(note_id.clone());
+                if text(props, "sessionID") == self.session {
+                    let (message_id, _) = self.receipt.submissions.last().ok_or_else(|| {
+                        Error::bad_gateway("OpenCode refused a question before receiving input.")
+                    })?;
+                    // The next assistant response is parented to this new user
+                    // context. It still completes the same Cairn submission.
+                    self.receipt
+                        .submissions
+                        .push((message_id.clone(), note_id.clone()));
+                }
+                self.receipt.save(&self.receipt_path).await?;
+                self.server
+                    .post(
+                        &format!("/session/{}/message", text(props, "sessionID")),
+                        &json!({
+                            "messageID": note_id,
+                            "noReply": true,
+                            "parts": [{
+                                "type": "text",
+                                "text": crate::chats::questions::NATIVE_DENIED,
+                            }],
+                        }),
+                    )
+                    .await?;
+                self.server
+                    .post(&format!("/question/{id}/reject"), &json!({}))
+                    .await?;
             }
             "permission.asked" if self.sessions.contains(text(props, "sessionID")) => {
                 let id = text(props, "id");
@@ -602,24 +544,6 @@ impl Turn<'_> {
             .server
             .get(&format!("/session/{}/message?limit=100", self.session))
             .await?;
-        if self.receipt.submitted_at.is_none() {
-            // Older receipts did not record submission time. Infer it from the
-            // native history before checking continuations, regardless of order.
-            self.receipt.submitted_at = messages
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter(|message| {
-                    message["info"]["role"] == "user"
-                        && self
-                            .receipt
-                            .submissions
-                            .iter()
-                            .any(|(_, wire)| message["info"]["id"] == wire.as_str())
-                })
-                .filter_map(|message| message["info"]["time"]["created"].as_i64())
-                .min();
-        }
         for message in messages.as_array().into_iter().flatten() {
             if message["info"]["role"] == "user" {
                 self.observe_user(&message["info"])?;
@@ -639,7 +563,15 @@ impl Turn<'_> {
             })
             .max_by_key(|message| {
                 let info = &message["info"];
+                // Overlapping prompts can create responses out of order. Settle
+                // the newest submission before comparing its assistant messages.
+                let submission = self
+                    .receipt
+                    .submissions
+                    .iter()
+                    .rposition(|(_, wire)| info["parentID"] == wire.as_str());
                 (
+                    submission,
                     info["time"]["created"].as_i64().unwrap_or(0),
                     text(info, "id"),
                 )
@@ -703,7 +635,7 @@ impl Turn<'_> {
                 self.pending.remove(&id);
             }
         }
-        if !self.pending.is_empty() || !self.questions.is_empty() {
+        if !self.pending.is_empty() {
             return Ok(false);
         }
         let answer = response["parts"]
@@ -842,7 +774,6 @@ async fn execute(
         receipt_path,
         submitted: HashSet::new(),
         pending: HashSet::new(),
-        questions: HashMap::new(),
         user_messages: HashSet::new(),
         items: HashMap::new(),
         finished_items: HashSet::new(),
@@ -899,15 +830,11 @@ async fn execute(
                 let event = event.ok_or_else(|| Error::bad_gateway("OpenCode event stream closed."))??;
                 if turn.on_event(&event).await? {
                     turn.poll_inbox().await?;
-                    if turn.pending.is_empty() && turn.questions.is_empty() { return turn.complete().await; }
+                    if turn.pending.is_empty() { return turn.complete().await; }
                 }
             }
         }
     }
-}
-
-fn question_id(session: &str, native: &str) -> String {
-    crate::auth::hex_digest(&format!("opencode:{session}:{native}"))
 }
 
 #[cfg(test)]

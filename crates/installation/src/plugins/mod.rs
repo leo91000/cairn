@@ -10,21 +10,23 @@ pub mod device_flow;
 pub mod files;
 pub mod forms;
 mod idempotency;
-pub mod legacy;
-pub mod legacy_github;
+pub mod instances;
 pub(crate) mod management;
 mod mime;
 pub mod oauth;
 pub mod operations;
 pub mod panels;
+mod program_cache;
 pub mod program_installation;
 pub mod programs;
 pub mod projects;
+pub mod queues;
 pub mod registry;
 pub mod run_credentials;
 pub mod runtime;
 pub mod scope;
 pub mod socket;
+pub mod state;
 pub mod work;
 
 use crate::{
@@ -57,6 +59,8 @@ pub struct Plugins {
     worker: Mutex<Option<std::path::PathBuf>>,
     programs: Mutex<HashMap<(String, String), PathBuf>>,
     pub(crate) program_installation: tokio::sync::Mutex<()>,
+    pub(crate) program_caches: program_cache::Caches,
+    pub(crate) package_publication: tokio::sync::Mutex<()>,
     pub(crate) installer_host: Host,
     pub operations: operations::Operations,
     pub device_flows: device_flow::Flows,
@@ -82,6 +86,8 @@ impl Default for Plugins {
             worker: Mutex::new(None),
             programs: Mutex::new(HashMap::new()),
             program_installation: tokio::sync::Mutex::new(()),
+            program_caches: program_cache::Caches::default(),
+            package_publication: tokio::sync::Mutex::new(()),
             installer_host: Host::with_limits(4, std::time::Duration::from_secs(120)),
             operations: operations::Operations::default(),
             device_flows: device_flow::Flows::default(),
@@ -151,7 +157,6 @@ impl Plugins {
     }
 
     pub async fn start(self: Arc<Self>, s: Arc<Service>) {
-        tokio::spawn(legacy_github::complete(s.clone()));
         runtime::maintain(s).await;
     }
 }
@@ -189,56 +194,97 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
         .trim_start_matches("/api/")
         .split('/')
         .collect::<Vec<_>>();
+    if input.method == "POST" && parts.as_slice() == ["plugins", "manage"] {
+        let command = management::decode(input.body.clone())?;
+        return manage_http(s, input, command, true).await;
+    }
     let body = &input.body;
-    let version = || crate::validation::text(body, "version").to_owned();
-    // Cold owner handlers may prepare programs. Keep that work outside the relay's
-    // short request lifetime, including views/forms that call exec lazily.
-    let cold_handler = match (input.method.as_str(), parts.as_slice()) {
-        ("POST", ["plugins", id, "form"]) => Some((*id, "", "form")),
-        ("GET", ["plugins", id, "connections", instance, "view"]) => Some((*id, *instance, "view")),
-        ("POST", ["plugins", id, "connections", instance, "test"]) => {
-            Some((*id, *instance, "test"))
+    // Each route is an authenticated transport adapter to the same typed command.
+    let command = match (input.method.as_str(), parts.as_slice()) {
+        ("POST", ["plugins", plugin, "form"]) => Some(
+            json!({ "kind": "form", "pluginId": plugin, "instanceId": body["instance"], "data": body }),
+        ),
+        ("POST", ["plugins", plugin, "connections"]) => {
+            Some(json!({ "kind": "save", "pluginId": plugin, "data": body }))
         }
-        ("POST", ["plugins", id, "connections", instance, "actions"]) => {
-            Some((*id, *instance, "action"))
+        ("PUT", ["plugins", plugin, "connections", instance]) => Some(
+            json!({ "kind": "save", "pluginId": plugin, "instanceId": instance, "data": body }),
+        ),
+        ("DELETE", ["plugins", plugin, "connections", instance]) => {
+            Some(json!({ "kind": "delete", "pluginId": plugin, "instanceId": instance }))
         }
-        ("POST", ["plugins", id, "connections"]) => Some((*id, "", "save")),
-        ("PUT", ["plugins", id, "connections", instance]) => Some((*id, *instance, "save")),
+        ("POST", ["plugins", plugin, "connections", instance, "enabled"]) => Some(
+            json!({ "kind": "enabled", "pluginId": plugin, "instanceId": instance, "data": body }),
+        ),
+        ("POST", ["plugins", plugin, "connections", instance, "disconnect"]) => {
+            Some(json!({ "kind": "disconnect", "pluginId": plugin, "instanceId": instance }))
+        }
+        ("POST", ["plugins", plugin, "connections", instance, "test"]) => {
+            Some(json!({ "kind": "test", "pluginId": plugin, "instanceId": instance }))
+        }
+        ("GET", ["plugins", plugin, "connections", instance, "view"]) => {
+            Some(json!({ "kind": "view", "pluginId": plugin, "instanceId": instance }))
+        }
+        ("POST", ["plugins", plugin, "connections", instance, "actions"]) => Some(
+            json!({ "kind": "action", "pluginId": plugin, "instanceId": instance, "data": body }),
+        ),
+        (
+            "POST",
+            [
+                "plugins",
+                plugin,
+                "connections",
+                instance,
+                "people",
+                person,
+                operation,
+            ],
+        ) => Some(
+            json!({ "kind": "people", "pluginId": plugin, "instanceId": instance, "userId": person, "operation": operation }),
+        ),
         _ => None,
     };
-    if let Some((id, instance, handler)) = cold_handler {
-        let package = registry::active(s, id).await?;
-        let invokes_handler = match handler {
-            "form" | "save" => package.manifest.instance_form,
-            "view" | "action" => package.manifest.instance_view,
-            "test" => package.manifest.instance_test,
-            _ => false,
-        };
-        if invokes_handler && program_installation::needs_preparation(s, &package) {
-            let (service, id, instance, body) =
-                (s.clone(), id.to_owned(), instance.to_owned(), body.clone());
-            return s.plugins.operations.start(s.clone(), async move {
-                match handler {
-                    "form" => forms::form(&service, &id, &body).await,
-                    "view" => panels::view(&service, &id, &instance).await,
-                    "test" => panels::test(&service, &id, &instance).await,
-                    "action" => panels::action(&service, &id, &instance, &body).await,
-                    "save" => {
-                        if !instance.is_empty() {
-                            connections::get(&service, &id, &instance).await?;
-                        }
-                        connections::save(
-                            &service,
-                            &id,
-                            &body,
-                            (!instance.is_empty()).then_some(instance.as_str()),
-                        )
-                        .await
-                    }
-                    _ => unreachable!("classified owner handler"),
-                }
-            });
+    if let Some(command) = command {
+        return manage_http(s, input, management::decode(command)?, false).await;
+    }
+    let package_command = match (input.method.as_str(), parts.as_slice()) {
+        ("GET", ["plugins"]) => Some(("list_plugins", json!({}))),
+        ("POST", ["plugins", "packages"]) => Some(("install_plugin_package", body.clone())),
+        ("GET", ["plugins", "packages", "operations", id]) => {
+            Some(("get_plugin_operation", json!({ "operationId": id })))
         }
+        ("DELETE", ["plugins", "packages", "operations", id]) => {
+            Some(("cancel_plugin_operation", json!({ "operationId": id })))
+        }
+        ("POST", ["plugins", "packages", id, "approve"]) => {
+            Some(("approve_plugin_package", package_path_input(body, id)?))
+        }
+        ("POST", ["plugins", "packages", id, "activate"]) => {
+            Some(("activate_plugin_package", package_path_input(body, id)?))
+        }
+        ("DELETE", ["plugins", "packages", id]) => {
+            Some(("delete_plugin_package", json!({ "pluginId": id })))
+        }
+        ("GET", ["plugins", id, "programs"]) => {
+            Some(("list_plugin_programs", json!({ "pluginId": id })))
+        }
+        ("POST", ["plugins", "programs", "prepare"]) => {
+            Some(("prepare_plugin_program", body.clone()))
+        }
+        ("POST", ["plugins", id, "programs", name, action]) => {
+            let mut command = json!({ "kind": action, "pluginId": id, "program": name });
+            if *action == "install" {
+                command["digest"] = body["digest"].clone();
+            }
+            Some(("prepare_plugin_program", command))
+        }
+        _ => None,
+    };
+    if let Some((name, command)) = package_command {
+        return crate::capabilities::plugin_package_operation(name)
+            .unwrap()
+            .invoke(s, command, crate::capabilities::ResumeContext::http(input)?)
+            .await;
     }
     match (input.method.as_str(), parts.as_slice()) {
         ("POST", ["plugins", "oauth", "callback"]) => {
@@ -277,98 +323,111 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
                 .oauth_flows
                 .cancel(id, flow, identity.oauth_binding())
         }
-        ("GET", ["plugins"]) => {
-            let mut catalog = registry::catalog(s).await?;
-            let mut overview = connections::overview(s).await?;
-            // Instances of packages without a worker are ready whenever enabled.
-            for connection in &mut overview {
-                let worker = catalog["packages"].as_array().and_then(|packages| {
-                    packages
-                        .iter()
-                        .find(|package| package["id"] == connection["pluginId"])
-                        .and_then(|package| {
-                            serde_json::from_value::<cairn_plugin_api::Manifest>(
-                                package["manifest"].clone(),
-                            )
-                            .ok()
-                        })
-                        .map(|manifest| manifest.needs_worker())
-                });
-                if worker == Some(false) && connection["enabled"] == true {
-                    connection["status"] = json!({ "state": "ready" });
-                }
-            }
-            catalog["connections"] = json!(overview);
-            Ok(catalog)
-        }
-        ("POST", ["plugins", "packages"]) => registry::install(s, body).await,
-        ("GET", ["plugins", "packages", "operations", id]) => s.plugins.operations.get(id),
-        ("POST", ["plugins", "packages", id, "approve"]) => {
-            registry::activate_request(
-                s,
-                id,
-                &version(),
-                Some(crate::validation::text(body, "digest")),
-            )
-            .await
-        }
-        ("POST", ["plugins", "packages", id, "activate"]) => {
-            registry::activate_request(s, id, &version(), None).await
-        }
-        ("DELETE", ["plugins", "packages", id]) => registry::uninstall(s, id).await,
-        ("POST", ["plugins", id, "form"]) => forms::form(s, id, body).await,
         ("POST", ["plugins", id, "device-flow"]) => device_flow::start(s, id).await,
         ("GET", ["plugins", id, "device-flow", flow]) => device_flow::status(s, id, flow),
         ("DELETE", ["plugins", id, "device-flow", flow]) => Ok(device_flow::cancel(s, id, flow)),
         ("GET", ["plugins", id, "projects"]) => projects::list(s, id, input).await,
-        ("GET", ["plugins", id, "programs"]) => program_installation::list(s, id).await,
-        ("POST", ["plugins", id, "programs", name, action]) => {
-            let (service, id, name, action, body) = (
-                s.clone(),
-                id.to_string(),
-                name.to_string(),
-                action.to_string(),
-                body.clone(),
-            );
-            s.plugins.operations.start(s.clone(), async move {
-                program_installation::action(&service, &id, &name, &action, &body).await
-            })
-        }
-        ("POST", ["plugins", id, "connections"]) => connections::save(s, id, body, None).await,
-        ("PUT", ["plugins", id, "connections", connection]) => {
-            connections::get(s, id, connection).await?;
-            connections::save(s, id, body, Some(connection)).await
-        }
-        ("DELETE", ["plugins", id, "connections", connection]) => {
-            connections::remove(s, id, connection).await
-        }
-        ("POST", ["plugins", id, "connections", connection, "enabled"]) => {
-            connections::set_enabled(s, id, connection, body).await
-        }
-        ("POST", ["plugins", id, "connections", connection, "disconnect"]) => {
-            oauth::disconnect(s, id, connection, |_| Ok(())).await
-        }
-        ("POST", ["plugins", id, "connections", connection, "test"]) => {
-            panels::test(s, id, connection).await
-        }
-        ("GET", ["plugins", id, "connections", connection, "view"]) => {
-            panels::view(s, id, connection).await
-        }
-        ("POST", ["plugins", id, "connections", connection, "actions"]) => {
-            panels::action(s, id, connection, body).await
-        }
-        (
-            "POST",
-            [
-                "plugins",
-                id,
-                "connections",
-                connection,
-                "people",
-                user,
-                action,
-            ],
-        ) => connections::people(s, id, connection, user, action).await,
         _ => Err(Error::not_found("Not found.")),
     }
+}
+
+fn package_path_input(body: &Value, id: &str) -> Result<Value> {
+    let mut command = body
+        .as_object()
+        .cloned()
+        .ok_or_else(|| Error::bad("Supply a package command object."))?;
+    command.insert("pluginId".into(), json!(id));
+    Ok(Value::Object(command))
+}
+
+async fn manage_http(
+    s: &Arc<Service>,
+    input: &Input,
+    command: cairn_contracts::ManagePluginInput,
+    wrapped: bool,
+) -> Result<Value> {
+    use cairn_contracts::ManagePluginInput as Command;
+    let preparation = match &command {
+        Command::Form { plugin_id, .. }
+        | Command::Save { plugin_id, .. }
+        | Command::Test { plugin_id, .. }
+        | Command::View { plugin_id, .. }
+        | Command::Action { plugin_id, .. } => Some(plugin_id),
+        _ => None,
+    };
+    if let Some(plugin) = preparation {
+        let package = registry::active(s, plugin).await?;
+        if program_installation::needs_preparation(s, &package) {
+            let crate::capabilities::ResumeContext::Human(account) =
+                crate::capabilities::ResumeContext::http(input)?
+            else {
+                return Err(Error::forbidden(
+                    "Owner preparation requires a signed-in owner.",
+                ));
+            };
+            let authority =
+                crate::capabilities::plugin_packages::Authority::human(s, &account).await?;
+            let origin = crate::native::policy::origin();
+            let service = s.clone();
+            return s.plugins.operations.start(
+                s.clone(),
+                operations::Audience::Owner,
+                async move {
+                    crate::native::policy::DELEGATION
+                        .scope(origin, async move {
+                            Ok(cairn_contracts::PluginOperationResult::Management {
+                                output: Box::pin(management::invoke(
+                                    &service,
+                                    command,
+                                    None,
+                                    true,
+                                    Some(authority),
+                                ))
+                                .await?,
+                                wrapped,
+                            })
+                        })
+                        .await
+                },
+            );
+        }
+    }
+    present(
+        Box::pin(management::invoke(s, command, None, true, None)).await?,
+        wrapped,
+    )
+}
+
+/// The per-command routes keep their native response shape; all results originate
+/// from the typed capability, including deferred preparation results.
+fn present(output: cairn_contracts::ManagePluginOutput, wrapped: bool) -> Result<Value> {
+    use cairn_contracts::ManagePluginOutput as Output;
+    if wrapped {
+        return Ok(serde_json::to_value(output)?);
+    }
+    Ok(match output {
+        Output::Form { form } => serde_json::to_value(form)?,
+        Output::Saved { instance } | Output::Enabled { instance } | Output::People { instance } => {
+            serde_json::to_value(instance)?
+        }
+        Output::Deleted { deleted } => json!({ "deleted": deleted }),
+        Output::Disconnected {
+            disconnected,
+            revoked,
+            message,
+        } => json!({ "disconnected": disconnected, "revoked": revoked, "message": message }),
+        Output::Tested { ok, message } => json!({ "ok": ok, "message": message }),
+        Output::View { view } => json!({ "view": view }),
+        Output::Action { result } => result,
+        Output::Signin { flow } => serde_json::to_value(flow)?,
+        Output::SigninCancelled { cancelled } => json!({ "cancelled": cancelled }),
+        Output::Setup {
+            manifest,
+            setup,
+            callback_url,
+            management_url,
+        } => {
+            json!({ "manifest": manifest, "setup": setup, "callbackUrl": callback_url, "managementUrl": management_url })
+        }
+    })
 }

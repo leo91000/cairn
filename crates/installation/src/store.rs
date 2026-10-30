@@ -7,24 +7,17 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 use tokio::sync::{mpsc, oneshot, watch};
 
 type Job = Box<dyn FnOnce(&mut Connection) + Send>;
 
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Event {
-    pub id: i64,
-    run_id: String,
-    created_at: i64,
-    #[serde(rename = "type")]
-    kind: String,
-    text: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    payload: Option<Box<serde_json::value::RawValue>>,
-}
+use cairn_contracts::EventKind;
+pub use cairn_contracts::RunEvent as Event;
 
 #[derive(Clone)]
 pub struct Store(Arc<Pool>);
@@ -33,15 +26,14 @@ struct Pool {
     writer: mpsc::Sender<Job>,
     readers: mpsc::Sender<Job>,
     changes: watch::Sender<u64>,
+    discarded_changes: Arc<AtomicU64>,
 }
 
 /// Read connections. WAL readers do not block each other or the writer; a few
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-// Advanced before Service::new runs any data migration. Older managers refuse
-// this database, and installed host updaters retain the candidate after a failure.
-const DATABASE_VERSION: i64 = 12;
+const DATABASE_VERSION: i64 = 16;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -71,65 +63,107 @@ impl Store {
     pub fn open(directory: &Path) -> Result<Self> {
         std::fs::create_dir_all(directory)?;
         let file = directory.join("manager.db");
+        let fresh = !file.exists();
         let mut writer = Connection::open(&file)?;
-        let version: i64 = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > DATABASE_VERSION {
+        let mut version: i64 = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if !fresh && !matches!(version, 11 | 12 | 13 | 14 | 15 | DATABASE_VERSION) {
             return Err(Error::bad(
-                "This database belongs to a newer application version.",
+                "Unsupported installation database version; use a compatible release or an explicit migration.",
             ));
         }
         writer.busy_timeout(std::time::Duration::from_secs(5))?;
         writer.set_prepared_statement_cache_capacity(128);
-        writer.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
-CREATE TABLE IF NOT EXISTS records(id TEXT PRIMARY KEY,kind TEXT NOT NULL,data TEXT NOT NULL,updated_at INTEGER NOT NULL);
+        writer.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+        if !fresh && version == 11 {
+            let upgraded = crate::nodes::inventory::migration::upgrade(&mut writer);
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+            // Another startup can finish later atomic steps while this one
+            // waits for the inventory migration's immediate transaction.
+            if !matches!(version, 12 | 13 | 14 | 15 | DATABASE_VERSION) {
+                upgraded?;
+            }
+        }
+        if !fresh && version == 12 {
+            // Only small metadata changes here; v2 disk objects migrate lazily.
+            // Fence older binaries before publishing the first v3 object.
+            let tx = writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let current: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+            if current == 12 {
+                tx.execute_batch("CREATE TABLE direct_storage_grants(object TEXT PRIMARY KEY REFERENCES shared_objects(id) ON DELETE CASCADE,expires_at INTEGER NOT NULL,settled INTEGER NOT NULL DEFAULT 0 CHECK(settled IN (0,1)));")?;
+                tx.execute_batch("CREATE TABLE direct_read_authorizations(grant_id TEXT NOT NULL,object TEXT NOT NULL,hash TEXT NOT NULL,run_id TEXT NOT NULL,PRIMARY KEY(grant_id,object));CREATE INDEX direct_read_authorizations_object ON direct_read_authorizations(object);")?;
+                tx.execute_batch(crate::nodes::journal_acknowledgements::SCHEMA)?;
+                tx.pragma_update(None, "user_version", 13)?;
+            } else if !matches!(current, 13 | 14 | 15 | DATABASE_VERSION) {
+                return Err(Error::bad(
+                    "Unexpected installation database version during direct storage upgrade.",
+                ));
+            }
+            tx.commit()?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        }
+        if !fresh && version == 13 {
+            crate::accounts::migration::upgrade(&mut writer)?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        }
+        if !fresh && version == 14 {
+            crate::chats::migration::upgrade(&mut writer)?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        }
+        if !fresh && version == 15 {
+            crate::chats::question_migration::upgrade(&mut writer)?;
+        }
+        if fresh {
+            let tx = writer.transaction()?;
+            tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS records(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind NOT IN ('agentAccounts','chats','nodes','projects','agents','tasks','mcps','plugin-connections','plugin-packages','plugin-requests','plugin-activity','plugin-timers','plugin-events','plugin-deliveries','plugin-storage','plugin-http-receipts')),data TEXT NOT NULL,updated_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS records_kind ON records(kind,updated_at DESC);
 CREATE INDEX IF NOT EXISTS records_node_backups_run ON records(json_extract(data,'$.runId')) WHERE kind='node-backups';
-CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,project_id TEXT NOT NULL,status TEXT NOT NULL,created_at INTEGER NOT NULL,data TEXT NOT NULL,dedupe TEXT UNIQUE);
-CREATE INDEX IF NOT EXISTS runs_status ON runs(status,created_at);
-CREATE INDEX IF NOT EXISTS runs_task ON runs(task_id,created_at DESC);
-CREATE INDEX IF NOT EXISTS runs_created ON runs(created_at DESC,id DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS runs_active_task ON runs(task_id) WHERE status IN ('queued','running','waiting');
-CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,created_at INTEGER NOT NULL,type TEXT NOT NULL,text TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,created_at INTEGER NOT NULL CHECK(created_at BETWEEN 0 AND 9007199254740991),type TEXT NOT NULL CHECK(length(type)>0),text TEXT NOT NULL,payload TEXT CHECK(payload IS NULL OR json_valid(payload)));
+CREATE TABLE run_checkpoints(run_id TEXT PRIMARY KEY NOT NULL REFERENCES runs(id) ON DELETE CASCADE,state TEXT NOT NULL CHECK(json_valid(state) AND json_type(state)='object'));
 CREATE INDEX IF NOT EXISTS events_run ON events(run_id,id);
-CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY,data TEXT NOT NULL,expires INTEGER);
+CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY CHECK(key NOT LIKE 'run-checkpoint:%' AND key NOT LIKE 'chat-coding-agent:%' AND key NOT LIKE 'chat-coding-agent-request:%' AND key NOT LIKE 'chat-question:%' AND key!='conversation-expiration'),data TEXT NOT NULL,expires INTEGER);
 CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT,created_at INTEGER NOT NULL,action TEXT NOT NULL,detail TEXT NOT NULL);",
         )?;
-        let tx = writer.transaction()?;
-        if version < 2 {
-            tx.execute_batch("ALTER TABLE events ADD COLUMN payload TEXT;")?;
-        }
-        tx.execute_batch(
-            "CREATE TABLE IF NOT EXISTS chat_messages(id TEXT PRIMARY KEY,chat_id TEXT NOT NULL,data TEXT NOT NULL,created_at INTEGER NOT NULL);
-CREATE INDEX IF NOT EXISTS chat_messages_chat ON chat_messages(chat_id,created_at);",
-        )?;
-        if version < 9 {
-            tx.execute_batch("DROP INDEX runs_active_task;
-CREATE UNIQUE INDEX runs_active_task ON runs(task_id) WHERE status IN ('queued','running','waiting');")?;
-        }
-        tx.pragma_update(None, "user_version", DATABASE_VERSION)?;
-        // Backwards history excludes superseded text snapshots. These small keys
-        // bound both the next-turn lookup and the same-message revision lookup.
-        tx.execute_batch("CREATE INDEX IF NOT EXISTS events_turns ON events(run_id,id) WHERE type='turn.started';
+            tx.pragma_update(None, "user_version", DATABASE_VERSION)?;
+            // Backwards history excludes superseded text snapshots. These small keys
+            // bound both the next-turn lookup and the same-message revision lookup.
+            tx.execute_batch("CREATE INDEX IF NOT EXISTS events_turns ON events(run_id,id) WHERE type='turn.started';
 CREATE INDEX IF NOT EXISTS events_user_input ON events(run_id,id) WHERE type='chat.user';
 CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload,'$.item.id'),id) WHERE json_extract(payload,'$.item.type')='agent_message';")?;
-        tx.execute_batch(crate::nodes::shared_blocks::SCHEMA)?;
-        tx.execute_batch(crate::storage::migration::SCHEMA)?;
-        tx.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS records_chat_slug ON records(json_extract(data,'$.slug')) WHERE kind='chats';")?;
-        let db = Db(&tx);
-        let missing = db.json_rows(
-            "SELECT data FROM records WHERE kind='chats' AND json_extract(data,'$.slug') IS NULL",
-            [],
-        )?;
-        for mut chat in missing {
-            chat["slug"] = db.new_chat_slug()?.into();
-            tx.execute(
-                "UPDATE records SET data=? WHERE kind='chats' AND id=?",
-                params![chat.to_string(), chat["id"].as_str()],
-            )?;
+            tx.execute_batch(crate::runs::SCHEMA)?;
+            tx.execute_batch(crate::accounts::sql::SCHEMA)?;
+            tx.execute_batch(crate::nodes::shared_blocks::SCHEMA)?;
+            tx.execute_batch(crate::nodes::journal_acknowledgements::SCHEMA)?;
+            tx.execute_batch(crate::projects::SCHEMA)?;
+            tx.execute_batch(crate::nodes::inventory::SCHEMA)?;
+            tx.execute_batch(crate::agents::SCHEMA)?;
+            tx.execute_batch(crate::mcps::sql::SCHEMA)?;
+            tx.execute_batch(crate::plugins::instances::SCHEMA)?;
+            tx.execute_batch(crate::plugins::state::SCHEMA)?;
+            tx.execute_batch(crate::plugins::queues::SCHEMA)?;
+            crate::plugins::registry::initialize(&Db(&tx))?;
+            tx.execute_batch(crate::agent_grants::SCHEMA)?;
+            tx.execute_batch(crate::missions::SCHEMA)?;
+            tx.execute_batch(crate::chats::storage::SCHEMA)?;
+            tx.execute_batch(crate::chats::question_storage::SCHEMA)?;
+            tx.execute_batch(crate::waits::sql::SCHEMA)?;
+            tx.execute_batch(crate::chats::engine_switch::SCHEMA)?;
+            tx.commit()?;
         }
-
-        tx.commit()?;
+        // total_changes also counts rows undone by a transition savepoint. Keep
+        // their count on this writer connection so committed work alone wakes readers.
+        let discarded_changes = Arc::new(AtomicU64::new(0));
+        let discarded = discarded_changes.clone();
+        writer.create_scalar_function(
+            "cairn_discarded_changes",
+            1,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+            move |context| {
+                let rows = context.get::<i64>(0)?;
+                let total = discarded.fetch_add(rows as u64, Ordering::Relaxed) + rows as u64;
+                Ok(i64::try_from(total).unwrap_or(i64::MAX))
+            },
+        )?;
         let mut readers = Vec::new();
         for _ in 0..READERS {
             let connection = Connection::open(&file)?;
@@ -142,6 +176,7 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
             writer: actors(vec![writer]),
             readers: actors(readers),
             changes: watch::channel(0).0,
+            discarded_changes,
         })))
     }
 
@@ -172,12 +207,22 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
         f: impl FnOnce(&mut Db<'_>) -> Result<T> + Send + 'static,
     ) -> Result<T> {
         let changes = self.0.changes.clone();
+        let discarded = self.0.discarded_changes.clone();
+        let preparation = crate::plugins::operations::publication_cancellation();
         self.call(&self.0.writer, move |db| {
+            if preparation.is_some_and(|token| token.is_cancelled()) {
+                return Err(Error::conflict("Preparation was cancelled."));
+            }
             let before = db.0.total_changes();
+            let discarded_before = discarded.load(Ordering::Relaxed);
             let result = f(db);
             // Notify on the database actor, after commit, even if the caller was cancelled.
             // Empty scheduler transactions must not wake every live UI subscriber.
-            if db.0.total_changes() != before {
+            if db.0.total_changes() - before
+                > discarded
+                    .load(Ordering::Relaxed)
+                    .wrapping_sub(discarded_before)
+            {
                 changes.send_modify(|revision| *revision = revision.wrapping_add(1));
             }
             result
@@ -198,13 +243,29 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
         &self,
         f: impl FnOnce(&mut Db<'_>) -> Result<T> + Send + 'static,
     ) -> Result<T> {
-        self.write(move |db| {
+        let changes = self.0.changes.clone();
+        let discarded = self.0.discarded_changes.clone();
+        let preparation = crate::plugins::operations::publication_cancellation();
+        self.call(&self.0.writer, move |db| {
+            if preparation.is_some_and(|token| token.is_cancelled()) {
+                return Err(Error::conflict("Preparation was cancelled."));
+            }
+            let before = db.0.total_changes();
+            let discarded_before = discarded.load(Ordering::Relaxed);
             let tx = rusqlite::Transaction::new_unchecked(
                 db.0,
                 rusqlite::TransactionBehavior::Immediate,
             )?;
             let value = f(&mut Db(&tx))?;
             tx.commit()?;
+            // Notify only after commit, excluding rows undone at run savepoints.
+            if db.0.total_changes() - before
+                > discarded
+                    .load(Ordering::Relaxed)
+                    .wrapping_sub(discarded_before)
+            {
+                changes.send_modify(|revision| *revision = revision.wrapping_add(1));
+            }
             Ok(value)
         })
         .await
@@ -297,17 +358,10 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
             .await
     }
 
-    pub async fn patch_run(&self, id: &str, patch: Value) -> Result<Value> {
-        let id = id.to_owned();
-        // Read and rewrite the document under one write lock: another connection,
-        // such as a second process on this database, must not interleave its patch.
-        self.transaction(move |db| db.patch_run(&id, &patch)).await
-    }
-
     pub async fn event(
         &self,
         id: &str,
-        kind: &str,
+        kind: &EventKind,
         text: &str,
         payload: Option<Value>,
     ) -> Result<()> {
@@ -328,18 +382,46 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
 }
 
 /// Run list projection: drops the heavy snapshot and summary, keeps display names and the
-/// coding agent (agents saved before Claude Code support run on Codex).
-pub const RUN_SUMMARY: &str = "json_set(
-    json_remove(data,'$.snapshot','$.summary'),
-    '$.taskName',json_extract(data,'$.snapshot.task.name'),
-    '$.agentName',json_extract(data,'$.snapshot.agent.name'),
-    '$.provider',COALESCE(json_extract(data,'$.snapshot.agent.provider'),'codex')
-)";
+/// explicit coding agent saved in the snapshot.
+pub const RUN_SUMMARY: &str = "summary_data";
 
 // Database transactions and statement caches stay on their owning database thread.
 pub struct Db<'a>(pub &'a Connection);
 
 impl Db<'_> {
+    pub(crate) fn discarded_change_count(&self) -> Result<u64> {
+        let registered: bool = self.0.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_function_list WHERE name='cairn_discarded_changes')",
+            [], |row| row.get(0),
+        )?;
+        if !registered {
+            return Ok(0);
+        }
+        Ok(self
+            .0
+            .query_row("SELECT cairn_discarded_changes(0)", [], |row| {
+                row.get::<_, i64>(0)
+            })? as u64)
+    }
+
+    pub(crate) fn discard_savepoint_changes(
+        &self,
+        before: u64,
+        discarded_before: u64,
+    ) -> Result<()> {
+        let already_discarded = self
+            .discarded_change_count()?
+            .saturating_sub(discarded_before);
+        let discarded = (self.0.total_changes() - before).saturating_sub(already_discarded);
+        if discarded > 0 && self.0.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_function_list WHERE name='cairn_discarded_changes')",
+            [], |row| row.get::<_, bool>(0),
+        )? {
+            self.0.query_row("SELECT cairn_discarded_changes(?)", [i64::try_from(discarded).unwrap_or(i64::MAX)], |_| Ok(()))?;
+        }
+        Ok(())
+    }
+
     /// First column of at most one row, decoded from its JSON text.
     fn json_row<T: DeserializeOwned>(
         &self,
@@ -370,10 +452,11 @@ impl Db<'_> {
     }
 
     pub fn list(&self, kind: &str) -> Result<Vec<Value>> {
-        self.json_rows(
+        let values = self.json_rows(
             "SELECT data FROM records WHERE kind=? ORDER BY updated_at DESC",
             [kind],
-        )
+        )?;
+        Ok(values)
     }
 
     pub fn node_backups_for_run(&self, run: &str) -> Result<Vec<Value>> {
@@ -395,45 +478,27 @@ impl Db<'_> {
         )
     }
 
-    pub fn chat_id_for_slug(&self, slug: &str) -> Result<Option<String>> {
-        Ok(self
-            .0
-            .prepare_cached(
-                "SELECT id FROM records WHERE kind='chats' AND json_extract(data,'$.slug')=?",
-            )?
-            .query_row([slug], |row| row.get(0))
-            .optional()?)
-    }
-
-    fn new_chat_slug(&self) -> Result<String> {
-        loop {
-            let slug = cairn_protocol::slugs::readable(uuid::Uuid::new_v4().as_bytes());
-            let used: bool = self.0.query_row(
-                "SELECT EXISTS(SELECT 1 FROM records WHERE kind='chats' AND json_extract(data,'$.slug')=?)",
-                [&slug],
-                |row| row.get(0),
-            )?;
-            if !used {
-                return Ok(slug);
-            }
-        }
-    }
-
     pub fn put(&self, kind: &str, value: &Value) -> Result<Value> {
-        let mut chat;
-        let value = if kind == "chats" {
-            chat = value.clone();
-            let existing = self.get(kind, value["id"].as_str().unwrap_or(""))?;
-            chat["slug"] = match existing.and_then(|chat| chat["slug"].as_str().map(str::to_owned))
-            {
-                Some(slug) => slug.into(),
-                None => self.new_chat_slug()?.into(),
-            };
-            &chat
-        } else {
-            value
-        };
-
+        if matches!(
+            kind,
+            "agentAccounts"
+                | "chats"
+                | "nodes"
+                | "projects"
+                | "agents"
+                | "mcps"
+                | "plugin-connections"
+                | "plugin-packages"
+                | "plugin-requests"
+                | "plugin-activity"
+                | "plugin-timers"
+                | "plugin-events"
+                | "plugin-deliveries"
+                | "plugin-storage"
+                | "plugin-http-receipts"
+        ) {
+            return Err(Error::bad("Use typed domain commands."));
+        }
         self.0
             .prepare_cached(
                 "INSERT INTO records VALUES(?,?,?,?)
@@ -514,38 +579,36 @@ impl Db<'_> {
     }
 
     pub fn run(&self, id: &str) -> Result<Option<Value>> {
-        self.json_row("SELECT data FROM runs WHERE id=?", [id])
+        self.run_record(id)?
+            .map(crate::runs::RunRecord::wire)
+            .transpose()
     }
 
-    pub fn add_run(&self, run: &Value, dedupe: Option<&str>) -> Result<Value> {
-        self.0
-            .prepare_cached("INSERT INTO runs VALUES(?,?,?,?,?,?,?)")?
-            .execute(params![
-                run["id"].as_str(),
-                run["taskId"].as_str(),
-                run["projectId"].as_str().unwrap_or(""),
-                run["status"].as_str(),
-                run["createdAt"].as_i64(),
-                run.to_string(),
-                dedupe
-            ])?;
-        Ok(run.clone())
-    }
-
-    pub fn patch_run(&self, id: &str, patch: &Value) -> Result<Value> {
-        let mut run = required(self.run(id)?, "Run not found")?;
-        merge(&mut run, patch);
-        self.0
-            .prepare_cached("UPDATE runs SET status=?,data=? WHERE id=?")?
-            .execute(params![run["status"].as_str(), run.to_string(), id])?;
-        Ok(run)
+    fn hydrate_run_wakeups(&self, rows: &mut [Value]) -> Result<()> {
+        let mut wakeups = self.wakeups(false, None)?;
+        for row in rows {
+            row["wakeup"] =
+                serde_json::to_value(wakeups.remove(crate::validation::text(row, "id")))?;
+        }
+        Ok(())
     }
 
     pub fn active(&self) -> Result<Vec<Value>> {
-        self.json_rows(
+        if self.0.is_autocommit() {
+            let tx = rusqlite::Transaction::new_unchecked(
+                self.0,
+                rusqlite::TransactionBehavior::Deferred,
+            )?;
+            let result = Db(&tx).active()?;
+            tx.commit()?;
+            return Ok(result);
+        }
+        let mut rows=self.json_rows(
             "SELECT data FROM runs WHERE status IN ('queued','running','waiting') ORDER BY created_at",
             [],
-        )
+        )?;
+        self.hydrate_run_wakeups(&mut rows)?;
+        Ok(rows)
     }
 
     pub fn runs(
@@ -556,8 +619,19 @@ impl Db<'_> {
         offset: i64,
         full: bool,
     ) -> Result<Vec<Value>> {
+        if self.0.is_autocommit() {
+            let tx = rusqlite::Transaction::new_unchecked(
+                self.0,
+                rusqlite::TransactionBehavior::Deferred,
+            )?;
+            let result = Db(&tx).runs(status, task, limit, offset, full)?;
+            tx.commit()?;
+            return Ok(result);
+        }
         let (query, values) = Self::run_query(status, task, limit, offset, full);
-        self.json_rows(&query, rusqlite::params_from_iter(values))
+        let mut rows = self.json_rows(&query, rusqlite::params_from_iter(values))?;
+        self.hydrate_run_wakeups(&mut rows)?;
+        Ok(rows)
     }
 
     pub fn run_page(
@@ -567,13 +641,33 @@ impl Db<'_> {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<Box<serde_json::value::RawValue>>> {
+        if self.0.is_autocommit() {
+            let tx = rusqlite::Transaction::new_unchecked(
+                self.0,
+                rusqlite::TransactionBehavior::Deferred,
+            )?;
+            let result = Db(&tx).run_page(status, task, limit, offset)?;
+            tx.commit()?;
+            return Ok(result);
+        }
         let (query, values) = Self::run_query(status, task, limit, offset, false);
+        let query = query.replacen("SELECT ", "SELECT runs.id,", 1);
+        let mut wakeups = self.wakeups(false, None)?;
         let mut statement = self.0.prepare_cached(&query)?;
         statement
             .query_map(rusqlite::params_from_iter(values), |row| {
-                row.get::<_, String>(0)
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?
-            .map(|row| Ok(serde_json::value::RawValue::from_string(row?)?))
+            .map(|row| {
+                let (id, mut data) = row?;
+                // The SQL projection is an object. Append its typed continuation
+                // without decoding/re-encoding the unrelated run boundary.
+                data.pop();
+                data.push_str(",\"wakeup\":");
+                data.push_str(&serde_json::to_string(&wakeups.remove(&id))?);
+                data.push('}');
+                Ok(serde_json::value::RawValue::from_string(data)?)
+            })
             .collect()
     }
 
@@ -587,9 +681,7 @@ impl Db<'_> {
         let fields = if full { "data" } else { RUN_SUMMARY };
         let mut filters = vec![
             "NOT EXISTS (
-               SELECT 1 FROM records c
-               WHERE c.kind='chats' AND json_extract(c.data,'$.runId')=runs.id
-                 AND COALESCE(json_extract(c.data,'$.lifecycle'),'active')<>'active'
+               SELECT 1 FROM conversations c WHERE c.run_id=runs.id AND c.lifecycle<>'active'
              )",
         ];
         let mut values: Vec<rusqlite::types::Value> = Vec::new();
@@ -623,7 +715,13 @@ impl Db<'_> {
         Ok(counts.into())
     }
 
-    pub fn event(&self, run: &str, kind: &str, text: &str, payload: Option<&Value>) -> Result<()> {
+    pub fn event(
+        &self,
+        run: &str,
+        kind: &EventKind,
+        text: &str,
+        payload: Option<&Value>,
+    ) -> Result<()> {
         let text = text.chars().take(16000).collect::<String>();
         self.0
             .prepare_cached(
@@ -632,7 +730,7 @@ impl Db<'_> {
             .execute(params![
                 run,
                 now(),
-                kind,
+                kind.as_str(),
                 text,
                 payload.map(Value::to_string)
             ])?;
@@ -643,7 +741,7 @@ impl Db<'_> {
                     "DELETE FROM events
                      WHERE run_id=?1
                        AND id<(SELECT COALESCE(MAX(id),0)-10000 FROM events WHERE run_id=?1)
-                       AND run_id IN (SELECT id FROM runs WHERE json_extract(data,'$.trigger')!='chat')",
+                       AND run_id IN (SELECT id FROM runs WHERE trigger!='chat')",
                 )?
                 .execute([run])?;
         }
@@ -660,27 +758,32 @@ impl Db<'_> {
             summary: String,
             finished_at: Option<i64>,
         }
-        let summaries: Vec<Summary> = self.json_rows_as(
-            "SELECT json_object('id',r.id,'summary',json_extract(r.data,'$.summary'),
-                'finishedAt',json_extract(r.data,'$.finishedAt')) FROM runs r
-             WHERE r.status='succeeded' AND json_extract(r.data,'$.trigger')='chat'
+        let mut query = self.0.prepare_cached(
+            "SELECT r.id,r.summary,r.finished_at FROM runs r
+             WHERE r.status='succeeded' AND r.trigger='chat'
                AND (?1 IS NULL OR r.id=?1)
                AND NOT EXISTS (
-                 SELECT 1 FROM records c
-                 WHERE c.kind='chats' AND json_extract(c.data,'$.runId')=r.id
-                   AND COALESCE(json_extract(c.data,'$.lifecycle'),'active')!='active'
+                 SELECT 1 FROM conversations c WHERE c.run_id=r.id AND c.lifecycle!='active'
                )
-               AND length(trim(COALESCE(json_extract(r.data,'$.summary'),''),char(9)||char(10)||char(13)||' '))>0
+               AND length(trim(COALESCE(r.summary,''),char(9)||char(10)||char(13)||' '))>0
                AND NOT EXISTS (
                  SELECT 1 FROM events e WHERE e.run_id=r.id
                    AND e.id>COALESCE((SELECT MAX(u.id) FROM events u WHERE u.run_id=r.id AND u.type='chat.user'),0)
                    AND (json_extract(e.payload,'$.item.type')='agent_message'
                      OR (e.type='item.completed' AND json_extract(e.payload,'$.item.type') IS NULL))
                    AND trim(substr(COALESCE(json_extract(e.payload,'$.item.text'),e.text),1,100000),char(9)||char(10)||char(13)||' ')
-                     =trim(json_extract(r.data,'$.summary'),char(9)||char(10)||char(13)||' ')
+                     =trim(r.summary,char(9)||char(10)||char(13)||' ')
                )",
-            [run],
         )?;
+        let summaries = query
+            .query_map([run], |row| {
+                Ok(Summary {
+                    id: row.get(0)?,
+                    summary: row.get(1)?,
+                    finished_at: row.get(2)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         for Summary {
             id,
             summary,
@@ -698,20 +801,13 @@ impl Db<'_> {
                     "recovered": true,
                 },
             });
-            self.event(&id, "item.completed", &summary, Some(&payload))?;
+            self.event(&id, &EventKind::ItemCompleted, &summary, Some(&payload))?;
             self.0.execute(
                 "UPDATE events SET created_at=? WHERE id=?",
                 params![finished, self.0.last_insert_rowid()],
             )?;
         }
         Ok(())
-    }
-
-    pub fn events(&self, run: &str, after: i64, limit: i64) -> Result<Vec<Value>> {
-        self.event_page(run, after, limit)?
-            .into_iter()
-            .map(|event| serde_json::to_value(event).map_err(Error::from))
-            .collect()
     }
 
     // Stored payloads are already JSON. Validate their bytes without allocating
@@ -731,7 +827,7 @@ impl Db<'_> {
             AND id>? ORDER BY id LIMIT ?";
         let mut stmt = self.0.prepare_cached(sql)?;
         let rows = stmt.query_map(params![run, after, limit], event_row)?;
-        within_budget(rows, limit, max_bytes)
+        Ok(within_budget(rows, limit, EventBudget::Raw(max_bytes), false)?.0)
     }
 
     pub fn events_before(&self, run: &str, before: i64) -> Result<(Vec<Event>, bool)> {
@@ -742,6 +838,39 @@ impl Db<'_> {
     /// text snapshots a later snapshot of the same message replaced within its turn.
     /// Also reports whether earlier such events remain above `after`.
     pub fn events_between(&self, run: &str, after: i64, before: i64) -> Result<(Vec<Event>, bool)> {
+        self.history_events(
+            run,
+            after,
+            before,
+            HISTORY_PAGE_EVENTS,
+            EventBudget::Gzip(HISTORY_PAGE_BYTES),
+        )
+    }
+
+    /// SSE is intentionally uncompressed; preserve its small initial/replay window.
+    pub(crate) fn live_events_between(
+        &self,
+        run: &str,
+        after: i64,
+        before: i64,
+    ) -> Result<(Vec<Event>, bool)> {
+        self.history_events(
+            run,
+            after,
+            before,
+            100,
+            EventBudget::Raw(HISTORY_PAGE_BYTES),
+        )
+    }
+
+    fn history_events(
+        &self,
+        run: &str,
+        after: i64,
+        before: i64,
+        limit: i64,
+        budget: EventBudget,
+    ) -> Result<(Vec<Event>, bool)> {
         let sql = "SELECT e.id,e.run_id,e.created_at,e.type,e.text,e.payload FROM events e
 WHERE e.run_id=? AND e.id>? AND e.id<? AND (
  json_extract(e.payload,'$.item.type') IS NOT 'agent_message'
@@ -753,12 +882,9 @@ WHERE e.run_id=? AND e.id>? AND e.id<? AND (
    AND n.id>e.id AND n.id<COALESCE((SELECT t.id FROM events t WHERE t.run_id=e.run_id AND t.type='turn.started' AND t.id>e.id ORDER BY t.id LIMIT 1),9223372036854775807)
  )) ORDER BY e.id DESC LIMIT ?";
         let mut stmt = self.0.prepare_cached(sql)?;
-        let mut rows = stmt.query_map(
-            params![run, after, before, HISTORY_PAGE_EVENTS + 1],
-            event_row,
-        )?;
-        let mut events = within_budget(&mut rows, HISTORY_PAGE_EVENTS, HISTORY_PAGE_BYTES)?;
-        let more = rows.next().transpose()?.is_some();
+        let mut rows = stmt.query_map(params![run, after, before, limit + 1], event_row)?;
+        let (mut events, trimmed) = within_budget(&mut rows, limit, budget, true)?;
+        let more = trimmed || rows.next().transpose()?.is_some();
         events.reverse();
         Ok((events, more))
     }
@@ -777,28 +903,6 @@ WHERE e.run_id=? AND e.id>? AND e.id<? AND (
         Ok(())
     }
 
-    pub fn messages(&self, chat: &str) -> Result<Vec<Value>> {
-        self.json_rows(
-            "SELECT data FROM chat_messages WHERE chat_id=? ORDER BY created_at,rowid",
-            [chat],
-        )
-    }
-
-    pub fn put_message(&self, message: &Value) -> Result<Value> {
-        self.0
-            .prepare_cached(
-                "INSERT INTO chat_messages VALUES(?,?,?,?)
-                 ON CONFLICT(id) DO UPDATE SET data=excluded.data",
-            )?
-            .execute(params![
-                message["id"].as_str(),
-                message["chatId"].as_str(),
-                message.to_string(),
-                message["createdAt"].as_i64()
-            ])?;
-        Ok(message.clone())
-    }
-
     pub fn audit(&self, action: &str, detail: &Value) -> Result<()> {
         self.0
             .prepare_cached("INSERT INTO audit(created_at,action,detail) VALUES(?,?,?)")?
@@ -807,11 +911,18 @@ WHERE e.run_id=? AND e.id>? AND e.id<? AND (
     }
 }
 
-/// Events per page of history, and their approximate byte budget.
-const HISTORY_PAGE_EVENTS: i64 = 100;
+/// Gzip-budgeted history windows, with a separate decoded memory ceiling.
+const HISTORY_PAGE_EVENTS: i64 = 1000;
 const HISTORY_PAGE_BYTES: usize = 256 * 1024;
+const HISTORY_PAGE_DECODED_BYTES: usize = 4 * 1024 * 1024;
 
 type EventRow = (i64, String, i64, String, String, Option<String>);
+
+#[derive(Clone, Copy)]
+enum EventBudget {
+    Raw(usize),
+    Gzip(usize),
+}
 
 fn event_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<EventRow> {
     Ok((
@@ -824,34 +935,139 @@ fn event_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<EventRow> {
     ))
 }
 
-/// Stops reading rows at the byte budget, rather than allocating an entire page
-/// of large historical outputs. Stored payloads are already JSON: their bytes are
-/// kept as they are instead of being parsed into intermediate object nodes.
+/// Serialize each candidate once and probe geometrically increasing byte batches.
+/// Large/noisy rows stop early instead of reading and compressing 1,000 rows.
+/// Backwards reads measure chronological order, as delivered to the clients.
+/// Keep one oversized event whole so every cursor can make progress.
 fn within_budget(
     rows: impl Iterator<Item = rusqlite::Result<EventRow>>,
     limit: i64,
-    max_bytes: usize,
-) -> Result<Vec<Event>> {
+    budget: EventBudget,
+    backwards: bool,
+) -> Result<(Vec<Event>, bool)> {
     let mut events = Vec::new();
-    let mut bytes = 0;
+    let (max_bytes, compressed) = match budget {
+        EventBudget::Raw(bytes) => (bytes, false),
+        EventBudget::Gzip(bytes) => (bytes, true),
+    };
+    let mut bytes = if compressed { 2 } else { 0 };
+    let mut trimmed = false;
+    let mut encoded = Vec::new();
+    let mut next_bytes = max_bytes.saturating_mul(2);
+    let mut compressed_bytes = None;
     for row in rows {
         let (id, run, created, kind, text, payload) = row?;
-        bytes += text.len() + payload.as_ref().map_or(0, String::len) + 256;
-        events.push(Event {
+        if !compressed {
+            bytes += text.len() + payload.as_ref().map_or(0, String::len) + 256;
+        }
+        let event = Event {
             id,
             run_id: run,
             created_at: created,
-            kind,
+            kind: EventKind::from_adapter(&kind),
             text,
+            display_id: None,
             payload: payload
                 .map(serde_json::value::RawValue::from_string)
                 .transpose()?,
-        });
-        if bytes >= max_bytes || events.len() >= limit as usize {
+        };
+        if compressed {
+            let json = serde_json::to_vec(&event)?;
+            let encoded_bytes = json.len() + usize::from(!events.is_empty());
+            if !events.is_empty() && bytes + encoded_bytes > HISTORY_PAGE_DECODED_BYTES {
+                trimmed = true;
+                break;
+            }
+            bytes += encoded_bytes;
+            encoded.push(json);
+        }
+        events.push(event);
+        compressed_bytes = None;
+        if events.len() >= limit as usize || !compressed && bytes >= max_bytes {
             break;
         }
+        if compressed && bytes >= next_bytes {
+            let size = compressed_event_bytes(&encoded, backwards)?;
+            compressed_bytes = Some(size);
+            if size >= max_bytes {
+                break;
+            }
+
+            // At least double the input between probes: at most four probes for
+            // the 4 MiB ceiling, even if compression ratios vary across rows.
+            next_bytes = bytes
+                .saturating_mul(max_bytes)
+                .div_ceil(size.max(1))
+                .max(bytes.saturating_mul(2));
+        }
     }
-    Ok(events)
+
+    if compressed && events.len() > 1 {
+        let mut size = match compressed_bytes {
+            Some(size) => size,
+            None => compressed_event_bytes(&encoded, backwards)?,
+        };
+        // Try two proportional cuts with headroom. Heterogeneous rows need not
+        // have proportional sizes, so fall back to one whole event if neither
+        // fits. This bounds compression work independently of the event count.
+        for _ in 0..2 {
+            if size <= max_bytes || events.len() <= 1 {
+                break;
+            }
+
+            let estimated = events.len().saturating_mul(max_bytes) / size;
+            let count = (estimated.saturating_mul(95) / 100).clamp(1, events.len() - 1);
+            events.truncate(count);
+            encoded.truncate(count);
+            trimmed = true;
+            size = compressed_event_bytes(&encoded, backwards)?;
+        }
+        if size > max_bytes && events.len() > 1 {
+            events.truncate(1);
+            trimmed = true;
+        }
+    }
+    Ok((events, trimmed))
+}
+
+#[derive(Default)]
+struct CountBytes(usize);
+
+impl std::io::Write for CountBytes {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 += bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn compressed_event_bytes(events: &[Vec<u8>], backwards: bool) -> Result<usize> {
+    use std::io::Write;
+
+    // Bulk writes avoid invoking the compressor for every JSON token. The
+    // serialized candidates are reused by probes and cuts, without re-encoding.
+    let mut json = Vec::with_capacity(2 + events.iter().map(|e| e.len() + 1).sum::<usize>());
+    json.push(b'[');
+    for index in 0..events.len() {
+        if index != 0 {
+            json.push(b',');
+        }
+        let event = if backwards {
+            &events[events.len() - index - 1]
+        } else {
+            &events[index]
+        };
+        json.extend_from_slice(event);
+    }
+    json.push(b']');
+
+    let mut gzip =
+        flate2::write::GzEncoder::new(CountBytes::default(), flate2::Compression::fast());
+    gzip.write_all(&json)?;
+    Ok(gzip.finish()?.0)
 }
 
 /// Shallow merge: every top-level key of `patch` replaces the key in `value`
@@ -859,5 +1075,140 @@ fn within_budget(
 pub fn merge(value: &mut Value, patch: &Value) {
     if let (Some(target), Some(patch)) = (value.as_object_mut(), patch.as_object()) {
         target.extend(patch.clone());
+    }
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+    use crate::agent_fixture::StoreAgentFixture;
+
+    #[tokio::test]
+    async fn fresh_node_schema_reopens_without_a_records_mirror() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let node = crate::node_fixture::node(
+            json!({ "id": "00000000-0000-4000-8000-000000000099", "name": "Saved VM" }),
+        )
+        .unwrap();
+        store
+            .transaction(move |db| db.save_node(&node))
+            .await
+            .unwrap();
+        drop(store);
+        let store = Store::open(root.path()).unwrap();
+        assert_eq!(store.nodes().await.unwrap()[0].name, "Saved VM");
+        assert!(store.list("nodes").await.unwrap().is_empty());
+        let connection = Connection::open(root.path().join("manager.db")).unwrap();
+        assert_eq!(
+            connection
+                .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
+        assert!(
+            !connection
+                .prepare("PRAGMA foreign_key_check")
+                .unwrap()
+                .exists([])
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn initial_schema_reopens_with_events_and_records_intact() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        store
+            .put_agent_fixture(
+                json!({ "id": "00000000-0000-4000-8000-000000000099", "name": "Agent" }),
+            )
+            .await
+            .unwrap();
+        let reopened = Store::open(root.path()).unwrap();
+        assert_eq!(
+            reopened
+                .agent_snapshot("00000000-0000-4000-8000-000000000099")
+                .await
+                .unwrap()
+                .unwrap()["name"],
+            "Agent"
+        );
+        let db = Connection::open(root.path().join("manager.db")).unwrap();
+        assert_eq!(
+            db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            DATABASE_VERSION
+        );
+        db.prepare("SELECT payload FROM events").unwrap();
+        assert!(!db.table_exists(None, "disk_block_migration").unwrap());
+    }
+
+    #[test]
+    fn version_twelve_upgrade_preserves_data_and_fences_older_binaries() {
+        let root = tempfile::tempdir().unwrap();
+        drop(Store::open(root.path()).unwrap());
+        let file = root.path().join("manager.db");
+        let db = Connection::open(&file).unwrap();
+        crate::chats::migration::tests::version14(&db);
+        db.execute_batch("DROP TABLE account_leases; DROP TABLE account_usage_windows; DROP TABLE account_usage; DROP TABLE account_exhaustion; DROP TABLE coding_agent_accounts; DROP TABLE direct_journal_acknowledgements; DROP TABLE direct_object_quarantines; DROP TABLE direct_storage_grants; DROP TABLE direct_read_authorizations; PRAGMA user_version=12;
+            INSERT INTO kv(key,data) VALUES('migration-fixture','{\"preserved\":true}');
+            INSERT INTO shared_objects(id,destination,hash,size,location,state) VALUES('old-object','bucket','hash',4096,'{}','ready');").unwrap();
+        drop(db);
+
+        drop(Store::open(root.path()).unwrap());
+        drop(Store::open(root.path()).unwrap());
+        let db = Connection::open(file).unwrap();
+        assert_eq!(
+            db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            DATABASE_VERSION
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT data FROM kv WHERE key='migration-fixture'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "{\"preserved\":true}"
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT state FROM shared_objects WHERE id='old-object'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "ready"
+        );
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM direct_storage_grants", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
+    }
+
+    #[test]
+    fn existing_other_versions_fail_without_changing_the_database() {
+        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 17, 99] {
+            let root = tempfile::tempdir().unwrap();
+            let db = Connection::open(root.path().join("manager.db")).unwrap();
+            db.pragma_update(None, "user_version", version).unwrap();
+            let error = Store::open(root.path()).err().unwrap();
+            assert!(error.message.contains("compatible release"));
+            assert_eq!(
+                db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                version
+            );
+            assert!(!db.table_exists(None, "records").unwrap());
+        }
     }
 }
