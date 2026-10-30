@@ -359,7 +359,7 @@ async fn receive(socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::Tcp
     loop {
         match socket.next().await.unwrap().unwrap() {
             Message::Text(text) => return serde_json::from_str(text.as_str()).unwrap(),
-            Message::Close(_) => panic!("closed"),
+            Message::Close(frame) => panic!("closed: {frame:?}"),
             _ => {}
         }
     }
@@ -381,6 +381,56 @@ async fn receive_op(
         assert_eq!(payload["op"], op, "unexpected gateway payload: {payload}");
         return payload;
     }
+}
+
+async fn acknowledge_heartbeat(
+    socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    sequence: u64,
+) -> Value {
+    loop {
+        let heartbeat = receive_op(socket, 1).await;
+        send(socket, json!({ "op": 11 })).await;
+        if heartbeat["d"] == sequence {
+            return heartbeat;
+        }
+        assert!(
+            heartbeat["d"].is_null()
+                || heartbeat["d"]
+                    .as_u64()
+                    .is_some_and(|value| value < sequence),
+            "unexpected gateway heartbeat: {heartbeat}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn gateway_expectations_acknowledge_heartbeats_until_the_dispatch_sequence() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream = async {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        assert_eq!(
+            acknowledge_heartbeat(&mut socket, 3).await,
+            json!({ "op": 1, "d": 3 })
+        );
+    };
+    let client = async {
+        let stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        let (mut socket, _) = tokio_tungstenite::client_async("ws://localhost", stream)
+            .await
+            .unwrap();
+        for sequence in [Value::Null, json!(1), json!(2), json!(3)] {
+            send(&mut socket, json!({ "op": 1, "d": sequence })).await;
+            assert_eq!(receive(&mut socket).await, json!({ "op": 11 }));
+        }
+    };
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(upstream, client);
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -969,6 +1019,19 @@ async fn oversized_gateway_payloads_keep_threads_without_blocking_on_rest() {
     s.plugins
         .route_sockets_to(Some(format!("ws://{}", listener.local_addr().unwrap())));
     let upstream = tokio::spawn(async move {
+        // Construct and serialize the large frame before Hello starts heartbeat
+        // timers. The mock gateway must keep reading and acknowledging beats.
+        let channels = (0..12_000)
+            .map(|index| json!({ "id": format!("{}", 10_000 + index), "type": 0, "name": "x".repeat(80) }))
+            .collect::<Vec<_>>();
+        let large = json!({ "op": 0, "s": 2, "t": "GUILD_CREATE", "d": {
+            "id": "100", "channels": channels, "threads": [
+                { "id": "700", "guild_id": "100", "parent_id": "200", "thread_metadata": { "archived": false }, "irrelevant": "x".repeat(1_100_000) },
+                { "id": "701", "guild_id": "100", "parent_id": "999" },
+            ],
+        } })
+        .to_string();
+        assert!(large.len() > 1_048_576);
         let (stream, _) = listener.accept().await.unwrap();
         let mut socket = accept_async(stream).await.unwrap();
         send(
@@ -986,20 +1049,13 @@ async fn oversized_gateway_payloads_keep_threads_without_blocking_on_rest() {
             } }),
         )
         .await;
-        // Queue an earlier heartbeat, as the random first heartbeat can do.
+        // Request an earlier heartbeat, as the random first heartbeat can do.
+        // ACK it before further dispatches: otherwise the first periodic tick
+        // can correctly detect a zombie while this mock is still sending.
         send(&mut socket, json!({ "op": 1 })).await;
+        acknowledge_heartbeat(&mut socket, 1).await;
         // A large server's GUILD_CREATE, well over what a script receives whole.
-        let channels = (0..12_000)
-            .map(|index| json!({ "id": format!("{}", 10_000 + index), "type": 0, "name": "x".repeat(80) }))
-            .collect::<Vec<_>>();
-        let large = json!({ "op": 0, "s": 2, "t": "GUILD_CREATE", "d": {
-            "id": "100", "channels": channels, "threads": [
-                { "id": "700", "guild_id": "100", "parent_id": "200", "thread_metadata": { "archived": false }, "irrelevant": "x".repeat(1_100_000) },
-                { "id": "701", "guild_id": "100", "parent_id": "999" },
-            ],
-        } });
-        assert!(large.to_string().len() > 1_048_576);
-        send(&mut socket, large).await;
+        socket.send(Message::Text(large.into())).await.unwrap();
         // A reply in a thread retained by projection, without the slow REST endpoint.
         send(
             &mut socket,
@@ -1010,20 +1066,10 @@ async fn oversized_gateway_payloads_keep_threads_without_blocking_on_rest() {
         )
         .await;
         send(&mut socket, json!({ "op": 1 })).await;
-        let heartbeat = tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                let heartbeat = receive(&mut socket).await;
-                let caught_up = heartbeat["d"]
-                    .as_u64()
-                    .is_some_and(|sequence| sequence >= 3);
-                if heartbeat["op"] != 1 || caught_up {
-                    break heartbeat;
-                }
-                // A periodic heartbeat can precede the requested one. Acknowledge
-                // it while waiting for the response after the large dispatch.
-                send(&mut socket, json!({ "op": 11 })).await;
-            }
-        })
+        let heartbeat = tokio::time::timeout(
+            Duration::from_secs(1),
+            acknowledge_heartbeat(&mut socket, 3),
+        )
         .await
         .expect("oversized thread routing must not block heartbeats on REST");
         assert_eq!(
