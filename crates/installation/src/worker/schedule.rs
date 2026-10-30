@@ -150,9 +150,21 @@ impl Worker {
         let run = record.wire()?;
         let state = &state;
         let recovering = state.recovery_pending;
-        let launched = RunCheckpoint::load(&s.store, &run_id)
-            .await?
-            .is_some_and(|checkpoint| checkpoint.launched());
+        let checkpoint = RunCheckpoint::load(&s.store, &run_id).await?;
+        let launched = checkpoint.as_ref().is_some_and(RunCheckpoint::launched);
+        if checkpoint
+            .as_ref()
+            .is_some_and(|saved| legacy_provider_retry(saved, state))
+        {
+            let id = run_id.clone();
+            let expected = checkpoint.clone();
+            s.store
+                .transaction(move |db| {
+                    migrate_legacy_provider_retry_in(db, &id, expected.as_ref())?;
+                    Ok(())
+                })
+                .await?;
+        }
         // A recovering run may still own its workspace, so keep it reserved even
         // when it cannot start in this pass.
         if recovering || launched {
@@ -451,6 +463,65 @@ pub(super) fn provider_retry_paid(saved: &RunCheckpoint, state: &RunState) -> bo
             && (!saved.managed() || saved.has_provider_retry_reservation())
             && saved.retry_cause.as_ref().and_then(Option::as_ref) == Some(&retry.cause)
     })
+}
+
+// Before attempt-bound reservations existed, the queued Retry and this exact
+// checkpoint were committed before fencing. Recognize only that old shape;
+// a replacement attempt, a new-format failure, or an in-flight start is not it.
+fn legacy_provider_retry(saved: &RunCheckpoint, state: &RunState) -> bool {
+    let Some(retry) = state.retry.as_ref() else {
+        return false;
+    };
+    state.status == RunStatus::Queued
+        && state.cancel_requested_at.is_none()
+        && (state.session_id.is_some() || retry.cause.startup)
+        && retry.next_attempt_at.is_some()
+        && !crate::run_retry::Retry::expired(Some(retry), now())
+        && (1..=crate::run_retry::MAX_ATTEMPTS).contains(&retry.attempt)
+        && retry.limit == crate::run_retry::MAX_ATTEMPTS
+        && saved.managed()
+        && saved.runner_id().is_some_and(|attempt| !attempt.is_empty())
+        && saved.provider_failed()
+        && !saved.completed()
+        && saved.terminal_code == Some(None)
+        && saved.turn_pending != Some(true)
+        && saved.start_rejected != Some(true)
+        && saved.settled().is_none()
+        && !matches!(saved.remaining_ms, Some(Some(i64::MIN..=0)))
+        && saved.provider_failure_attempt.is_none()
+        && saved.finalization_failure_attempt.is_none()
+        && saved.provider_retry_reservation.is_none()
+        && saved.pending_paid_admission.is_none()
+        && saved
+            .controller_observation
+            .as_ref()
+            .is_none_or(|observation| !observation.in_flight)
+        && (state.recovery_pending || saved.process().is_none())
+        && saved.retry_cause.as_ref().and_then(Option::as_ref) == Some(&retry.cause)
+}
+
+/// Bind a legacy payment to its observed physical attempt in the same
+/// transaction that rechecks its identity, cancellation, deadline and cause.
+fn migrate_legacy_provider_retry_in(
+    db: &Db<'_>,
+    id: &str,
+    expected: Option<&RunCheckpoint>,
+) -> Result<Option<RunCheckpoint>> {
+    let Some(mut saved) = RunCheckpoint::load_in(db, id)? else {
+        return Ok(None);
+    };
+    if !recovery::same_execution(Some(&saved), expected) {
+        return Ok(None);
+    }
+    let Some(state) = db.run_state(id)? else {
+        return Ok(None);
+    };
+    if !legacy_provider_retry(&saved, &state) {
+        return Ok(None);
+    }
+    saved.provider_retry_reservation = saved.runner_id().map(str::to_owned);
+    saved.store_in(db, id)?;
+    Ok(Some(saved))
 }
 
 fn controller_budget_exhausted(saved: &RunCheckpoint, state: &RunState, run: &Value) -> bool {
@@ -912,7 +983,11 @@ pub(super) fn finish_recovery(
         if checkpoint.provider_failed() && super::retry::expire_in(db, id)? {
             return Ok(false);
         }
+        let migrated = migrate_legacy_provider_retry_in(db, id, Some(checkpoint))?;
         let provider_paid = provider_retry_paid(checkpoint, current)
+            || migrated
+                .as_ref()
+                .is_some_and(|saved| provider_retry_paid(saved, current))
             || RunCheckpoint::load_in(db, id)?
                 .as_ref()
                 .is_some_and(|persisted| {
