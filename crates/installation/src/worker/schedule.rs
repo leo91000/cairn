@@ -494,12 +494,16 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
         && !matches!(saved.remaining_ms, Some(Some(i64::MIN..=0)))
         && let Some(attempt) = saved.runner_id().map(str::to_owned)
     {
+        let observation_limit = recovery_deadline.map_or(Duration::from_secs(5), |deadline| {
+            Duration::from_millis(deadline.saturating_sub(now()).max(0) as u64)
+                .min(Duration::from_secs(5))
+        });
         recovery::terminal_code(
             s,
             &attempt,
             saved.node_id.as_ref().and_then(|node| node.as_deref()),
             &CancellationToken::new(),
-            Duration::from_secs(5),
+            observation_limit,
             |action| {
                 let id = run_id.to_owned();
                 let attempt = attempt.clone();
@@ -525,7 +529,9 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
                             let mut reserved = false;
                             match action {
                                 recovery::ObservationAction::Reserve => {
-                                    reserved = current.reserve_observation(&attempt);
+                                    if recovery_deadline.is_none_or(|deadline| now() < deadline) {
+                                        reserved = current.reserve_observation(&attempt);
+                                    }
                                 }
                                 recovery::ObservationAction::Release => {
                                     current.release_observation(&attempt);
