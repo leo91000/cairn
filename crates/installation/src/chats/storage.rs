@@ -318,7 +318,7 @@ impl Db<'_> {
             .query_row([id], row)
             .optional()?;
         if let Some(record) = &mut record {
-            record.requested_by = self.lineages(Some(id))?.remove(id);
+            record.requested_by = self.lineage(id)?;
             record.wakeup = self.wakeup(true, id)?;
         }
         Ok(record)
@@ -342,7 +342,7 @@ impl Db<'_> {
             .query_map([], row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut wakeups = self.wakeups(true, None)?;
-        let mut lineages = self.lineages(None)?;
+        let mut lineages = self.lineages()?;
         for record in &mut records {
             record.wakeup = wakeups.remove(&record.id);
             record.requested_by = lineages.remove(&record.id);
@@ -362,7 +362,7 @@ impl Db<'_> {
         }
         let mut records=self.0.prepare_cached(&format!("SELECT {COLUMNS} FROM conversations JOIN conversation_lineage l ON l.chat_id=conversations.id WHERE l.requester_chat_id=? ORDER BY persisted_at DESC,id"))?.query_map([requester],row)?.collect::<rusqlite::Result<Vec<_>>>()?;
         let mut wakeups = self.wakeups(true, None)?;
-        let mut lineages = self.lineages(None)?;
+        let mut lineages = self.lineages()?;
         for record in &mut records {
             record.wakeup = wakeups.remove(&record.id);
             record.requested_by = lineages.remove(&record.id);

@@ -6,15 +6,14 @@ use crate::{
 use cairn_contracts::{
     ChatWakeup, PluginWaitData, TimeCondition, WaitCondition, WaitMemberProgress,
 };
-use rusqlite::{Row, params};
+use rusqlite::{OptionalExtension, Row, params};
 use std::collections::HashMap;
 
 pub(crate) const SCHEMA: &str = "
 CREATE TABLE durable_wakeups(
-    owner_kind TEXT NOT NULL CHECK(owner_kind IN ('chat','mission')),
-    owner_id TEXT NOT NULL,
-    chat_id TEXT UNIQUE REFERENCES conversations(id) ON DELETE CASCADE,
-    mission_run_id TEXT UNIQUE REFERENCES runs(id) ON DELETE CASCADE,
+    key INTEGER PRIMARY KEY,
+    chat_id TEXT REFERENCES conversations(id) ON DELETE CASCADE,
+    mission_run_id TEXT REFERENCES runs(id) ON DELETE CASCADE,
     id TEXT NOT NULL CHECK(length(id)>0),
     message_id TEXT,
     reason TEXT NOT NULL,
@@ -29,14 +28,13 @@ CREATE TABLE durable_wakeups(
     display TEXT CHECK(display IS NULL OR json_valid(display)),
     next_check_at INTEGER CHECK(next_check_at BETWEEN 0 AND 9007199254740991),
     last_error TEXT,
-    CHECK((owner_kind='chat' AND chat_id=owner_id AND mission_run_id IS NULL) OR (owner_kind='mission' AND mission_run_id=owner_id AND chat_id IS NULL)),
-    CHECK((time_kind IS NULL AND time_seconds IS NULL AND time_date IS NULL) OR (time_kind='delay' AND time_seconds IS NOT NULL AND time_date IS NULL) OR (time_kind='at' AND time_date IS NOT NULL AND time_seconds IS NULL)),
-    PRIMARY KEY(owner_kind,owner_id)
-) WITHOUT ROWID;
-CREATE INDEX durable_wakeups_deadline ON durable_wakeups(wake_at,owner_kind,owner_id);
+    CHECK((chat_id IS NOT NULL) != (mission_run_id IS NOT NULL)),
+    CHECK((time_kind IS NULL AND time_seconds IS NULL AND time_date IS NULL) OR (time_kind='delay' AND time_seconds IS NOT NULL AND time_date IS NULL) OR (time_kind='at' AND time_date IS NOT NULL AND time_seconds IS NULL))
+);
+CREATE UNIQUE INDEX durable_wakeups_chat ON durable_wakeups(chat_id) WHERE chat_id IS NOT NULL;
+CREATE UNIQUE INDEX durable_wakeups_mission ON durable_wakeups(mission_run_id) WHERE mission_run_id IS NOT NULL;
 CREATE TABLE wait_conditions(
-    owner_kind TEXT NOT NULL,
-    owner_id TEXT NOT NULL,
+    wakeup_key INTEGER NOT NULL REFERENCES durable_wakeups(key) ON DELETE CASCADE,
     position INTEGER NOT NULL CHECK(position>=0),
     kind TEXT NOT NULL CHECK(kind IN ('run_finished','task_finished','plugin')),
     target_run_id TEXT,
@@ -52,11 +50,8 @@ CREATE TABLE wait_conditions(
     CHECK((kind='run_finished' AND target_run_id IS NOT NULL AND target_chat_id IS NULL AND plugin_id IS NULL AND condition_type IS NULL AND project_id IS NULL AND plugin_input IS NULL)
        OR (kind='task_finished' AND target_chat_id IS NOT NULL AND target_run_id IS NULL AND plugin_id IS NULL AND condition_type IS NULL AND project_id IS NULL AND plugin_input IS NULL)
        OR (kind='plugin' AND target_run_id IS NULL AND target_chat_id IS NULL AND plugin_id IS NOT NULL AND condition_type IS NOT NULL AND plugin_input IS NOT NULL)),
-    PRIMARY KEY(owner_kind,owner_id,position),
-    FOREIGN KEY(owner_kind,owner_id) REFERENCES durable_wakeups(owner_kind,owner_id) ON DELETE CASCADE
+    PRIMARY KEY(wakeup_key,position)
 ) WITHOUT ROWID;
-CREATE INDEX wait_conditions_run ON wait_conditions(target_run_id) WHERE target_run_id IS NOT NULL;
-CREATE INDEX wait_conditions_chat ON wait_conditions(target_chat_id) WHERE target_chat_id IS NOT NULL;
 CREATE TABLE conversation_lineage(
     chat_id TEXT PRIMARY KEY NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
     requester_chat_id TEXT NOT NULL,
@@ -93,74 +88,147 @@ fn progress(row: &Row<'_>, start: usize) -> rusqlite::Result<WaitMemberProgress>
     })
 }
 
+const WAKEUP_COLUMNS: &str = "w.id,w.message_id,w.reason,w.seconds,w.created_at,w.wake_at,w.group_mode,w.time_kind,w.time_seconds,w.time_date,w.observation,w.display,w.next_check_at,w.last_error";
+const CONDITION_COLUMNS: &str = "c.kind,c.target_run_id,c.target_chat_id,c.plugin_id,c.condition_type,c.project_id,c.plugin_input,c.observation,c.display,c.next_check_at,c.last_error";
+
+fn wakeup_row(row: &Row<'_>) -> rusqlite::Result<(String, Option<String>, ChatWakeup)> {
+    let time_kind: Option<String> = row.get(8)?;
+    let time_condition = match time_kind.as_deref() {
+        Some("delay") => Some(TimeCondition::Delay {
+            seconds: row.get(9)?,
+        }),
+        Some("at") => Some(TimeCondition::At { date: row.get(10)? }),
+        _ => None,
+    };
+    Ok((
+        row.get(0)?,
+        row.get(7)?,
+        ChatWakeup {
+            id: row.get(1)?,
+            message_id: row.get(2)?,
+            reason: row.get(3)?,
+            seconds: row.get(4)?,
+            created_at: row.get(5)?,
+            wake_at: row.get(6)?,
+            condition: None,
+            time_condition,
+            members: None,
+            progress: progress(row, 11)?,
+        },
+    ))
+}
+
+fn condition_row(
+    row: &Row<'_>,
+    start: usize,
+) -> rusqlite::Result<(WaitCondition, WaitMemberProgress)> {
+    let kind: String = row.get(start)?;
+    let condition = match kind.as_str() {
+        "run_finished" => WaitCondition::RunFinished {
+            run_id: row.get(start + 1)?,
+        },
+        "task_finished" => WaitCondition::TaskFinished {
+            chat_id: row.get(start + 2)?,
+        },
+        _ => WaitCondition::Plugin {
+            plugin_id: row.get(start + 3)?,
+            condition_type: row.get(start + 4)?,
+            project_id: row.get(start + 5)?,
+            input: decode::<PluginWaitData>(row, start + 6)?.unwrap(),
+        },
+    };
+    Ok((condition, progress(row, start + 7)?))
+}
+
+fn attach_conditions(
+    wakeup: &mut ChatWakeup,
+    mode: Option<String>,
+    slots: Vec<(WaitCondition, WaitMemberProgress)>,
+) {
+    if let Some(mode) = mode {
+        let (conditions, progress) = slots.into_iter().unzip();
+        wakeup.condition = Some(WaitCondition::Group { mode, conditions });
+        wakeup.members = Some(progress);
+    } else {
+        wakeup.condition = slots.into_iter().next().map(|(condition, _)| condition);
+    }
+}
+
 impl Db<'_> {
     pub fn wakeup(&self, chat: bool, id: &str) -> Result<Option<ChatWakeup>> {
-        Ok(self.wakeups(chat, Some(id))?.remove(id))
+        let owner = if chat { "chat_id" } else { "mission_run_id" };
+        // One statement gives point readers an atomic header/member snapshot.
+        // Integer child keys avoid repeating external UUIDs in every condition.
+        let query = format!(
+            "SELECT w.{owner},{WAKEUP_COLUMNS},{CONDITION_COLUMNS} FROM durable_wakeups w LEFT JOIN wait_conditions c ON c.wakeup_key=w.key WHERE w.{owner}=? ORDER BY c.position"
+        );
+        let mut statement = self.0.prepare_cached(&query)?;
+        let mut rows = statement.query([id])?;
+        let mut loaded = None;
+        let mut mode = None;
+        let mut slots = Vec::new();
+        while let Some(row) = rows.next()? {
+            if loaded.is_none() {
+                let (_, group, wakeup) = wakeup_row(row)?;
+                loaded = Some(wakeup);
+                mode = group;
+            }
+            if row.get::<_, Option<String>>(15)?.is_some() {
+                slots.push(condition_row(row, 15)?);
+            }
+        }
+        if let Some(wakeup) = &mut loaded {
+            attach_conditions(wakeup, mode, slots);
+        }
+        Ok(loaded)
     }
 
     pub fn wakeups(&self, chat: bool, id: Option<&str>) -> Result<HashMap<String, ChatWakeup>> {
+        if let Some(id) = id {
+            return Ok(self
+                .wakeup(chat, id)?
+                .into_iter()
+                .map(|w| (id.to_owned(), w))
+                .collect());
+        }
         if self.0.is_autocommit() {
             let tx = rusqlite::Transaction::new_unchecked(
                 self.0,
                 rusqlite::TransactionBehavior::Deferred,
             )?;
-            let result = Db(&tx).wakeups(chat, id)?;
+            let result = Db(&tx).wakeups(chat, None)?;
             tx.commit()?;
             return Ok(result);
         }
-        let kind = if chat { "chat" } else { "mission" };
-        let filter = if id.is_some() {
-            "owner_kind=?1 AND owner_id=?2"
-        } else {
-            "owner_kind=?1 AND ?2 IS NULL"
-        };
-        let mut rows = self.0.prepare_cached(&format!("SELECT owner_id,id,message_id,reason,seconds,created_at,wake_at,group_mode,time_kind,time_seconds,time_date,observation,display,next_check_at,last_error FROM durable_wakeups WHERE {filter}"))?
-            .query_map(params![kind,id], |r| {
-                let time_kind: Option<String> = r.get(8)?;
-                let time_condition = match time_kind.as_deref() {
-                    Some("delay") => Some(TimeCondition::Delay {seconds:r.get(9)?}),
-                    Some("at") => Some(TimeCondition::At {date:r.get(10)?}),
-                    _ => None,
-                };
-                Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(7)?,ChatWakeup {
-                    id:r.get(1)?,message_id:r.get(2)?,reason:r.get(3)?,seconds:r.get(4)?,created_at:r.get(5)?,wake_at:r.get(6)?,
-                    condition:None,time_condition,members:None,progress:progress(r,11)?,
-                }))
-            })?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let owner = if chat { "chat_id" } else { "mission_run_id" };
+        let query = format!(
+            "SELECT w.{owner},{WAKEUP_COLUMNS} FROM durable_wakeups w WHERE w.{owner} IS NOT NULL"
+        );
+        let mut rows = self
+            .0
+            .prepare_cached(&query)?
+            .query_map([], wakeup_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if rows.is_empty() {
+            return Ok(HashMap::new());
+        }
         let mut conditions = HashMap::<String, Vec<(WaitCondition, WaitMemberProgress)>>::new();
-        let mut statement = self.0.prepare_cached(&format!("SELECT owner_id,kind,target_run_id,target_chat_id,plugin_id,condition_type,project_id,plugin_input,observation,display,next_check_at,last_error FROM wait_conditions WHERE {filter} ORDER BY owner_id,position"))?;
-        for value in statement.query_map(params![kind, id], |r| {
-            let kind: String = r.get(1)?;
-            let condition = match kind.as_str() {
-                "run_finished" => WaitCondition::RunFinished { run_id: r.get(2)? },
-                "task_finished" => WaitCondition::TaskFinished { chat_id: r.get(3)? },
-                _ => WaitCondition::Plugin {
-                    plugin_id: r.get(4)?,
-                    condition_type: r.get(5)?,
-                    project_id: r.get(6)?,
-                    input: decode::<PluginWaitData>(r, 7)?.unwrap(),
-                },
-            };
-            Ok((r.get::<_, String>(0)?, condition, progress(r, 8)?))
+        let query = format!(
+            "SELECT w.{owner},{CONDITION_COLUMNS} FROM durable_wakeups w JOIN wait_conditions c ON c.wakeup_key=w.key WHERE w.{owner} IS NOT NULL ORDER BY w.{owner},c.position"
+        );
+        let mut statement = self.0.prepare_cached(&query)?;
+        for value in statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, condition_row(row, 1)?))
         })? {
-            let (id, condition, progress) = value?;
-            conditions
-                .entry(id)
-                .or_default()
-                .push((condition, progress));
+            let (id, slot) = value?;
+            conditions.entry(id).or_default().push(slot);
         }
         for (id, mode, wakeup) in &mut rows {
-            let slots = conditions.remove(id).unwrap_or_default();
-            if let Some(mode) = mode {
-                let (conditions, progress) = slots.into_iter().unzip();
-                wakeup.condition = Some(WaitCondition::Group {
-                    mode: mode.clone(),
-                    conditions,
-                });
-                wakeup.members = Some(progress);
-            } else {
-                wakeup.condition = slots.into_iter().next().map(|(condition, _)| condition);
-            }
+            attach_conditions(
+                wakeup,
+                mode.take(),
+                conditions.remove(id).unwrap_or_default(),
+            );
         }
         Ok(rows
             .into_iter()
@@ -202,10 +270,10 @@ impl Db<'_> {
     }
 
     fn write_wakeup(&self, chat: bool, owner_id: &str, wakeup: Option<&ChatWakeup>) -> Result<()> {
-        let kind = if chat { "chat" } else { "mission" };
+        let owner = if chat { "chat_id" } else { "mission_run_id" };
         self.0.execute(
-            "DELETE FROM durable_wakeups WHERE owner_kind=? AND owner_id=?",
-            params![kind, owner_id],
+            &format!("DELETE FROM durable_wakeups WHERE {owner}=?"),
+            [owner_id],
         )?;
         let Some(w) = wakeup else {
             return Ok(());
@@ -232,11 +300,9 @@ impl Db<'_> {
         };
         self.0
             .prepare_cached(
-                "INSERT INTO durable_wakeups VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO durable_wakeups(chat_id,mission_run_id,id,message_id,reason,seconds,created_at,wake_at,group_mode,time_kind,time_seconds,time_date,observation,display,next_check_at,last_error) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             )?
             .execute(params![
-                kind,
-                owner_id,
                 chat.then_some(owner_id),
                 (!chat).then_some(owner_id),
                 w.id,
@@ -262,6 +328,7 @@ impl Db<'_> {
                 w.progress.next_check_at,
                 w.progress.last_error,
             ])?;
+        let wakeup_key = self.0.last_insert_rowid();
         let empty_progress = WaitMemberProgress::default();
         for (position, condition) in conditions.into_iter().enumerate() {
             let (condition_kind, run, task, plugin, condition_type, project, input) =
@@ -296,10 +363,9 @@ impl Db<'_> {
                 .and_then(|m| m.get(position))
                 .unwrap_or(&empty_progress);
             self.0
-                .prepare_cached("INSERT INTO wait_conditions VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)")?
+                .prepare_cached("INSERT INTO wait_conditions VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)")?
                 .execute(params![
-                    kind,
-                    owner_id,
+                    wakeup_key,
                     position as i64,
                     condition_kind,
                     run,
@@ -327,17 +393,14 @@ impl Db<'_> {
 }
 
 impl Db<'_> {
-    pub fn lineages(
-        &self,
-        id: Option<&str>,
-    ) -> Result<HashMap<String, cairn_contracts::ConversationRequester>> {
-        let filter = if id.is_some() {
-            "chat_id=?1"
-        } else {
-            "?1 IS NULL"
-        };
-        Ok(self.0.prepare_cached(&format!("SELECT chat_id,requester_chat_id,requester_run_id,request_id FROM conversation_lineage WHERE {filter}"))?
-            .query_map([id],|r|Ok((r.get(0)?,cairn_contracts::ConversationRequester {chat_id:r.get(1)?,run_id:r.get(2)?,request_id:r.get(3)?})))?.collect::<rusqlite::Result<_>>()?)
+    pub fn lineage(&self, id: &str) -> Result<Option<cairn_contracts::ConversationRequester>> {
+        Ok(self.0.prepare_cached("SELECT requester_chat_id,requester_run_id,request_id FROM conversation_lineage WHERE chat_id=?")?
+            .query_row([id],|row|Ok(cairn_contracts::ConversationRequester {chat_id:row.get(0)?,run_id:row.get(1)?,request_id:row.get(2)?})).optional()?)
+    }
+
+    pub fn lineages(&self) -> Result<HashMap<String, cairn_contracts::ConversationRequester>> {
+        Ok(self.0.prepare_cached("SELECT chat_id,requester_chat_id,requester_run_id,request_id FROM conversation_lineage")?
+            .query_map([],|row|Ok((row.get(0)?,cairn_contracts::ConversationRequester {chat_id:row.get(1)?,run_id:row.get(2)?,request_id:row.get(3)?})))?.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn save_lineage(

@@ -11,21 +11,132 @@ fn owner(n: usize) -> String {
     uuid::Uuid::from_u128((4_u128 << 76) | (2_u128 << 62) | n as u128).to_string()
 }
 
-impl StorageEntity for ChatQuestion {
+// The v15 reader kept option objects and extension fields as Values. Keep that
+// decoder here; conversions used only for equality run outside the timed read.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PreviousQuestionField {
+    id: String,
+    title: String,
+    #[serde(default)]
+    secret: bool,
+    #[serde(default = "previous_single")]
+    mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    min_choices: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_choices: Option<usize>,
+    #[serde(default)]
+    options: Vec<Value>,
+    #[serde(flatten)]
+    extra: serde_json::Map<String, Value>,
+}
+
+fn previous_single() -> String {
+    "single".into()
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PreviousQuestion {
+    id: String,
+    chat_id: String,
+    run_id: String,
+    blocking: bool,
+    #[serde(default)]
+    source: String,
+    status: cairn_contracts::QuestionStatus,
+    fields: Vec<PreviousQuestionField>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    created_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    message_id: Option<String>,
+    #[serde(flatten)]
+    extra: serde_json::Map<String, Value>,
+}
+
+#[derive(Debug, Clone)]
+enum QuestionSample {
+    Prepared {
+        current: ChatQuestion,
+        previous: Box<PreviousQuestion>,
+    },
+    Current(ChatQuestion),
+    Previous(Box<PreviousQuestion>),
+}
+
+impl QuestionSample {
+    fn id(&self) -> &str {
+        match self {
+            Self::Prepared { current, .. } | Self::Current(current) => &current.id,
+            Self::Previous(previous) => &previous.id,
+        }
+    }
+
+    fn current(&self) -> &ChatQuestion {
+        match self {
+            Self::Prepared { current, .. } | Self::Current(current) => current,
+            _ => panic!("prepared candidate writer"),
+        }
+    }
+
+    fn previous(&self) -> &PreviousQuestion {
+        match self {
+            Self::Prepared { previous, .. } | Self::Previous(previous) => previous,
+            _ => panic!("prepared reference writer"),
+        }
+    }
+
+    fn wire(&self) -> Value {
+        match self {
+            Self::Prepared { current, .. } | Self::Current(current) => {
+                serde_json::to_value(current).unwrap()
+            }
+            Self::Previous(previous) => serde_json::to_value(previous).unwrap(),
+        }
+    }
+}
+
+impl PartialEq for QuestionSample {
+    fn eq(&self, other: &Self) -> bool {
+        self.wire() == other.wire()
+    }
+}
+
+impl serde::Serialize for QuestionSample {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.wire().serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for QuestionSample {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Box::<PreviousQuestion>::deserialize(deserializer).map(Self::Previous)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+struct MeasuredQuestion(QuestionSample);
+
+impl StorageEntity for MeasuredQuestion {
     const KIND: &'static str = "a8-questions";
     const TABLE: &'static str = "chat_questions";
     const SAVE: &'static str = "chat.question";
 
     fn prepare(db: &Db<'_>) {
-        db.save_conversation_boundary(&json!({"id":CHAT})).unwrap();
+        db.save_conversation_boundary(&json!({"id":CHAT,"slug":"a8-question-chat"}))
+            .unwrap();
     }
 
     fn id(&self) -> String {
-        self.id.clone()
+        self.0.id().into()
     }
 
     fn read(db: &Db<'_>, id: &str) -> Self {
-        db.question(CHAT, id).unwrap().unwrap()
+        Self(QuestionSample::Current(
+            db.question(CHAT, id).unwrap().unwrap(),
+        ))
     }
 
     fn list(db: &Db<'_>) -> usize {
@@ -33,8 +144,8 @@ impl StorageEntity for ChatQuestion {
     }
 
     fn write(&self, db: &Db<'_>, _: bool) {
-        db.save_question(self).unwrap();
-        db.audit(Self::SAVE, &json!({"id":self.id})).unwrap();
+        db.save_question(self.0.current()).unwrap();
+        db.audit(Self::SAVE, &json!({"id":self.id()})).unwrap();
     }
 
     fn reference_schema(db: &Connection) {
@@ -43,22 +154,28 @@ CREATE TABLE kv(key TEXT PRIMARY KEY CHECK(key NOT LIKE 'run-checkpoint:%' AND k
     }
 
     fn reference_read(db: &Db<'_>, id: &str) -> Self {
-        db.kv_as(&format!("chat-question:{CHAT}:{id}"))
-            .unwrap()
-            .unwrap()
+        Self(QuestionSample::Previous(
+            db.kv_as(&format!("chat-question:{CHAT}:{id}"))
+                .unwrap()
+                .unwrap(),
+        ))
     }
 
     fn reference_list(db: &Db<'_>) -> usize {
         let mut questions = db
-            .keys_as::<ChatQuestion>(&format!("chat-question:{CHAT}:"))
+            .keys_as::<PreviousQuestion>(&format!("chat-question:{CHAT}:"))
             .unwrap();
         questions.sort_by_key(|(_, q)| q.created_at);
         questions.len()
     }
 
     fn reference_write(&self, db: &Db<'_>, _: bool) {
-        db.set_as(&format!("chat-question:{CHAT}:{}", self.id), self, None)
-            .unwrap();
+        db.set_as(
+            &format!("chat-question:{CHAT}:{}", self.id()),
+            self.0.previous(),
+            None,
+        )
+        .unwrap();
     }
 
     fn reference_delete(db: &Db<'_>, id: &str) {
@@ -153,7 +270,7 @@ impl StorageEntity for Continuation {
 
     fn prepare(db: &Db<'_>) {
         for n in 0..1000 {
-            db.save_conversation_boundary(&json!({"id":owner(n)}))
+            db.save_conversation_boundary(&json!({"id":owner(n),"slug":format!("a8-owner-{n}")}))
                 .unwrap();
         }
     }
@@ -170,7 +287,7 @@ impl StorageEntity for Continuation {
         Self {
             id: id.into(),
             wakeup: WakeupSample::Current(reader.wakeup(true, id).unwrap().unwrap()),
-            requester: reader.lineages(Some(id)).unwrap().remove(id).unwrap(),
+            requester: reader.lineage(id).unwrap().unwrap(),
         }
     }
 
@@ -180,7 +297,7 @@ impl StorageEntity for Continuation {
                 .unwrap();
         let reader = Db(&tx);
         let wakeups = reader.wakeups(true, None).unwrap();
-        let lineage = reader.lineages(None).unwrap();
+        let lineage = reader.lineages().unwrap();
         assert_eq!(wakeups.len(), lineage.len());
         wakeups.len()
     }
@@ -261,7 +378,15 @@ async fn a8_question_storage_layouts() {
         "id":format!("{n:064x}"),"chatId":CHAT,"runId":uuid::Uuid::from_u128((4_u128<<76)|(2_u128<<62)|n as u128).to_string(),"source":"cairn","blocking":false,"status":"pending","createdAt":1700000000000i64+n,
         "fields":(0..3).map(|f|json!({"id":format!("field-{f}"),"title":"Deterministic questionnaire storage qualification. ".repeat(4),"secret":f==2,"mode":"multiple","options":(0..4).map(|o|json!({"id":format!("option-{o}"),"label":format!("Choice {o}"),"description":"Reproducible synthetic option. ".repeat(3),"recommended":o==0})).collect::<Vec<_>>()})).collect::<Vec<_>>()
     })).unwrap()).collect::<Vec<ChatQuestion>>();
-    measure(&values);
+    let measured = values
+        .into_iter()
+        .map(|current| {
+            let previous =
+                Box::new(serde_json::from_value(serde_json::to_value(&current).unwrap()).unwrap());
+            MeasuredQuestion(QuestionSample::Prepared { current, previous })
+        })
+        .collect::<Vec<_>>();
+    measure(&measured);
 }
 
 #[tokio::test]
@@ -341,6 +466,71 @@ struct PrivateAnswer {
     answers: AnswerSample,
 }
 
+fn previous_answers(db: &Db<'_>, message: Option<&str>) -> Vec<PrivateAnswer> {
+    if db.0.is_autocommit() {
+        let tx =
+            rusqlite::Transaction::new_unchecked(db.0, rusqlite::TransactionBehavior::Deferred)
+                .unwrap();
+        let values = previous_answers(&Db(&tx), message);
+        tx.commit().unwrap();
+        return values;
+    }
+    let filter = if message.is_some() {
+        "chat_id=?1 AND id=?2"
+    } else {
+        "chat_id=?1 AND ?2 IS NULL"
+    };
+    let query = format!(
+        "SELECT id,chat_id,revision,text,provider,model,reasoning,speed,mode,status,created_at,question_id,answers FROM chat_messages WHERE {filter} ORDER BY created_at,rowid"
+    );
+    let values =
+        db.0.prepare_cached(&query)
+            .unwrap()
+            .query_map(params![CHAT, message], |r| {
+                let content = cairn_contracts::ChatMessage {
+                    id: r.get(0)?,
+                    chat_id: r.get(1)?,
+                    revision: r.get(2)?,
+                    text: r.get(3)?,
+                    provider: r.get(4)?,
+                    model: r.get(5)?,
+                    reasoning: r.get(6)?,
+                    speed: r.get(7)?,
+                    mode: cairn_contracts::MessageMode::parse(&r.get::<_, String>(8)?).unwrap(),
+                    status: cairn_contracts::MessageStatus::parse(&r.get::<_, String>(9)?).unwrap(),
+                    created_at: r.get(10)?,
+                    question_id: r.get(11)?,
+                    attachments: vec![],
+                };
+                let raw: String = r.get(12)?;
+                Ok(PrivateAnswer {
+                    id: content.id,
+                    text: content.text,
+                    answers: AnswerSample::Previous(serde_json::from_str(&raw).unwrap()),
+                })
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+    let attachment_filter = if message.is_some() {
+        "m.chat_id=?1 AND m.id=?2"
+    } else {
+        "m.chat_id=?1 AND ?2 IS NULL"
+    };
+    let query = format!(
+        "SELECT a.message_id,a.attachment_id,a.chat_id,a.name,a.size,a.media_type,a.kind,a.width,a.height,a.digest,a.created_at FROM message_attachments a JOIN chat_messages m ON m.id=a.message_id WHERE {attachment_filter} ORDER BY a.message_id,a.position"
+    );
+    assert!(
+        !db.0
+            .prepare_cached(&query)
+            .unwrap()
+            .exists(params![CHAT, message])
+            .unwrap(),
+        "This workload has no attachments."
+    );
+    values
+}
+
 impl StorageEntity for PrivateAnswer {
     const KIND: &'static str = "a8-private-answers";
     const TABLE: &'static str = "chat_messages";
@@ -398,44 +588,23 @@ impl StorageEntity for PrivateAnswer {
     }
 
     fn reference_read(db: &Db<'_>, id: &str) -> Self {
-        let (text, answers): (String, String) =
-            db.0.prepare_cached("SELECT text,answers FROM chat_messages WHERE chat_id=? AND id=?")
-                .unwrap()
-                .query_row(params![CHAT, id], |r| Ok((r.get(0)?, r.get(1)?)))
-                .unwrap();
-        Self {
-            id: id.into(),
-            text,
-            answers: AnswerSample::Previous(serde_json::from_str(&answers).unwrap()),
-        }
+        previous_answers(db, Some(id)).pop().unwrap()
     }
 
     fn reference_list(db: &Db<'_>) -> usize {
-        db.0.prepare_cached(
-            "SELECT id,text,answers FROM chat_messages WHERE chat_id=? ORDER BY created_at,rowid",
-        )
-        .unwrap()
-        .query_map([CHAT], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        })
-        .unwrap()
-        .map(|row| {
-            let (id, text, answers) = row.unwrap();
-            PrivateAnswer {
-                id,
-                text,
-                answers: AnswerSample::Previous(serde_json::from_str(&answers).unwrap()),
-            }
-        })
-        .count()
+        previous_answers(db, None).len()
     }
 
     fn reference_write(&self, db: &Db<'_>, _: bool) {
-        db.0.prepare_cached("INSERT INTO chat_messages(id,chat_id,revision,text,provider,model,reasoning,speed,mode,status,created_at,question_id,answers) VALUES(?,?,'fixture',?,'codex','model','high','','queue','queued',1700000000000,'question',?) ON CONFLICT(id) DO UPDATE SET text=excluded.text,answers=excluded.answers,revision=excluded.revision").unwrap().execute(params![self.id,CHAT,self.text,serde_json::to_string(&self.answers).unwrap()]).unwrap();
+        db.0.execute_batch("SAVEPOINT conversation_message")
+            .unwrap();
+        db.0.prepare_cached("INSERT INTO chat_messages(id,chat_id,revision,text,provider,model,reasoning,speed,mode,status,created_at,question_id,answers) VALUES(?,?,?,?,'codex','model','high','','queue','queued',1700000000000,'question',?) ON CONFLICT(id) DO UPDATE SET text=excluded.text,answers=excluded.answers,revision=excluded.revision").unwrap().execute(params![self.id,CHAT,cairn_installation::config::id(),self.text,serde_json::to_string(&self.answers).unwrap()]).unwrap();
+        db.0.execute(
+            "DELETE FROM message_attachments WHERE message_id=?",
+            [&self.id],
+        )
+        .unwrap();
+        db.0.execute_batch("RELEASE conversation_message").unwrap();
     }
 
     fn reference_delete(db: &Db<'_>, id: &str) {

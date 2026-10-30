@@ -78,7 +78,7 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
                     .is_some_and(|options| {
                         options
                             .iter()
-                            .all(|option| option.as_object().is_some_and(|o| o.is_empty()))
+                            .all(|option| option.as_object().is_some_and(serde_json::Map::is_empty))
                     })
                 {
                     field.as_object_mut().unwrap().remove("options");
@@ -86,7 +86,7 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
             }
             if fields
                 .iter()
-                .all(|field| field.as_object().is_some_and(|o| o.is_empty()))
+                .all(|field| field.as_object().is_some_and(serde_json::Map::is_empty))
             {
                 metadata.as_object_mut().unwrap().remove("fields");
             }

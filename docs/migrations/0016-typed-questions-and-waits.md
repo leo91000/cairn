@@ -6,7 +6,8 @@ installation upgrades, stop the previous manager and retain a consistent backup
 of `manager.db` and its WAL. Never open this database with two manager versions.
 
 Question definitions move from `chat-question:*` keys into `chat_questions`,
-ordered `question_fields` and `question_options`. Answer selections, comments and
+ordered `question_fields` and `question_options`. Their integer relation keys
+avoid repeating the external question digest in every field/option row. Answer selections, comments and
 private delivery text move from message payloads into `question_answers`,
 `question_answer_choices` and `question_answer_deliveries`. Public message headers
 contain a placeholder; the internal delivery reader reconstructs the original
@@ -17,6 +18,9 @@ questions remain expired. The `kv` constraint rejects the removed question path.
 
 Conversation and mission continuations move into `durable_wakeups` and ordered
 `wait_conditions`; `conversation_lineage` owns requester chat/run/request IDs.
+An internal integer relation key links conditions to their wakeup; partial unique
+indexes select either a conversation or mission owner, with foreign keys and an
+exclusive-owner constraint. External identities remain unchanged.
 Wait identity, turn, absolute deadline, reason, original delay/date, member order,
 all/any mode, progress, next probe, transient errors, observations and plugin
 payloads remain intact. Plugin conditions have an explicit input object and plugin

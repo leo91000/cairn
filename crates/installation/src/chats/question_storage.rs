@@ -3,13 +3,16 @@ use crate::{
     error::{Error, Result},
     store::Db,
 };
-use cairn_contracts::{ChatQuestion, QuestionField, QuestionOption};
+use cairn_contracts::{ChatQuestion, QuestionField, QuestionOption, QuestionStatus};
 use rusqlite::params;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+
+type AnswersByMessage = HashMap<String, BTreeMap<String, cairn_contracts::QuestionAnswer>>;
 
 pub(crate) const SCHEMA: &str = "
 CREATE TABLE chat_questions(
-    id TEXT PRIMARY KEY NOT NULL CHECK(length(id)>0),
+    key INTEGER PRIMARY KEY,
+    id TEXT NOT NULL UNIQUE CHECK(length(id)>0),
     chat_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
     run_id TEXT NOT NULL,
     blocking INTEGER NOT NULL CHECK(blocking IN (0,1)),
@@ -28,7 +31,7 @@ CREATE TABLE question_import_metadata(
     metadata TEXT NOT NULL CHECK(json_valid(metadata) AND json_type(metadata)='object')
 ) WITHOUT ROWID;
 CREATE TABLE question_fields(
-    question_id TEXT NOT NULL REFERENCES chat_questions(id) ON DELETE CASCADE,
+    question_key INTEGER NOT NULL REFERENCES chat_questions(key) ON DELETE CASCADE,
     id TEXT NOT NULL CHECK(length(id) BETWEEN 1 AND 200),
     position INTEGER NOT NULL CHECK(position BETWEEN 0 AND 19),
     title TEXT NOT NULL CHECK(length(title) BETWEEN 1 AND 10000),
@@ -38,18 +41,18 @@ CREATE TABLE question_fields(
     max_choices INTEGER CHECK(max_choices BETWEEN 1 AND 30),
     CHECK(min_choices IS NULL OR max_choices IS NULL OR min_choices<=max_choices),
     CHECK(mode!='single' OR max_choices IS NULL OR max_choices=1),
-    PRIMARY KEY(question_id,id), UNIQUE(question_id,position)
+    PRIMARY KEY(question_key,id), UNIQUE(question_key,position)
 ) WITHOUT ROWID;
 CREATE TABLE question_options(
-    question_id TEXT NOT NULL,
+    question_key INTEGER NOT NULL,
     field_id TEXT NOT NULL,
     id TEXT NOT NULL CHECK(length(id)<=200),
     position INTEGER NOT NULL CHECK(position BETWEEN 0 AND 29),
     label TEXT NOT NULL CHECK(length(label) BETWEEN 1 AND 2000),
     description TEXT NOT NULL CHECK(length(description)<=4000),
     recommended INTEGER NOT NULL CHECK(recommended IN (0,1)),
-    PRIMARY KEY(question_id,field_id,position),
-    FOREIGN KEY(question_id,field_id) REFERENCES question_fields(question_id,id) ON DELETE CASCADE
+    PRIMARY KEY(question_key,field_id,position),
+    FOREIGN KEY(question_key,field_id) REFERENCES question_fields(question_key,id) ON DELETE CASCADE
 ) WITHOUT ROWID;
 CREATE TABLE question_answers(
     message_id TEXT NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
@@ -71,53 +74,123 @@ CREATE TABLE question_answer_deliveries(
 ) WITHOUT ROWID;
 ";
 
+fn question_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatQuestion> {
+    let status: String = row.get(5)?;
+    let status = match status.as_str() {
+        "pending" => QuestionStatus::Pending,
+        "answering" => QuestionStatus::Answering,
+        "answered" => QuestionStatus::Answered,
+        "cancelled" => QuestionStatus::Cancelled,
+        _ => {
+            return Err(rusqlite::Error::FromSqlConversionFailure(
+                5,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Invalid question status",
+                )),
+            ));
+        }
+    };
+    Ok(ChatQuestion {
+        id: row.get(0)?,
+        chat_id: row.get(1)?,
+        run_id: row.get(2)?,
+        blocking: row.get(3)?,
+        source: row.get(4)?,
+        status,
+        created_at: row.get(6)?,
+        message_id: row.get(7)?,
+        fields: Vec::new(),
+    })
+}
+
 impl Db<'_> {
     pub fn questions(&self, chat: &str) -> Result<Vec<ChatQuestion>> {
-        self.load_questions(chat, None)
+        self.load_questions(chat)
     }
 
     pub fn question(&self, chat: &str, id: &str) -> Result<Option<ChatQuestion>> {
-        Ok(self.load_questions(chat, Some(id))?.pop())
+        // A point read gets one atomic definition, including ordered children.
+        // Internal integer keys keep the external digest out of every child key.
+        let query="SELECT q.id,q.chat_id,q.run_id,q.blocking,q.source,q.status,q.created_at,q.message_id,
+            f.id,f.position,f.title,f.secret,f.mode,f.min_choices,f.max_choices,
+            o.position,o.id,o.label,o.description,o.recommended
+            FROM chat_questions q
+            LEFT JOIN question_fields f ON f.question_key=q.key
+            LEFT JOIN question_options o ON o.question_key=f.question_key AND o.field_id=f.id
+            WHERE q.chat_id=?1 AND q.id=?2
+              AND NOT EXISTS(SELECT 1 FROM question_import_metadata m WHERE m.question_id=q.id AND m.expires<=?3)
+            ORDER BY f.position,o.position";
+        let mut statement = self.0.prepare_cached(query)?;
+        let mut rows = statement.query(params![chat, id, crate::config::now()])?;
+        let mut loaded: Option<ChatQuestion> = None;
+        let mut field_position = None;
+        while let Some(row) = rows.next()? {
+            if loaded.is_none() {
+                loaded = Some(question_row(row)?);
+            }
+            let question = loaded.as_mut().unwrap();
+            let position: Option<i64> = row.get(9)?;
+            if position.is_none() {
+                continue;
+            }
+            if position != field_position {
+                question.fields.push(QuestionField {
+                    id: row.get(8)?,
+                    title: row.get(10)?,
+                    secret: row.get(11)?,
+                    mode: row.get(12)?,
+                    min_choices: row.get::<_, Option<u32>>(13)?.map(|n| n as usize),
+                    max_choices: row.get::<_, Option<u32>>(14)?.map(|n| n as usize),
+                    options: Vec::new(),
+                });
+                field_position = position;
+            }
+            if row.get::<_, Option<i64>>(15)?.is_some() {
+                question
+                    .fields
+                    .last_mut()
+                    .unwrap()
+                    .options
+                    .push(QuestionOption {
+                        id: row.get(16)?,
+                        label: row.get(17)?,
+                        description: row.get(18)?,
+                        recommended: row.get(19)?,
+                    });
+            }
+        }
+        Ok(loaded)
     }
 
-    fn load_questions(&self, chat: &str, id: Option<&str>) -> Result<Vec<ChatQuestion>> {
+    fn load_questions(&self, chat: &str) -> Result<Vec<ChatQuestion>> {
         if self.0.is_autocommit() {
             let tx = rusqlite::Transaction::new_unchecked(
                 self.0,
                 rusqlite::TransactionBehavior::Deferred,
             )?;
-            let result = Db(&tx).load_questions(chat, id)?;
+            let result = Db(&tx).load_questions(chat)?;
             tx.commit()?;
             return Ok(result);
         }
-        let identity = if id.is_some() {
-            "q.chat_id=?1 AND q.id=?2"
-        } else {
-            "q.chat_id=?1 AND ?2 IS NULL"
-        };
-        let filter = format!(
-            "{identity} AND NOT EXISTS(SELECT 1 FROM question_import_metadata m WHERE m.question_id=q.id AND m.expires<=?3)"
-        );
-        let mut questions = self.0.prepare_cached(&format!("SELECT q.id,q.chat_id,q.run_id,q.blocking,q.source,q.status,q.created_at,q.message_id FROM chat_questions q WHERE {filter} ORDER BY q.created_at,q.id"))?
-            .query_map(params![chat,id,crate::config::now()], |r| {
-                let status: String = r.get(5)?;
-                Ok(ChatQuestion {
-                    id:r.get(0)?,chat_id:r.get(1)?,run_id:r.get(2)?,blocking:r.get(3)?,source:r.get(4)?,
-                    status:serde_json::from_value(status.into()).map_err(|e| rusqlite::Error::FromSqlConversionFailure(5,rusqlite::types::Type::Text,Box::new(e)))?,
-                    created_at:r.get(6)?,message_id:r.get(7)?,fields:Vec::new(),
-                })
-            })?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let time = crate::config::now();
+        let filter = "q.chat_id=?1 AND NOT EXISTS(SELECT 1 FROM question_import_metadata m WHERE m.question_id=q.id AND m.expires<=?2)";
+        let mut questions=self.0.prepare_cached(&format!("SELECT q.id,q.chat_id,q.run_id,q.blocking,q.source,q.status,q.created_at,q.message_id FROM chat_questions q WHERE {filter} ORDER BY q.created_at,q.id"))?.query_map(params![chat,time],question_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        if questions.is_empty() {
+            return Ok(questions);
+        }
         let mut options = HashMap::<(String, String), Vec<QuestionOption>>::new();
-        let mut statement = self.0.prepare_cached(&format!("SELECT o.question_id,o.field_id,o.id,o.label,o.description,o.recommended FROM question_options o JOIN chat_questions q ON q.id=o.question_id WHERE {filter} ORDER BY o.question_id,o.field_id,o.position"))?;
-        for value in statement.query_map(params![chat, id, crate::config::now()], |r| {
+        let mut statement=self.0.prepare_cached(&format!("SELECT q.id,o.field_id,o.id,o.label,o.description,o.recommended FROM question_options o JOIN chat_questions q ON q.key=o.question_key WHERE {filter} ORDER BY q.id,o.field_id,o.position"))?;
+        for value in statement.query_map(params![chat, time], |row| {
             Ok((
-                r.get(0)?,
-                r.get(1)?,
+                row.get(0)?,
+                row.get(1)?,
                 QuestionOption {
-                    id: r.get(2)?,
-                    label: r.get(3)?,
-                    description: r.get(4)?,
-                    recommended: r.get(5)?,
+                    id: row.get(2)?,
+                    label: row.get(3)?,
+                    description: row.get(4)?,
+                    recommended: row.get(5)?,
                 },
             ))
         })? {
@@ -125,17 +198,17 @@ impl Db<'_> {
             options.entry((question, field)).or_default().push(option);
         }
         let mut fields = HashMap::<String, Vec<QuestionField>>::new();
-        let mut statement = self.0.prepare_cached(&format!("SELECT f.question_id,f.id,f.title,f.secret,f.mode,f.min_choices,f.max_choices FROM question_fields f JOIN chat_questions q ON q.id=f.question_id WHERE {filter} ORDER BY f.question_id,f.position"))?;
-        for value in statement.query_map(params![chat, id, crate::config::now()], |r| {
+        let mut statement=self.0.prepare_cached(&format!("SELECT q.id,f.id,f.title,f.secret,f.mode,f.min_choices,f.max_choices FROM question_fields f JOIN chat_questions q ON q.key=f.question_key WHERE {filter} ORDER BY q.id,f.position"))?;
+        for value in statement.query_map(params![chat, time], |row| {
             Ok((
-                r.get::<_, String>(0)?,
+                row.get::<_, String>(0)?,
                 QuestionField {
-                    id: r.get(1)?,
-                    title: r.get(2)?,
-                    secret: r.get(3)?,
-                    mode: r.get(4)?,
-                    min_choices: r.get::<_, Option<u32>>(5)?.map(|n| n as usize),
-                    max_choices: r.get::<_, Option<u32>>(6)?.map(|n| n as usize),
+                    id: row.get(1)?,
+                    title: row.get(2)?,
+                    secret: row.get(3)?,
+                    mode: row.get(4)?,
+                    min_choices: row.get::<_, Option<u32>>(5)?.map(|n| n as usize),
+                    max_choices: row.get::<_, Option<u32>>(6)?.map(|n| n as usize),
                     options: Vec::new(),
                 },
             ))
@@ -153,7 +226,6 @@ impl Db<'_> {
     }
 
     pub fn save_question(&self, question: &ChatQuestion) -> Result<()> {
-        cairn_contracts::validate_question_fields(&question.fields).map_err(Error::bad)?;
         if self.0.is_autocommit() {
             let tx = rusqlite::Transaction::new_unchecked(
                 self.0,
@@ -166,7 +238,7 @@ impl Db<'_> {
         self.0.execute_batch("SAVEPOINT question_write")?;
         let before = self.0.total_changes();
         let discarded_before = self.discarded_change_count()?;
-        let result = self.write_question(question);
+        let result = self.write_question(question, true);
         match result {
             Ok(()) => self.0.execute_batch("RELEASE question_write")?,
             Err(error) => {
@@ -182,17 +254,19 @@ impl Db<'_> {
     /// The only caller is the atomic v15 importer. Retired engine options had
     /// no selection identity; retain their labels/order without inventing one.
     pub(super) fn import_question(&self, question: &ChatQuestion) -> Result<()> {
-        if question.source == "cairn" {
-            cairn_contracts::validate_question_fields(&question.fields).map_err(Error::bad)?;
-        }
-        self.write_question(question)
+        self.write_question(question, question.source == "cairn")
     }
 
-    fn write_question(&self, q: &ChatQuestion) -> Result<()> {
+    fn write_question(&self, q: &ChatQuestion, validate_new: bool) -> Result<()> {
         self.0.execute("DELETE FROM chat_questions WHERE id=?1 AND EXISTS(SELECT 1 FROM question_import_metadata m WHERE m.question_id=?1 AND m.expires<=?2)", params![q.id,crate::config::now()])?;
         let existing = self.question(&q.chat_id, &q.id)?;
-        self.0.prepare_cached("INSERT INTO chat_questions VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET blocking=excluded.blocking,status=excluded.status,message_id=excluded.message_id WHERE chat_questions.chat_id=excluded.chat_id AND chat_questions.run_id=excluded.run_id")?
-            .execute(params![q.id,q.chat_id,q.run_id,q.blocking,q.source,q.status.as_str(),q.created_at,q.message_id])?;
+        // Imported retired-engine definitions can have label-only options. Their
+        // delivery status must still advance without inventing selection IDs.
+        if existing.is_none() && validate_new {
+            cairn_contracts::validate_question_fields(&q.fields).map_err(Error::bad)?;
+        }
+        let question_key:i64=self.0.prepare_cached("INSERT INTO chat_questions(id,chat_id,run_id,blocking,source,status,created_at,message_id) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET blocking=excluded.blocking,status=excluded.status,message_id=excluded.message_id WHERE chat_questions.chat_id=excluded.chat_id AND chat_questions.run_id=excluded.run_id RETURNING key")?
+            .query_row(params![q.id,q.chat_id,q.run_id,q.blocking,q.source,q.status.as_str(),q.created_at,q.message_id],|row|row.get(0))?;
         if let Some(existing) = existing {
             if existing.fields != q.fields
                 || existing.run_id != q.run_id
@@ -207,7 +281,7 @@ impl Db<'_> {
             self.0
                 .prepare_cached("INSERT INTO question_fields VALUES(?,?,?,?,?,?,?,?)")?
                 .execute(params![
-                    q.id,
+                    question_key,
                     field.id,
                     position as i64,
                     field.title,
@@ -220,7 +294,7 @@ impl Db<'_> {
                 self.0
                     .prepare_cached("INSERT INTO question_options VALUES(?,?,?,?,?,?,?)")?
                     .execute(params![
-                        q.id,
+                        question_key,
                         field.id,
                         option.id,
                         position as i64,
@@ -239,10 +313,7 @@ impl Db<'_> {
         &self,
         chat: &str,
         message: Option<&str>,
-    ) -> Result<(
-        HashMap<String, std::collections::BTreeMap<String, cairn_contracts::QuestionAnswer>>,
-        HashMap<String, String>,
-    )> {
+    ) -> Result<(AnswersByMessage, HashMap<String, String>)> {
         let filter = if message.is_some() {
             "m.chat_id=?1 AND m.id=?2"
         } else {

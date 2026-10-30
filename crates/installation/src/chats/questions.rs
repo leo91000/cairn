@@ -199,7 +199,7 @@ pub async fn ask(s: &Service, bearer: &str, input: Value) -> Result<Value> {
 /// Retire pre-Cairn questionnaires without rewriting historical user messages.
 pub(crate) async fn retire_native(s: &Service) -> Result<()> {
     s.store.transaction(|db| {
-        db.0.execute("UPDATE chat_questions SET status=CASE WHEN status='pending' THEN 'cancelled' ELSE status END,blocking=0 WHERE source!='cairn' AND (status='pending' OR blocking=1)", [])?;
+        db.0.execute("UPDATE chat_questions SET status=CASE WHEN status='pending' THEN 'cancelled' ELSE status END,blocking=0 WHERE source!='cairn' AND (status='pending' OR blocking=1) AND NOT EXISTS(SELECT 1 FROM question_import_metadata m WHERE m.question_id=chat_questions.id AND m.expires<=?1)", [crate::config::now()])?;
         Ok(())
     }).await
 }

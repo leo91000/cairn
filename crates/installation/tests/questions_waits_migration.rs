@@ -311,6 +311,20 @@ async fn migrates_plugin_history_mission_snapshots_and_private_engine_metadata()
         ["First", "Second"]
     );
     assert!(retired.fields[0].options.iter().all(|o| o.id.is_empty()));
+    let mut delivered = retired.clone();
+    delivered.status = cairn_contracts::QuestionStatus::Answered;
+    let delivered_chat = delivered.chat_id.clone();
+    store
+        .transaction(move |db| db.save_question(&delivered))
+        .await
+        .unwrap();
+    let delivered = store
+        .read(move |db| db.question(&delivered_chat, "retired-native"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(delivered.status, cairn_contracts::QuestionStatus::Answered);
+    assert_eq!(delivered.fields, retired.fields);
     let id = q["id"].as_str().unwrap().to_owned();
     db.execute(
         "UPDATE question_import_metadata SET expires=0 WHERE question_id=?",

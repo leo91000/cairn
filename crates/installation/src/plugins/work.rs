@@ -948,7 +948,7 @@ pub async fn questions(
                 .filter_map(|question| {
                     match db.kv(&format!(
                         "plugin-question-seen:{}:{}",
-                        connection.id, &question.id
+                        connection.id, question.id
                     )) {
                         Ok(None) => Some(Ok(question)),
                         Ok(Some(_)) => None,

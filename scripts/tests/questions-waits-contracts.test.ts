@@ -6,6 +6,7 @@ import questionSchema from '../../packages/contracts/generated/ChatQuestion.json
 import wakeupSchema from '../../packages/contracts/generated/ChatWakeup.json'
 import delegateSchema from '../../packages/contracts/generated/DelegateTaskInput.json'
 import answerSchema from '../../packages/contracts/generated/QuestionAnswerInput.json'
+import waitOutputSchema from '../../packages/contracts/generated/WaitForOutput.json'
 import corpus from '../../tests/fixtures/questions-waits-contracts.json'
 
 it('qualifies questions, private answers, grouped plugin observations and project choices from Rust schemas', () => {
@@ -17,7 +18,7 @@ it('qualifies questions, private answers, grouped plugin observations and projec
     expect(ask(structuredClone(input)), JSON.stringify(ask.errors)).toBe(true)
   for (const input of corpus.invalidAsks)
     expect(ask(structuredClone(input)), JSON.stringify(input)).toBe(false)
-  for (const [schema, values] of [[questionSchema, corpus.questions], [answerSchema, corpus.answers], [wakeupSchema, corpus.wakeups]] as const) {
+  for (const [schema, values] of [[questionSchema, corpus.questions], [answerSchema, corpus.answers], [wakeupSchema, corpus.wakeups], [waitOutputSchema, corpus.waitOutputs]] as const) {
     const validate = ajv.compile(schema)
     for (const value of values)
       expect(validate(structuredClone(value)), JSON.stringify(validate.errors)).toBe(true)

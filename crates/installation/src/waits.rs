@@ -625,7 +625,7 @@ fn access_typed(db: &Db<'_>, run: &Value, condition: &WaitCondition) -> Result<(
                 .ok_or_else(|| Error::not_found("The target run no longer exists."))?;
         }
         WaitCondition::TaskFinished { chat_id } => {
-            crate::delegation::wait_access(db, run, chat_id)?
+            crate::delegation::wait_access(db, run, chat_id)?;
         }
         WaitCondition::Plugin { .. } => conditions::access(db, run, &condition_wire(condition))?,
     }
@@ -727,49 +727,90 @@ pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
         checked[index] = Some(value);
     }
     let token = bearer.to_owned();
-    let result=s.store.transaction(move|db| {
-        let (run,mut owner)=registering(db,&token,&request)?;
-        if input_revision(db,&run,owner.conversation.as_ref())?!=revision {return Err(Error::conflict("User input changed while the condition was checked. Handle it before registering a wait."));}
-        if same_request(owner.wakeup.as_ref(),&run,&request) {return Ok(serde_json::to_value(cairn_contracts::WaitForOutput::waiting(owner.wakeup.unwrap()))?);}
-        let created=now();
-        let deadline=match &request.time {
-            Some(TimeCondition::At {date})=>date_millis(&json!({"date":date}))?,
-            Some(TimeCondition::Delay {seconds})=>created+seconds*1000,
-            None=>created+request.seconds.unwrap()*1000,
+    let result = s.store.transaction(move |db| {
+        let (run, mut owner) = registering(db, &token, &request)?;
+        let current_revision = input_revision(db, &run, owner.conversation.as_ref())?;
+        if current_revision != revision {
+            return Err(Error::conflict("User input changed while the condition was checked. Handle it before registering a wait."));
+        }
+        if same_request(owner.wakeup.as_ref(), &run, &request) {
+            return Ok(serde_json::to_value(cairn_contracts::WaitForOutput::waiting(owner.wakeup.unwrap()))?);
+        }
+
+        let created = now();
+        let deadline = match &request.time {
+            Some(TimeCondition::At { date }) => date_millis(&json!({ "date": date }))?,
+            Some(TimeCondition::Delay { seconds }) => created + seconds * 1000,
+            None => created + request.seconds.unwrap() * 1000,
         };
-        let mut results=Vec::new();
-        let mut slots=Vec::new();
-        for (member,checked) in request.condition.as_ref().map(sources).unwrap_or_default().into_iter().zip(&checked) {
-            let result=if is_native(member) {native_result(db,member)?} else {checked.as_ref().and_then(|c|c.result.as_ref()).map(observed_from_wire).transpose()?};
-            let mut slot=WaitMemberProgress {observation:result.clone(),..Default::default()};
-            if result.is_none() && matches!(member,WaitCondition::Plugin {..}) {
-                slot.next_check_at=Some(created);
-                slot.display=checked.as_ref().and_then(|c|c.display.as_ref()).map(|v|serde_json::from_value(v.clone())).transpose()?;
+        let mut results = Vec::new();
+        let mut slots = Vec::new();
+        let condition_sources = request.condition.as_ref().map(sources).unwrap_or_default();
+        for (member, checked) in condition_sources.into_iter().zip(&checked) {
+            let result = if is_native(member) {
+                native_result(db, member)?
+            } else {
+                checked.as_ref().and_then(|check| check.result.as_ref()).map(observed_from_wire).transpose()?
+            };
+            let mut slot = WaitMemberProgress { observation: result.clone(), ..Default::default() };
+            if result.is_none() && matches!(member, WaitCondition::Plugin { .. }) {
+                slot.next_check_at = Some(created);
+                slot.display = checked.as_ref().and_then(|check| check.display.as_ref())
+                    .map(|display| serde_json::from_value(display.clone())).transpose()?;
             }
             results.push(result);
             slots.push(slot);
         }
-        let observed=if matches!(request.time,Some(TimeCondition::At {..}))&&deadline<=created {Some(time_result(deadline))}
-            else if let Some(condition)=request.condition.as_ref().filter(|_|grouped) {settled(condition,&results).then(||group_result("completed",condition,&results))}
-            else {results.pop().flatten()};
-        if let Some(observed)=observed {
-            owner.wakeup=None;
+
+        let observed = if matches!(request.time, Some(TimeCondition::At { .. })) && deadline <= created {
+            Some(time_result(deadline))
+        } else if let Some(condition) = request.condition.as_ref().filter(|_| grouped) {
+            settled(condition, &results).then(|| group_result("completed", condition, &results))
+        } else {
+            results.pop().flatten()
+        };
+        if let Some(observed) = observed {
+            owner.wakeup = None;
             owner.save(db)?;
-            let mut announced=serde_json::to_value(&observed)?;
-            announced["reason"]=request.reason.into();
-            announced["immediate"]=true.into();
-            db.event(text(&run,"id"),&EventKind::from_adapter(owner.event("wait_ready")),"Wait condition already completed",Some(&announced))?;
+            let mut announced = serde_json::to_value(&observed)?;
+            announced["reason"] = request.reason.into();
+            announced["immediate"] = true.into();
+            db.event(
+                text(&run, "id"),
+                &EventKind::from_adapter(owner.event("wait_ready")),
+                "Wait condition already completed",
+                Some(&announced),
+            )?;
             return Ok(serde_json::to_value(cairn_contracts::WaitForOutput::ready(observed))?);
         }
-        let wakeup=ChatWakeup {
-            id:id(),message_id:execution_id(&run).as_str().map(str::to_owned),reason:request.reason,seconds:(deadline-created+999)/1000,created_at:created,wake_at:deadline,
-            condition:request.condition,time_condition:request.time,members:grouped.then_some(slots.clone()),progress:if grouped {WaitMemberProgress::default()}else{slots.pop().unwrap_or_default()},
+
+        let (members, progress) = if grouped {
+            (Some(slots), WaitMemberProgress::default())
+        } else {
+            (None, slots.pop().unwrap_or_default())
         };
-        owner.wakeup=Some(wakeup.clone());
-        crate::nodes::exclusive::release_before_wait(db,text(&run,"id"))?;
+        let wakeup = ChatWakeup {
+            id: id(),
+            message_id: execution_id(&run).as_str().map(str::to_owned),
+            reason: request.reason,
+            seconds: (deadline - created + 999) / 1000,
+            created_at: created,
+            wake_at: deadline,
+            condition: request.condition,
+            time_condition: request.time,
+            members,
+            progress,
+        };
+        owner.wakeup = Some(wakeup.clone());
+        crate::nodes::exclusive::release_before_wait(db, text(&run, "id"))?;
         owner.touch(created);
         owner.save(db)?;
-        db.event(text(&run,"id"),&EventKind::from_adapter(owner.event("wait")),&wakeup.reason,Some(&serde_json::to_value(&wakeup)?))?;
+        db.event(
+            text(&run, "id"),
+            &EventKind::from_adapter(owner.event("wait")),
+            &wakeup.reason,
+            Some(&serde_json::to_value(&wakeup)?),
+        )?;
         Ok(serde_json::to_value(cairn_contracts::WaitForOutput::waiting(wakeup))?)
     }).await?;
     s.worker.notify();
