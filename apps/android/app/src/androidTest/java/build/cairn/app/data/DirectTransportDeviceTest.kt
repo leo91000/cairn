@@ -391,7 +391,20 @@ class DirectTransportDeviceTest {
                                             .build()
                                     }
                                 }
-                                val response = chain.proceed(request)
+                                val response =
+                                    try {
+                                        chain.proceed(request)
+                                    } catch (error: java.io.IOException) {
+                                        if (path.contains("/direct/"))
+                                            recordRenewal(
+                                                "${path.substringAfterLast('/')}:${error.javaClass.simpleName}"
+                                            )
+                                        throw error
+                                    }
+                                if (path.endsWith("/signal") || path.endsWith("/events"))
+                                    recordRenewal(
+                                        "${path.substringAfterLast('/')}:${response.code}"
+                                    )
                                 if (path.endsWith("/direct/authorize"))
                                     recordRenewal("authorize:response:${response.code}")
                                 if (path.endsWith("/direct/authorize") && response.isSuccessful) {
@@ -452,6 +465,7 @@ class DirectTransportDeviceTest {
                     try {
                         renewal.startDirect(context)
                         awaitDirect(renewal, "unavailable renewal initial direct response")
+                        recordRenewal("observed-direct")
                         duringPhase("unavailable renewal acknowledgement", 20000) {
                             while (
                                 renewalReplies.get() == 0 ||
@@ -476,6 +490,11 @@ class DirectTransportDeviceTest {
                             renewalReplies.get(),
                         )
                         unavailableRenewal = true
+                    } catch (error: AssertionError) {
+                        throw AssertionError(
+                            "${error.message}; renewal events=$renewalTrace",
+                            error,
+                        )
                     } finally {
                         renewal.closeStreams()
                     }
