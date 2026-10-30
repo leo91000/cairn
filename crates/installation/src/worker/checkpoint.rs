@@ -1082,6 +1082,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn no_op_run_transition_keeps_checkpoint_evidence_events_and_node_ownership() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        store.transaction(|db| {
+            db.add_run_fixture(&json!({ "id": "ownership", "taskId": "task", "status": "queued", "recoveryPending": true, "nodeId": "node-a" }), None)?;
+            Ok(())
+        }).await.unwrap();
+        let saved = RunCheckpoint::from_value(json!({
+            "prepared": { "backend": "native", "isolated": true },
+            "runnerId": "attempt-a", "nodeId": "node-a", "remainingMs": null,
+        }))
+        .unwrap();
+        saved.store(&store, "ownership").await.unwrap();
+        let checkpoint = Checkpoint::new(store.clone(), "ownership".into(), saved);
+        let changes = store.subscribe();
+        checkpoint
+            .decide(|saved, db| {
+                db.change_run(
+                    "ownership",
+                    crate::runs::RunChanges {
+                        status: Some(RunStatus::Queued),
+                        recovery_pending: Some(true),
+                        boundary: Some(json!({ "nodeId": "node-a" })),
+                        ..Default::default()
+                    },
+                )?;
+                assert!(saved.reserve_observation("attempt-a"));
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(changes.has_changed().unwrap());
+        let reserved = RunCheckpoint::load(&store, "ownership")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            reserved.controller_observation.as_ref().unwrap().requests,
+            1
+        );
+        assert!(reserved.controller_observation.as_ref().unwrap().in_flight);
+        checkpoint
+            .decide(|saved, db| {
+                db.change_run(
+                    "ownership",
+                    crate::runs::RunChanges {
+                        status: Some(RunStatus::Queued),
+                        ..Default::default()
+                    },
+                )?;
+                saved.release_observation("attempt-a");
+                saved.record_controller_result(
+                    db,
+                    "ownership",
+                    "attempt-a",
+                    Some(crate::runner::ControllerResult {
+                        code: 70,
+                        finalization_failed: true,
+                    }),
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        store
+            .read(|db| {
+                let saved = RunCheckpoint::load_in(db, "ownership")?.unwrap();
+                assert_eq!(saved.terminal_code(), Some(70));
+                assert_eq!(
+                    saved.finalization_failure_attempt.as_deref(),
+                    Some("attempt-a")
+                );
+                assert!(!saved.controller_observation.unwrap().in_flight);
+                let ownership = db.checkpoint_node_ownership("ownership")?.unwrap();
+                assert_eq!(
+                    (ownership.node_id.as_deref(), ownership.runner_id.as_deref()),
+                    (Some("node-a"), Some("attempt-a"))
+                );
+                let events = db.events_fixture("ownership", 0, 100)?;
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|event| event["text"]
+                            .as_str()
+                            .is_some_and(|text| text.contains("filesystem could not be flushed")))
+                        .count(),
+                    1
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn launcher_publication_rolls_back_checkpoint_state_and_event_together() {
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(root.path()).unwrap();
