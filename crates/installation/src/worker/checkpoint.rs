@@ -261,11 +261,17 @@ impl RunCheckpoint {
         self.terminal_code.flatten()
     }
 
-    /// A completed turn must not be replayed to repair uncertain or failed
-    /// finalization. Only the controller can confirm its storage closed cleanly.
+    /// A healthy controller exit cannot prove that the provider finished its turn.
     pub fn output_error(&self) -> Option<&'static str> {
-        (self.managed() && self.output_interrupted == Some(true) && !self.completed())
-            .then_some("Execution output was interrupted before the agent's completion was recorded. The response may be incomplete; automatic replay was stopped.")
+        if !self.managed() || self.completed() {
+            return None;
+        }
+        if self.output_interrupted == Some(true) {
+            return Some(
+                "Execution output was interrupted before the agent's completion was recorded. The response may be incomplete; automatic replay was stopped.",
+            );
+        }
+        (self.terminal_code() == Some(0)).then_some("Execution ended before the agent's completion was recorded. The response may be incomplete; automatic replay was stopped.")
     }
 
     pub fn finalization_error(&self) -> Option<&str> {

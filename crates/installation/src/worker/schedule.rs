@@ -441,12 +441,21 @@ async fn recover_or_wait(s: &Service, run: &Value) -> Result<bool> {
 async fn recover(s: &Service, run: &Value) -> Result<bool> {
     let run_id = text(run, "id");
     let mut checkpoint = RunCheckpoint::load(&s.store, run_id).await?;
-    let recovery_deadline = checkpoint
-        .as_ref()
-        .and_then(|saved| match saved.remaining_ms {
-            Some(Some(remaining)) => Some(now().saturating_add(remaining)),
-            Some(None) | None => None,
-        });
+    let initial_state = s.store.run_state(run_id).await?;
+    let parked = initial_state.status == RunStatus::Waiting
+        || (initial_state.trigger != "chat"
+            && run["wakeup"].is_object()
+            && checkpoint.as_ref().is_some_and(RunCheckpoint::completed));
+    let recovery_deadline = (!parked)
+        .then(|| {
+            checkpoint
+                .as_ref()
+                .and_then(|saved| match saved.remaining_ms {
+                    Some(Some(remaining)) => Some(now().saturating_add(remaining)),
+                    Some(None) | None => None,
+                })
+        })
+        .flatten();
     let expected_attempt = checkpoint
         .as_ref()
         .and_then(RunCheckpoint::runner_id)
@@ -546,6 +555,7 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
             || matches!(saved.remaining_ms, Some(Some(i64::MIN..=0)))
             || saved.finalization_error().is_some()
             || saved.output_error().is_some()
+            || (saved.managed() && saved.completed() && saved.terminal_code() == Some(0))
             || saved.settled().is_some_and(|settled| {
                 matches!(settled.status, RunStatus::Failed | RunStatus::Cancelled)
             })
@@ -559,7 +569,7 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
         return Ok(false);
     }
     recovery::fence(s, run).await?;
-    if cannot_replay {
+    if cannot_replay && !parked {
         crate::nodes::moves::abort_terminal_recovery(s, run_id).await?;
     }
     s.mcps.revoke_run(s, run_id).await?;
@@ -681,6 +691,20 @@ pub(super) fn finish_recovery(
             db.change_run(id, patch)?;
             return Ok(false);
         }
+    }
+    if let Some(saved) = checkpoint
+        && saved.managed()
+        && saved.start_rejected != Some(true)
+        && saved.runner_id().is_some()
+        && (saved.terminal_code.is_none()
+            || saved.terminal_code().is_some()
+            || saved.controller_observation.is_some())
+        && !saved.has_controller_recovery_reservation()
+    {
+        let mut paid = saved.clone();
+        paid.controller_recoveries = Some(saved.controller_recoveries() + 1);
+        paid.controller_recovery_reservation = saved.runner_id().map(str::to_owned);
+        paid.store_in(db, id)?;
     }
     db.change_run(
         id,

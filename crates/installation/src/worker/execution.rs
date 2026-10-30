@@ -175,10 +175,21 @@ async fn record_failure(
         // Do not let the transport error or its exhausted replay budget hide
         // a healthy controller result, or replay a completed failed flush.
         let id = run_id.to_owned();
-        let saved = saved.clone();
+        let expected_attempt = saved.runner_id().map(str::to_owned);
+        let deadline = checkpoint.deadline();
         s.store
             .transaction(move |db| {
-                super::schedule::finish_recovery(db, &id, Some(&saved)).map(|_| ())
+                let Some(mut current) = RunCheckpoint::load_in(db, &id)? else {
+                    return Ok(());
+                };
+                if current.runner_id() != expected_attempt.as_deref() {
+                    return Ok(());
+                }
+                if let Some(deadline) = deadline {
+                    current.remaining_ms = Some(Some(deadline.saturating_sub(now()).max(0)));
+                    current.store_in(db, &id)?;
+                }
+                super::schedule::finish_recovery(db, &id, Some(&current)).map(|_| ())
             })
             .await?;
         return Ok(());
@@ -408,7 +419,14 @@ async fn requeue_pending_move(s: &Service, checkpoint: &Checkpoint, fenced: bool
         // finalization and not permission to replay on the destination.
         return Ok(());
     }
-    let terminal_failure = saved.finalization_error().is_some()
+    if saved.managed() && saved.completed() && saved.terminal_code() == Some(0) {
+        if fenced && run.state.status != RunStatus::Waiting {
+            crate::nodes::moves::abort_terminal_recovery(s, run_id).await?;
+        }
+        return Ok(());
+    }
+    let terminal_failure = saved.output_error().is_some()
+        || saved.finalization_error().is_some()
         || saved.settled().is_some_and(|settled| {
             matches!(settled.status, RunStatus::Failed | RunStatus::Cancelled)
         });
