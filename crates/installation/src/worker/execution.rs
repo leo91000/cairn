@@ -187,7 +187,8 @@ async fn record_failure(
             .decide(move |current, db| {
                 let may_resume = super::schedule::finish_recovery(db, &id, Some(current))?;
                 if may_resume && let Some(paid) = RunCheckpoint::load_in(db, &id)? {
-                    *current = paid;
+                    current.controller_recoveries = paid.controller_recoveries;
+                    current.controller_recovery_reservation = paid.controller_recovery_reservation;
                 }
                 Ok(())
             })
