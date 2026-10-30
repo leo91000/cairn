@@ -94,6 +94,23 @@ describe('engine status', () => {
     })
   })
 
+  it('keeps the recorded engine output available in the run log', () => {
+    const entry = card(1, { code: 'engineRetry', engineRetry: retry })
+    if (entry.content.kind !== 'notice')
+      throw new Error('Expected notice')
+    const source = {
+      id: 1,
+      runId: 'run',
+      createdAt: 1,
+      type: 'engine.retry',
+      text: '{"retryAt":123}',
+      payload: null,
+    }
+    expect(noticeArtifact(entry, entry.content.notice, source).blocks).toEqual([
+      { label: 'Output', code: source.text, language: 'plaintext' },
+    ])
+  })
+
   it('stops showing a usage limit once its window resets', () => {
     const now = Date.now()
     const applies = {

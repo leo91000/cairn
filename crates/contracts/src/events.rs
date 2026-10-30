@@ -166,7 +166,7 @@ impl<'de> serde::Deserialize<'de> for EventKind {
 #[serde(rename_all = "camelCase")]
 pub struct HistoryPage {
     pub events: Vec<RunEvent>,
-    /// Timeline cards that first appeared within this page.
+    /// Timeline cards that first appeared within this page or last changed in it.
     #[serde(default)]
     pub entries: Vec<TimelineEntry>,
     pub history: String,

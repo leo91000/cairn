@@ -112,13 +112,20 @@ export function noticeShown(notice: TimelineNotice, now = Date.now()) {
  */
 export function noticeArtifact(card: TimelineEntry, notice: TimelineNotice, source?: RunEvent): ActivityArtifact {
   const process = notice.code === 'diagnostic'
+  // These events previously showed their recorded output in the run log. Keep
+  // that diagnostic detail while their raw events remain available to C1.
+  const showRecordedOutput = ['engineRetry', 'usageLimit', 'retryScheduled', 'backgroundTasks'].includes(notice.code)
+  const output = showRecordedOutput ? source?.text : undefined
+  const blocks = output
+    ? [{ label: 'Output', code: output, language: 'plaintext' }]
+    : notice.detail ? [{ label: process ? 'Output' : 'Details', code: notice.detail, language: 'plaintext' }] : []
   return {
     kind: 'notice',
     id: card.id,
     sourceIds: [`${card.runId}:${card.position}`],
     time: card.createdAt,
     status: notice.state === 'error' ? 'error' : notice.state === 'info' ? 'info' : notice.state === 'running' ? 'running' : 'done',
-    blocks: notice.detail ? [{ label: process ? 'Output' : 'Details', code: notice.detail, language: 'plaintext' }] : [],
+    blocks,
     files: [],
     tasks: [],
     raw: source ? source.payload ? JSON.stringify(source.payload, null, 2) : source.text : notice.detail ?? '',

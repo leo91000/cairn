@@ -5,7 +5,7 @@ import type { TimelineEntry } from './TimelineEntry'
 export interface HistoryPage {
   events: Array<RunEvent>
   /**
-   * Timeline cards that first appeared within this page.
+   * Timeline cards that first appeared within this page or last changed in it.
    */
   entries: Array<TimelineEntry>
   history: string

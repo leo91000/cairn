@@ -45,8 +45,9 @@ class TimelineTest {
             ),
             shown(1),
         )
+        // Plain process output remains an activity step, not a timeline card.
         assertEquals(
-            listOf("Partial", "L’exécuteur a échoué", "Exécution interrompue"),
+            listOf("Partial", "group", "L’exécuteur a échoué", "Exécution interrompue"),
             shown(2),
         )
         val via =

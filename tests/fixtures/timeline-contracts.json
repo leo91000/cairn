@@ -20,12 +20,14 @@
           {
             "id": "00000000-0000-4000-8000-0000000000f1",
             "chatId": "00000000-0000-4000-8000-000000000071",
-            "name": "log 🦊.txt",
+            "name": "screen 🦊.png",
             "size": 41943040,
-            "mediaType": "text/plain",
-            "kind": "file",
-            "digest": "",
-            "createdAt": 9007199254740991
+            "mediaType": "image/png",
+            "kind": "image",
+            "digest": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+            "createdAt": 9007199254740991,
+            "width": 1280,
+            "height": 720
           }
         ]
       }

@@ -603,7 +603,7 @@
   "properties": {
     "entries": {
       "default": [],
-      "description": "Timeline cards that first appeared within this page.",
+      "description": "Timeline cards that first appeared within this page or last changed in it.",
       "items": {
         "$ref": "#/definitions/TimelineEntry"
       },
