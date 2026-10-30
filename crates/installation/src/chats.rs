@@ -169,10 +169,7 @@ fn conversation_view_with_run(
 ) -> Result<cairn_contracts::Chat> {
     use cairn_contracts::{Chat, ChatRequester, ConversationLifecycle, ConversationStatus};
     let active = chat.lifecycle == ConversationLifecycle::Active;
-    let pending_questions = questions(db, &chat.id)?
-        .iter()
-        .filter(|question| question.status == QuestionStatus::Pending)
-        .count() as u32;
+    let pending_questions = db.pending_question_count(&chat.id)?;
     let agent_name =
         db.0.query_row(
             "SELECT name FROM agents WHERE id=?",

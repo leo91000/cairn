@@ -1,6 +1,178 @@
 use super::*;
 
 #[tokio::test]
+async fn card_question_counts_preserve_visibility_without_reading_definitions() {
+    let root = tempfile::tempdir().unwrap();
+    let store = crate::store::Store::open(root.path()).unwrap();
+    store.transaction(|db| {
+        for chat in ["chat", "other", "empty"] {
+            db.save_conversation_boundary(&json!({ "id": chat }))?;
+        }
+        let time = crate::config::now();
+        for (index, status) in ["pending", "pending", "pending", "pending", "answering", "answered", "cancelled", "pending"].into_iter().enumerate() {
+            let question = serde_json::from_value(json!({
+                "id": format!("question-{index}"), "chatId": "chat", "runId": "run",
+                "source": "cairn", "status": status, "blocking": false, "createdAt": 0,
+                "fields": [{ "id": "field", "title": "Retained definition", "mode": "single", "secret": false, "options": [] }],
+            }))?;
+            db.save_question(&question)?;
+            if index == 0 {
+                continue;
+            }
+            let expires = match index {
+                1 => Some(time - 1),
+                2 => Some(time + 86_400_000),
+                3 => Some(time),
+                _ => None,
+            };
+            db.0.execute("INSERT INTO question_import_metadata(question_id,expires,metadata) VALUES(?,?,'{}')", rusqlite::params![format!("question-{index}"), expires])?;
+        }
+        let other = serde_json::from_value(json!({
+            "id": "other-question", "chatId": "other", "runId": "run",
+            "source": "cairn", "status": "pending", "blocking": false, "createdAt": 0,
+            "fields": [{ "id": "field", "title": "Other definition", "mode": "single", "secret": false, "options": [] }],
+        }))?;
+        db.save_question(&other)?;
+        Ok(())
+    }).await.unwrap();
+
+    let connection = rusqlite::Connection::open(root.path().join("manager.db")).unwrap();
+    let db = Db(&connection);
+    let chat = db.conversation("chat").unwrap().unwrap();
+    let expected = conversation_view(&db, chat.clone()).unwrap();
+    let reference = db
+        .questions("chat")
+        .unwrap()
+        .iter()
+        .filter(|q| q.status == QuestionStatus::Pending)
+        .count();
+    assert_eq!(reference, 3);
+    assert_eq!(expected.pending_questions as usize, reference);
+    assert_eq!(db.pending_question_count("other").unwrap(), 1);
+    assert_eq!(db.pending_question_count("empty").unwrap(), 0);
+    assert_eq!(db.pending_question_count("missing").unwrap(), 0);
+
+    connection
+        .create_scalar_function(
+            "definition_probe",
+            1,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+            |_| -> rusqlite::Result<String> {
+                Err(rusqlite::Error::UserFunctionError(Box::new(
+                    std::io::Error::other("question definition was read"),
+                )))
+            },
+        )
+        .unwrap();
+    connection.execute_batch("ALTER TABLE question_fields RENAME TO retained_question_fields;
+CREATE VIEW question_fields AS SELECT question_key,id,position,definition_probe(title) AS title,secret,mode,min_choices,max_choices FROM retained_question_fields;
+PRAGMA query_only=ON; BEGIN;").unwrap();
+    let before = connection.total_changes();
+    assert!(
+        db.questions("chat").is_err(),
+        "the reference must exercise the definition probe"
+    );
+    assert_eq!(
+        serde_json::to_value(conversation_view(&db, chat).unwrap()).unwrap(),
+        serde_json::to_value(expected).unwrap()
+    );
+    assert_eq!(connection.total_changes(), before);
+}
+
+#[tokio::test]
+#[ignore = "explicit conversation-card question-count measurement"]
+async fn measure_conversation_cards_with_question_history() {
+    use sha2::Digest;
+
+    fn cpu_micros() -> u128 {
+        let mut time = std::mem::MaybeUninit::<libc::timespec>::uninit();
+        // SAFETY: a successful clock_gettime initializes the supplied timespec.
+        assert_eq!(
+            unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, time.as_mut_ptr()) },
+            0
+        );
+        // SAFETY: the successful call above initialized every field.
+        let time = unsafe { time.assume_init() };
+        time.tv_sec as u128 * 1_000_000 + time.tv_nsec as u128 / 1_000
+    }
+
+    for (count, questions_per_chat, every) in [(100, 0, 1), (100, 4, 6), (300, 8, 1)] {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        let write_started = std::time::Instant::now();
+        store
+            .transaction(move |db| {
+                for index in 0..count {
+                    let chat = format!("chat-{index}");
+                    db.save_conversation_boundary(
+                        &json!({ "id": chat, "title": "Measured conversation" }),
+                    )?;
+                    if index % every != 0 {
+                        continue;
+                    }
+                    for ordinal in 0..questions_per_chat {
+                        let question = serde_json::from_value(json!({
+                            "id": format!("question-{index}-{ordinal}"), "chatId": chat,
+                            "runId": "measured-run", "source": "cairn", "blocking": false,
+                            "status": if ordinal % 2 == 0 { "pending" } else { "answered" },
+                            "createdAt": ordinal,
+                            "fields": [{
+                                "id": "field", "title": "Measured question", "secret": false,
+                                "mode": "single", "options": (0..8).map(|option| json!({
+                                    "id": format!("option-{option}"), "label": "x".repeat(128),
+                                    "description": "y".repeat(128), "recommended": false,
+                                })).collect::<Vec<_>>(),
+                            }],
+                        }))?;
+                        db.save_question(&question)?;
+                    }
+                }
+                // Make both reference and candidate fixtures byte-for-byte comparable.
+                db.0.execute("UPDATE conversations SET slug='measured-'||id,revision='measured',persisted_at=0", [])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let setup_write_us = write_started.elapsed().as_micros();
+        let connection = rusqlite::Connection::open(root.path().join("manager.db")).unwrap();
+        connection
+            .execute_batch("PRAGMA query_only=ON; BEGIN")
+            .unwrap();
+        let db = Db(&connection);
+        let before_changes = connection.total_changes();
+        let started = std::time::Instant::now();
+        let cold = list(&db).unwrap();
+        let cold_us = started.elapsed().as_micros();
+        assert_eq!(cold.len(), count);
+        let encoded = serde_json::to_vec(&cold).unwrap();
+        let encoded_bytes = encoded.len();
+        let encoded_sha256 = format!("{:x}", sha2::Sha256::digest(&encoded));
+        let mut samples = Vec::new();
+        for _ in 0..7 {
+            let cpu = cpu_micros();
+            let started = std::time::Instant::now();
+            assert_eq!(list(&db).unwrap(), cold);
+            samples.push(
+                json!({ "wallUs": started.elapsed().as_micros(), "cpuUs": cpu_micros() - cpu }),
+            );
+        }
+        assert_eq!(connection.total_changes(), before_changes);
+        println!(
+            "{}",
+            json!({
+                "benchmark": "conversation_cards_question_history", "conversations": count,
+                "questionsPerChat": questions_per_chat, "questionEvery": every,
+                "setupWriteUs": setup_write_us, "encodedBytes": encoded_bytes,
+                "encodedSha256": encoded_sha256,
+                "coldConnectionReadUs": cold_us, "warmReadSamples": samples,
+                "readChanges": connection.total_changes() - before_changes,
+                "sqlite": rusqlite::version(),
+            })
+        );
+    }
+}
+
+#[tokio::test]
 async fn lightweight_cards_match_full_execution_metadata() {
     let root = tempfile::tempdir().unwrap();
     let store = crate::store::Store::open(root.path()).unwrap();
