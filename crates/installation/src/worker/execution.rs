@@ -224,18 +224,12 @@ async fn record_failure(
                 )?;
                 return Ok(true);
             }
-            let mode_change = run.boundary["nativeModeInterruption"].is_string();
-            let may_retry = mode_change
-                || saved.controller_recoveries() < MAX_CONTROLLER_RECOVERIES
-                || run.boundary["moveRequest"].is_object();
-            let recover_controller = unavailable
-                && saved.managed()
-                && !saved.completed()
-                && may_retry
-                && (mode_change || run.state.session_id.is_some())
-                && !cancelled
-                && !expired
-                && !shutdown.is_cancelled();
+            let recover_controller = can_recover_controller(
+                saved,
+                &run,
+                unavailable,
+                cancelled || expired || shutdown.is_cancelled(),
+            );
             if recover_controller && !saved.has_controller_recovery_reservation() {
                 saved.controller_recoveries = Some(saved.controller_recoveries() + 1);
                 saved.controller_recovery_reservation = saved.runner_id().map(str::to_owned);
@@ -281,8 +275,26 @@ async fn record_failure(
     Ok(())
 }
 
-/// Controller recovery is bounded on both local and remote nodes. An explicit
-/// move retains its separate recovery policy while transferring ownership.
+/// Apply the same bounded recovery policy at the durable decision point.
+fn can_recover_controller(
+    saved: &RunCheckpoint,
+    run: &crate::runs::RunRecord,
+    unavailable: bool,
+    stopped: bool,
+) -> bool {
+    let mode_change = run.boundary["nativeModeInterruption"].is_string();
+    let may_retry = mode_change
+        || saved.controller_recoveries() < MAX_CONTROLLER_RECOVERIES
+        || run.boundary["moveRequest"].is_object();
+    unavailable
+        && saved.managed()
+        && !saved.completed()
+        && may_retry
+        && (mode_change || run.state.session_id.is_some())
+        && !stopped
+}
+
+#[cfg(test)]
 async fn recovers_controller(
     s: &Service,
     checkpoint: &Checkpoint,
@@ -291,18 +303,12 @@ async fn recovers_controller(
     error: &Error,
 ) -> Result<bool> {
     let run = s.store.run_record(&checkpoint.id).await?;
-    let mode_change = run.boundary["nativeModeInterruption"].is_string();
-    if !error.is_unavailable() || !saved.managed() || saved.completed() {
-        return Ok(false);
-    }
-    let may_retry = mode_change
-        || saved.controller_recoveries() < MAX_CONTROLLER_RECOVERIES
-        || run.boundary["moveRequest"].is_object();
-    Ok(may_retry
-        && (mode_change || run.state.session_id.is_some())
-        && !checkpoint.expired()
-        && !cancel.is_cancelled()
-        && !s.shutdown.is_cancelled())
+    Ok(can_recover_controller(
+        saved,
+        &run,
+        error.is_unavailable(),
+        checkpoint.expired() || cancel.is_cancelled() || s.shutdown.is_cancelled(),
+    ))
 }
 
 /// A run whose VM may still be running stays queued for recovery; its final
