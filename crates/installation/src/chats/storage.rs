@@ -99,11 +99,17 @@ pub struct Message {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct MessageAnswer {
-    #[serde(default)]
-    pub selected: Vec<String>,
-    #[serde(default)]
-    pub comment: String,
+#[serde(untagged)]
+pub enum MessageAnswer {
+    // Before the common questionnaire contract, lists mixed selections and
+    // free text. Preserve their meaning and wire shape instead of guessing.
+    Legacy(Vec<String>),
+    Current {
+        #[serde(default)]
+        selected: Vec<String>,
+        #[serde(default)]
+        comment: String,
+    },
 }
 
 impl std::ops::Deref for Message {

@@ -343,6 +343,11 @@ async fn message_storage_layouts() {
                 "model": "gpt-6-sol",
                 "reasoning": "high",
                 "speed": "standard",
+                "answers": if n % 2 == 0 {
+                    json!({"field": ["Free text", "second choice", "Free text"]})
+                } else {
+                    json!({"field": {"selected": ["b", "a"], "comment": "Separate comment"}})
+                },
                 "attachments": if n % 4 == 0 { vec![json!({
                     "id": format!("00000000-0000-4000-9000-{n:012}"),
                 "chatId": CHAT,
