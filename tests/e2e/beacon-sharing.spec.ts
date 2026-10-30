@@ -168,15 +168,19 @@ test('owner shares an installation and member works without management controls'
     // Until access loads, the overview claims neither "Only you" nor shared.
     let releaseSharing = () => {}
     const sharingHeld = new Promise<void>(resolve => releaseSharing = resolve)
-    await page.route('**/api/installations/*/sharing', async (route) => {
-      await sharingHeld
-      await route.continue()
+    const heldRequests: Promise<void>[] = []
+    await page.route('**/api/installations/*/sharing', (route) => {
+      const continued = sharingHeld.then(() => route.continue())
+      heldRequests.push(continued)
+      return continued
     })
     await page.goto(`${installationUrl}agents/${agents[0].id}`)
     const peopleCard = page.getByRole('region', { name: 'Who can use it' })
     await expect(peopleCard.getByText('Checking which members can use it', { exact: true })).toBeVisible()
     await expect(peopleCard.getByText('Only you', { exact: true })).toHaveCount(0)
     releaseSharing()
+    // Let held requests continue before removing the route that holds them.
+    await Promise.all(heldRequests)
     await page.unroute('**/api/installations/*/sharing')
     await expect(peopleCard.getByText('Only you', { exact: true }).first()).toBeVisible()
     await peopleCard.getByRole('button', { name: /People/ }).click()
