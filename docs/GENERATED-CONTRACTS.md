@@ -306,9 +306,8 @@ columns. Connection/revision/external-author lineage from ADR-0068 survives miss
 replacement, restrictive state changes, restart and launch; revocation still uses
 the live native policy. `list_task_activity`
 returns the existing run-summary shape until the run conversion; its input and policy
-are registered here. It uses the authenticated account's read state in the apps and
-the owner's current read state in agent tools, without initializing that state on
-an agent read. No historical format, fallback reader or migration is included.
+are registered here. Its personal read state follows B4 below: the calling account's
+in the apps and through a public grant, none for an execution, never the owner's. No historical format, fallback reader or migration is included.
 
 `tests/fixtures/mission-contracts.json` qualifies defaults, null/empty skill selections,
 creation identities, command bounds and wire output in Rust, TypeScript and Kotlin.

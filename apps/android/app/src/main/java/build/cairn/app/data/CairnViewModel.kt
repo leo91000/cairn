@@ -309,12 +309,14 @@ constructor(
         dismissal(
             runId,
             OutcomeDismissal(until),
-            SetOutcomeAsideInput(
-                taskId = taskId,
-                action =
-                    if (until == null) OutcomeAsideAction.A(finishedAt = finishedAt)
-                    else OutcomeAsideAction.B(finishedAt = finishedAt, until = until),
-            ),
+            {
+                SetOutcomeAsideInput(
+                    taskId = taskId,
+                    action =
+                        if (until == null) OutcomeAsideAction.A(finishedAt = finishedAt)
+                        else OutcomeAsideAction.B(finishedAt = finishedAt, until = until),
+                )
+            },
             if (until == null) "Écartée jusqu’au prochain résultat de la mission"
             else "Rappel demain à 9 h",
         )
@@ -324,14 +326,15 @@ constructor(
         dismissal(
             runId,
             null,
-            SetOutcomeAsideInput(taskId = taskId, action = OutcomeAsideAction.C()),
+            { SetOutcomeAsideInput(taskId = taskId, action = OutcomeAsideAction.C()) },
             "De retour dans Pour vous",
         )
 
     private fun dismissal(
         runId: String,
         value: OutcomeDismissal?,
-        input: SetOutcomeAsideInput,
+        // Built inside the request: an invalid local value reports an error, never crashes.
+        input: () -> SetOutcomeAsideInput,
         message: String,
     ) {
         val target = connection ?: return
@@ -343,7 +346,7 @@ constructor(
         localDismissals[runId] = value
         viewModelScope.launch {
             try {
-                target.setOutcomeAside(input)
+                target.setOutcomeAside(input())
                 if (generation != readsGeneration || connection !== target) return@launch
                 if (dismissalRequests[runId] === request) savedDismissals[runId] = request
                 notify(message)

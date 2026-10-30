@@ -306,8 +306,10 @@ response ceiling without discarding its payload. Use `cairn.read_run_content` wi
 Calls return text and a structured `{ result }` object for compatibility with both
 older and newer clients; the page budget allows for both copies and JSON escaping.
 Tool metadata includes OAuth scopes and
-read/write annotations; denied tool calls carry an OAuth challenge for clients
-that support relinking with additional scopes.
+read/write annotations; calls denied for a scope the grant lacks carry an OAuth
+challenge for clients that support relinking with additional scopes. Refusals that
+no scope can lift, such as saving storage credentials (owner-only in the apps),
+carry no challenge.
 
 OAuth grants and 30-day personal tokens are limited to one installation and the selected scopes. They can be revoked from that installation’s **Settings** on the beacon web app. Personal
 tokens are displayed once; put them in the client's secret storage, never its Git
