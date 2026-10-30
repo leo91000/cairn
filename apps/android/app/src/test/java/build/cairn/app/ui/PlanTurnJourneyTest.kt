@@ -16,6 +16,7 @@ import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
 import java.io.File
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.*
@@ -162,6 +163,7 @@ class PlanTurnJourneyTest {
     fun `saved Plan intent cannot become ordinary with OpenCode`() {
         MockWebServer().use { server ->
             val calls = CopyOnWriteArrayList<String>()
+            val initialSnapshot = CountDownLatch(1)
             val chat =
                 Chat(
                     id = CHAT,
@@ -196,6 +198,7 @@ class PlanTurnJourneyTest {
                     emptyList(),
                     calls,
                     ChatDraft(text = "Examiner sans modifier", provider = "opencode", plan = true),
+                    initialSnapshot,
                 )
             try {
                 compose.waitUntil(20_000) {
@@ -216,6 +219,16 @@ class PlanTurnJourneyTest {
                         .isEmpty()
                 }
                 compose.onNodeWithTag("plan-toggle").assertIsSelected()
+                // The composer appears before its initial chat snapshot. Even a compatible
+                // provider cannot send until the live conversation has loaded.
+                compose.onNodeWithTag("conversation-send").assertIsNotEnabled()
+                initialSnapshot.countDown()
+                compose.waitUntil(20_000) {
+                    compose
+                        .onAllNodes(hasTestTag("conversation-send") and isEnabled())
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
                 compose.onNodeWithTag("conversation-send").assertIsEnabled().performClick()
                 compose.waitUntil(20_000) { calls.isNotEmpty() || vm.state.value.error != null }
                 assertNull(
@@ -252,6 +265,7 @@ class PlanTurnJourneyTest {
                 assertEquals(false, ordinary["plan"]?.jsonPrimitive?.boolean)
                 assertEquals("opencode", ordinary["provider"]?.jsonPrimitive?.content)
             } finally {
+                initialSnapshot.countDown()
                 vm.api.closeStreams()
             }
         }
@@ -263,6 +277,7 @@ class PlanTurnJourneyTest {
         events: List<RunEvent>,
         calls: CopyOnWriteArrayList<String>,
         savedDraft: ChatDraft? = null,
+        initialSnapshot: CountDownLatch? = null,
     ): CairnViewModel {
         val batch = wireJson.encodeToString(LiveBatch(events, LiveState(chat = chat), true, false))
         server.dispatcher =
@@ -270,6 +285,7 @@ class PlanTurnJourneyTest {
                 override fun dispatch(request: RecordedRequest): MockResponse {
                     val path = request.path!!.substringBefore('?')
                     if (path == "/api/installations/fixture/api/chats/$CHAT/stream") {
+                        check(initialSnapshot?.await(20, TimeUnit.SECONDS) != false)
                         val initial = "event: batch\nid: 4\ndata: $batch\n\n"
                         return MockResponse()
                             .setHeader("Content-Type", "text/event-stream")
