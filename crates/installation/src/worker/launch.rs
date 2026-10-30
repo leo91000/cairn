@@ -632,7 +632,9 @@ impl Execution<'_> {
                 "Native node mode changed. Managed executions stopped; saved files and conversation history are retained for restart.",
             ));
         }
-        if managed && saved.completed() && saved.terminal_code() != Some(0) {
+        if saved.output_error().is_some()
+            || (managed && saved.completed() && saved.terminal_code() != Some(0))
+        {
             // A provider completion cannot repair EIO/EROFS or an unknown flush.
             // Existing execution cleanup fences it before releasing its resources.
             self.finish(workspace, &exit, &saved, session.is_some())
@@ -994,6 +996,7 @@ impl Execution<'_> {
                 c.process = Some(identity);
                 c.launched = Some(true);
                 c.start_rejected = Some(false);
+                c.output_interrupted = None;
                 c.retry_cause = Some(None);
                 c.completed = Some(false);
                 c.terminal_code = None;
@@ -1212,7 +1215,7 @@ impl Execution<'_> {
             .unwrap_or_default();
         let status = if self.cancel.is_cancelled() {
             RunStatus::Cancelled
-        } else if exit.timed_out {
+        } else if exit.timed_out || self.checkpoint.expired() || saved.output_error().is_some() {
             RunStatus::Failed
         } else if exit.code == Some(0)
             || (s.shutdown.is_cancelled() && saved.completed() && !saved.managed())
@@ -1223,6 +1226,8 @@ impl Execution<'_> {
         };
         if status == RunStatus::Failed
             && !exit.timed_out
+            && !self.checkpoint.expired()
+            && saved.output_error().is_none()
             && !self.stopping()
             && !saved.completed()
             && let Some(cause) = saved.retry_cause.as_ref().and_then(Option::as_ref)
@@ -1265,10 +1270,18 @@ impl Execution<'_> {
             patch.retry = Some(None);
         }
         let id = self.id.clone();
+        let deadline = self.checkpoint.deadline();
         s.store.transaction(move |db| {
             let current = db.run(&id)?.ok_or_else(|| Error::not_found("Run not found"))?;
+            let expired = deadline.is_some_and(|deadline| now() >= deadline);
             let status = if !current["cancelRequestedAt"].is_null() {
                 RunStatus::Cancelled
+            } else if expired {
+                let message = "Run exceeded its time limit.";
+                patch.error = Some(Some(message.into()));
+                patch.summary = Some(message.into());
+                patch.wakeup = Some(None);
+                RunStatus::Failed
             } else if status == RunStatus::Succeeded && current["trigger"] != "chat" && current["wakeup"].is_object() {
                 if !has_session {
                     return Err(Error::conflict("Cannot wait without a saved agent session. Working files were preserved."));
@@ -1287,7 +1300,11 @@ impl Execution<'_> {
                 patch.wakeup = Some(None);
             }
             db.change_run(&id, patch)?;
-            let details = details.filter(|_| status == RunStatus::Failed);
+            let details = if status == RunStatus::Failed && expired {
+                Some(json!({ "error": { "message": "Run exceeded its time limit." } }))
+            } else {
+                details.filter(|_| status == RunStatus::Failed)
+            };
             db.event(&id, &EventKind::Status, status.as_str(), details.as_ref())
         }).await
     }
@@ -1296,8 +1313,11 @@ impl Execution<'_> {
         if self.cancel.is_cancelled() {
             return "Run stopped. You can resume this conversation.".into();
         }
-        if exit.timed_out {
+        if exit.timed_out || self.checkpoint.expired() {
             return "Run exceeded its time limit.".into();
+        }
+        if let Some(error) = saved.output_error() {
+            return error.to_owned();
         }
         if status == RunStatus::Succeeded {
             return String::new();

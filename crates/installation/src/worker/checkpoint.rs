@@ -32,6 +32,9 @@ pub struct RunCheckpoint {
     /// Explicit controller rejection of this attempt; absent is not proof of rejection.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub start_rejected: Option<bool>,
+    /// Output was truncated for this attempt; completion may be missing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_interrupted: Option<bool>,
     /// `null` means the run has no time limit; absent means its budget is spent.
     #[serde(default, with = "nullable", skip_serializing_if = "Option::is_none")]
     pub remaining_ms: Nullable<i64>,
@@ -260,6 +263,11 @@ impl RunCheckpoint {
 
     /// A completed turn must not be replayed to repair uncertain or failed
     /// finalization. Only the controller can confirm its storage closed cleanly.
+    pub fn output_error(&self) -> Option<&'static str> {
+        (self.managed() && self.output_interrupted == Some(true) && !self.completed())
+            .then_some("Execution output was interrupted before the agent's completion was recorded. The response may be incomplete; automatic replay was stopped.")
+    }
+
     pub fn finalization_error(&self) -> Option<&str> {
         if !self.managed() || !self.completed() || self.terminal_code() == Some(0) {
             return None;
@@ -430,12 +438,14 @@ impl Checkpoint {
                 attempt: previous.0.clone(),
                 total_ms: previous.1,
             });
-            saved.remaining_ms = Some(self.deadline().map(|deadline| (deadline - now()).max(0)));
         }
+        let deadline = self.deadline();
         let id = self.id.clone();
         let saved = self
             .store
             .transaction(move |db| {
+                saved.remaining_ms =
+                    Some(deadline.map(|deadline| deadline.saturating_sub(now()).max(0)));
                 saved.store_in(db, &id)?;
                 publish(db)?;
                 Ok(saved)
@@ -480,12 +490,16 @@ impl Checkpoint {
                 attempt: previous.0.clone(),
                 total_ms: previous.1,
             });
-            saved.remaining_ms = Some(self.deadline().map(|deadline| (deadline - now()).max(0)));
         }
+        let deadline = self.deadline();
         let id = self.id.clone();
         let saved = self
             .store
             .transaction(move |db| {
+                if let Some(saved) = &mut saved {
+                    saved.remaining_ms =
+                        Some(deadline.map(|deadline| deadline.saturating_sub(now()).max(0)));
+                }
                 if let Some(changes) = changes.run {
                     db.change_run(&id, changes)?;
                 }

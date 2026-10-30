@@ -285,6 +285,12 @@ pub(super) async fn record(
             .await?;
         return Ok(false);
     }
+    if event["type"] == "runner.output_interrupted" {
+        checkpoint
+            .update(|c| c.output_interrupted = Some(true))
+            .await?;
+        return Ok(false);
+    }
     if event["type"] == "runner.start_rejected" {
         let run = s.store.run(id).await?;
         let first_rejected = !previously_launched

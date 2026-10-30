@@ -116,6 +116,13 @@ impl Controller {
         let (output, status) = collect_completion(output, self.wait()).await;
         if let Err(error) = output {
             eprintln!("{}", error.message);
+            // Report the missing output independently of the controller result.
+            // A leading newline separates this marker from a truncated provider frame.
+            let mut stdout = tokio::io::stdout();
+            stdout
+                .write_all(b"\n{\"type\":\"runner.output_interrupted\"}\n")
+                .await?;
+            stdout.flush().await?;
         }
         // Preserve the last complete frames even when the next one was cut.
         let _ = tokio::io::stdout().flush().await;
@@ -321,23 +328,34 @@ mod tests {
 
     #[tokio::test]
     async fn failed_initial_wait_does_not_issue_unreserved_reads() {
-        use axum::{Router, routing::{get, post}};
-        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        use axum::{
+            Router,
+            routing::{get, post},
+        };
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
         let requests = Arc::new(AtomicUsize::new(0));
         let count = requests.clone();
         let app = Router::new()
             .route("/runs/fixture", post(|| async {}))
             .route("/runs/fixture/logs", get(|| async { "" }))
-            .route("/runs/fixture/wait", post(move || {
-                let count = count.clone();
-                async move {
-                    count.fetch_add(1, Ordering::SeqCst);
-                    StatusCode::SERVICE_UNAVAILABLE
-                }
-            }));
+            .route(
+                "/runs/fixture/wait",
+                post(move || {
+                    let count = count.clone();
+                    async move {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        StatusCode::SERVICE_UNAVAILABLE
+                    }
+                }),
+            );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
         let controller = Controller {
             http: reqwest::Client::new(),
             url: format!("http://{address}/runs/fixture"),

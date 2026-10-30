@@ -441,6 +441,13 @@ async fn recover_or_wait(s: &Service, run: &Value) -> Result<bool> {
 async fn recover(s: &Service, run: &Value) -> Result<bool> {
     let run_id = text(run, "id");
     let mut checkpoint = RunCheckpoint::load(&s.store, run_id).await?;
+    let recovery_deadline = checkpoint
+        .as_ref()
+        .and_then(|saved| match saved.remaining_ms {
+            Some(None) => None,
+            Some(Some(remaining)) => Some(now().saturating_add(remaining)),
+            None => Some(now()),
+        });
     let expected_attempt = checkpoint
         .as_ref()
         .and_then(RunCheckpoint::runner_id)
@@ -532,8 +539,10 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
     // requeued because its first fencing attempt failed. Placement and possible
     // disk relocation belong to admission after its wakeup.
     let cannot_replay = checkpoint.as_ref().is_some_and(|saved| {
-        matches!(saved.remaining_ms, Some(Some(i64::MIN..=0)))
+        recovery_deadline.is_some_and(|deadline| now() >= deadline)
+            || matches!(saved.remaining_ms, Some(Some(i64::MIN..=0)))
             || saved.finalization_error().is_some()
+            || saved.output_error().is_some()
             || saved.settled().is_some_and(|settled| {
                 matches!(settled.status, RunStatus::Failed | RunStatus::Cancelled)
             })
@@ -552,10 +561,16 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
     }
     s.mcps.revoke_run(s, run_id).await?;
     s.accounts.recover_run(s, run).await?;
-    let checkpoint = RunCheckpoint::load(&s.store, run_id).await?;
+    let mut checkpoint = RunCheckpoint::load(&s.store, run_id).await?;
     let id = run_id.to_owned();
     s.store
-        .transaction(move |db| finish_recovery(db, &id, checkpoint.as_ref()))
+        .transaction(move |db| {
+            if let (Some(saved), Some(deadline)) = (&mut checkpoint, recovery_deadline) {
+                saved.remaining_ms = Some(Some(deadline.saturating_sub(now()).max(0)));
+                saved.store_in(db, &id)?;
+            }
+            finish_recovery(db, &id, checkpoint.as_ref())
+        })
         .await
 }
 
@@ -591,7 +606,10 @@ pub(super) fn finish_recovery(
             db.change_run(id, patch)?;
             return Ok(false);
         }
-        if let Some(error) = checkpoint.finalization_error() {
+        if let Some(error) = checkpoint
+            .output_error()
+            .or_else(|| checkpoint.finalization_error())
+        {
             let settled = Settled::failure(RunStatus::Failed, error);
             let mut patch = settled.run_changes();
             patch.wakeup = Some(None);
