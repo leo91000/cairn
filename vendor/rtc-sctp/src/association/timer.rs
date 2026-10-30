@@ -112,15 +112,11 @@ impl TimerTable {
         self.data[timer as usize] = Some(time);
     }
 
-    /// Restarts the timer if the current instant is none or elapsed.
-    pub fn restart_if_stale(&mut self, timer: Timer, now: Instant, interval: u64) {
-        if let Some(current) = self.data[timer as usize]
-            && current >= now
-        {
-            return;
+    /// Starts a stopped timer without replacing an unhandled expiration.
+    pub fn start_if_stopped(&mut self, timer: Timer, now: Instant, interval: u64) {
+        if self.data[timer as usize].is_none() {
+            self.start(timer, now, interval);
         }
-
-        self.start(timer, now, interval);
     }
 
     pub fn stop(&mut self, timer: Timer) {
