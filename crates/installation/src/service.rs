@@ -87,6 +87,7 @@ impl Service {
             conversation_lists: Arc::default(),
             skills: Skills {
                 config: config.clone(),
+                source_mutations: Arc::default(),
             },
             http: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())

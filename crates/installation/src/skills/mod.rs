@@ -341,9 +341,18 @@ pub fn bundle_response(scope: &str, skill: &str, described: &bundle::Described) 
     })
 }
 
+async fn skill_directory(root: &Path, skill: &str) -> Result<PathBuf> {
+    name(skill)?;
+    bounded(root, skill, false).await
+}
+
 #[derive(Clone)]
 pub struct Skills {
     pub config: Config,
+    /// File replacement and source metadata form one lifecycle operation of this
+    /// installation. Downloads happen before this lock so detach and deletion can
+    /// invalidate a pending update.
+    pub(crate) source_mutations: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Skills {
@@ -371,13 +380,12 @@ impl Skills {
     }
 
     async fn directory(&self, skill: &str, project: Option<&Path>) -> Result<PathBuf> {
-        name(skill)?;
-        bounded(&self.root(project).await?, skill, false).await
+        skill_directory(&self.root(project).await?, skill).await
     }
 
     pub async fn list(&self, scope: &str, project: Option<&Path>) -> Result<Vec<Value>> {
-        let _read = bundle::ACCESS.read().await;
         let root = self.root(project).await?;
+        let _read = bundle::access(&root).await.read_owned().await;
         let mut entries = fs::read_dir(&root).await?;
         let mut listings = Vec::new();
         while let Some(entry) = entries.next_entry().await? {
@@ -505,16 +513,18 @@ impl Skills {
     }
 
     pub async fn remove(&self, skill: &str, project: Option<&Path>) -> Result<()> {
-        let _write = bundle::ACCESS.write().await;
-        let directory = self.directory(skill, project).await?;
+        let root = self.root(project).await?;
+        let _write = bundle::access(&root).await.write_owned().await;
+        let directory = skill_directory(&root, skill).await?;
         fs::remove_dir_all(directory).await?;
         Ok(())
     }
 
     /// Paths of the visible files, for clients that predate bundles.
     pub async fn files(&self, skill: &str, project: Option<&Path>) -> Result<Vec<String>> {
-        let _read = bundle::ACCESS.read().await;
-        let directory = self.directory(skill, project).await?;
+        let root = self.root(project).await?;
+        let _read = bundle::access(&root).await.read_owned().await;
+        let directory = skill_directory(&root, skill).await?;
         Ok(bundle::scan(&directory)
             .await?
             .into_iter()
@@ -524,13 +534,14 @@ impl Skills {
 
     /// Text files as UTF-8, other files as base64.
     pub async fn read(&self, skill: &str, file: &str, project: Option<&Path>) -> Result<Value> {
-        let _read = bundle::ACCESS.read().await;
+        let root = self.root(project).await?;
+        let _read = bundle::access(&root).await.read_owned().await;
         if !visible(file) {
             return Err(Error::bad(
                 "Files whose names start with . are not part of a skill.",
             ));
         }
-        let directory = self.directory(skill, project).await?;
+        let directory = skill_directory(&root, skill).await?;
         let target = bounded(&directory, file, false).await?;
         let metadata = fs::symlink_metadata(&target).await?;
         if !metadata.is_file() {
@@ -555,8 +566,9 @@ impl Skills {
     }
 
     pub async fn bundle(&self, scope: &str, skill: &str, project: Option<&Path>) -> Result<Value> {
-        let _read = bundle::ACCESS.read().await;
-        let directory = self.directory(skill, project).await?;
+        let root = self.root(project).await?;
+        let _read = bundle::access(&root).await.read_owned().await;
+        let directory = skill_directory(&root, skill).await?;
         let described = bundle::describe_locked(&directory).await?;
         Ok(bundle_response(scope, skill, &described))
     }
