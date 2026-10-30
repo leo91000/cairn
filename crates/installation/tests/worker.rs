@@ -3906,7 +3906,7 @@ async fn native_failed_flush_after_provider_failure_never_replays_with_intact_lo
 /// Exercises the real manager -> runner client -> disposable HTTP controller.
 /// Even at the replay ceiling a read of the same attempt is permitted.
 #[tokio::test]
-async fn controller_evidence_is_reconciled_before_replay_or_terminal_failure() {
+async fn controller_evidence_is_reconciled_before_replay_or_terminal_failure_reconciliation() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     for (completed, terminal, expected) in [
         (true, 0, RunStatus::Succeeded),
@@ -3997,7 +3997,7 @@ async fn controller_evidence_is_reconciled_before_replay_or_terminal_failure() {
 /// The real runner client and manager must retain a broken output stream even
 /// when the controller reports a healthy physical completion.
 #[tokio::test]
-async fn interrupted_controller_output_after_healthy_exit_never_replays_the_turn() {
+async fn interrupted_controller_output_after_healthy_exit_never_replays_the_turn_reconciliation() {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     for (completed, truncated, clean_eof) in [
@@ -4190,7 +4190,8 @@ async fn interrupted_controller_output_after_healthy_exit_never_replays_the_turn
 /// Hold the SQLite writer after the manager reserves an observation and before
 /// its healthy response can be committed. The live deadline must still win.
 #[tokio::test]
-async fn active_observation_expiring_during_result_persistence_fails_without_replay() {
+async fn active_observation_expiring_during_result_persistence_fails_without_replay_reconciliation()
+{
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     let mut fixture = Fixture::new().await;
     fixture.stop(false).await;
@@ -4302,7 +4303,8 @@ async fn active_observation_expiring_during_result_persistence_fails_without_rep
 /// Manager SIGTERM is a local stop, not a controller completion observation.
 /// A recorded turn must retain the original attempt for reconciliation on restart.
 #[tokio::test]
-async fn manager_shutdown_between_turn_completion_and_wait_preserves_same_attempt_evidence() {
+async fn manager_shutdown_between_turn_completion_and_wait_preserves_same_attempt_evidence_reconciliation()
+ {
     use std::sync::atomic::{AtomicUsize, Ordering};
     for interruption in ["shutdown", "cancel", "signal", "client-error", "timeout"] {
         let cancel = interruption == "cancel";
