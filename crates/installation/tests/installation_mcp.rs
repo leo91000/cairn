@@ -1196,6 +1196,7 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "restore_chat",
         "read_chat_content",
     ]);
+    public_names.insert("upload_chat_attachment");
     public_names.insert(cairn_contracts::RESUME_RUN_ID);
     public_names.insert("manage_plugin");
     public_names.extend([
