@@ -41,6 +41,8 @@ import org.junit.runner.RunWith
 class DirectTransportDeviceTest {
     @get:Rule val compose = createComposeRule()
     private val diagnostics = DirectBenchDiagnostics()
+    private val renewalAnswersBeforeOfferAckDelivery = AtomicInteger(-1)
+    private val renewalStreamClosuresBeforeOfferAckDelivery = AtomicInteger(-1)
 
     private suspend fun <T> duringPhase(
         name: String,
@@ -374,6 +376,14 @@ class DirectTransportDeviceTest {
                                 // Controlled answer-before-ack probe on the ordinary device path.
                                 // The server may answer before this HTTP acknowledgement arrives.
                                 Thread.sleep(1000)
+                                renewalAnswersBeforeOfferAckDelivery.compareAndSet(
+                                    -1,
+                                    renewalSignals.answers.get(),
+                                )
+                                renewalStreamClosuresBeforeOfferAckDelivery.compareAndSet(
+                                    -1,
+                                    renewalSignals.closed.get(),
+                                )
                                 recordRenewal("offer-ack:${renewalSignals.summary()}")
                             } else recordRenewal("candidate-ack")
                             response
@@ -765,6 +775,14 @@ class DirectTransportDeviceTest {
                         put("cappedRenewal", cappedRenewal)
                         put("foregroundBackoff", foregroundBackoff)
                         put("unavailableRenewal", unavailableRenewal)
+                        put(
+                            "renewalAnswersBeforeOfferAckDelivery",
+                            renewalAnswersBeforeOfferAckDelivery.get(),
+                        )
+                        put(
+                            "renewalStreamClosuresBeforeOfferAckDelivery",
+                            renewalStreamClosuresBeforeOfferAckDelivery.get(),
+                        )
                         put("refusedCandidates", refusedCandidates.get())
                         put("phaseEvidence", diagnostics.summary())
                         put("sdk", Build.VERSION.SDK_INT)
