@@ -1,9 +1,14 @@
 package build.cairn.app.ui
 
 import android.app.Application
+import android.view.WindowManager
+import android.view.inputmethod.InputMethodManager
+import android.view.inspector.WindowInspector
 import androidx.compose.runtime.*
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
@@ -251,8 +256,6 @@ abstract class NodePlacementCases {
     @Test
     fun nativeNodeEditorRequiresExplicitPeopleAndSupportsSixExecutionSlots() {
         var saved: NodeConfiguration? = null
-        var keyboard: androidx.compose.ui.platform.SoftwareKeyboardController? = null
-        var focus: androidx.compose.ui.focus.FocusManager? = null
         val node =
             ExecutionNode(
                 id = "beac7d45-75ca-544c-a4f6-a61c1e5787f2",
@@ -276,8 +279,6 @@ abstract class NodePlacementCases {
                 staleDisks = StaleDisks(count = 0, diskMiB = 0),
             )
         compose.setContent {
-            keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
-            focus = androidx.compose.ui.platform.LocalFocusManager.current
             CairnTheme {
                 NodeEditor(
                     node,
@@ -294,20 +295,41 @@ abstract class NodePlacementCases {
             }
         }
         compose.onNodeWithText("Slots d’exécution").assertIsEnabled().performTextReplacement("6")
-        // A focused field keeps reopening the keyboard on devices, and its panel can take the
-        // toggle's tap: release focus first.
-        compose.runOnIdle {
-            focus?.clearFocus()
-            keyboard?.hide()
+        // The editor's Dialog owns its focus and IME window, separate from setContent.
+        val editorWindow = compose.runOnIdle {
+            val window =
+                WindowInspector.getGlobalWindowViews().single { root ->
+                    val attributes = root.layoutParams as? WindowManager.LayoutParams
+                    attributes?.type == WindowManager.LayoutParams.TYPE_APPLICATION
+                }
+
+            window.findFocus()?.clearFocus()
+            val keyboard = window.context.getSystemService(InputMethodManager::class.java)
+            keyboard.hideSoftInputFromWindow(window.windowToken, 0)
+            window
         }
-        compose.waitForIdle()
+        compose.onNodeWithText("Slots d’exécution").assertIsNotFocused()
+        // Compose idleness does not wait for the native IME resize. Scroll only once the
+        // dialog has its full viewport, so the switch's touch coordinates remain valid.
+        compose.waitUntil(10000) {
+            compose.runOnIdle {
+                val insets = ViewCompat.getRootWindowInsets(editorWindow)
+                insets != null &&
+                    !insets.isVisible(WindowInsetsCompat.Type.ime()) &&
+                    insets.getInsets(WindowInsetsCompat.Type.ime()).bottom == 0
+            }
+        }
         compose
             .onNodeWithText("Tous les slots partagent ces budgets.", substring = true)
             .assertExists()
         compose.onNodeWithText("Réservation exclusive").assertDoesNotExist()
         compose.onNodeWithText("Mettez à jour le runtime", substring = true).assertExists()
         compose.onNodeWithText("Personnes de confiance").performScrollTo().assertExists()
-        val nativeToggle = compose.onNodeWithText("Activer l’exécution native").performScrollTo()
+        val nativeToggle =
+            compose
+                .onNodeWithText("Activer l’exécution native")
+                .performScrollTo()
+                .assertIsDisplayed()
         nativeToggle.performClick()
         try {
             nativeToggle.assertIsOn()
