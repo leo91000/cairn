@@ -6,7 +6,8 @@ recorded in Cairn's lockfile before this patch. Upstream revision:
 [`4be2e3d6f99787ac438d28f9f704d343b1aa1498`](https://github.com/webrtc-rs/webrtc/tree/4be2e3d6f99787ac438d28f9f704d343b1aa1498).
 
 Compared with the archive, this directory patches only
-`src/peer_connection/mod.rs` and `src/peer_connection/driver.rs`, adds this file,
+`src/peer_connection/mod.rs`, `src/peer_connection/driver.rs` and
+`src/data_channel/mod.rs`, adds this file,
 replaces the local `.gitignore`, and omits packaging metadata (`.cargo*`) and the
 archive's `Cargo.lock`. The upstream MIT/Apache licenses are preserved. Every
 other file is byte-identical to the archive. Cairn's root lockfile pins the
@@ -30,6 +31,12 @@ This preserves channel handles, protocol messages, certificate checks,
 authorization, direct/relay policy, buffering and connection deadlines. It does
 not upgrade the transport stack.
 
+A bounded sender checks terminal channel readiness before waiting for credit
+or returning buffer-full. A channel retained for SCTP reset completion cannot
+strand blocked binary/text sends after closure. Already admitted bytes and the
+receive lifecycle remain unchanged; unbounded sends retain their existing fast
+path and reach the synchronous RTC write guard.
+
 ## Validation
 
 Two deterministic library regressions cover a driver Open event racing recipient
@@ -43,6 +50,13 @@ added relay connections:
 ```sh
 pnpm test:backend -p cairn-beacon --test node_channel -- --test-threads=4
 ```
+
+In-memory library regressions also park bounded `writable`, binary and text
+senders behind unacknowledged DATA, close the still-registered channel and
+assert closure on their next credit notification. Nonblocking sends report
+closure before buffer-full without charging additional bytes. The fixture
+establishes the real RTC cores by exchanging byte buffers and virtual deadlines;
+it opens no sockets and uses no wall-clock sleeps.
 
 Seed the ignored standalone lockfile from the root and retain the pinned local
 protocol patches; pin the upstream-only signal development dependency separately:
