@@ -1219,6 +1219,7 @@ pub(crate) async fn tick_missions(s: &Service, active: &HashSet<String>) -> Resu
                     .ok_or_else(|| Error::conflict("Waiting mission has no saved checkpoint."))?;
                 // Keep remainingMs: elapsed waiting time never spends the execution budget.
                 checkpoint.completed = Some(false);
+                checkpoint.output_interrupted = None;
                 checkpoint.terminal_code = Some(None);
                 checkpoint.settled = Some(None);
                 checkpoint.last_message = None;

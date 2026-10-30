@@ -2793,7 +2793,14 @@ async fn controller_evidence_is_reconciled_before_replay_or_terminal_failure() {
 async fn interrupted_controller_output_after_healthy_exit_never_replays_the_turn() {
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    for (completed, truncated) in [(false, true), (true, true), (false, false), (true, false)] {
+    for (completed, truncated, clean_eof) in [
+        (false, true, false),
+        (true, true, false),
+        (false, false, false),
+        (true, false, false),
+        (false, false, true),
+        (true, false, true),
+    ] {
         let mut fixture = Fixture::new().await;
         fixture.stop(false).await;
         let controller = Arc::new(Controller {
@@ -2871,6 +2878,9 @@ async fn interrupted_controller_output_after_healthy_exit_never_replays_the_turn
                                             (1, store, id, wait_returned, frame),
                                         ));
                                     }
+                                    if stage == 1 && clean_eof {
+                                        return None;
+                                    }
                                     if stage == 1 && truncated {
                                         loop {
                                             let completion_committed = !completed
@@ -2928,13 +2938,19 @@ async fn interrupted_controller_output_after_healthy_exit_never_replays_the_turn
         );
         let saved = fixture.checkpoint(&run_id).await;
         assert_eq!(saved["terminalCode"], 0);
-        assert_eq!(saved["outputInterrupted"], true);
+        if clean_eof {
+            assert!(saved["outputInterrupted"].is_null());
+        } else {
+            assert_eq!(saved["outputInterrupted"], true);
+        }
         assert_eq!(saved["completed"], completed);
         if !completed {
-            assert!(
-                text(&result, "error").contains("output was interrupted"),
-                "{result}"
-            );
+            let expected_error = if clean_eof {
+                "completion was recorded"
+            } else {
+                "output was interrupted"
+            };
+            assert!(text(&result, "error").contains(expected_error), "{result}");
         }
         assert_eq!(
             controller.plans.lock().await.len(),
