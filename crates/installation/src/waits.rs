@@ -1050,6 +1050,8 @@ pub(crate) async fn tick_missions(s: &Service, active: &HashSet<String>) -> Resu
                 checkpoint.last_error = Some(None);
                 checkpoint.retry_cause = Some(None);
                 checkpoint.controller_recoveries = None;
+                checkpoint.controller_recovery_reservation = None;
+                checkpoint.controller_observation = None;
                 checkpoint.store_in(db, &run_id)?;
                 let mut wakeup = run["wakeup"].clone();
                 wakeup["observation"] = observed;

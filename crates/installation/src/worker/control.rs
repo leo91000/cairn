@@ -286,6 +286,9 @@ fn requeue(db: &Db<'_>, id: &str) -> Result<Value> {
     crate::chats::continuation::cancel_for_run(db, id)?;
     if let Some(mut checkpoint) = checkpoint {
         checkpoint.remaining_ms = Some(crate::run_limits::budget_ms(&run["snapshot"]["agent"]));
+        checkpoint.controller_recoveries = None;
+        checkpoint.controller_recovery_reservation = None;
+        checkpoint.controller_observation = None;
         if !before_launch {
             checkpoint.completed = Some(false);
             checkpoint.terminal_code = Some(None);

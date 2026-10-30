@@ -79,18 +79,87 @@ pub async fn fence_process(identity: &ProcessIdentity) -> Result<()> {
 
 /// Observe the existing attempt before stopping it or deciding whether to replay.
 /// This never acquires a workspace, starts an agent, or replays retained output.
-pub(crate) async fn terminal_code(s: &Service, run_id: &str, attempt: &str) -> Result<i32> {
+#[derive(Clone, Copy)]
+pub(crate) enum ObservationAction {
+    Reserve,
+    Release,
+    Exhausted,
+    Record(Option<i32>),
+}
+
+pub(crate) async fn terminal_code<F, Fut>(
+    s: &Service,
+    run_id: &str,
+    attempt: &str,
+    cancel: &tokio_util::sync::CancellationToken,
+    limit: Duration,
+    mut persist: F,
+) -> Result<()>
+where
+    F: FnMut(ObservationAction) -> Fut,
+    Fut: std::future::Future<Output = Result<bool>>,
+{
     let runner_url = crate::nodes::transport::url(s, run_id).await?;
     if runner_url.is_empty() {
-        return Err(Error::unavailable(
-            "Execution controller is unavailable for reconciliation.",
-        ));
+        persist(ObservationAction::Exhausted).await?;
+        return Ok(());
     }
     let token = secret(&s.config.data_dir, "runner-secret").await?;
     let url = format!("{runner_url}/runs/{attempt}");
-    tokio::select! {
-        () = s.shutdown.cancelled() => Err(Error::unavailable("Worker is restarting.")),
-        result = crate::runner::reconcile_exit(&s.http, &url, &token) => result,
+    let deadline = tokio::time::Instant::now() + limit.min(Duration::from_secs(5));
+    loop {
+        if s.shutdown.is_cancelled() || cancel.is_cancelled() {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            persist(ObservationAction::Exhausted).await?;
+            return Ok(());
+        }
+        // Do not drop an in-flight transaction: it may still commit after its
+        // caller is cancelled, leaving an active checkpoint's memory stale.
+        if !persist(ObservationAction::Reserve).await? {
+            persist(ObservationAction::Exhausted).await?;
+            return Ok(());
+        }
+        if s.shutdown.is_cancelled()
+            || cancel.is_cancelled()
+            || tokio::time::Instant::now() >= deadline
+        {
+            persist(ObservationAction::Release).await?;
+            if !s.shutdown.is_cancelled() && !cancel.is_cancelled() {
+                persist(ObservationAction::Record(None)).await?;
+            }
+            return Ok(());
+        }
+        let wait = crate::runner::wait_for_exit(&s.http, &url, &token);
+        let result = tokio::select! {
+            () = s.shutdown.cancelled() => None,
+            () = cancel.cancelled() => None,
+            result = tokio::time::timeout_at(deadline, wait) => Some(result),
+        };
+        match result {
+            None => {
+                persist(ObservationAction::Release).await?;
+                return Ok(());
+            }
+            Some(Ok(Ok(code))) => {
+                persist(ObservationAction::Record(Some(code))).await?;
+                return Ok(());
+            }
+            Some(Err(_)) => {
+                persist(ObservationAction::Record(None)).await?;
+                return Ok(());
+            }
+            Some(Ok(Err(_))) => {
+                persist(ObservationAction::Release).await?;
+            }
+        }
+        let next_read = (tokio::time::Instant::now() + Duration::from_millis(200)).min(deadline);
+        tokio::select! {
+            () = s.shutdown.cancelled() => return Ok(()),
+            () = cancel.cancelled() => return Ok(()),
+            _ = tokio::time::sleep_until(next_read) => {}
+        }
     }
 }
 

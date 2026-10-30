@@ -1081,6 +1081,9 @@ fn continue_run(
     }
     checkpoint.completed = Some(false);
     checkpoint.terminal_code = Some(None);
+    checkpoint.controller_recoveries = None;
+    checkpoint.controller_recovery_reservation = None;
+    checkpoint.controller_observation = None;
     checkpoint.remaining_ms = Some(crate::run_limits::budget_ms(agent));
     checkpoint.last_message = None;
     checkpoint.settled = None;

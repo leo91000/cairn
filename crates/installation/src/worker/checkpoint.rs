@@ -55,6 +55,9 @@ pub struct RunCheckpoint {
     /// Neither absent nor null proves success.
     #[serde(default, with = "nullable", skip_serializing_if = "Option::is_none")]
     pub terminal_code: Nullable<i32>,
+    /// Durable reservations for reads of one controller attempt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub controller_observation: Option<ControllerObservation>,
     #[serde(default, with = "nullable", skip_serializing_if = "Option::is_none")]
     pub last_error: Nullable<String>,
     #[serde(default, with = "nullable", skip_serializing_if = "Option::is_none")]
@@ -63,6 +66,9 @@ pub struct RunCheckpoint {
     pub last_message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub controller_recoveries: Option<u64>,
+    /// A recovery already charged to the budget, bound to the stopped attempt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub controller_recovery_reservation: Option<String>,
     /// A controller's capacity refusal delays admission without consuming a recovery attempt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capacity_retry_at: Option<i64>,
@@ -75,6 +81,15 @@ pub struct RunCheckpoint {
     pub resources: Option<crate::nodes::Resources>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub administrative_pause_observation: Option<AdministrativePauseObservation>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControllerObservation {
+    pub attempt: String,
+    pub requests: u8,
+    #[serde(default)]
+    pub in_flight: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -131,6 +146,43 @@ impl Settled {
 }
 
 impl RunCheckpoint {
+    pub fn reserve_observation(&mut self, attempt: &str) -> bool {
+        if self.runner_id() != Some(attempt)
+            || self.terminal_code.is_some()
+            || self.settled().is_some()
+        {
+            return false;
+        }
+        let observation =
+            self.controller_observation
+                .get_or_insert_with(|| ControllerObservation {
+                    attempt: attempt.to_owned(),
+                    requests: 0,
+                    in_flight: false,
+                });
+        if observation.attempt != attempt {
+            *observation = ControllerObservation {
+                attempt: attempt.to_owned(),
+                requests: 0,
+                in_flight: false,
+            };
+        }
+        if observation.requests >= 3 || observation.in_flight {
+            return false;
+        }
+        observation.requests += 1;
+        observation.in_flight = true;
+        true
+    }
+
+    pub fn release_observation(&mut self, attempt: &str) {
+        if let Some(observation) = &mut self.controller_observation
+            && observation.attempt == attempt
+        {
+            observation.in_flight = false;
+        }
+    }
+
     pub fn fresh(budget_ms: Option<i64>) -> Self {
         Self {
             launched: Some(false),
@@ -254,6 +306,11 @@ impl RunCheckpoint {
 
     pub fn controller_recoveries(&self) -> u64 {
         self.controller_recoveries.unwrap_or(0)
+    }
+
+    pub fn has_controller_recovery_reservation(&self) -> bool {
+        self.runner_id()
+            .is_some_and(|id| self.controller_recovery_reservation.as_deref() == Some(id))
     }
 
     pub fn settled(&self) -> Option<&Settled> {

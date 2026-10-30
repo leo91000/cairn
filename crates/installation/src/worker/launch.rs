@@ -232,6 +232,7 @@ impl Execution<'_> {
         self.checkpoint
             .update(|checkpoint| {
                 checkpoint.runner_id = Some(Some(saved_runner));
+                checkpoint.controller_recovery_reservation = None;
                 checkpoint.terminal_code = None;
                 checkpoint.node_id = Some(node);
                 checkpoint.runtime_id = Some(Some(runtime));
@@ -807,6 +808,7 @@ impl Execution<'_> {
         self.checkpoint
             .update(|c| {
                 c.runner_id = Some(Some(runner.clone()));
+                c.controller_recovery_reservation = None;
                 c.terminal_code = None;
                 c.node_id = Some(node_id);
                 c.runtime_id = Some(Some(runtime_id));

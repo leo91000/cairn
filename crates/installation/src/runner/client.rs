@@ -160,7 +160,7 @@ async fn collect_completion(
 
 /// Read only the terminal result of this exact attempt. Both controller backends
 /// publish it after finalization and physical ownership release.
-async fn wait_for_exit(http: &reqwest::Client, url: &str, token: &str) -> Result<i32> {
+pub(crate) async fn wait_for_exit(http: &reqwest::Client, url: &str, token: &str) -> Result<i32> {
     let response = http
         .post(format!("{url}/wait"))
         .bearer_auth(token)

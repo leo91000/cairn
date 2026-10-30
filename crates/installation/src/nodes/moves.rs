@@ -793,7 +793,6 @@ async fn resume_at_destination(s: &Service, current: &Value, backup: &Value) -> 
             checkpoint["nodeId"] = node;
             checkpoint["process"] = Value::Null;
             checkpoint["settled"] = Value::Null;
-            checkpoint["controllerRecoveries"] = 0.into();
             db.save_checkpoint_boundary(&owner, &checkpoint)?;
             db.change_run(&owner, patch)?;
             db.event(
@@ -846,4 +845,30 @@ async fn release_destination(s: &Service, run: &Value) -> Result<()> {
         super::placement::release(s, reservation).await?;
     }
     Ok(())
+}
+
+/// A terminal recovery cannot resume the interrupted turn on a destination.
+/// Release only the pending destination reservation, retaining the source and
+/// its checkpoint until fencing and finalization have been resolved.
+pub(crate) async fn abort_terminal_recovery(s: &Service, run_id: &str) -> Result<()> {
+    let run = s.store.run(run_id).await?;
+    let movement = run["moveRequest"].clone();
+    if !movement.is_object() {
+        return Ok(());
+    }
+    if let Some(reservation) = movement["reservation"].as_str() {
+        super::placement::release(s, reservation).await?;
+    }
+    let id = run_id.to_owned();
+    s.store.transaction(move |db| {
+        let current = db.run(&id)?.ok_or_else(|| Error::not_found("Conversation removed."))?;
+        if current["moveRequest"] == movement {
+            db.update_run_boundary(&id, &serde_json::json!({
+                "moveRequest": null,
+                "nodeState": null,
+                "movementError": "Movement stopped because the interrupted execution cannot be replayed.",
+            }))?;
+        }
+        Ok(())
+    }).await
 }
