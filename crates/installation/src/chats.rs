@@ -2054,7 +2054,7 @@ provider,model,reasoning,speed,mode,status,created_at,question_id FROM retained_
                         db.save_conversation_boundary(&chat)?;
                         db.save_question(&serde_json::from_value(json!({
                             "id": "old-session", "chatId":"chat", "runId":"run",
-                            "source":"cairn", "status":"pending", "blocking":true,
+                            "source":"codex", "status":"pending", "blocking":true,
                             "fields":[{"id":"field","title":"Question from previous session"}],
                         }))?)?;
                         let mut prepared =
@@ -2231,8 +2231,9 @@ provider,model,reasoning,speed,mode,status,created_at,question_id FROM retained_
 
     #[test]
     fn provider_changes_must_wait_for_the_next_turn_and_model_aliases_are_valid() {
-        let connection = rusqlite::Connection::open_in_memory().unwrap();
-        connection.execute_batch(crate::runs::SCHEMA).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let _store = crate::store::Store::open(root.path()).unwrap();
+        let connection = rusqlite::Connection::open(root.path().join("manager.db")).unwrap();
         let run = json!({
             "status": "running",
             "snapshot": {

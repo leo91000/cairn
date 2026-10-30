@@ -2364,7 +2364,7 @@ mod capture_policy_tests {
                     "id": id, "taskId": id, "status": "waiting", "createdAt": 0,
                     "isolated": true, "storage": { "mode": "on-demand", "dirtyBytes": dirty },
                     "backup": { "status": backup, "requestedRevision": 1, "acknowledgedRevision": 1 },
-                    "wakeup": { "reason": "Wait for CI", "wakeAt": i64::MAX },
+                    "wakeup": { "reason": "Wait for CI", "wakeAt": 9007199254740991i64 },
                 }), None)?;
             }
             Ok(())

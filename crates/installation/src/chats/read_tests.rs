@@ -61,7 +61,7 @@ async fn a_window_does_not_read_delivered_message_bodies() {
     let connection = rusqlite::Connection::open(root.path().join("manager.db")).unwrap();
     connection.execute_batch("ALTER TABLE chat_messages RENAME TO retained_messages;
 CREATE VIEW chat_messages AS SELECT rowid AS rowid,id,chat_id,revision,
-    body_probe(status,text) AS text,provider,model,reasoning,speed,mode,status,created_at,question_id,answers
+    body_probe(status,text) AS text,provider,model,reasoning,speed,mode,status,created_at,question_id
     FROM retained_messages;").unwrap();
     connection
         .create_scalar_function(

@@ -429,7 +429,7 @@ async fn a8_continuation_storage_layouts() {
                         ..Default::default()
                     },
                 ]),
-                progress: Default::default(),
+                progress: WaitMemberProgress::default(),
             };
             let previous = previous_wakeup(&current);
             Continuation {

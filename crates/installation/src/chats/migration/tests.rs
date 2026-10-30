@@ -543,6 +543,7 @@ async fn broken_run_reference_aborts_and_historical_resource_ids_remain_valid() 
             let mut other = conversation();
             other["id"] = "second".into();
             other["slug"] = "second-slug".into();
+            other["requestedBy"]["requestId"] = "second-request".into();
             db.execute(
                 "INSERT INTO records VALUES('second','chats',?,124)",
                 [other.to_string()],
@@ -570,16 +571,11 @@ async fn broken_run_reference_aborts_and_historical_resource_ids_remain_valid() 
 
 #[tokio::test]
 async fn engine_switch_retains_current_progress_and_all_receipt_lifetimes() {
-    use crate::run_fixture::DbRunFixture;
     let root = tempfile::tempdir().unwrap();
     let db = database(root.path()).await;
     seed(&db);
-    Db(&db)
-        .add_run_fixture(
-            &json!({"id":"saved-run","taskId":"chat","status":"failed","createdAt":1}),
-            None,
-        )
-        .unwrap();
+    // This scenario is a version-14 input, before the current wait tables exist.
+    db.execute("INSERT INTO runs(id,task_id,status,created_at,recovery_pending,resume_available,resume_count,boundary) VALUES('saved-run','chat','failed',1,0,0,0,'{}')", []).unwrap();
     let expires = crate::config::now() + 500_000;
     let first = json!({"chatId":CHAT,"requestId":"first","runId":"saved-run","turnId":"turn-1","provider":"codex"});
     let second = json!({"chatId":CHAT,"requestId":"second","runId":"saved-run","turnId":"turn-2","provider":"claude"});

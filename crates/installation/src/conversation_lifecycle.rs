@@ -647,7 +647,7 @@ mod tests {
                 db.save_conversation_boundary(&json!({
                     "id": "chat",
                     "runId": "run",
-                    "wakeup": { "wakeAt": 100 },
+                    "wakeup": crate::run_fixture::complete_wakeup_fixture(&json!({ "wakeAt": 100 })),
                 }))?;
                 request_new_session(db, "chat")
             })

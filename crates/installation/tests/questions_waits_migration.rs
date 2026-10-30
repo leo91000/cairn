@@ -175,7 +175,15 @@ async fn migrates_plugin_history_mission_snapshots_and_private_engine_metadata()
     )
     .unwrap();
     let condition = json!({"type":"github_workflow", "pluginId":"github", "projectId":"project", "runId":40972562294u64, "headSha":"a".repeat(40)});
-    let result = json!({"state":"completed", "type":"github_workflow", "pluginId":"github", "runId":40972562294u64, "conclusion":"failure", "nested":{"future":[]}});
+    let result = json!({"state":"completed", "type":"github_workflow", "pluginId":"github", "runId":40972562294u64, "conclusion":"failure", "nested":{"future":[]}, "reason":"Plugin-owned reason", "immediate":false, "message":{"code":200,"text":"ready"}});
+    let mut group = wake.clone();
+    group["condition"]["conditions"][0] = condition.clone();
+    group["members"][0]["observation"] = result.clone();
+    db.execute(
+        "UPDATE conversations SET wakeup=? WHERE wakeup IS NOT NULL",
+        [group.to_string()],
+    )
+    .unwrap();
     wake["condition"] = condition.clone();
     wake.as_object_mut().unwrap().remove("members");
     wake["observation"] = result.clone();
@@ -243,6 +251,20 @@ async fn migrates_plugin_history_mission_snapshots_and_private_engine_metadata()
         typed["observation"]["pluginResult"]["runId"],
         40972562294u64
     );
+    let plugin = &typed["observation"]["pluginResult"];
+    assert_eq!(plugin["reason"], "Plugin-owned reason");
+    assert_eq!(plugin["immediate"], false);
+    assert_eq!(plugin["message"], json!({"code":200,"text":"ready"}));
+    let conversations = store.conversations().await.unwrap();
+    let migrated_group = conversations
+        .iter()
+        .find_map(|chat| chat.wakeup.as_ref())
+        .unwrap();
+    let migrated_group = serde_json::to_value(migrated_group).unwrap();
+    assert_eq!(
+        migrated_group["members"][0]["observation"]["pluginResult"],
+        *plugin
+    );
     assert_eq!(loaded["waitContinuation"], typed);
     assert_eq!(loaded["chatExecution"]["wakeup"], typed);
     let page = store
@@ -270,6 +292,9 @@ async fn migrates_plugin_history_mission_snapshots_and_private_engine_metadata()
                 assert_eq!(payload["reason"], "Keep the event metadata");
                 assert_eq!(payload["immediate"], true);
                 assert_eq!(payload["pluginResult"]["nested"]["future"], json!([]));
+                assert_eq!(payload["pluginResult"]["message"], plugin["message"]);
+            } else {
+                assert_eq!(payload["members"][0]["result"]["pluginResult"], *plugin);
             }
         } else {
             let _: cairn_contracts::ChatWakeup = serde_json::from_value(payload.clone()).unwrap();

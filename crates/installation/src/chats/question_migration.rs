@@ -112,7 +112,7 @@ ALTER TABLE kv_v16 RENAME TO kv;")?;
 
 // Retained events are snapshots, not current authority. Convert their owned
 // condition/result fields without dropping event metadata or plugin payloads.
-fn observation(value: &mut serde_json::Value) -> Result<()> {
+fn observation(value: &mut serde_json::Value, event_envelope: bool) -> Result<()> {
     if !value.is_object() {
         return Err(invalid());
     }
@@ -121,9 +121,10 @@ fn observation(value: &mut serde_json::Value) -> Result<()> {
         let mut plugin = serde_json::Map::new();
         let keys = object.keys().cloned().collect::<Vec<_>>();
         for key in keys {
-            if !["state", "type", "message", "display", "reason", "immediate"]
-                .contains(&key.as_str())
-            {
+            let envelope_field = matches!(key.as_str(), "state" | "type" | "display")
+                || (key == "message" && object[&key].is_string())
+                || (event_envelope && matches!(key.as_str(), "reason" | "immediate"));
+            if !envelope_field {
                 plugin.insert(key.clone(), object.remove(&key).unwrap());
             }
         }
@@ -144,7 +145,7 @@ fn observation(value: &mut serde_json::Value) -> Result<()> {
                 crate::waits::condition_from_wire(&member["condition"]).map_err(|_| invalid())?,
             )?;
             if !member["result"].is_null() {
-                observation(&mut member["result"])?;
+                observation(&mut member["result"], false)?;
             }
         }
     }
@@ -158,7 +159,7 @@ fn wakeup_snapshot(value: &mut serde_json::Value) -> Result<()> {
         )?;
     }
     if value["observation"].is_object() {
-        observation(&mut value["observation"])?;
+        observation(&mut value["observation"], false)?;
     }
     if let Some(members) = value
         .get_mut("members")
@@ -166,7 +167,7 @@ fn wakeup_snapshot(value: &mut serde_json::Value) -> Result<()> {
     {
         for member in members {
             if member["observation"].is_object() {
-                observation(&mut member["observation"])?;
+                observation(&mut member["observation"], false)?;
             }
         }
     }
@@ -186,7 +187,7 @@ fn migrate_wait_snapshots(tx: &Connection) -> Result<()> {
     for (id, kind, payload) in events {
         let mut value: serde_json::Value = serde_json::from_str(&payload).map_err(|_| invalid())?;
         if kind.ends_with("wait_ready") {
-            observation(&mut value)?;
+            observation(&mut value, true)?;
         } else {
             wakeup_snapshot(&mut value)?;
         }
