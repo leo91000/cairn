@@ -26,6 +26,10 @@ pub(super) async fn schedule(
         return Ok(false);
     };
     if saved.completed()
+        || (saved.managed()
+            && saved.provider_failed()
+            && saved.confirmed_provider_failure() != Some(cause))
+        || saved.finalization_error().is_some()
         || (cause.message != error.message && saved.confirmed_provider_failure() != Some(cause))
     {
         return Ok(false);
@@ -44,6 +48,10 @@ pub(super) async fn schedule(
                 || shutdown.is_cancelled()
                 || matches!(current.remaining_ms, Some(Some(i64::MIN..=0)))
                 || current.completed()
+                || current.finalization_error().is_some()
+                || (current.managed()
+                    && current.provider_failed()
+                    && current.confirmed_provider_failure() != Some(&cause))
                 || current.retry_cause.as_ref().and_then(Option::as_ref) != Some(&cause)
                 || (cause.message != error_message
                     && current.confirmed_provider_failure() != Some(&cause))

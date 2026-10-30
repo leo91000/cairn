@@ -508,6 +508,9 @@ fn recovery_cannot_replay(
             || matches!(saved.remaining_ms, Some(Some(i64::MIN..=0)))
             || saved.finalization_error().is_some()
             || saved.output_error().is_some()
+            || (saved.provider_failed()
+                && !provider_retry_paid(saved, state)
+                && saved.confirmed_provider_failure().is_none())
             || (saved.managed() && saved.completed() && saved.terminal_code() == Some(0))
             || saved.settled().is_some_and(|settled| {
                 matches!(settled.status, RunStatus::Failed | RunStatus::Cancelled)
@@ -858,29 +861,6 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
         .await
 }
 
-fn scheduled_provider_retry(saved: &RunCheckpoint, state: &RunState) -> bool {
-    state.retry.as_ref().is_some_and(|retry| {
-        retry.next_attempt_at.is_some()
-            && saved.retry_cause.as_ref().and_then(Option::as_ref) == Some(&retry.cause)
-    })
-}
-
-fn terminal_provider_failure(saved: &RunCheckpoint, state: &RunState) -> bool {
-    if !saved.provider_failed() {
-        return false;
-    }
-    let Some(cause) = saved.retry_cause.as_ref().and_then(Option::as_ref) else {
-        return true;
-    };
-    (state.session_id.is_none() && !cause.startup)
-        || crate::run_retry::Retry::expired(state.retry.as_ref(), now())
-        || (!scheduled_provider_retry(saved, state)
-            && state
-                .retry
-                .as_ref()
-                .is_some_and(|retry| retry.attempt >= crate::run_retry::MAX_ATTEMPTS))
-}
-
 fn recovery_observation_limit(deadline: Option<i64>) -> Duration {
     deadline.map_or(Duration::from_secs(5), |deadline| {
         Duration::from_millis(deadline.saturating_sub(now()).clamp(0, 5000) as u64)
@@ -929,6 +909,9 @@ pub(super) fn finish_recovery(
             db.change_run(id, patch)?;
             return Ok(false);
         }
+        if checkpoint.provider_failed() && super::retry::expire_in(db, id)? {
+            return Ok(false);
+        }
         if let Some(cause) = checkpoint.confirmed_provider_failure()
             && !provider_retry_paid(checkpoint, current)
         {
@@ -944,9 +927,6 @@ pub(super) fn finish_recovery(
             return Ok(false);
         }
         if checkpoint.provider_failed() && !provider_retry_paid(checkpoint, current) {
-            if super::retry::expire_in(db, id)? {
-                return Ok(false);
-            }
             let message = if checkpoint.last_error().is_empty() {
                 "Agent turn failed."
             } else {
@@ -957,7 +937,9 @@ pub(super) fn finish_recovery(
             db.change_run(id, patch)?;
             return Ok(false);
         }
-        if (checkpoint.terminal_code() == Some(0) && !checkpoint.provider_failed()) || checkpoint.completed() {
+        if (checkpoint.terminal_code() == Some(0) && !checkpoint.provider_failed())
+            || checkpoint.completed()
+        {
             let summary = match checkpoint.last_message() {
                 "" => {
                     "Conversation completed before worker restart. See Activity for the recorded result."
