@@ -1151,7 +1151,16 @@ mod tests {
                                 "terminalCode": code, "controllerRecoveries": recoveries,
                                 "remainingMs": remaining,
                             }))?;
+                            saved.store_in(db, &id)?;
                             let may_launch = finish_recovery(db, &id, Some(&saved))?;
+                            let persisted = RunCheckpoint::load_in(db, &id)?.unwrap();
+                            if cancel || remaining == Some(0) || recoveries == 3 {
+                                assert_eq!(persisted.controller_recoveries(), recoveries);
+                                assert!(!persisted.has_controller_recovery_reservation());
+                            } else {
+                                assert_eq!(persisted.controller_recoveries(), recoveries + 1);
+                                assert!(persisted.has_controller_recovery_reservation());
+                            }
                             assert_eq!(
                                 may_launch,
                                 recoveries < 3 && !cancel && remaining.is_none(),
