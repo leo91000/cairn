@@ -30,6 +30,126 @@ fn report() -> Value {
 
 const PATH: &str = "/api/account/telemetry/performance";
 
+fn web_report() -> Value {
+    json!({
+        "schema": 2,
+        "platform": "web",
+        "buildId": "a".repeat(64),
+        "buildType": "release",
+        "browser": "FIREFOX",
+        "connection": "NONE",
+        "measurements": {
+            "windowId": Uuid::new_v4().to_string(),
+            "sequence": 4,
+            "elapsedMs": 10000,
+            "foregroundMs": 8000,
+            "operations": [{ "operation": "API_READ", "screen": "CHAT", "count": 2, "startedOnMainThread": 2, "meanMs": 100.0, "maxMs": 180.0, "p95UpperBoundMs": 180.0 }],
+            "apiFailures": [{ "operation": "API_READ", "screen": "CHAT", "errors": 1, "cancelled": 0 }],
+            "inFlight": [{ "operation": "API_WRITE", "screen": "MISSIONS", "count": 1, "maxElapsedMs": 2000.0 }],
+            "omittedInFlight": 0,
+            "eventLoop": [{ "screen": "CHAT", "reason": "API", "count": 2, "late": 1, "meanDelayMs": 50.0, "maxDelayMs": 80.0, "p95UpperBoundDelayMs": 80.0 }],
+            "longTaskSupported": true,
+            "longTasks": [{ "screen": "CHAT", "count": 1, "totalMs": 80.0, "maxMs": 80.0 }],
+            "recentSlowSamples": [{ "elapsedMs": 9000, "screen": "CHAT", "kind": "LONG_TASK", "durationMs": 80.0, "outcome": "ok" }]
+        }
+    })
+}
+
+#[tokio::test]
+async fn web_and_android_reports_share_private_account_storage_and_limits() {
+    let app = Fixture::new().await;
+    let (cookie, session) = login(&app, "web-performance@example.test").await;
+    let mut web = web_report();
+    let window = web["measurements"]["windowId"].clone();
+    for sequence in [4, 3, 5] {
+        web["measurements"]["sequence"] = json!(sequence);
+        let response = app
+            .authenticated(&cookie, &session, Method::POST, PATH)
+            .json(&web)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+    for _ in 0..3 {
+        let response = app
+            .authenticated(&cookie, &session, Method::POST, PATH)
+            .json(&report())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+    let limited = app
+        .authenticated(&cookie, &session, Method::POST, PATH)
+        .json(&web)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    let response = app
+        .authenticated(&cookie, &session, Method::GET, PATH)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    let stored: Value = response.json().await.unwrap();
+    let rows = stored["reports"].as_array().unwrap();
+    assert_eq!(rows.len(), 4);
+    let saved = rows.iter().find(|row| row["platform"] == "web").unwrap();
+    assert_eq!(saved["measurements"]["windowId"], window);
+    assert_eq!(saved["measurements"]["sequence"], 5);
+    let (other_cookie, other_session) = login(&app, "web-other@example.test").await;
+    let other: Value = app
+        .authenticated(&other_cookie, &other_session, Method::GET, PATH)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(other["reports"], json!([]));
+    app.close().await;
+}
+
+#[tokio::test]
+async fn web_schema_rejects_unbounded_labels_content_and_inconsistent_aggregates() {
+    let app = Fixture::new().await;
+    let (cookie, session) = login(&app, "web-schema@example.test").await;
+    for (path, value) in [
+        ("/url", json!("https://private.test/chat")),
+        ("/buildId", json!("private-label")),
+        ("/browser", json!("private-user-agent")),
+        ("/schema", json!(1)),
+        ("/platform", json!("android")),
+        ("/measurements/foregroundMs", json!(10001)),
+        ("/measurements/operations/0/name", json!("private payload")),
+        ("/measurements/operations/0/p95UpperBoundMs", json!(181)),
+        ("/measurements/apiFailures/0/errors", json!(3)),
+        ("/measurements/inFlight/0/count", json!(65)),
+        ("/measurements/eventLoop/0/reason", json!("private route")),
+        ("/measurements/eventLoop/0/late", json!(3)),
+        ("/measurements/longTaskSupported", json!(false)),
+        ("/measurements/longTasks/0/totalMs", json!(79)),
+        (
+            "/measurements/recentSlowSamples/0/outcome",
+            json!("private error"),
+        ),
+    ] {
+        let mut input = web_report();
+        let (parent, key) = path.rsplit_once('/').unwrap();
+        input.pointer_mut(parent).unwrap()[key] = value;
+        let response = app
+            .authenticated(&cookie, &session, Method::POST, PATH)
+            .json(&input)
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_client_error(), "accepted {path}");
+    }
+    app.close().await;
+}
+
 #[tokio::test]
 async fn uploads_are_authenticated_private_and_idempotent_without_an_installation() {
     let app = Fixture::new().await;
