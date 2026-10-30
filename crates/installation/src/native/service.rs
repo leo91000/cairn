@@ -144,6 +144,18 @@ fn exit_record(code: i32, finalization_failed: bool) -> String {
     }
 }
 
+async fn preserve_interrupted_exit(marker: &std::path::Path) -> Result<()> {
+    let exit = marker.with_extension("exit");
+    if !exit.exists() {
+        atomic_write(
+            &exit,
+            crate::runner::CONTROLLER_INTERRUPTED.to_string().as_bytes(),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 struct Controller {
     data: PathBuf,
@@ -2213,14 +2225,7 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
     }
     for (attempt, run, marker) in interrupted {
         block::recover_completed(&state, &run, &attempt).await?;
-        let exit = marker.with_extension("exit");
-        if !exit.exists() {
-            atomic_write(
-                &exit,
-                crate::runner::CONTROLLER_INTERRUPTED.to_string().as_bytes(),
-            )
-            .await?;
-        }
+        preserve_interrupted_exit(&marker).await?;
         tokio::fs::remove_file(marker).await?;
     }
     recover_preparations(&data, &state).await?;
@@ -3327,6 +3332,9 @@ mod tests {
         atomic_write(&controller.file(&attempt, "exit"), record.as_bytes())
             .await
             .unwrap();
+        let marker = controller.file(&attempt, "active");
+        atomic_write(&marker, b"run").await.unwrap();
+        preserve_interrupted_exit(&marker).await.unwrap();
         for _ in 0..2 {
             let response = handler(
                 State(controller.clone()),
