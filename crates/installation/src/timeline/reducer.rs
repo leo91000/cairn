@@ -821,7 +821,17 @@ impl<C: Cards> Reducer<'_, C> {
         let id = if item_id.is_empty() {
             format!("message:{}", event.id)
         } else {
-            format!("message:{}:{item_id}", self.state.turn)
+            let plain = format!("message:{}:{item_id}", self.state.turn);
+            if plain.chars().count() <= 1024 {
+                plain
+            } else {
+                // A distinct namespace prevents a long ID from colliding with a literal short ID.
+                format!(
+                    "message-hash:{}:{}",
+                    self.state.turn,
+                    crate::auth::hex_digest(item_id)
+                )
+            }
         };
         let state = if *event.kind == EventKind::ItemCompleted {
             TimelineState::Done

@@ -64,6 +64,37 @@ async fn cards(store: &Store, run: &str) -> Vec<TimelineEntry> {
     store.read(move |db| window(db, &run, 0)).await.unwrap()
 }
 
+#[tokio::test]
+async fn long_engine_item_ids_survive_migration_and_live_updates() {
+    let root = tempfile::tempdir().unwrap();
+    let db = previous(root.path());
+    let first = "é".repeat(1100);
+    let second = format!("{first}b");
+    for id in [&first, &second] {
+        let payload =
+            serde_json::json!({"item": {"id": id, "type": "agent_message", "text": "Before"}});
+        db.execute(
+            "INSERT INTO events(run_id,created_at,type,text,payload) VALUES(?,?,?,?,?)",
+            rusqlite::params![CODEX, 2, "item.updated", "Before", payload.to_string()],
+        )
+        .unwrap();
+    }
+    let before = tables(&db);
+    let store = Store::open(root.path()).unwrap();
+    assert_eq!(version(&db), 19);
+    assert_eq!(tables(&db), before);
+    let old = cards(&store, CODEX).await;
+    let first_card = old.iter().find(|card| matches!(&card.content, TimelineContent::AgentMessage { item_id, .. } if item_id == &first)).unwrap();
+    let second_card = old.iter().find(|card| matches!(&card.content, TimelineContent::AgentMessage { item_id, .. } if item_id == &second)).unwrap();
+    assert_ne!(first_card.id, second_card.id);
+    assert!(first_card.id.chars().count() <= 1024);
+    let stable_id = first_card.id.clone();
+    store.event(CODEX, &EventKind::ItemUpdated, "After", Some(serde_json::json!({"item": {"id": first, "type": "agent_message", "text": "After"}}))).await.unwrap();
+    let updated = cards(&store, CODEX).await;
+    assert!(updated.iter().any(|card| card.id == stable_id
+        && matches!(&card.content, TimelineContent::AgentMessage { text, .. } if text == "After")));
+}
+
 fn notice(entry: &TimelineEntry) -> &TimelineNotice {
     match &entry.content {
         TimelineContent::Notice { notice } => notice,
