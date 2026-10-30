@@ -13,7 +13,7 @@ use storage_v15::{ConversationV15 as Conversation, MessageV15 as Message};
 pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if matches!(version, 15..=17) {
+    if matches!(version, 15..=18) {
         return Ok(());
     }
     if version != 14 {

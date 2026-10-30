@@ -1,0 +1,48 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "description": "Credentials are written to the installation's private storage file only.",
+  "properties": {
+    "accessKeyId": {
+      "maxLength": 256,
+      "minLength": 1,
+      "type": "string"
+    },
+    "bucket": {
+      "maxLength": 63,
+      "minLength": 1,
+      "pattern": "^[a-z0-9.-]+$",
+      "type": "string"
+    },
+    "endpoint": {
+      "maxLength": 2048,
+      "minLength": 9,
+      "pattern": "^https://",
+      "type": "string"
+    },
+    "privateBucketConfirmed": {
+      "default": false,
+      "description": "Required for Cloudflare R2: public domains and bucket locks are disabled.",
+      "type": "boolean"
+    },
+    "region": {
+      "maxLength": 100,
+      "minLength": 1,
+      "type": "string"
+    },
+    "secretAccessKey": {
+      "maxLength": 256,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "bucket",
+    "endpoint",
+    "region",
+    "accessKeyId",
+    "secretAccessKey"
+  ],
+  "title": "SaveStorageSettingsInput",
+  "type": "object"
+}

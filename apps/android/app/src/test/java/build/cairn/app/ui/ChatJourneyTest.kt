@@ -236,7 +236,8 @@ class ChatJourneyTest {
                                 "/api/installations/fixture/api/tasks/activity",
                                 "/api/installations/fixture/api/skills" -> "[]"
                                 "/api/installations/fixture/api/mcps" -> """{"mcps":[]}"""
-                                "/api/installations/fixture/api/overview" -> "{}"
+                                "/api/installations/fixture/api/overview" ->
+                                    installationOverviewFixture()
                                 "/api/installations/fixture/api/codex/models" ->
                                     wireJson.encodeToString(
                                         ModelCatalog(

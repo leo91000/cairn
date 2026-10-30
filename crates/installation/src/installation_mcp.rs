@@ -227,6 +227,24 @@ pub(crate) async fn operation(
             )
             .await;
     }
+    if let Some(op) = crate::capabilities::personal_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Installation(bearer.to_owned()),
+            )
+            .await;
+    }
+    if let Some(op) = crate::capabilities::settings_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Installation(bearer.to_owned()),
+            )
+            .await;
+    }
     if name == "create_chat"
         && let Some(input) = args.as_object_mut()
     {

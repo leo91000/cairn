@@ -121,8 +121,8 @@ class WorkspaceJourneyTest {
                                 "/api/installations/fixture/api/mcps" -> """{"mcps":[]}"""
 
                                 "/api/installations/fixture/api/skills",
-                                "/api/installations/fixture/tokens",
-                                "/api/installations/fixture/api/audit" -> "[]"
+                                "/api/installations/fixture/tokens" -> "[]"
+                                "/api/installations/fixture/api/audit" -> """{"entries":[]}"""
                                 "/api/installations/fixture/api/tasks/activity" ->
                                     if (launched)
                                         "[{\"id\":\"run\",\"taskId\":\"00000000-0000-4000-8000-000000000099\",\"status\":\"running\"}]"
@@ -264,9 +264,9 @@ class WorkspaceJourneyTest {
                                                 "\n\n"
                                         )
                                 "/api/installations/fixture/api/settings" ->
-                                    """{"publicUrl":"https://cairn.example.com","mcpUrl":"https://cairn.example.com/mcp","protocol":"2026-07-28","version":"0.19.0"}"""
+                                    """{"publicUrl":"https://cairn.example.com","mcpUrl":"https://cairn.example.com/mcp","workspaceRoots":["/workspace"],"home":"/home/cairn","concurrency":1,"protocol":"2026-07-28","version":"0.19.0","commit":"development"}"""
                                 "/api/installations/fixture/api/overview" ->
-                                    """{"counts":{},"agents":1,"projects":1,"tasks":[],"runs":[]}"""
+                                    """{"runsByStatus":{},"agents":1,"projects":1,"missions":0,"concurrency":1}"""
                                 "/api/installations/fixture/api/tasks" ->
                                     if (request.method == "POST") {
                                         created = true

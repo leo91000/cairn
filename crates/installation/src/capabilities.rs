@@ -583,3 +583,11 @@ pub(crate) use accounts::{ACCOUNT_OPERATIONS, AccountOperation, account_operatio
 pub(crate) mod conversations;
 
 pub(crate) use conversations::{CHAT_OPERATIONS, chat_operation};
+
+pub(crate) mod personal;
+
+pub(crate) use personal::{PERSONAL_OPERATIONS, personal_operation};
+
+pub(crate) mod settings;
+
+pub(crate) use settings::{SETTINGS_OPERATIONS, settings_operation};

@@ -1124,3 +1124,6 @@ mod a8;
 
 #[path = "project_measurement/attachments.rs"]
 mod attachments;
+
+#[path = "project_measurement/reads.rs"]
+mod reads;
