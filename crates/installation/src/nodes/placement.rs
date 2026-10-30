@@ -794,7 +794,7 @@ pub(crate) async fn renew_preparation(s: &Service, run: &str, attempt: &str) -> 
         .await
 }
 
-fn release_in(db: &Db<'_>, attempt: &str) -> Result<()> {
+pub(crate) fn release_in(db: &Db<'_>, attempt: &str) -> Result<()> {
     let Some(mut record) = db.get("node-attempts", attempt)? else {
         return Ok(());
     };

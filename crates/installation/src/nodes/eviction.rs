@@ -178,7 +178,7 @@ fn candidate(
     cutoff: i64,
     expected_node: Option<&str>,
 ) -> Result<Option<(Value, Value, Value)>> {
-    let Some(current) = db.run(run)? else {
+    let Some(current) = db.node_storage_run(run)? else {
         return Ok(None);
     };
     let queued_resume = expected_node.is_some() && current["status"] == "queued";
@@ -196,8 +196,8 @@ fn candidate(
     {
         return Ok(None);
     }
-    let checkpoint = db.checkpoint_boundary(run)?.unwrap_or_default();
-    let node_id = text(&checkpoint, "nodeId");
+    let checkpoint = db.checkpoint_node_ownership(run)?.unwrap_or_default();
+    let node_id = checkpoint.node_id.as_deref().unwrap_or_default();
     if expected_node.is_some_and(|expected| expected != node_id) {
         return Ok(None);
     }
@@ -227,9 +227,10 @@ fn candidate(
         "SELECT data FROM records WHERE kind='node-attempts' AND json_extract(data,'$.runId')=?",
         [run],
     )?;
-    let execution = attempts
-        .iter()
-        .find(|attempt| attempt["id"] == checkpoint["runnerId"]);
+    let execution = checkpoint
+        .runner_id
+        .as_deref()
+        .and_then(|id| attempts.iter().find(|attempt| attempt["id"] == id));
     // Consumed historical destination reservations may lack releasedAt. The
     // actual latest execution must positively prove that its writer stopped.
     if execution.is_none_or(|attempt| {
@@ -255,7 +256,7 @@ fn candidate(
         return Ok(None);
     }
     let expected = json!({
-        "attempt": checkpoint["runnerId"], "backupId": point["id"],
+        "attempt": checkpoint.runner_id, "backupId": point["id"],
         "generation": point["diskGeneration"], "grantId": current["storage"]["grantId"],
     });
     Ok(Some((node, point, expected)))
@@ -270,7 +271,7 @@ pub(super) fn reclaimable_bytes(db: &Db<'_>, node: &Value) -> Result<u64> {
     let mut bytes = 0u64;
     for (run, backing) in retained {
         if db
-            .run(run)?
+            .node_storage_run(run)?
             .is_none_or(|run| run["storage"]["dirtyBytes"] != 0)
         {
             continue;

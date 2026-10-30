@@ -1,5 +1,19 @@
 # Android 0.6.0 / web parity
 
+Performance diagnostics: web now matches Android's default-on, account-bound,
+foreground-only upload, opt-out, local refresh/reset/copy and native sharing where
+available, including without a selected installation. Personal account diagnostics
+are UI-only, outside installation MCP/agent grants. Both retain the same Beacon
+account authorization, 64 KiB request cap, six uploads/minute/account, 256 windows
+and 14-day retention. Android retains schema 1, device/heap metadata and native
+frame metrics; web uses closed schema 2, frontend source-build identity, browser
+family, API outcome/pending counts, JSON/Markdown timings and event-loop/Long Task
+observations where supported. These browser measurements do not represent GPU
+frames. Web opt-out is shared across Beacon subdomains; Android remains a phone
+preference. See ADR-0043. Coverage: model/monitor/uploader/build identity unit tests,
+Beacon telemetry integration tests, browser account/settings diagnostics journeys;
+existing Android diagnostics tests cover its unchanged native implementation.
+
 ## Mermaid diagrams in Markdown (2026-10-29)
 
 Both layouts reserve the asymmetric flag notch when sizing multiline node labels.

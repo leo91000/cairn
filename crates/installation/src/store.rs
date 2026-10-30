@@ -14,7 +14,9 @@ use std::{
 };
 use tokio::sync::{mpsc, oneshot, watch};
 
-type Job = Box<dyn FnOnce(&mut Connection) + Send>;
+mod performance;
+
+type Job = Box<dyn FnOnce(&mut Connection) -> performance::Completed + Send>;
 
 use cairn_contracts::EventKind;
 pub use cairn_contracts::RunEvent as Event;
@@ -37,21 +39,23 @@ const DATABASE_VERSION: i64 = 18;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
-fn actors(connections: Vec<Connection>) -> mpsc::Sender<Job> {
+fn actors(connections: Vec<Connection>, lane: &'static str) -> mpsc::Sender<Job> {
     let (tx, rx) = mpsc::channel::<Job>(256);
     let rx = Arc::new(Mutex::new(rx));
-    for mut db in connections {
+    for (index, mut db) in connections.into_iter().enumerate() {
         let rx = rx.clone();
         std::thread::Builder::new()
             .name("cairn-sqlite".into())
             .spawn(move || {
+                let mut metrics = performance::Metrics::new(lane, index);
                 loop {
                     // The guard is released before the job runs.
                     let job = rx.lock().ok().and_then(|mut rx| rx.blocking_recv());
                     let Some(job) = job else {
                         break;
                     };
-                    job(&mut db);
+                    let completed = job(&mut db);
+                    metrics.record(&completed);
                 }
             })
             .expect("database thread");
@@ -183,8 +187,8 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
             readers.push(connection);
         }
         Ok(Self(Arc::new(Pool {
-            writer: actors(vec![writer]),
-            readers: actors(readers),
+            writer: actors(vec![writer], "write"),
+            readers: actors(readers, "read"),
             changes: watch::channel(0).0,
             discarded_changes,
         })))
@@ -195,9 +199,20 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
         tx: &mpsc::Sender<Job>,
         f: impl FnOnce(&mut Db<'_>) -> Result<T> + Send + 'static,
     ) -> Result<T> {
+        let queued_at = std::time::Instant::now();
         let (reply, rx) = oneshot::channel();
         tx.send(Box::new(move |connection| {
-            let _ = reply.send(f(&mut Db(connection)));
+            let started = std::time::Instant::now();
+            let result = f(&mut Db(connection));
+            let execution = started.elapsed();
+            let failed = result.is_err();
+            let abandoned_reply = reply.send(result).is_err();
+            performance::Completed {
+                queue: started.duration_since(queued_at),
+                execution,
+                failed,
+                abandoned_reply,
+            }
         }))
         .await
         .map_err(|_| Error::unavailable("Database is closing."))?;
