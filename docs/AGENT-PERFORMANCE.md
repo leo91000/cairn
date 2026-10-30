@@ -45,6 +45,41 @@ acknowledgement measurements. Host and guest run the same application build.
 | `agent_activity` | Turn start/end, first item, first nonempty assistant message, item start/end and periodic activity summary |
 | `agent_output` | Worker pipe-to-consumer queue delays of at least 100 ms |
 | `agent_wait` | Awaits lasting at least 100 ms: stdout writing/flushing, credential-redaction refresh and output persistence |
+| `database_actor` | Per SQLite actor: admission/queue wait, execution wall time, completed jobs, errors and replies abandoned by their caller |
+
+`database_actor` aggregates locally in each SQLite actor and emits at most once
+every 30 seconds, after a job completes. `lane=write` includes both individual
+writes and transactions; `lane=read` covers the four reader actors. `actor` is a
+fixed index within its lane, starting at zero. Compare the same process lifetime.
+The interval can include idle time; an idle or blocked actor does not emit a timer
+record. These records describe completed jobs, not current queue depth or work
+still blocked. Existing `agent_wait` records cover long output-persistence waits.
+
+`queue_us` measures from submission to the actor beginning the closure, including
+bounded-channel admission and scheduling. `execution_us` measures the closure,
+including Rust decoding and transaction commit where applicable. Neither is CPU
+time. Totals and maxima cover every completed job, including errors and work whose
+caller stopped waiting (`abandoned_replies`). Reader execution times can overlap;
+do not sum them as elapsed wall time. SQL, parameters, errors and conversation or
+account identifiers are never included. Aggregation performs no database write.
+
+An explicit local metadata-write benchmark exercises the real `Store` on synthetic
+0/128/512 KiB frozen snapshots:
+
+```sh
+CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
+  node scripts/test-backend.mjs -p cairn-installation --test run_write_performance \
+  -- --ignored --nocapture --test-threads=1
+```
+
+It reports individual warm-operation wall times, process CPU (including SQLite
+actors), snapshot bytes, WAL bytes and subscriber revisions for 32 changed or
+unchanged boundary/state writes. Setup and WAL truncation are outside timing;
+automatic checkpointing is disabled only on this disposable writer to expose
+write amplification. This is a warm local metadata workload, without network,
+agent processes or storage-object I/O. WAL bytes are not physical disk-write
+bytes. Cold reads and object compression are outside its scope. Keep results and
+reference/candidate SHAs in the PR description or temporary evidence, not here.
 
 `agent_activity` emits a heartbeat every 30 seconds while its receive loop is
 waiting. If output writing or persistence itself blocks, `agent_wait` instead
