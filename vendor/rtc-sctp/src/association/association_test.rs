@@ -873,6 +873,116 @@ fn outgoing_reset_acknowledgement_waits_for_the_incoming_reset() -> Result<()> {
 }
 
 #[test]
+fn new_data_cannot_postpone_a_due_retransmission() -> Result<()> {
+    for late_by_millis in [0, 1] {
+        let mut association = create_association(TransportConfig::default());
+        association.set_state(AssociationState::Established);
+        association.handshake_completed = true;
+        association.rwnd = 65536;
+        // Handshake setup is outside this scenario. Drain its queued INIT and
+        // remove its timer before exercising the established DATA path.
+        association.timers.stop(Timer::T1Init);
+        let now = Instant::now();
+        while association.poll_transmit(now).is_some() {}
+        assert_eq!(association.poll_timeout(), None);
+        association.open_stream(2, PayloadProtocolIdentifier::Binary)?;
+
+        let first_tsn = association.my_next_tsn;
+        association.stream(2)?.write_sctp(
+            now,
+            &Bytes::from_static(b"lost reliable DATA"),
+            PayloadProtocolIdentifier::Binary,
+        )?;
+        // Drop the first transmission: neither DATA nor an acknowledgement
+        // reaches the peer, so only T3 can recover this reliable message.
+        assert!(association.poll_transmit(now).is_some());
+        assert_eq!(association.inflight_queue.len(), 1);
+        let deadline = association.poll_timeout().expect("DATA starts T3");
+        let late = deadline + Duration::from_millis(late_by_millis);
+
+        association.stream(2)?.write_sctp(
+            late,
+            &Bytes::from_static(b"later DATA"),
+            PayloadProtocolIdentifier::Binary,
+        )?;
+        // The async driver flushes writes before polling/handling its timeout.
+        // Follow that real ordering after waking exactly at or just after T3.
+        assert!(association.poll_transmit(late).is_some());
+        assert_eq!(
+            association.poll_timeout(),
+            Some(deadline),
+            "new DATA must not erase an unhandled T3 expiration ({late_by_millis} ms late)"
+        );
+        association.handle_timeout(late);
+        assert_eq!(association.stats.get_num_t3timeouts(), 1);
+
+        let mut recovered = false;
+        while let Some(transmit) = association.poll_transmit(late) {
+            if let Payload::RawEncode(packets) = transmit.message {
+                for packet in packets {
+                    let packet = crate::packet::PartialDecode::unmarshal(&packet)?.finish()?;
+                    for chunk in packet.chunks {
+                        if let Some(data) = chunk.as_any().downcast_ref::<ChunkPayloadData>()
+                            && data.tsn == first_tsn
+                        {
+                            assert_eq!(data.user_data, Bytes::from_static(b"lost reliable DATA"));
+                            recovered = true;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(recovered, "the overdue poll must retransmit the oldest DATA");
+        assert!(association.poll_timeout().is_some_and(|next| next > late));
+    }
+    Ok(())
+}
+
+#[test]
+fn a_gap_ack_cannot_postpone_a_due_retransmission() -> Result<()> {
+    let mut association = create_association(TransportConfig::default());
+    association.set_state(AssociationState::Established);
+    association.handshake_completed = true;
+    association.rwnd = 65536;
+    association.timers.stop(Timer::T1Init);
+    let now = Instant::now();
+    while association.poll_transmit(now).is_some() {}
+    association.open_stream(2, PayloadProtocolIdentifier::Binary)?;
+    let first_tsn = association.my_next_tsn;
+    for body in [b"first".as_slice(), b"second".as_slice()] {
+        association.stream(2)?.write_sctp(
+            now,
+            &Bytes::copy_from_slice(body),
+            PayloadProtocolIdentifier::Binary,
+        )?;
+    }
+    assert!(association.poll_transmit(now).is_some());
+    assert_eq!(association.inflight_queue.len(), 2);
+    let deadline = association.poll_timeout().expect("DATA starts T3");
+    let late = deadline + Duration::from_millis(1);
+
+    // Only the later chunk reached the peer. Its gap acknowledgement must
+    // preserve recovery of the earlier lost chunk, not replace its due timer.
+    association.handle_sack(
+        &ChunkSelectiveAck {
+            cumulative_tsn_ack: first_tsn.wrapping_sub(1),
+            advertised_receiver_window_credit: 65536,
+            gap_ack_blocks: vec![crate::chunk::chunk_selective_ack::GapAckBlock {
+                start: 2,
+                end: 2,
+            }],
+            ..Default::default()
+        },
+        late,
+    )?;
+    assert_eq!(association.poll_timeout(), Some(deadline));
+    association.handle_timeout(late);
+    assert_eq!(association.stats.get_num_t3timeouts(), 1);
+    assert!(association.poll_transmit(late).is_some());
+    Ok(())
+}
+
+#[test]
 fn reset_retry_deadline_survives_unrelated_transmit_polls() -> Result<()> {
     let mut association = create_association(TransportConfig::default());
     association.set_state(AssociationState::Established);
