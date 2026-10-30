@@ -1230,6 +1230,7 @@ pub(crate) async fn tick_missions(s: &Service, active: &HashSet<String>) -> Resu
                 checkpoint.controller_recoveries = None;
                 checkpoint.controller_recovery_reservation = None;
                 checkpoint.provider_retry_reservation = None;
+                checkpoint.pending_paid_admission = None;
                 checkpoint.controller_observation = None;
                 checkpoint.store_in(db, &run_id)?;
                 wakeup.progress.observation = Some(observed);

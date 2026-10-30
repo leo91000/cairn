@@ -2262,6 +2262,169 @@ async fn refused_local_budget_keeps_presence_and_exposes_the_reason() {
 }
 
 #[tokio::test]
+async fn paid_recovery_survives_confirmed_capacity_rejection_and_restart() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    for provider in [false, true] {
+        let mut fixture = Fixture::new().await;
+        fixture.stop(false).await;
+        let controller = Arc::new(Controller {
+            data: fixture.service.config.data_dir.clone(),
+            plans: tokio::sync::Mutex::new(Vec::new()),
+            failures: 0,
+            slots: 4,
+            hold: AtomicBool::new(false),
+        });
+        let busy = Arc::new(AtomicBool::new(true));
+        let rejections = Arc::new(AtomicUsize::new(0));
+        let (reject, seen) = (busy.clone(), rejections.clone());
+        let app = Router::new()
+            .fallback(any(
+                move |state: State<Arc<Controller>>, request: Request| {
+                    let (reject, seen) = (reject.clone(), seen.clone());
+                    async move {
+                        let path = request.uri().path();
+                        if request.method() == "POST"
+                            && path.starts_with("/runs/")
+                            && path.trim_matches('/').split('/').count() == 2
+                            && reject.load(Ordering::SeqCst)
+                        {
+                            seen.fetch_add(1, Ordering::SeqCst);
+                            return (
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                Json(json!({ "error": "All VM slots are occupied." })),
+                            )
+                                .into_response();
+                        }
+                        serve_controller(state, request).await
+                    }
+                },
+            ))
+            .with_state(controller.clone());
+        let (listener, address) = common::bind().await;
+        common::reconfigure(&mut fixture.service, |config| {
+            config.runner_url = format!("http://{address}");
+        })
+        .await;
+        let server = common::serve(listener, app);
+        let service = fixture.service.clone();
+        let home = service.config.home.join(".codex");
+        tokio::fs::create_dir_all(&home).await.unwrap();
+        tokio::fs::write(home.join("auth.json"), "{}")
+            .await
+            .unwrap();
+        tokio::fs::write(
+            service.config.data_dir.join("storage-s3.json"),
+            json!({
+                "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1"
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+        let run = fixture
+            .enqueue("Preserve paid admission after refusal")
+            .await;
+        let id = text(&run, "id").to_owned();
+        fixture.start().await;
+        let first = fixture
+            .until(&id, |run| {
+                finished(run)
+                    || (rejections.load(Ordering::SeqCst) >= 1
+                        && run["status"] == RunStatus::Queued
+                        && !run["recoveryPending"].as_bool().unwrap_or(true))
+            })
+            .await;
+        assert_eq!(first["status"], RunStatus::Queued, "{first}");
+        fixture.stop(false).await;
+        let mut saved = fixture.checkpoint(&id).await;
+        let old_attempt = text(&saved, "runnerId").to_owned();
+        assert_eq!(saved["startRejected"], true);
+        saved["capacityRetryAt"] = (now() - 1).into();
+        saved["controllerRecoveries"] = if provider { 2 } else { 3 }.into();
+        if provider {
+            let cause: cairn_installation::run_retry::Cause = serde_json::from_value(json!({
+                "kind": "server", "message": "Provider busy", "startup": true
+            }))
+            .unwrap();
+            let mut retry = cairn_installation::run_retry::Retry::next(None, cause, now()).unwrap();
+            retry.next_attempt_at = Some(now() - 1);
+            saved["retryCause"] = serde_json::to_value(&retry.cause).unwrap();
+            saved["providerRetryReservation"] = old_attempt.into();
+            service
+                .store
+                .change_run(
+                    &id,
+                    cairn_installation::runs::RunChanges {
+                        retry: Some(Some(retry)),
+                        recovery_pending: Some(true),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        } else {
+            saved["controllerRecoveryReservation"] = old_attempt.into();
+            service
+                .store
+                .change_run(
+                    &id,
+                    cairn_installation::runs::RunChanges {
+                        recovery_pending: Some(true),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        service
+            .store
+            .save_checkpoint_boundary(&id, saved)
+            .await
+            .unwrap();
+        fixture.start().await;
+        let waiting = fixture
+            .until(&id, |run| {
+                finished(run)
+                    || (rejections.load(Ordering::SeqCst) >= 2
+                        && run["status"] == RunStatus::Queued
+                        && !run["recoveryPending"].as_bool().unwrap_or(true))
+            })
+            .await;
+        assert_eq!(
+            waiting["status"],
+            RunStatus::Queued,
+            "provider={provider}: {waiting}"
+        );
+        fixture.stop(false).await;
+        let mut saved = fixture.checkpoint(&id).await;
+        assert_eq!(saved["startRejected"], true);
+        assert_eq!(saved["controllerRecoveries"], if provider { 2 } else { 3 });
+        assert!(controller.plans.lock().await.is_empty());
+        saved["capacityRetryAt"] = (now() - 1).into();
+        service
+            .store
+            .save_checkpoint_boundary(&id, saved)
+            .await
+            .unwrap();
+        busy.store(false, Ordering::SeqCst);
+        fixture.start().await;
+        let completed = fixture.until_finished(&id).await;
+        assert_eq!(
+            completed["status"],
+            RunStatus::Succeeded,
+            "provider={provider}: {completed}"
+        );
+        assert_eq!(
+            fixture.checkpoint(&id).await["controllerRecoveries"],
+            if provider { 2 } else { 3 }
+        );
+        assert_eq!(controller.plans.lock().await.len(), 1);
+        fixture.stop(false).await;
+        server.abort();
+    }
+}
+
+#[tokio::test]
 async fn controller_capacity_rejection_waits_and_retries_without_an_agent_session() {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 

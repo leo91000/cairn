@@ -227,13 +227,12 @@ impl Execution<'_> {
             return Ok(());
         }
         let saved_runner = runner.clone();
+        let state = self.s.store.run_state(&self.id).await?;
         let node = placement["nodeId"].as_str().map(str::to_owned);
         let runtime = placement["runtimeId"].clone();
         self.checkpoint
             .update(|checkpoint| {
-                checkpoint.runner_id = Some(Some(saved_runner));
-                checkpoint.controller_recovery_reservation = None;
-                checkpoint.provider_retry_reservation = None;
+                checkpoint.bind_paid_admission(&saved_runner, &state);
                 checkpoint.turn_pending = None;
                 checkpoint.recovery_deadline_ms = None;
                 checkpoint.terminal_code = None;
@@ -809,11 +808,10 @@ impl Execution<'_> {
         placement::materialize(s, &runner).await?;
         let node_id = placement["nodeId"].as_str().map(str::to_owned);
         let runtime_id = placement["runtimeId"].clone();
+        let state = s.store.run_state(&self.id).await?;
         self.checkpoint
             .update(|c| {
-                c.runner_id = Some(Some(runner.clone()));
-                c.controller_recovery_reservation = None;
-                c.provider_retry_reservation = None;
+                c.bind_paid_admission(&runner, &state);
                 c.turn_pending = None;
                 c.recovery_deadline_ms = None;
                 c.terminal_code = None;

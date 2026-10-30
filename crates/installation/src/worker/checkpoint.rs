@@ -81,6 +81,9 @@ pub struct RunCheckpoint {
     /// A provider retry already scheduled and charged to this attempt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_retry_reservation: Option<String>,
+    /// Previously paid admission carried into an attempt until its start is known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_paid_admission: Option<PaidAdmission>,
     /// A controller's capacity refusal delays admission without consuming a recovery attempt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capacity_retry_at: Option<i64>,
@@ -93,6 +96,15 @@ pub struct RunCheckpoint {
     pub resources: Option<crate::nodes::Resources>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub administrative_pause_observation: Option<AdministrativePauseObservation>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PaidAdmission {
+    pub attempt: String,
+    pub controller: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_cause: Option<crate::run_retry::Cause>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -329,6 +341,29 @@ impl RunCheckpoint {
 
     pub fn controller_recoveries(&self) -> u64 {
         self.controller_recoveries.unwrap_or(0)
+    }
+
+    /// Transfer a paid authorization to a candidate attempt, without allowing
+    /// it to be reused until an explicit capacity rejection proves no start.
+    pub fn bind_paid_admission(&mut self, runner: &str, state: &cairn_contracts::RunState) {
+        if self.runner_id() != Some(runner) {
+            let controller =
+                self.controller_recoveries() > 0 && self.has_controller_recovery_reservation();
+            let provider_cause = if super::schedule::provider_retry_paid(self, state) {
+                state.retry.as_ref().map(|retry| retry.cause.clone())
+            } else {
+                None
+            };
+            self.pending_paid_admission =
+                (controller || provider_cause.is_some()).then(|| PaidAdmission {
+                    attempt: runner.to_owned(),
+                    controller,
+                    provider_cause,
+                });
+        }
+        self.runner_id = Some(Some(runner.to_owned()));
+        self.controller_recovery_reservation = None;
+        self.provider_retry_reservation = None;
     }
 
     pub fn has_provider_retry_reservation(&self) -> bool {

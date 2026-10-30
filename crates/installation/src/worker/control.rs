@@ -289,6 +289,7 @@ fn requeue(db: &Db<'_>, id: &str) -> Result<Value> {
         checkpoint.controller_recoveries = None;
         checkpoint.controller_recovery_reservation = None;
         checkpoint.provider_retry_reservation = None;
+        checkpoint.pending_paid_admission = None;
         checkpoint.controller_observation = None;
         checkpoint.turn_pending = Some(true);
         checkpoint.recovery_deadline_ms = None;
