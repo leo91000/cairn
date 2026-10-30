@@ -560,10 +560,13 @@ impl Checkpoint {
                 saved.completed = Some(true);
             }
         }
-        let (deadline, observation) = self.budget_snapshot();
-        if let Some(saved) = &mut saved {
+        let deadline = if let Some(saved) = &mut saved {
+            let (deadline, observation) = self.budget_snapshot();
             saved.administrative_pause_observation = Some(observation);
-        }
+            deadline
+        } else {
+            None
+        };
         let id = self.id.clone();
         let saved = self
             .store
