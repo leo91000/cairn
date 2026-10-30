@@ -85,6 +85,32 @@ class ChatRenderingBenchmarkDeviceTest {
             )
     }
 
+    private fun card(position: Long, revision: Long, user: Boolean, text: String): TimelineCard =
+        TimelineCard(
+            id = "message:$position",
+            runId = "benchmark",
+            position = position,
+            revision = revision,
+            source = revision,
+            turn = position,
+            attempt = 0,
+            createdAt = position,
+            updatedAt = revision,
+            content =
+                if (user)
+                    build.cairn.contracts.TimelineContent.A(
+                        attachments = emptyList(),
+                        sentAt = position,
+                        text = text,
+                    )
+                else
+                    build.cairn.contracts.TimelineContent.B(
+                        itemId = "answer-$position",
+                        state = "running",
+                        text = text,
+                    ),
+        )
+
     @Test
     fun timelinePreparation() {
         val results = buildJsonArray {
@@ -94,69 +120,30 @@ class ChatRenderingBenchmarkDeviceTest {
                         (1 until count).map { index ->
                             val user = shape == "users" || index % 2 == 1
                             val text = if (user) "Question $index" else source(300)
-                            RunEvent(
-                                id = index.toLong(),
-                                createdAt = index.toLong(),
-                                type = if (user) "chat.user" else "item.completed",
-                                text = text,
-                                payload =
-                                    (if (user) mapOf("text" to JsonPrimitive(text))
-                                        else
-                                            mapOf(
-                                                "item" to
-                                                    buildJsonObject {
-                                                        put("id", "answer-$index")
-                                                        put("type", "agent_message")
-                                                        put("text", text)
-                                                    }
-                                            ))
-                                        ?.let { kotlinx.serialization.json.JsonObject(it) },
-                            )
+                            card(index.toLong(), index.toLong(), user, text)
                         }
                     var text = source(if (shape == "large_answer") 100_000 else 2_000)
                     val keys = TimelineKeys()
                     val times = mutableListOf<Double>()
                     val cpu = mutableListOf<Double>()
-                    val recovery = mutableListOf<Double>()
                     val identities = mutableSetOf<String>()
                     repeat(40) { sample ->
                         text += " suite $sample"
-                        val last =
-                            RunEvent(
-                                id = (count + sample).toLong(),
-                                createdAt = count.toLong(),
-                                type = "item.updated",
-                                text = text,
-                                payload =
-                                    kotlinx.serialization.json.JsonObject(
-                                        mapOf(
-                                            "item" to
-                                                buildJsonObject {
-                                                    put("id", "current-answer")
-                                                    put("type", "agent_message")
-                                                    put("text", text)
-                                                }
-                                        )
-                                    ),
-                                displayId = count.toLong(),
-                            )
-                        val events = prefix + last
+                        val cards =
+                            prefix + card(count.toLong(), (count + sample).toLong(), false, text)
                         val start = System.nanoTime()
                         val cpuStart = Debug.threadCpuTimeNanos()
                         val timeline =
-                            keys.stabilize("measurement", timelineEntries(events, chat = true))
+                            keys.stabilize(
+                                "measurement",
+                                timelineEntries(emptyList(), chat = true, cards = cards),
+                            )
                         val elapsedCpu = (Debug.threadCpuTimeNanos() - cpuStart) / 1e6
                         val elapsed = (System.nanoTime() - start) / 1e6
-                        val recoveryStart = System.nanoTime()
-                        val recovered =
-                            recoveredChatConnections(events, events.map { it.id }.toSet())
-                        val recoveryMs = (System.nanoTime() - recoveryStart) / 1e6
                         assertEquals(count, timeline.size)
-                        assertTrue(recovered.isEmpty())
                         if (sample >= 10) {
                             times.add(elapsed)
                             cpu.add(elapsedCpu)
-                            recovery.add(recoveryMs)
                             identities.add(timeline.last().key)
                         }
                     }
@@ -167,7 +154,6 @@ class ChatRenderingBenchmarkDeviceTest {
                             put("shape", shape)
                             put("timelineWithStableKeys", stats(times))
                             put("timelineThreadCpu", stats(cpu))
-                            put("reconnectionScan", stats(recovery))
                             put("messageKeys", identities.size)
                         }
                     )
@@ -304,20 +290,19 @@ class ChatRenderingBenchmarkDeviceTest {
                 }
             }
             for (count in listOf(40, 400, 2000)) {
-                val events =
+                val cards =
                     (1..count).map {
-                        RunEvent(
-                            id = it.toLong(),
-                            createdAt = it.toLong(),
-                            type = "chat.user",
-                            text = "Question $it",
-                        )
+                        card(it.toLong(), it.toLong(), true, "Question $it")
                     }
                 val keys = TimelineKeys()
                 val times = mutableListOf<Double>()
                 repeat(120) { sample ->
                     val start = System.nanoTime()
-                    val result = keys.stabilize("measurement", timelineEntries(events, chat = true))
+                    val result =
+                        keys.stabilize(
+                            "measurement",
+                            timelineEntries(emptyList(), chat = true, cards = cards),
+                        )
                     val duration = (System.nanoTime() - start) / 1e6
                     assertEquals(count, result.size)
                     if (sample >= 20) times.add(duration)

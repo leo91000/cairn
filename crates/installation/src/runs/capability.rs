@@ -53,12 +53,12 @@ pub(crate) const RUN_OPERATIONS: &[RunOperation] = &[
     RunOperation {
         name: "read_run_timeline",
         scope: "read",
-        description: "Read the run's timeline: messages, run cycle, errors and retries as Cairn interprets them for every coding agent, newest page first. Cards keep a stable id; a newer revision replaces an older one. Use oldest as the next before cursor while hasOlder is true. Read a truncated card's source event with read_run_content.",
+        description: "Read the run's timeline, newest page first. Save the first page's changeCursor and pass it as snapshot with oldest as before for older pages. Restart if the timeline changes between pages. Then pass the saved cursor as changes and follow changeCursor while hasMoreChanges is true to catch up. A newer card revision replaces an older one. Read a truncated card by entryId with read_run_content.",
     },
     RunOperation {
         name: "read_run_content",
         scope: "read",
-        description: "Read complete run metadata or an event in UTF-8 JSON chunks. Continue with nextOffset and sha256, restarting from zero if the content changes.",
+        description: "Read complete run metadata, an event, or a timeline card by entryId in UTF-8 JSON chunks. Continue with nextOffset and sha256, restarting from zero if the content changes.",
     },
 ];
 
@@ -242,9 +242,7 @@ impl RunOperation {
                         db.require_run(&run)?;
                         crate::conversation_lifecycle::require_active_run(&db, &run)?;
                         Ok(serde_json::to_value(crate::mcp_server::run_timeline(
-                            &db,
-                            &run,
-                            input.before,
+                            &db, &run, &input,
                         )?)?)
                     })
                     .await
@@ -252,6 +250,11 @@ impl RunOperation {
             "read_run_content" => {
                 let input: ReadRunContentInput = decode(input)?;
                 if input.offset < 0
+                    || (input.event_id.is_some() && input.entry_id.is_some())
+                    || input
+                        .entry_id
+                        .as_ref()
+                        .is_some_and(|id| id.is_empty() || id.len() > 1024)
                     || input
                         .event_id
                         .is_some_and(|id| !(1..=9_007_199_254_740_991).contains(&id))

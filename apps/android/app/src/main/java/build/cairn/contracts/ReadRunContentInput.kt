@@ -7,6 +7,8 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class ReadRunContentInput(
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val entryId: String? = null,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val eventId: Long? = null,
     val offset: Long = 0,
     val runId: String,

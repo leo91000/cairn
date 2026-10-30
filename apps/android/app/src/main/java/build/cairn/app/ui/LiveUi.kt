@@ -749,6 +749,11 @@ internal fun timelineEntries(
                                     card = card,
                                 )
                             )
+                        } else if (!chat && folded.none { it.id == card.source }) {
+                            // A card can change in this window while its source is on an older
+                            // page.
+                            flushActivity()
+                            result.add(TimelineEntry(card.id, emptyList(), false, card = card))
                         }
                 }
             }
@@ -1205,11 +1210,14 @@ internal fun TimelineRow(
     else {
         // The run log presents a lifecycle event through its card, never its payload.
         val presentations =
-            remember(entry.events, entry.notices) {
-                entry.events.map { event ->
-                    entry.notices[event.id]?.let { presentNotice(it, event) }
-                        ?: presentActivity(event)
-                }
+            remember(entry.events, entry.notices, entry.card) {
+                val events =
+                    entry.events.map { event ->
+                        entry.notices[event.id]?.let { presentNotice(it, event) }
+                            ?: presentActivity(event)
+                    }
+                val notice = (entry.card?.content as? TimelineContent.C)?.notice
+                if (notice == null) events else events + presentNotice(notice)
             }
         AgentActions(entry.key, presentations, hideRunning)
     }

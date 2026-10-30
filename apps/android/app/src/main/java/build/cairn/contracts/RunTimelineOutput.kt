@@ -6,9 +6,21 @@ import kotlinx.serialization.Serializable
 @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
 data class RunTimelineOutput(
+    val changeCursor: ChangeCursor,
     val entries: List<TimelineEntryPage>,
+    val hasMoreChanges: Boolean,
     val hasOlder: Boolean,
     val oldest: Long,
+) {
+    init {}
+}
+
+@OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+@Serializable
+data class ChangeCursor(
+    val history: String,
+    val id: String?,
+    val revision: Long,
 ) {
     init {}
 }

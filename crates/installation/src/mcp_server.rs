@@ -880,16 +880,45 @@ pub(crate) fn bounded_history_window(
 pub(crate) fn run_timeline(
     db: &Db<'_>,
     run: &str,
-    before: i64,
+    input: &cairn_contracts::ReadRunTimelineInput,
 ) -> Result<cairn_contracts::RunTimelineOutput> {
-    use cairn_contracts::{TimelineContent, TimelineEntryPage, TimelinePreview};
+    use cairn_contracts::{TimelineContent, TimelineCursor, TimelineEntryPage, TimelinePreview};
     const PREVIEW_BYTES: usize = 1024;
-    let (cards, mut has_older) = crate::timeline::page(db, run, before, 100)?;
+    let (first, newest) = crate::live::event_bounds(db, run)?;
+    let history = format!("v2:{run}:{first}");
+    let changes = input.changes.as_ref();
+    if changes.is_some_and(|cursor| cursor.history != history || cursor.revision > newest) {
+        return Err(Error::conflict(
+            "Timeline history changed; restart from the newest page.",
+        ));
+    }
+    if input
+        .snapshot
+        .as_ref()
+        .is_some_and(|cursor| cursor.history != history || cursor.revision != newest)
+    {
+        return Err(Error::conflict(
+            "Timeline changed between pages; restart from the newest page.",
+        ));
+    }
+    let (cards, mut has_older) = if let Some(cursor) = changes {
+        let mut cards =
+            crate::timeline::changes_after(db, run, cursor.revision, cursor.id.as_deref(), 101)?;
+        let more = cards.len() > 100;
+        cards.truncate(100);
+        (cards, more)
+    } else {
+        let (mut cards, more) = crate::timeline::page(db, run, input.before, 100)?;
+        cards.reverse();
+        (cards, more)
+    };
     let mut entries = Vec::new();
     let mut bytes = 2;
-    let mut oldest = before;
-    for entry in cards.into_iter().rev() {
+    let mut oldest = input.before;
+    let mut last_change = None;
+    for entry in cards {
         let position = entry.position;
+        let cursor = (entry.revision, entry.id.clone());
         let total_bytes = encoded_size(&entry)? as u64;
         let page = if total_bytes as usize <= RUN_PAGE_BYTES - 2 {
             TimelineEntryPage::Complete {
@@ -926,13 +955,33 @@ pub(crate) fn run_timeline(
         }
         bytes += size;
         oldest = position;
+        last_change = Some(cursor);
         entries.push(page);
     }
-    entries.reverse();
+    if changes.is_none() {
+        entries.reverse();
+    }
+    let has_more_changes = changes.is_some() && has_older;
+    let change_cursor = if has_more_changes {
+        let (revision, id) = last_change.expect("a bounded page always includes one card");
+        TimelineCursor {
+            revision,
+            id: Some(id),
+            history,
+        }
+    } else {
+        TimelineCursor {
+            revision: newest,
+            id: None,
+            history,
+        }
+    };
     Ok(cairn_contracts::RunTimelineOutput {
         entries,
         oldest,
-        has_older,
+        has_older: changes.is_none() && has_older,
+        change_cursor,
+        has_more_changes,
     })
 }
 
@@ -988,7 +1037,13 @@ pub(crate) fn read_run_content(
 ) -> Result<Value> {
     let run_id = args.run_id.to_string();
     let id = run_id.as_str();
-    let data = if let Some(event_id) = args.event_id {
+    let data = if let Some(entry_id) = &args.entry_id {
+        db.require_run(id)?;
+        serde_json::to_string(&required(
+            crate::timeline::entry(db, id, entry_id)?,
+            "Timeline entry not found in this run",
+        )?)?
+    } else if let Some(event_id) = args.event_id {
         db.require_run(id)?;
         let event = db
             .event_batch(id, event_id - 1, 1, RUN_PAGE_BYTES)?
@@ -1016,6 +1071,7 @@ pub(crate) fn read_run_content(
     let chunk = cairn_contracts::RunContentOutput {
         run_id,
         event_id: args.event_id,
+        entry_id: args.entry_id.clone(),
         encoding: "utf-8".into(),
         format: "json".into(),
         offset: offset as u64,

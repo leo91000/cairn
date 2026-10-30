@@ -209,7 +209,9 @@
       }
     ],
     "oldest": 40,
-    "hasOlder": true
+    "hasOlder": true,
+    "changeCursor": { "revision": 42, "id": null, "history": "v2:00000000-0000-4000-8000-000000000001:1" },
+    "hasMoreChanges": false
   },
   "input": { "runId": "00000000-0000-4000-8000-000000000001", "before": 9007199254740991 },
   "invalidEntries": [

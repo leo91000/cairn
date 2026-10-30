@@ -317,7 +317,7 @@ async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
     // One event can exceed the transport ceiling on its own. Its original content
     // must remain available, including escaped characters and multi-byte Unicode.
     let large = "\0\"\\🦊é".repeat(250_000);
-    let payload = json!({ "item": { "type": "agent_message", "text": large } });
+    let payload = json!({ "item": { "id": "large", "type": "agent_message", "text": large } });
     s.store
         .event(
             run_id,
@@ -384,19 +384,100 @@ async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
     assert!(saw_preview);
     backwards.sort_unstable();
     assert_eq!(backwards, expected);
-    // The same answer is one timeline card; its preview names the source event
-    // whose complete content read_run_content returns below.
+    // The same answer is one timeline card, readable in chunks as interpreted data.
     let timeline = mcp
         .bounded("read_run_timeline", json!({ "runId": run_id }))
         .await;
     assert_ne!(timeline["result"]["isError"], true);
-    let cards = result(&timeline)["entries"].as_array().unwrap().clone();
+    let timeline_page = result(&timeline);
+    let change_cursor = timeline_page["changeCursor"].clone();
+    let older = mcp
+        .bounded(
+            "read_run_timeline",
+            json!({"runId":run_id, "before":timeline_page["oldest"], "snapshot":change_cursor}),
+        )
+        .await;
+    assert_ne!(older["result"]["isError"], true, "{older}");
+    let cards = timeline_page["entries"].as_array().unwrap().clone();
     let reply = cards
         .iter()
         .find(|card| card["kind"] == "truncated")
         .unwrap();
     assert_eq!(reply["preview"]["kind"], "agentMessage");
     assert_eq!(reply["preview"]["source"], event_id);
+    let entry_id = reply["preview"]["id"].as_str().unwrap();
+    let mut offset = 0;
+    let mut digest = Value::Null;
+    let mut contents = String::new();
+    loop {
+        let mut input = json!({"runId": run_id, "entryId": entry_id, "offset": offset});
+        if !digest.is_null() {
+            input["sha256"] = digest.clone();
+        }
+        let response = mcp.bounded("read_run_content", input).await;
+        assert_ne!(response["result"]["isError"], true, "{response}");
+        let chunk = result(&response);
+        digest = chunk["sha256"].clone();
+        contents.push_str(chunk["data"].as_str().unwrap());
+        if chunk["nextOffset"].is_null() {
+            break;
+        }
+        offset = chunk["nextOffset"].as_u64().unwrap();
+    }
+    let complete: Value = serde_json::from_str(&contents).unwrap();
+    assert_eq!(complete["id"], entry_id);
+    assert_eq!(complete["content"]["text"], payload["item"]["text"]);
+    s.store
+        .event(
+            run_id,
+            &EventKind::ItemUpdated,
+            "Updated answer",
+            Some(
+                json!({"item": {"id": "large", "type": "agent_message", "text": "Updated answer"}}),
+            ),
+        )
+        .await
+        .unwrap();
+    let stale = mcp
+        .bounded(
+            "read_run_timeline",
+            json!({"runId":run_id, "before":timeline_page["oldest"], "snapshot":change_cursor}),
+        )
+        .await;
+    assert_eq!(stale["result"]["isError"], true, "{stale}");
+    s.store
+        .event(
+            run_id,
+            &EventKind::EngineNotice,
+            "Warning",
+            Some(json!({"type":"engine.notice", "level":"warning", "message":"Warning"})),
+        )
+        .await
+        .unwrap();
+    let changes = mcp
+        .bounded(
+            "read_run_timeline",
+            json!({"runId":run_id, "changes":change_cursor}),
+        )
+        .await;
+    assert_ne!(changes["result"]["isError"], true, "{changes}");
+    assert!(
+        result(&changes)["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|card| card["entry"]["content"]["notice"]["code"] == "engineNotice")
+    );
+    assert!(
+        result(&changes)["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|card| {
+                card["entry"]["id"] == entry_id
+                    && card["entry"]["content"]["text"] == "Updated answer"
+            })
+    );
     assert!(
         cards
             .iter()

@@ -10,12 +10,14 @@ export class LiveTimeline {
   cursor = 0
   events: RunEvent[] = []
   cards = new Map<string, TimelineEntry>()
+  private streamCards = new Map<string, TimelineEntry>()
 
   copy() {
     const next = new LiveTimeline()
     next.cursor = this.cursor
     next.events = this.events.slice()
     next.cards = new Map(this.cards)
+    next.streamCards = new Map(this.streamCards)
     return next
   }
 
@@ -23,6 +25,7 @@ export class LiveTimeline {
     this.cursor = cursor
     this.events = events.slice()
     this.cards = new Map(cards.map(card => [card.id, card]))
+    this.streamCards = new Map(this.cards)
   }
 
   /** Applies a live batch: events after the cursor, then the cards they changed. */
@@ -36,20 +39,23 @@ export class LiveTimeline {
 
     for (const change of changes) {
       if (change.kind === 'upsert') {
+        this.streamCards.set(change.entry.id, change.entry)
         this.upsert(change.entry)
         continue
       }
 
-      const card = this.cards.get(change.id)
+      const card = this.streamCards.get(change.id)
       if (card?.content.kind !== 'agentMessage')
         throw new Error('Missing streamed message baseline')
-      this.cards.set(change.id, {
+      const updated = {
         ...card,
         revision: change.revision,
         source: change.source,
         updatedAt: change.updatedAt,
         content: { ...card.content, text: card.content.text + change.text },
-      })
+      }
+      this.streamCards.set(change.id, updated)
+      this.upsert(updated)
     }
 
     this.cursor = Math.max(this.cursor, cursor)

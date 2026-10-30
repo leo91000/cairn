@@ -669,7 +669,7 @@ pub fn ui_events(events: Vec<crate::store::Event>) -> Vec<crate::store::Event> {
 /// Wire-only compression of streaming replies. Persisted cards and history pages
 /// keep complete text; a new connection or reset always receives whole cards.
 #[derive(Default)]
-struct Replies(HashMap<String, (String, Option<String>)>);
+struct Replies(HashMap<String, (String, Option<String>, bool)>);
 
 impl Replies {
     fn encode(&mut self, entries: Vec<TimelineEntry>, reset: bool) -> Vec<TimelineChange> {
@@ -680,7 +680,11 @@ impl Replies {
             .into_iter()
             .map(|entry| {
                 let TimelineContent::AgentMessage {
-                    text, state, via, ..
+                    text,
+                    state,
+                    via,
+                    echo,
+                    ..
                 } = &entry.content
                 else {
                     return TimelineChange::Upsert {
@@ -688,8 +692,8 @@ impl Replies {
                     };
                 };
                 let previous = self.0.remove(&entry.id);
-                let suffix = previous.as_ref().and_then(|(sent, sent_via)| {
-                    (*state == TimelineState::Running && sent_via == via)
+                let suffix = previous.as_ref().and_then(|(sent, sent_via, sent_echo)| {
+                    (*state == TimelineState::Running && sent_via == via && sent_echo == echo)
                         .then(|| text.strip_prefix(sent.as_str()))
                         .flatten()
                 });
@@ -707,7 +711,7 @@ impl Replies {
                 };
                 // Only a reply still streaming can grow; a finished one is sent whole.
                 if *state == TimelineState::Running {
-                    self.0.insert(entry.id, (text.clone(), via.clone()));
+                    self.0.insert(entry.id, (text.clone(), via.clone(), *echo));
                 }
                 change
             })

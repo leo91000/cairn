@@ -321,6 +321,25 @@ pub struct ReadRunTimelineInput {
     #[schemars(range(min = 1_i64, max = 9007199254740991_i64))]
     #[ts(type = "number")]
     pub before: i64,
+    /// Resume the change feed from a cursor returned by this operation.
+    #[serde(default)]
+    pub changes: Option<TimelineCursor>,
+    /// Pin older pages to the first page's cursor. A change requires restarting.
+    #[serde(default)]
+    pub snapshot: Option<TimelineCursor>,
+}
+
+/// A cursor over card revisions, bound to the retained event history.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TimelineCursor {
+    #[ts(type = "number")]
+    #[serde(deserialize_with = "crate::wire_integer")]
+    #[schemars(range(min = 0_i64, max = 9007199254740991_i64))]
+    pub revision: i64,
+    /// None means all cards at this revision have been delivered.
+    pub id: Option<String>,
+    pub history: String,
 }
 
 fn timeline_end() -> i64 {
@@ -329,7 +348,28 @@ fn timeline_end() -> i64 {
 
 impl ReadRunTimelineInput {
     pub fn validate(&self) -> Result<(), String> {
-        if self.before < 1 {
+        if self.before < 1
+            || (self.changes.is_some() && self.snapshot.is_some())
+            || (self.before != timeline_end() && self.changes.is_none() && self.snapshot.is_none())
+            || self
+                .snapshot
+                .as_ref()
+                .is_some_and(|cursor| cursor.id.is_some())
+            || self
+                .changes
+                .iter()
+                .chain(self.snapshot.iter())
+                .any(|cursor| {
+                    cursor.revision < 0
+                        || cursor.revision > timeline_end()
+                        || cursor.history.is_empty()
+                        || cursor.history.len() > 200
+                        || cursor
+                            .id
+                            .as_ref()
+                            .is_some_and(|id| id.is_empty() || id.len() > 1024)
+                })
+        {
             return Err("Invalid timeline cursor.".into());
         }
         Ok(())
@@ -345,6 +385,9 @@ pub struct RunTimelineOutput {
     #[ts(type = "number")]
     pub oldest: i64,
     pub has_older: bool,
+    /// Save the first page's cursor, then request changes after loading the pages.
+    pub change_cursor: TimelineCursor,
+    pub has_more_changes: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
@@ -357,7 +400,7 @@ pub enum TimelineEntryPage {
     Complete {
         entry: Box<TimelineEntry>,
     },
-    /// The card's identity and cursor; read its source event with read_run_content.
+    /// The card's identity and cursor; read the card by entryId with read_run_content.
     Truncated {
         preview: TimelinePreview,
         #[ts(type = "number")]

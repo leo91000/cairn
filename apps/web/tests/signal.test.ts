@@ -460,6 +460,25 @@ describe('the working indicator', () => {
     expect(backgroundWait([...announced, command(3, 3000, 'cat log', true)])).toBeNull()
     expect(backgroundWait([...announced, user(3, 3000)])).toBeNull()
     expect(backgroundWait([...announced, { ...user(3, 3000), type: 'diagnostic' }])).not.toBeNull()
+    const reply = {
+      id: 'reply',
+      runId: 'run',
+      position: 1,
+      revision: 3,
+      source: 3,
+      turn: 1,
+      attempt: 0,
+      createdAt: 1000,
+      updatedAt: 3000,
+      content: {
+        kind: 'agentMessage' as const,
+        itemId: 'reply',
+        state: 'running' as const,
+        text: 'Resuming',
+      },
+    }
+    expect(backgroundWait(announced, [reply])).toBeNull()
+    expect(backgroundWait(announced, [{ ...reply, source: 1, revision: 1 }])).not.toBeNull()
   })
 
   it('labels background waits in the activity log', () => {

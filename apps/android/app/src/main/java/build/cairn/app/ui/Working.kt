@@ -88,7 +88,7 @@ internal fun backgroundWait(
     // A reply streaming after the announcement shows the agent at work again.
     if (
         cards.any {
-            it.content is build.cairn.contracts.TimelineContent.B && it.position > announcement.id
+            it.content is build.cairn.contracts.TimelineContent.B && it.source > announcement.id
         }
     )
         return null

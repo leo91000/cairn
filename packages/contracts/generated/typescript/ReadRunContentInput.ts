@@ -4,6 +4,10 @@ import type { RunId } from './RunId'
 export interface ReadRunContentInput {
   runId: RunId
   eventId?: number | null
+  /**
+   * Read a complete interpreted timeline card instead of a raw event.
+   */
+  entryId?: string | null
   offset: number
   sha256: string | null
 }

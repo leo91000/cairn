@@ -104,7 +104,6 @@ describe('engine status', () => {
       createdAt: 1,
       type: 'engine.retry',
       text: '{"retryAt":123}',
-      payload: null,
     }
     expect(noticeArtifact(entry, entry.content.notice, source).blocks).toEqual([
       { label: 'Output', code: source.text, language: 'plaintext' },

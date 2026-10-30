@@ -77,6 +77,30 @@ it('refuses appended text without the baseline this stream delivered', () => {
   }])).toThrow('Missing streamed message baseline')
 })
 
+it('keeps the stream baseline separate from a newer overlapping history page', () => {
+  const live = new LiveTimeline()
+  live.apply([], [{ kind: 'upsert', entry: reply(3, 3, 'A') }], 3)
+  live.merge([], [reply(3, 5, 'ABC')])
+  live.apply([], [{
+    kind: 'append',
+    id: 'message:1:3',
+    revision: 4,
+    source: 4,
+    updatedAt: 4,
+    text: 'B',
+  }], 4)
+  expect(live.entries()).toMatchObject([{ revision: 5, content: { text: 'ABC' } }])
+  live.apply([], [{
+    kind: 'append',
+    id: 'message:1:3',
+    revision: 6,
+    source: 6,
+    updatedAt: 6,
+    text: 'CD',
+  }], 6)
+  expect(live.entries()).toMatchObject([{ revision: 6, content: { text: 'ABCD' } }])
+})
+
 it('orders cards by first appearance, whatever page delivered them', () => {
   const live = new LiveTimeline()
   live.apply([], [{ kind: 'upsert', entry: reply(20, 20, 'Later') }], 20)

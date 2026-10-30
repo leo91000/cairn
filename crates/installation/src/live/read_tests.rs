@@ -152,6 +152,41 @@ async fn measure_conversation_reads_by_count_and_snapshot_size() {
     }
 }
 
+#[test]
+fn a_streaming_reply_resends_non_text_changes_whole() {
+    let reply = |revision: i64, text: &str, echo: bool| TimelineEntry {
+        id: "message:1:a".into(),
+        run_id: "run".into(),
+        position: 1,
+        revision,
+        source: revision,
+        turn: 1,
+        attempt: 1,
+        created_at: 1,
+        updated_at: revision,
+        content: TimelineContent::AgentMessage {
+            item_id: "a".into(),
+            text: text.into(),
+            state: TimelineState::Running,
+            via: None,
+            echo,
+        },
+    };
+    let mut replies = Replies::default();
+    assert!(matches!(
+        replies.encode(vec![reply(1, "One", false)], false)[0],
+        TimelineChange::Upsert { .. }
+    ));
+    assert!(matches!(
+        replies.encode(vec![reply(2, "One two", false)], false)[0],
+        TimelineChange::Append { .. }
+    ));
+    assert!(matches!(
+        replies.encode(vec![reply(3, "One two!", true)], false)[0],
+        TimelineChange::Upsert { .. }
+    ));
+}
+
 #[tokio::test]
 async fn list_cache_coalesces_revisions_and_preserves_account_and_external_refreshes() {
     let root = tempfile::tempdir().unwrap();

@@ -331,7 +331,7 @@ export function backgroundWait(events: RunEvent[], cards: TimelineEntry[] = []):
     return null
   const announcement = events[index]!
   // A reply streaming after the announcement shows the agent at work again.
-  if (cards.some(card => card.content.kind === 'agentMessage' && card.position > announcement.id))
+  if (cards.some(card => card.content.kind === 'agentMessage' && card.source > announcement.id))
     return null
   const tasks = Array.isArray(announcement.payload?.tasks) ? announcement.payload.tasks : []
   const descriptions = tasks.map((task) => {

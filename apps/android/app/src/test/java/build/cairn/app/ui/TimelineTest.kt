@@ -10,6 +10,14 @@ import org.junit.Test
 
 class TimelineTest {
     @Test
+    fun `run log retains a changed notice whose source is outside the loaded window`() {
+        val (events, cards) = timelineCorpus().first()
+        val card = cards.first { it.content is TimelineContent.C }
+        val entries = timelineEntries(events.filter { it.id != card.source }, cards = listOf(card))
+        assertEquals(1, entries.count { it.card?.id == card.id })
+    }
+
+    @Test
     fun `the conversation and run log present the server's cards for the shared corpus`() {
         val runs = timelineCorpus()
         fun shown(index: Int) =

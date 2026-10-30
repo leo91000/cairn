@@ -897,7 +897,12 @@ families. History revisions become `v2:` so saved `v1:` histories reload with ca
 
 `read_run_timeline` (`read` scope) gives public MCP and `cairn_installation` the
 same cards, newest page first, with `complete`/`truncated` pages bounded like the
-other run windows; a truncated card names its source event for `read_run_content`.
+other run windows; a truncated card can be read by `entryId` through `read_run_content`.
+Save the first page's `changeCursor` and pass it as `snapshot` while loading older
+pages. If the timeline changes during pagination, restart from the newest page.
+After paging, pass the saved cursor as `changes` and follow returned cursors until
+`hasMoreChanges` is false. Replace cards by their latest revision. A changed
+retained-history revision also requires a restart.
 Installation grants are rechecked in the read transaction, like `read_run_history`.
 
 `timeline-contracts.json` qualifies the DTOs in Rust, JSON Schema/TS and Kotlin.

@@ -407,6 +407,30 @@ pub fn changed(db: &Db<'_>, run: &str, after: i64, upto: i64) -> Result<Vec<Time
     )
 }
 
+/// Read one interpreted card, including its hydrated content.
+pub(crate) fn entry(db: &Db<'_>, run: &str, id: &str) -> Result<Option<TimelineEntry>> {
+    Ok(
+        entries(db, run, "t.run_id=?1 AND t.id=?2", params![run, id])?
+            .into_iter()
+            .next(),
+    )
+}
+
+pub(crate) fn changes_after(
+    db: &Db<'_>,
+    run: &str,
+    revision: i64,
+    id: Option<&str>,
+    limit: i64,
+) -> Result<Vec<TimelineEntry>> {
+    entries(
+        db,
+        run,
+        "t.run_id=?1 AND (t.revision>?2 OR (t.revision=?2 AND ?3 IS NOT NULL AND t.id>?3)) ORDER BY t.revision,t.id LIMIT ?4",
+        params![run, revision, id, limit],
+    )
+}
+
 /// The cards of a window that starts at `oldest`, including a card that began
 /// before it and changed within it, such as a reply still streaming.
 pub fn window(db: &Db<'_>, run: &str, oldest: i64) -> Result<Vec<TimelineEntry>> {

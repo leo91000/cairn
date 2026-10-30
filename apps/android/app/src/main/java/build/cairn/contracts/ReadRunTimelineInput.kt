@@ -7,7 +7,9 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class ReadRunTimelineInput(
     val before: Long = 9007199254740991,
+    val changes: TimelineCursor? = null,
     val runId: String,
+    val snapshot: TimelineCursor? = null,
 ) {
     init {
         require(before in 1L..9007199254740991L)

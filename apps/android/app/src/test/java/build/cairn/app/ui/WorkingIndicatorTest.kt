@@ -197,6 +197,26 @@ class WorkingIndicatorTest {
         val announced = listOf(user(1, 1000), waiting(2, 2000, "Build"))
         assertNull(backgroundWait(emptyList()))
         assertNotNull(backgroundWait(announced))
+        val reply =
+            build.cairn.app.data.TimelineCard(
+                id = "reply",
+                runId = "run",
+                position = 1,
+                revision = 3,
+                source = 3,
+                turn = 1,
+                attempt = 0,
+                createdAt = 1000,
+                updatedAt = 3000,
+                content =
+                    build.cairn.contracts.TimelineContent.B(
+                        itemId = "reply",
+                        state = "running",
+                        text = "Resuming",
+                    ),
+            )
+        assertNull(backgroundWait(announced, listOf(reply)))
+        assertNotNull(backgroundWait(announced, listOf(reply.copy(source = 1, revision = 1))))
         assertNull(backgroundWait(announced + waiting(3, 3000)))
         assertNull(backgroundWait(announced + tool(3, "cat log", running = true)))
         assertNull(backgroundWait(announced + user(3, 3000)))

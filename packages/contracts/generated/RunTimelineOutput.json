@@ -269,6 +269,34 @@
         }
       ]
     },
+    "TimelineCursor": {
+      "additionalProperties": false,
+      "description": "A cursor over card revisions, bound to the retained event history.",
+      "properties": {
+        "history": {
+          "type": "string"
+        },
+        "id": {
+          "description": "None means all cards at this revision have been delivered.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "revision",
+        "id",
+        "history"
+      ],
+      "type": "object"
+    },
     "TimelineEntry": {
       "description": "One card of a run's timeline. Its identity is stable across pages, turns and\nreconnections; a newer revision of the same card replaces the older one.",
       "properties": {
@@ -362,7 +390,7 @@
           "type": "object"
         },
         {
-          "description": "The card's identity and cursor; read its source event with read_run_content.",
+          "description": "The card's identity and cursor; read the card by entryId with read_run_content.",
           "properties": {
             "kind": {
               "const": "truncated",
@@ -640,11 +668,22 @@
   },
   "description": "Tool windows use the same cards with explicit previews for oversized content.",
   "properties": {
+    "changeCursor": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/TimelineCursor"
+        }
+      ],
+      "description": "Save the first page's cursor, then request changes after loading the pages."
+    },
     "entries": {
       "items": {
         "$ref": "#/definitions/TimelineEntryPage"
       },
       "type": "array"
+    },
+    "hasMoreChanges": {
+      "type": "boolean"
     },
     "hasOlder": {
       "type": "boolean"
@@ -658,7 +697,9 @@
   "required": [
     "entries",
     "oldest",
-    "hasOlder"
+    "hasOlder",
+    "changeCursor",
+    "hasMoreChanges"
   ],
   "title": "RunTimelineOutput",
   "type": "object"
