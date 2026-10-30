@@ -1386,10 +1386,7 @@ internal fun ChatPage(
                                         }
                                     }
                                     chat
-                                        ?.takeIf {
-                                            !readOnly &&
-                                                (quota != null || it.codingAgentSwitch != null)
-                                        }
+                                        ?.takeIf { quota != null || it.codingAgentSwitch != null }
                                         ?.let { currentChat ->
                                             item(key = "quota:${chat?.run?.id}") {
                                                 ChatQuotaRecovery(
@@ -1398,6 +1395,7 @@ internal fun ChatPage(
                                                     quota,
                                                     followConversation = { chooseProvider("") },
                                                     canManage = state.isOwner,
+                                                    readOnly = readOnly,
                                                     busy = state.busy,
                                                     openConnections = openConnections,
                                                     resume = {

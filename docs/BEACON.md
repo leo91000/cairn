@@ -340,11 +340,14 @@ use it** section on web and Android ([ADR-0075](adr/0075-plugin-hooks-rules-and-
 A new agent is the owner's alone; at rollout, the members of the first membership
 check after the upgrade kept the existing agents (someone invited before that check,
 which only a Beacon outage can delay, counts as an existing member). Starting,
-continuing, steering, answering, launching by hand, deleting or restoring a
-conversation and cleaning up a task run's workspace require access to its agent;
-creating or editing a task requires access to the agent it is saved on, so an author
-can move a suspended task to an agent they may use. Every member still sees every
-conversation and can pause, archive or stop any work. Renaming a conversation and
+continuing (sending or editing a queued message, attaching files, resuming a paused
+queue, retrying or resuming a run, a fresh session, compacting, switching the coding
+agent), steering, answering or cancelling an agent's question, launching by hand,
+deleting or restoring a conversation and cleaning up a task run's workspace require
+access to its agent; creating or editing a task requires access to the agent it is
+saved on, so an author can move a suspended task to an agent they may use. Every
+member still sees every conversation and why it stopped, and can pause or stop any
+conversation or run and pause or archive any task. Renaming a conversation and
 removing a message still waiting in its queue stay open to every member too: neither
 makes the agent work. Access is checked when a message is sent or queued: a message a member queued
 while they had access is still delivered after the owner removes it, unless someone

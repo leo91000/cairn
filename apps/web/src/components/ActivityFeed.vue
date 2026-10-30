@@ -506,11 +506,12 @@ defineExpose({
               </template>
 
               <ChatQuotaRecovery
-                v-if="chat && chatId && !readOnly"
+                v-if="chat && chatId"
                 :chat-id="chatId"
                 :quota="quota"
                 :progress="codingAgentSwitch"
                 :can-manage="!!canManageAccounts"
+                :read-only="readOnly"
                 :busy="busy"
                 @resume="emit('resumeQuota')"
                 @switched="emit('codingAgentSwitched', $event)"

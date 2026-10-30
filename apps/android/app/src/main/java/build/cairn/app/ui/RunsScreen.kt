@@ -162,6 +162,16 @@ fun RunScreen(
             ?.finishedAt
             ?.let { "task:${run.taskId}" to it },
     )
+    // Members direct only runs whose agent they may use; a conversation's run follows its
+    // conversation, including a delegated task's requester (ADR-0075).
+    val chats = LocalFilSnapshot.current?.conversations?.state?.chats.orEmpty()
+    val directable =
+        run?.let { current ->
+            chats
+                .find { it.id == current.taskId }
+                ?.let { canDirectChat(state.usableAgents, it, chats) }
+                ?: canUseAgent(state.usableAgents, current.snapshot?.agent?.id)
+        } ?: true
     val events = live.events
     val more = live.catchingUp
     val timelineKeys = remember(id) { TimelineKeys() }
@@ -266,10 +276,7 @@ fun RunScreen(
                                     details = true
                                 },
                             )
-                            // Members direct only runs whose agent they may use; a retry
-                            // starts the task again on its current agent (ADR-0075).
-                            val directable =
-                                canUseAgent(state.usableAgents, current.snapshot?.agent?.id)
+                            // A retry starts the task again on its current agent (ADR-0075).
                             val retryable =
                                 state.tasks
                                     .find { it.id == current.taskId }
@@ -577,7 +584,7 @@ fun RunScreen(
                             // Cleaning up needs access to the run's agent (ADR-0075).
                             if (
                                 !current.active &&
-                                    canUseAgent(state.usableAgents, current.snapshot?.agent?.id) &&
+                                    directable &&
                                     current.workspace != null &&
                                     !current.isolated &&
                                     (current.snapshot?.task?.worktree == true)

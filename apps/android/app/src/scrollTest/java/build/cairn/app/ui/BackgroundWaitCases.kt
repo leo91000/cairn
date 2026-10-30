@@ -209,6 +209,20 @@ abstract class BackgroundWaitCases {
         }
 
     @Test
+    fun aMemberWithoutAccessSeesWhyTheConversationStoppedWithoutItsActions() =
+        conversation("failed", quota = true, readOnly = true) {
+            compose.onNodeWithTag("chat-quota").assertIsDisplayed()
+            compose.onNodeWithText("Limite de dépense Claude Code atteinte").assertExists()
+            compose.onNodeWithText("Reprendre la conversation").assertDoesNotExist()
+            compose
+                .onNodeWithText(
+                    "Demandez au propriétaire de l’installation de vérifier les comptes."
+                )
+                .assertDoesNotExist()
+            compose.onNodeWithText("L’agent a rencontré une erreur").assertDoesNotExist()
+        }
+
+    @Test
     fun savedQuotaFailureOffersManualResumeInsteadOfPromisingAutomaticRecovery() =
         conversation("failed", quota = true) { server ->
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
@@ -599,6 +613,8 @@ abstract class BackgroundWaitCases {
         initialAlternatives: String? = null,
         rejectSwitch: Boolean = false,
         paused: Boolean = false,
+        // A member who cannot use the conversation's agent.
+        readOnly: Boolean = false,
         reason: String = "Attendre la CI",
         history: ((ChatWakeup?, Long) -> List<RunEvent>)? = null,
         check: (MockWebServer) -> Unit,
@@ -861,7 +877,7 @@ abstract class BackgroundWaitCases {
                             Box(Modifier.safeDrawingPadding()) {
                                 ChatScreen(
                                     vm,
-                                    state,
+                                    if (readOnly) state.copy(usableAgents = emptyList()) else state,
                                     "6cc6efab-10af-54c7-a91b-dcff664166a1",
                                     openChat = {},
                                     openRun = {},
