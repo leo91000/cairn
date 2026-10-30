@@ -63,6 +63,8 @@ badge. The proposal appears as a **Proposed plan** card; **Implement** on the la
 one queues an ordinary message in the same conversation, which runs with the agent's
 usual permissions. Turning **Plan** off and writing a message does the same.
 
+A selected or saved Plan choice is never silently converted to an ordinary request. If the current engine cannot run Plan (OpenCode), sending is blocked until you choose Codex or Claude Code, or explicitly turn Plan off. The same rule applies after restoring a draft or switching engines.
+
 Cairn enforces the boundary rather than asking the model to respect it. During a plan
 turn the engine's sandbox is read-only with no shell network access, whatever the
 agent's access; MCP connections only offer tools they declare read-only

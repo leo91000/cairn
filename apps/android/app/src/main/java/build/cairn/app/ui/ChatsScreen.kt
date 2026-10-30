@@ -584,7 +584,9 @@ internal fun ChatPage(
         speed = ""
     }
     val planAvailable = codingAgent(chosenProvider).planTurns
-    val planRequested = planning && planAvailable
+    // Availability blocks submission; it never removes the requested boundary.
+    val planRequested = planning
+    val planBlocked = planRequested && !planAvailable
     // A plan request cannot join a turn that can already change files.
     val steerBlocked = planRequested && chat?.run?.chatExecution?.plan != true
     val skillOptions =
@@ -688,6 +690,9 @@ internal fun ChatPage(
     }
     fun send(mode: String, plan: Boolean = planRequested) {
         vm.perform {
+            require(!plan || planAvailable) {
+                "Le mode Plan nécessite Codex ou Claude Code. Désactivez Plan pour une demande ordinaire."
+            }
             val chatId =
                 id
                     ?: createdId
@@ -1604,6 +1609,14 @@ internal fun ChatPage(
                                             color = MaterialTheme.colorScheme.outlineVariant,
                                         )
                                     }
+                                    if (planBlocked)
+                                        Text(
+                                            "Le mode Plan nécessite Codex ou Claude Code. Choisissez un assistant compatible ou désactivez Plan pour une demande ordinaire.",
+                                            Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                                                .testTag("plan-unavailable"),
+                                            color = MaterialTheme.colorScheme.error,
+                                            style = MaterialTheme.typography.bodySmall,
+                                        )
                                     if (attachments.isNotEmpty() || rejected.isNotEmpty())
                                         ComposerAttachments(
                                             vm,
@@ -1755,7 +1768,7 @@ internal fun ChatPage(
                                             label = { Text("Plan") },
                                             modifier =
                                                 Modifier.padding(end = 4.dp).testTag("plan-toggle"),
-                                            enabled = !state.busy && planAvailable,
+                                            enabled = !state.busy && (planAvailable || planning),
                                             leadingIcon = {
                                                 Icon(
                                                     CairnIcons.Tasks,
@@ -1765,7 +1778,8 @@ internal fun ChatPage(
                                             },
                                         )
                                         val canSend =
-                                            !state.busy &&
+                                            !planBlocked &&
+                                                !state.busy &&
                                                 rejected.isEmpty() &&
                                                 uploadProgress.isEmpty() &&
                                                 (draft.isNotBlank() || attachments.isNotEmpty()) &&

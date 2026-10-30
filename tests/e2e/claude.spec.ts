@@ -619,10 +619,11 @@ test('Claude default names follow available metadata without pinning the model',
 
 test('plan drafts keep their mode across conversation switches and reloads', async ({ page, workspace }) => {
   test.setTimeout(120000)
+  await connectClaude(workspace, 'Draft restoration', 'fixture-code:plan-drafts@example.test')
   const first = await workspace.api('/api/chats', 'POST', {})
   const second = await workspace.api('/api/chats', 'POST', {})
   for (const [chat, text] of [[first, 'Plan draft conversation'], [second, 'Ordinary draft conversation']] as const) {
-    await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: crypto.randomUUID(), text })
+    await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: crypto.randomUUID(), text, provider: 'claude' })
     await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 30000 }).toBe('succeeded')
     await workspace.api(`/api/chats/${chat.id}/pause`, 'POST', { paused: true })
   }
@@ -656,6 +657,68 @@ test('plan drafts keep their mode across conversation switches and reloads', asy
   await page.getByRole('button', { name: 'Queue', exact: true }).click()
   await expect.poll(async () => (await workspace.api(`/api/chats/${second.id}`)).messages.find((m: { text: string }) => m.text === 'Implement the separate ordinary draft')).toMatchObject({ text: 'Implement the separate ordinary draft' })
   const ordinary = (await workspace.api(`/api/chats/${second.id}`)).messages.find((m: { text: string }) => m.text === 'Implement the separate ordinary draft')
+  expect(ordinary.plan).not.toBe(true)
+})
+
+test('a Plan draft never becomes ordinary when its engine resolves to OpenCode', async ({ page, workspace }) => {
+  test.setTimeout(120000)
+  await workspace.api('/api/accounts', 'POST', {
+    provider: 'opencode',
+    name: 'Plan intent control',
+    modelProvider: 'opencode',
+    apiKey: 'synthetic-plan-intent-key',
+  })
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  const initial = crypto.randomUUID()
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
+    id: initial,
+    text: 'Ordinary OpenCode control',
+    provider: 'opencode',
+    model: 'opencode/ling-3.1-flash-free',
+  })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 30000 }).toBe('succeeded')
+  await workspace.api(`/api/chats/${chat.id}/pause`, 'POST', { paused: true })
+  await useRelayForHttpMocks(page)
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  const picker = page.getByRole('button', { name: /^Agent, model, reasoning and speed:/ })
+  const choose = async (provider: string) => {
+    await picker.click()
+    const menu = page.getByRole('dialog', { name: 'Agent & model' })
+    await menu.getByRole('radio', { name: provider, exact: true }).click()
+    await menu.getByRole('button', { name: 'Close', exact: true }).click()
+  }
+
+  await expect(picker).toHaveAccessibleName(/OpenCode/)
+  await choose('Codex')
+  const toggle = page.getByRole('button', { name: 'Plan first' })
+  const message = page.getByRole('textbox', { name: 'Message' })
+  await toggle.click()
+  await message.fill('Keep this request read-only')
+  await page.reload()
+  await expect(picker).toHaveAccessibleName(/OpenCode/)
+  await expect(message).toHaveValue('Keep this request read-only')
+  const attempt = page.waitForRequest(request => request.method() === 'POST' && request.url().endsWith(`/chats/${chat.id}/messages`), { timeout: 1000 }).catch(() => null)
+  await message.press('Control+Enter')
+  const submitted = await attempt
+  expect(submitted?.postDataJSON() ?? null).toBeNull()
+  await expect(toggle).toHaveAttribute('aria-pressed', 'true')
+  await expect(page.getByTestId('plan-unavailable')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Queue', exact: true })).toBeDisabled()
+  expect((await workspace.api(`/api/chats/${chat.id}`)).run.chatExecution.messageId).toBe(initial)
+  await choose('Codex')
+  await expect(toggle).toHaveAttribute('aria-pressed', 'true')
+  await page.getByRole('button', { name: 'Queue', exact: true }).click()
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).messages.find((m: { text: string }) => m.text === 'Keep this request read-only')?.plan).toBe(true)
+  await message.fill('Only run ordinarily after I turn Plan off')
+  await choose('OpenCode')
+  await expect(toggle).toHaveAttribute('aria-pressed', 'true')
+  await expect(page.getByRole('button', { name: 'Queue', exact: true })).toBeDisabled()
+  await toggle.click()
+  await expect(toggle).toHaveAttribute('aria-pressed', 'false')
+  await page.getByRole('button', { name: 'Queue', exact: true }).click()
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).messages.find((m: { text: string }) => m.text === 'Only run ordinarily after I turn Plan off')).toMatchObject({ provider: 'opencode' })
+  const ordinary = (await workspace.api(`/api/chats/${chat.id}`)).messages.find((m: { text: string }) => m.text === 'Only run ordinarily after I turn Plan off')
   expect(ordinary.plan).not.toBe(true)
 })
 

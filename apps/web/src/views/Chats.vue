@@ -292,7 +292,6 @@ const dragging = ref(0)
 const hasDraft = computed(() => !!draft.value.trim() || attachments.value.length > 0)
 // Rejected files must be removed before sending; nothing is sent while a file uploads.
 const attachmentsBlocked = computed(() => Object.values(attachmentStates.value).some(item => item.status === 'rejected' || item.status === 'uploading'))
-const canSend = computed(() => !inactive.value && (!route.params.id || (detail.value?.id === route.params.id || detail.value?.slug === route.params.id)) && !live.error.value && (!!draft.value.trim() || attachments.value.length > 0) && !attachmentsBlocked.value)
 
 function removeAttachment(id: string) {
   if (previews.value[id])
@@ -468,7 +467,11 @@ const chosenProvider = computed({
 })
 const switchingProvider = computed(() => !!detail.value?.run && chosenProvider.value !== currentProvider.value)
 const planAvailable = computed(() => providers[chosenProvider.value].planTurns)
-const planRequested = computed(() => planning.value && planAvailable.value)
+// Availability can block submission, but must not erase the requested boundary.
+const planRequested = computed(() => planning.value)
+const planBlocked = computed(() => planRequested.value && !planAvailable.value)
+const planUnavailableMessage = 'Plan requires Codex or Claude Code. Choose a compatible agent, or turn Plan off to send an ordinary request.'
+const canSend = computed(() => !planBlocked.value && !inactive.value && (!route.params.id || (detail.value?.id === route.params.id || detail.value?.slug === route.params.id)) && !live.error.value && (!!draft.value.trim() || attachments.value.length > 0) && !attachmentsBlocked.value)
 // A plan request cannot join a turn that can already change files.
 const steerBlocked = computed(() => planRequested.value && !detail.value?.run?.chatExecution?.plan)
 const conversationAssistant = computed(() => detail.value?.run?.snapshot.agent)
@@ -1417,6 +1420,14 @@ function key(event: KeyboardEvent) {
                   class="mb-1.5"
                   @remove="removeAttachment"
                 />
+                <p
+                  v-if="planBlocked"
+                  role="status"
+                  class="px-2 text-sm text-danger"
+                  data-testid="plan-unavailable"
+                >
+                  {{ planUnavailableMessage }}
+                </p>
                 <SkillTextarea
                   ref="textarea"
                   v-model="draft"
@@ -1454,8 +1465,8 @@ function key(event: KeyboardEvent) {
                       :class="planRequested ? 'bg-soft text-accent' : 'text-muted hover:bg-hover'"
                       :aria-pressed="planRequested"
                       aria-label="Plan first"
-                      :title="planAvailable ? 'Plan first: the agent explores and proposes an approach without changing files, using the network from its shell or calling tools with external effects. Implement it afterwards in this conversation.' : `${providers[chosenProvider].label} cannot run plan turns: Cairn cannot enforce a read-only boundary for it.`"
-                      :disabled="busy || !planAvailable"
+                      :title="planAvailable ? 'Plan first: the agent explores and proposes an approach without changing files, using the network from its shell or calling tools with external effects. Implement it afterwards in this conversation.' : planUnavailableMessage"
+                      :disabled="busy || (!planAvailable && !planRequested)"
                       data-testid="plan-toggle"
                       @click="planning = !planning"
                     >
