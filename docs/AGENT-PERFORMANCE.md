@@ -320,3 +320,30 @@ SSE framing and event serialization. Compare the same harness/profile/host on a
 reference; do not infer production savings from one trial. Use the existing
 `conversation_reads` aggregate to compare page read/queue time, list rebuilds and
 coalescing after deployment.
+
+## Client performance report ingress
+
+Beacon emits a process-wide `client_performance_ingress` record every 30 seconds,
+including idle windows. Only POST requests to the account performance-report
+endpoint are counted. Production applies the observer once, outside the final
+host guard, browser security and JSON extraction,
+so rejected uploads remain visible even when the report handler never runs.
+It does not read request bodies, headers or query strings, and records no account,
+window, installation or device identifiers. Counters are fixed-size, in memory,
+and reset on process restart; collection performs no database operation.
+
+`started`, `completed` and `abandoned` count handler-future events within the
+window. `active` survives window boundaries; `max_active` includes requests
+already active at the start of the window. Completions can therefore exceed
+starts in a window. `duration_us` and `max_duration_us` include completed and
+abandoned handler lifetimes, through response creation, excluding body transfer.
+
+`accepted` means an HTTP 204 response was produced, including stale sequence
+retries that do not update a stored window. It is not a count of distinct reports
+or database changes, nor proof that the client received the response. Rejections
+distinguish invalid input (400/422), unauthenticated (401), forbidden (403),
+too large (413), unsupported content type (415), limited
+(429), server errors (5xx), and other outcomes. An abandoned future has no HTTP
+status and is counted separately. Zero activity establishes that no upload
+entered this observer; it does not explain whether a client was closed, offline
+or had opted out.

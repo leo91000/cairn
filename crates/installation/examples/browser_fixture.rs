@@ -111,8 +111,14 @@ async fn main() -> Result<()> {
             )?;
             connection.busy_timeout(std::time::Duration::from_secs(5))?;
             connection.execute_batch("PRAGMA foreign_keys=ON;")?;
-            let transaction =
-                connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            // Reading a run needs a consistent snapshot, not the writer lock.
+            // Writes still acquire their lock before reading mutable state.
+            let behavior = if operation == "run" {
+                rusqlite::TransactionBehavior::Deferred
+            } else {
+                rusqlite::TransactionBehavior::Immediate
+            };
+            let transaction = connection.transaction_with_behavior(behavior)?;
             let db = Db(&transaction);
             let string = |index: usize| args.get(index).and_then(Value::as_str).unwrap_or("");
             let arg = |index: usize| args.get(index).cloned().unwrap_or(Value::Null);

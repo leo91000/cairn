@@ -8,6 +8,7 @@ extern crate self as cairn_beacon;
 
 mod account;
 mod audit;
+mod client_performance_ingress;
 mod fcm;
 mod hosts;
 pub mod html;
@@ -25,6 +26,7 @@ mod sharing;
 pub mod stun;
 mod telemetry;
 
+pub use client_performance_ingress::observe_performance_uploads;
 pub use fcm::{AccountPushSender, FcmPushSender};
 pub use hosts::InstallationHosts;
 pub use network::TrustedProxies;

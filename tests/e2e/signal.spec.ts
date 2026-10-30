@@ -1,6 +1,9 @@
 import type { Page, TestInfo } from '@playwright/test'
 import type { Workspace } from './fixtures'
+import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import { once } from 'node:events'
+import { join } from 'node:path'
 import { MAIN_AGENT_ID } from '../../packages/contracts/constants'
 import {
   signIn as authenticateWorkspace,
@@ -10,6 +13,29 @@ import {
   useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
+
+test('fixture reads a run while another process holds the SQLite writer', async ({ workspace }) => {
+  const existing = workspace.service.store.runs()[0]
+  expect(existing).toBeDefined()
+  const script = `import sqlite3, sys
+connection = sqlite3.connect(sys.argv[1], timeout=5)
+connection.execute('BEGIN IMMEDIATE')
+print('ready', flush=True)
+sys.stdin.read()
+connection.rollback()
+`
+  const holder = spawn('python3', ['-u', '-c', script, join(workspace.service.config.dataDir, 'manager.db')], { stdio: ['pipe', 'pipe', 'pipe'] })
+  const closed = once(holder, 'close')
+  try {
+    const [ready] = await once(holder.stdout, 'data')
+    expect(ready.toString()).toContain('ready')
+    expect(workspace.service.store.run(existing.id)).toMatchObject({ id: existing.id })
+  }
+  finally {
+    holder.stdin.end()
+    await closed
+  }
+})
 
 // A failed mission needs the user; a hanging conversation keeps an agent working.
 async function seed(workspace: Workspace) {
