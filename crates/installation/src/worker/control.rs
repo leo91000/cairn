@@ -289,6 +289,7 @@ fn requeue(db: &Db<'_>, id: &str) -> Result<Value> {
         checkpoint.controller_recoveries = None;
         checkpoint.controller_recovery_reservation = None;
         checkpoint.controller_observation = None;
+        checkpoint.turn_pending = Some(true);
         if !before_launch {
             checkpoint.output_interrupted = None;
             checkpoint.completed = Some(false);

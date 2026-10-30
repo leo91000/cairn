@@ -1078,6 +1078,7 @@ fn continue_run(
     }
     checkpoint.completed = Some(false);
     checkpoint.output_interrupted = None;
+    checkpoint.turn_pending = Some(true);
     checkpoint.terminal_code = Some(None);
     checkpoint.controller_recoveries = None;
     checkpoint.controller_recovery_reservation = None;

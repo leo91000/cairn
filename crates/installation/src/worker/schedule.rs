@@ -447,11 +447,9 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
             && run["wakeup"].is_object()
             && checkpoint.as_ref().is_some_and(RunCheckpoint::completed));
     // A newly queued turn has not spent any of its active execution budget yet.
-    let new_turn = checkpoint.as_ref().is_some_and(|saved| {
-        !saved.completed()
-            && saved.terminal_code == Some(None)
-            && saved.controller_observation.is_none()
-    });
+    let new_turn = checkpoint
+        .as_ref()
+        .is_some_and(|saved| saved.turn_pending == Some(true));
     let recovery_deadline = (!parked && !new_turn)
         .then(|| {
             checkpoint
@@ -706,9 +704,7 @@ pub(super) fn finish_recovery(
         && saved.managed()
         && saved.start_rejected != Some(true)
         && saved.runner_id().is_some()
-        && (saved.terminal_code.is_none()
-            || saved.terminal_code().is_some()
-            || saved.controller_observation.is_some())
+        && saved.turn_pending != Some(true)
         && !saved.has_controller_recovery_reservation()
     {
         let mut paid = saved.clone();

@@ -35,6 +35,9 @@ pub struct RunCheckpoint {
     /// Output was truncated for this attempt; completion may be missing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_interrupted: Option<bool>,
+    /// A new explicit turn is queued but has not yet acquired an attempt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_pending: Option<bool>,
     /// `null` means the run has no time limit; absent means its budget is spent.
     #[serde(default, with = "nullable", skip_serializing_if = "Option::is_none")]
     pub remaining_ms: Nullable<i64>,
