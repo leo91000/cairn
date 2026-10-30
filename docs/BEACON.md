@@ -342,7 +342,11 @@ check after the upgrade kept the existing agents (someone invited before that ch
 which only a Beacon outage can delay, counts as an existing member). Starting,
 continuing, steering, answering, launching by hand, deleting or restoring a
 conversation and creating or editing a task require access to its agent; every member
-still sees every conversation and can pause, archive or stop any work. A delegated
+still sees every conversation and can pause, archive or stop any work. Renaming a
+conversation, removing a message still waiting in its queue and cleaning up a
+task run's workspace stay open to every member too: none of them makes the agent
+work. A delegated task's title is still shown to its requesting agent, as every
+title is to an agent with installation access. A delegated
 task can be directed with access to its requesting conversation's agent. The
 installation refuses management of agents, projects, skills, nodes, coding-agent
 accounts, connections, secrets and settings. The web hides these actions and
