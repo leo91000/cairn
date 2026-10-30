@@ -165,7 +165,7 @@ if(mode==='cancel'||mode==='crash') {
   console.log('probe.pause');
   if(mode==='cancel') {
     const deadline=Date.now()+30000;
-    while(!fs.readFileSync('/run/cairn-chat/messages.json','utf8').includes('capture-update')){assert.ok(Date.now()<deadline,'capture update request');await new Promise(r=>setTimeout(r,100));}
+    while(!fs.readFileSync('/run/cairn-chat/messages.json','utf8').includes('capture-update')){assert.ok(Date.now()<deadline,'capture update request');await new Promise(r=>setTimeout(r,${process.env.CAIRN_PROBE_INBOX_POLL_MS || 100}));}
     console.log('probe.update-received');
     fs.writeFileSync(root+'/workspace/capture-update',Buffer.alloc(4*1024*1024,91));
     execFileSync('sync');
@@ -352,8 +352,11 @@ console.log('probe.done');
                 await until(() => {
                   const records = docker('exec', name, 'cat', `/runner-state/${id}.log`).split('\n').filter(Boolean).map(line => JSON.parse(line))
                   const text = records.map(row => Buffer.from(row.data || '', 'base64').toString()).join('')
-                  if (text.includes('probe.updated'))
+                  if (text.includes('probe.updated')) {
+                    process.stdout.write(`${JSON.stringify({ diagnostic: 'capture-update-observed', elapsedMs: Date.now() - captureStarted, wholeRecord: records.some(row => Buffer.from(row.data || '', 'base64').toString().includes('probe.updated')) })}\n`)
                     return true
+                  }
+
                   try {
                     const exit = docker('exec', name, 'cat', `/runner-state/${id}.exit`)
                     throw new Error(`Active capture guest exited ${exit}: ${text}`)
