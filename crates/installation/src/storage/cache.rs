@@ -321,6 +321,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn recovery_fixtures_are_isolated_from_another_test_admission() {
+        crate::test_process::run_ignored(
+            "storage::cache::tests::recovery_fixtures_isolation_child",
+        );
+    }
+
+    #[test]
+    #[ignore = "executes recovery fixture children while this process holds admission"]
+    fn recovery_fixtures_isolation_child() {
+        let _held = admission().unwrap();
+        for test in [
+            "nodes::checkpoint::tests::periodic_capture_keeps_guest_running_and_fences_the_captured_prefix_child",
+            "nodes::checkpoint::tests::retained_resume_can_write_while_manifest_reconstruction_waits_for_a_block_child",
+            "native::bases_tests::background_preparation_yields_to_foreground_intent_and_then_finishes_child",
+        ] {
+            crate::test_process::run_ignored(test);
+        }
+    }
+
+    #[test]
     fn cache_fills_cannot_spend_pending_write_headroom() {
         // Isolate the controller-global reservation from parallel unit tests.
         let output = std::process::Command::new(std::env::current_exe().unwrap())
