@@ -315,6 +315,30 @@ fn background_preparation_yields_to_foreground_intent_and_then_finishes() {
 #[ignore = "executed by the isolated background preparation wrapper"]
 async fn background_preparation_yields_to_foreground_intent_and_then_finishes_child() {
     use std::{sync::Arc, time::Duration};
+
+    // The isolated fixture is the only writer in this directory. Track actual
+    // build progress so slow fsyncs do not consume one deadline for the entire
+    // image and journal, while a stalled or abandoned job still fails promptly.
+    fn activity(
+        path: &std::path::Path,
+        entries: &mut Vec<(std::path::PathBuf, u64, std::time::SystemTime)>,
+    ) {
+        let Ok(children) = std::fs::read_dir(path) else {
+            return;
+        };
+        for child in children.flatten() {
+            let path = child.path();
+            let Ok(metadata) = child.metadata() else {
+                continue;
+            };
+            if let Ok(modified) = metadata.modified() {
+                entries.push((path.clone(), metadata.len(), modified));
+            }
+            if metadata.is_dir() {
+                activity(&path, entries);
+            }
+        }
+    }
     let (_root, bases, archive, policy) = fixture().await;
     super::atomic_write(
         &bases.state.join("storage-policy.json"),
@@ -351,7 +375,11 @@ async fn background_preparation_yields_to_foreground_intent_and_then_finishes_ch
         .is_ok()
     );
     drop(foreground);
-    tokio::time::timeout(Duration::from_secs(10), async {
+    // A separate overall guard prevents a job that writes forever from passing.
+    // The 60 s ceiling also accommodates the measured 27 s slow-sync build.
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let mut last_activity = Vec::new();
+        let mut progress_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
             if bases
                 .lookup(std::slice::from_ref(&archive), 128)
@@ -361,6 +389,17 @@ async fn background_preparation_yields_to_foreground_intent_and_then_finishes_ch
             {
                 break;
             }
+            let mut current_activity = Vec::new();
+            activity(&bases.state.join("environments"), &mut current_activity);
+            current_activity.sort();
+            if current_activity != last_activity {
+                last_activity = current_activity;
+                progress_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            }
+            assert!(
+                tokio::time::Instant::now() < progress_deadline,
+                "native base warming made no filesystem progress for 10 seconds"
+            );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
