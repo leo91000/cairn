@@ -2011,6 +2011,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recovered_provider_failure_with_output_loss_is_paid_once_and_attempt_scoped() {
+        let (_root, service, _chat, run, _workspace) = fixture().await;
+        for (same, code, cancelled, expired) in [
+            (true, 1, false, false),
+            (false, 1, false, false),
+            (true, 70, false, false),
+            (true, 1, true, false),
+            (true, 1, false, true),
+        ] {
+            let id = run.clone();
+            service.store.transaction(move |db| {
+                db.change_run(&id, crate::runs::RunChanges {
+                    status: Some(RunStatus::Queued), session_id: Some(Some("session".into())),
+                    cancel_requested_at: Some(cancelled.then(now)), retry: Some(None),
+                    ..Default::default()
+                })?;
+                let cause = crate::run_retry::Cause::classify(&json!({ "code": "server_overloaded", "message": "Provider busy" })).unwrap();
+                let mut saved = RunCheckpoint::from_value(json!({
+                    "prepared": { "backend": "firecracker", "isolated": true },
+                    "runnerId": "attempt", "providerFailureAttempt": if same { "attempt" } else { "old" },
+                    "completed": false, "terminalCode": code, "outputInterrupted": true,
+                    "remainingMs": if expired { Some(0) } else { None }, "controllerRecoveries": 3,
+                }))?;
+                saved.retry_cause = Some(Some(cause));
+                saved.store_in(db, &id)?;
+                assert!(!finish_recovery(db, &id, Some(&saved))?);
+                let state = db.run_state(&id)?.unwrap();
+                if same && code == 1 && !cancelled && !expired {
+                    assert_eq!(state.status, RunStatus::Queued);
+                    assert_eq!(state.retry.as_ref().unwrap().attempt, 1);
+                    let paid = RunCheckpoint::load_in(db, &id)?.unwrap();
+                    assert!(paid.has_provider_retry_reservation());
+                    assert_eq!(paid.controller_recoveries(), 3);
+                    assert!(finish_recovery(db, &id, Some(&paid))?);
+                    assert_eq!(db.run_state(&id)?.unwrap().retry.unwrap().attempt, 1);
+                } else {
+                    assert_eq!(state.status, if cancelled { RunStatus::Cancelled } else { RunStatus::Failed });
+                    assert!(state.retry.is_none());
+                }
+                Ok(())
+            }).await.unwrap();
+        }
+        service.shutdown.cancel();
+    }
+
+    #[tokio::test]
     async fn recovered_output_loss_fails_only_when_completion_is_missing() {
         let (_root, service, _chat, run, _workspace) = fixture().await;
         for completed in [false, true] {
