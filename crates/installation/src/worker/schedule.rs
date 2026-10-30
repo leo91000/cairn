@@ -1148,6 +1148,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recovered_output_loss_fails_only_when_completion_is_missing() {
+        let (_root, service, _chat, run, _workspace) = fixture().await;
+        for completed in [false, true] {
+            let id = run.clone();
+            service
+                .store
+                .transaction(move |db| {
+                    db.change_run(
+                        &id,
+                        crate::runs::RunChanges {
+                            status: Some(RunStatus::Queued),
+                            cancel_requested_at: Some(None),
+                            ..Default::default()
+                        },
+                    )?;
+                    let saved = RunCheckpoint::from_value(json!({
+                        "prepared": { "backend": "native", "isolated": true },
+                        "runnerId": "attempt", "completed": completed,
+                        "outputInterrupted": true, "terminalCode": 0, "remainingMs": null,
+                    }))?;
+                    assert!(!finish_recovery(db, &id, Some(&saved))?);
+                    let state = db.run_state(&id)?.unwrap();
+                    assert_eq!(
+                        state.status,
+                        if completed {
+                            RunStatus::Succeeded
+                        } else {
+                            RunStatus::Failed
+                        }
+                    );
+                    if !completed {
+                        assert!(state.error.unwrap().contains("output was interrupted"));
+                    }
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+        service.shutdown.cancel();
+    }
+
+    #[tokio::test]
     async fn recovery_may_spend_a_reservation_already_charged_to_the_attempt() {
         let (_root, service, _chat, run, _workspace) = fixture().await;
         service
