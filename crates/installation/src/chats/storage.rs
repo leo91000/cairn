@@ -104,7 +104,30 @@ pub enum MessageAnswer {
     // Historical lists mixed selections and free text. Keep their shape and
     // order rather than guessing which entries were choices or comments.
     Legacy(Vec<String>),
-    Current(cairn_contracts::QuestionAnswer),
+    Current(#[serde(deserialize_with = "answer_object")] cairn_contracts::QuestionAnswer),
+}
+
+// Serde structs can also accept positional arrays. That would reinterpret a
+// malformed historical string list as a current answer and change its shape.
+fn answer_object<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<cairn_contracts::QuestionAnswer, D::Error> {
+    struct Answer;
+    impl<'de> serde::de::Visitor<'de> for Answer {
+        type Value = cairn_contracts::QuestionAnswer;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a question answer object")
+        }
+
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            map: A,
+        ) -> std::result::Result<Self::Value, A::Error> {
+            Self::Value::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+        }
+    }
+    deserializer.deserialize_map(Answer)
 }
 
 impl std::ops::Deref for Message {
