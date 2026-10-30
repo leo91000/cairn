@@ -167,27 +167,74 @@ where
 pub async fn fence(s: &Service, run: &Value) -> Result<()> {
     let run_id = text(run, "id");
     let checkpoint = RunCheckpoint::load(&s.store, run_id).await?;
-    if let Some(process) = checkpoint.as_ref().and_then(RunCheckpoint::process) {
+    let attempt = checkpoint
+        .as_ref()
+        .and_then(RunCheckpoint::runner_id)
+        .map(str::to_owned);
+    fence_attempt(s, run, attempt.as_deref()).await
+}
+
+/// Fence only the attempt selected by the caller, including its original node.
+pub(crate) async fn fence_attempt(s: &Service, run: &Value, expected: Option<&str>) -> Result<()> {
+    let run_id = text(run, "id");
+    let checkpoint = RunCheckpoint::load(&s.store, run_id).await?;
+    if checkpoint.as_ref().and_then(RunCheckpoint::runner_id) != expected {
+        return Err(Error::conflict(
+            "Execution attempt changed during recovery.",
+        ));
+    }
+    let process = checkpoint
+        .as_ref()
+        .and_then(RunCheckpoint::process)
+        .cloned();
+    let node = checkpoint
+        .as_ref()
+        .and_then(|saved| saved.node_id.as_ref())
+        .and_then(|node| node.as_deref())
+        .map(str::to_owned);
+    if let Some(process) = &process {
         fence_process(process).await?;
     }
     let isolated =
         run["isolated"] == true || checkpoint.as_ref().is_some_and(RunCheckpoint::isolated);
     if isolated {
-        let attempt = checkpoint
-            .as_ref()
-            .and_then(RunCheckpoint::runner_id)
-            .unwrap_or(run_id);
-        fence_runner(s, run_id, attempt).await?;
+        let attempt = expected.unwrap_or(run_id);
+        let runner_url = crate::nodes::transport::url_for_node(s, node.as_deref());
+        fence_runner(s, &runner_url, attempt).await?;
     }
-    if let Some(mut checkpoint) = checkpoint {
-        checkpoint.process = None;
-        checkpoint.store(&s.store, run_id).await?;
-    }
-    Ok(())
+    let id = run_id.to_owned();
+    let expected = expected.map(str::to_owned);
+    let release = isolated.then(|| expected.clone().unwrap_or_else(|| id.clone()));
+    s.store
+        .transaction(move |db| {
+            let mut current = RunCheckpoint::load_in(db, &id)?;
+            let current_attempt = current.as_ref().and_then(RunCheckpoint::runner_id);
+            let current_node = current
+                .as_ref()
+                .and_then(|saved| saved.node_id.as_ref())
+                .and_then(|node| node.as_deref());
+            let current_process = current.as_ref().and_then(RunCheckpoint::process);
+            if current_attempt != expected.as_deref()
+                || current_node != node.as_deref()
+                || current_process != process.as_ref()
+            {
+                return Err(Error::conflict(
+                    "Execution attempt changed during recovery.",
+                ));
+            }
+            if let Some(saved) = &mut current {
+                saved.process = None;
+                saved.store_in(db, &id)?;
+            }
+            if let Some(attempt) = release {
+                crate::nodes::placement::release_in(db, &attempt)?;
+            }
+            Ok(())
+        })
+        .await
 }
 
-async fn fence_runner(s: &Service, run_id: &str, attempt: &str) -> Result<()> {
-    let runner_url = crate::nodes::transport::url(s, run_id).await?;
+async fn fence_runner(s: &Service, runner_url: &str, attempt: &str) -> Result<()> {
     if runner_url.is_empty() {
         return Err(Error::unavailable(
             "Waiting for the isolated runner before recovering this run.",
@@ -207,7 +254,7 @@ async fn fence_runner(s: &Service, run_id: &str, attempt: &str) -> Result<()> {
             "Waiting for the previous VM execution lease to expire.",
         ));
     }
-    crate::nodes::placement::release(s, attempt).await
+    Ok(())
 }
 
 /// An unreachable runner is only presumed stopped once its node lease has lapsed.

@@ -589,7 +589,7 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
     if !parked && !cannot_replay && !crate::nodes::moves::advance(s, run).await? {
         return Ok(false);
     }
-    let fenced = recovery::fence(s, run).await;
+    let fenced = recovery::fence_attempt(s, run, expected_attempt.as_deref()).await;
     if let Some(deadline) = recovery_deadline {
         let id = run_id.to_owned();
         let expected = expected_attempt.clone();

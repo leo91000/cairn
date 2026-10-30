@@ -467,15 +467,17 @@ pub async fn proxy(State(app): State<App>, request: Request) -> Result<Response>
 /// All manager callers, including artifact and project operations, use the same destination.
 pub async fn url(s: &Service, run: &str) -> Result<String> {
     let checkpoint = super::checkpoint(s, run).await?;
-    match checkpoint["nodeId"]
-        .as_str()
-        .filter(|id| *id != super::LOCAL_NODE_ID)
-    {
-        Some(node) => Ok(format!(
+    Ok(url_for_node(s, checkpoint["nodeId"].as_str()))
+}
+
+/// Route an already identified attempt without re-reading a changing checkpoint.
+pub(crate) fn url_for_node(s: &Service, node: Option<&str>) -> String {
+    match node.filter(|id| *id != super::LOCAL_NODE_ID) {
+        Some(node) => format!(
             "{}/internal/execution/{node}",
             s.config.public_url.trim_end_matches('/')
-        )),
-        None => Ok(s.config.runner_url.clone()),
+        ),
+        None => s.config.runner_url.clone(),
     }
 }
 
