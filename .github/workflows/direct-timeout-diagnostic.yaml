@@ -1,5 +1,7 @@
 name: Direct timeout diagnostic
 on:
+  push:
+    branches: [fix/release-direct-timeout]
   workflow_dispatch:
 permissions:
   contents: read
