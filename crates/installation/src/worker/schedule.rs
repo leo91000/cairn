@@ -638,6 +638,10 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
     if !revoked {
         return Ok(false);
     }
+    let current = RunCheckpoint::load(&s.store, run_id).await?;
+    if current.as_ref().and_then(RunCheckpoint::runner_id) != expected_attempt.as_deref() {
+        return Ok(false);
+    }
     s.accounts.recover_run(s, run).await?;
     let id = run_id.to_owned();
     s.store
