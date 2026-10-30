@@ -337,9 +337,14 @@ receives the beacon account and role through its existing trusted identity.
 Members can read agents, projects and skills, and create conversations and work
 with the agents the owner lets them use: each agent page has an owner-only **Who can
 use it** section on web and Android ([ADR-0075](adr/0075-plugin-hooks-rules-and-scoped-grants.md)).
-A new agent is the owner's alone; at rollout, the members of the first membership
-check after the upgrade kept the existing agents (someone invited before that check,
-which only a Beacon outage can delay, counts as an existing member). Starting,
+A new agent is the owner's alone. At rollout, members retain access to existing
+agents only when their current membership's Beacon `joined_at` is strictly earlier
+than the stored upgrade cutoff (`upgradedAt`); later invitations and re-invitations
+receive no automatic access. Missing timestamp evidence from an older Beacon leaves
+the rollout pending with its original cutoff. A legacy pending rollout without a
+usable cutoff grants no automatic access; see [migration 0019](migrations/0019-agent-account-access.md).
+
+Starting,
 continuing (sending or editing a queued message, attaching files, resuming a paused
 queue, retrying or resuming a run, a fresh session, compacting, switching the coding
 agent), steering, answering or cancelling an agent's question, launching by hand,
