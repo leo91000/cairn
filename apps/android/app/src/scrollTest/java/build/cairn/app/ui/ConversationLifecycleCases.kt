@@ -174,7 +174,8 @@ abstract class ConversationLifecycleCases {
                                             )
                                         )
                                     )
-                                path == "/api/installations/fixture/api/overview" -> "{}"
+                                path == "/api/installations/fixture/api/overview" ->
+                                    installationOverviewFixture()
                                 path.endsWith("/models") -> """{"models":[]}"""
                                 else ->
                                     if (

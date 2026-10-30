@@ -91,7 +91,8 @@ abstract class CacheRefreshCases {
                             when (endpoint) {
                                 "/api/account/session" -> beaconAccountFixture()
                                 "/api/installations" -> beaconInstallationsFixture()
-                                "/api/installations/fixture/api/overview" -> "{}"
+                                "/api/installations/fixture/api/overview" ->
+                                    installationOverviewFixture()
                                 else ->
                                     if (
                                         request.requestUrl

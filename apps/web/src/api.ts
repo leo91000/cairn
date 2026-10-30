@@ -6,6 +6,7 @@ import type {
 } from '../../../packages/contracts/contracts'
 import type { McpView } from '../../../packages/contracts/mcp'
 import { reactive, watch } from 'vue'
+import { getInstallationOverview } from '../../../packages/contracts/generated/getInstallationOverview'
 import { listAgents } from '../../../packages/contracts/generated/listAgents'
 import { listMcps } from '../../../packages/contracts/generated/listMcps'
 import { listMissions } from '../../../packages/contracts/generated/listMissions'
@@ -149,7 +150,14 @@ function awaitRecovery(pending: Promise<void>, signal?: AbortSignal | null) {
   })
 }
 
-function recoverConnection(scope: string, reconcile: boolean, probe: string) {
+/** Probes a lost connection: the Beacon session, or the installation's generated overview. */
+function connectionProbe(account: boolean): [string, (signal: AbortSignal) => Promise<unknown>] {
+  if (account)
+    return ['/api/account/session', signal => requestOnce('/api/account/session', { signal })]
+  return [apiUrl('/overview'), signal => getInstallationOverview((path, options) => requestOnce(apiUrl(path), { ...options, signal }), {})]
+}
+
+function recoverConnection(scope: string, reconcile: boolean, [probe, request]: ReturnType<typeof connectionProbe>) {
   const recovery = recoveries.get(probe)
   if (recovery?.scope === scope) {
     recovery.reconcile ||= reconcile
@@ -163,7 +171,7 @@ function recoverConnection(scope: string, reconcile: boolean, probe: string) {
     while (true) {
       await recoveryDelay(delay, controller.signal)
       try {
-        await requestOnce(probe, { signal: controller.signal })
+        await request(controller.signal)
         return
       }
       catch (error) {
@@ -301,8 +309,7 @@ async function requestApi<T = any>(url: string, options: RequestInit = {}, accou
 
       const method = (options.method || 'GET').toUpperCase()
       const mutation = method !== 'GET' && method !== 'HEAD'
-      const probe = account ? '/api/account/session' : apiUrl('/overview')
-      const pending = recoverConnection(scope, mutation && !account, probe)
+      const pending = recoverConnection(scope, mutation && !account, connectionProbe(account))
       if (mutation) {
         notify('Connection unavailable. Please try again.')
         throw new ApiError('', 0)

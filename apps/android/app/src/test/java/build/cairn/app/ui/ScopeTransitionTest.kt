@@ -85,7 +85,8 @@ class ScopeTransitionTest {
                             path == "/api/account/logout" ->
                                 return MockResponse().setResponseCode(503).setBody("{}")
                             path == "/api/account/options" || path == "/api/account/methods" -> "{}"
-                            path.endsWith("/models") || path.endsWith("/overview") -> "{}"
+                            path.endsWith("/overview") -> installationOverviewFixture()
+                            path.endsWith("/models") -> "{}"
                             else ->
                                 if (
                                     request.requestUrl?.encodedPath?.endsWith("/api/projects") ==

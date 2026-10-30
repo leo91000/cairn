@@ -56,9 +56,10 @@ async fn conversation_list_by_saved_execution_size() {
             "checkpointKiB": kib, "elapsedMicros": samples, "responseBytes": bytes })
         );
         let context = common::relay_fixture::context(&service).await;
+        // Everything counts as unread: the account started reading at time zero.
         service
             .store
-            .set("read-since:fixture-owner", json!(0), None)
+            .transaction(|db| db.start_reading("fixture-owner", 0))
             .await
             .unwrap();
         let router = common::relay_fixture::router(service.clone())

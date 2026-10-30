@@ -342,7 +342,8 @@ class FilUnreadJourneyTest {
                                             .setBody("{\"error\":\"Offline\"}")
                                     "{\"read\":1,\"readAt\":1}"
                                 }
-                                path.endsWith("/overview") || path.endsWith("/models") -> "{}"
+                                path.endsWith("/overview") -> installationOverviewFixture()
+                                path.endsWith("/models") -> "{}"
                                 else ->
                                     if (
                                         request.requestUrl
@@ -454,7 +455,8 @@ class FilUnreadJourneyTest {
                                     reads += request.body.readUtf8()
                                     "{\"read\":1,\"readAt\":1}"
                                 }
-                                path.endsWith("/overview") || path.endsWith("/models") -> "{}"
+                                path.endsWith("/overview") -> installationOverviewFixture()
+                                path.endsWith("/models") -> "{}"
                                 else ->
                                     if (
                                         request.requestUrl
@@ -578,7 +580,8 @@ class FilUnreadJourneyTest {
                                     reads += request.body.readUtf8()
                                     "{\"read\":1,\"readAt\":1}"
                                 }
-                                path.endsWith("/overview") || path.endsWith("/models") -> "{}"
+                                path.endsWith("/overview") -> installationOverviewFixture()
+                                path.endsWith("/models") -> "{}"
                                 else ->
                                     if (
                                         request.requestUrl

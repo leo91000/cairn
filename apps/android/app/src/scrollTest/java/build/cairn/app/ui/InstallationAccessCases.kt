@@ -72,7 +72,7 @@ abstract class InstallationAccessCases {
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
                                 path.endsWith("/models") -> """{"models":[]}"""
-                                path.endsWith("/overview") -> "{}"
+                                path.endsWith("/overview") -> installationOverviewFixture()
                                 else ->
                                     if (
                                         request.requestUrl

@@ -5,6 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import build.cairn.app.BuildConfig
 import build.cairn.contracts.AccountSignInMethod
+import build.cairn.contracts.GetInstallationOverviewInput
 import build.cairn.contracts.ListMissionsInput
 import build.cairn.contracts.ListModelsInput
 import build.cairn.contracts.ListProjectsInput
@@ -13,6 +14,7 @@ import build.cairn.contracts.OutcomeAsideAction
 import build.cairn.contracts.ReadMark
 import build.cairn.contracts.ReadTarget
 import build.cairn.contracts.SetOutcomeAsideInput
+import build.cairn.contracts.getInstallationOverview
 import build.cairn.contracts.listAccountMethods
 import build.cairn.contracts.listAgents
 import build.cairn.contracts.listMcps
@@ -412,7 +414,7 @@ constructor(
                 delay(wait)
                 if (connection !== target || !state.value.session.authenticated) return@launch
                 try {
-                    target.request("GET", "/overview")
+                    target.getInstallationOverview(GetInstallationOverviewInput())
                     break
                 } catch (e: Exception) {
                     if (e is CancellationException) throw e

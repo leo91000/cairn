@@ -67,7 +67,8 @@ abstract class QuestionWithdrawalCases {
                             when {
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
                                 path == "/api/installations" -> beaconInstallationsFixture()
-                                path.endsWith("/overview") || path.endsWith("/models") -> "{}"
+                                path.endsWith("/overview") -> installationOverviewFixture()
+                                path.endsWith("/models") -> "{}"
                                 else ->
                                     if (
                                         request.requestUrl
@@ -221,7 +222,8 @@ abstract class QuestionWithdrawalCases {
                             when {
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
                                 path == "/api/installations" -> beaconInstallationsFixture()
-                                path.endsWith("/overview") || path.endsWith("/models") -> "{}"
+                                path.endsWith("/overview") -> installationOverviewFixture()
+                                path.endsWith("/models") -> "{}"
                                 path.endsWith("/projects") -> """{"projects":[]}"""
                                 path.endsWith("/agents") -> """{"agents":[]}"""
                                 path.endsWith("/tasks") -> """{"tasks":[]}"""

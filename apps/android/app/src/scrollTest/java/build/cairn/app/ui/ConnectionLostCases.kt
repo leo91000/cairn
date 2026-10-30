@@ -72,7 +72,8 @@ abstract class ConnectionLostCases {
                             when {
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
                                 path == "/api/installations" -> beaconInstallationsFixture()
-                                path.endsWith("/overview") || path.endsWith("/models") -> "{}"
+                                path.endsWith("/overview") -> installationOverviewFixture()
+                                path.endsWith("/models") -> "{}"
                                 else ->
                                     if (
                                         request.requestUrl
@@ -204,7 +205,8 @@ abstract class ConnectionLostCases {
                                 path == "/api/account/session" ->
                                     """{"authenticated":true,"csrf":"fixture","account":{"id":"fixture-account","email":"owner@example.test"},"installations":$installations}"""
                                 path == "/api/installations" -> installations
-                                path.endsWith("/overview") || path.endsWith("/models") -> "{}"
+                                path.endsWith("/overview") -> installationOverviewFixture()
+                                path.endsWith("/models") -> "{}"
                                 else ->
                                     if (
                                         request.requestUrl
@@ -278,7 +280,8 @@ abstract class ConnectionLostCases {
                             when {
                                 path == "/api/account/session" -> beaconAccountFixture()
                                 path == "/api/installations" -> beaconInstallationsFixture()
-                                path.endsWith("/overview") || path.endsWith("/models") -> "{}"
+                                path.endsWith("/overview") -> installationOverviewFixture()
+                                path.endsWith("/models") -> "{}"
                                 else ->
                                     if (
                                         request.requestUrl
@@ -346,7 +349,8 @@ abstract class ConnectionLostCases {
                             when {
                                 path == "/api/account/session" -> beaconAccountFixture()
                                 path == "/api/installations" -> beaconInstallationsFixture()
-                                path.endsWith("/overview") || path.endsWith("/models") -> "{}"
+                                path.endsWith("/overview") -> installationOverviewFixture()
+                                path.endsWith("/models") -> "{}"
                                 else ->
                                     if (
                                         request.requestUrl
@@ -431,7 +435,8 @@ abstract class ConnectionLostCases {
                                 path == "/api/installations" ->
                                     beaconInstallationsFixture()
                                         .replace("\"online\":true", "\"online\":false")
-                                path.endsWith("/overview") || path.endsWith("/models") -> "{}"
+                                path.endsWith("/overview") -> installationOverviewFixture()
+                                path.endsWith("/models") -> "{}"
                                 else ->
                                     if (
                                         request.requestUrl
@@ -502,7 +507,8 @@ abstract class ConnectionLostCases {
                             when {
                                 path == "/api/account/session" -> beaconAccountFixture()
                                 path == "/api/installations" -> beaconInstallationsFixture()
-                                path.endsWith("/overview") || path.endsWith("/models") -> "{}"
+                                path.endsWith("/overview") -> installationOverviewFixture()
+                                path.endsWith("/models") -> "{}"
                                 else ->
                                     if (
                                         request.requestUrl

@@ -126,7 +126,8 @@ abstract class NodePlacementCases {
                             when (path) {
                                 "/api/account/session" -> beaconAccountFixture("fixture")
                                 "/api/installations" -> beaconInstallationsFixture()
-                                "/api/installations/fixture/api/overview" -> "{}"
+                                "/api/installations/fixture/api/overview" ->
+                                    installationOverviewFixture()
                                 "/api/installations/fixture/api/nodes/native-callers" -> "[]"
                                 "/api/installations/fixture/api/nodes/aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503/native-mode" -> {
                                     val change =
@@ -378,7 +379,8 @@ abstract class NodePlacementCases {
                                     """{"agents":[{"access":{"backend":"firecracker","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":["00000000-0000-4000-8000-000000000002"],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"65a2e5b3-c5e4-5bb1-a839-36064775dd2a","instructions":"","model":"","name":"Agent VM","plugins":[],"provider":"codex","reasoning":"high","revision":"r1","timeoutMinutes":0},{"access":{"backend":"native","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":[],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"38235acc-317f-50db-b506-53809ad1c8a0","instructions":"","model":"","name":"Agent natif","plugins":[],"provider":"codex","reasoning":"high","revision":"r1","timeoutMinutes":0}]}"""
                                 "/api/installations" -> beaconInstallationsFixture()
                                 "/api/account/session" -> beaconAccountFixture("fixture")
-                                "/api/installations/fixture/api/overview" -> "{}"
+                                "/api/installations/fixture/api/overview" ->
+                                    installationOverviewFixture()
                                 "/api/installations/fixture/api/projects" -> """{"projects":[]}"""
                                 else ->
                                     if (request.method == "PUT") "{}"
@@ -599,7 +601,8 @@ abstract class NodePlacementCases {
                             when {
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
-                                path == "/api/installations/fixture/api/overview" -> "{}"
+                                path == "/api/installations/fixture/api/overview" ->
+                                    installationOverviewFixture()
                                 path == "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(
                                         build.cairn.contracts.ListAgentsOutput(
@@ -714,7 +717,8 @@ abstract class NodePlacementCases {
                                     """[{"id":"b40903f9-0487-53d0-a309-c589f0cae405","name":"Serveur réservé","status":"online","accepting":true,"executionReady":true,"capabilities":{"kvm":true},"exclusiveReservations":true,"exclusiveReservation":{"id":"reservation","nodeId":"b40903f9-0487-53d0-a309-c589f0cae405","ownerRunId":"owner-run","reason":"Compilation Android","state":"${if (releasing.get()) "releasing" else "acquired"}","createdAt":100,"expiresAt":4102444800000,"waitUntil":4102444800000,"pausedRunIds":["neighbor-one","neighbor-two"],"minimumAvailableMemoryMiB":4096}}]"""
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
-                                path == "/api/installations/fixture/api/overview" -> "{}"
+                                path == "/api/installations/fixture/api/overview" ->
+                                    installationOverviewFixture()
                                 else ->
                                     if (
                                         request.requestUrl
@@ -789,7 +793,8 @@ abstract class NodePlacementCases {
                                     """{"nodes":[{"id":"b40903f9-0487-53d0-a309-c589f0cae405","name":"Serveur réservé","status":"online"}]}"""
                                 "/api/installations" -> beaconInstallationsFixture()
                                 "/api/account/session" -> beaconAccountFixture("fixture")
-                                "/api/installations/fixture/api/overview" -> "{}"
+                                "/api/installations/fixture/api/overview" ->
+                                    installationOverviewFixture()
                                 else ->
                                     if (
                                         request.requestUrl
@@ -891,7 +896,8 @@ abstract class NodePlacementCases {
                                     """{"nodes":[{"id":"aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503","name":"Bureau GPU","status":"online","capabilities":{"backend":"native","ublk":true},"nativeModeStatus":"${privilegeStatus.get()}","nativeModeObserved":{"mode":"${if (privilegeStatus.get() == "applied") "administrator" else "protected"}"}}]}"""
                                 "/api/installations" -> beaconInstallationsFixture()
                                 "/api/account/session" -> beaconAccountFixture("fixture")
-                                "/api/installations/fixture/api/overview" -> "{}"
+                                "/api/installations/fixture/api/overview" ->
+                                    installationOverviewFixture()
                                 else ->
                                     if (
                                         request.requestUrl
@@ -1038,7 +1044,8 @@ abstract class NodePlacementCases {
                                     """{"nodes":[{"id":"b40903f9-0487-53d0-a309-c589f0cae405","name":"Mon serveur","status":"online"},{"id":"824f3da3-b37b-5713-9c61-06e3f54a7ff8","name":"Autre serveur","status":"online"}],"pinnedNodeId":null,"preferredNodeId":null}"""
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
-                                path == "/api/installations/fixture/api/overview" -> "{}"
+                                path == "/api/installations/fixture/api/overview" ->
+                                    installationOverviewFixture()
                                 else ->
                                     if (
                                         request.requestUrl
@@ -1209,7 +1216,7 @@ abstract class NodePlacementCases {
                                     """{"required":${!automatic && !completed.get()},"optional":$automatic,"environmentExpired":$expired,"fromBackend":"${if (completed.get()) "native" else "firecracker"}","toBackend":"${if (automatic && completed.get()) "firecracker" else "native"}","pending":${submitted.isNotEmpty() && !completed.get()},"nodes":[{"id":"475328ca-1491-5a74-abfb-fb52c2e04160","name":"Desktop GPU"}]}"""
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
-                                path.endsWith("/overview") -> "{}"
+                                path.endsWith("/overview") -> installationOverviewFixture()
                                 else ->
                                     if (
                                         request.requestUrl
@@ -1379,7 +1386,8 @@ abstract class NodePlacementCases {
                                     """{"agents":[{"access":{"backend":"firecracker","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":["00000000-0000-4000-8000-000000000002"],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"d3153f9f-724b-59c3-9614-ab78f231c4d3","instructions":"","model":"","name":"Agent test","plugins":[],"provider":"codex","reasoning":"high","revision":"fixture-revision","timeoutMinutes":0},{"access":{"backend":"firecracker","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":["f65d5a2a-81d0-5580-bfa4-7ec33313e328"],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"ebfa691e-a987-5771-8e65-e1e51d1e4bb5","instructions":"","model":"","name":"Agent autorisé","plugins":[],"provider":"codex","reasoning":"high","revision":"fixture-revision","timeoutMinutes":0},{"access":{"backend":"firecracker","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":["00000000-0000-4000-8000-000000000002"],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"8d489b40-6d91-5e69-ab94-d43fa270f612","instructions":"","model":"","name":"Agent tardif","plugins":[],"provider":"codex","reasoning":"high","revision":"fixture-revision","timeoutMinutes":0},{"access":{"backend":"firecracker","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":null,"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"ce26d2b8-ac9e-597f-a8ff-d2d679cbe59c","instructions":"","model":"","name":"Agent global","plugins":[],"provider":"codex","reasoning":"high","revision":"fixture-revision","timeoutMinutes":0},{"access":{"backend":"native","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":[],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"38235acc-317f-50db-b506-53809ad1c8a0","instructions":"","model":"","name":"Agent natif","plugins":[],"provider":"codex","reasoning":"high","revision":"fixture-revision","timeoutMinutes":0}]}"""
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
-                                path == "/api/installations/fixture/api/overview" -> "{}"
+                                path == "/api/installations/fixture/api/overview" ->
+                                    installationOverviewFixture()
                                 else ->
                                     if (
                                         request.requestUrl
