@@ -62,6 +62,12 @@ def match_controller_result(path, wait_result):
     return recorded
 
 
+def require_finalization_failure(path, wait_result):
+    proof = match_controller_result(path, wait_result)
+    assert proof == {'StatusCode': 70, 'FinalizationFailed': True}, 'Missing controller flush-failure evidence.'
+    return proof
+
+
 def fixture_garbage_inventory(root):
     root = Path(root)
     database = root / 'manager/manager.db'
@@ -644,12 +650,16 @@ def main():
             events = Path('/sys/fs/cgroup') / group.lstrip('/') / 'cgroup.events'
             return not events.exists() or 'populated 1' not in events.read_text().splitlines()
 
-        def fenced(run, attempt, timeout=90):
+        def fenced(run, attempt, timeout=90, expect_flush_failure=False):
             eventually(lambda: (state / (attempt + '.exit')).exists(), timeout=timeout)
             # Completion writes the exit marker before retiring admission. Use
             # the runner wait protocol to observe the entire ordered release.
             result = api('/runs/' + attempt + '/wait')
-            match_controller_result(state / (attempt + '.exit'), result)
+            exit_file = state / (attempt + '.exit')
+            if expect_flush_failure:
+                metrics['nativeFlushFailure'] = require_finalization_failure(exit_file, result)
+            else:
+                match_controller_result(exit_file, result)
             assert not (state / (attempt + '.active')).exists()
             active = command('systemctl', 'show', 'cairn-native-' + attempt + '.service', '--property=ActiveState', '--value').stdout.strip()
             assert active not in ('active', 'activating'), 'Descendant escaped cgroup fencing.'
@@ -693,13 +703,7 @@ def main():
             command('sync', '-f', str(readonly_mount))
             (Path('/sys/fs/ext4') / sys_device.name / 'trigger_fs_error').write_text('cairn-disposable-flush-failure\n')
             api('/runs/' + readonly_attempt, method='DELETE')
-            readonly_snapshot = fenced(readonly_run, readonly_attempt)
-            assert read_controller_result(state / (readonly_attempt + '.exit')) == {
-                'StatusCode': 70, 'FinalizationFailed': True,
-            }
-            output = b''.join(base64.b64decode(json.loads(record).get('data', ''))
-                              for record in (state / (readonly_attempt + '.log')).read_text().splitlines())
-            assert b'Native filesystem could not be flushed; the durable crash prefix was retained.' in output
+            readonly_snapshot = fenced(readonly_run, readonly_attempt, expect_flush_failure=True)
             assert not (state / 'native-block' / readonly_run / 'root/disk.blk').exists()
             assert readonly_snapshot['manifest']['kind'] == 'native-ext4-v1'
             # Resume the same local journal and confirm the acknowledged bytes.

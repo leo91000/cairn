@@ -44,6 +44,17 @@ class ControllerResultTest(unittest.TestCase):
         with self.assertRaises(AssertionError):
             runtime.match_controller_result(self.exit_file, expected)
 
+    def test_readonly_fault_consumes_authenticated_result_without_workload_log(self):
+        self.exit_file.write_text('{"StatusCode":70,"FinalizationFailed":true}')
+        proof = {'StatusCode': 70, 'FinalizationFailed': True}
+        self.assertEqual(runtime.require_finalization_failure(self.exit_file, proof), proof)
+        for wait in ({'StatusCode': 70}, {'StatusCode': 1}, {'StatusCode': 70, 'FinalizationFailed': False}):
+            with self.subTest(wait=wait), self.assertRaises(AssertionError):
+                runtime.require_finalization_failure(self.exit_file, wait)
+        self.exit_file.write_text('70')
+        with self.assertRaises(AssertionError):
+            runtime.require_finalization_failure(self.exit_file, {'StatusCode': 70})
+
     def test_only_true_flag_with_code_seventy_is_authenticated(self):
         for content, expected in [
             ('{"StatusCode":70}', False),
