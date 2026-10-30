@@ -117,7 +117,7 @@ export function noticeArtifact(card: TimelineEntry, notice: TimelineNotice, sour
   const showRecordedOutput = ['engineRetry', 'usageLimit', 'retryScheduled', 'backgroundTasks'].includes(notice.code)
   const output = showRecordedOutput ? source?.text : undefined
   const blocks = output
-    ? [{ label: 'Output', code: output, language: 'plaintext' }]
+    ? [{ label: 'Output', code: output, language: source?.payload ? 'json' : 'plaintext' }]
     : notice.detail ? [{ label: process ? 'Output' : 'Details', code: notice.detail, language: 'plaintext' }] : []
   return {
     kind: 'notice',

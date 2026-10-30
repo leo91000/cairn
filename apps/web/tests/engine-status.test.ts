@@ -109,6 +109,9 @@ describe('engine status', () => {
     expect(noticeArtifact(entry, entry.content.notice, source).blocks).toEqual([
       { label: 'Output', code: source.text, language: 'plaintext' },
     ])
+    expect(noticeArtifact(entry, entry.content.notice, { ...source, payload: { retryAt: 123 } }).blocks).toEqual([
+      { label: 'Output', code: source.text, language: 'json' },
+    ])
   })
 
   it('stops showing a usage limit once its window resets', () => {
