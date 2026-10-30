@@ -4291,7 +4291,7 @@ async fn connect_running_source(
             let frame = json!({ "type": "output", "stderr": false, "data": STANDARD.encode(output) });
             Body::from(format!("{frame}\n"))
         }))
-        .route("/runs/{attempt}/wait", get(|| async { Json(json!({ "StatusCode": 0 })) }))
+        .route("/runs/{attempt}/wait", post(|| async { Json(json!({ "StatusCode": 0 })) }))
         .route("/runs/{attempt}/administrative-pause", get(|| async { Json(json!({ "administrativePausedMs": 0 })) }))
         .route("/runs/{attempt}/lease", post(|| async { Json(json!({})) }))
         .route("/runs/{attempt}", any(move |request: Request<Body>| {
