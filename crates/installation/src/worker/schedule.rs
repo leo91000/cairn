@@ -515,6 +515,9 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
                             let Some(mut current) = RunCheckpoint::load_in(db, &id)? else {
                                 return Ok(false);
                             };
+                            if current.runner_id() != Some(attempt.as_str()) {
+                                return Ok(false);
+                            }
                             let mut reserved = false;
                             match action {
                                 recovery::ObservationAction::Reserve => {
