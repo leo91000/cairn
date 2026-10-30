@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import type { AuditEntry } from '../../../../packages/contracts/generated/typescript/AuditEntry'
+import type { InstallationSettings } from '../../../../packages/contracts/generated/typescript/InstallationSettings'
 import { twMerge } from 'tailwind-merge'
 import {
   computed,
@@ -8,6 +10,8 @@ import {
   watch,
 } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { getInstallationSettings } from '../../../../packages/contracts/generated/getInstallationSettings'
+import { listAudit } from '../../../../packages/contracts/generated/listAudit'
 import {
   api,
   beaconEntry,
@@ -50,9 +54,9 @@ const currentSection = computed(() => section.value || (phone.value ? '' : 'acco
 
 // An installation awaiting an update cannot answer: its settings wait until it can.
 const installationSettingsAvailable = computed(() => section.value === 'installation' && state.installationRole === 'owner' && !state.installationUpdateRequired)
-const settings = ref<any>()
+const settings = ref<InstallationSettings>()
 const grants = ref<any[]>([])
-const audit = ref<any[]>([])
+const audit = ref<AuditEntry[]>([])
 const open = ref(false)
 const confirmingIdentity = ref(false)
 const label = ref('')
@@ -62,13 +66,14 @@ const error = ref('')
 
 async function load() {
   try {
-    [settings.value, grants.value, audit.value] = await Promise.all([
-      api('/settings'),
-      api('/tokens'),
-      api('/audit'),
+    const [installation, tokens, changes] = await Promise.all([
+      getInstallationSettings(api, {}),
+      api<any[]>('/tokens'),
+      listAudit(api, {}),
     ])
-    if (beaconEntry)
-      settings.value.mcpUrl = `${beaconOrigin}/mcp`
+    settings.value = beaconEntry ? { ...installation, mcpUrl: `${beaconOrigin}/mcp` } : installation
+    grants.value = tokens
+    audit.value = changes.entries
   }
   catch (e) {
     error.value = (e as Error).message
@@ -291,7 +296,7 @@ async function copy(value: string) {
             <h2>Recent changes</h2>
             <div class="audit-list mt-4.5">
               <div v-for="item in audit.slice(0, 20)" :key="item.id">
-                <span>{{ item.action.replaceAll(".", " · ") }}</span><time>{{ date(item.created_at) }}</time>
+                <span>{{ item.action.replaceAll(".", " · ") }}</span><time>{{ date(item.createdAt) }}</time>
               </div>
               <p v-if="!audit.length" class="muted text-muted">
                 Workspace changes will be recorded here.

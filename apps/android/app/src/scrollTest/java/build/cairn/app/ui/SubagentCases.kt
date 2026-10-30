@@ -202,7 +202,8 @@ abstract class SubagentCases {
                                     )
                                 "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1" ->
                                     wireJson.encodeToString(chat)
-                                "/api/installations/fixture/api/overview" -> "{}"
+                                "/api/installations/fixture/api/overview" ->
+                                    installationOverviewFixture()
                                 else ->
                                     if (
                                         request.requestUrl

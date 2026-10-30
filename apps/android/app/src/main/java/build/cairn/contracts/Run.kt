@@ -3,7 +3,6 @@ package build.cairn.contracts
 
 import build.cairn.boundary.ExclusiveReservation
 import build.cairn.boundary.NodeBackup
-import build.cairn.boundary.OutcomeDismissal
 import build.cairn.boundary.RunStorage
 import build.cairn.boundary.TaskOutcome
 import kotlinx.serialization.Serializable

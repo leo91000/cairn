@@ -1,0 +1,58 @@
+[
+  {
+    "input": "MarkReadInput",
+    "method": "POST",
+    "name": "markRead",
+    "output": "MarkReadOutput",
+    "path": "/reads"
+  },
+  {
+    "input": "SetOutcomeAsideInput",
+    "method": "POST",
+    "name": "setOutcomeAside",
+    "output": "SetOutcomeAsideOutput",
+    "path": "/dismissals"
+  },
+  {
+    "input": "GetInstallationSettingsInput",
+    "method": "GET",
+    "name": "getInstallationSettings",
+    "output": "InstallationSettings",
+    "path": "/settings"
+  },
+  {
+    "input": "GetInstallationOverviewInput",
+    "method": "GET",
+    "name": "getInstallationOverview",
+    "output": "InstallationOverview",
+    "path": "/overview"
+  },
+  {
+    "input": "ListAuditInput",
+    "method": "GET",
+    "name": "listAudit",
+    "output": "ListAuditOutput",
+    "path": "/audit"
+  },
+  {
+    "input": "GetStorageSettingsInput",
+    "method": "GET",
+    "name": "getStorageSettings",
+    "output": "StorageSettings",
+    "path": "/settings/storage"
+  },
+  {
+    "input": "SaveStorageSettingsInput",
+    "method": "PUT",
+    "name": "saveStorageSettings",
+    "output": "StorageSettings",
+    "path": "/settings/storage"
+  },
+  {
+    "input": "CheckStorageInput",
+    "method": "POST",
+    "name": "checkStorage",
+    "output": "StorageCheck",
+    "path": "/settings/storage/check"
+  }
+]

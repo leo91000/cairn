@@ -196,38 +196,40 @@ fn read_config(s: &Service) -> Result<Value> {
     }
 }
 
-pub fn settings(s: &Service) -> Result<Value> {
+/// The default storage for new disks, without its credentials.
+pub fn settings(s: &Service) -> Result<cairn_contracts::StorageSettings> {
     let config = read_config(s)?;
     let environment_managed = ["BUCKET", "ENDPOINT", "REGION"]
         .iter()
         .any(|suffix| non_empty_env(&format!("STORAGE_S3_{suffix}")).is_some());
-    Ok(json!({
-        "configured": Storage::configured(s).is_ok(),
-        "bucket": setting(&config, "BUCKET", "bucket"),
-        "endpoint": setting(&config, "ENDPOINT", "endpoint"),
-        "region": setting(&config, "REGION", "region"),
-        "integrated": config["integrated"] == true,
-        "environmentManaged": environment_managed,
-    }))
+    Ok(cairn_contracts::StorageSettings {
+        configured: Storage::configured(s).is_ok(),
+        bucket: setting(&config, "BUCKET", "bucket"),
+        endpoint: setting(&config, "ENDPOINT", "endpoint"),
+        region: setting(&config, "REGION", "region"),
+        integrated: config["integrated"] == true,
+        environment_managed,
+    })
 }
 
-pub async fn save_settings(s: &Service, input: &Value) -> Result<Value> {
+/// Checks the candidate over the network before replacing the private storage file.
+pub async fn save_settings(
+    s: &Service,
+    input: cairn_contracts::SaveStorageSettingsInput,
+) -> Result<cairn_contracts::StorageSettings> {
     let _lock = s.hot_s3.settings_lock.lock().await;
-    if settings(s)?["environmentManaged"] == true {
+    if settings(s)?.environment_managed {
         return Err(Error::conflict(
             "Remove server S3 environment overrides before using storage settings.",
         ));
     }
-    let field = |name: &str, max: usize| -> Result<String> {
-        let value = input[name]
-            .as_str()
-            .filter(|value| {
-                !value.is_empty() && value.len() <= max && !value.chars().any(char::is_control)
-            })
-            .ok_or_else(|| Error::bad(format!("{name}: enter a valid value.")))?;
-        Ok(value.to_owned())
+    let field = |name: &str, value: String, max: usize| -> Result<String> {
+        if value.is_empty() || value.len() > max || value.chars().any(char::is_control) {
+            return Err(Error::bad(format!("{name}: enter a valid value.")));
+        }
+        Ok(value)
     };
-    let endpoint = field("endpoint", 2048)?;
+    let endpoint = field("endpoint", input.endpoint, 2048)?;
     let url = url::Url::parse(&endpoint).map_err(|_| Error::bad("Use an HTTPS S3 endpoint."))?;
     if url.scheme() != "https"
         || url.host_str().is_none()
@@ -242,12 +244,12 @@ pub async fn save_settings(s: &Service, input: &Value) -> Result<Value> {
     }
     let mut previous = read_config(s)?;
     let mut next = json!({
-        "bucket": field("bucket", 63)?,
+        "bucket": field("bucket", input.bucket, 63)?,
         "endpoint": endpoint,
-        "region": field("region", 100)?,
-        "accessKeyId": field("accessKeyId", 256)?,
-        "secretAccessKey": field("secretAccessKey", 256)?,
-        "privateBucketConfirmed": input["privateBucketConfirmed"] == true,
+        "region": field("region", input.region, 100)?,
+        "accessKeyId": field("accessKeyId", input.access_key_id, 256)?,
+        "secretAccessKey": field("secretAccessKey", input.secret_access_key, 256)?,
+        "privateBucketConfirmed": input.private_bucket_confirmed,
     });
     // Executable selection is server configuration, never user input.
     if previous["awsBinary"].is_string() {

@@ -430,7 +430,7 @@ class SignalPresentationTest {
                     taskId = "8a025d72-4937-53c0-a41d-820414dc655d",
                     status = "succeeded",
                     outcome = TaskOutcome("blocked", "CI"),
-                    dismissal = OutcomeDismissal(),
+                    dismissal = OutcomeDismissal(null),
                 ),
                 Run(
                     id = "r2",

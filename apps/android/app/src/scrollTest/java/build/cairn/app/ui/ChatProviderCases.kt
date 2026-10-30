@@ -103,7 +103,8 @@ abstract class ChatProviderCases {
                                     )
                                 "/api/installations/fixture/api/claude/models" ->
                                     """{"models":[]}"""
-                                "/api/installations/fixture/api/overview" -> "{}"
+                                "/api/installations/fixture/api/overview" ->
+                                    installationOverviewFixture()
                                 else ->
                                     if (
                                         request.requestUrl
@@ -265,7 +266,8 @@ abstract class ChatProviderCases {
                                     """{"models":[{"model":"fixture-deep","displayName":"Deep thinker","supportedReasoningEfforts":[{"reasoningEffort":"ultra"}]}]}"""
                                 "/api/installations/fixture/api/claude/models" ->
                                     """{"models":[{"model":"opus[1m]","displayName":"Opus 1M","isDefault":true,"supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}"""
-                                "/api/installations/fixture/api/overview" -> "{}"
+                                "/api/installations/fixture/api/overview" ->
+                                    installationOverviewFixture()
                                 else ->
                                     if (
                                         request.requestUrl
@@ -574,7 +576,8 @@ abstract class ChatProviderCases {
                                             .jsonObject
                                     wireJson.encodeToString(chat)
                                 }
-                                "/api/installations/fixture/api/overview" -> "{}"
+                                "/api/installations/fixture/api/overview" ->
+                                    installationOverviewFixture()
                                 else ->
                                     if (
                                         request.requestUrl

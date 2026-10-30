@@ -58,7 +58,7 @@ pub(crate) const CHAT_OPERATIONS: &[ChatOperation] = &[
     ChatOperation {
         name: "list_chats",
         scope: "read",
-        description: "List conversations with pagination, optional agent/project filters and active/trash view. Returns metadata including accountWaitReason and accountRequired for quota waits, without messages or marking chats read. Includes environmentState, environmentExpiredAt and environmentError; after expiration, a new message starts a fresh environment using preserved history.",
+        description: "List conversations with pagination, optional agent/project filters and active/trash view. Returns metadata including accountWaitReason and accountRequired for quota waits, without messages or marking chats read. unread and preview describe the Cairn account that authorized this connection; executions receive none. Includes environmentState, environmentExpiredAt and environmentError; after expiration, a new message starts a fresh environment using preserved history.",
     },
     ChatOperation {
         name: "get_chat",
@@ -259,6 +259,7 @@ impl ChatOperation {
         input: Value,
         context: ResumeContext,
     ) -> Result<Value> {
+        let reader = super::personal::listing_reader(&context);
         let (bearer, origin) = match context {
             ResumeContext::Human(account) => (None, crate::native::policy::Origin::Human(account)),
             ResumeContext::Public(scopes, _) => {
@@ -468,7 +469,8 @@ impl ChatOperation {
                         )
                         .await;
                 }
-                crate::mcp_server::chat_tools::invoke(s, self.name, args, bearer.as_deref()).await
+                crate::mcp_server::chat_tools::invoke(s, self.name, args, bearer.as_deref(), reader)
+                    .await
             })
             .await?;
         if matches!(

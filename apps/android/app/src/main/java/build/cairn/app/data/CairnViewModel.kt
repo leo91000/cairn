@@ -5,15 +5,24 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import build.cairn.app.BuildConfig
 import build.cairn.contracts.AccountSignInMethod
+import build.cairn.contracts.GetInstallationOverviewInput
 import build.cairn.contracts.ListMissionsInput
 import build.cairn.contracts.ListModelsInput
 import build.cairn.contracts.ListProjectsInput
+import build.cairn.contracts.MarkReadInput
+import build.cairn.contracts.OutcomeAsideAction
+import build.cairn.contracts.ReadMark
+import build.cairn.contracts.ReadTarget
+import build.cairn.contracts.SetOutcomeAsideInput
+import build.cairn.contracts.getInstallationOverview
 import build.cairn.contracts.listAccountMethods
 import build.cairn.contracts.listAgents
 import build.cairn.contracts.listMcps
 import build.cairn.contracts.listMissions
 import build.cairn.contracts.listModels
 import build.cairn.contracts.listProjects
+import build.cairn.contracts.markRead
+import build.cairn.contracts.setOutcomeAside
 import java.io.IOException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -27,11 +36,8 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
-import kotlinx.serialization.json.putJsonArray
 
 fun body(vararg pairs: Pair<String, String>) = buildJsonObject {
     pairs.forEach { put(it.first, it.second) }
@@ -59,7 +65,6 @@ data class Workspace(
     val projects: List<Project> = emptyList(),
     val tasks: List<Task> = emptyList(),
     val skills: List<Skill> = emptyList(),
-    val overview: Overview = Overview(),
     val transportRoute: String = "relay",
     val protocolError: String? = null,
 ) {
@@ -304,10 +309,13 @@ constructor(
         dismissal(
             runId,
             OutcomeDismissal(until),
-            buildJsonObject {
-                put("key", "task:$taskId")
-                put("finishedAt", finishedAt)
-                if (until != null) put("until", until)
+            {
+                SetOutcomeAsideInput(
+                    taskId = taskId,
+                    action =
+                        if (until == null) OutcomeAsideAction.A(finishedAt = finishedAt)
+                        else OutcomeAsideAction.B(finishedAt = finishedAt, until = until),
+                )
             },
             if (until == null) "Écartée jusqu’au prochain résultat de la mission"
             else "Rappel demain à 9 h",
@@ -318,17 +326,15 @@ constructor(
         dismissal(
             runId,
             null,
-            buildJsonObject {
-                put("key", "task:$taskId")
-                put("restore", true)
-            },
+            { SetOutcomeAsideInput(taskId = taskId, action = OutcomeAsideAction.C()) },
             "De retour dans Pour vous",
         )
 
     private fun dismissal(
         runId: String,
         value: OutcomeDismissal?,
-        item: JsonObject,
+        // Built inside the request: an invalid local value reports an error, never crashes.
+        input: () -> SetOutcomeAsideInput,
         message: String,
     ) {
         val target = connection ?: return
@@ -340,11 +346,7 @@ constructor(
         localDismissals[runId] = value
         viewModelScope.launch {
             try {
-                target.request(
-                    "POST",
-                    "/dismissals",
-                    buildJsonObject { putJsonArray("items") { add(item) } },
-                )
+                target.setOutcomeAside(input())
                 if (generation != readsGeneration || connection !== target) return@launch
                 if (dismissalRequests[runId] === request) savedDismissals[runId] = request
                 notify(message)
@@ -360,6 +362,17 @@ constructor(
         }
     }
 
+    /** A Fil key (`chat:<id>` or `task:<id>`) and the finish of the work read. */
+    private fun readMark(key: String, at: Long): ReadMark {
+        val id = key.substringAfter(':')
+        return ReadMark(
+            target =
+                if (key.startsWith("chat:")) ReadTarget.A(chatId = id)
+                else ReadTarget.B(taskId = id),
+            finishedAt = at,
+        )
+    }
+
     /** Marks finished work (`chat:<id>` or `task:<id>` with its finish time) as read everywhere. */
     fun markRead(items: List<Pair<String, Long>>) {
         val target = connection ?: return
@@ -373,22 +386,7 @@ constructor(
                 val previous = batch.map { (key, _) -> key to localReads[key] }
                 batch.forEach { (key, at) -> localReads[key] = maxOf(localReads[key] ?: 0, at) }
                 try {
-                    target.request(
-                        "POST",
-                        "/reads",
-                        buildJsonObject {
-                            putJsonArray("items") {
-                                batch.forEach { (key, at) ->
-                                    add(
-                                        buildJsonObject {
-                                            put("key", key)
-                                            put("finishedAt", at)
-                                        }
-                                    )
-                                }
-                            }
-                        },
-                    )
+                    target.markRead(MarkReadInput(batch.map { (key, at) -> readMark(key, at) }))
                 } catch (e: Exception) {
                     if (e is CancellationException) throw e
                     if (generation != readsGeneration || connection !== target) return@launch
@@ -419,7 +417,7 @@ constructor(
                 delay(wait)
                 if (connection !== target || !state.value.session.authenticated) return@launch
                 try {
-                    target.request("GET", "/overview")
+                    target.getInstallationOverview(GetInstallationOverviewInput())
                     break
                 } catch (e: Exception) {
                     if (e is CancellationException) throw e
@@ -800,14 +798,12 @@ constructor(
                     }
                 }
         }
-        val overview = async { target.get<Overview>("/overview") }
         val updated =
             Workspace(
                 agents = agents.await(),
                 projects = projects.await(),
                 tasks = tasks.await(),
                 skills = skills.await(),
-                overview = overview.await(),
                 mcps = mcps.await(),
                 modelCatalogs = catalogs.mapValues { (_, catalog) -> catalog.await() },
             )
@@ -818,7 +814,6 @@ constructor(
                     projects = updated.projects,
                     tasks = updated.tasks,
                     skills = updated.skills,
-                    overview = updated.overview,
                     mcps = updated.mcps,
                     modelCatalogs = updated.modelCatalogs,
                 )

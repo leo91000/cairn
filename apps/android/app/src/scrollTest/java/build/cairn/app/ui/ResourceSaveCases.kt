@@ -209,7 +209,8 @@ abstract class ResourceSaveCases {
                                     """{"packages":[{"id":"github","status":"active","active":"1.0.0","manifest":{"id":"github","name":"GitHub","projectSources":[{"name":"repositories","title":"GitHub repository"}],"version":"1.0.0","apiVersion":2,"capabilities":[]},"builtin":true,"versions":[],"setup":null}],"connections":[{"id":"acct","pluginId":"github","name":"octo","enabled":true,"settings":{},"status":{"state":"disconnected","message":null},"usage":{"hour":0}}],"capabilities":[]}"""
                                 path.endsWith("/plugins/github/projects") ->
                                     """{"items":[{"id":"owner/repository","name":"owner/repository","description":"","defaultBranch":"main","badges":["Private"],"imported":false}],"nextPage":null}"""
-                                path.endsWith("/overview") || path.endsWith("/models") -> "{}"
+                                path.endsWith("/overview") -> installationOverviewFixture()
+                                path.endsWith("/models") -> "{}"
                                 path.endsWith("/agents") ->
                                     """{"agents":[{"access":{"backend":"firecracker","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":["00000000-0000-4000-8000-000000000002"],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"d3153f9f-724b-59c3-9614-ab78f231c4d3","instructions":"","model":"","name":"Agent","plugins":[],"provider":"codex","reasoning":"high","revision":"fixture-revision","timeoutMinutes":0}]}"""
                                 else ->
