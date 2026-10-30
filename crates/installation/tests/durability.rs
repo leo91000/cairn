@@ -283,9 +283,14 @@ async fn writes_serialize_and_failed_transactions_roll_back() {
 
 /// The worker integration tests patch a run from a second process while the
 /// worker patches the same run. Neither writer may drop the other's fields.
+///
+/// SQLite does not queue connections waiting for its write lock: a connection
+/// that keeps writing back to back can hold it past the other's busy timeout.
+/// Each round therefore starts both transitions together, so they contend for
+/// the lock while every wait stays bounded by one competing transaction.
 #[tokio::test]
 async fn run_transitions_from_two_connections_preserve_each_others_fields() {
-    const PATCHES: usize = 200;
+    const ROUNDS: usize = 200;
 
     let root = TempDir::new().unwrap();
     let first = Store::open(root.path()).unwrap();
@@ -299,36 +304,28 @@ async fn run_transitions_from_two_connections_preserve_each_others_fields() {
     });
     common::add_run(&first, &run).await;
 
-    let writers = [("first", first.clone()), ("second", second)].map(|(name, store)| {
-        let run_id = run_id.clone();
-        tokio::spawn(async move {
-            for index in 0..PATCHES {
-                let value = format!("{name}-{index}");
-                let change = if name == "first" {
-                    cairn_installation::runs::RunChanges {
-                        summary: Some(value),
-                        ..Default::default()
-                    }
-                } else {
-                    cairn_installation::runs::RunChanges {
-                        account_wait_reason: Some(Some(value)),
-                        ..Default::default()
-                    }
-                };
-                store.change_run(&run_id, change).await.unwrap();
-            }
-        })
-    });
-    for writer in writers {
-        writer.await.unwrap();
-    }
+    for index in 0..ROUNDS {
+        let summary = cairn_installation::runs::RunChanges {
+            summary: Some(format!("first-{index}")),
+            ..Default::default()
+        };
+        let wait_reason = cairn_installation::runs::RunChanges {
+            account_wait_reason: Some(Some(format!("second-{index}"))),
+            ..Default::default()
+        };
 
-    let state = first.run_state(&run_id).await.unwrap();
-    assert_eq!(state.summary, format!("first-{}", PATCHES - 1));
-    assert_eq!(
-        state.account_wait_reason,
-        Some(format!("second-{}", PATCHES - 1))
-    );
+        // Each store runs its transition on its own writer connection.
+        let (first_change, second_change) = tokio::join!(
+            first.change_run(&run_id, summary),
+            second.change_run(&run_id, wait_reason),
+        );
+        first_change.unwrap();
+        second_change.unwrap();
+
+        let state = first.run_state(&run_id).await.unwrap();
+        assert_eq!(state.summary, format!("first-{index}"));
+        assert_eq!(state.account_wait_reason, Some(format!("second-{index}")));
+    }
 }
 
 #[tokio::test]
