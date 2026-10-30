@@ -460,7 +460,11 @@ def android_failure_evidence(adb, output):
             errors.append(category + "-unavailable")
     evidence = android_crash_summary(*values)
     evidence["collectionErrors"] = errors
-    output.with_suffix(".crash.json").write_text(json.dumps(evidence) + "\n")
+    try:
+        output.with_suffix(".crash.json").write_text(json.dumps(evidence) + "\n")
+    except OSError:
+        # An unavailable artifact directory must not replace the test's failure.
+        return
 
 
 def android_instrumentation(adb, scenario, output):

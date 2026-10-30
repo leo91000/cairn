@@ -90,6 +90,46 @@ with tempfile.TemporaryDirectory() as directory:
 `], { stdio: 'pipe' })
 })
 
+it('diagnostic artifact write failures never replace the initial instrumentation failure', () => {
+  execFileSync('python3', ['-B', '-c', `
+import importlib.util
+import subprocess
+import tempfile
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+spec = importlib.util.spec_from_file_location("network_bench", "tests/network-bench.py")
+bench = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(bench)
+primary = subprocess.TimeoutExpired('instrumentation', 360)
+def adb(*args, **options):
+    if args[:3] == ('shell', 'am', 'instrument'):
+        raise primary
+    return SimpleNamespace(stdout='')
+original_write = Path.write_text
+def write(self, *args, **options):
+    if self.name.endswith('.crash.json'):
+        raise OSError('synthetic evidence disk full')
+    return original_write(self, *args, **options)
+with tempfile.TemporaryDirectory() as directory, patch.object(Path, 'write_text', write):
+    output = Path(directory) / 'same-lan.json'
+    try:
+        bench.android_instrumentation(adb, 'same-lan', output)
+    except BaseException as error:
+        assert error is primary, type(error)
+    else:
+        raise AssertionError('The original timeout must propagate')
+    def crashed(*args, **options):
+        return SimpleNamespace(stdout='shortMsg=Process crashed.')
+    try:
+        bench.android_instrumentation(crashed, 'same-lan', output)
+    except RuntimeError as error:
+        assert str(error) == 'Native Android transport scenario failed; see instrumentation result'
+    else:
+        raise AssertionError('The original process crash must fail the qualification')
+`], { stdio: 'pipe' })
+})
+
 it('network bench stops its writers before removing their temporary directory, including on failure', () => {
   execFileSync('python3', ['-B', '-c', `
 import importlib.util
