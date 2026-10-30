@@ -931,8 +931,18 @@ async fn run(
                 finalization_failed.store(true, Ordering::SeqCst);
                 let exit = state.join(format!("{}.exit", plan.id()));
                 let outcome = serde_json::json!({ "StatusCode": crate::runner::CONTROLLER_FAILED, "FinalizationFailed": true });
-                if let Err(error) = atomic_write(&exit, outcome.to_string().as_bytes()).await {
-                    tracing::error!(attempt = plan.id(), %error, "Guest flush failure must be saved before releasing the attempt");
+                if !matches!(
+                    tokio::time::timeout(
+                        Duration::from_secs(1),
+                        atomic_write(&exit, outcome.to_string().as_bytes())
+                    )
+                    .await,
+                    Ok(Ok(()))
+                ) {
+                    tracing::error!(
+                        attempt = plan.id(),
+                        "Guest flush evidence could not be saved before physical cleanup"
+                    );
                 }
                 return Ok(crate::runner::FINALIZATION_FAILED_SENTINEL);
             }

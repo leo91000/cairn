@@ -318,11 +318,16 @@ impl Broker {
     }
 
     pub async fn stop(&self, id: &str) -> Result<()> {
-        if let Err(error) = atomic_write(&self.state_file(id, "stopped"), b"").await {
+        let written = tokio::time::timeout(
+            Duration::from_secs(1),
+            atomic_write(&self.state_file(id, "stopped"), b""),
+        )
+        .await;
+        if !matches!(written, Ok(Ok(()))) {
             if let Some(attempt) = self.active.lock().await.get(id) {
                 attempt.stop.cancel();
             }
-            return Err(error);
+            return Err(Error::unavailable("Could not persist the VM stop marker."));
         }
         let attempt = {
             let active = self.active.lock().await;

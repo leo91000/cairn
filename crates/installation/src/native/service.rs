@@ -512,11 +512,21 @@ impl Controller {
                                         "Native filesystem could not be flushed; the durable crash prefix was retained"
                                     );
                                     let exit = exit_record(code, true);
-                                    if let Err(error) =
-                                        atomic_write(&controller.file(&id, "exit"), exit.as_bytes())
-                                            .await
-                                    {
-                                        tracing::error!(attempt = id, %error, "Native flush evidence could not be saved before physical cleanup");
+                                    if !matches!(
+                                        tokio::time::timeout(
+                                            Duration::from_secs(1),
+                                            atomic_write(
+                                                &controller.file(&id, "exit"),
+                                                exit.as_bytes()
+                                            )
+                                        )
+                                        .await,
+                                        Ok(Ok(()))
+                                    ) {
+                                        tracing::error!(
+                                            attempt = id,
+                                            "Native flush evidence could not be saved before physical cleanup"
+                                        );
                                     }
                                 }
                                 break;
@@ -1331,11 +1341,18 @@ impl Controller {
         uuid(id)?;
         // Publish cancellation before waiting for an admission that may itself
         // be waiting for storage. Its waiter observes this durable marker.
-        if let Err(error) = atomic_write(&self.file(id, "stopped"), b"1").await {
+        let written = tokio::time::timeout(
+            Duration::from_secs(1),
+            atomic_write(&self.file(id, "stopped"), b"1"),
+        )
+        .await;
+        if !matches!(written, Ok(Ok(()))) {
             if let Some(attempt) = self.active.lock().await.get(id) {
                 attempt.stop.cancel();
             }
-            return Err(error);
+            return Err(Error::unavailable(
+                "Could not persist the native stop marker.",
+            ));
         }
         let _admission = self.admission.lock().await;
         self.stop_admitted(id).await
@@ -1346,11 +1363,18 @@ impl Controller {
             self.record_stop(id, "controller_shutdown", Value::Null)
                 .await;
         }
-        if let Err(error) = atomic_write(&self.file(id, "stopped"), b"1").await {
+        let written = tokio::time::timeout(
+            Duration::from_secs(1),
+            atomic_write(&self.file(id, "stopped"), b"1"),
+        )
+        .await;
+        if !matches!(written, Ok(Ok(()))) {
             if let Some(attempt) = self.active.lock().await.get(id) {
                 attempt.stop.cancel();
             }
-            return Err(error);
+            return Err(Error::unavailable(
+                "Could not persist the native stop marker.",
+            ));
         }
         let requested = self.active.lock().await.get(id).and_then(|attempt| {
             if attempt.stop.is_cancelled() {
