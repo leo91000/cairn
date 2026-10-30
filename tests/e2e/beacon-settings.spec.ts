@@ -34,6 +34,10 @@ test('account settings expose bounded local performance diagnostics on desktop a
   await expect(diagnostics.getByRole('switch', { name: 'Send performance diagnostics' })).toBeChecked()
   await diagnostics.getByRole('button', { name: 'Refresh report', exact: true }).click()
   const report = diagnostics.getByLabel('Local performance report')
+  await expectSingleScroll(page)
+  await diagnostics.getByText('Inspect local report', { exact: true }).click()
+  await expect(report).toBeVisible()
+  await expectSingleScroll(page)
   const before = JSON.parse((await report.textContent())!)
   expect(before).toMatchObject({ schema: 2, platform: 'web', buildType: 'release' })
   expect(before.buildId).toMatch(/^[a-f0-9]{64}$/)
@@ -44,8 +48,11 @@ test('account settings expose bounded local performance diagnostics on desktop a
   await diagnostics.getByRole('switch', { name: 'Send performance diagnostics' }).uncheck()
   await page.reload()
   await expect(diagnostics.getByRole('switch', { name: 'Send performance diagnostics' })).not.toBeChecked()
+  await expect(report).not.toBeVisible()
+  await diagnostics.getByText('Inspect local report', { exact: true }).click()
   for (const width of [1440, 390, 320]) {
     await page.setViewportSize({ width, height: 844 })
+    await expectSingleScroll(page)
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   }
 })

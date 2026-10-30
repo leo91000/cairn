@@ -78,7 +78,12 @@ async function share() {
     <p v-if="status" role="status" class="mb-3 text-sm text-muted">
       {{ status }}
     </p>
-    <pre v-if="report" aria-label="Local performance report" class="max-h-96 overflow-auto rounded-lg border border-line p-3 text-xs">{{ serialized }}</pre>
+    <details v-if="report">
+      <summary class="cursor-pointer text-sm text-muted">
+        Inspect local report
+      </summary>
+      <pre aria-label="Local performance report" class="mt-3 whitespace-pre-wrap break-all rounded-lg border border-line p-3 text-xs">{{ serialized }}</pre>
+    </details>
     <p v-else class="text-sm text-muted">
       Performance reporting is unavailable in this browser context.
     </p>
