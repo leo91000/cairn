@@ -5392,6 +5392,16 @@ async fn side_questions_are_asked_withdrawn_and_answered_beside_the_running_repl
     assert_eq!(result(&listed)["sideQuestionUnavailable"], "claude-release");
 
     s.side_questions_available(&run_id, true).await.unwrap();
+    // Conversation lists report the same availability as the conversation itself.
+    let chats = call(&s, &configuration, "list_chats", json!({})).await;
+    let listed = result(&chats)["chats"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|listed| listed["id"] == chat_id.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(listed["canAskSideQuestion"], true, "{listed}");
     let first = ask("Why this order?");
     let asked = call(&s, &configuration, "ask_chat_side_question", first.clone()).await;
     assert_eq!(result(&asked)["status"], "pending");
