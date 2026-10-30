@@ -304,42 +304,27 @@ async fn run_transitions_from_two_connections_preserve_each_others_fields() {
     });
     common::add_run(&first, &run).await;
 
-    let rounds = std::sync::Arc::new(tokio::sync::Barrier::new(3));
-    let writers = [("first", first.clone()), ("second", second)].map(|(name, store)| {
-        let run_id = run_id.clone();
-        let rounds = rounds.clone();
-        tokio::spawn(async move {
-            for index in 0..ROUNDS {
-                let value = format!("{name}-{index}");
-                let change = if name == "first" {
-                    cairn_installation::runs::RunChanges {
-                        summary: Some(value),
-                        ..Default::default()
-                    }
-                } else {
-                    cairn_installation::runs::RunChanges {
-                        account_wait_reason: Some(Some(value)),
-                        ..Default::default()
-                    }
-                };
-
-                rounds.wait().await;
-                store.change_run(&run_id, change).await.unwrap();
-                rounds.wait().await;
-            }
-        })
-    });
-
     for index in 0..ROUNDS {
-        rounds.wait().await;
-        rounds.wait().await;
+        let summary = cairn_installation::runs::RunChanges {
+            summary: Some(format!("first-{index}")),
+            ..Default::default()
+        };
+        let wait_reason = cairn_installation::runs::RunChanges {
+            account_wait_reason: Some(Some(format!("second-{index}"))),
+            ..Default::default()
+        };
+
+        // Each store runs its transition on its own writer connection.
+        let (first_change, second_change) = tokio::join!(
+            first.change_run(&run_id, summary),
+            second.change_run(&run_id, wait_reason),
+        );
+        first_change.unwrap();
+        second_change.unwrap();
 
         let state = first.run_state(&run_id).await.unwrap();
         assert_eq!(state.summary, format!("first-{index}"));
         assert_eq!(state.account_wait_reason, Some(format!("second-{index}")));
-    }
-    for writer in writers {
-        writer.await.unwrap();
     }
 }
 

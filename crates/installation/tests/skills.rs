@@ -1139,7 +1139,6 @@ async fn runs_install_the_files_frozen_when_they_were_created() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn snapshots_describe_the_manifest_version_that_was_frozen() {
     use cairn_installation::skills::bundle::{self, Base, Change};
-    use std::os::unix::fs::OpenOptionsExt;
 
     let api = Api::new().await;
     let saved = api
@@ -1185,12 +1184,12 @@ async fn snapshots_describe_the_manifest_version_that_was_frozen() {
     let listing = tokio::select! {
         opened = &mut opened => opened.unwrap().expect("Unable to open listing gate"),
         finished = &mut snapshot => {
-            // Release the blocked writer so the runtime can shut down.
-            let _ = std::fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_NONBLOCK)
-                .open(&gate);
+            release_gate(&gate);
             panic!("The snapshot finished before listing the project: {finished:?}");
+        }
+        () = tokio::time::sleep(std::time::Duration::from_secs(60)) => {
+            release_gate(&gate);
+            panic!("The snapshot never reached the project listing");
         }
     };
     let content = SKILL.replace(
@@ -1224,6 +1223,17 @@ async fn snapshots_describe_the_manifest_version_that_was_frozen() {
         "writer must commit between listing and freezing"
     );
     assert_eq!(selected["description"], "Use the latest branch conventions");
+}
+
+/// Opens a FIFO for reading so a writer blocked on opening it can return and
+/// the runtime can shut down.
+fn release_gate(gate: &Path) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let _ = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(gate);
 }
 
 /// A local GitHub serving `fixture/skills` through the bundled package and one instance.
