@@ -298,8 +298,12 @@ internal fun ColumnScope.SideQuestionPanel(
                         "La conversation compacte son contexte. Réessayez une fois la compaction terminée."
                     "claude-release" ->
                         "Cette version de Claude Code ne peut pas répondre aux questions à côté dans Cairn : la version 2.1.308 ou plus récente est nécessaire. Posez-la dans la conversation."
-                    else ->
+                    "not-offered" ->
                         "Claude Code n’a pas encore proposé de questions à côté pour cette réponse. Réessayez dans un instant ; s’il ne le fait jamais, son runtime doit peut-être être mis à jour."
+                    // A reason this version does not know yet: the server's own words.
+                    else ->
+                        chat.sideQuestionReason
+                            ?: "Les questions à côté ne sont pas disponibles pour cette réponse."
                 },
                 icon = CairnIcons.SideQuestion,
                 maxLines = 4,

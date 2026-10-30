@@ -1563,7 +1563,8 @@ impl Service {
             if let Some(run) = run.as_ref().filter(|run| run_is_active(run)) {
                 // Messages sent while compacting wait for the next turn instead of steering.
                 if !is_compaction(run) {
-                    self.publish_steering(&chat, run).await?;
+                    self.publish_steering(&chat, run, side_open.contains(&chat.id))
+                        .await?;
                 }
                 continue;
             }
@@ -1633,14 +1634,20 @@ impl Service {
     }
 
     /// Writes steering messages where the running agent turn reads them.
-    async fn publish_steering(&self, chat: &Conversation, run: &Value) -> Result<()> {
+    /// `side_open`: the conversation has side questions its reply may still receive.
+    async fn publish_steering(
+        &self,
+        chat: &Conversation,
+        run: &Value,
+        side_open: bool,
+    ) -> Result<()> {
         let chat_id = chat.id.clone();
         let paused = chat.paused;
         let delivering = run["chatExecution"]["messageId"].clone();
         let run_id = text(run, "id").to_owned();
-        // Only a reply that announced side questions reads them; a later tick sees an
-        // announcement made since this one read the run.
-        let announced = run["sideQuestions"] == true;
+        // Only a reply that announced side questions, with some to receive, reads them; a
+        // later tick sees an announcement or a question made since this one read them.
+        let announced = side_open && run["sideQuestions"] == true;
         let (mut steering, side_turn) = self
             .store
             .transaction(move |db| {

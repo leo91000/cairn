@@ -239,6 +239,13 @@ abstract class SideQuestionCases {
                         "Claude Code n’a pas encore proposé de questions à côté pour cette réponse. Réessayez dans un instant ; s’il ne le fait jamais, son runtime doit peut-être être mis à jour."
                     )
                     .assertExists()
+                // A reason this version does not know shows the server's own words.
+                unavailable = "future-reason"
+                compose
+                    .onNodeWithText(
+                        "Les questions à côté ne sont pas disponibles pour cette réponse."
+                    )
+                    .assertExists()
                 compose.onNodeWithText("Demander").assertDoesNotExist()
                 assertTrue(writes.isEmpty())
             } finally {

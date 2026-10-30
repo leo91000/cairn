@@ -5723,6 +5723,15 @@ async fn side_questions_are_asked_withdrawn_and_answered_beside_the_running_repl
         .unwrap()
         .clone();
     assert_eq!(expired["status"], "failed");
+    // Withdrawing it then changes nothing: it was not answered.
+    let withdrawn = call(
+        &s,
+        &configuration,
+        "cancel_chat_side_question",
+        json!({ "chatId": chat_id, "sideQuestionId": third_id }),
+    )
+    .await;
+    assert_eq!(result(&withdrawn)["status"], "failed", "{withdrawn}");
     assert!(
         expired["error"]
             .as_str()

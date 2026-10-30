@@ -369,7 +369,8 @@ fn cancel(db: &Db<'_>, chat_id: &str, id: &str) -> Result<ChatSideQuestion> {
     require_live(&conversation(db, chat_id)?)?;
     let mut question = required(find(db, chat_id, id)?, "Side question not found")?;
     match question.status {
-        SideQuestionStatus::Cancelled => Ok(question),
+        // Already settled without an answer: there is nothing left to withdraw.
+        SideQuestionStatus::Cancelled | SideQuestionStatus::Failed => Ok(question),
         SideQuestionStatus::Pending => {
             question.status = SideQuestionStatus::Cancelled;
             question.settled_at = Some(now());

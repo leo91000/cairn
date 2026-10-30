@@ -30,13 +30,25 @@ const MAX_IMAGE: usize = 10_000_000;
 /// Whether this Claude Code release was qualified to answer side questions with every tool
 /// denied before it runs (ADR-0078). Earlier or unknown releases never receive them.
 fn answers_side_questions(version: &str) -> bool {
-    // A pre-release or build of a later release qualifies like the release itself.
-    let core = version.split(['-', '+']).next().unwrap_or_default();
-    let release = core
+    // Build metadata does not change a release; a pre-release precedes it, so only one of a
+    // later release qualifies.
+    let release = version.split('+').next().unwrap_or_default();
+    let (core, pre_release) = match release.split_once('-') {
+        Some((core, _)) => (core, true),
+        None => (release, false),
+    };
+    let core = core
         .split('.')
         .map(|part| part.parse::<u64>().ok())
         .collect::<Option<Vec<_>>>();
-    release.is_some_and(|release| release >= vec![2, 1, 308])
+    let qualified = vec![2, 1, 308];
+    core.is_some_and(|core| {
+        if pre_release {
+            core > qualified
+        } else {
+            core >= qualified
+        }
+    })
 }
 
 /// Prefix of the context usage requests this adapter sends Claude Code.
@@ -1831,7 +1843,15 @@ mod side_question_release_tests {
         ] {
             assert!(answers_side_questions(release), "{release}");
         }
-        for release in ["2.1.280", "2.1.307", "2.1.307-rc", "2.1", "", "next"] {
+        for release in [
+            "2.1.280",
+            "2.1.307",
+            "2.1.307-rc",
+            "2.1.308-rc.1",
+            "2.1",
+            "",
+            "next",
+        ] {
             assert!(!answers_side_questions(release), "{release}");
         }
     }

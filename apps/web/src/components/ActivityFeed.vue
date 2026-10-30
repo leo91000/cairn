@@ -335,8 +335,6 @@ function schedulePaging() {
 
 watch([entries, settled, () => props.more, () => props.loading, () => props.olderError], schedulePaging, { flush: 'post' })
 
-// As on Android, scrolling up pauses following and scrolling back to the end resumes it.
-// Positions the feed sets itself, and the browser's anchoring, change neither.
 // A passage selected in one agent reply can be asked about, beside the running reply.
 const selection = ref<{
   itemId: string
@@ -388,6 +386,8 @@ onBeforeUnmount(() => {
 })
 watch(() => props.canAsk, () => selectionChanged())
 
+// As on Android, scrolling up pauses following and scrolling back to the end resumes it.
+// Positions the feed sets itself, and the browser's anchoring, change neither.
 function scrolled() {
   const el = scroller.value
   if (!el)
