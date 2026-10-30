@@ -764,6 +764,25 @@ impl Association {
         }
     }
 
+    /// Whether an existing stream accepts new outgoing data. `None` means the
+    /// stream has not been opened, or has already been removed.
+    pub fn stream_is_writable(&self, stream_identifier: StreamId) -> Option<bool> {
+        let shutting_down = matches!(
+            self.state(),
+            AssociationState::ShutdownSent
+                | AssociationState::ShutdownAckSent
+                | AssociationState::ShutdownPending
+                | AssociationState::ShutdownReceived
+        );
+        self.streams.get(&stream_identifier).map(|stream| {
+            !shutting_down
+                && matches!(
+                    stream.state,
+                    RecvSendState::Writable | RecvSendState::ReadWritable
+                )
+        })
+    }
+
     /// accept_stream accepts a stream
     pub fn accept_stream(&mut self) -> Option<Stream<'_>> {
         self.stream_queue
@@ -1778,12 +1797,18 @@ impl Association {
                     self.acknowledge_stream_reset(p.reconfig_response_sequence_number);
                 }
                 ReconfigResult::InProgress => {
-                    if let Some(request) = self.reconfigs.get_mut(&p.reconfig_response_sequence_number) {
+                    if let Some(request) =
+                        self.reconfigs.get_mut(&p.reconfig_response_sequence_number)
+                    {
                         request.unanswered_expirations = None;
                     }
                     // Restart the drain-probe timer on the next timed poll.
                     // An unanswered request keeps its existing deadline.
-                    if self.reconfigs.values().all(|request| request.unanswered_expirations.is_none()) {
+                    if self
+                        .reconfigs
+                        .values()
+                        .all(|request| request.unanswered_expirations.is_none())
+                    {
                         self.timers.stop(Timer::Reconfig);
                     }
                 }
@@ -2259,10 +2284,13 @@ impl Association {
                 ..Default::default()
             };
 
-            self.reconfigs.insert(rsn, OutgoingReset {
-                chunk: c.clone(),
-                unanswered_expirations: Some(0),
-            });
+            self.reconfigs.insert(
+                rsn,
+                OutgoingReset {
+                    chunk: c.clone(),
+                    unanswered_expirations: Some(0),
+                },
+            );
 
             let p = self.create_packet(vec![Box::new(c)]);
             reply.push(p);
@@ -2501,10 +2529,13 @@ impl Association {
                     })),
                     ..Default::default()
                 };
-                self.reconfigs.insert(rsn, OutgoingReset {
-                    chunk: c.clone(),
-                    unanswered_expirations: Some(0),
-                });
+                self.reconfigs.insert(
+                    rsn,
+                    OutgoingReset {
+                        chunk: c.clone(),
+                        unanswered_expirations: Some(0),
+                    },
+                );
 
                 let p = self.create_packet(vec![Box::new(c)]);
                 if let Ok(raw) = p.marshal() {

@@ -8,7 +8,7 @@ recorded in Cairn's lockfile before this patch. Upstream revision:
 
 Compared with the archive, this directory patches only
 `src/peer_connection/handler/sctp.rs`, `src/peer_connection/handler/mod.rs` and
-`src/peer_connection/handler/datachannel.rs`,
+`src/peer_connection/handler/datachannel.rs` and `src/data_channel/mod.rs`,
 adds this file, replaces the local `.gitignore`,
 and omits packaging metadata (`.cargo*`) and the archive's `Cargo.lock`.
 The upstream MIT/Apache licenses are preserved. Every other file is
@@ -44,6 +44,13 @@ This covers final reset ACK, old payload and replacement DCEP sharing one batch.
 
 No dependency version, connection deadline, certificate check, authorization,
 HTTP route restriction or direct/relay selection policy changes.
+
+A remote reset can close the SCTP write half before its final acknowledgement.
+Expose Closing and reject new binary/text sends without charging buffer credit,
+including while a final close event waits behind received messages. Previously
+received messages still drain before OnClose, without an early public OnClosing
+event. Already closed channels remain terminal when a late close is deferred.
+Association shutdown also prevents new writes before SHUTDOWN-COMPLETE arrives.
 
 The regular workspace regression uses the same multithreaded Tokio runtime as
 the gateway and repeatedly opens/closes eight concurrent HTTP connections,

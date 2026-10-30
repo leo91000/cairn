@@ -70,6 +70,26 @@ pub(crate) struct SctpHandlerContext {
 }
 
 impl SctpHandlerContext {
+    pub(crate) fn stream_write_closed(
+        &self,
+        association: AssociationHandle,
+        stream: StreamId,
+    ) -> bool {
+        if let Some(writable) = self
+            .sctp_transport
+            .sctp_associations
+            .get(&association)
+            .and_then(|connection| connection.stream_is_writable(stream))
+        {
+            return !writable;
+        }
+
+        self.event_outs.iter().any(|event| matches!(
+            event.event,
+            RTCEventInternal::SCTPStreamClosed(handle, id) if handle == association.0 && id == stream
+        ))
+    }
+
     pub(crate) fn new(now: Instant, sctp_transport: SctpTransport) -> Self {
         Self {
             sctp_transport,
@@ -2036,6 +2056,230 @@ mod tests {
             matches!(response.message, RTCMessageInternal::Dtls(DTLSMessage::Sctp(DataChannelMessage { payload, .. })) if payload.as_ref() == [0; 64])
         );
         assert!(ctx.pending_readable.is_empty());
+    }
+
+    fn negotiated_peer(
+        now: Instant,
+        context: SctpHandlerContext,
+        association: AssociationHandle,
+    ) -> (
+        crate::peer_connection::RTCPeerConnection,
+        crate::data_channel::RTCDataChannelId,
+    ) {
+        let mut peer = crate::peer_connection::RTCPeerConnectionBuilder::new()
+            .build(now)
+            .expect("peer");
+        peer.dtls_transport_mut().dtls_role = RTCDtlsRole::Server;
+        let handle = peer
+            .create_data_channel(
+                "response",
+                Some(crate::data_channel::RTCDataChannelInit {
+                    negotiated: Some(1),
+                    ..Default::default()
+                }),
+            )
+            .expect("channel")
+            .id();
+        peer.pipeline_context.sctp_handler_context = context;
+        peer.get_datachannel_handler()
+            .handle_event(TaggedRTCEventInternal {
+                now,
+                event: RTCEventInternal::SCTPHandshakeComplete(association.0),
+            })
+            .expect("open negotiated channel");
+        assert_eq!(
+            peer.data_channel(handle).unwrap().ready_state(),
+            crate::data_channel::RTCDataChannelState::Open,
+            "queued stream creation must retain its negotiated opening state"
+        );
+        while let Some(message) = peer.get_datachannel_handler().poll_write() {
+            peer.get_sctp_handler()
+                .handle_write(message)
+                .expect("open underlying stream");
+        }
+        assert_eq!(
+            peer.data_channel(handle).unwrap().ready_state(),
+            crate::data_channel::RTCDataChannelState::Open
+        );
+        while peer.get_datachannel_handler().poll_read().is_some() {}
+        while peer.get_datachannel_handler().poll_event().is_some() {}
+        (peer, handle)
+    }
+
+    #[test]
+    fn a_peer_shutdown_rejects_new_writes_before_shutdown_completes() {
+        let now = Instant::now();
+        let mut established = establish();
+        let (mut peer, handle) = negotiated_peer(
+            now,
+            client_ctx(
+                now,
+                established.client_ep,
+                established.client_ch,
+                established.client_conn,
+            ),
+            established.client_ch,
+        );
+        established.server_conn.shutdown().expect("peer shutdown");
+        let shutdown = drain_transmits(&mut established.server_conn, now);
+        assert!(!shutdown.is_empty());
+        for datagram in shutdown {
+            peer.get_sctp_handler()
+                .handle_read(raw_read(now, datagram))
+                .expect("receive shutdown");
+        }
+        assert!(
+            peer.sctp_transport()
+                .sctp_associations
+                .contains_key(&established.client_ch)
+        );
+        let mut channel = peer
+            .data_channel(handle)
+            .expect("channel retained until shutdown completes");
+        let outstanding = channel.outstanding_bytes();
+        assert!(matches!(
+            channel.send(now, BytesMut::from(&b"after shutdown"[..])),
+            Err(Error::ErrDataChannelClosed)
+        ));
+        assert!(matches!(
+            channel.send_text(now, "after shutdown"),
+            Err(Error::ErrDataChannelClosed)
+        ));
+        assert_eq!(channel.outstanding_bytes(), outstanding);
+        assert_eq!(
+            channel.ready_state(),
+            crate::data_channel::RTCDataChannelState::Closing
+        );
+    }
+
+    #[test]
+    fn a_peer_reset_rejects_new_writes_without_losing_the_final_received_message() {
+        let now = Instant::now();
+        let mut established = establish();
+        let final_data = server_datagrams_carrying(&mut established, 1, 1, now);
+        established
+            .server_conn
+            .stream(1)
+            .expect("server stream")
+            .close(now)
+            .expect("peer reset");
+        let reset = drain_transmits(&mut established.server_conn, now);
+        assert!(!reset.is_empty());
+        let (mut peer, handle) = negotiated_peer(
+            now,
+            client_ctx(
+                now,
+                established.client_ep,
+                established.client_ch,
+                established.client_conn,
+            ),
+            established.client_ch,
+        );
+
+        for datagram in final_data.into_iter().chain(reset) {
+            peer.get_sctp_handler()
+                .handle_read(raw_read(now, datagram))
+                .expect("receive final data and peer reset");
+        }
+        let connection = peer
+            .sctp_transport_mut()
+            .sctp_associations
+            .get_mut(&established.client_ch)
+            .expect("association");
+        assert!(!connection.stream(1).unwrap().is_writable());
+        assert!(
+            connection
+                .open_stream(1, PayloadProtocolIdentifier::Binary)
+                .is_err(),
+            "the wire ID remains reserved until the reciprocal reset is acknowledged"
+        );
+
+        let mut channel = peer.data_channel(handle).expect("retained channel");
+        let outstanding = channel.outstanding_bytes();
+        assert!(matches!(
+            channel.send(now, BytesMut::from(&b"after peer reset"[..])),
+            Err(Error::ErrDataChannelClosed)
+        ));
+        assert!(matches!(
+            channel.send_text(now, "after peer reset"),
+            Err(Error::ErrDataChannelClosed)
+        ));
+        assert_eq!(channel.outstanding_bytes(), outstanding);
+        assert_eq!(
+            channel.ready_state(),
+            crate::data_channel::RTCDataChannelState::Closing
+        );
+
+        // Finish the reciprocal reset before the application reads its final
+        // message. This removes SCTP's stream while RTC must still retain it.
+        while let Some(message) = peer.get_sctp_handler().poll_write() {
+            if let RTCMessageInternal::Dtls(DTLSMessage::Raw(datagram)) = message.message {
+                if let Some((_, DatagramEvent::AssociationEvent(event))) = established
+                    .server_ep
+                    .handle(now, client_addr(), None, datagram.freeze())
+                {
+                    established.server_conn.handle_event(event);
+                }
+            }
+        }
+        while established.server_conn.poll().is_some() {}
+        for datagram in drain_transmits(&mut established.server_conn, now) {
+            peer.get_sctp_handler()
+                .handle_read(raw_read(now, datagram))
+                .expect("reset acknowledgement");
+        }
+        assert!(
+            peer.sctp_transport()
+                .sctp_associations
+                .get(&established.client_ch)
+                .unwrap()
+                .stream_is_writable(1)
+                .is_none()
+        );
+        let mut channel = peer
+            .data_channel(handle)
+            .expect("channel retained for final read");
+        assert_eq!(
+            channel.ready_state(),
+            crate::data_channel::RTCDataChannelState::Closing
+        );
+        assert!(matches!(
+            channel.send(now, BytesMut::from(&b"after reset ACK"[..])),
+            Err(Error::ErrDataChannelClosed)
+        ));
+        assert_eq!(channel.outstanding_bytes(), outstanding);
+
+        while let Some(message) = peer.get_sctp_handler().poll_read() {
+            peer.get_datachannel_handler()
+                .handle_read(message)
+                .expect("deliver final message");
+        }
+        let final_message = peer
+            .get_datachannel_handler()
+            .poll_read()
+            .expect("final response");
+        assert!(matches!(
+            final_message.message,
+            RTCMessageInternal::Dtls(DTLSMessage::DataChannel(ApplicationMessage {
+                data_channel_id,
+                data_channel_event: DataChannelEvent::Message(message),
+            })) if data_channel_id == handle && message.data.as_ref() == [0; 64]
+        ));
+        let mut closes = 0;
+        while let Some(event) = peer.get_datachannel_handler().poll_event() {
+            closes += usize::from(matches!(
+                event.event,
+                RTCEventInternal::RTCPeerConnectionEvent(
+                    crate::peer_connection::event::RTCPeerConnectionEvent::OnDataChannel(
+                        crate::peer_connection::event::data_channel_event::RTCDataChannelEvent::OnClose(_)
+                    )
+                )
+            ));
+        }
+        assert_eq!(
+            closes, 1,
+            "the final close follows delivery of the final message"
+        );
     }
 
     #[test]

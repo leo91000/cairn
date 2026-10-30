@@ -220,11 +220,31 @@ impl RTCDataChannel<'_> {
     pub fn ready_state(&self) -> RTCDataChannelState {
         // peer_connection is mutable borrow, its data_channels won't be resized,
         // so, unwrap() here is safe.
-        self.peer_connection
-            .data_channels
-            .get(&self.id)
-            .unwrap()
-            .ready_state
+        let channel = self.peer_connection.data_channels.get(&self.id).unwrap();
+        if matches!(
+            channel.ready_state,
+            RTCDataChannelState::Closing | RTCDataChannelState::Closed
+        ) {
+            return channel.ready_state;
+        }
+        let Some(data_channel) = &channel.data_channel else {
+            return channel.ready_state;
+        };
+        // Keep the registered channel and its readable messages until final
+        // reset acknowledgement. Its outgoing half can already be closed.
+        // A not-yet-created stream remains in its existing negotiation state.
+        if self
+            .peer_connection
+            .pipeline_context
+            .sctp_handler_context
+            .stream_write_closed(
+                sctp::AssociationHandle(data_channel.association_handle()),
+                data_channel.stream_identifier(),
+            )
+        {
+            return RTCDataChannelState::Closing;
+        }
+        channel.ready_state
     }
 
     /// The threshold at which the buffered amount is considered high.
@@ -305,9 +325,11 @@ impl RTCDataChannel<'_> {
             .get(&self.id)
             .ok_or(Error::ErrDataChannelClosed)?;
 
-        if dc.data_channel.is_none() {
-            // No stream yet: either it is still being negotiated, or it is already gone.
-            return Err(if dc.ready_state == RTCDataChannelState::Connecting {
+        let state = self.ready_state();
+        if dc.data_channel.is_none() || state != RTCDataChannelState::Open {
+            // A stream still being negotiated, or whose write half has closed,
+            // cannot accept a new application message.
+            return Err(if state == RTCDataChannelState::Connecting {
                 Error::ErrDataChannelNotOpen
             } else {
                 Error::ErrDataChannelClosed

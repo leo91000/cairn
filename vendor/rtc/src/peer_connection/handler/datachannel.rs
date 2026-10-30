@@ -96,6 +96,12 @@ impl<'a> DataChannelHandler<'a> {
             let defer_close = matches!(&event.event,
                 RTCEventInternal::SCTPStreamClosed(_, id) if !close_ready(*id));
             if defer_close {
+                if let RTCEventInternal::SCTPStreamClosed(_, id) = &event.event
+                    && let Some(channel) = self.data_channels.get_by_stream_mut(id)
+                    && channel.ready_state != RTCDataChannelState::Closed
+                {
+                    channel.ready_state = RTCDataChannelState::Closing;
+                }
                 self.ctx.pending_sctp_events.push_back(event);
             } else {
                 self.handle_event(event)?;
@@ -240,14 +246,16 @@ impl<'a>
                 (dc.label.clone(), dc.protocol.clone())
             };
 
-            // Only deliver application messages once the channel is Open. Messages that
+            // Deliver final received messages while Closing as well. Messages that
             // arrive while it is still Connecting stay buffered in the underlying
             // DataChannel's read queue; they drain once the channel opens, or are
             // discarded on close/timeout.
-            let is_open = self
-                .data_channels
-                .get(&channel_id)
-                .is_some_and(|dc| dc.ready_state == RTCDataChannelState::Open);
+            let can_deliver_received = self.data_channels.get(&channel_id).is_some_and(|dc| {
+                matches!(
+                    dc.ready_state,
+                    RTCDataChannelState::Open | RTCDataChannelState::Closing
+                )
+            });
 
             let data_channel = self
                 .data_channels
@@ -257,7 +265,7 @@ impl<'a>
                 .as_mut()
                 .ok_or(Error::ErrDataChannelNotExisted)?;
 
-            if is_open {
+            if can_deliver_received {
                 while let Some(data_channel_message) = data_channel.poll_read() {
                     let payload_len = data_channel_message.payload.len();
                     debug!("recv application message {:?}", msg.transport.peer_addr);
@@ -926,6 +934,41 @@ mod tests {
 
     /// A straggler `DATA_CHANNEL_ACK` on a channel that has already been closed
     /// must be ignored: it must not flip state or emit an open event.
+    #[test]
+    fn a_deferred_final_close_keeps_an_already_closed_channel_terminal() {
+        let now = Instant::now();
+        let mut ctx = DataChannelHandlerContext::new(now);
+        let mut channel = in_band_channel(1);
+        channel.ready_state = RTCDataChannelState::Closed;
+        let (mut channels, handles) = registry(vec![channel]);
+        let mut stats = RTCStatsAccumulator::new();
+        ctx.pending_sctp_events.push_back(TaggedRTCEventInternal {
+            now,
+            event: RTCEventInternal::SCTPStreamClosed(0, 1),
+        });
+        let mut handler = DataChannelHandler::new(
+            &mut ctx,
+            &mut channels,
+            &mut stats,
+            None,
+            RTCDtlsRole::Server,
+            None,
+        );
+        handler.process_sctp_events(|_| false).unwrap();
+        handler
+            .handle_read(TaggedRTCMessageInternal {
+                now,
+                transport: TransportContext::default(),
+                message: RTCMessageInternal::Dtls(DTLSMessage::Sctp(data_message(0, 1, b"late"))),
+            })
+            .unwrap();
+        assert!(handler.poll_read().is_none());
+        assert_eq!(
+            channels.get(&handles[0]).unwrap().ready_state,
+            RTCDataChannelState::Closed
+        );
+    }
+
     #[test]
     fn ack_on_closed_channel_is_ignored() {
         let now = Instant::now();

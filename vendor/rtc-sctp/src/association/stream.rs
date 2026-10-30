@@ -228,15 +228,6 @@ impl Stream<'_> {
             return Err(Error::ErrOutboundPacketTooLarge);
         }
 
-        let state: AssociationState = self.association.state();
-        match state {
-            AssociationState::ShutdownSent
-            | AssociationState::ShutdownAckSent
-            | AssociationState::ShutdownPending
-            | AssociationState::ShutdownReceived => return Err(Error::ErrStreamClosed),
-            _ => {}
-        };
-
         let (p, _) = source.pop_chunk(self.association.max_message_size() as usize);
 
         if let Some(s) = self.association.streams.get_mut(&self.stream_identifier) {
@@ -270,11 +261,9 @@ impl Stream<'_> {
 
     /// Whether this stream can currently accept more data.
     pub fn is_writable(&self) -> bool {
-        if let Some(s) = self.association.streams.get(&self.stream_identifier) {
-            s.state == RecvSendState::Writable || s.state == RecvSendState::ReadWritable
-        } else {
-            false
-        }
+        self.association
+            .stream_is_writable(self.stream_identifier)
+            .unwrap_or(false)
     }
 
     /// stop closes the read-direction of the stream.

@@ -8,8 +8,8 @@ recorded in Cairn's lockfile before this patch. Upstream revision:
 
 Compared with the archive, this directory patches only
 `src/association/mod.rs`, `src/association/stream.rs`,
-`src/association/association_test.rs`, `src/endpoint/endpoint_test.rs` and
-`src/queue/pending_queue.rs`, and `src/association/timer.rs`, adds the
+`src/association/association_test.rs`, `src/endpoint/endpoint_test.rs`,
+`src/queue/pending_queue.rs` and `src/association/timer.rs`, adds the
 MIT/Apache licenses from the same upstream revision, this file and `.gitignore`,
 and omits packaging metadata (`.cargo*`) and the archive's `Cargo.lock`.
 All other files are byte-identical to the archive. Cairn's root lockfile pins
@@ -45,6 +45,9 @@ An In Progress response marks that request's later retransmissions as probes of
 application drain, without charging its failure budget (RFC 6525 section 5.2.7).
 Every unanswered request retains its own budget and deadline, so one progressing
 reset cannot conceal another reset that receives no response.
+The non-mutating stream-writability query shares the write path's stream and
+association-shutdown eligibility. RTC rejects new application writes while
+retaining the closing stream for reset completion and final received data.
 Already established closed associations reject new streams and late packets.
 Cancelling a stream's read half releases unread receive data and acknowledges
 later old-generation DATA without retaining it, so an abandoned local HTTP
