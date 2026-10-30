@@ -1081,6 +1081,11 @@ fn continue_run(
     checkpoint.terminal_code = Some(None);
     checkpoint.controller_recoveries = None;
     checkpoint.controller_recovery_reservation = None;
+    checkpoint.provider_failure_attempt = None;
+    checkpoint.finalization_failure_attempt = None;
+    checkpoint.move_recovery_reservation = None;
+    checkpoint.provider_retry_reservation = None;
+    checkpoint.pending_paid_admission = None;
     checkpoint.controller_observation = None;
     checkpoint.remaining_ms = Some(crate::run_limits::budget_ms(agent));
     checkpoint.last_message = None;

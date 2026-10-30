@@ -673,7 +673,9 @@ async fn stream_agent(
         complete = usage.complete,
     );
     timing.next("sync_disk");
-    sync_disk("/usr/bin/sync").await?;
+    if !finalize_disk(write, "/usr/bin/sync").await? {
+        return Ok(());
+    }
     timing.next("send_exit");
     let exit = Event::Exit {
         code: Some(code.into()),
@@ -712,6 +714,15 @@ async fn wait_agent(
 /// syncfs() reports writeback errors and does not flush unrelated guest mounts.
 async fn sync_disk(program: &str) -> Result<()> {
     filesystems::sync(program).await
+}
+
+async fn finalize_disk(write: &mut (impl AsyncWrite + Unpin), program: &str) -> Result<bool> {
+    if let Err(error) = sync_disk(program).await {
+        tracing::error!(%error, "Guest filesystem finalization failed");
+        wire::write(write, &Event::FinalizationFailed).await?;
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 /// The chat result file written by the agent, if this run is a chat.
@@ -826,6 +837,12 @@ mod tests {
     async fn failed_disk_flush_is_propagated() {
         assert!(sync_disk("false").await.is_err());
         assert!(sync_disk("true").await.is_ok());
+        let (mut guest, host) = tokio::io::duplex(4096);
+        assert!(!finalize_disk(&mut guest, "false").await.unwrap());
+        let mut host = tokio::io::BufReader::new(host);
+        let event = wire::read(&mut host).await.unwrap().unwrap();
+        let event: Event = serde_json::from_value(event).unwrap();
+        assert!(matches!(event, Event::FinalizationFailed));
     }
 
     #[tokio::test]
