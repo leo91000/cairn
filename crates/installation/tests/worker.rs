@@ -3145,11 +3145,47 @@ async fn confirmed_provider_failure_survives_later_output_truncation_and_restart
     assert_eq!(waiting["status"], RunStatus::Queued, "{waiting}");
     assert_eq!(waiting["retry"]["cause"]["message"], "Provider busy");
     fixture.stop(false).await;
-    let saved = fixture.checkpoint(&run_id).await;
+    let mut saved = fixture.checkpoint(&run_id).await;
     assert_eq!(saved["outputInterrupted"], true);
     assert_eq!(saved["retryCause"]["message"], "Provider busy");
     assert_eq!(saved["providerRetryReservation"], saved["runnerId"]);
     assert_eq!(saved["controllerRecoveries"].as_u64().unwrap_or(0), 0);
+    // Model a crash after the observed failure and broken output were committed,
+    // but before record_failure paid for the retry. Recovery must fence and pay it.
+    saved
+        .as_object_mut()
+        .unwrap()
+        .remove("providerRetryReservation");
+    fixture
+        .service
+        .store
+        .save_checkpoint_boundary(&run_id, saved)
+        .await
+        .unwrap();
+    fixture
+        .service
+        .store
+        .change_run(
+            &run_id,
+            cairn_installation::runs::RunChanges {
+                retry: Some(None),
+                recovery_pending: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    fixture.start().await;
+    let waiting = fixture
+        .until(&run_id, |run| {
+            finished(run) || (run["status"] == RunStatus::Queued && run["retry"]["attempt"] == 1)
+        })
+        .await;
+    assert_eq!(waiting["status"], RunStatus::Queued, "{waiting}");
+    fixture.stop(false).await;
+    let recovered = fixture.checkpoint(&run_id).await;
+    assert_eq!(recovered["providerRetryReservation"], recovered["runnerId"]);
+    assert_eq!(recovered["controllerRecoveries"].as_u64().unwrap_or(0), 0);
     let mut retry = waiting["retry"].clone();
     retry["nextAttemptAt"] = now().into();
     fixture
