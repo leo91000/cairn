@@ -5430,9 +5430,25 @@ async fn installation_settings_audit_and_storage_match_on_every_surface() {
             refused.to_string().contains("Only the installation owner"),
             "{refused}"
         );
+        // An actor refusal is not a missing scope: the client is not asked to step up.
+        assert!(
+            refused["result"]["_meta"]["mcp/www_authenticate"].is_null(),
+            "{refused}"
+        );
     }
-    let (status, _) = http(&member, "PUT", "/api/settings/storage", replacement).await;
+    let (status, _) = http(&member, "PUT", "/api/settings/storage", replacement.clone()).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+    // The owner's writes still pass the server's bucket and HTTPS checks before any probe.
+    for (field, value) in [
+        ("bucket", "Cairn_Disks"),
+        ("endpoint", "http://s3.example.test"),
+    ] {
+        let mut invalid = replacement.clone();
+        invalid[field] = value.into();
+        let (status, body) = http(&owner, "PUT", "/api/settings/storage", invalid).await;
+        assert!(status.is_client_error(), "{field}: {status} {body}");
+        assert!(!body.to_string().contains("agent-secret"));
+    }
     let saved: Value =
         serde_json::from_slice(&std::fs::read(s.config.data_dir.join("storage-s3.json")).unwrap())
             .unwrap();
@@ -5453,4 +5469,10 @@ async fn installation_settings_audit_and_storage_match_on_every_surface() {
         .unwrap();
     let denied = common::read_json(common::send(&app, request).await).await;
     assert_eq!(denied["result"]["isError"], true, "{denied}");
+    assert!(
+        denied["result"]["_meta"]["mcp/www_authenticate"]
+            .as_str()
+            .unwrap()
+            .contains("manage")
+    );
 }

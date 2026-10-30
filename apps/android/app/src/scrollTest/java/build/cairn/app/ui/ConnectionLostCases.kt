@@ -61,9 +61,7 @@ abstract class ConnectionLostCases {
                             return MockResponse()
                                 .setResponseCode(503)
                                 .setBody("""{"error":"Installation unavailable"}""")
-                        // Probes read the overview; workspace reloads read agents.
-                        if (path.endsWith("/overview") || path.endsWith("/agents"))
-                            overviews.incrementAndGet()
+                        if (path.endsWith("/overview")) overviews.incrementAndGet()
                         if (path.endsWith("/agents") && holdReload.get()) {
                             reloadStarted.countDown()
                             releaseReload.await(20, TimeUnit.SECONDS)
@@ -147,7 +145,7 @@ abstract class ConnectionLostCases {
                 down.set(false)
                 waitFor {
                     !vm.state.value.connectionLost &&
-                        overviews.get() >= before + 2 &&
+                        overviews.get() > before &&
                         reloadStarted.count == 0L
                 }
                 compose.waitForIdle()
@@ -181,6 +179,7 @@ abstract class ConnectionLostCases {
         val firstProbe = CountDownLatch(1)
         val releaseFirst = CountDownLatch(1)
         val secondOverviews = AtomicInteger()
+        val secondReloads = AtomicInteger()
         val installations =
             """[{"id":"fixture","name":"Première","role":"owner","online":true},{"id":"second","name":"Deuxième","role":"owner","online":true}]"""
         MockWebServer().use { server ->
@@ -196,8 +195,9 @@ abstract class ConnectionLostCases {
                             return unavailable()
                         }
                         if (path.startsWith("/api/installations/second/")) {
-                            if (path.endsWith("/overview") || path.endsWith("/agents"))
-                                secondOverviews.incrementAndGet()
+                            if (path.endsWith("/overview")) secondOverviews.incrementAndGet()
+                            if (path.endsWith("/agents") && !secondDown.get())
+                                secondReloads.incrementAndGet()
                             if (secondDown.get()) return unavailable()
                         }
                         val body =
@@ -250,9 +250,14 @@ abstract class ConnectionLostCases {
                         !vm.state.value.busy
                 }
                 val before = secondOverviews.get()
+                val reloadsBefore = secondReloads.get()
                 secondDown.set(false)
                 // The old probe remains blocked; the second installation needs its own recovery.
-                waitFor { !vm.state.value.connectionLost && secondOverviews.get() >= before + 2 }
+                waitFor {
+                    !vm.state.value.connectionLost &&
+                        secondOverviews.get() > before &&
+                        secondReloads.get() > reloadsBefore
+                }
                 assertNull(vm.state.value.error)
             } finally {
                 releaseFirst.countDown()
@@ -269,13 +274,14 @@ abstract class ConnectionLostCases {
 
     private fun recoverDuringAction(failure: Exception?) {
         val overviews = AtomicInteger()
+        val reloads = AtomicInteger()
         MockWebServer().use { server ->
             server.dispatcher =
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path!!.substringBefore('?')
-                        if (path.endsWith("/overview") || path.endsWith("/agents"))
-                            overviews.incrementAndGet()
+                        if (path.endsWith("/overview")) overviews.incrementAndGet()
+                        if (path.endsWith("/agents")) reloads.incrementAndGet()
                         val body =
                             when {
                                 path == "/api/account/session" -> beaconAccountFixture()
@@ -316,15 +322,18 @@ abstract class ConnectionLostCases {
             val action = CompletableDeferred<Unit>()
             try {
                 val before = overviews.get()
+                val reloadsBefore = reloads.get()
                 compose.runOnIdle {
                     vm.report(ApiException(503, "Installation busy."))
                     vm.perform { action.await() }
                 }
                 waitFor { !vm.state.value.connectionLost && overviews.get() > before }
                 assertTrue(vm.state.value.busy)
+                assertEquals(reloadsBefore, reloads.get())
                 if (failure == null) action.complete(Unit)
                 else action.completeExceptionally(failure)
-                waitFor { !vm.state.value.busy && overviews.get() >= before + 2 }
+                // The workspace reloads once the user's action settles.
+                waitFor { !vm.state.value.busy && reloads.get() > reloadsBefore }
                 assertEquals(failure?.message, vm.state.value.error)
             } finally {
                 action.complete(Unit)
