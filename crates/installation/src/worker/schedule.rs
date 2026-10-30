@@ -410,6 +410,12 @@ pub(super) async fn report_capacity_wait(s: &Service, run: &RunState, detail: &s
     let run_id = run_id.to_owned();
     s.store
         .transaction(move |db| {
+            let current = db
+                .run_state(&run_id)?
+                .ok_or_else(|| Error::not_found("Run not found"))?;
+            if current.cancel_requested_at.is_some() || current.status != RunStatus::Queued {
+                return Ok(());
+            }
             db.change_run(&run_id, patch)?;
             if !changed_figures {
                 db.event(&run_id, &EventKind::Status, &reason, None)?;
