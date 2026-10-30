@@ -433,9 +433,12 @@ test('large diagrams export a bounded readable PNG', async ({ page }) => {
   await page.evaluate(text => window.chatRendering.markdown(text), `\`\`\`mermaid\n${source}\n\`\`\``)
   await page.getByRole('button', { name: 'Open diagram' }).click()
   const viewer = page.getByRole('dialog', { name: 'Flowchart' })
-  const fits = () => viewer.locator('svg').evaluate((element) => {
-    const image = element.getBoundingClientRect()
-    const stage = element.closest('.diagram-stage')!.getBoundingClientRect()
+  const fits = () => viewer.locator('.diagram-stage').evaluate((element) => {
+    const svg = element.querySelector('svg')
+    if (!svg)
+      return false
+    const stage = element.getBoundingClientRect()
+    const image = svg.getBoundingClientRect()
     return image.left >= stage.left - 1 && image.right <= stage.right + 1 && image.top >= stage.top - 1 && image.bottom <= stage.bottom + 1
   })
   await expect.poll(fits).toBe(true)
