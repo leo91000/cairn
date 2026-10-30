@@ -1813,6 +1813,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn paid_move_recovery_at_ceiling_is_not_a_free_controller_retry() {
+        let (_root, service, _chat, run, _workspace) = fixture().await;
+        for (movement, same_attempt) in [(true, true), (false, true), (true, false)] {
+            let id = run.clone();
+            service.store.transaction(move |db| {
+                db.change_run(&id, crate::runs::RunChanges {
+                    status: Some(RunStatus::Queued), cancel_requested_at: Some(None),
+                    boundary: Some(json!({ "moveRequest": movement.then(|| json!({ "nodeId": "destination" })) })),
+                    ..Default::default()
+                })?;
+                let saved = RunCheckpoint::from_value(json!({
+                    "prepared": { "backend": "firecracker", "isolated": true },
+                    "runnerId": if same_attempt { "attempt" } else { "replacement" },
+                    "completed": false, "terminalCode": 75, "remainingMs": null,
+                    "controllerRecoveries": 4, "controllerRecoveryReservation": "attempt",
+                }))?;
+                saved.store_in(db, &id)?;
+                assert_eq!(finish_recovery(db, &id, Some(&saved))?, movement && same_attempt);
+                let durable = RunCheckpoint::load_in(db, &id)?.unwrap();
+                assert_eq!(durable.controller_recoveries(), 4);
+                Ok(())
+            }).await.unwrap();
+        }
+        service.shutdown.cancel();
+    }
+
+    #[tokio::test]
     async fn paid_native_mode_recovery_can_settle_at_and_above_controller_ceiling() {
         let (_root, service, _chat, run, _workspace) = fixture().await;
         for count in [3, 4, 5] {
