@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs'
+import { runInNewContext } from 'node:vm'
 import { describe, expect, it } from 'vitest'
 import { parse } from 'yaml'
 
@@ -7,6 +8,30 @@ const android = parse(readFileSync(new URL('../../.github/workflows/android.yaml
 const pr = parse(readFileSync(new URL('../../.github/workflows/pr.yaml', import.meta.url), 'utf8'))
 
 describe('parallel CI coverage', () => {
+  it.each(['image', 'beacon-image'])('exports %s layers for main and version tags without giving PR refs a cache writer', (name) => {
+    const build = quality.jobs[name].steps.find(step => step.uses?.startsWith('docker/build-push-action@'))
+    const expression = build.with['cache-to'].replace(/^\$\{\{\s*|\s*\}\}$/g, '')
+    const image = name === 'image' ? 'cairn' : 'cairn-beacon'
+    for (const [ref, writes] of [
+      ['refs/heads/main', true],
+      ['refs/tags/v0.74.1', true],
+      ['refs/tags/nightly', false],
+      ['refs/heads/fix/cache', false],
+      ['refs/heads/v0.74.1', false],
+      ['refs/pull/42/merge', false],
+    ]) {
+      // Evaluate the string/boolean expression used by the workflow, not a copied predicate.
+      const destination = runInNewContext(expression, {
+        github: { ref, repository_owner: 'cache-owner' },
+        startsWith: (value, prefix) => value.startsWith(prefix),
+        format: (template, value) => template.replaceAll('{0}', value),
+      }, { timeout: 1000 })
+      expect(destination, ref).toBe(writes
+        ? `type=registry,ref=ghcr.io/cache-owner/${image}:buildcache,mode=max,compression=zstd,compression-level=3,ignore-error=true`
+        : '')
+    }
+  })
+
   it('keeps full qualification off PRs and branch pushes while preserving nightly and tag checks', () => {
     for (const workflow of [quality, android]) {
       expect(workflow.on.pull_request).toBeUndefined()
