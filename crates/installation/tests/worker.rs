@@ -2729,7 +2729,7 @@ async fn managed_provider_retries_do_not_spend_controller_recoveries() {
         })).with_state(controller.clone());
         let (listener, address) = common::bind().await;
         common::reconfigure(&mut fixture.service, |config| {
-            config.runner_url = format!("http://{address}")
+            config.runner_url = format!("http://{address}");
         })
         .await;
         let server = common::serve(listener, app);
