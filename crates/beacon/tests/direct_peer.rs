@@ -1,4 +1,6 @@
 mod common;
+#[path = "common/delayed_dtls.rs"]
+mod delayed_dtls;
 
 use cairn_protocol::{
     Frame,
@@ -130,9 +132,35 @@ async fn client_with_offer_candidates(
     Arc<dyn DataChannel>,
     DirectAuthorization,
 ) {
+    client_with_runtime(
+        relay,
+        cookie,
+        session,
+        mismatched,
+        extra_candidates,
+        channel_label,
+        Arc::new(webrtc::runtime::TokioRuntime),
+    )
+    .await
+}
+
+async fn client_with_runtime(
+    relay: &RelayedInstallation,
+    cookie: &str,
+    session: &serde_json::Value,
+    mismatched: bool,
+    extra_candidates: &str,
+    channel_label: &str,
+    runtime: Arc<dyn webrtc::runtime::Runtime>,
+) -> (
+    Arc<dyn PeerConnection>,
+    Arc<dyn DataChannel>,
+    DirectAuthorization,
+) {
     let (events, mut candidates) = mpsc::channel(32);
     let peer: Arc<dyn PeerConnection> = Arc::new(
         PeerConnectionBuilder::new()
+            .with_runtime(runtime)
             .with_handler(Arc::new(ClientEvents(events)))
             .with_setting_engine(
                 SettingEngineBuilder::new()
@@ -213,7 +241,9 @@ async fn client_with_offer_candidates(
         .await
         .unwrap();
     assert_eq!(events.status(), StatusCode::OK);
-    let negotiated = tokio::time::timeout(Duration::from_secs(3), async {
+    // Setup follows the installation handshake budget; later response, fairness
+    // and revocation assertions retain their own stricter behavior deadlines.
+    let negotiated = tokio::time::timeout(cairn_protocol::REQUEST_TIMEOUT, async {
         let mut buffered = String::new();
         loop {
             tokio::select! {
@@ -287,6 +317,106 @@ async fn authorized_client_opens_a_real_installation_data_channel() {
     let mut relay = RelayedInstallation::new(axum::Router::new()).await;
     production_connector(&mut relay).await;
     let (peer, _channel, _grant) = client(&relay).await;
+    peer.close().await.unwrap();
+    relay.close().await;
+}
+
+async fn renew_delayed_peer(
+    relay: &RelayedInstallation,
+    grant: &DirectAuthorization,
+) -> reqwest::Response {
+    let path = format!(
+        "/api/installations/{}/direct/{}/renew",
+        grant.claims.installation_id, grant.claims.connection_id
+    );
+    relay
+        .app
+        .authenticated(&relay.cookie, &relay.session, Method::POST, &path)
+        .json(&json!({
+            "fingerprint": grant.claims.fingerprint,
+            "version": 4,
+        }))
+        .send()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_delayed_dtls_flight_can_open_an_authorized_real_channel() {
+    let mut relay = RelayedInstallation::new(axum::Router::new()).await;
+    production_connector(&mut relay).await;
+
+    // The old three-second fixture budget expires before this real flight.
+    let runtime = Arc::new(delayed_dtls::DelayedDtlsRuntime::new(
+        Duration::from_millis(3_250),
+    ));
+    let (peer, channel, grant) = client_with_runtime(
+        &relay,
+        &relay.cookie,
+        &relay.session,
+        false,
+        "",
+        "cairn.v4",
+        runtime.clone(),
+    )
+    .await;
+    assert!(
+        runtime.delayed_flight_sent(),
+        "the delayed flight must actually reach UDP"
+    );
+    send_frame(
+        channel.as_ref(),
+        1,
+        &request("delayed-flight", "/api/chats"),
+    )
+    .await;
+    assert!(
+        matches!(response(channel.as_ref()).await, Frame::Response(reply) if reply.id == "delayed-flight" && reply.status == 200)
+    );
+
+    let renewed = renew_delayed_peer(&relay, &grant).await;
+    assert_eq!(renewed.status(), StatusCode::OK);
+    assert_eq!(
+        renewed.json::<serde_json::Value>().await.unwrap()["available"],
+        true
+    );
+
+    peer.close().await.unwrap();
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn a_wrong_certificate_is_rejected_even_after_a_delayed_dtls_flight() {
+    let mut relay = RelayedInstallation::new(axum::Router::new()).await;
+    production_connector(&mut relay).await;
+
+    let runtime = Arc::new(delayed_dtls::DelayedDtlsRuntime::new(
+        Duration::from_millis(3_250),
+    ));
+    let (peer, _, grant) = client_with_runtime(
+        &relay,
+        &relay.cookie,
+        &relay.session,
+        true,
+        "",
+        "cairn.v4",
+        runtime.clone(),
+    )
+    .await;
+    assert!(
+        runtime.delayed_flight_sent(),
+        "a timeout before the handshake cannot prove certificate rejection"
+    );
+    let refused = renew_delayed_peer(&relay, &grant).await;
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+    assert!(
+        refused
+            .text()
+            .await
+            .unwrap()
+            .contains("Installation refused direct authorization")
+    );
+
     peer.close().await.unwrap();
     relay.close().await;
 }
@@ -747,6 +877,9 @@ async fn a_new_beacon_key_closes_real_peers_and_a_fresh_peer_still_works() {
     .await
     .unwrap();
     relay.app.server = tokio::spawn(async move {
+        // Recovery can outlast the revocation deadline: established peers remain
+        // authorized until the installation receives the recreated Beacon's key.
+        tokio::time::sleep(Duration::from_secs(3)).await;
         axum::serve(
             listener,
             router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
@@ -754,8 +887,8 @@ async fn a_new_beacon_key_closes_real_peers_and_a_fresh_peer_still_works() {
         .await
         .unwrap();
     });
-    closed(old_channel.as_ref()).await;
-    assert!(grant.claims.expires_at > cairn_protocol::direct::unix_time());
+    // A relayed response through the new Beacon proves the installation has
+    // received its DirectKey, which precedes tunnel registration on the wire.
     tokio::time::timeout(Duration::from_secs(5), async {
         while relay.get("/chats").send().await.unwrap().status() != StatusCode::OK {
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -763,6 +896,8 @@ async fn a_new_beacon_key_closes_real_peers_and_a_fresh_peer_still_works() {
     })
     .await
     .unwrap();
+    closed(old_channel.as_ref()).await;
+    assert!(grant.claims.expires_at > cairn_protocol::direct::unix_time());
     let (fresh_peer, fresh_channel, _) = client(&relay).await;
     send_frame(fresh_channel.as_ref(), 1, &request("fresh", "/api/chats")).await;
     assert!(
