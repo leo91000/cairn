@@ -2,7 +2,9 @@
 import type { AgentProvider } from './AgentProvider'
 import type { ChatCompaction } from './ChatCompaction'
 import type { ChatMessage } from './ChatMessage'
+import type { ChatQuestion } from './ChatQuestion'
 import type { ChatRequester } from './ChatRequester'
+import type { ChatWakeup } from './ChatWakeup'
 import type { CodingAgentSwitch } from './CodingAgentSwitch'
 import type { ContextUsage } from './ContextUsage'
 import type { ConversationEnvironmentState } from './ConversationEnvironmentState'
@@ -49,8 +51,8 @@ export interface Chat {
   projectName: string | null
   status: ConversationStatus
   suspendedByExclusive?: import('../../nodes').ExclusiveReservation | null
-  wakeup?: import('../../chats').ChatWakeup | null
-  questions: import('../../chats').ChatQuestion[]
+  wakeup?: ChatWakeup | null
+  questions: Array<ChatQuestion>
   run: import('../../contracts').Run | null
   messages: Array<ChatMessage>
 }

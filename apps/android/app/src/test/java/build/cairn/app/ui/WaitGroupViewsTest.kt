@@ -11,7 +11,6 @@ import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.unit.dp
-import build.cairn.app.data.ChatWakeup
 import java.io.File
 import kotlinx.serialization.json.*
 import org.junit.Assert.assertEquals
@@ -59,7 +58,7 @@ class WaitGroupViewsTest {
     }
 
     private fun wakeup(condition: JsonObject, vararg members: JsonObject) =
-        ChatWakeup(
+        wakeupFixture(
             "wait-${condition.hashCode()}",
             "message",
             "Fusionner une fois la doc construite, la migration testée et la CI passée.",

@@ -24,6 +24,12 @@ even if their resource was removed; live references use nullable foreign keys.
 Current run references are checked. Historical account references are retained
 without selecting an account or owning its lifetime. Message IDs, delivery states, text, selections,
 private answer maps, equal-timestamp row order and attachment order are retained.
+Private answer values retain both historical string lists and the current
+`selected`/`comment` objects as explicit typed variants. Historical lists mixed
+free text and selections, so their strings, order and duplicates are preserved
+without reinterpreting them as current choices or comments. This storage format
+does not restore the retired questionnaire API; new answers still use the current
+contract, and public message views omit either form of private answer data.
 UUID spelling is preserved in persisted identities and typed commands, so retained
 uppercase message IDs and attachment keys keep their retry/edit/delete semantics.
 Messages without a revision receive one. Engine-switch receipts keep their exact

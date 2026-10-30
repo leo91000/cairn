@@ -82,10 +82,14 @@ async fn a_blocked_conversation_read_does_not_block_another_tabs_events() {
     }).await.unwrap();
     let path = root.path().join("manager.db");
     let connection = rusqlite::Connection::open(&path).unwrap();
-    connection.execute_batch("ALTER TABLE chat_messages RENAME TO retained_messages;
+    connection
+        .execute_batch(
+            "ALTER TABLE chat_messages RENAME TO retained_messages;
 CREATE VIEW chat_messages AS SELECT rowid AS rowid,id,chat_id,revision,
-    body_probe(text) AS text,provider,model,reasoning,speed,mode,status,created_at,question_id,answers
-    FROM retained_messages;").unwrap();
+    body_probe(text) AS text,provider,model,reasoning,speed,mode,status,created_at,question_id
+    FROM retained_messages;",
+        )
+        .unwrap();
     let lists = Arc::new(ConversationLists::default());
     let gate = lists.gate("account");
     let permit = gate.clone().lock_owned().await;

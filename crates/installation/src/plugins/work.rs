@@ -481,8 +481,12 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
     let mut attachment_ids = Vec::new();
     for (name, bytes) in files {
         let attachment = id();
-        s.store_attachment(&chat_id, &attachment, &name, &bytes)
-            .await?;
+        let expected = expected.clone();
+        let event = event.clone();
+        s.store_attachment_authorized(&chat_id, &attachment, &name, &bytes, move |db| {
+            admit(db, &expected, &event).map(|_| ())
+        })
+        .await?;
         attachment_ids.push(attachment);
     }
     let expected = expected.clone();
@@ -928,7 +932,6 @@ pub async fn questions(
 ) -> Result<Vec<Value>> {
     let expected = expected.clone();
     let delivery = delivery.clone();
-    let prefix = crate::chats::questions::question_prefix(&delivery.chat_id);
     s.store
         .read(move |db| {
             let connection = authorize(db, &expected)?;
@@ -940,15 +943,16 @@ pub async fn questions(
                 return Ok(Vec::new());
             }
             Ok(db
-                .keys(&prefix)?
+                .questions(&delivery.chat_id)?
                 .into_iter()
-                .map(|(_, question)| question)
-                .filter(|question| question["status"] == "pending" && question["runId"] == run)
+                .filter(|question| {
+                    question.status == cairn_contracts::QuestionStatus::Pending
+                        && question.run_id == run
+                })
                 .filter_map(|question| {
                     match db.kv(&format!(
                         "plugin-question-seen:{}:{}",
-                        connection.id,
-                        text(&question, "id")
+                        connection.id, question.id
                     )) {
                         Ok(None) => Some(Ok(question)),
                         Ok(Some(_)) => None,
@@ -959,9 +963,9 @@ pub async fn questions(
                 .into_iter()
                 .map(|question| {
                     json!({
-                        "id": question["id"],
-                        "blocking": question["blocking"],
-                        "fields": question["fields"],
+                        "id": question.id,
+                        "blocking": question.blocking,
+                        "fields": question.fields,
                     })
                 })
                 .collect())

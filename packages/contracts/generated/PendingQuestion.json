@@ -1,0 +1,107 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "QuestionField": {
+      "properties": {
+        "id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        },
+        "maxChoices": {
+          "format": "uint",
+          "maximum": 30,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "minChoices": {
+          "format": "uint",
+          "maximum": 30,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "mode": {
+          "default": "single",
+          "pattern": "^(single|multiple)$",
+          "type": "string"
+        },
+        "options": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/QuestionOption"
+          },
+          "maxItems": 30,
+          "type": "array"
+        },
+        "secret": {
+          "default": false,
+          "type": "boolean"
+        },
+        "title": {
+          "maxLength": 10000,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title"
+      ],
+      "type": "object"
+    },
+    "QuestionOption": {
+      "properties": {
+        "description": {
+          "default": "",
+          "maxLength": 4000,
+          "type": "string"
+        },
+        "id": {
+          "default": "",
+          "maxLength": 200,
+          "type": "string"
+        },
+        "label": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "recommended": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "label"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "blocking": {
+      "type": "boolean"
+    },
+    "fields": {
+      "items": {
+        "$ref": "#/definitions/QuestionField"
+      },
+      "type": "array"
+    },
+    "questionId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "questionId",
+    "fields",
+    "blocking"
+  ],
+  "title": "PendingQuestion",
+  "type": "object"
+}

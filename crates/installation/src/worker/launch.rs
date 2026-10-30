@@ -711,11 +711,10 @@ impl Execution<'_> {
                     let Some(chat) = crate::chats::chat_for_run(db, &run_id)? else {
                         return Ok(Vec::new());
                     };
-                    Ok(db
-                        .keys(&format!("chat-attachment:{}:", text(&chat, "id")))?
+                    db.attachments(text(&chat, "id"))?
                         .into_iter()
-                        .map(|(_, attachment)| attachment)
-                        .collect::<Vec<_>>())
+                        .map(|a| serde_json::to_value(a).map_err(Into::into))
+                        .collect::<crate::error::Result<Vec<_>>>()
                 })
                 .await?;
             s.prepare_chat_files(&self.id, &attachments.into()).await?;
@@ -1244,7 +1243,7 @@ impl Execution<'_> {
                 patch.resume_available = Some(true);
                 patch.boundary.as_mut().unwrap()["outcome"] = Value::Null;
             } else if current["trigger"] != "chat" {
-                patch.boundary.as_mut().unwrap()["wakeup"] = Value::Null;
+                patch.wakeup = Some(None);
             }
             db.change_run(&id, patch)?;
             let details = details.filter(|_| status == RunStatus::Failed);

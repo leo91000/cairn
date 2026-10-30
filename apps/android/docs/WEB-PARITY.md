@@ -1,5 +1,51 @@
 # Android 0.6.0 / web parity
 
+## Mermaid diagrams in Markdown (2026-10-29)
+
+Both layouts reserve the asymmetric flag notch when sizing multiline node labels.
+Group borders share separation constraints across ranks, keeping sibling groups and unrelated nodes outside each other's frames.
+Group titles use the reserved space at the physical top in every direction.
+Sequence parent frames include the complete drawn bounds of nested frames, including short labels and empty children spanning unused participants.
+Nested sequence backgrounds paint parent before child, behind lifelines. The web viewer refreshes its layout when app fonts finish loading; Android measures its bundled typefaces synchronously. Automatic Fit follows that refresh, while manual zoom and pan stay in place.
+
+Both apps draw closed ```` ```mermaid ```` (or `mmd`) fences in chat Markdown as native
+diagrams: flowcharts (directions, node shapes, subgraphs, link styles, heads and labels,
+`classDef`/`class`/`style`/`linkStyle`, http(s) `click` links, front-matter titles), state
+diagrams (start/end, composite states, choice, fork/join, notes), sequence diagrams
+(actors, every arrow kind, activations, notes, `loop`/`alt`/`opt`/`par`/`critical`/`break`/`rect`,
+`autonumber`, including start/increment values to hundredths, and semicolon-separated steps
+including after the header) and pie charts. Encoded semicolons stay in sequence labels. Large pie totals
+move to a full-value legend row, with a sum symbol in the center so digits do not cross the ring. Zero-value categories stay in the legend without an arc. Neither app loads Mermaid or a WebView: `diagram.ts` /
+`Diagram.kt` parse the same model and `diagram-layout.ts` / `DiagramLayout.kt` compute the
+same scene, drawn as SVG on web and on a Compose canvas on Android with one light/dark
+palette. A fence stays code until its closing fence arrives, so streaming never flickers;
+unsupported types (gantt, class…) keep the code block, and invalid sources show their code
+with a short note. State notes stay physically left/right of their target in every direction;
+multiple notes stack with reserved space. Notes on composite states or self-transition states
+keep readable source. Links between a group and its own descendants, self-transitions on composite states or subgraphs, and concurrent state
+regions (`--`), and sequence participant creation/destruction or `box` groups also keep source with an explanation. Subgraphs with a differing local direction keep source unless
+an external member link invokes Mermaid's documented parent-direction inheritance
+([syntax](https://mermaid.js.org/syntax/flowchart.html#direction-in-subgraphs)). Each drawing has a source toggle, copy and a full-screen viewer with
+zoom and pan, including two-finger translation while pinching. Node links remain usable in the card and the full-screen viewer; Cairn file links use the same installation routing and in-app file viewer in both presentations; dragging a
+linked node pans without opening it. This is presentation of existing message text, so public MCP and
+`cairn_installation` are unchanged: agents already read and write the Mermaid source.
+
+Platform differences: Android shrinks oversized card previews further when their physical dimensions cannot fit Compose constraints; the full scene stays available in the viewer. Web labels in English, Android in French (« Logigramme »,
+« Diagramme d’états »…). The web viewer downloads SVG with embedded app fonts and measured line advances, or PNG drawn with the loaded app fonts; Android shares a PNG with a unique URI per export, so an earlier recipient cannot read a later export through its existing grant. Both PNG paths bound the image
+to 16 megapixels and 8192 pixels per side. A failed
+diagram's source can be hidden on web and is always shown on Android. Android draws a fence
+inside a list item or quote at full width, and also draws a fence implicitly closed by the
+end of its list item or quote, which the web keeps as code.
+
+Validation: shared corpus `tests/fixtures/diagrams.json` (parsed models and layout
+signatures must match exactly) in `apps/web/tests/diagram.test.ts` and `DiagramCorpusTest`;
+browser journeys in `tests/e2e/chat-rendering.spec.ts` (Chromium and WebKit);
+`DiagramMarkdownTest` on Robolectric and `DiagramDeviceTest` on Android 16 (native drawing
+in both themes, closed-fence streaming, source/copy, node links, pinch/pan/double-tap fit,
+and a readable PNG shared through FileProvider). The corpus also covers cyclic hierarchies,
+long titles, large pie legends and single-participant notes; both platforms check text and
+path bounds and a deterministic measurement budget for long labels.
+
 ## Direct storage and overdue synchronization (2026-10-28)
 
 Web and Android expose overdue synchronization while the agent continues on its
@@ -355,3 +401,18 @@ lancée par le propriétaire, sans URL ni code. Connexion, remplacement de clé,
 code, annulation, suppression et refresh manuel renvoient `humanRequired` aux
 agents ; les apps gardent leur preuve de propriétaire. Aucun flux de confirmation
 ponctuelle du propriétaire n'est ajouté.
+
+
+A8 (#409) : questionnaires, réponses privées, attentes simples/groupées et lineage
+utilisent les contrats Rust générés sur web et Android. Réponse et annulation de
+gestion utilisent les clients générés ; annulation de gestion et retrait workspace
+du run courant gardent leurs autorisations distinctes. Les champs secrets restent
+absents des vues publiques après envoi. Les cartes d'attente et de délégation
+gardent leur présentation native et leur rendu existant ; les adaptateurs de
+présentation lisent les observations typées sans refonte de timeline.
+
+Attachment quota reservations (D2): both apps retain the generated A7 attachment
+model, binary upload endpoint, previews, retries and existing presentation. Limits
+remain 10 MiB/file, 40 MiB/message, 200 MiB/conversation and eight files/message.
+No platform difference or client error mapping changes; HTTP, both management
+tools and plugin imports share the reservation writer.

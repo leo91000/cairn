@@ -61,7 +61,7 @@ pub struct Conversation {
     #[serde(default)]
     pub requested_by: Option<ConversationRequester>,
     #[serde(default)]
-    pub wakeup: Option<Value>,
+    pub wakeup: Option<cairn_contracts::ChatWakeup>,
     #[serde(default)]
     pub native_principals: Option<Vec<String>>,
     #[serde(default)]
@@ -87,8 +87,8 @@ pub struct Conversation {
     pub account_id: Option<String>,
 }
 
-/// A8 still owns questionnaire delivery and answer validation. Its temporary
-/// payload is local to this boundary, never an open message decision document.
+/// Private answer material is reconstructed from the questionnaire tables.
+/// Public message views never expose this delivery representation.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Message {
@@ -99,11 +99,35 @@ pub struct Message {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct MessageAnswer {
-    #[serde(default)]
-    pub selected: Vec<String>,
-    #[serde(default)]
-    pub comment: String,
+#[serde(untagged)]
+pub enum MessageAnswer {
+    // Historical lists mixed selections and free text. Keep their shape and
+    // order rather than guessing which entries were choices or comments.
+    Legacy(Vec<String>),
+    Current(#[serde(deserialize_with = "answer_object")] cairn_contracts::QuestionAnswer),
+}
+
+// Serde structs can also accept positional arrays. That would reinterpret a
+// malformed historical string list as a current answer and change its shape.
+fn answer_object<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<cairn_contracts::QuestionAnswer, D::Error> {
+    struct Answer;
+    impl<'de> serde::de::Visitor<'de> for Answer {
+        type Value = cairn_contracts::QuestionAnswer;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a question answer object")
+        }
+
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            map: A,
+        ) -> std::result::Result<Self::Value, A::Error> {
+            Self::Value::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+        }
+    }
+    deserializer.deserialize_map(Answer)
 }
 
 impl std::ops::Deref for Message {
@@ -147,8 +171,6 @@ CREATE TABLE conversations(
     cancelled_by_deletion INTEGER NOT NULL CHECK(cancelled_by_deletion IN (0,1)),
     agent_name TEXT,
     project_name TEXT,
-    requested_by TEXT CHECK(requested_by IS NULL OR json_valid(requested_by)),
-    wakeup TEXT CHECK(wakeup IS NULL OR json_valid(wakeup)),
     native_principals TEXT CHECK(native_principals IS NULL OR json_valid(native_principals)),
     native_authority_nodes TEXT CHECK(native_authority_nodes IS NULL OR json_valid(native_authority_nodes)),
     native_parent_run_id TEXT,
@@ -178,8 +200,7 @@ CREATE TABLE chat_messages(
     mode TEXT NOT NULL CHECK(mode IN ('queue','steer')),
     status TEXT NOT NULL CHECK(status IN ('queued','sending','delivered','cancelled')),
     created_at INTEGER NOT NULL CHECK(created_at BETWEEN 0 AND 9007199254740991),
-    question_id TEXT,
-    answers TEXT CHECK(answers IS NULL OR json_valid(answers))
+    question_id TEXT
 );
 CREATE INDEX chat_messages_chat ON chat_messages(chat_id,created_at);
 CREATE INDEX chat_messages_pending ON chat_messages(chat_id,status,created_at);
@@ -201,7 +222,7 @@ CREATE TABLE message_attachments(
 ) WITHOUT ROWID;
 ";
 
-const COLUMNS: &str = "id,slug,title,agent_id,project_id,run_id,paused,lifecycle,created_at,updated_at,last_activity_at,revision,trashed_at,purge_at,restored_at,retry_after,lifecycle_error,previous_lifecycle,session_restart_requested,cancelled_by_deletion,agent_name,project_name,requested_by,wakeup,native_principals,native_authority_nodes,native_parent_run_id,native_parent_access,native_provenance_unknown,native_plugin_grants,environment_state,environment_expired_at,environment_error,environment_retry_after,account_id";
+const COLUMNS: &str = "id,slug,title,agent_id,project_id,run_id,paused,lifecycle,created_at,updated_at,last_activity_at,revision,trashed_at,purge_at,restored_at,retry_after,lifecycle_error,previous_lifecycle,session_restart_requested,cancelled_by_deletion,agent_name,project_name,NULL,NULL,native_principals,native_authority_nodes,native_parent_run_id,native_parent_access,native_provenance_unknown,native_plugin_grants,environment_state,environment_expired_at,environment_error,environment_retry_after,account_id";
 
 fn decode<T: serde::de::DeserializeOwned>(
     row: &rusqlite::Row<'_>,
@@ -304,31 +325,82 @@ impl Db<'_> {
     }
 
     pub fn conversation(&self, id: &str) -> Result<Option<Conversation>> {
-        Ok(self
+        if self.0.is_autocommit() {
+            let tx = rusqlite::Transaction::new_unchecked(
+                self.0,
+                rusqlite::TransactionBehavior::Deferred,
+            )?;
+            let result = Db(&tx).conversation(id)?;
+            tx.commit()?;
+            return Ok(result);
+        }
+        let mut record = self
             .0
             .prepare_cached(&format!("SELECT {COLUMNS} FROM conversations WHERE id=?"))?
             .query_row([id], row)
-            .optional()?)
+            .optional()?;
+        if let Some(record) = &mut record {
+            record.requested_by = self.lineage(id)?;
+            record.wakeup = self.wakeup(true, id)?;
+        }
+        Ok(record)
     }
 
     pub fn conversations(&self) -> Result<Vec<Conversation>> {
-        Ok(self
+        if self.0.is_autocommit() {
+            let tx = rusqlite::Transaction::new_unchecked(
+                self.0,
+                rusqlite::TransactionBehavior::Deferred,
+            )?;
+            let result = Db(&tx).conversations()?;
+            tx.commit()?;
+            return Ok(result);
+        }
+        let mut records = self
             .0
             .prepare_cached(&format!(
                 "SELECT {COLUMNS} FROM conversations ORDER BY persisted_at DESC,id"
             ))?
             .query_map([], row)?
-            .collect::<rusqlite::Result<_>>()?)
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut wakeups = self.wakeups(true, None)?;
+        let mut lineages = self.lineages()?;
+        for record in &mut records {
+            record.wakeup = wakeups.remove(&record.id);
+            record.requested_by = lineages.remove(&record.id);
+        }
+        Ok(records)
+    }
+
+    pub fn delegated_conversations(&self, requester: &str) -> Result<Vec<Conversation>> {
+        if self.0.is_autocommit() {
+            let tx = rusqlite::Transaction::new_unchecked(
+                self.0,
+                rusqlite::TransactionBehavior::Deferred,
+            )?;
+            let result = Db(&tx).delegated_conversations(requester)?;
+            tx.commit()?;
+            return Ok(result);
+        }
+        let mut records=self.0.prepare_cached(&format!("SELECT {COLUMNS} FROM conversations JOIN conversation_lineage l ON l.chat_id=conversations.id WHERE l.requester_chat_id=? ORDER BY persisted_at DESC,id"))?.query_map([requester],row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut wakeups = self.wakeups(true, None)?;
+        let mut lineages = self.lineages()?;
+        for record in &mut records {
+            record.wakeup = wakeups.remove(&record.id);
+            record.requested_by = lineages.remove(&record.id);
+        }
+        Ok(records)
     }
 
     pub fn conversation_for_run(&self, run: &str) -> Result<Option<Conversation>> {
-        Ok(self
+        let id: Option<String> = self
             .0
-            .prepare_cached(&format!(
-                "SELECT {COLUMNS} FROM conversations WHERE run_id=?"
-            ))?
-            .query_row([run], row)
-            .optional()?)
+            .prepare_cached("SELECT id FROM conversations WHERE run_id=?")?
+            .query_row([run], |r| r.get(0))
+            .optional()?;
+        id.map(|id| self.conversation(&id))
+            .transpose()
+            .map(Option::flatten)
     }
 
     pub fn chat_id_for_slug(&self, slug: &str) -> Result<Option<String>> {
@@ -354,6 +426,35 @@ impl Db<'_> {
     }
 
     pub fn save_conversation(&self, conversation: &Conversation) -> Result<Conversation> {
+        if self.0.is_autocommit() {
+            let tx = rusqlite::Transaction::new_unchecked(
+                self.0,
+                rusqlite::TransactionBehavior::Immediate,
+            )?;
+            let result = Db(&tx).save_conversation(conversation)?;
+            tx.commit()?;
+            return Ok(result);
+        }
+        self.0.execute_batch("SAVEPOINT conversation_record")?;
+        let before = self.0.total_changes();
+        let discarded_before = self.discarded_change_count()?;
+        let result = self.write_conversation(conversation);
+        match result {
+            Ok(conversation) => {
+                self.0.execute_batch("RELEASE conversation_record")?;
+                Ok(conversation)
+            }
+            Err(error) => {
+                self.0.execute_batch(
+                    "ROLLBACK TO conversation_record; RELEASE conversation_record",
+                )?;
+                self.discard_savepoint_changes(before, discarded_before)?;
+                Err(error)
+            }
+        }
+    }
+
+    fn write_conversation(&self, conversation: &Conversation) -> Result<Conversation> {
         let mut c = conversation.clone();
         let current = self.conversation(&c.id)?;
         if let Some(current) = &current {
@@ -367,7 +468,7 @@ impl Db<'_> {
             c.slug = self.new_conversation_slug()?;
         }
         c.revision = id();
-        self.0.prepare_cached("INSERT INTO conversations(id,slug,title,agent_id,project_id,run_id,paused,lifecycle,created_at,updated_at,last_activity_at,revision,trashed_at,purge_at,restored_at,retry_after,lifecycle_error,previous_lifecycle,session_restart_requested,cancelled_by_deletion,agent_name,project_name,requested_by,wakeup,native_principals,native_authority_nodes,native_parent_run_id,native_parent_access,native_provenance_unknown,native_plugin_grants,environment_state,environment_expired_at,environment_error,environment_retry_after,account_id,persisted_at,live_agent_id,live_project_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,(SELECT id FROM agents WHERE id=?),(SELECT id FROM projects WHERE id=?)) ON CONFLICT(id) DO UPDATE SET slug=excluded.slug,title=excluded.title,agent_id=excluded.agent_id,project_id=excluded.project_id,run_id=excluded.run_id,paused=excluded.paused,lifecycle=excluded.lifecycle,created_at=excluded.created_at,updated_at=excluded.updated_at,last_activity_at=excluded.last_activity_at,revision=excluded.revision,trashed_at=excluded.trashed_at,purge_at=excluded.purge_at,restored_at=excluded.restored_at,retry_after=excluded.retry_after,lifecycle_error=excluded.lifecycle_error,previous_lifecycle=excluded.previous_lifecycle,session_restart_requested=excluded.session_restart_requested,cancelled_by_deletion=excluded.cancelled_by_deletion,agent_name=excluded.agent_name,project_name=excluded.project_name,requested_by=excluded.requested_by,wakeup=excluded.wakeup,native_principals=excluded.native_principals,native_authority_nodes=excluded.native_authority_nodes,native_parent_run_id=excluded.native_parent_run_id,native_parent_access=excluded.native_parent_access,native_provenance_unknown=excluded.native_provenance_unknown,native_plugin_grants=excluded.native_plugin_grants,environment_state=excluded.environment_state,environment_expired_at=excluded.environment_expired_at,environment_error=excluded.environment_error,environment_retry_after=excluded.environment_retry_after,account_id=excluded.account_id,persisted_at=excluded.persisted_at,live_agent_id=excluded.live_agent_id,live_project_id=excluded.live_project_id")?.execute(params![
+        self.0.prepare_cached("INSERT INTO conversations(id,slug,title,agent_id,project_id,run_id,paused,lifecycle,created_at,updated_at,last_activity_at,revision,trashed_at,purge_at,restored_at,retry_after,lifecycle_error,previous_lifecycle,session_restart_requested,cancelled_by_deletion,agent_name,project_name,native_principals,native_authority_nodes,native_parent_run_id,native_parent_access,native_provenance_unknown,native_plugin_grants,environment_state,environment_expired_at,environment_error,environment_retry_after,account_id,persisted_at,live_agent_id,live_project_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,(SELECT id FROM agents WHERE id=?),(SELECT id FROM projects WHERE id=?)) ON CONFLICT(id) DO UPDATE SET slug=excluded.slug,title=excluded.title,agent_id=excluded.agent_id,project_id=excluded.project_id,run_id=excluded.run_id,paused=excluded.paused,lifecycle=excluded.lifecycle,created_at=excluded.created_at,updated_at=excluded.updated_at,last_activity_at=excluded.last_activity_at,revision=excluded.revision,trashed_at=excluded.trashed_at,purge_at=excluded.purge_at,restored_at=excluded.restored_at,retry_after=excluded.retry_after,lifecycle_error=excluded.lifecycle_error,previous_lifecycle=excluded.previous_lifecycle,session_restart_requested=excluded.session_restart_requested,cancelled_by_deletion=excluded.cancelled_by_deletion,agent_name=excluded.agent_name,project_name=excluded.project_name,native_principals=excluded.native_principals,native_authority_nodes=excluded.native_authority_nodes,native_parent_run_id=excluded.native_parent_run_id,native_parent_access=excluded.native_parent_access,native_provenance_unknown=excluded.native_provenance_unknown,native_plugin_grants=excluded.native_plugin_grants,environment_state=excluded.environment_state,environment_expired_at=excluded.environment_expired_at,environment_error=excluded.environment_error,environment_retry_after=excluded.environment_retry_after,account_id=excluded.account_id,persisted_at=excluded.persisted_at,live_agent_id=excluded.live_agent_id,live_project_id=excluded.live_project_id")?.execute(params![
             c.id,
             c.slug,
             c.title,
@@ -390,8 +491,6 @@ impl Db<'_> {
             c.cancelled_by_deletion,
             c.agent_name,
             c.project_name,
-            c.requested_by.as_ref().map(serde_json::to_string).transpose()?,
-            c.wakeup.as_ref().map(serde_json::to_string).transpose()?,
             c.native_principals.as_ref().map(serde_json::to_string).transpose()?,
             c.native_authority_nodes.as_ref().map(serde_json::to_string).transpose()?,
             c.native_parent_run_id,
@@ -405,6 +504,8 @@ impl Db<'_> {
             c.account_id,
             now(), c.agent_id, c.project_id
         ])?;
+        self.save_lineage(&c.id, c.requested_by.as_ref())?;
+        self.save_wakeup(true, &c.id, c.wakeup.as_ref())?;
         Ok(c)
     }
 
@@ -480,7 +581,7 @@ impl Db<'_> {
         } else {
             "chat_id=?1 AND ?2 IS NULL"
         };
-        let mut statement = self.0.prepare_cached(&format!("SELECT id,chat_id,revision,text,provider,model,reasoning,speed,mode,status,created_at,question_id,answers FROM chat_messages WHERE {filter} ORDER BY created_at,rowid"))?;
+        let mut statement = self.0.prepare_cached(&format!("SELECT id,chat_id,revision,text,provider,model,reasoning,speed,mode,status,created_at,question_id,NULL FROM chat_messages WHERE {filter} ORDER BY created_at,rowid"))?;
         let rows = statement
             .query_map(params![chat, message], |r| {
                 Ok((
@@ -533,9 +634,14 @@ impl Db<'_> {
             let (message, attachment) = item?;
             attachments.entry(message).or_default().push(attachment);
         }
+        let (mut answers, mut deliveries) = self.message_answers(chat, message)?;
         Ok(rows
             .into_iter()
-            .map(|(mut content, answers)| {
+            .map(|(mut content, _)| {
+                let answers = answers.remove(&content.id);
+                if let Some(text) = deliveries.remove(&content.id) {
+                    content.text = text;
+                }
                 content.attachments = attachments.remove(&content.id).unwrap_or_default();
                 Message { content, answers }
             })
@@ -567,6 +673,7 @@ impl Db<'_> {
         }
         self.0.execute_batch("SAVEPOINT conversation_message")?;
         let before = self.0.total_changes();
+        let discarded_before = self.discarded_change_count()?;
         let result = self.write_message(message);
         match result {
             Ok(message) => {
@@ -577,10 +684,7 @@ impl Db<'_> {
                 self.0.execute_batch(
                     "ROLLBACK TO conversation_message; RELEASE conversation_message",
                 )?;
-                let discarded = self.0.total_changes() - before;
-                if discarded > 0 && self.0.query_row("SELECT EXISTS(SELECT 1 FROM pragma_function_list WHERE name='cairn_discarded_changes')", [], |r| r.get::<_, bool>(0))? {
-                    self.0.query_row("SELECT cairn_discarded_changes(?)", [i64::try_from(discarded).unwrap_or(i64::MAX)], |_| Ok(()))?;
-                }
+                self.discard_savepoint_changes(before, discarded_before)?;
                 Err(error)
             }
         }
@@ -589,7 +693,8 @@ impl Db<'_> {
     fn write_message(&self, message: &Message) -> Result<Message> {
         let mut m = message.clone();
         m.revision = id();
-        self.0.prepare_cached("INSERT INTO chat_messages(id,chat_id,revision,text,provider,model,reasoning,speed,mode,status,created_at,question_id,answers) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,text=excluded.text,provider=excluded.provider,model=excluded.model,reasoning=excluded.reasoning,speed=excluded.speed,mode=excluded.mode,status=excluded.status,question_id=excluded.question_id,answers=excluded.answers")?.execute(params![m.id,m.chat_id,m.revision,m.text,m.provider,m.model,m.reasoning,m.speed,m.mode.as_str(),m.status.as_str(),m.created_at,m.question_id,m.answers.as_ref().map(serde_json::to_string).transpose()?])?;
+        self.0.prepare_cached("INSERT INTO chat_messages(id,chat_id,revision,text,provider,model,reasoning,speed,mode,status,created_at,question_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,text=excluded.text,provider=excluded.provider,model=excluded.model,reasoning=excluded.reasoning,speed=excluded.speed,mode=excluded.mode,status=excluded.status,question_id=excluded.question_id")?.execute(params![m.id,m.chat_id,m.revision,if m.answers.is_some() {"Questionnaire response"} else {&m.text},m.provider,m.model,m.reasoning,m.speed,m.mode.as_str(),m.status.as_str(),m.created_at,m.question_id])?;
+        self.save_message_answers(&m.id, m.answers.as_ref(), &m.text)?;
         self.0
             .prepare_cached("DELETE FROM message_attachments WHERE message_id=?")?
             .execute([&m.id])?;

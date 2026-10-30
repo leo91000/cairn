@@ -173,5 +173,32 @@
       "text": "An explicit null is not an omission",
       "speed": null
     }
+  ],
+  "uploads": [
+    {
+      "chatId": "00000000-0000-4000-8000-000000000001",
+      "attachmentId": "ABCDEFAB-CDEF-4ABC-8DEF-ABCDEFABCDE2",
+      "name": "écran.gif",
+      "data": "R0lGODlhAgADAA=="
+    },
+    {
+      "chatId": "00000000-0000-4000-8000-000000000001",
+      "attachmentId": "00000000-0000-4000-8000-000000000002",
+      "name": "empty.txt",
+      "data": ""
+    }
+  ],
+  "invalidUploads": [
+    {
+      "chatId": "00000000-0000-4000-8000-000000000001",
+      "attachmentId": "00000000-0000-4000-8000-000000000002",
+      "name": "file.txt"
+    },
+    {
+      "chatId": "bad",
+      "attachmentId": "00000000-0000-4000-8000-000000000002",
+      "name": "file.txt",
+      "data": ""
+    }
   ]
 }
