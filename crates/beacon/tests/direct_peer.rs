@@ -1910,6 +1910,9 @@ async fn observed_certificate_is_compared_with_the_grant_without_an_sdp_check() 
 
 struct PanicPeerStart(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
+const EXPECTED_PEER_PANIC_BEGIN: &str = "[expected-peer-panic:begin]";
+const EXPECTED_PEER_PANIC_END: &str = "[expected-peer-panic:end]";
+
 impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for PanicPeerStart {
     fn on_new_span(
         &self,
@@ -1927,6 +1930,8 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for PanicPeerStart {
 
 #[test]
 fn a_panicking_peer_task_releases_its_authorization_and_preserves_other_peers() {
+    use std::io::Write as _;
+
     // A real panic runs its backtrace hook before the peer can unwind. Keep
     // that expected diagnostic off the enclosing suite's shared capture sink,
     // so a slow reader cannot stall this fixture's live peer and cleanup.
@@ -1948,16 +1953,54 @@ fn a_panicking_peer_task_releases_its_authorization_and_preserves_other_peers() 
         "real-panic fixture failed: {}\nstdout:\n{stdout}\nstderr:\n{stderr}",
         output.status
     );
+    let expected_output = stderr
+        .trim()
+        .strip_prefix(EXPECTED_PEER_PANIC_BEGIN)
+        .and_then(|body| body.strip_suffix(EXPECTED_PEER_PANIC_END));
+    let framed_once = stderr.matches(EXPECTED_PEER_PANIC_BEGIN).count() == 1
+        && stderr.matches(EXPECTED_PEER_PANIC_END).count() == 1;
+    let real_expected_panic = expected_output.is_some_and(|body| {
+        body.contains("fixture peer task failure") && body.contains("stack backtrace:")
+    });
     assert!(
-        stderr.contains("fixture peer task failure") && stderr.contains("stack backtrace:"),
-        "the child must retain its real expected panic and enabled backtrace\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        framed_once && real_expected_panic,
+        "unexpected or missing child diagnostics\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
+    // Only the explicitly framed expected stderr is isolated. Successful-child
+    // stdout is still visible, including diagnostics from background tasks.
+    std::io::stdout()
+        .write_all(&output.stdout)
+        .expect("forward the isolated fixture's stdout");
 }
 
 #[tokio::test]
 #[ignore = "isolated real panic; exercised by the enclosing parent test"]
 async fn panicking_peer_task_child() {
+    use std::io::Write as _;
     use tracing_subscriber::prelude::*;
+
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let expected = info
+            .payload()
+            .downcast_ref::<&str>()
+            .is_some_and(|message| *message == "fixture peer task failure")
+            && info
+                .location()
+                .is_some_and(|location| location.file() == file!());
+        if !expected {
+            original_hook(info);
+            return;
+        }
+
+        // Keep the real hook and backtrace. Serialize its marked block so
+        // another Rust stderr writer cannot be mistaken for expected output.
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "{EXPECTED_PEER_PANIC_BEGIN}");
+        original_hook(info);
+        let _ = writeln!(stderr, "{EXPECTED_PEER_PANIC_END}");
+    }));
+
     let panic_next = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let subscriber = tracing_subscriber::registry().with(PanicPeerStart(panic_next.clone()));
     let _subscriber = tracing::subscriber::set_default(subscriber);
