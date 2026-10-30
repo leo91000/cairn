@@ -2812,9 +2812,9 @@ async fn manager_shutdown_between_turn_completion_and_wait_preserves_same_attemp
                     async move {
                         if request.uri().path().ends_with("/wait") {
                             let observation = count.fetch_add(1, Ordering::SeqCst);
-                            if interruption == "client-error" && observation < 4 {
-                                // Initial wait and all three client recovery reads fail
-                                // decoding. The CLI returns local exit 1, not remote 1.
+                            if interruption == "client-error" && observation == 0 {
+                                // The initial wait fails decoding. Only the manager's
+                                // durably reserved observation may read again.
                                 return Json(json!({})).into_response();
                             }
                             if interruption != "client-error" && observation == 0 {
@@ -2966,10 +2966,7 @@ async fn manager_shutdown_between_turn_completion_and_wait_preserves_same_attemp
                 "{interruption}: {result}"
             );
             assert_eq!(fixture.checkpoint(run_id).await["terminalCode"], 0);
-            assert_eq!(
-                waits.load(Ordering::SeqCst),
-                if interruption == "client-error" { 5 } else { 2 }
-            );
+            assert_eq!(waits.load(Ordering::SeqCst), 2);
         }
         assert_eq!(
             controller.plans.lock().await.len(),
