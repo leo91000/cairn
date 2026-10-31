@@ -2949,6 +2949,31 @@ mod tests {
 
     #[tokio::test]
     async fn actual_home_reconciliation_exposes_its_held_phase_without_blocking_controls() {
+        let module = module_path!().split_once("::").unwrap().1;
+        let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--exact",
+                &format!("{module}::held_home_reconciliation_child"),
+                "--ignored",
+            ])
+            .kill_on_drop(true);
+        let output = tokio::time::timeout(Duration::from_secs(15), child.output())
+            .await
+            .expect("isolated blocked-I/O regression must finish")
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed;"));
+    }
+
+    #[tokio::test]
+    #[ignore = "isolated FIFO regression, executed by its parent"]
+    async fn held_home_reconciliation_child() {
         use std::io::Write;
         use std::os::unix::fs::MetadataExt;
 
@@ -2999,11 +3024,14 @@ mod tests {
                 .unwrap();
         let response = tokio::time::timeout(Duration::from_secs(1), controller.health()).await;
         let phase = controller.bootstrap.get(&id).unwrap();
-        let lease = handler(
-            State(controller.clone()),
-            request(
-                &format!("/runs/{id}/lease"),
-                &json!({ "remainingMs": 60_000 }),
+        let lease = tokio::time::timeout(
+            Duration::from_secs(1),
+            handler(
+                State(controller.clone()),
+                request(
+                    &format!("/runs/{id}/lease"),
+                    &json!({ "remainingMs": 60_000 }),
+                ),
             ),
         )
         .await;
@@ -3012,7 +3040,9 @@ mod tests {
         preparing.await.unwrap().unwrap();
         arrived.expect("the real reconciler must reach the held metadata read");
         response.expect("health must remain responsive during actual reconciliation");
-        lease.unwrap();
+        lease
+            .expect("lease renewal must remain responsive")
+            .unwrap();
         assert!(controller.leased(&id).await);
         let phase = serde_json::to_value(phase).unwrap();
         assert_eq!(phase["phase"], "identity_reconcile");
