@@ -128,245 +128,270 @@ fun NodesScreen(
         )
         val clock = fleetClock(nodes, runner)
         val summary = fleetSummary(nodes, clock = clock, runner = runner, unready = unready)
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                "${summary.connected}/${summary.machines} connectée${if (summary.connected > 1) "s" else ""} · " +
-                    "${summary.usedSlots}/${summary.totalSlots} slots utilisés" +
-                    if (summary.attention > 0) " · ${summary.attention} à vérifier" else "",
-                Modifier.weight(1f),
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            FilledTonalButton(
-                onClick = {
-                    replacing = null
-                    adding = true
-                }
-            ) {
-                Text("Ajouter une machine")
+        Text(
+            "${summary.connected}/${summary.machines} connectée${if (summary.connected > 1) "s" else ""} · " +
+                "${summary.usedSlots}/${summary.totalSlots} slots utilisés" +
+                if (summary.attention > 0) " · ${summary.attention} à vérifier" else "",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        FilledTonalButton(
+            onClick = {
+                replacing = null
+                adding = true
             }
+        ) {
+            Text("Ajouter une machine")
         }
         nodes
             .filter { showRevoked || !it.revoked }
             .forEach { node ->
-                Panel {
-                    val health = nodeHealth(node, clock = clock, runner = runner, unready = unready)
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
+                key(node.id) {
+                    Panel {
+                        val health =
+                            nodeHealth(node, clock = clock, runner = runner, unready = unready)
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                node.name,
+                                Modifier.weight(1f, fill = false),
+                                style = MaterialTheme.typography.titleMedium,
+                            )
+                            NodeHealthPill(health)
+                        }
                         Text(
-                            node.name,
-                            Modifier.weight(1f, fill = false),
-                            style = MaterialTheme.typography.titleMedium,
-                        )
-                        NodeHealthPill(health)
-                    }
-                    Text(
-                        (if (node.local) "Runner du master · " else "") +
-                            if (node.capabilities.backend == "native")
-                                "Processus natif · GPU partagé · personnes de confiance"
-                            else "VM Firecracker",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    if (!node.revoked)
-                        Text(
-                            health.detail,
-                            color =
-                                if (
-                                    health.state == NodeHealthState.OFFLINE ||
-                                        health.state == NodeHealthState.ATTENTION
-                                )
-                                    signal.attention
-                                else MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    if (node.revoked) {
-                        Text(
-                            "Cette machine n’a plus accès. Réinscrivez-la avec un nouveau code pour la reconnecter."
-                        )
-                        return@Panel
-                    }
-                    val available = node.limits
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        NodeCapacity(
-                            "CPU partagés",
-                            available.cpu.toString(),
-                            "pour tous les slots",
-                            Modifier.weight(1f),
-                        )
-                        NodeCapacity(
-                            "RAM partagée",
-                            formatMiB(available.memoryMiB.toLong()),
-                            node.usage?.let { "${formatMiB(it.memoryMiB)} utilisés" }
-                                ?: "pour tous les slots",
-                            Modifier.weight(1f),
-                        )
-                        NodeCapacity(
-                            "Disque partagé",
-                            formatMiB(available.diskMiB),
-                            node.usage?.let { "${formatMiB(it.diskMiB)} utilisés" }
-                                ?: "pour tous les slots",
-                            Modifier.weight(1f),
-                        )
-                    }
-                    Text(
-                        "${freeSlots(node)} slots libres sur ${slotCapacity(node)} · ${node.occupiedSlots} occupés"
-                    )
-                    node.diskAccounting?.let { disk ->
-                        Text("Capacité disque", style = MaterialTheme.typography.titleSmall)
-                        Text(
-                            "${formatBytes(disk.localBytes)} stockés localement · ${formatBytes(disk.unusedGrantedBytes)} accordés mais inutilisés"
-                        )
-                        Text(
-                            "${formatBytes(disk.hostFreeBytes)} libres sur l’hôte · ${formatBytes(disk.hostReserveBytes)} réservés à l’hôte · ${formatBytes(disk.poolReserveBytes)} de réserve du pool"
-                        )
-                        Text(
-                            "Au moins ${formatBytes(disk.reclaimableBytes)} récupérables sur les conversations inactives synchronisées"
-                        )
-                        Text(
-                            "${formatBytes(disk.unsynchronizedBytes)} de journal non synchronisé au dernier relevé ; conservés jusqu’à la réussite de la synchronisation."
-                        )
-                        Text(
-                            "Ces mesures se recoupent. Sous pression, les copies inactives synchronisées sont libérées sans attendre une heure ; les conversations en attente passent avant un nouvel agrandissement.",
+                            (if (node.local) "Runner du master · " else "") +
+                                if (node.capabilities.backend == "native")
+                                    "Processus natif · GPU partagé · personnes de confiance"
+                                else "VM Firecracker",
                             style = MaterialTheme.typography.bodySmall,
                         )
-                    }
-                    NodeAgents(node, state, openAgents)
-                    node.exclusiveReservation?.let { reservation ->
-                        Panel {
+                        if (!node.revoked)
                             Text(
-                                "Réservation exclusive",
-                                style = MaterialTheme.typography.titleSmall,
+                                health.detail,
+                                color =
+                                    if (
+                                        health.state == NodeHealthState.OFFLINE ||
+                                            health.state == NodeHealthState.ATTENTION
+                                    )
+                                        signal.attention
+                                    else MaterialTheme.colorScheme.onSurfaceVariant,
                             )
-                            Text(exclusiveReservationState(reservation.state))
-                            Text(reservation.reason)
+                        if (node.revoked) {
                             Text(
-                                "${reservation.pausedRunIds.size} tâche${if (reservation.pausedRunIds.size == 1) "" else "s"} suspendue${if (reservation.pausedRunIds.size == 1) "" else "s"}"
+                                "Cette machine n’a plus accès. Réinscrivez-la avec un nouveau code pour la reconnecter."
                             )
-                            Text(
-                                reservation.expiresAt?.let { "Expire le ${date(it)}" }
-                                    ?: "Attente jusqu’au ${date(reservation.waitUntil)}"
-                            )
-                            if (reservation.renewalPending) Text("Prolongation en attente")
-                            if (reservation.minimumAvailableMemoryMiB > 0)
-                                Text(
-                                    "RAM disponible demandée : ${formatMiB(reservation.minimumAvailableMemoryMiB)}"
-                                )
-                            reservation.error?.let {
-                                Text(it, color = MaterialTheme.colorScheme.error)
-                            }
-                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                TextButton(onClick = { openRun(reservation.ownerRunId) }) {
-                                    Text("Ouvrir l’exécution")
-                                }
-                                OutlinedButton(
-                                    enabled =
-                                        !state.busy &&
-                                            reservation.state in
-                                                listOf("queued", "acquiring", "acquired"),
-                                    onClick = {
-                                        vm.perform {
-                                            api.request(
-                                                "POST",
-                                                "/nodes/${segment(node.id)}/exclusive/${segment(reservation.id)}/release",
-                                            )
-                                            load()
-                                            notify("Libération de la réservation demandée")
-                                        }
-                                    },
-                                ) {
-                                    Text("Libérer la réservation")
-                                }
-                            }
+                            return@Panel
                         }
-                    }
-                    if (node.staleDisks.count > 0)
-                        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                            Text(
-                                "Anciens disques : ${formatMiB(node.staleDisks.diskMiB)} (${node.staleDisks.count} conversation${if (node.staleDisks.count > 1) "s" else ""})",
-                                Modifier.weight(1f),
-                            )
-                            TextButton(onClick = { cleaning = node }) { Text("Libérer") }
-                        }
-                    node.maintenance?.let {
-                        Text(
-                            if (it == "draining")
-                                "Mise en pause et sauvegarde des conversations pour une mise à jour"
-                            else "Prête à redémarrer pour la mise à jour"
+                        if (
+                            health.state != NodeHealthState.READY &&
+                                health.state != NodeHealthState.FULL
                         )
-                        node.maintenanceError?.let { message ->
-                            Text(message, color = MaterialTheme.colorScheme.error)
-                        }
-                    }
-                    nodeDiagnostics(node, clock = clock, runner = runner).forEach {
-                        Text("• $it", color = MaterialTheme.colorScheme.error)
-                    }
-                    if (node.tags.isNotEmpty()) Text(node.tags.joinToString(" · "))
-                    var technical by remember(node.id) { mutableStateOf(false) }
-                    TextButton(onClick = { technical = !technical }) {
-                        Text(if (technical) "Masquer les détails" else "Détails techniques")
-                    }
-                    if (technical) {
-                        Text(
-                            "Détecté : ${node.capabilities.cpu} CPU · ${formatMiB(node.capabilities.memoryMiB)} RAM · ${formatMiB(node.capabilities.diskMiB)} disque · ${if (node.capabilities.backend == NATIVE_BACKEND) "ublk ${if (node.capabilities.ublk) "disponible" else "indisponible"}" else "KVM ${if (node.capabilities.kvm) "disponible" else "indisponible"}"}",
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                        node.usage?.let {
                             Text(
-                                "Utilisé : ${formatMiB(it.memoryMiB)} RAM · ${formatMiB(it.diskMiB)} disque",
-                                style = MaterialTheme.typography.bodySmall,
+                                "${freeSlots(node)} slots libres sur ${slotCapacity(node)} · ${node.occupiedSlots} occupés",
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                        var expanded by remember(node.id) { mutableStateOf(false) }
+                        TextButton(onClick = { expanded = !expanded }) {
+                            Text(
+                                if (expanded) "Masquer les détails de ${node.name}"
+                                else "Voir les détails de ${node.name}"
                             )
                         }
-                        if (node.systemTags.isNotEmpty())
-                            Text(
-                                "Tags détectés : ${node.systemTags.joinToString(" · ")}",
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                        node.lastSeen?.let {
-                            Text(
-                                "Dernier contact : ${Date(it)}",
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                        }
-                        node.imageDigest?.let {
-                            Text("Version : $it", style = MaterialTheme.typography.bodySmall)
-                        }
-                    }
-                    if (node.capabilities.backend == NATIVE_BACKEND)
-                        NativeNodeMode(vm, node) { load() }
-                    HorizontalDivider()
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TextButton(onClick = { editing = node }) { Text("Configurer") }
-                        if (node.nativeModeRequest?.mode == "administrator")
-                            TextButton(onClick = { granting = node }) {
-                                Text("Examiner l’accès administrateur des agents")
-                            }
-                        TextButton(onClick = { storage = node }) { Text("Stockage") }
-                        if (!node.local)
-                            TextButton(
-                                onClick = {
-                                    // Another runtime enrolls as a new node, so its grants and
-                                    // checkpoints never mix with the old ones.
-                                    replacing = node
-                                    backend =
-                                        if (node.capabilities.backend == NATIVE_BACKEND)
-                                            "firecracker"
-                                        else NATIVE_BACKEND
-                                    name = node.name
-                                    enrollment = null
-                                    adding = true
-                                }
+                        if (expanded) {
+                            Text("Capacité", style = MaterialTheme.typography.titleSmall)
+                            val available = node.limits
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
                             ) {
-                                Text(
-                                    if (node.capabilities.backend == NATIVE_BACKEND) "Passer en VM"
-                                    else "Passer en natif"
+                                NodeCapacity(
+                                    "CPU partagés",
+                                    available.cpu.toString(),
+                                    "pour tous les slots",
+                                    Modifier.weight(1f),
+                                )
+                                NodeCapacity(
+                                    "RAM partagée",
+                                    formatMiB(available.memoryMiB.toLong()),
+                                    node.usage?.let { "${formatMiB(it.memoryMiB)} utilisés" }
+                                        ?: "pour tous les slots",
+                                    Modifier.weight(1f),
+                                )
+                                NodeCapacity(
+                                    "Disque partagé",
+                                    formatMiB(available.diskMiB),
+                                    node.usage?.let { "${formatMiB(it.diskMiB)} utilisés" }
+                                        ?: "pour tous les slots",
+                                    Modifier.weight(1f),
                                 )
                             }
-                        if (!node.local)
-                            TextButton(onClick = { revoking = node }) { Text("Révoquer") }
+                            node.diskAccounting?.let { disk ->
+                                Text("Capacité disque", style = MaterialTheme.typography.titleSmall)
+                                Text(
+                                    "${formatBytes(disk.localBytes)} stockés localement · ${formatBytes(disk.unusedGrantedBytes)} accordés mais inutilisés"
+                                )
+                                Text(
+                                    "${formatBytes(disk.hostFreeBytes)} libres sur l’hôte · ${formatBytes(disk.hostReserveBytes)} réservés à l’hôte · ${formatBytes(disk.poolReserveBytes)} de réserve du pool"
+                                )
+                                Text(
+                                    "Au moins ${formatBytes(disk.reclaimableBytes)} récupérables sur les conversations inactives synchronisées"
+                                )
+                                Text(
+                                    "${formatBytes(disk.unsynchronizedBytes)} de journal non synchronisé au dernier relevé ; conservés jusqu’à la réussite de la synchronisation."
+                                )
+                                Text(
+                                    "Ces mesures se recoupent. Sous pression, les copies inactives synchronisées sont libérées sans attendre une heure ; les conversations en attente passent avant un nouvel agrandissement.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
+                            Text("Accès", style = MaterialTheme.typography.titleSmall)
+                            NodeAgents(node, state, openAgents)
+                            node.exclusiveReservation?.let { reservation ->
+                                Panel {
+                                    Text(
+                                        "Réservation exclusive",
+                                        style = MaterialTheme.typography.titleSmall,
+                                    )
+                                    Text(exclusiveReservationState(reservation.state))
+                                    Text(reservation.reason)
+                                    Text(
+                                        "${reservation.pausedRunIds.size} tâche${if (reservation.pausedRunIds.size == 1) "" else "s"} suspendue${if (reservation.pausedRunIds.size == 1) "" else "s"}"
+                                    )
+                                    Text(
+                                        reservation.expiresAt?.let { "Expire le ${date(it)}" }
+                                            ?: "Attente jusqu’au ${date(reservation.waitUntil)}"
+                                    )
+                                    if (reservation.renewalPending) Text("Prolongation en attente")
+                                    if (reservation.minimumAvailableMemoryMiB > 0)
+                                        Text(
+                                            "RAM disponible demandée : ${formatMiB(reservation.minimumAvailableMemoryMiB)}"
+                                        )
+                                    reservation.error?.let {
+                                        Text(it, color = MaterialTheme.colorScheme.error)
+                                    }
+                                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        TextButton(onClick = { openRun(reservation.ownerRunId) }) {
+                                            Text("Ouvrir l’exécution")
+                                        }
+                                        OutlinedButton(
+                                            enabled =
+                                                !state.busy &&
+                                                    reservation.state in
+                                                        listOf("queued", "acquiring", "acquired"),
+                                            onClick = {
+                                                vm.perform {
+                                                    api.request(
+                                                        "POST",
+                                                        "/nodes/${segment(node.id)}/exclusive/${segment(reservation.id)}/release",
+                                                    )
+                                                    load()
+                                                    notify("Libération de la réservation demandée")
+                                                }
+                                            },
+                                        ) {
+                                            Text("Libérer la réservation")
+                                        }
+                                    }
+                                }
+                            }
+                            if (node.staleDisks.count > 0)
+                                Row(
+                                    verticalAlignment =
+                                        androidx.compose.ui.Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        "Anciens disques : ${formatMiB(node.staleDisks.diskMiB)} (${node.staleDisks.count} conversation${if (node.staleDisks.count > 1) "s" else ""})",
+                                        Modifier.weight(1f),
+                                    )
+                                    TextButton(onClick = { cleaning = node }) { Text("Libérer") }
+                                }
+                            node.maintenance?.let {
+                                Text(
+                                    if (it == "draining")
+                                        "Mise en pause et sauvegarde des conversations pour une mise à jour"
+                                    else "Prête à redémarrer pour la mise à jour"
+                                )
+                                node.maintenanceError?.let { message ->
+                                    Text(message, color = MaterialTheme.colorScheme.error)
+                                }
+                            }
+                            nodeDiagnostics(node, clock = clock, runner = runner).forEach {
+                                Text("• $it", color = MaterialTheme.colorScheme.error)
+                            }
+                            if (node.tags.isNotEmpty()) Text(node.tags.joinToString(" · "))
+                            var technical by remember(node.id) { mutableStateOf(false) }
+                            TextButton(onClick = { technical = !technical }) {
+                                Text(if (technical) "Masquer les détails" else "Détails techniques")
+                            }
+                            if (technical) {
+                                Text(
+                                    "Détecté : ${node.capabilities.cpu} CPU · ${formatMiB(node.capabilities.memoryMiB)} RAM · ${formatMiB(node.capabilities.diskMiB)} disque · ${if (node.capabilities.backend == NATIVE_BACKEND) "ublk ${if (node.capabilities.ublk) "disponible" else "indisponible"}" else "KVM ${if (node.capabilities.kvm) "disponible" else "indisponible"}"}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                                node.usage?.let {
+                                    Text(
+                                        "Utilisé : ${formatMiB(it.memoryMiB)} RAM · ${formatMiB(it.diskMiB)} disque",
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                }
+                                if (node.systemTags.isNotEmpty())
+                                    Text(
+                                        "Tags détectés : ${node.systemTags.joinToString(" · ")}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                node.lastSeen?.let {
+                                    Text(
+                                        "Dernier contact : ${Date(it)}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                }
+                                node.imageDigest?.let {
+                                    Text(
+                                        "Version : $it",
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                }
+                            }
+                            if (node.capabilities.backend == NATIVE_BACKEND)
+                                NativeNodeMode(vm, node) { load() }
+                            HorizontalDivider()
+                            Text("Réglages", style = MaterialTheme.typography.titleSmall)
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                TextButton(onClick = { editing = node }) { Text("Configurer") }
+                                if (node.nativeModeRequest?.mode == "administrator")
+                                    TextButton(onClick = { granting = node }) {
+                                        Text("Examiner l’accès administrateur des agents")
+                                    }
+                                TextButton(onClick = { storage = node }) { Text("Stockage") }
+                                if (!node.local)
+                                    TextButton(
+                                        onClick = {
+                                            // Another runtime enrolls as a new node, so its grants
+                                            // and
+                                            // checkpoints never mix with the old ones.
+                                            replacing = node
+                                            backend =
+                                                if (node.capabilities.backend == NATIVE_BACKEND)
+                                                    "firecracker"
+                                                else NATIVE_BACKEND
+                                            name = node.name
+                                            enrollment = null
+                                            adding = true
+                                        }
+                                    ) {
+                                        Text(
+                                            if (node.capabilities.backend == NATIVE_BACKEND)
+                                                "Passer en VM"
+                                            else "Passer en natif"
+                                        )
+                                    }
+                                if (!node.local)
+                                    TextButton(onClick = { revoking = node }) { Text("Révoquer") }
+                            }
+                        }
                     }
                 }
             }

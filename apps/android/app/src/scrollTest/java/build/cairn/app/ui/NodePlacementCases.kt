@@ -156,7 +156,12 @@ abstract class NodePlacementCases {
                                         if (failed.get())
                                             ",\"nativeModeRequest\":{\"mode\":\"administrator\",\"generation\":\"g1\"},\"nativeModeStatus\":\"failed\""
                                         else ""
-                                    """[{"id":"aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503","name":"Machine jetable","status":"online","accepting":true,"slots":2,"capabilities":{"backend":"native","nativeModeProtocol":1},"nativeModeObserved":{"mode":"protected","status":"$status"}$requested}]"""
+                                    // The next listing inserts a machine ahead of the open card.
+                                    val prefix =
+                                        if (failed.get())
+                                            """{"id":"00000000-0000-4000-8000-000000000001","name":"Autre machine","status":"online"},"""
+                                        else ""
+                                    """[$prefix{"id":"aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503","name":"Machine jetable","status":"online","accepting":true,"slots":2,"capabilities":{"backend":"native","nativeModeProtocol":1},"nativeModeObserved":{"mode":"protected","status":"$status"}$requested}]"""
                                 }
                                 else ->
                                     if (
@@ -210,6 +215,16 @@ abstract class NodePlacementCases {
                 }
                 CairnTheme { if (state.session.authenticated) NodesScreen(vm, state) }
             }
+            compose.waitUntil(20000) {
+                compose
+                    .onAllNodesWithText("Voir les détails de Machine jetable")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose
+                .onNodeWithText("Voir les détails de Machine jetable")
+                .performScrollTo()
+                .performClick()
             compose.waitUntil(20000) {
                 compose
                     .onAllNodes(hasText("Passer en Natif administrateur") and isEnabled())
@@ -592,6 +607,7 @@ abstract class NodePlacementCases {
             )
             assertEquals(JsonPrimitive(true), grant["add"])
             // The ublk storage policy applies to native disks; technical details name ublk.
+            compose.onNodeWithText("Voir les détails de Desk").performScrollTo().performClick()
             compose.onNodeWithText("Stockage").performScrollTo().assertExists()
             compose.onNodeWithText("Détails techniques").performScrollTo().performClick()
             compose.onNodeWithText("disque · ublk indisponible", substring = true).assertExists()
@@ -828,6 +844,16 @@ abstract class NodePlacementCases {
                 }
                 CairnTheme { if (state.session.authenticated) NodesScreen(vm, state, opened::add) }
             }
+            compose.waitUntil(20000) {
+                compose
+                    .onAllNodesWithText("Voir les détails de Serveur réservé")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose
+                .onNodeWithText("Voir les détails de Serveur réservé")
+                .performScrollTo()
+                .performClick()
             compose.waitUntil(20000) {
                 compose.onAllNodesWithText("Exclusivité acquise").fetchSemanticsNodes().isNotEmpty()
             }
@@ -1542,6 +1568,19 @@ abstract class NodePlacementCases {
             compose.waitUntil(20000) {
                 compose.onAllNodesWithText("Serveur test").fetchSemanticsNodes().isNotEmpty()
             }
+            // The fleet stays compact until a machine is opened.
+            compose.onNodeWithText("Stockage").assertDoesNotExist()
+            compose.onNodeWithText("Voir les détails de Serveur test").performClick()
+            compose.onNodeWithText("Stockage").assertExists()
+            compose
+                .onNodeWithText("Masquer les détails de Serveur test")
+                .performScrollTo()
+                .performClick()
+            compose.onNodeWithText("Stockage").assertDoesNotExist()
+            compose
+                .onNodeWithText("Voir les détails de Serveur test")
+                .performScrollTo()
+                .performClick()
             compose
                 .onNodeWithText(
                     "Aucun agent ne peut encore utiliser cette machine.",

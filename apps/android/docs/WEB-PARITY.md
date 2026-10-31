@@ -123,8 +123,9 @@ or a runner contact that changed while watched), and with the device clock
 otherwise. Free slots and slot totals follow the runtime pool, as placement does.
 Platform difference: web lists machines as compact rows and opens a side panel
 (Overview, Access, Storage, Settings) whose existing editors and confirmations are
-unchanged; Android keeps its Material cards and adds the health pill and reason
-under each name. Health is derived from the existing `list_nodes` inventory,
+unchanged; Android uses compact Material cards with the health pill, reason and
+slot availability, and expands each card to show capacity, access, diagnostics
+and settings. The existing editors and confirmations are unchanged. Health is derived from the existing `list_nodes` inventory,
 already returned by public MCP and `cairn_installation`; no capability, grant or
 command changes.
 
