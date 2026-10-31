@@ -373,10 +373,6 @@ pub(in crate::native) async fn reconcile(
 mod tests {
     use super::*;
 
-    async fn reconcile(data: &Path, identity: &Identity) -> Result<()> {
-        super::reconcile(data, identity, &Trace::default()).await
-    }
-
     fn count(report: &serde_json::Value, counter: Counter) -> u64 {
         let counter = serde_json::to_value(counter).unwrap();
         report["counters"]

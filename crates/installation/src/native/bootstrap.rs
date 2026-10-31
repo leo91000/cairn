@@ -219,7 +219,10 @@ fn add(counter: &AtomicU64, value: u64) {
 
 impl Observation {
     fn snapshot(&self) -> Snapshot {
-        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut phases = state.phases;
         let preparing = state.status == Status::Preparing;
         if preparing {
@@ -304,7 +307,7 @@ impl Trace {
             let mut state = observation
                 .state
                 .lock()
-                .unwrap_or_else(|error| error.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if state.status != Status::Preparing || state.phase == phase {
                 return;
             }
@@ -384,7 +387,7 @@ impl Scope {
             let mut state = observation
                 .state
                 .lock()
-                .unwrap_or_else(|error| error.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if state.status != Status::Preparing || state.run.is_some() {
                 return;
             }
@@ -401,7 +404,7 @@ impl Scope {
             let mut state = observation
                 .state
                 .lock()
-                .unwrap_or_else(|error| error.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if state.status != Status::Preparing {
                 false
             } else {
@@ -510,12 +513,12 @@ impl Registry {
         let mut history = self
             .history
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let invocation = if let Some(previous) = history.reports.get(id) {
             let status = previous
                 .state
                 .lock()
-                .unwrap_or_else(|error| error.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .status;
             if matches!(status, Status::Preparing | Status::Submitted) {
                 return Scope::default();
@@ -530,7 +533,7 @@ impl Registry {
                         observation
                             .state
                             .lock()
-                            .unwrap_or_else(|error| error.into_inner())
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .status
                             != Status::Preparing
                     })
@@ -584,7 +587,7 @@ impl Registry {
         let observation = self
             .history
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .reports
             .get(id)
             .cloned()?;
@@ -627,13 +630,13 @@ impl Registry {
     pub(super) fn forget(&self, run: &str) {
         self.history
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .reports
             .retain(|_, observation| {
                 let owned = observation
                     .state
                     .lock()
-                    .unwrap_or_else(|error| error.into_inner())
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .run
                     .as_deref()
                     == Some(run);
@@ -926,7 +929,7 @@ mod tests {
             serde_json::json!({
                 "workload": "100000 counter increments and capture timers; no filesystem or export",
                 "debugAssertions": cfg!(debug_assertions),
-                "parallelism": std::thread::available_parallelism().map(|value| value.get()).ok(),
+                "parallelism": std::thread::available_parallelism().map(std::num::NonZeroUsize::get).ok(),
                 "snapshotBytes": serde_json::to_vec(&snapshot).unwrap().len(),
                 "measurements": measurements,
             })
