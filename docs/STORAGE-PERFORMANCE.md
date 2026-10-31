@@ -162,3 +162,76 @@ is checked on every iteration; full reads preserve the snapshot and summaries
 exclude it. Connection-cold timing includes open/close; the operating system
 cache remains warm. These local measurements do not include production network
 latency and do not predict a whole-server speedup.
+
+
+### Paired local reference
+
+The reference is `e0625c9c8ca9c64d798c1c084a7659e903484c68`; candidate Rust inputs
+match `8432d5fcc420c3c426ce3d375218c6359574323c` (crate tree
+`332c69c62668caf14a077ac3f6df5aab5bd3dfec`). Both executables use the same
+benchmark source, SHA-256
+`11fc6d541328a65f0748fb45155865fc462b8d7c7c0b088b8700f926cbb36c42`.
+Copy that test file into the reference checkout to measure the same workload;
+run only its ignored measurements there because the new write-plan guard
+intentionally fails on the old implementation.
+
+Measured on 2026-10-31 on a local Linux x64 workstation with
+Intel(R) Core(TM) i9-14900K, 32 logical CPUs and 94.1 GiB RAM
+(kernel 7.2.11-arch1-1), disk-backed `/var/tmp`
+(ext-family filesystem), bundled SQLite 3.53.2, WAL/FULL and 4,096-byte pages.
+Rust 1.97.1 uses the development profile with debug information and incremental
+compilation disabled, and `cairn-installation` (including its integration test)
+optimized at level 2. Dependencies retain their development defaults: this is
+**not a release-profile or production measurement**. Add
+`--config 'profile.dev.package.cairn-installation.opt-level=2'` before `--test`
+in the command above, with `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0`.
+Other workstation processes remained active; qualification builds had finished.
+Four alternating-order reference/candidate pairs produced 192 case observations.
+Each table cell is the median across the four runs; wall time is the median
+individual call within each run. Process CPU includes fixture assertions.
+
+| Input KiB | Write operation | CPU / 32 calls, before → after (ms) | Median wall / call, before → after (µs) | WAL bytes |
+| ---: | --- | ---: | ---: | ---: |
+| 0 | boundary changed | 11.811 → 8.563 | 3860.00 → 3837.75 | 131,872 |
+| 0 | boundary unchanged | 2.529 → 3.022 | 69.00 → 84.00 | 0 |
+| 0 | state changed | 12.565 → 11.438 | 3795.50 → 3843.75 | 527,392 |
+| 0 | state unchanged | 4.657 → 5.513 | 117.50 → 164.00 | 0 |
+| 128 | boundary changed | 27.345 → 24.088 | 4331.75 → 4218.75 | 131,872 |
+| 128 | boundary unchanged | 12.182 → 9.127 | 304.50 → 277.50 | 0 |
+| 128 | state changed | 22.570 → 14.410 | 4196.00 → 4018.00 | 527,392 |
+| 128 | state unchanged | 4.125 → 3.945 | 133.00 → 118.50 | 0 |
+| 512 | boundary changed | 73.329 → 54.706 | 5781.75 → 5108.00 | 131,872 |
+| 512 | boundary unchanged | 32.392 → 30.513 | 1000.00 → 952.00 | 0 |
+| 512 | state changed | 45.214 → 25.914 | 4895.25 → 4287.25 | 527,392 |
+| 512 | state unchanged | 3.793 → 3.546 | 108.50 → 104.00 | 0 |
+
+| Input KiB | Read projection | Connection | CPU / 32 reads, before → after (ms) | Median wall / read, before → after (µs) | Encoded bytes |
+| ---: | --- | --- | ---: | ---: | ---: |
+| 0 | Summary | Reused | 2.208 → 1.288 | 65.25 → 36.75 | 531 |
+| 0 | Summary | New | 68.645 → 70.608 | 2132.25 → 2139.75 | 531 |
+| 0 | Full | Reused | 2.933 → 1.438 | 85.25 → 40.50 | 1,626 |
+| 0 | Full | New | 69.021 → 69.526 | 2136.00 → 2163.75 | 1,626 |
+| 128 | Summary | Reused | 2.266 → 0.940 | 67.75 → 27.00 | 531 |
+| 128 | Summary | New | 69.879 → 69.754 | 2126.00 → 2158.75 | 531 |
+| 128 | Full | Reused | 14.884 → 12.809 | 453.00 → 387.75 | 132,698 |
+| 128 | Full | New | 82.398 → 84.273 | 2556.50 → 2615.75 | 132,698 |
+| 512 | Summary | Reused | 2.518 → 1.144 | 74.50 → 33.00 | 531 |
+| 512 | Summary | New | 71.245 → 74.835 | 2204.75 → 2272.50 | 531 |
+| 512 | Full | Reused | 62.413 → 59.522 | 1903.75 → 1806.75 | 525,914 |
+| 512 | Full | New | 140.968 → 140.830 | 4328.50 → 4290.50 | 525,914 |
+
+Encoded frozen write snapshots were 1,132 bytes at 0 KiB, 132,204 bytes at 128 KiB, 525,420 bytes at 512 KiB.
+WAL bytes, snapshot bytes, wire byte counts and subscriber revisions matched
+between variants in every case. Changed writes notify 32 times; unchanged writes
+produce neither WAL growth nor notifications. Zero-input no-op CPU and some
+new-connection reads were slower in this sample. Keep those tradeoffs visible;
+these medians do not establish statistical significance or whole-server gains.
+The connection-cold cases include open/close and keep the OS cache warm.
+
+Public executable SHA-256 values:
+
+- Reference: `b133b89c44927f1a505cff3daf86780130eec3c2a0e5852be093647a46572da4`.
+- Candidate: `22c3a080ed380db7cd446411a665c58b0f9174cc55c5dcb988629c002994a6fa`.
+
+Use post-release actor queue/CPU measurements and the actual workload to assess
+production impact. Retain raw numeric observations outside the repository.
