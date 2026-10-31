@@ -206,7 +206,7 @@ async fn real_v17_upgrade_preserves_each_accounts_reads_and_set_aside_outcomes()
     assert_eq!(
         db.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
             .unwrap(),
-        22
+        23
     );
 
     // The real service serves each account its own preserved outcomes.
@@ -314,7 +314,7 @@ async fn v17_upgrade_preserves_legacy_paid_retry_and_checkpoint() {
     assert_eq!(
         db.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
             .unwrap(),
-        22
+        23
     );
 }
 
@@ -355,6 +355,6 @@ fn malformed_previous_read_state_rolls_back_schema_data_and_version() {
     assert_eq!(
         db.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
             .unwrap(),
-        22
+        23
     );
 }

@@ -9,11 +9,11 @@ use rusqlite::{Connection, TransactionBehavior};
 pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if (22..=crate::store::DATABASE_VERSION).contains(&version) {
+    if (23..=crate::store::DATABASE_VERSION).contains(&version) {
         tx.commit()?;
         return Ok(());
     }
-    if version != 21 {
+    if version != 22 {
         return Err(Error::bad(
             "Unexpected database version during placement upgrade.",
         ));
@@ -86,10 +86,10 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
     {
         tx.execute_batch("ALTER TABLE nodes DROP COLUMN exclusive_reservation")?;
     }
-    tx.execute_batch("CREATE TABLE records_v22(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind NOT IN ('agentAccounts','chats','node-exclusive-requests','node-attempts','nodes','projects','agents','tasks','mcps','plugin-connections','plugin-packages','plugin-requests','plugin-activity','plugin-timers','plugin-events','plugin-deliveries','plugin-storage','plugin-http-receipts')),data TEXT NOT NULL,updated_at INTEGER NOT NULL);
-INSERT INTO records_v22 SELECT id,kind,data,updated_at FROM records WHERE kind NOT IN ('node-attempts','node-exclusive-requests');
+    tx.execute_batch("CREATE TABLE records_v23(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind NOT IN ('agentAccounts','chats','node-exclusive-requests','node-attempts','nodes','projects','agents','tasks','mcps','plugin-connections','plugin-packages','plugin-requests','plugin-activity','plugin-timers','plugin-events','plugin-deliveries','plugin-storage','plugin-http-receipts')),data TEXT NOT NULL,updated_at INTEGER NOT NULL);
+INSERT INTO records_v23 SELECT id,kind,data,updated_at FROM records WHERE kind NOT IN ('node-attempts','node-exclusive-requests');
 DROP TABLE records;
-ALTER TABLE records_v22 RENAME TO records;
+ALTER TABLE records_v23 RENAME TO records;
 CREATE INDEX records_kind ON records(kind,updated_at DESC);
 CREATE INDEX records_node_backups_run ON records(json_extract(data,'$.runId')) WHERE kind='node-backups';")?;
     if tx.prepare("PRAGMA foreign_key_check")?.exists([])? {
@@ -97,7 +97,7 @@ CREATE INDEX records_node_backups_run ON records(json_extract(data,'$.runId')) W
             "Placement upgrade failed its foreign key check.",
         ));
     }
-    tx.pragma_update(None, "user_version", 22)?;
+    tx.pragma_update(None, "user_version", 23)?;
     tx.commit()?;
     Ok(())
 }

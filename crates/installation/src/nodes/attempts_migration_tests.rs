@@ -24,6 +24,7 @@ PRAGMA user_version=18;").unwrap();
     crate::runs::projections::upgrade(&mut db).unwrap();
     db.pragma_update(None, "user_version", 20).unwrap();
     crate::worker::progress::upgrade(&mut db).unwrap();
+    crate::timeline::migration::upgrade(&mut db).unwrap();
     db
 }
 
@@ -225,7 +226,7 @@ async fn failed_late_conversion_rolls_back_schema_rows_counters_and_version() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        21
+        22
     );
     assert_eq!(
         db.query_row(
@@ -288,7 +289,7 @@ async fn qualify_previous_manager_database(allowance: Option<u64>) {
     source
         .execute_batch(include_str!("../../tests/fixtures/placements-v15.sql"))
         .unwrap();
-    // Apply the actual previous manager migrations to obtain its version-21 layout, retaining hooks and writer-owned progress.
+    // Apply the actual previous manager migrations to obtain its version-22 layout, retaining hooks, writer-owned progress and the timeline.
     crate::chats::question_migration::upgrade(&mut source).unwrap();
     crate::attachments::migration::upgrade(&mut source).unwrap();
     crate::reads::migration::upgrade(&mut source).unwrap();
@@ -296,6 +297,7 @@ async fn qualify_previous_manager_database(allowance: Option<u64>) {
     source.execute_batch(crate::plugins::hooks::SCHEMA).unwrap();
     source.pragma_update(None, "user_version", 20).unwrap();
     crate::worker::progress::upgrade(&mut source).unwrap();
+    crate::timeline::migration::upgrade(&mut source).unwrap();
     if let Some(allowance) = allowance {
         let allowance = i64::try_from(allowance).unwrap();
         // The previous writer stored derived allowances without reapplying the
@@ -317,7 +319,7 @@ async fn qualify_previous_manager_database(allowance: Option<u64>) {
         source
             .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
             .unwrap(),
-        21
+        22
     );
     let runs: Vec<(String, Value)> = source
         .prepare("SELECT id,data FROM run_views ORDER BY id")
