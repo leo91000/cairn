@@ -73,7 +73,8 @@ for (let i = 0; i < cargoArgs.length; i++) {
   }
 }
 
-const installationSelected = !selectsPackage || args.includes('--workspace')
+const selectsWorkspace = cargoArgs.includes('--workspace') || cargoArgs.includes('--all')
+const installationSelected = !selectsPackage || selectsWorkspace
   || packages.some(spec => maySelectPackage(spec, 'cairn-installation'))
 const testTargets = cargoArgs.flatMap((arg, index) => {
   if (arg === '--test')
@@ -84,7 +85,7 @@ const explicitOtherTarget = cargoArgs.some(arg => ['--lib', '--bin', '--bins', '
 const includesAllTests = cargoArgs.some(arg => ['--tests', '--all-targets'].includes(arg))
 const needsWorkerFixture = installationSelected
   && (includesAllTests || (testTargets.length > 0 ? testTargets.some(target => /[*?[\]]/.test(target) ? path.matchesGlob('worker', target) : target === 'worker') : !explicitOtherTarget))
-const needsCodeWorker = !selectsPackage || args.includes('--workspace')
+const needsCodeWorker = !selectsPackage || selectsWorkspace
   || packages.some(spec => maySelectPackage(spec, 'cairn-beacon'))
 const reusedBinaries = new Set(['--archive-file', '--binaries-metadata', '--cargo-metadata'])
 if (nextest && (needsWorkerFixture || needsCodeWorker) && cargoArgs.some(arg => reusedBinaries.has(arg.split('=')[0]))) {
