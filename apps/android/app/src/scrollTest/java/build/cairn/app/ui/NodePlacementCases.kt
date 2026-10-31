@@ -217,8 +217,9 @@ abstract class NodePlacementCases {
                     .fetchSemanticsNodes()
                     .isNotEmpty()
             }
+            compose.waitUntil(10000) { !vm.state.value.busy }
             val refresh = CompletableDeferred<Unit>()
-            compose.runOnUiThread { vm.perform { refresh.await() } }
+            compose.runOnUiThread { assertTrue(vm.tryPerform { refresh.await() }) }
             compose.waitUntil(10000) { vm.state.value.busy }
             compose.onNodeWithText("Passer en Natif administrateur").assertIsNotEnabled()
             assertTrue(writes.isEmpty())
@@ -240,7 +241,7 @@ abstract class NodePlacementCases {
             capture("native-administrator-review")
             compose.waitUntil(10000) { !vm.state.value.busy }
             val confirmationRefresh = CompletableDeferred<Unit>()
-            compose.runOnUiThread { vm.perform { confirmationRefresh.await() } }
+            compose.runOnUiThread { assertTrue(vm.tryPerform { confirmationRefresh.await() }) }
             compose.waitUntil(10000) { vm.state.value.busy }
             compose
                 .onNodeWithText("Confirmer l’accès et relancer les exécutions")
