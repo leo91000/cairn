@@ -109,7 +109,7 @@ async fn caller_costs_include_failed_work_after_its_receiver_is_abandoned() {
 }
 
 #[tokio::test]
-async fn real_reader_jobs_skip_cpu_sampling_and_caller_cost_rows() {
+async fn real_reader_jobs_report_cpu_sampling_and_caller_cost_rows() {
     let capture = Capture::default();
     let subscriber = tracing_subscriber::fmt()
         .without_time()
@@ -132,7 +132,7 @@ async fn real_reader_jobs_skip_cpu_sampling_and_caller_cost_rows() {
             let mut connection = Connection::open_in_memory().unwrap();
             let mut metrics = Metrics::new("read", 0, &connection);
             let completed = job(&mut connection);
-            assert!(completed.cpu.is_none());
+            assert_eq!(completed.cpu.is_some(), cfg!(target_os = "linux"));
             metrics.since = Instant::now() - Duration::from_secs(31);
             metrics.record(&completed, &connection);
             assert_eq!(metrics.callers.len(), 0);
@@ -142,11 +142,18 @@ async fn real_reader_jobs_skip_cpu_sampling_and_caller_cost_rows() {
     .unwrap();
     assert_eq!(task.await.unwrap(), "private-reader-value".len());
     let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
-    assert_eq!(output.lines().count(), 1);
+    assert_eq!(output.lines().count(), 2);
     assert!(output.contains("operation=\"database_actor\""));
-    assert!(output.contains("cpu_available=false"));
-    assert!(output.contains("cpu_sampled_jobs=0"));
-    assert!(!output.contains("database_caller"));
+    let available = cfg!(target_os = "linux");
+    assert!(output.contains(&format!("cpu_available={available}")));
+    assert!(output.contains(&format!("cpu_sampled_jobs={}", u8::from(available))));
+    let caller = output
+        .lines()
+        .find(|line| line.contains("database_caller"))
+        .unwrap();
+    assert!(caller.contains("read_probe"));
+    assert!(caller.contains("lane=\"read\""));
+    assert!(!output.contains("lane=\"write\""));
     assert!(!output.contains("private-reader-value"));
 }
 
@@ -402,6 +409,7 @@ fn caller_cost_rows_bound_cardinality_and_account_for_omitted_jobs() {
     assert_eq!(callers.untracked_jobs, 2);
     tracing::subscriber::with_default(subscriber, || {
         callers.emit(
+            "write",
             0,
             7,
             30_000,
@@ -467,6 +475,7 @@ fn caller_cost_rows_include_cpu_and_wall_leaders_without_duplicates() {
     }
     tracing::subscriber::with_default(subscriber, || {
         callers.emit(
+            "write",
             0,
             0,
             30_000,

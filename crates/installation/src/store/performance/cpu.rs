@@ -4,8 +4,8 @@ use std::time::Duration;
 pub(crate) struct CpuTime(Option<Duration>);
 
 impl CpuTime {
-    pub(crate) fn start(writer: bool) -> Self {
-        if !writer || !tracing::event_enabled!(target: "cairn_performance", tracing::Level::INFO) {
+    pub(crate) fn start() -> Self {
+        if !tracing::event_enabled!(target: "cairn_performance", tracing::Level::INFO) {
             return Self(None);
         }
         Self(read())

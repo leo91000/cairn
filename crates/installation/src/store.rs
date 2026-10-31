@@ -261,10 +261,9 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
         f: impl FnOnce(&mut Db<'_>) -> Result<T> + Send + 'static,
     ) -> Result<T> {
         let queued_at = std::time::Instant::now();
-        let writer = tx.same_channel(&self.0.writer);
         let (reply, rx) = oneshot::channel();
         tx.send(Box::new(move |connection| {
-            let cpu = performance::CpuTime::start(writer);
+            let cpu = performance::CpuTime::start();
             let started = std::time::Instant::now();
             let result = f(&mut Db(connection));
             let execution = started.elapsed();

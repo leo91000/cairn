@@ -1,4 +1,4 @@
-//! Per-actor timings and bounded writer costs, without SQL or captured values.
+//! Per-actor timings and bounded caller costs, without SQL or captured values.
 use rusqlite::Connection;
 use std::time::{Duration, Instant};
 
@@ -97,9 +97,7 @@ impl Metrics {
             self.cpu_us = self.cpu_us.saturating_add(micros(cpu));
             self.cpu_sampled_jobs = self.cpu_sampled_jobs.saturating_add(1);
         }
-        if self.lane == "write"
-            && tracing::event_enabled!(target: "cairn_performance", tracing::Level::INFO)
-        {
+        if tracing::event_enabled!(target: "cairn_performance", tracing::Level::INFO) {
             self.callers.record(job);
         }
 
@@ -170,22 +168,21 @@ impl Metrics {
                     caller_coverage_complete = self.callers.recorded_jobs == self.completed
                         && self.callers.untracked_jobs == 0,
                 );
-                if self.lane == "write" {
-                    self.callers.emit(
-                        self.index,
-                        self.window,
-                        interval_ms,
-                        Totals {
-                            completed: self.completed,
-                            errors: self.errors,
-                            abandoned_replies: self.abandoned_replies,
-                            queue_us: self.queue_us,
-                            execution_us: self.execution_us,
-                            cpu_us: self.cpu_us,
-                            cpu_sampled_jobs: self.cpu_sampled_jobs,
-                        },
-                    );
-                }
+                self.callers.emit(
+                    self.lane,
+                    self.index,
+                    self.window,
+                    interval_ms,
+                    Totals {
+                        completed: self.completed,
+                        errors: self.errors,
+                        abandoned_replies: self.abandoned_replies,
+                        queue_us: self.queue_us,
+                        execution_us: self.execution_us,
+                        cpu_us: self.cpu_us,
+                        cpu_sampled_jobs: self.cpu_sampled_jobs,
+                    },
+                );
             }
         });
         *self = Self::window(self.lane, self.index, cache, self.window.saturating_add(1));

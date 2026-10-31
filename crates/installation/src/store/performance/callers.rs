@@ -46,12 +46,20 @@ impl Totals {
         self.cpu_sampled_jobs = self.cpu_sampled_jobs.saturating_sub(other.cpu_sampled_jobs);
     }
 
-    fn emit(&self, caller: &'static str, index: usize, window: u64, interval_ms: u64, other: bool) {
+    fn emit(
+        &self,
+        lane: &'static str,
+        caller: &'static str,
+        index: usize,
+        window: u64,
+        interval_ms: u64,
+        other: bool,
+    ) {
         tracing::info!(
             target: "cairn_performance",
             parent: None,
             operation = "database_caller",
-            lane = "write",
+            lane,
             actor = index,
             window,
             interval_ms,
@@ -96,7 +104,14 @@ impl Callers {
         self.tracked.len()
     }
 
-    pub fn emit(&self, index: usize, window: u64, interval_ms: u64, mut remaining: Totals) {
+    pub fn emit(
+        &self,
+        lane: &'static str,
+        index: usize,
+        window: u64,
+        interval_ms: u64,
+        mut remaining: Totals,
+    ) {
         let mut by_wall = self.tracked.iter().collect::<Vec<_>>();
         by_wall.sort_by_key(|(caller, totals)| (std::cmp::Reverse(totals.execution_us), **caller));
         let mut selected = by_wall.iter().take(TOP).copied().collect::<Vec<_>>();
@@ -108,11 +123,11 @@ impl Callers {
             }
         }
         for (caller, totals) in selected {
-            totals.emit(caller, index, window, interval_ms, false);
+            totals.emit(lane, caller, index, window, interval_ms, false);
             remaining.subtract(*totals);
         }
         if remaining.completed > 0 {
-            remaining.emit("other", index, window, interval_ms, true);
+            remaining.emit(lane, "other", index, window, interval_ms, true);
         }
     }
 }
