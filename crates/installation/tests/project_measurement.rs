@@ -938,7 +938,7 @@ impl StorageEntity for MeasuredRun {
 
     fn reference_schema(db: &Connection) {
         // Exact pre-A5 seven-column runs layout and indexes at 7fecc082.
-        db.execute_batch("DROP TABLE runs;
+        db.execute_batch("DROP VIEW run_views; DROP TABLE runs;
 CREATE TABLE runs(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,project_id TEXT NOT NULL,status TEXT NOT NULL,created_at INTEGER NOT NULL,data TEXT NOT NULL,dedupe TEXT UNIQUE);
 CREATE INDEX runs_status ON runs(status,created_at);
 CREATE INDEX runs_task ON runs(task_id,created_at DESC);

@@ -1270,7 +1270,7 @@ fn from_run(db: &Db<'_>, run_id: &str, origin: &crate::native::policy::Origin) -
     )?;
     // Work already delegated by this run still returns to its new conversation.
     let dependents = db.json_rows(
-        "SELECT data FROM runs WHERE json_extract(requested_by,'$.runId')=?",
+        "SELECT data FROM run_views AS runs WHERE json_extract(requested_by,'$.runId')=?",
         [run_id],
     )?;
     for dependent in dependents {

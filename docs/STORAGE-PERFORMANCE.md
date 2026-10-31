@@ -114,3 +114,43 @@ container/start epochs: missing samples do not prove zero I/O, and counter reset
 suppress invalid deltas. Manager CPU includes all manager work; worker timings
 are wall time. These samples do not classify cold/warm reads or establish precise
 latency percentiles. Keep observations outside Git.
+
+## Run JSON projections
+
+SQLite 3.53.2 computes generated columns during updates, including VIRTUAL
+columns whose inputs did not change. The former `runs.data` and
+`runs.summary_data` columns therefore rebuilt JSON during scalar lifecycle
+updates. On a busy v0.74.2 installation, a 15-second user CPU profile attributed
+24.83% of sampled manager CPU to `jsonTranslateTextToBlob`. This identifies a
+hot path; the sampling window alone does not measure a particular write's cost.
+
+Database v19 moves these two expressions, unchanged, into the `run_views` SQL
+view. Scalar writes target `runs`; wire readers use `run_views`. The three STORED
+display fields remain on `runs`, so list summaries still avoid loading snapshot
+overflow pages. Stored display fields and JSON validity checks can still parse
+the snapshot on a write; this change removes the two wire reconstructions.
+
+The v18 -> v19 migration drops only VIRTUAL columns and creates the view in one
+immediate transaction. The pinned SQLite implementation does not rewrite table
+rows when dropping a VIRTUAL column. Failed DDL rolls back the drops and version;
+concurrent starters recheck the version under the writer lock. Older binaries
+reject v19. Retain a fresh consistent backup before upgrading and use a compatible
+runtime afterward; an old binary alone cannot roll this migration back.
+
+Reproduce the synthetic real-Store write and wire-read measurements against both
+the unchanged reference and candidate, using the same test source and build flags:
+
+```sh
+TMPDIR=/var/tmp pnpm test:backend -p cairn-installation \
+  --test run_write_performance -- --ignored --nocapture --test-threads=1
+```
+
+Each case seeds one run with a frozen 0, 128 or 512 KiB instruction string.
+Write cases perform 32 changed/unchanged boundary or summary operations and
+record process CPU, individual wall times, snapshot bytes, WAL bytes, SQLite
+settings and subscriber revisions. Read cases exercise the actual summary/full
+list reader 32 times using a reused or freshly opened connection. Read output
+is checked on every iteration; full reads preserve the snapshot and summaries
+exclude it. Connection-cold timing includes open/close; the operating system
+cache remains warm. These local measurements do not include production network
+latency and do not predict a whole-server speedup.
