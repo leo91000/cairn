@@ -1,4 +1,4 @@
--- Real Store f836a3df: actual v19 fixture upgraded offline to schema21; all data and credentials synthetic.
+-- Real Store/event writer 1bf0a055: actual v21 fixture upgraded offline to schema22, then one retained timeline recorded; all data/credentials synthetic.
 PRAGMA foreign_keys=OFF;
 BEGIN TRANSACTION;
 CREATE TABLE account_dismissals(
@@ -362,6 +362,7 @@ CREATE TABLE durable_wakeups(
 );
 INSERT INTO "durable_wakeups" VALUES(1,'00000000-0000-4000-8000-000000000071',NULL,'wake-v15','turn-v15','synthetic grouped upgrade fixture',3600,123,3600123,'all',NULL,NULL,NULL,NULL,NULL,NULL,NULL);
 CREATE TABLE events(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,created_at INTEGER NOT NULL CHECK(created_at BETWEEN 0 AND 9007199254740991),type TEXT NOT NULL CHECK(length(type)>0),text TEXT NOT NULL,payload TEXT CHECK(payload IS NULL OR json_valid(payload)));
+INSERT INTO "events" VALUES(1,'00000000-0000-4000-8000-000000000010',1793477898624,'item.completed','Retained synthetic timeline','{"item":{"id":"retained-metadata-answer","text":"Retained synthetic timeline","type":"agent_message"}}');
 CREATE TABLE external_delegations(
  instance_id TEXT PRIMARY KEY NOT NULL REFERENCES plugin_instances(id) ON DELETE CASCADE,
  agent_id TEXT NOT NULL REFERENCES agents(id),
@@ -857,6 +858,26 @@ CREATE TABLE shared_publications(id TEXT PRIMARY KEY,run_id TEXT NOT NULL);
 INSERT INTO "shared_publications" VALUES('synthetic-publication','retained-run');
 CREATE TABLE shared_references(publication TEXT NOT NULL REFERENCES shared_publications(id) ON DELETE CASCADE,object TEXT NOT NULL REFERENCES shared_objects(id),PRIMARY KEY(publication,object));
 INSERT INTO "shared_references" VALUES('synthetic-publication','synthetic-object');
+CREATE TABLE timeline_entries(
+ run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+ id TEXT NOT NULL CHECK(length(id) BETWEEN 1 AND 1024),
+ position INTEGER NOT NULL CHECK(position BETWEEN 1 AND 9007199254740991),
+ revision INTEGER NOT NULL CHECK(revision BETWEEN position AND 9007199254740991),
+ source INTEGER NOT NULL CHECK(source BETWEEN position AND revision),
+ turn INTEGER NOT NULL CHECK(turn BETWEEN 0 AND 9007199254740991),
+ attempt INTEGER NOT NULL CHECK(attempt BETWEEN 0 AND 9007199254740991),
+ created_at INTEGER NOT NULL CHECK(created_at BETWEEN 0 AND 9007199254740991),
+ updated_at INTEGER NOT NULL CHECK(updated_at BETWEEN 0 AND 9007199254740991),
+ kind TEXT NOT NULL CHECK(kind IN ('userMessage','agentMessage','notice')),
+ content TEXT NOT NULL CHECK(json_valid(content) AND json_type(content)='object'),
+ PRIMARY KEY(run_id,id)
+) WITHOUT ROWID;
+INSERT INTO "timeline_entries" VALUES('00000000-0000-4000-8000-000000000010','message:0:0:retained-metadata-answer',1,1,1,0,0,1793477898624,1793477898624,'agentMessage','{"itemId":"retained-metadata-answer","state":"done"}');
+CREATE TABLE timeline_state(
+ run_id TEXT PRIMARY KEY NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+ state TEXT NOT NULL CHECK(json_valid(state) AND json_type(state)='object')
+) WITHOUT ROWID;
+INSERT INTO "timeline_state" VALUES('00000000-0000-4000-8000-000000000010','{"turn":0,"attempt":0,"via":null,"replies":[],"connections":[],"engineRetries":[],"limits":[],"failure":null,"retried":null,"reported":[],"echoes":{"exhausted":false,"causes":[],"failures":[],"replies":[{"card":"message:0:0:retained-metadata-answer","text":11196012984462885109,"trimmed":11196012984462885109,"usageLimit":false}]},"quota":null,"activeWait":null}');
 CREATE TABLE wait_conditions(
     wakeup_key INTEGER NOT NULL REFERENCES durable_wakeups(key) ON DELETE CASCADE,
     position INTEGER NOT NULL CHECK(position>=0),
@@ -1017,7 +1038,10 @@ CREATE VIEW run_views AS SELECT runs.*,
 FROM runs;
 CREATE INDEX plugin_hook_events_instance ON plugin_hook_events(instance_id,created_at,id);
 CREATE INDEX plugin_hook_receipts_expiry ON plugin_hook_receipts(expires_at);
+CREATE INDEX timeline_entries_position ON timeline_entries(run_id,position);
+CREATE INDEX timeline_entries_revision ON timeline_entries(run_id,revision);
 DELETE FROM "sqlite_sequence";
 INSERT INTO "sqlite_sequence" VALUES('audit',780);
+INSERT INTO "sqlite_sequence" VALUES('events',1);
 COMMIT;
-PRAGMA user_version=21;
+PRAGMA user_version=22;

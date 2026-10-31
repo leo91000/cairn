@@ -69,6 +69,14 @@ fn tables(db: &Connection) -> BTreeMap<String, Vec<String>> {
         .collect()
 }
 
+// Later startup steps may add tables; every previously existing row must remain.
+fn assert_preserved_tables(db: &Connection, before: &BTreeMap<String, Vec<String>>) {
+    let after = tables(db);
+    for (table, rows) in before {
+        assert_eq!(after.get(table), Some(rows), "{table}");
+    }
+}
+
 fn version(db: &Connection) -> i64 {
     db.pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap()
@@ -272,8 +280,8 @@ async fn long_engine_item_ids_survive_migration_and_live_updates() {
     }
     let before = tables(&db);
     let store = Store::open(root.path()).unwrap();
-    assert_eq!(version(&db), 22);
-    assert_eq!(tables(&db), before);
+    assert_eq!(version(&db), crate::store::DATABASE_VERSION);
+    assert_preserved_tables(&db, &before);
     let old = cards(&store, CODEX).await;
     let first_card = old.iter().find(|card| matches!(&card.content, TimelineContent::AgentMessage { item_id, .. } if item_id == &first)).unwrap();
     let second_card = old.iter().find(|card| matches!(&card.content, TimelineContent::AgentMessage { item_id, .. } if item_id == &second)).unwrap();
@@ -408,8 +416,8 @@ async fn upgrade_builds_the_timeline_from_retained_events_and_changes_nothing_el
     assert!(before["events"].len() >= 48);
 
     let store = Store::open(root.path()).unwrap();
-    assert_eq!(version(&db), 22);
-    assert_eq!(tables(&db), before);
+    assert_eq!(version(&db), crate::store::DATABASE_VERSION);
+    assert_preserved_tables(&db, &before);
     assert_eq!(
         db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
             .unwrap(),
@@ -1070,7 +1078,7 @@ fn version_18_upgrades_through_both_projections() {
         .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
         .unwrap();
     Store::open(root.path()).unwrap();
-    assert_eq!(version(&db), 22);
+    assert_eq!(version(&db), crate::store::DATABASE_VERSION);
     assert_eq!(
         db.query_row("SELECT COUNT(*) FROM events", [], |row| row
             .get::<_, i64>(0))

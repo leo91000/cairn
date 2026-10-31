@@ -1,10 +1,10 @@
-//! Frozen by the real v21 Store (f836a3df), retaining metadata from the preceding fixture.
+//! Frozen by the real v22 Store (1bf0a055), retaining metadata from the preceding fixture.
 use cairn_installation::store::Store;
 use rusqlite::{Connection, types::Value as SqlValue};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-const PREVIOUS: &str = include_str!("fixtures/deliverable-metadata-v21.sql");
+const PREVIOUS: &str = include_str!("fixtures/deliverable-metadata-v22.sql");
 const RUN: &str = "00000000-0000-4000-8000-000000000010";
 const TOKEN: &str = "00000000-0000-4000-8000-000000000e01";
 
@@ -164,7 +164,7 @@ async fn real_previous_database_preserves_versions_links_sources_and_unrelated_d
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        22
+        23
     );
     assert_eq!(
         db.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
@@ -254,7 +254,7 @@ fn invalid_previous_metadata_leaves_schema_and_every_row_intact() {
         assert_eq!(
             db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            21
+            22
         );
     }
 }
