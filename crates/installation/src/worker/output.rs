@@ -90,7 +90,7 @@ const NOTICE_LIMIT: usize = 4_000;
 /// Event types that are always recorded. Clients use turn markers to scope reused message IDs,
 /// show the latest context usage, and show the engine's retries and usage limits in the
 /// conversation.
-const CONVERSATION_EVENTS: [&str; 10] = [
+const CONVERSATION_EVENTS: [&str; 11] = [
     "thread.started",
     "context.usage",
     "turn.started",
@@ -99,6 +99,7 @@ const CONVERSATION_EVENTS: [&str; 10] = [
     "turn.waiting",
     "error",
     "runner.failed",
+    "runner.finalized",
     "engine.retry",
     "provider.limit",
 ];
@@ -249,7 +250,11 @@ pub(super) async fn record(
         record_raw(s, id, "diagnostic", raw, secrets, log_total).await?;
         return Ok(false);
     }
+    if raw.trim().is_empty() {
+        return Ok(false);
+    }
     let Ok(event) = serde_json::from_str::<Value>(raw) else {
+        checkpoint.mark_progress_incomplete().await?;
         record_raw(s, id, "output", raw, secrets, log_total).await?;
         return Ok(false);
     };
@@ -286,26 +291,7 @@ pub(super) async fn record(
         return Ok(false);
     }
     if event["type"] == "runner.output_interrupted" {
-        let id = id.to_owned();
-        checkpoint
-            .update_and_publish_if(
-                |c| {
-                    if c.output_interrupted == Some(true) {
-                        return false;
-                    }
-                    c.output_interrupted = Some(true);
-                    true
-                },
-                move |db| {
-                    db.event(
-                        &id,
-                        &EventKind::Status,
-                        "Execution output was interrupted; some activity may be missing.",
-                        None,
-                    )
-                },
-            )
-            .await?;
+        mark_output_interrupted(checkpoint).await?;
         return Ok(false);
     }
     if event["type"] == "runner.start_rejected" {
@@ -343,6 +329,10 @@ pub(super) async fn record(
     if handle_chat_control(s, id, &event, secrets).await? {
         return Ok(false);
     }
+    if !super::progress::known_frame(&event) {
+        // Even an exhausted log budget cannot certify an unsupported protocol.
+        checkpoint.mark_progress_incomplete().await?;
+    }
     let exhausted = run_output::exhausted(&event);
     // Every activity item has its own detail limit, regardless of earlier output.
     let conversation = event["item"]["type"] == "agent_message"
@@ -374,6 +364,32 @@ pub(super) async fn record(
         let _ = crate::chat_titles::enqueue(s, id).await;
     }
     Ok(exhausted)
+}
+
+/// The trusted relay explicitly reports lost output. Other unsupported frames
+/// affect monitoring coverage only, without changing provider/replay policy.
+async fn mark_output_interrupted(checkpoint: &Checkpoint) -> Result<()> {
+    if checkpoint
+        .read(|saved| saved.output_interrupted == Some(true))
+        .await
+    {
+        return Ok(());
+    }
+    let id = checkpoint.id.clone();
+    checkpoint
+        .decide(move |saved, db| {
+            if saved.output_interrupted == Some(true) {
+                return Ok(());
+            }
+            saved.output_interrupted = Some(true);
+            db.event(
+                &id,
+                &EventKind::Status,
+                "Execution output was interrupted; some activity may be missing.",
+                None,
+            )
+        })
+        .await
 }
 
 async fn record_raw(
@@ -492,6 +508,7 @@ async fn apply_event(
                 run: changed.then_some(changes),
                 failure: failure.map(|(message, cause)| (message, cause, provider_failure)),
                 completed,
+                progress_complete: super::progress::same_semantics(event, stored),
                 last_message: message,
             },
         )

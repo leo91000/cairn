@@ -1025,6 +1025,15 @@ impl Execution<'_> {
         }
         self.checkpoint
             .update(|c| {
+                c.progress = Some(super::progress::Progress::launched(
+                    self.attempt_id.clone(),
+                    c.runner_id().map(str::to_owned),
+                    identity.clone(),
+                    crate::waits::execution_id(self.run)
+                        .as_str()
+                        .map(str::to_owned),
+                    now(),
+                ));
                 c.process = Some(identity);
                 c.turn_pending = None;
                 c.recovery_deadline_ms = None;
