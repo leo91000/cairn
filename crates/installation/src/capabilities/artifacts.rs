@@ -10,6 +10,26 @@ use cairn_contracts::*;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
+async fn recheck_read(
+    s: &Service,
+    authority: Authority,
+    credential: Option<&str>,
+    run: String,
+) -> Result<()> {
+    s.store
+        .read(move |db| {
+            authority.authorize(db)?;
+            crate::conversation_lifecycle::require_active_run(db, &run)?;
+            db.require_run(&run)?;
+            Ok(())
+        })
+        .await?;
+    if let Some(credential) = credential {
+        crate::relay::authorize_read_mcp(s, credential).await?;
+    }
+    Ok(())
+}
+
 pub(crate) struct ArtifactOperation {
     pub name: &'static str,
     scope: &'static str,
@@ -77,7 +97,18 @@ impl ArtifactOperation {
         input: Value,
         context: ResumeContext,
     ) -> Result<Value> {
+        let credential = match &context {
+            ResumeContext::Public(_, credential) if self.scope == "read" => {
+                Some(credential.clone().ok_or_else(|| {
+                    Error::unauthorized("A current public MCP authorization is required.")
+                })?)
+            }
+            _ => None,
+        };
         let authority = Authority::new(s, context, self.scope).await?;
+        if let Some(credential) = &credential {
+            crate::relay::authorize_read_mcp(s, credential).await?;
+        }
         match self.name {
             "list_run_artifacts" => {
                 let input: ListRunArtifactsInput = decode(input)?;
@@ -85,13 +116,15 @@ impl ArtifactOperation {
                     return Err(Error::bad("Invalid artifact page."));
                 }
                 let run = input.run_id.to_string();
+                let auth = authority.clone();
+                let selected_run = run.clone();
                 let items = s
                     .store
                     .read(move |db| {
-                        authority.authorize(db)?;
-                        crate::conversation_lifecycle::require_active_run(db, &run)?;
-                        db.require_run(&run)?;
-                        db.artifacts(Some(&run))
+                        auth.authorize(db)?;
+                        crate::conversation_lifecycle::require_active_run(db, &selected_run)?;
+                        db.require_run(&selected_run)?;
+                        db.artifacts(Some(&selected_run))
                     })
                     .await?;
                 let offset =
@@ -110,6 +143,7 @@ impl ArtifactOperation {
                     artifacts.push(item.clone());
                 }
                 let next = offset + artifacts.len();
+                recheck_read(s, authority, credential.as_deref(), run).await?;
                 Ok(serde_json::to_value(ListRunArtifactsOutput {
                     artifacts,
                     next_offset: (next < items.len()).then_some(next as u64),
@@ -150,15 +184,9 @@ impl ArtifactOperation {
                 file.seek(std::io::SeekFrom::Start(input.offset)).await?;
                 let mut bytes = Vec::new();
                 file.take(192 * 1024).read_to_end(&mut bytes).await?;
-                // The same revocable execution grant and lifecycle are checked after IO.
-                s.store
-                    .read(move |db| {
-                        authority.authorize(db)?;
-                        crate::conversation_lifecycle::require_active_run(db, &run)?;
-                        db.require_run(&run)?;
-                        Ok(())
-                    })
-                    .await?;
+                // Recheck both local execution access and the originating public
+                // authorization after file I/O, before releasing any bytes.
+                recheck_read(s, authority, credential.as_deref(), run).await?;
                 let next = input.offset + bytes.len() as u64;
                 Ok(serde_json::to_value(ReadRunArtifactOutput {
                     offset: input.offset,
@@ -171,11 +199,13 @@ impl ArtifactOperation {
             }
             _ => {
                 let input: SetRunArtifactVisibilityInput = decode(input)?;
+                let publication = authority.clone();
                 crate::artifacts::sharing::set_authorized(
                     s,
                     &input.run_id.to_string(),
                     &input.artifact_id.to_string(),
                     input.visibility.as_str(),
+                    publication.recheck(s),
                     move |db| authority.authorize(db),
                 )
                 .await

@@ -115,6 +115,7 @@ pub(super) async fn invoke(
             text(&record, "runId"),
             text(&args, "artifactId"),
             text(&args, "visibility"),
+            std::future::ready(Ok(())),
             authorize_chat,
         )
         .await;

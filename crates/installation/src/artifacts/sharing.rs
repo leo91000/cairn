@@ -66,27 +66,36 @@ pub async fn set(
 ) -> Result<Value> {
     let bearer = bearer.map(str::to_owned);
     let expected_run = run.to_owned();
-    set_authorized(s, run, artifact, value, move |db| {
-        if let Some(token) = bearer {
-            let authorized = crate::project_workspaces::authorize_in(db, &token)?;
-            if authorized["id"] != expected_run {
-                return Err(Error::forbidden("Artifact is outside this run."));
+    set_authorized(
+        s,
+        run,
+        artifact,
+        value,
+        std::future::ready(Ok(())),
+        move |db| {
+            if let Some(token) = bearer {
+                let authorized = crate::project_workspaces::authorize_in(db, &token)?;
+                if authorized["id"] != expected_run {
+                    return Err(Error::forbidden("Artifact is outside this run."));
+                }
             }
-        }
-        Ok(())
-    })
+            Ok(())
+        },
+    )
     .await
 }
 
-pub(crate) async fn set_authorized<F>(
+pub(crate) async fn set_authorized<F, R>(
     s: &Service,
     run: &str,
     artifact: &str,
     value: &str,
+    recheck: R,
     authorize: F,
 ) -> Result<Value>
 where
     F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+    R: std::future::Future<Output = Result<()>> + Send,
 {
     uuid(run)?;
     uuid(artifact)?;
@@ -98,6 +107,7 @@ where
     } else {
         String::new()
     };
+    recheck.await?;
     s.store
         .transaction(move |db| {
             authorize(db)?;
