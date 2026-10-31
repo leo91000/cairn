@@ -15,7 +15,7 @@ import { describe, expect, it } from 'vitest'
 
 const launcher = fileURLToPath(new URL('../test-backend.mjs', import.meta.url))
 
-function invoke(args, status = 0, buildStatus = 0, threads) {
+function invoke(args, status = 0, buildStatus = 0, threads, wrongFixture = false) {
   const directory = mkdtempSync(path.join(os.tmpdir(), 'cairn-backend-runner-'))
   try {
     const cargo = path.join(directory, 'cargo')
@@ -35,7 +35,7 @@ if (args[0] === 'build' && args.includes('worker_fixture')) {
   const sources = targets.length > 1 ? targets.map(target => path.join(process.env.CAIRN_FIXTURE_ROOT, target, 'debug', 'examples', 'worker_fixture')) : [process.env.CAIRN_FIXTURE_WORKER_SOURCE];
   for (const source of sources) {
     fs.mkdirSync(path.dirname(source), { recursive: true });
-    fs.writeFileSync(source, 'instrumented');
+    fs.writeFileSync(source, process.env.CAIRN_FIXTURE_WRONG === '1' ? 'ordinary' : 'instrumented cairn-worker-fixture-hooks-v1');
     console.log(JSON.stringify({ reason: 'compiler-artifact', target: { name: 'worker_fixture' }, executable: source }));
   }
   fs.writeFileSync(process.env.CAIRN_FIXTURE_SOURCE_LIST, JSON.stringify(sources));
@@ -58,6 +58,7 @@ else process.exit(Number(process.env.CAIRN_FIXTURE_STATUS));
         CAIRN_FIXTURE_SOURCE_LIST: path.join(directory, 'sources.json'),
         CAIRN_FIXTURE_STATUS: `${status}`,
         CAIRN_FIXTURE_BUILD_STATUS: `${buildStatus}`,
+        CAIRN_FIXTURE_WRONG: wrongFixture ? '1' : '',
         CAIRN_AUTH_SOCKET: '/must-not-reach-tests',
         RUST_TEST_THREADS: threads,
         CAIRN_FIXTURE_CAPTURE_THREADS: threads ? '1' : '',
@@ -90,22 +91,28 @@ describe('backend test launcher', () => {
     const { calls, status } = invoke(['--nextest', '--test-threads', '4', '--no-fail-fast'])
     expect(status).toBe(0)
     expect(calls[0]).toEqual({ args: ['build', '--locked', '-p', 'cairn-installation', '--example', 'worker_fixture', '--features', 'worker-fixture-hooks', '--message-format=json'] })
-    expect(calls[1]).toMatchObject({ args: ['build', '--locked', '-p', 'cairn-installation', '--bin', 'cairn', '--message-format=json'], fixtureContents: 'instrumented' })
-    expect(calls[2]).toMatchObject({ args: ['nextest', 'run', '--locked', '--workspace', '--test-threads', '4', '--no-fail-fast'], worker: '/fixture/cairn', fixtureContents: 'instrumented' })
+    expect(calls[1]).toMatchObject({ args: ['build', '--locked', '-p', 'cairn-installation', '--bin', 'cairn', '--message-format=json'], fixtureContents: 'instrumented cairn-worker-fixture-hooks-v1' })
+    expect(calls[2]).toMatchObject({ args: ['nextest', 'run', '--locked', '--workspace', '--test-threads', '4', '--no-fail-fast'], worker: '/fixture/cairn', fixtureContents: 'instrumented cairn-worker-fixture-hooks-v1' })
+  })
+
+  it('refuses a copied fixture that lacks the test hooks', () => {
+    const result = invoke(['-p', 'cairn-installation', '--test', 'worker'], 0, 0, undefined, true)
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toContain('Copied worker fixture lacks test hooks')
   })
 
   it('preserves the nextest failure exit code and package selection', () => {
     const { calls, status } = invoke(['--nextest', '-p', 'cairn-installation'], 100)
     expect(status).toBe(100)
     expect(calls[0].args).toEqual(['build', '--locked', '-p', 'cairn-installation', '--example', 'worker_fixture', '--features', 'worker-fixture-hooks', '--message-format=json'])
-    expect(calls[1]).toMatchObject({ args: ['nextest', 'run', '--locked', '-p', 'cairn-installation'], fixtureContents: 'instrumented' })
+    expect(calls[1]).toMatchObject({ args: ['nextest', 'run', '--locked', '-p', 'cairn-installation'], fixtureContents: 'instrumented cairn-worker-fixture-hooks-v1' })
   })
 
   it('builds the instrumented worker fixture only when worker tests are selected', () => {
     const worker = invoke(['-p', 'cairn-installation', '--test', 'worker', '--target-dir', '/fixture/target'])
     expect(worker.calls[0].args).toEqual(['build', '--locked', '-p', 'cairn-installation', '--example', 'worker_fixture', '--features', 'worker-fixture-hooks', '--message-format=json', '--target-dir', '/fixture/target'])
     expect(worker.calls[1].args).toEqual(['test', '--locked', '-p', 'cairn-installation', '--test', 'worker', '--target-dir', '/fixture/target'])
-    expect(worker.calls[1].fixtureContents).toBe('instrumented')
+    expect(worker.calls[1].fixtureContents).toBe('instrumented cairn-worker-fixture-hooks-v1')
     expect(worker.fixtureRemoved).toBe(true)
     const other = invoke(['-p', 'cairn-installation', '--test', 'nodes'])
     expect(other.calls).toEqual([{ args: ['test', '--locked', '-p', 'cairn-installation', '--test', 'nodes'] }])
@@ -116,7 +123,7 @@ describe('backend test launcher', () => {
     for (const selector of ['--tests', '--all-targets']) {
       const additive = invoke(['-p', 'cairn-installation', '--lib', selector])
       expect(additive.calls[0].args).toContain('worker-fixture-hooks')
-      expect(additive.calls[1].fixtureContents).toBe('instrumented')
+      expect(additive.calls[1].fixtureContents).toBe('instrumented cairn-worker-fixture-hooks-v1')
     }
 
     const short = invoke(['-pcairn-installation', '--test', 'worker'])
@@ -144,7 +151,7 @@ describe('backend test launcher', () => {
     const { calls } = invoke(['--nextest', '--workspace', '-r'])
     expect(calls[0].args).toContain('-r')
     expect(calls[1].args).toContain('-r')
-    expect(calls[2].fixtureContents).toBe('instrumented')
+    expect(calls[2].fixtureContents).toBe('instrumented cairn-worker-fixture-hooks-v1')
     expect(calls[2].args.filter(arg => arg === '--workspace')).toHaveLength(1)
   })
 
@@ -166,7 +173,7 @@ describe('backend test launcher', () => {
     const { calls } = invoke(['-p', 'cairn-*', '--test', 'work*', '--manifest-path', '/fixture/Cargo.toml', '--features=extra', '--no-default-features', '--ignore-rust-version', '-j4'])
     expect(calls[0].args).toEqual(expect.arrayContaining(['worker-fixture-hooks', '--manifest-path', '/fixture/Cargo.toml', '--features=extra', '--no-default-features', '--ignore-rust-version', '-j4']))
     expect(calls[1].args).toContain('cairn')
-    expect(calls[2].fixtureContents).toBe('instrumented')
+    expect(calls[2].fixtureContents).toBe('instrumented cairn-worker-fixture-hooks-v1')
     const other = invoke(['-p', 'cairn-contract*', '--test', 'fixture'])
     expect(other.calls).toEqual([{ args: ['test', '--locked', '-p', 'cairn-contract*', '--test', 'fixture'] }])
     const otherTarget = invoke(['-p', 'cairn-installation', '--test', 'node*'])
@@ -186,7 +193,7 @@ describe('backend test launcher', () => {
       expect.stringContaining('/first-target/debug'),
       expect.stringContaining('/second-target/debug'),
     ]))
-    expect(result.calls[1].allFixtureContents).toEqual(['instrumented', 'instrumented'])
+    expect(result.calls[1].allFixtureContents).toEqual(['instrumented cairn-worker-fixture-hooks-v1', 'instrumented cairn-worker-fixture-hooks-v1'])
     expect(result.fixtureRemoved).toBe(true)
     const workspace = invoke(['-p', 'cairn-*', '--tests', '--target', 'first-target', '--target=second-target'])
     expect(workspace.calls[2].codeWorkers).toHaveLength(2)

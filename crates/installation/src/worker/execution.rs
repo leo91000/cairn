@@ -123,44 +123,39 @@ pub(super) async fn reconcile(
             let shutdown = s.shutdown.clone();
             let id = checkpoint.id.clone();
             async move {
-                let recording_result = matches!(action, recovery::ObservationAction::Record(_));
                 checkpoint
-                    .decide_observation(
-                        move |current, _db| {
-                            let mut reserved = false;
-                            match action {
-                                recovery::ObservationAction::Reserve => {
-                                    reserved = current.reserve_observation(&attempt);
-                                }
-                                recovery::ObservationAction::Release => {
+                    .decide(move |current, _db| {
+                        let mut reserved = false;
+                        match action {
+                            recovery::ObservationAction::Reserve => {
+                                reserved = current.reserve_observation(&attempt);
+                            }
+                            recovery::ObservationAction::Release => {
+                                current.release_observation(&attempt);
+                            }
+                            recovery::ObservationAction::Exhausted => {
+                                if !shutdown.is_cancelled()
+                                    && current.runner_id() == Some(attempt.as_str())
+                                    && current.terminal_code.is_none()
+                                    && current.settled().is_none()
+                                {
                                     current.release_observation(&attempt);
-                                }
-                                recovery::ObservationAction::Exhausted => {
-                                    if !shutdown.is_cancelled()
-                                        && current.runner_id() == Some(attempt.as_str())
-                                        && current.terminal_code.is_none()
-                                        && current.settled().is_none()
-                                    {
-                                        current.release_observation(&attempt);
-                                        current.terminal_code = Some(None);
-                                    }
-                                }
-                                recovery::ObservationAction::Record(code) => {
-                                    current.release_observation(&attempt);
-                                    if current.runner_id() == Some(attempt.as_str())
-                                        && current.terminal_code.is_none()
-                                        && current.settled().is_none()
-                                        && (!shutdown.is_cancelled() || code.is_some())
-                                    {
-                                        current
-                                            .record_controller_result(_db, &id, &attempt, code)?;
-                                    }
+                                    current.terminal_code = Some(None);
                                 }
                             }
-                            Ok(reserved)
-                        },
-                        recording_result,
-                    )
+                            recovery::ObservationAction::Record(code) => {
+                                current.release_observation(&attempt);
+                                if current.runner_id() == Some(attempt.as_str())
+                                    && current.terminal_code.is_none()
+                                    && current.settled().is_none()
+                                    && (!shutdown.is_cancelled() || code.is_some())
+                                {
+                                    current.record_controller_result(_db, &id, &attempt, code)?;
+                                }
+                            }
+                        }
+                        Ok(reserved)
+                    })
                     .await
             }
         },

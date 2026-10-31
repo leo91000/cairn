@@ -355,10 +355,6 @@ impl Skills {
         Ok(current)
     }
 
-    async fn directory(&self, skill: &str, project: Option<&Path>) -> Result<PathBuf> {
-        skill_directory(&self.root(project).await?, skill).await
-    }
-
     pub async fn list(&self, scope: &str, project: Option<&Path>) -> Result<Vec<Value>> {
         let root = self.root(project).await?;
         let _read = bundle::access(&root).await.read_owned().await;
