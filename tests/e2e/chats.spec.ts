@@ -161,7 +161,8 @@ test('a durable scheduled wait survives restart and resumes without a user messa
   test.setTimeout(90000)
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Check CI and finish the original task' })
-  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).toBe('succeeded')
+  // Native agent startup and durable completion can span the normal test deadline.
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 30000 }).toBe('succeeded')
   const detail = await workspace.api(`/api/chats/${chat.id}`)
   const wakeup = {
     id: randomUUID(),

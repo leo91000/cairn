@@ -59,7 +59,7 @@ pub(super) fn relay(
                     let Some(channel) = channel else {
                         return;
                     };
-                    if let Ok(mut run) = tokio::net::UnixStream::connect(channel).await {
+                    if let Ok(mut run) = crate::unix_socket::connect(&channel).await {
                         let _ = tokio::io::copy_bidirectional(&mut guest, &mut run).await;
                     }
                 }

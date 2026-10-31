@@ -348,7 +348,7 @@ fn auth_relay(
                 continue;
             };
             // Bound concurrency and lifetime; only this run's manager socket is reachable.
-            if let Ok(mut manager) = UnixStream::connect(path).await {
+            if let Ok(mut manager) = crate::unix_socket::connect(path).await {
                 let relay = tokio::io::copy_bidirectional(&mut guest, &mut manager);
                 let _ = tokio::time::timeout(Duration::from_secs(45), relay).await;
             }
@@ -1021,6 +1021,36 @@ mod tests {
     use super::*;
     use crate::microvm::budget;
     use std::os::unix::process::CommandExt;
+
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn guest_auth_relay_connects_to_a_long_manager_socket() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let root = tempfile::tempdir().unwrap();
+        let long = root.path().join("manager-directory-".repeat(7));
+        std::fs::create_dir(&long).unwrap();
+        let manager_path = long.join("cairn-auth.sock");
+        let manager = crate::unix_socket::bind(&manager_path).unwrap();
+        let guest_path = root.path().join("guest.sock");
+        let guest = UnixListener::bind(&guest_path).unwrap();
+        let stop = CancellationToken::new();
+        let relay = auth_relay(guest, Some(manager_path), stop.clone());
+        let mut client = UnixStream::connect(&guest_path).await.unwrap();
+        let (mut server, _) = manager.accept().await.unwrap();
+        client.write_all(b"refresh").await.unwrap();
+        let mut request = [0; 7];
+        server.read_exact(&mut request).await.unwrap();
+        assert_eq!(&request, b"refresh");
+        server.write_all(b"access").await.unwrap();
+        let mut response = [0; 6];
+        client.read_exact(&mut response).await.unwrap();
+        assert_eq!(&response, b"access");
+        drop(client);
+        drop(server);
+        stop.cancel();
+        relay.await.unwrap();
+    }
 
     #[tokio::test]
     async fn resumed_disks_use_the_current_guest_image_without_changing_workspace_bytes() {

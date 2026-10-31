@@ -14,5 +14,9 @@ async fn router(
 }
 
 fn main() -> std::process::ExitCode {
+    #[cfg(feature = "worker-fixture-hooks")]
+    if let Some(path) = std::env::var_os("CAIRN_FIXTURE_CLOCK_FILE") {
+        cairn_installation::config::set_fixture_clock(path.into());
+    }
     native::main_with_router(router)
 }

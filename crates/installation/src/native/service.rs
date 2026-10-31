@@ -1534,7 +1534,7 @@ async fn relay(listener: tokio::net::TcpListener, channel: PathBuf, stop: Cancel
         |(mut client, _)| {
             let channel = channel.clone();
             async move {
-                if let Ok(mut server) = tokio::net::UnixStream::connect(channel).await {
+                if let Ok(mut server) = crate::unix_socket::connect(&channel).await {
                     let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
                 }
             }

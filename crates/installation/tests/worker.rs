@@ -46,6 +46,146 @@ struct Fixture {
     service: Arc<Service>,
     process: Option<Child>,
     url: String,
+    clock: Option<FixtureClock>,
+    observation_busy: Option<PathBuf>,
+}
+
+struct FixtureClock {
+    value: PathBuf,
+    millis: i64,
+}
+
+fn worker_fixture_binary(
+    target: &Path,
+    fixtures: Option<&std::ffi::OsStr>,
+    allow_remap: bool,
+) -> PathBuf {
+    if let Some(fixtures) = fixtures {
+        let fixtures: Vec<Value> = serde_json::from_slice(fixtures.as_encoded_bytes()).unwrap();
+        fixtures
+            .iter()
+            .find(|fixture| {
+                fixture["target"]
+                    .as_str()
+                    .is_some_and(|path| Path::new(path) == target)
+            })
+            .or_else(|| {
+                if !allow_remap {
+                    return None;
+                }
+                if fixtures.len() == 1 {
+                    return fixtures.first();
+                }
+                let suffix = PathBuf::from(target.parent()?.file_name()?).join(target.file_name()?);
+                let mut matches = fixtures.iter().filter(|fixture| {
+                    fixture["target"]
+                        .as_str()
+                        .is_some_and(|path| Path::new(path).ends_with(&suffix))
+                });
+                let matching = matches.next()?;
+                matches.next().is_none().then_some(matching)
+            })
+            .and_then(|fixture| fixture["binary"].as_str())
+            .map(PathBuf::from)
+            .expect("launcher supplied no worker fixture for this target")
+    } else {
+        target.join("examples/worker_fixture")
+    }
+}
+
+#[test]
+fn worker_fixture_uses_the_matching_compilation_target() {
+    let root = TempDir::new().unwrap();
+    let first = root.path().join("first/debug");
+    let second = root.path().join("second/debug");
+    let fixtures = std::ffi::OsString::from(
+        json!([
+            { "target": first, "binary": root.path().join("first-fixture") },
+            { "target": second, "binary": root.path().join("second-fixture") },
+        ])
+        .to_string(),
+    );
+    assert_eq!(
+        worker_fixture_binary(&first, Some(&fixtures), false),
+        root.path().join("first-fixture")
+    );
+    assert_eq!(
+        worker_fixture_binary(&second, Some(&fixtures), false),
+        root.path().join("second-fixture")
+    );
+    assert_eq!(
+        worker_fixture_binary(
+            &root.path().join("remapped/first/debug"),
+            Some(&fixtures),
+            true
+        ),
+        root.path().join("first-fixture")
+    );
+    let single = std::ffi::OsString::from(
+        json!([{ "target": first, "binary": root.path().join("first-fixture") }]).to_string(),
+    );
+    assert_eq!(
+        worker_fixture_binary(&root.path().join("remapped"), Some(&single), true),
+        root.path().join("first-fixture")
+    );
+}
+
+#[test]
+#[should_panic(expected = "launcher supplied no worker fixture for this target")]
+fn worker_fixture_rejects_a_missing_compilation_target() {
+    worker_fixture_binary(
+        Path::new("missing"),
+        Some(std::ffi::OsStr::new("[]")),
+        false,
+    );
+}
+
+#[test]
+#[should_panic(expected = "launcher supplied no worker fixture for this target")]
+fn worker_fixture_does_not_remap_an_ordinary_build() {
+    let fixtures = std::ffi::OsStr::new(r#"[{"target":"first","binary":"first-fixture"}]"#);
+    worker_fixture_binary(Path::new("second"), Some(fixtures), false);
+}
+
+#[test]
+#[should_panic(expected = "launcher supplied no worker fixture for this target")]
+fn worker_fixture_rejects_an_ambiguous_remap() {
+    let fixtures = std::ffi::OsStr::new(
+        r#"[{"target":"one/triple/debug","binary":"one"},{"target":"two/triple/debug","binary":"two"}]"#,
+    );
+    worker_fixture_binary(Path::new("other/triple/debug"), Some(fixtures), true);
+}
+
+impl FixtureClock {
+    fn new(root: &Path) -> Self {
+        require_fixture_hooks(std::env::var_os("CAIRN_TEST_WORKER_FIXTURES").as_deref());
+        let value = root.join("fixture-clock.txt");
+        let millis = now();
+        std::fs::write(&value, millis.to_string()).unwrap();
+        Self { value, millis }
+    }
+
+    fn advance(&mut self, millis: i64) {
+        self.millis += millis;
+        let next = self.value.with_extension("next");
+        std::fs::write(&next, self.millis.to_string()).unwrap();
+        std::fs::rename(next, &self.value).unwrap();
+    }
+}
+
+fn require_fixture_hooks(fixtures: Option<&std::ffi::OsStr>) {
+    assert!(
+        fixtures.is_some(),
+        "fixture clock requires worker hooks; run this test with pnpm test:backend"
+    );
+}
+
+#[test]
+#[should_panic(
+    expected = "fixture clock requires worker hooks; run this test with pnpm test:backend"
+)]
+fn fixture_clock_requires_the_backend_launcher() {
+    require_fixture_hooks(None);
 }
 
 impl Fixture {
@@ -74,6 +214,8 @@ impl Fixture {
             service,
             process: None,
             url: String::new(),
+            clock: None,
+            observation_busy: None,
         };
         fixture.start().await;
         fixture
@@ -84,12 +226,22 @@ impl Fixture {
         tokio::fs::write(&file, serde_json::to_vec(&self.service.config).unwrap())
             .await
             .unwrap();
-        let binary = std::path::Path::new(env!("CARGO_BIN_EXE_cairn"))
+        let target = std::path::Path::new(env!("CARGO_BIN_EXE_cairn"))
             .parent()
-            .unwrap()
-            .join("examples/worker_fixture");
+            .unwrap();
+        let fixtures = std::env::var_os("CAIRN_TEST_WORKER_FIXTURES");
+        let allow_remap = std::env::var_os("CAIRN_TEST_REUSED_BUILD").is_some();
+        let binary = worker_fixture_binary(target, fixtures.as_deref(), allow_remap);
         let mut command = Command::new(binary);
         command.arg("serve");
+        command.env_remove("CAIRN_FIXTURE_CLOCK_FILE");
+        command.env_remove("CAIRN_FIXTURE_OBSERVATION_BUSY");
+        if let Some(clock) = &self.clock {
+            command.env("CAIRN_FIXTURE_CLOCK_FILE", &clock.value);
+        }
+        if let Some(marker) = &self.observation_busy {
+            command.env("CAIRN_FIXTURE_OBSERVATION_BUSY", marker);
+        }
         let usage = self.root.path().join("usage.json");
         if usage.exists() {
             command.env("CAIRN_FIXTURE_USAGE", usage);
@@ -1866,6 +2018,36 @@ async fn serve_controller(State(state): State<Arc<Controller>>, request: Request
             output.push_str(&format!("{delivered}\n"));
         }
         drop(plans);
+        if state.hold.load(std::sync::atomic::Ordering::Relaxed) {
+            let stream = futures_util::stream::unfold(
+                (0, state.clone(), output),
+                |(step, state, output)| async move {
+                    match step {
+                        0 => {
+                            let frame = json!({ "type": "output", "stderr": false, "data": STANDARD.encode(output) });
+                            Some((
+                                Ok::<_, std::io::Error>(format!("{frame}\n")),
+                                (1, state, String::new()),
+                            ))
+                        }
+                        1 => {
+                            if state.hold.load(std::sync::atomic::Ordering::Relaxed) {
+                                tokio::time::sleep(Duration::from_secs(1)).await;
+                                return Some((
+                                    Ok("{\"type\":\"heartbeat\"}\n".to_owned()),
+                                    (1, state, String::new()),
+                                ));
+                            }
+                            let output = "{\"type\":\"item.completed\",\"item\":{\"id\":\"reply\",\"type\":\"agent_message\",\"text\":\"resumed VM\"}}\n{\"type\":\"turn.completed\",\"usage\":{}}\n";
+                            let frame = json!({ "type": "output", "stderr": false, "data": STANDARD.encode(output) });
+                            Some((Ok(format!("{frame}\n")), (2, state, String::new())))
+                        }
+                        _ => None,
+                    }
+                },
+            );
+            return Body::from_stream(stream).into_response();
+        }
         if state.attempt_index(attempt).await >= state.failures {
             output.push_str("{\"type\":\"item.completed\",\"item\":{\"id\":\"reply\",\"type\":\"agent_message\",\"text\":\"resumed VM\"}}\n{\"type\":\"turn.completed\",\"usage\":{}}\n");
         }
@@ -1986,6 +2168,17 @@ async fn controller_held_attempt_keeps_output_open_until_released() {
     controller
         .hold
         .store(false, std::sync::atomic::Ordering::Relaxed);
+    let completion: Value = serde_json::from_slice(&stream.next().await.unwrap().unwrap()).unwrap();
+    assert_eq!(completion["type"], "output");
+    let payload = STANDARD
+        .decode(completion["data"].as_str().unwrap())
+        .unwrap();
+    let events: Vec<Value> = payload
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).unwrap())
+        .collect();
+    assert!(events.iter().any(|event| event["type"] == "turn.completed"));
     assert!(stream.next().await.is_none());
 }
 
@@ -2039,12 +2232,16 @@ async fn node_slots_exceed_manager_concurrency_without_overpreparing_the_queue()
         runs.push(fixture.enqueue("Inspect the VM fixture").await);
     }
     fixture.start().await;
-    eventually(
-        Duration::from_secs(20),
-        Duration::from_millis(30),
-        async || (controller.plans.lock().await.len() == slots).then_some(()),
-    )
-    .await;
+    // Placement serializes preparation. Bound each admission's progress instead
+    // of requiring every independent preparation to fit one disk deadline.
+    for admitted in 1..=slots {
+        eventually(
+            Duration::from_secs(20),
+            Duration::from_millis(30),
+            async || (controller.plans.lock().await.len() >= admitted).then_some(()),
+        )
+        .await;
+    }
     tokio::time::sleep(Duration::from_millis(1200)).await;
     let mut queued = Vec::new();
     let mut running = 0;
@@ -2072,10 +2269,8 @@ async fn node_slots_exceed_manager_concurrency_without_overpreparing_the_queue()
         .hold
         .store(false, std::sync::atomic::Ordering::Relaxed);
     for run in &runs {
-        assert_eq!(
-            fixture.until_finished(text(run, "id")).await["status"],
-            RunStatus::Succeeded
-        );
+        let completed = fixture.until_finished(text(run, "id")).await;
+        assert_eq!(completed["status"], RunStatus::Succeeded, "{completed}");
     }
     assert_eq!(controller.plans.lock().await.len(), slots + 1);
     fixture.stop(false).await;
@@ -2994,12 +3189,22 @@ async fn controller_interruptions_resume_saved_threads_and_stop_after_three_reco
         fixture.start().await;
         let run = fixture.enqueue("Inspect the VM fixture").await;
         let run_id = text(&run, "id");
-        let completed = fixture.until_finished(run_id).await;
         let (expected, attempts) = if failures == 1 {
             (RunStatus::Succeeded, 2)
         } else {
             (RunStatus::Failed, 4)
         };
+        // Each recovery prepares a new attempt; require bounded progress at
+        // every attempt before waiting for its terminal state.
+        for admitted in 1..=attempts {
+            eventually(
+                Duration::from_secs(20),
+                Duration::from_millis(30),
+                async || (controller.plans.lock().await.len() >= admitted).then_some(()),
+            )
+            .await;
+        }
+        let completed = fixture.until_finished(run_id).await;
         assert_eq!(completed["status"], expected, "{completed}");
         assert_eq!(completed["sessionId"], "fixture-session");
         let plans = controller.plans.lock().await;
@@ -3306,6 +3511,9 @@ async fn active_observation_expiring_during_result_persistence_fails_without_rep
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     let mut fixture = Fixture::new().await;
     fixture.stop(false).await;
+    fixture.clock = Some(FixtureClock::new(fixture.root.path()));
+    let busy = fixture.root.path().join("observation-busy");
+    fixture.observation_busy = Some(busy.clone());
     let controller = Arc::new(Controller {
         data: fixture.service.config.data_dir.clone(),
         plans: tokio::sync::Mutex::new(Vec::new()),
@@ -3365,7 +3573,7 @@ async fn active_observation_expiring_during_result_persistence_fails_without_rep
         .unwrap();
     fixture.start().await;
     let saved = eventually(
-        Duration::from_secs(3),
+        Duration::from_secs(20),
         Duration::from_millis(10),
         async || {
             let saved = fixture.checkpoint(&run_id).await;
@@ -3378,6 +3586,7 @@ async fn active_observation_expiring_during_result_persistence_fails_without_rep
     .await;
     let remaining = saved["remainingMs"].as_u64().unwrap();
     assert!((300..=4000).contains(&remaining), "{saved}");
+    assert_eq!(remaining, 4000, "fixture time must remain frozen: {saved}");
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let store = fixture.service.store.clone();
@@ -3392,8 +3601,24 @@ async fn active_observation_expiring_during_result_persistence_fails_without_rep
             .unwrap();
     });
     entered_rx.await.unwrap();
+    assert!(
+        !busy.exists(),
+        "only result persistence can signal contention"
+    );
     response_gate.add_permits(1);
-    tokio::time::sleep(Duration::from_millis(remaining + 250)).await;
+    // The feature-gated fixture marks the exact result transaction only after
+    // SQLite reports that the held writer lock prevented its BEGIN.
+    eventually(
+        Duration::from_secs(5),
+        Duration::from_millis(10),
+        async || busy.exists().then_some(()),
+    )
+    .await;
+    fixture
+        .clock
+        .as_mut()
+        .unwrap()
+        .advance((remaining + 250) as i64);
     release_tx.send(()).unwrap();
     blocker.await.unwrap();
     let result = fixture.until_finished(&run_id).await;
@@ -4249,6 +4474,9 @@ async fn active_observation_expiring_during_result_persistence_fails_without_rep
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     let mut fixture = Fixture::new().await;
     fixture.stop(false).await;
+    fixture.clock = Some(FixtureClock::new(fixture.root.path()));
+    let busy = fixture.root.path().join("observation-busy");
+    fixture.observation_busy = Some(busy.clone());
     let controller = Arc::new(Controller {
         data: fixture.service.config.data_dir.clone(),
         plans: tokio::sync::Mutex::new(Vec::new()),
@@ -4308,7 +4536,7 @@ async fn active_observation_expiring_during_result_persistence_fails_without_rep
         .unwrap();
     fixture.start().await;
     let saved = eventually(
-        Duration::from_secs(3),
+        Duration::from_secs(20),
         Duration::from_millis(10),
         async || {
             let saved = fixture.checkpoint(&run_id).await;
@@ -4321,6 +4549,7 @@ async fn active_observation_expiring_during_result_persistence_fails_without_rep
     .await;
     let remaining = saved["remainingMs"].as_u64().unwrap();
     assert!((300..=4000).contains(&remaining), "{saved}");
+    assert_eq!(remaining, 4000, "fixture time must remain frozen: {saved}");
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let store = fixture.service.store.clone();
@@ -4335,8 +4564,24 @@ async fn active_observation_expiring_during_result_persistence_fails_without_rep
             .unwrap();
     });
     entered_rx.await.unwrap();
+    assert!(
+        !busy.exists(),
+        "only result persistence can signal contention"
+    );
     response_gate.add_permits(1);
-    tokio::time::sleep(Duration::from_millis(remaining + 250)).await;
+    // The feature-gated fixture marks the exact result transaction only after
+    // SQLite reports that the held writer lock prevented its BEGIN.
+    eventually(
+        Duration::from_secs(5),
+        Duration::from_millis(10),
+        async || busy.exists().then_some(()),
+    )
+    .await;
+    fixture
+        .clock
+        .as_mut()
+        .unwrap()
+        .advance((remaining + 250) as i64);
     release_tx.send(()).unwrap();
     blocker.await.unwrap();
     let result = fixture.until_finished(&run_id).await;
@@ -4797,6 +5042,7 @@ async fn unlimited_runs_cancel_and_resume_without_creating_a_deadline() {
 async fn quiet_chat_protocol_keeps_a_finite_checkpoint_deadline() {
     let mut fixture = Fixture::new().await;
     fixture.stop(false).await;
+    fixture.clock = Some(FixtureClock::new(fixture.root.path()));
     let s = fixture.service.clone();
     let run = fixture.enqueue("fixture:hang").await;
     let id = text(&run, "id");
@@ -4823,6 +5069,35 @@ async fn quiet_chat_protocol_keeps_a_finite_checkpoint_deadline() {
     fixture
         .until(id, |r| r["sessionId"] == "fixture-chat")
         .await;
+    // Ensure the quiet turn has started before advancing its resumed budget.
+    eventually(
+        Duration::from_secs(20),
+        Duration::from_millis(30),
+        async || {
+            let path = fixture
+                .run_directory(id)
+                .join("codex/fixture-conversation.json");
+            let data = tokio::fs::read(path).await.ok()?;
+            let thread: Value = serde_json::from_slice(&data).ok()?;
+            thread["turns"]
+                .as_array()?
+                .iter()
+                .any(|turn| turn["status"] == "inProgress")
+                .then_some(())
+        },
+    )
+    .await;
+    // Real time and the fixture's monotonic timers continue while its wall
+    // clock is frozen; the resumed budget must still be intact.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let still_running = s.store.run(id).await.unwrap();
+    assert_eq!(
+        still_running["status"],
+        RunStatus::Running,
+        "{still_running}"
+    );
+    assert_eq!(fixture.checkpoint(id).await["remainingMs"], 1000);
+    fixture.clock.as_mut().unwrap().advance(1250);
     let failed = tokio::time::timeout(
         Duration::from_secs(8),
         fixture.until(id, |r| r["status"] == RunStatus::Failed),

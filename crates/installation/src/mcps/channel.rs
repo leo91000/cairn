@@ -100,7 +100,7 @@ async fn bind(path: &Path) -> Result<(UnixListener, Socket)> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
-    let listener = UnixListener::bind(path)?;
+    let listener = crate::unix_socket::bind(path)?;
     owners.insert(path.to_owned(), generation);
     drop(owners);
 
@@ -388,6 +388,47 @@ mod tests {
 
         stop.cancel();
         channel.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn long_node_channel_forwards_and_cleans_up() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (address, master, mut received) = master().await;
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("long-channel-".repeat(10));
+        std::fs::create_dir(&directory).unwrap();
+        let socket = directory.join("channel.sock");
+        let stop = CancellationToken::new();
+        let channel = tokio::spawn(forward(socket.clone(), session(address), stop.clone()));
+        let mut stream = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match crate::unix_socket::connect(&socket).await {
+                    Ok(stream) => break stream,
+                    Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+                }
+            }
+        })
+        .await
+        .expect("node channel did not become ready");
+        assert_eq!(
+            std::fs::metadata(&socket).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        stream.write_all(b"POST /mcp-workspace HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").await.unwrap();
+        received.recv().await.unwrap();
+        master.release.notify_one();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.unwrap();
+        assert!(
+            String::from_utf8(response)
+                .unwrap()
+                .starts_with("HTTP/1.1 200")
+        );
+        stop.cancel();
+        channel.await.unwrap().unwrap();
+        assert!(!socket.exists());
     }
 
     #[tokio::test]

@@ -160,6 +160,12 @@ environment until explicit migration. Web uses English buttons; Android uses
 French Material controls. Public MCP and `cairn_installation` expose the same
 generated `access.backend` and `nodePriorities` through agent create/replace.
 
+Conversation placement, movement, backend migration and native-mode review use the
+same operations on both apps. Android disables their action controls while the
+workspace is busy, including its initial refresh; web tracks each component's own
+request. If an Android action reaches admission after the workspace became busy,
+it reports that another operation is in progress and asks the person to retry.
+
 Native disk capacity: web and Android show the same `list_nodes` disk-accounting
 breakdown (local usage, unused grants, host free space and reserves, reclaimable
 acknowledged backing, and last-reported unpublished journal bytes). Android uses
