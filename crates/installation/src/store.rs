@@ -36,7 +36,7 @@ struct Pool {
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-pub(crate) const DATABASE_VERSION: i64 = 21;
+pub(crate) const DATABASE_VERSION: i64 = 22;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -181,6 +181,20 @@ impl Store {
         }
         if !fresh && version == 20 {
             crate::worker::progress::upgrade(&mut writer)?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        }
+        if !fresh && version == 21 {
+            let tx = writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let current: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+            if current == 21 {
+                tx.execute_batch("CREATE INDEX events_turn_boundaries ON events(run_id,id) WHERE type IN ('turn.started','turn.completed','turn.failed');")?;
+                tx.pragma_update(None, "user_version", 22)?;
+            } else if current != DATABASE_VERSION {
+                return Err(Error::bad(
+                    "Unexpected database version during event index upgrade.",
+                ));
+            }
+            tx.commit()?;
         }
         if fresh {
             let tx = writer.transaction()?;
@@ -198,6 +212,7 @@ CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT,created_at
             // Backwards history excludes superseded text snapshots. These small keys
             // bound both the next-turn lookup and the same-message revision lookup.
             tx.execute_batch("CREATE INDEX IF NOT EXISTS events_turns ON events(run_id,id) WHERE type='turn.started';
+CREATE INDEX IF NOT EXISTS events_turn_boundaries ON events(run_id,id) WHERE type IN ('turn.started','turn.completed','turn.failed');
 CREATE INDEX IF NOT EXISTS events_user_input ON events(run_id,id) WHERE type='chat.user';
 CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload,'$.item.id'),id) WHERE json_extract(payload,'$.item.type')='agent_message';")?;
             tx.execute_batch(crate::runs::SCHEMA)?;
@@ -1313,6 +1328,33 @@ mod schema_tests {
         );
         db.prepare("SELECT payload FROM events").unwrap();
         assert!(!db.table_exists(None, "disk_block_migration").unwrap());
+    }
+
+    #[test]
+    fn existing_databases_upgrade_to_index_all_history_turn_boundaries() {
+        let root = tempfile::tempdir().unwrap();
+        drop(Store::open(root.path()).unwrap());
+        let db = Connection::open(root.path().join("manager.db")).unwrap();
+        db.execute_batch("DROP INDEX events_turn_boundaries; PRAGMA user_version=21;")
+            .unwrap();
+        drop(db);
+
+        drop(Store::open(root.path()).unwrap());
+        let db = Connection::open(root.path().join("manager.db")).unwrap();
+        assert_eq!(
+            db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            DATABASE_VERSION
+        );
+        for direction in ["id>? ORDER BY id", "id<? ORDER BY id DESC"] {
+            let sql = format!(
+                "EXPLAIN QUERY PLAN SELECT id FROM events WHERE run_id=? AND type IN ('turn.started','turn.completed','turn.failed') AND {direction} LIMIT 1"
+            );
+            let plan: String = db
+                .query_row(&sql, params!["run", 10], |row| row.get(3))
+                .unwrap();
+            assert!(plan.contains("events_turn_boundaries"), "{plan}");
+        }
     }
 
     #[test]

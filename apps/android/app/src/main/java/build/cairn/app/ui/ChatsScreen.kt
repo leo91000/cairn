@@ -1845,11 +1845,13 @@ internal fun ChatPage(
                                         replyEventId in (event.displayId ?: event.id)..event.id)
                             }
                     }
-                    if (index >= 0)
+                    if (index >= 0) {
+                        followGesture.syncFollow(false)
+                        follow = false
                         sideScope.launch {
                             listState.animateScrollToItem(index + if (id == null) 1 else 0)
                         }
-                    else side.unreachable(itemId, replyEventId)
+                    } else side.unreachable(itemId, replyEventId)
                 }
             if (newSession && chat != null)
                 Confirm(
