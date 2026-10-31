@@ -129,23 +129,39 @@ struct Attempt {
     started: bool,
     protection: Option<tokio::task::JoinHandle<()>>,
     suspension: Arc<super::suspension::Suspension>,
+    // External mounted-filesystem access; pool accounting remains global.
+    live_access: Arc<Mutex<()>>,
 }
 
-#[derive(Default)]
+#[cfg_attr(test, derive(Default))]
 pub(super) struct StorageClose {
+    live_access: Arc<Mutex<()>>,
     mutations_drained: bool,
 }
 
 impl StorageClose {
+    fn new(live_access: Arc<Mutex<()>>) -> Self {
+        Self {
+            live_access,
+            mutations_drained: false,
+        }
+    }
+
     pub(super) async fn finish(
         &mut self,
-        state: &Path,
         closing: impl std::future::Future<Output = Result<block::Completion>>,
     ) -> Result<block::Completion> {
         if !self.mutations_drained {
             // Cancellation is already published and the workload is fenced.
             // Drain admitted mutations once; later ones observe cancellation.
-            drop(disk::lock(state).await?);
+            let admitted = tokio::time::timeout(Duration::from_secs(300), self.live_access.lock())
+                .await
+                .map_err(|_| {
+                    Error::unavailable(
+                        "Native filesystem mutations did not drain before their deadline.",
+                    )
+                })?;
+            drop(admitted);
             self.mutations_drained = true;
         }
         // The clean backend namespace removes host mount-inventory coupling.
@@ -465,6 +481,7 @@ impl Controller {
         trace.phase(Phase::WorkspaceOwnership);
         let owner = workspace::execution_ownership(&self.state, text(&plan, "runId")).await?;
         let stop = self.stop.child_token();
+        let live_access = Arc::new(Mutex::new(()));
         atomic_write(&self.file(id, "run"), text(&plan, "runId").as_bytes()).await?;
         atomic_write(&self.file(id, "active"), text(&plan, "runId").as_bytes()).await?;
         atomic_write(&self.file(id, "log"), b"").await?;
@@ -477,6 +494,7 @@ impl Controller {
                 started: false,
                 protection: None,
                 suspension: Arc::new(super::suspension::Suspension::new(&self.state, id)),
+                live_access: live_access.clone(),
             },
         );
         self.capacity.lock().await.register(
@@ -502,7 +520,7 @@ impl Controller {
             // it never waits for fencing, filesystem close, or a telemetry sink.
             drop(observation);
             // Reject in-flight file mutations before flushing/unmounting. Any
-            // already admitted copy retains the global mutation lock.
+            // already admitted access retains both its pool and attempt guards.
             stop.cancel();
             // The physical owner lock and active marker survive any uncertain stop.
             while let Err(error) = systemd::stop(&id).await {
@@ -558,12 +576,10 @@ impl Controller {
                 };
                 let had_mount = mounted.is_some();
                 if let Some(mounted) = mounted {
-                    let mut storage_close = StorageClose::default();
+                    let mut storage_close = StorageClose::new(live_access);
                     loop {
                         let result = storage_close
-                            .finish(&controller.state, async {
-                                mounted.mount.lock().await.close().await
-                            })
+                            .finish(async { mounted.mount.lock().await.close().await })
                             .await;
                         match result {
                             Ok(completion) => {
@@ -1406,6 +1422,173 @@ impl Controller {
         Ok(())
     }
 
+    /// Admission is global before it is attempt-scoped: a queued pool waiter
+    /// must never retain the guard needed by an unrelated physical close.
+    async fn with_live_access<T, F, Fut>(
+        &self,
+        id: &str,
+        requested_run: Value,
+        forbidden: &'static str,
+        operation: F,
+    ) -> Result<T>
+    where
+        F: FnOnce(Self, String, CancellationToken) -> Fut + Send,
+        Fut: std::future::Future<Output = Result<T>> + Send,
+    {
+        uuid(id)?;
+        let pool = disk::lock(&self.state).await?;
+        let live_access = {
+            let active = self.active.lock().await;
+            let attempt = active
+                .get(id)
+                .ok_or_else(|| Error::conflict("Native attempt is not active."))?;
+            if requested_run != attempt.run {
+                return Err(Error::forbidden(forbidden));
+            }
+            attempt.live_access.clone()
+        };
+        let admitted = live_access.clone().lock_owned().await;
+        let (run, stop) = {
+            let active = self.active.lock().await;
+            let attempt = active
+                .get(id)
+                .ok_or_else(|| Error::conflict("Native attempt is not active."))?;
+            if requested_run != attempt.run
+                || !Arc::ptr_eq(&live_access, &attempt.live_access)
+                || attempt.stop.is_cancelled()
+            {
+                return Err(Error::forbidden(forbidden));
+            }
+            (attempt.run.clone(), attempt.stop.clone())
+        };
+        // The existing non-GET handler owns this whole route in its task. A
+        // disconnected caller cannot drop these guards during a blocking open
+        // or buffered write; no second operation task is necessary.
+        let _pool = pool;
+        let _admitted = admitted;
+        operation(self.clone(), run, stop).await
+    }
+
+    async fn artifact_snapshot(
+        &self,
+        id: &str,
+        value: Value,
+    ) -> Result<(tempfile::NamedTempFile, u64)> {
+        let attempt = id.to_owned();
+        self.with_live_access(
+            id,
+            value["runId"].clone(),
+            "Wrong native artifact scope.",
+            move |controller, run, stop| async move {
+                let plan = controller.plan(&attempt).await?;
+                let environment = workspace::directory(&controller.state, &run)?;
+                let root = environment.join("data");
+                let path = Path::new(text(&value, "path"));
+                let project_root = Path::new(text(&plan, "projectRoot"));
+                let (source, allowed) = if let Ok(relative) = path.strip_prefix(project_root) {
+                    (root.join("workspaces").join(relative), root.clone())
+                } else if let Ok(relative) = path.strip_prefix(
+                    guest_data(&plan, &controller.data)
+                        .join("runs")
+                        .join(&run)
+                        .join("output"),
+                ) {
+                    (root.join("output").join(relative), root.clone())
+                } else if let Ok(relative) = path.strip_prefix("/tmp") {
+                    let temporary = environment.join("tmp");
+                    (temporary.join(relative), temporary)
+                } else {
+                    return Err(Error::forbidden(
+                        "Native artifacts must be in this conversation's workspace, output directory or /tmp.",
+                    ));
+                };
+                let exports = controller.state.join("exports");
+                private_dir(&exports).await?;
+                let (snapshot, size) = crate::artifacts::file::snapshot_in(
+                    &source,
+                    &allowed,
+                    &exports,
+                    controller.disk_growth().await?,
+                )
+                .await?;
+                if stop.is_cancelled() {
+                    return Err(Error::forbidden("Native artifact attempt stopped."));
+                }
+
+                Ok((snapshot, size))
+            },
+        )
+        .await
+    }
+
+    async fn import_project(&self, id: &str, project: &str, value: Value) -> Result<Value> {
+        uuid(project)?;
+        let attempt = id.to_owned();
+        let project = project.to_owned();
+        self.with_live_access(
+            id,
+            value["runId"].clone(),
+            "Wrong native project scope.",
+            move |controller, run, stop| async move {
+                let plan = controller.plan(&attempt).await?;
+                if stop.is_cancelled() {
+                    return Err(Error::conflict("Native project import stopped."));
+                }
+                let source = controller
+                    .data
+                    .join("runs")
+                    .join(&run)
+                    .join("workspace")
+                    .join(&project);
+                let expected = Path::new(text(&plan, "projectRoot")).join(&project);
+                if value["source"]
+                    != guest_data(&plan, &controller.data)
+                        .join("runs")
+                        .join(&run)
+                        .join("workspace")
+                        .join(&project)
+                        .to_string_lossy()
+                        .as_ref()
+                    || value["target"] != expected.to_string_lossy().as_ref()
+                {
+                    return Err(Error::forbidden("Invalid native project path."));
+                }
+                let target = workspace::directory(&controller.state, &run)?
+                    .join("data/workspaces")
+                    .join(&project);
+                if !target.exists() {
+                    let data = workspace::directory(&controller.state, &run)?.join("data");
+                    // Stage on the mounted filesystem so installation is an atomic
+                    // rename, and do not walk all lazy files to estimate free space.
+                    let staged = tempfile::tempdir_in(&data)?;
+                    let received = staged.path().join("project");
+                    let remaining = block::free_bytes(&data)?;
+                    workspace::copy(
+                        &source,
+                        &received,
+                        remaining.min(controller.disk_growth().await?),
+                    )
+                    .await?;
+                    if stop.is_cancelled() {
+                        return Err(Error::conflict("Native project import stopped."));
+                    }
+                    let mut identity = super::identity::provision(&controller.state, &run).await?;
+                    if plan["nativeMode"]["mode"] == "administrator" {
+                        identity.host_engine =
+                            Some((controller.identity.uid, controller.identity.gid));
+                    }
+                    workspace::own_tree(&received, identity.uid(), identity.gid()).await?;
+                    if stop.is_cancelled() {
+                        return Err(Error::conflict("Native project import stopped."));
+                    }
+                    tokio::fs::rename(received, &target).await?;
+                }
+                Ok(json!({ "ok": true }))
+            },
+        )
+        .await
+    }
+
     async fn stopped_snapshot(&self, run: &str, force: bool) -> Result<Value> {
         let _disk = disk::lock(&self.state).await?;
         if block::exists(&self.state, run)? {
@@ -2188,56 +2371,8 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             json!({ "deleted": *action == "delete", "pruned": *action == "prune", "retiredGrants": retired_grants })
         }
         ("POST", ["runs", id, "artifact"]) => {
-            let disk_owner = disk::lock(&controller.state).await?;
-            uuid(id)?;
             let value = input(request, 16384).await?;
-            let (run, stop) = {
-                let active = controller.active.lock().await;
-                let attempt = active
-                    .get(*id)
-                    .ok_or_else(|| Error::conflict("Native attempt is not active."))?;
-                if value["runId"] != attempt.run || attempt.stop.is_cancelled() {
-                    return Err(Error::forbidden("Wrong native artifact scope."));
-                }
-                (attempt.run.clone(), attempt.stop.clone())
-            };
-            // Keep physical ownership through the copy, while health, lease
-            // supervision and cancellation remain free to inspect active runs.
-            let plan = controller.plan(id).await?;
-            let environment = workspace::directory(&controller.state, &run)?;
-            let root = environment.join("data");
-            let path = Path::new(text(&value, "path"));
-            let project_root = Path::new(text(&plan, "projectRoot"));
-            let (source, allowed) = if let Ok(relative) = path.strip_prefix(project_root) {
-                (root.join("workspaces").join(relative), root.clone())
-            } else if let Ok(relative) = path.strip_prefix(
-                guest_data(&plan, &controller.data)
-                    .join("runs")
-                    .join(&run)
-                    .join("output"),
-            ) {
-                (root.join("output").join(relative), root.clone())
-            } else if let Ok(relative) = path.strip_prefix("/tmp") {
-                let temporary = environment.join("tmp");
-                (temporary.join(relative), temporary)
-            } else {
-                return Err(Error::forbidden(
-                    "Native artifacts must be in this conversation's workspace, output directory or /tmp.",
-                ));
-            };
-            let exports = controller.state.join("exports");
-            private_dir(&exports).await?;
-            let (snapshot, size) = crate::artifacts::file::snapshot_in(
-                &source,
-                &allowed,
-                &exports,
-                controller.disk_growth().await?,
-            )
-            .await?;
-            if stop.is_cancelled() {
-                return Err(Error::forbidden("Native artifact attempt stopped."));
-            }
-            drop(disk_owner);
+            let (snapshot, size) = controller.artifact_snapshot(id, value).await?;
             let file = tokio::fs::File::from_std(snapshot.reopen()?);
             let stream = futures_util::stream::try_unfold(
                 (file, snapshot),
@@ -2255,75 +2390,8 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                 .into_response());
         }
         ("POST", ["runs", id, "projects", project]) => {
-            let _disk = disk::lock(&controller.state).await?;
-            uuid(id)?;
-            uuid(project)?;
             let value = input(request, 16384).await?;
-            // Disk ownership protects the import through completion. Keep the
-            // global attempt map available to unrelated streams and cancellation.
-            let (run, stop) = {
-                let active = controller.active.lock().await;
-                let attempt = active
-                    .get(*id)
-                    .ok_or_else(|| Error::conflict("Native attempt is not active."))?;
-                if value["runId"] != attempt.run || attempt.stop.is_cancelled() {
-                    return Err(Error::forbidden("Wrong native project scope."));
-                }
-                (attempt.run.clone(), attempt.stop.clone())
-            };
-            let plan = controller.plan(id).await?;
-            if stop.is_cancelled() {
-                return Err(Error::conflict("Native project import stopped."));
-            }
-            let source = controller
-                .data
-                .join("runs")
-                .join(&run)
-                .join("workspace")
-                .join(project);
-            let expected = Path::new(text(&plan, "projectRoot")).join(project);
-            if value["source"]
-                != guest_data(&plan, &controller.data)
-                    .join("runs")
-                    .join(&run)
-                    .join("workspace")
-                    .join(project)
-                    .to_string_lossy()
-                    .as_ref()
-                || value["target"] != expected.to_string_lossy().as_ref()
-            {
-                return Err(Error::forbidden("Invalid native project path."));
-            }
-            let target = workspace::directory(&controller.state, &run)?
-                .join("data/workspaces")
-                .join(project);
-            if !target.exists() {
-                let data = workspace::directory(&controller.state, &run)?.join("data");
-                // Stage on the mounted filesystem so installation is an atomic
-                // rename, and do not walk all lazy files to estimate free space.
-                let staged = tempfile::tempdir_in(&data)?;
-                let received = staged.path().join("project");
-                let remaining = block::free_bytes(&data)?;
-                workspace::copy(
-                    &source,
-                    &received,
-                    remaining.min(controller.disk_growth().await?),
-                )
-                .await?;
-                if stop.is_cancelled() {
-                    return Err(Error::conflict("Native project import stopped."));
-                }
-                let mut identity = super::identity::provision(&controller.state, &run).await?;
-                if plan["nativeMode"]["mode"] == "administrator" {
-                    identity.host_engine = Some((controller.identity.uid, controller.identity.gid));
-                }
-                workspace::own_tree(&received, identity.uid(), identity.gid()).await?;
-                if stop.is_cancelled() {
-                    return Err(Error::conflict("Native project import stopped."));
-                }
-                tokio::fs::rename(received, &target).await?;
-            }
-            json!({ "ok": true })
+            controller.import_project(id, project, value).await?
         }
         _ => {
             return Err(Error::not_found(
@@ -3689,6 +3757,122 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scoped_close_contention_measurement() {
+        use std::os::fd::AsRawFd;
+
+        fn cpu_us() -> u64 {
+            let mut time: libc::timespec = unsafe { std::mem::zeroed() };
+            assert_eq!(
+                unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut time) },
+                0
+            );
+            time.tv_sec as u64 * 1_000_000 + time.tv_nsec as u64 / 1_000
+        }
+
+        let (_fixture, controller) = fixture().await;
+        let bytes = vec![0x5a; 4096];
+        let path = controller.state.join("measurement-file");
+        tokio::fs::write(&path, &bytes).await.unwrap();
+        let mut samples = Vec::new();
+        for trial in 0..8 {
+            for legacy in if trial % 2 == 0 {
+                [true, false]
+            } else {
+                [false, true]
+            } {
+                let held = disk::lock(&controller.state).await.unwrap();
+                let unrelated = tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    drop(held);
+                });
+                let started = std::time::Instant::now();
+                let cpu = cpu_us();
+                let mut sample = Value::Null;
+                let close_io = async {
+                    let admission_us = started.elapsed().as_micros() as u64;
+                    let writing = std::time::Instant::now();
+                    let mut file = tokio::fs::OpenOptions::new()
+                        .write(true)
+                        .open(&path)
+                        .await
+                        .unwrap();
+                    file.write_all(&bytes).await.unwrap();
+                    file.sync_all().await.unwrap();
+                    let write_us = writing.elapsed().as_micros() as u64;
+                    let advice = unsafe {
+                        libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED)
+                    };
+                    let reading = std::time::Instant::now();
+                    let cold_hinted = tokio::fs::read(&path).await.unwrap();
+                    let cold_hint_us = reading.elapsed().as_micros() as u64;
+                    let reading = std::time::Instant::now();
+                    let warm = tokio::fs::read(&path).await.unwrap();
+                    let warm_us = reading.elapsed().as_micros() as u64;
+                    assert_eq!(cold_hinted, bytes);
+                    assert_eq!(warm, bytes);
+                    sample = json!({
+                        "legacyGlobalDrain": legacy,
+                        "trial": trial,
+                        "admissionUs": admission_us,
+                        "writeAndFsyncUs": write_us,
+                        "coldHintReadUs": cold_hint_us,
+                        "warmReadUs": warm_us,
+                        "coldHintStatus": advice,
+                        "fileBytes": tokio::fs::metadata(&path).await.unwrap().len(),
+                        "processCpuUs": cpu_us().saturating_sub(cpu),
+                        "hash": blake3::hash(&warm).to_hex().to_string(),
+                    });
+                    Ok(block::Completion::Flushed)
+                };
+                if legacy {
+                    // Exact admission sequence of ADR0077, under the same real
+                    // pool lock as the candidate. No network latency model.
+                    drop(disk::lock(&controller.state).await.unwrap());
+                    close_io.await.unwrap();
+                } else {
+                    StorageClose::default().finish(close_io).await.unwrap();
+                }
+                unrelated.await.unwrap();
+                samples.push(sample);
+            }
+        }
+        eprintln!(
+            "NATIVE_CLOSE_GATE_MEASUREMENT {}",
+            json!({
+                "samples": samples,
+                "unrelatedPoolHoldMs": 50,
+                "fixture": "4KiB raw host file, same bytes; no journal or object encoding changed",
+                "coldRead": "per-file DONTNEED hint after fsync; residency not asserted",
+                "host": std::env::var("ImageVersion").unwrap_or_else(|_| "unspecified".into()),
+                "cpus": std::thread::available_parallelism().unwrap().get(),
+                "kernel": std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap().trim(),
+                "cpuMeasurement": "process CPU; run this test alone (nextest or --exact)",
+                "scope": "controlled production-gate contention fixture, not production/ublk latency",
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn first_close_drain_does_not_wait_for_an_unrelated_pool_operation() {
+        let (_fixture, controller) = fixture().await;
+        // This is the production pool gate used by seed transfers and policy
+        // updates, not a simulated delay in the close operation itself.
+        let unrelated = disk::lock(&controller.state).await.unwrap();
+        let mut close = StorageClose::default();
+        let result = tokio::time::timeout(
+            Duration::from_millis(250),
+            close.finish(async { Ok(block::Completion::Flushed) }),
+        )
+        .await;
+        drop(unrelated);
+        assert!(
+            result.is_ok(),
+            "unrelated pool ownership blocked the first close drain"
+        );
+        assert_eq!(result.unwrap().unwrap(), block::Completion::Flushed);
+    }
+
+    #[tokio::test]
     async fn close_drains_admitted_mutations_then_allows_policy_changes_and_refuses_late_mutations()
     {
         let (_fixture, controller) = fixture().await;
@@ -3698,6 +3882,7 @@ mod tests {
         controller.active.lock().await.insert(
             id.clone(),
             Attempt {
+                live_access: Arc::default(),
                 run: run.clone(),
                 expires: None,
                 stop,
@@ -3709,16 +3894,24 @@ mod tests {
                 )),
             },
         );
-        let admitted = disk::lock(&controller.state).await.unwrap();
+        let live_access = controller
+            .active
+            .lock()
+            .await
+            .get(&id)
+            .unwrap()
+            .live_access
+            .clone();
+        let admitted = live_access.lock().await;
         let entered = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
         let closing = tokio::spawn({
-            let controller = controller.clone();
+            let live_access = live_access.clone();
             let entered = entered.clone();
             let release = release.clone();
             async move {
-                StorageClose::default()
-                    .finish(&controller.state, async {
+                StorageClose::new(live_access)
+                    .finish(async {
                         entered.notify_one();
                         release.notified().await;
                         Ok(block::Completion::Flushed)
@@ -3783,6 +3976,7 @@ mod tests {
         controller.active.lock().await.insert(
             attempt.clone(),
             Attempt {
+                live_access: Arc::default(),
                 run: crate::config::id(),
                 expires: None,
                 stop: CancellationToken::new(),
@@ -3843,6 +4037,7 @@ mod tests {
         controller.active.lock().await.insert(
             attempt.clone(),
             Attempt {
+                live_access: Arc::default(),
                 run: crate::config::id(),
                 expires: None,
                 stop: CancellationToken::new(),
@@ -3950,6 +4145,7 @@ mod tests {
         controller.active.lock().await.insert(
             id.clone(),
             Attempt {
+                live_access: Arc::default(),
                 run: crate::config::id(),
                 expires: None,
                 stop: stop.clone(),
@@ -3983,6 +4179,7 @@ mod tests {
         controller.active.lock().await.insert(
             attempt.clone(),
             Attempt {
+                live_access: Arc::default(),
                 run: crate::config::id(),
                 expires: None,
                 stop: CancellationToken::new(),
@@ -4106,6 +4303,7 @@ mod tests {
         controller.active.lock().await.insert(
             attempt.clone(),
             Attempt {
+                live_access: Arc::default(),
                 run: run.clone(),
                 expires: None,
                 stop: CancellationToken::new(),
@@ -4118,6 +4316,199 @@ mod tests {
             },
         );
         (fixture, controller, run, attempt, environment)
+    }
+
+    #[tokio::test]
+    async fn queued_live_routes_do_not_delay_close_or_admit_after_cancellation() {
+        use std::{
+            future::{Future, poll_fn},
+            task::Poll,
+        };
+
+        for artifact in [true, false] {
+            let (_fixture, controller, run, id, environment) = artifact_fixture().await;
+            let project = crate::config::id();
+            let target = environment.join("data/workspaces").join(&project);
+            private_dir(&target).await.unwrap();
+            tokio::fs::write(target.join("preserved"), b"existing project bytes")
+                .await
+                .unwrap();
+            let plan = controller.plan(&id).await.unwrap();
+            let (path, body) = if artifact {
+                (
+                    format!("/runs/{id}/artifact"),
+                    json!({ "runId": run, "path": "/tmp/result" }),
+                )
+            } else {
+                (
+                    format!("/runs/{id}/projects/{project}"),
+                    json!({
+                        "runId": run,
+                        "source": guest_data(&plan, &controller.data).join("runs").join(&run).join("workspace").join(&project),
+                        "target": Path::new(text(&plan, "projectRoot")).join(&project),
+                    }),
+                )
+            };
+            let unrelated = disk::lock(&controller.state).await.unwrap();
+            let pending = route(controller.clone(), request(&path, &body));
+            tokio::pin!(pending);
+            // Poll the actual handler into the global gate before closing. It
+            // must not acquire this attempt's live-access guard while queued.
+            let queued = poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx))).await;
+            assert!(queued.is_pending());
+            let live_access = {
+                let active = controller.active.lock().await;
+                let attempt = active.get(&id).unwrap();
+                attempt.stop.cancel();
+                attempt.live_access.clone()
+            };
+            let mut close = StorageClose::new(live_access);
+            let closed = tokio::time::timeout(
+                Duration::from_millis(250),
+                close.finish(async { Ok(block::Completion::Flushed) }),
+            )
+            .await;
+            let still_held = crate::file_lock::exclusive(
+                &controller.state.join("storage.lock"),
+                "unrelated pool operation is still active",
+            )
+            .is_err();
+            drop(unrelated);
+            let rejected = tokio::time::timeout(Duration::from_secs(2), pending).await;
+            assert_eq!(closed.unwrap().unwrap(), block::Completion::Flushed);
+            assert!(still_held);
+            assert_eq!(rejected.unwrap().unwrap_err().status, 403);
+            assert!(!controller.state.join("exports").exists());
+            assert_eq!(
+                tokio::fs::read(target.join("preserved")).await.unwrap(),
+                b"existing project bytes"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_artifact_request_drains_its_admitted_io_before_close() {
+        assert_interrupted_artifact_drain(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn timed_out_artifact_request_drains_its_admitted_io_before_close() {
+        assert_interrupted_artifact_drain(true).await;
+    }
+
+    async fn assert_interrupted_artifact_drain(request_timeout: bool) {
+        let (_fixture, controller, run, id, environment) = artifact_fixture().await;
+        let path = environment.join("tmp/result");
+        tokio::fs::write(&path, b"preserved artifact bytes")
+            .await
+            .unwrap();
+        let (opening, release) = crate::artifacts::file::tests::delay_open(&path);
+        let expire_request = Arc::new(Notify::new());
+        let export = tokio::spawn({
+            let controller = controller.clone();
+            let id = id.clone();
+            let expire_request = expire_request.clone();
+            async move {
+                let exporting = handler(
+                    State(controller),
+                    request(
+                        &format!("/runs/{id}/artifact"),
+                        &json!({ "runId": run, "path": "/tmp/result" }),
+                    ),
+                );
+                tokio::pin!(exporting);
+                tokio::select! {
+                    result = &mut exporting => result,
+                    () = expire_request.notified() => {
+                        // The real open is already blocked before this short
+                        // HTTP deadline starts, so no scheduler timing is assumed.
+                        tokio::time::timeout(Duration::from_millis(1), &mut exporting)
+                            .await
+                            .unwrap_or_else(|_| Err(Error::timeout("Synthetic request timeout.")))
+                    }
+                }
+            }
+        });
+        let opened =
+            tokio::task::spawn_blocking(move || opening.recv_timeout(Duration::from_secs(5)))
+                .await
+                .unwrap();
+        if opened.is_err() {
+            let _ = release.send(());
+        }
+        opened.expect("artifact must reach its real blocking filesystem open");
+        if request_timeout {
+            expire_request.notify_one();
+            assert_eq!(
+                export.await.unwrap().unwrap_err().message,
+                "Synthetic request timeout."
+            );
+        } else {
+            export.abort();
+            assert!(export.await.unwrap_err().is_cancelled());
+        }
+        controller
+            .active
+            .lock()
+            .await
+            .get(&id)
+            .unwrap()
+            .stop
+            .cancel();
+        let pool_retained = crate::file_lock::exclusive(
+            &controller.state.join("storage.lock"),
+            "admitted filesystem work must retain pool ownership",
+        )
+        .is_err();
+        let entered = Arc::new(Notify::new());
+        let live_access = controller
+            .active
+            .lock()
+            .await
+            .get(&id)
+            .unwrap()
+            .live_access
+            .clone();
+        let closing = tokio::spawn({
+            let entered = entered.clone();
+            async move {
+                StorageClose::new(live_access)
+                    .finish(async {
+                        entered.notify_one();
+                        Ok(block::Completion::Flushed)
+                    })
+                    .await
+            }
+        });
+        let drained_too_early =
+            tokio::time::timeout(Duration::from_millis(100), entered.notified())
+                .await
+                .is_ok();
+        // Always release the actual blocking operation before an assertion.
+        let _ = release.send(());
+        let closed = tokio::time::timeout(Duration::from_secs(5), closing).await;
+        assert!(
+            pool_retained,
+            "request cancellation detached IO from its ownership"
+        );
+        assert!(
+            !drained_too_early,
+            "close raced an admitted filesystem open"
+        );
+        assert_eq!(
+            closed.unwrap().unwrap().unwrap(),
+            block::Completion::Flushed
+        );
+        assert_eq!(
+            tokio::fs::read(path).await.unwrap(),
+            b"preserved artifact bytes"
+        );
+        assert_eq!(
+            std::fs::read_dir(controller.state.join("exports"))
+                .unwrap()
+                .count(),
+            0
+        );
     }
 
     #[tokio::test]
@@ -4634,6 +5025,7 @@ mod tests {
             controller.active.lock().await.insert(
                 crate::config::id(),
                 Attempt {
+                    live_access: Arc::default(),
                     run: crate::config::id(),
                     expires: None,
                     stop: CancellationToken::new(),
@@ -4652,6 +5044,7 @@ mod tests {
         controller.active.lock().await.insert(
             existing.clone(),
             Attempt {
+                live_access: Arc::default(),
                 run: crate::config::id(),
                 expires: None,
                 stop: CancellationToken::new(),
