@@ -878,8 +878,10 @@ impl Publication<'_> {
                 }
             }
         }
-        // Stop admitting after an observed failure, but keep the operation and
-        // reader while every already-started control request drains its node PUTs.
+        // Stop admitting after an observed failure and join every control task.
+        // HTTP failure can precede a detached node PUT's completion: unsettled
+        // grants and the node reader retain that ambiguous work. Success below
+        // still requires explicit reader/physical-owner close acknowledgement.
         let drain = diagnostic::start(Stage::UploadDrain);
         while !uploads.is_empty() {
             match direct_upload::complete_one(&mut uploads).await {

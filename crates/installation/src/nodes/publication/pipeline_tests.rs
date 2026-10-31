@@ -43,6 +43,7 @@ struct ControlEffects {
     ordinary: AtomicUsize,
     terminal_overlap: AtomicBool,
     reader_disconnect: tokio_util::sync::CancellationToken,
+    early_response: AtomicBool,
     hold_reply: std::sync::Mutex<Option<usize>>,
     fault: std::sync::Mutex<Option<(usize, ReceiptFault)>>,
     reply_ready: Semaphore,
@@ -58,6 +59,7 @@ impl Default for ControlEffects {
             ordinary: AtomicUsize::new(0),
             terminal_overlap: AtomicBool::new(false),
             reader_disconnect: tokio_util::sync::CancellationToken::new(),
+            early_response: AtomicBool::new(false),
             hold_reply: std::sync::Mutex::default(),
             fault: std::sync::Mutex::default(),
             reply_ready: Semaphore::new(0),
@@ -179,6 +181,7 @@ struct ObjectServer {
     release: Semaphore,
     completed: Semaphore,
     fifth_started: Semaphore,
+    blocked_started: Semaphore,
     started: AtomicUsize,
     in_flight: AtomicUsize,
     maximum: AtomicUsize,
@@ -199,6 +202,7 @@ impl Default for ObjectServer {
             release: Semaphore::new(0),
             completed: Semaphore::new(0),
             fifth_started: Semaphore::new(0),
+            blocked_started: Semaphore::new(0),
             started: AtomicUsize::new(0),
             in_flight: AtomicUsize::new(0),
             maximum: AtomicUsize::new(0),
@@ -310,6 +314,7 @@ impl ObjectServer {
             .as_ref()
             .is_some_and(|object| path.split('/').any(|part| part == object));
         if blocked {
+            self.blocked_started.add_permits(1);
             self.release.acquire().await.unwrap().forget();
         }
         let status = if *self.fail_index.lock().unwrap() == Some(index) {
@@ -508,6 +513,20 @@ impl Fixture {
                 let delay = remote_conditions.conditions.lock().unwrap().control_ms;
                 if delay != 0 {
                     tokio::time::sleep(Duration::from_millis(delay)).await;
+                }
+                if ordinal == 1 && server_effects.early_response.load(Ordering::SeqCst) {
+                    // Model an interrupted control response after the actual
+                    // owned node task has started a PUT, not after its receipt.
+                    tokio::spawn(async move {
+                        let _ = snapshots::upload_direct(&directory, &bytes).await;
+                    });
+                    remote_conditions
+                        .blocked_started
+                        .acquire()
+                        .await
+                        .unwrap()
+                        .forget();
+                    return StatusCode::SERVICE_UNAVAILABLE.into_response();
                 }
                 let result = snapshots::upload_direct(&directory, &bytes).await;
                 if let Some(attempt) = plan["diagnostics"]["attempt"].as_str()

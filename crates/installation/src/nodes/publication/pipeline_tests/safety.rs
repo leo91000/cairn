@@ -103,7 +103,7 @@ impl Fixture {
         assert!(status["published"].is_null());
     }
 
-    async fn grant_counts(&self) -> (u64, u64) {
+    async fn grant_counts(&self) -> (i64, i64) {
         self.service
             .store
             .read(|db| {
@@ -111,8 +111,8 @@ impl Fixture {
                     "SELECT count(*),sum(settled),min(expires_at) FROM direct_storage_grants",
                     [],
                     |row| {
-                        let count: u64 = row.get(0)?;
-                        let settled: u64 = row.get(1)?;
+                        let count: i64 = row.get(0)?;
+                        let settled: i64 = row.get(1)?;
                         let expires: i64 = row.get(2)?;
                         assert!(expires > now());
                         Ok((count, settled))
@@ -502,5 +502,55 @@ async fn capture_cancellation_child() {
     assert!(
         !directory.exists(),
         "publication must close its reader before successful snapshot discard"
+    );
+}
+
+#[tokio::test]
+async fn ambiguous_control_failure_retains_physical_ownership_and_unsettled_grants() {
+    isolated("nodes::publication::pipeline_tests::safety::early_response_child").await;
+}
+
+#[tokio::test]
+#[ignore = "isolated process-global PUT budget child"]
+async fn early_response_child() {
+    let fixture = Fixture::demand(9).await;
+    fixture.effects.early_response.store(true, Ordering::SeqCst);
+    let result = tokio::time::timeout(Duration::from_secs(20), fixture.transfer_measured(Some(2)))
+        .await
+        .expect("an interrupted control reply must report ambiguity");
+    assert!(result.is_err());
+    assert_eq!(fixture.object_server.in_flight.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.grant_counts().await, (8, 4));
+    let physical = environment::lock(fixture.root.path(), text(&fixture.run, "id"), "fixture")
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(physical.status, 409);
+    let capture = fixture
+        .root
+        .path()
+        .join("snapshots")
+        .join(&fixture.snapshot_id);
+    assert!(
+        snapshots::discard(&capture).await.is_err(),
+        "a superseding capture cannot discard a still-owned reader"
+    );
+    assert!(capture.join("manifest.json").is_file());
+    assert_ne!(
+        fixture
+            .service
+            .store
+            .run(text(&fixture.run, "id"))
+            .await
+            .unwrap()["backup"]["status"],
+        "ready"
+    );
+    fixture.object_server.release.add_permits(1);
+    fixture.released_journal_is_unchanged().await;
+    assert_eq!(fixture.object_server.in_flight.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        fixture.grant_counts().await,
+        (8, 4),
+        "a detached PUT without receipt stays unsettled until verified replay"
     );
 }
