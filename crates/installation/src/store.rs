@@ -725,9 +725,11 @@ impl Db<'_> {
         values.push(limit.into());
         values.push(offset.into());
         let clause = filters.join(" AND ");
+        // Pagination values are already i64. An explicit integer expression
+        // prevents SQLite from reparsing the projection for each LIMIT binding.
         (
             format!(
-                "SELECT {fields} FROM run_views AS runs WHERE {clause} ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?"
+                "SELECT {fields} FROM run_views AS runs WHERE {clause} ORDER BY created_at DESC,id DESC LIMIT CAST(? AS INTEGER) OFFSET CAST(? AS INTEGER)"
             ),
             values,
         )
@@ -1160,6 +1162,56 @@ mod schema_tests {
         );
         db.prepare("SELECT payload FROM events").unwrap();
         assert!(!db.table_exists(None, "disk_block_migration").unwrap());
+    }
+
+    #[test]
+    fn run_pagination_reuses_its_plan_and_preserves_integer_boundaries() {
+        let root = tempfile::tempdir().unwrap();
+        drop(Store::open(root.path()).unwrap());
+        let connection = Connection::open(root.path().join("manager.db")).unwrap();
+        let db = Db(&connection);
+        for (id, created_at) in [("run-a", 1), ("run-b", 2), ("run-c", 3)] {
+            let state = serde_json::from_value(json!({
+                "id": id, "taskId": "task", "status": "succeeded", "createdAt": created_at,
+            }))
+            .unwrap();
+            db.admit_run(&state, None, &json!({}), None).unwrap();
+        }
+        for full in [false, true] {
+            for (status, task) in [
+                (None, None),
+                (Some("succeeded"), None),
+                (None, Some("task")),
+            ] {
+                for (limit, offset, expected) in [
+                    (10, 0, "run-c,run-b,run-a"),
+                    (-1, 0, "run-c,run-b,run-a"),
+                    (0, 0, ""),
+                    (1, 1, "run-b"),
+                    (i64::MAX, 2, "run-a"),
+                    (2, -1, "run-c,run-b"),
+                ] {
+                    let (query, values) = Db::run_query(status, task, limit, offset, full);
+                    let mut statement = connection.prepare_cached(&query).unwrap();
+                    let ids = statement
+                        .query_map(rusqlite::params_from_iter(values), |row| {
+                            row.get::<_, String>(0)
+                        })
+                        .unwrap()
+                        .map(|row| {
+                            let row: Value = serde_json::from_str(&row.unwrap()).unwrap();
+                            row["id"].as_str().unwrap().to_owned()
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(ids.join(","), expected);
+                    assert_eq!(
+                        statement.reset_status(rusqlite::StatementStatus::RePrepare),
+                        0,
+                        "Integer pagination must not recompile the wire projection"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

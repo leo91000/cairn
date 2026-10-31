@@ -121,7 +121,7 @@ SQLite 3.53.2 computes generated columns during updates, including VIRTUAL
 columns whose inputs did not change. The former `runs.data` and
 `runs.summary_data` columns therefore rebuilt JSON during scalar lifecycle
 updates. On a busy v0.74.2 installation, a 15-second user CPU profile attributed
-24.83% of sampled manager CPU to `jsonTranslateTextToBlob`. This identifies a
+about 25% of sampled manager CPU to `jsonTranslateTextToBlob`. This identifies a
 hot path; the sampling window alone does not measure a particular write's cost.
 
 Database v19 moves these two expressions, unchanged, into the `run_views` SQL
@@ -129,6 +129,14 @@ view. Scalar writes target `runs`; wire readers use `run_views`. The three STORE
 display fields remain on `runs`, so list summaries still avoid loading snapshot
 overflow pages. Stored display fields and JSON validity checks can still parse
 the snapshot on a write; this change removes the two wire reconstructions.
+
+Run list pagination also keeps its prepared query plan. SQLite reparses a query
+after rebinding a bare `LIMIT`, even when its integer value is unchanged, including
+reuse through the statement cache.
+The run reader already supplies signed 64-bit integers, so explicit integer casts
+around `LIMIT` and `OFFSET` preserve their values while avoiding those repeated
+parses. A regression checks SQLite's reprepare counter along with result ordering,
+summary/full reads, filters, zero, negative and maximum integer pagination values.
 
 The v18 -> v19 migration drops only VIRTUAL columns and creates the view in one
 immediate transaction. The pinned SQLite implementation does not rewrite table
