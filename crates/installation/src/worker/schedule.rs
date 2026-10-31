@@ -3082,6 +3082,7 @@ mod tests {
                         run: None,
                         failure: Some(("Provider busy".into(), Some(cause), true)),
                         completed: false,
+                        progress_complete: true,
                         last_message: None,
                     },
                 )
