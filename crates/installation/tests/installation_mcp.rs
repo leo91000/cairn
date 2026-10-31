@@ -3362,6 +3362,62 @@ async fn trashed_conversations_reject_timeline_content_on_both_mcp_surfaces() {
 }
 
 #[tokio::test]
+async fn timeline_page_counts_the_complete_wrapper_at_the_byte_limit() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (run, configuration) = active_run(&s, &main).await;
+    let run_id = run["id"].as_str().unwrap();
+    let record =
+        |text: String| json!({"item": {"id":"bounded-reply", "type":"agent_message", "text":text}});
+    s.store
+        .event(
+            run_id,
+            &EventKind::ItemUpdated,
+            "x",
+            Some(record("x".into())),
+        )
+        .await
+        .unwrap();
+    let first = call(
+        &s,
+        &configuration,
+        "read_run_timeline",
+        json!({"runId":run_id}),
+    )
+    .await;
+    let entry = result(&first)["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|page| page["entry"]["content"]["itemId"] == "bounded-reply")
+        .unwrap()["entry"]
+        .clone();
+    let entry_bytes = serde_json::to_vec(&entry).unwrap().len();
+    let text = "x".repeat(256 * 1024 - 2 - entry_bytes + 1 - 10);
+    s.store
+        .event(
+            run_id,
+            &EventKind::ItemUpdated,
+            &text,
+            Some(record(text.clone())),
+        )
+        .await
+        .unwrap();
+    for public in [false, true] {
+        let args = json!({"runId":run_id});
+        let response = if public {
+            public_call(&s, &["read"], "read_run_timeline", args).await
+        } else {
+            call(&s, &configuration, "read_run_timeline", args).await
+        };
+        let entries = result(&response)["entries"].as_array().unwrap();
+        assert!(serde_json::to_vec(entries).unwrap().len() <= 256 * 1024);
+        assert!(entries.iter().any(|page| page["kind"] == "truncated"));
+    }
+}
+
+#[tokio::test]
 async fn code_mode_discovers_schemas_and_composes_chat_and_artifact_reads() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;

@@ -901,11 +901,16 @@ pub(crate) fn run_timeline(
         let position = entry.position;
         let cursor = (entry.revision, entry.id.clone());
         let total_bytes = encoded_size(&entry)? as u64;
-        let page = if total_bytes as usize <= RUN_PAGE_BYTES - 2 {
-            TimelineEntryPage::Complete {
-                entry: Box::new(entry),
-            }
+        let complete = TimelineEntryPage::Complete {
+            entry: Box::new(entry),
+        };
+        let page = if encoded_size(&complete)? <= RUN_PAGE_BYTES - 2 {
+            complete
         } else {
+            let TimelineEntryPage::Complete { entry } = complete else {
+                unreachable!()
+            };
+            let entry = *entry;
             let (kind, text) = match &entry.content {
                 TimelineContent::UserMessage { text, .. } => ("userMessage", text.as_str()),
                 TimelineContent::AgentMessage { text, .. } => ("agentMessage", text.as_str()),
