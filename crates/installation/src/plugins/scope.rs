@@ -107,6 +107,51 @@ async fn current(s: &Service, scope: &Scope, args: &Value) -> Result<Connection>
     Ok(connection)
 }
 
+/// Resource operations retain this scope until their result is delivered.
+pub(crate) async fn authorize(s: &Service, scope: &Scope) -> Result<()> {
+    for instance in scope.instances() {
+        current(s, scope, &json!({ "instance": instance["id"] })).await?;
+    }
+    Ok(())
+}
+
+/// Take the local grant/revision snapshot after all remote authorization.
+pub(crate) fn authorize_in(db: &crate::store::Db<'_>, scope: &Scope) -> Result<()> {
+    match scope {
+        Scope::Managed(inner, authority) => {
+            authority.authorize(db)?;
+            return authorize_in(db, inner);
+        }
+        Scope::Draft(_, draft) => {
+            draft.authorize(db)?;
+            return Ok(());
+        }
+        _ => {}
+    }
+    let (instances, agent): (&[Connection], Option<&str>) = match scope {
+        Scope::Instance(connection) => (std::slice::from_ref(connection.as_ref()), None),
+        Scope::Agent {
+            agent_id,
+            instances,
+        } => (instances, Some(agent_id)),
+        Scope::Managed(..) | Scope::Draft(..) => unreachable!(),
+    };
+    for expected in instances {
+        let current = db
+            .plugin_instance(&expected.id)?
+            .ok_or_else(|| Error::forbidden("The instance was removed."))?;
+        if current.revision != expected.revision
+            || !current.enabled
+            || agent.is_some_and(|agent| !current.grants(agent))
+        {
+            return Err(Error::forbidden(
+                "The instance or its grants changed. Retry the operation.",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// One capability call from a one-shot handler, after the manifest gate.
 pub async fn call(
     s: &Service,
@@ -132,14 +177,21 @@ pub async fn call(
     let context = Context {
         connection,
         manifest: package.manifest.clone(),
+        package_digest: Some(package.digest.clone()),
         event: Value::Null,
         link: None,
         draft,
         management: management.clone(),
     };
-    if ["conversations.", "inbound.", "instance.", "socket."]
-        .iter()
-        .any(|family| method.starts_with(family))
+    if [
+        "conversations.",
+        "inbound.",
+        "hooks.",
+        "instance.",
+        "socket.",
+    ]
+    .iter()
+    .any(|family| method.starts_with(family))
     {
         return Err(Error::forbidden(
             "Conversations and connections belong to the instance's worker.",

@@ -9,7 +9,7 @@ const LEGACY_COLUMNS: &str = include_str!("../../../tests/fixtures/run-projectio
 /// The run layout must also represent the historical version they advertise.
 pub(crate) fn restore_legacy_columns(connection: &Connection) {
     connection
-        .execute_batch("DROP TABLE IF EXISTS run_progress;")
+        .execute_batch("DROP TABLE IF EXISTS run_progress; DROP TABLE IF EXISTS plugin_hook_receipts; DROP TABLE IF EXISTS plugin_hook_events;")
         .unwrap();
     let current: bool = connection
         .query_row(
@@ -82,7 +82,7 @@ fn version_eighteen_upgrade_preserves_exact_wire_projection_and_reopens() {
 
     let store = Store::open(root.path()).unwrap();
     let connection = Connection::open(root.path().join("manager.db")).unwrap();
-    assert_eq!(version(&connection), 20);
+    assert_eq!(version(&connection), crate::store::DATABASE_VERSION);
     assert_eq!(retained_schema(&connection), schema_before);
     assert_eq!(projections(&connection, "run_views"), expected);
     let removed: i64 = connection
@@ -181,7 +181,7 @@ fn concurrent_startups_converge_on_one_preserved_projection() {
         .map(|handle| handle.join().unwrap())
         .collect::<Vec<_>>();
     let connection = Connection::open(root.path().join("manager.db")).unwrap();
-    assert_eq!(version(&connection), 20);
+    assert_eq!(version(&connection), crate::store::DATABASE_VERSION);
     assert_eq!(projections(&connection, "run_views"), expected);
     drop(stores);
 }
@@ -224,7 +224,7 @@ fn startup_waits_for_a_rollback_journal_writer_and_preserves_projection() {
         Err(error) => panic!("startup stopped before completing: {error}"),
     };
     starter.join().unwrap();
-    assert_eq!(version(&connection), 20);
+    assert_eq!(version(&connection), crate::store::DATABASE_VERSION);
     assert_eq!(projections(&connection, "run_views"), expected);
     assert_eq!(
         connection

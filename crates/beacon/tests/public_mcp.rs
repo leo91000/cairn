@@ -1957,3 +1957,85 @@ async fn public_plugin_upload_rechecks_its_grant_after_compilation() {
         relay.close().await;
     }
 }
+
+#[tokio::test]
+async fn plugin_revalidation_distinguishes_read_from_manage_and_rejects_revoked_tokens() {
+    use sha2::{Digest, Sha256};
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let app = &relay.app;
+    let installation_id = relay.session["installations"][0]["id"].as_str().unwrap();
+    let identity: Value = serde_json::from_slice(
+        &std::fs::read(
+            relay
+                .installation
+                .config
+                .data_dir
+                .join("installation-relay/identity.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let check_url = format!(
+        "{}/api/relay/{installation_id}/plugin-mcp-authorization",
+        app.url
+    );
+    for granted in ["read", "manage"] {
+        let response = owner_post(
+            &relay,
+            &format!("/api/installations/{installation_id}/tokens"),
+            json!({
+                "label": "Resource discovery", "scopes": [granted],
+            }),
+        )
+        .send()
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let grant: Value = response.json().await.unwrap();
+        let credential_digest =
+            hex::encode(Sha256::digest(grant["token"].as_str().unwrap().as_bytes()));
+        for required in [None, Some("read"), Some("manage")] {
+            let mut input = json!({"credentialDigest":credential_digest});
+            if let Some(scope) = required {
+                input["scope"] = scope.into();
+            }
+            let response = app
+                .client
+                .post(&check_url)
+                .bearer_auth(identity["token"].as_str().unwrap())
+                .json(&input)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.json::<bool>().await.unwrap(),
+                required.unwrap_or("manage") == granted
+            );
+        }
+        app.client
+            .delete(format!(
+                "{}/api/installations/{installation_id}/tokens/{}",
+                app.url,
+                grant["id"].as_str().unwrap()
+            ))
+            .header("cookie", &relay.cookie)
+            .header("origin", &app.url)
+            .header("x-csrf-token", relay.session["csrf"].as_str().unwrap())
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        let response = app
+            .client
+            .post(&check_url)
+            .bearer_auth(identity["token"].as_str().unwrap())
+            .json(&json!({"credentialDigest":credential_digest,"scope":granted}))
+            .send()
+            .await
+            .unwrap();
+        assert!(!response.json::<bool>().await.unwrap());
+    }
+    relay.close().await;
+}

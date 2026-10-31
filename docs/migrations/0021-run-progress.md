@@ -1,6 +1,7 @@
 # Writer-owned run progress
 
-Version 19 upgrades transactionally to version 20 by adding `run_progress`, one
+Version 19 first retains the released plugin-hook migration to version 20.
+Version 20 upgrades transactionally to version 21 by adding `run_progress`, one
 small row per run with a cascading foreign key. Existing runs, checkpoints,
 conversation data and timestamps are preserved. Existing executions have no
 backfilled progress: historical events are not authoritatively bound to their
@@ -21,6 +22,11 @@ without interleaving provider output; the writer records its attempt-bound
 failed flushes remain unhealthy even without a progress row, and missing
 certificates remain unknown.
 
+All consumed item IDs, parent identities, statuses and semantic field shapes are
+validated before hashing or log-budget filtering. Malformed values lose coverage
+without advancing the clock. Omitted/null optional tool-start outputs are valid;
+MCP and collaboration results retain their legitimate structured JSON. Nested plan,
+file-change and web-action metadata is projected onto supported semantic fields.
 Digests cover the supported semantic item fields, excluding duration and transport
 metadata. They remain private to the installation. At 128 distinct items the
 record stops certifying complete coverage for that execution rather than evicting
@@ -52,7 +58,7 @@ The version ratchet deliberately prevents an old manager from opening a database
 whose progress writer contract it cannot maintain. As with other installation
 migrations, stop the old manager and retain a consistent database/WAL backup
 before upgrading. Use a forward fix or an explicitly compatible recovery image;
-rolling back the manager binary after version 20 is unsupported. Nodes and guests
+rolling back the manager binary after version 21 is unsupported. Nodes and guests
 do not open this database. Current native nodes emit an optional completion
 certificate; older clients ignore the extra JSON field and older nodes retain
 their existing behavior. A new manager cannot certify old-node finalization from a
@@ -64,7 +70,7 @@ conservatively retains unknown terminal finalization. VM completion remains
 unknown: its current best-effort shutdown discards retirement/accounting errors,
 so a guest exit cannot produce a physical certificate. VM and guest
 execution/recovery behavior do not change. Upgrade matching manager/native-node
-versions to obtain the new evidence. A collector on a version-19 manager remains
+versions to obtain the new evidence. A collector on a version-19 or version-20 manager remains
 compatible via the helper's missing `run_progress` fallback and reports unknown.
 This PR does not deploy software or apply a migration to any running installation.
 

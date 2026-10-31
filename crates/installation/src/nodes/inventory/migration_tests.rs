@@ -302,7 +302,7 @@ async fn legacy_missing_defaults_and_revocation_are_retained() {
     assert_eq!(node.storage, cairn_contracts::NodeStoragePolicy::default());
     assert!(
         migration::upgrade(&mut db).is_err(),
-        "The inventory-only helper must not rewrite version14"
+        "The inventory-only helper must not rewrite an upgraded database"
     );
 }
 
@@ -320,7 +320,7 @@ async fn empty_version11_inventory_upgrades_without_creating_a_node() {
 }
 
 #[tokio::test]
-async fn concurrent_startups_complete_the_version11_to15_chain_without_repeating_metadata_ddl() {
+async fn concurrent_startups_complete_all_upgrades_without_repeating_metadata_ddl() {
     let root = tempfile::tempdir().unwrap();
     drop(version11(root.path()).await);
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));

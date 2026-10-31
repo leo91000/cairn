@@ -29,7 +29,9 @@ suspend fun CairnApi.pluginOperation(
                 val result = contractJson.encodeToJsonElement(operation.result!!).jsonObject
                 return when (result["kind"]?.jsonPrimitive?.content) {
                     "project" -> result.getValue("project")
-                    "sourceProjects" -> result.getValue("page")
+                    "sourceProjects",
+                    "resourcePage" -> result.getValue("page")
+                    "resourceAncestry" -> result.getValue("resolution")
                     "skillImport" -> result.getValue("imported")
                     "skillSource" -> result.getValue("status")
                     "skillBundle" -> result.getValue("bundle")

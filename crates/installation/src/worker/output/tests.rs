@@ -1578,6 +1578,9 @@ async fn unsupported_json_degrades_coverage_even_after_log_budget_is_spent() {
         json!({ "type": "item.started" }),
         json!({ "type": "item.updated", "item": null }),
         json!({ "type": "item.completed", "item": [] }),
+        json!({ "type":"item.updated", "item":{"id":"stable","type":"agent_message","text":{"duration_ms":2}} }),
+        json!({ "type":"item.updated", "item":{"id":"stable","type":"agent_message","text":"stable","status":{"duration_ms":2}} }),
+        json!({ "type":"item.updated", "item":{"id":"stable","type":"agent_message","text":"stable","parent_id":{"duration_ms":2}} }),
         json!({ "type": "future.provider_wait" }),
         json!({ "type": "item.delta", "item": { "id": "future", "type": "agent_message" } }),
     ] {

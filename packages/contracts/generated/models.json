@@ -4172,6 +4172,65 @@
       ],
       "type": "object"
     },
+    "ListPluginResourcesInput": {
+      "additionalProperties": false,
+      "properties": {
+        "instanceId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "page": {
+          "default": 1,
+          "format": "int64",
+          "maximum": 10000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "pluginId": {
+          "type": "string"
+        },
+        "query": {
+          "default": "",
+          "type": "string"
+        },
+        "resourceType": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pluginId",
+        "instanceId",
+        "resourceType",
+        "page",
+        "query"
+      ],
+      "type": "object"
+    },
+    "ListPluginResourcesOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/definitions/PluginResource"
+          },
+          "type": "array"
+        },
+        "nextPage": {
+          "format": "int64",
+          "maximum": 10000,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "items",
+        "nextPage"
+      ],
+      "type": "object"
+    },
     "ListProjectsInput": {
       "additionalProperties": false,
       "type": "object"
@@ -6917,6 +6976,13 @@
         "required": {
           "default": false,
           "type": "boolean"
+        },
+        "resourceType": {
+          "description": "The resource type identified by this argument.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -7604,6 +7670,31 @@
       ],
       "type": "object"
     },
+    "PluginHook": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "payloadSchema": true,
+        "resourceFields": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/PluginResourceField"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "payloadSchema"
+      ],
+      "type": "object"
+    },
     "PluginInstanceInput": {
       "additionalProperties": false,
       "properties": {
@@ -7720,6 +7811,13 @@
           "description": "One sentence shown in the owner's plugin catalogue.",
           "type": "string"
         },
+        "hooks": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/PluginHook"
+          },
+          "type": "array"
+        },
         "hosts": {
           "default": [],
           "description": "Hostnames reachable through `http` (HTTPS) and `socket` (WSS). `*.example.com`\ncovers every subdomain of `example.com`, not the domain itself.",
@@ -7776,6 +7874,13 @@
           "description": "Projects the owner can import through the `projects` handler.",
           "items": {
             "$ref": "#/definitions/PluginProjectSource"
+          },
+          "type": "array"
+        },
+        "resources": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/PluginResourceType"
           },
           "type": "array"
         },
@@ -8103,6 +8208,40 @@
             "kind",
             "output",
             "wrapped"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "resourcePage",
+              "type": "string"
+            },
+            "page": {
+              "$ref": "#/definitions/ListPluginResourcesOutput"
+            }
+          },
+          "required": [
+            "kind",
+            "page"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "resourceAncestry",
+              "type": "string"
+            },
+            "resolution": {
+              "$ref": "#/definitions/ResolvePluginResourceOutput"
+            }
+          },
+          "required": [
+            "kind",
+            "resolution"
           ],
           "type": "object"
         }
@@ -8434,6 +8573,94 @@
       ],
       "type": "object"
     },
+    "PluginResource": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "parent": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PluginResourceRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "resourceType": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "resourceType",
+        "id",
+        "name",
+        "parent"
+      ],
+      "type": "object"
+    },
+    "PluginResourceField": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "description": "JSON Pointer through properties; `*` traverses array items.",
+          "type": "string"
+        },
+        "resourceType": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "resourceType"
+      ],
+      "type": "object"
+    },
+    "PluginResourceRef": {
+      "additionalProperties": false,
+      "description": "A resource identity is scoped to a plugin instance and a declared type.",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "resourceType": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "resourceType",
+        "id"
+      ],
+      "type": "object"
+    },
+    "PluginResourceType": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "parentType": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "description"
+      ],
+      "type": "object"
+    },
     "PluginRunCredentials": {
       "additionalProperties": false,
       "description": "Rendered by the host for granted agents, when their run is prepared or resumed, and\nfor its own Git fetches of matching remotes. Removed when the run ends or the grant\nis withdrawn.",
@@ -8632,6 +8859,13 @@
         "inputSchema": true,
         "name": {
           "type": "string"
+        },
+        "resourceFields": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/PluginResourceField"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -9501,6 +9735,51 @@
         "projectId",
         "revision",
         "settings"
+      ],
+      "type": "object"
+    },
+    "ResolvePluginResourceInput": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "instanceId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "pluginId": {
+          "type": "string"
+        },
+        "resourceType": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pluginId",
+        "instanceId",
+        "resourceType",
+        "id"
+      ],
+      "type": "object"
+    },
+    "ResolvePluginResourceOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "ancestors": {
+          "description": "Nearest parent first, through the root. Cairn resolves each parent itself.",
+          "items": {
+            "$ref": "#/definitions/PluginResource"
+          },
+          "type": "array"
+        },
+        "resource": {
+          "$ref": "#/definitions/PluginResource"
+        }
+      },
+      "required": [
+        "resource",
+        "ancestors"
       ],
       "type": "object"
     },

@@ -66,6 +66,9 @@ cairn.socket = {
     after = function(name, ms) call("socket.timer", { name = name, at = ms }) end,
     cancel = function(name) call("socket.timer", { name = name, cancel = true }) end,
 }
+cairn.hooks = {
+    emit = function(event) return call("hooks.emit", event) end,
+}
 cairn.inbound = {
     accept = function(message) return call("inbound.accept", message) end,
 }

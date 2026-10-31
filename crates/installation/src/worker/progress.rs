@@ -14,10 +14,10 @@ pub(crate) const SCHEMA: &str = "CREATE TABLE run_progress(run_id TEXT PRIMARY K
 pub(crate) fn upgrade(connection: &mut rusqlite::Connection) -> Result<()> {
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version == 19 {
+    if version == 20 {
         tx.execute_batch(SCHEMA)?;
-        tx.pragma_update(None, "user_version", 20)?;
-    } else if version != 20 {
+        tx.pragma_update(None, "user_version", 21)?;
+    } else if version != 21 {
         return Err(crate::error::Error::bad(
             "Unexpected installation database version during progress upgrade.",
         ));
@@ -193,24 +193,10 @@ impl Progress {
             return self.mark_incomplete();
         };
         let item_type = item["type"].as_str().unwrap_or("");
-        if item_type == "todo_list" && !item["items"].is_array() {
+        if !valid_item(item) {
             return self.mark_incomplete();
         }
-        if item_type == "subagent"
-            && !matches!(
-                item["status"].as_str(),
-                Some("in_progress" | "completed" | "failed" | "stopped")
-            )
-        {
-            return self.mark_incomplete();
-        }
-        let Some(fields) = semantic_fields(item_type) else {
-            return self.mark_incomplete();
-        };
-        let mut detail = Map::new();
-        for field in fields {
-            detail.insert((*field).to_owned(), item[*field].clone());
-        }
+        let detail = semantic_detail(item);
         // Event marker, elapsed time, retries and transport metadata are excluded.
         let fingerprint =
             digest(&json!({ "type": item_type, "status": item["status"], "detail": detail }));
@@ -320,11 +306,125 @@ pub(super) fn known_frame(event: &Value) -> bool {
     }
     if matches!(kind, "item.started" | "item.updated" | "item.completed") {
         let item = &event["item"];
-        return item.is_object()
-            && item["id"].as_str().is_some_and(|id| !id.is_empty())
-            && item["type"].as_str().is_some_and(|kind| !kind.is_empty());
+        return valid_item(item);
     }
     true
+}
+
+// Validate every identity, discriminator and typed semantic field consumed by
+// the fingerprint. Omitted/null tool-start outputs are valid; structured tool
+// results are protocol-owned JSON and intentionally retain their full value.
+fn valid_item(item: &Value) -> bool {
+    let optional =
+        |field: &str, check: fn(&Value) -> bool| item[field].is_null() || check(&item[field]);
+    if !item.is_object()
+        || !item["id"].as_str().is_some_and(|id| !id.is_empty())
+        || !optional("parent_id", |v| v.as_str().is_some_and(|id| !id.is_empty()))
+        || !optional("status", valid_status)
+        || !optional("replaces_id", Value::is_string)
+        || !optional("details_truncated", Value::is_boolean)
+    {
+        return false;
+    }
+    match item["type"].as_str().unwrap_or("") {
+        "agent_message" | "reasoning" | "subagent_message" => item["text"].is_string(),
+        "command_execution" => {
+            optional("aggregated_output", Value::is_string)
+                && optional("exit_code", |v| v.as_i64().is_some())
+        }
+        "mcp_tool_call" | "collab_tool_call" => true,
+        "subagent" => {
+            matches!(
+                item["status"].as_str(),
+                Some("in_progress" | "completed" | "failed" | "stopped")
+            ) && optional("result", Value::is_string)
+        }
+        "todo_list" => item["items"].as_array().is_some_and(|items| {
+            items.iter().all(|step| {
+                step.is_object()
+                    && step["text"].is_string()
+                    && (step["status"].is_null() || valid_status(&step["status"]))
+                    && (step["completed"].is_null() || step["completed"].is_boolean())
+                    && (step["active_text"].is_null() || step["active_text"].is_string())
+            })
+        }),
+        "file_change" => item["changes"].as_array().is_some_and(|changes| {
+            changes.iter().all(|change| {
+                change.is_object()
+                    && change["path"].is_string()
+                    && matches!(change["kind"].as_str(), Some("add" | "delete" | "update"))
+                    && (change["diff"].is_null() || change["diff"].is_string())
+            })
+        }),
+        "web_search" => {
+            optional("action", valid_web_action) && optional("results", Value::is_array)
+        }
+        _ => false,
+    }
+}
+
+fn valid_status(value: &Value) -> bool {
+    matches!(
+        value.as_str(),
+        Some("pending" | "in_progress" | "completed" | "failed" | "cancelled" | "stopped")
+    )
+}
+
+fn valid_web_action(action: &Value) -> bool {
+    if !action.is_object() {
+        return false;
+    }
+    match action["type"].as_str().unwrap_or("") {
+        "search" => {
+            (action["query"].is_null() || action["query"].is_string())
+                && (action["queries"].is_null()
+                    || action["queries"]
+                        .as_array()
+                        .is_some_and(|queries| queries.iter().all(Value::is_string)))
+                && (!action["query"].is_null() || !action["queries"].is_null())
+        }
+        "open_page" => action["url"].is_string(),
+        "find_in_page" => action["url"].is_string() && action["pattern"].is_string(),
+        _ => false,
+    }
+}
+
+fn semantic_detail(item: &Value) -> Map<String, Value> {
+    let project = |value: &Value, fields: &[&str]| -> Value {
+        fields
+            .iter()
+            .map(|field| ((*field).to_owned(), value[*field].clone()))
+            .collect::<Map<_, _>>()
+            .into()
+    };
+    let mut detail = Map::new();
+    for field in semantic_fields(item["type"].as_str().unwrap_or("")).unwrap_or_default() {
+        let value = match *field {
+            "items" => Value::Array(
+                item["items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|step| project(step, &["text", "status", "completed", "active_text"]))
+                    .collect(),
+            ),
+            "changes" => Value::Array(
+                item["changes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|change| project(change, &["path", "kind", "diff"]))
+                    .collect(),
+            ),
+            "action" if !item["action"].is_null() => project(
+                &item["action"],
+                &["type", "query", "queries", "url", "pattern"],
+            ),
+            _ => item[*field].clone(),
+        };
+        detail.insert((*field).to_owned(), value);
+    }
+    detail
 }
 
 fn semantic_fields(kind: &str) -> Option<&'static [&'static str]> {
@@ -559,6 +659,82 @@ mod tests {
     }
 
     #[test]
+    fn malformed_consumed_fields_cannot_advance_or_rekey_progress() {
+        let valid = json!({"id":"stable","type":"agent_message","text":"stable"});
+        let mut cases = vec![
+            json!({"id":"stable","type":"agent_message"}),
+            json!({"id":"stable","type":"command_execution","aggregated_output":{ "duration_ms":2 }}),
+            json!({"id":"stable","type":"command_execution","exit_code":"0"}),
+            json!({"id":"stable","type":"todo_list","items":[{"text":{ "duration_ms":2 }}]}),
+            json!({"id":"stable","type":"todo_list","items":[{"text":"step","completed":2}]}),
+            json!({"id":"stable","type":"subagent","status":"in_progress","result":{ "duration_ms":2 }}),
+            json!({"id":"stable","type":"file_change","changes":[{"path":3,"kind":"update"}]}),
+            json!({"id":"stable","type":"web_search","action":{"type":"search","queries":[2]}}),
+            json!({"id":"stable","type":"web_search","results":{ "duration_ms":2 }}),
+        ];
+        for field in [
+            "text",
+            "status",
+            "parent_id",
+            "replaces_id",
+            "details_truncated",
+        ] {
+            for value in [Value::Null, json!({"duration_ms":2}), json!([]), json!(2)] {
+                // Null is canonical absence for optional discriminators.
+                if value.is_null() && field != "text" {
+                    continue;
+                }
+                let mut item = valid.clone();
+                item[field] = value;
+                cases.push(item);
+            }
+        }
+        for item in cases {
+            let mut progress = progress();
+            progress.observe(&json!({"type":"item.updated","item":valid}), 2);
+            let event = json!({"type":"item.updated","item":item});
+            assert!(!known_frame(&event), "{event}");
+            assert!(progress.observe(&event, 3), "{event}");
+            assert!(!progress.complete, "{event}");
+            assert_eq!(progress.advanced_at, Some(2));
+            assert_eq!(progress.items.len(), 1);
+        }
+    }
+
+    #[test]
+    fn canonical_tool_starts_structured_results_and_nested_metadata_are_supported() {
+        for item in [
+            json!({"id":"command","type":"command_execution","status":"in_progress"}),
+            json!({"id":"command","type":"command_execution","aggregated_output":null,"exit_code":null}),
+            json!({"id":"tool","type":"mcp_tool_call","result":{"content":[{"type":"text","text":"result"}],"structured":{"value":42}}}),
+            json!({"id":"collab","type":"collab_tool_call","result":{"agent":{"status":"completed"}},"error":null}),
+        ] {
+            let mut progress = progress();
+            let event = json!({"type":"item.started","item":item});
+            assert!(known_frame(&event));
+            assert!(progress.observe(&event, 2));
+            assert!(progress.complete);
+        }
+        for item in [
+            json!({"id":"plan","type":"todo_list","items":[{"text":"step","status":"pending"}]}),
+            json!({"id":"files","type":"file_change","changes":[{"path":"a","kind":"update","diff":"content"}]}),
+            json!({"id":"web","type":"web_search","action":{"type":"search","query":"work"}}),
+        ] {
+            let mut progress = progress();
+            let mut event = json!({"type":"item.updated","item":item});
+            assert!(progress.observe(&event, 2));
+            match event["item"]["type"].as_str().unwrap() {
+                "todo_list" => event["item"]["items"][0]["duration_ms"] = 3.into(),
+                "file_change" => event["item"]["changes"][0]["duration_ms"] = 3.into(),
+                _ => event["item"]["action"]["duration_ms"] = 3.into(),
+            }
+            assert!(!progress.observe(&event, 3));
+            assert_eq!(progress.advanced_at, Some(2));
+            assert!(progress.complete);
+        }
+    }
+
+    #[test]
     fn bounded_item_budget_becomes_unknown_instead_of_forgetting_replays() {
         let mut progress = progress();
         for n in 0..10000 {
@@ -582,13 +758,13 @@ mod migration_tests {
     #[test]
     fn upgrade_is_atomic_idempotent_preserves_rows_and_cascades() {
         let mut db = rusqlite::Connection::open_in_memory().unwrap();
-        db.execute_batch("PRAGMA foreign_keys=ON; CREATE TABLE runs(id TEXT PRIMARY KEY); INSERT INTO runs VALUES('retained'); PRAGMA user_version=19;").unwrap();
+        db.execute_batch("PRAGMA foreign_keys=ON; CREATE TABLE runs(id TEXT PRIMARY KEY); INSERT INTO runs VALUES('retained'); PRAGMA user_version=20;").unwrap();
         upgrade(&mut db).unwrap();
         upgrade(&mut db).unwrap();
         assert_eq!(
             db.pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
                 .unwrap(),
-            20
+            21
         );
         db.execute("INSERT INTO run_progress VALUES('retained','{}')", [])
             .unwrap();
@@ -604,13 +780,13 @@ mod migration_tests {
     #[test]
     fn failed_upgrade_does_not_advance_version() {
         let mut db = rusqlite::Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE run_progress(existing TEXT); PRAGMA user_version=19;")
+        db.execute_batch("CREATE TABLE run_progress(existing TEXT); PRAGMA user_version=20;")
             .unwrap();
         assert!(upgrade(&mut db).is_err());
         assert_eq!(
             db.pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
                 .unwrap(),
-            19
+            20
         );
     }
 }
@@ -620,7 +796,7 @@ mod compatibility_tests {
     use super::*;
 
     #[test]
-    fn actual_full_schemas_seventeen_nineteen_and_twenty_use_the_safe_collector() {
+    fn actual_full_schemas_seventeen_nineteen_twenty_and_twenty_one_use_the_safe_collector() {
         let root = tempfile::tempdir().unwrap();
         let database = root.path().join("manager.db");
         let mut connection = rusqlite::Connection::open(&database).unwrap();
@@ -666,6 +842,12 @@ mod compatibility_tests {
                 .unwrap(),
             19
         );
+        check("unknown");
+        // The released version-20 contract adds hooks, before progress exists.
+        connection
+            .execute_batch(crate::plugins::hooks::SCHEMA)
+            .unwrap();
+        connection.pragma_update(None, "user_version", 20).unwrap();
         check("unknown");
         upgrade(&mut connection).unwrap();
         check("unknown");
