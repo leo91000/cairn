@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import pathlib
+import shutil
 import subprocess
 import sys
 import time
@@ -98,6 +99,45 @@ class CoverageTests(unittest.TestCase):
         self.assertEqual(pipe_page(large, kind="journal")["counts"]["errors"], 1)
         self.assertIn("--until", command)
         self.assertNotIn("--tail", coverage.command_for(request(), IDENTITY, START, END))
+        kernel_command = coverage.command_for({"kind": "kernel"}, IDENTITY, START, END)
+        self.assertIn("-k", kernel_command)
+        self.assertNotIn("--kernel", kernel_command)
+
+    def test_journal_diagnostics_preserve_exit_and_never_become_empty_success(self):
+        for code, expected in ((1, "source_exit"), (0, "source_diagnostic")):
+            program = f"import sys;sys.stderr.write('private-diagnostic');sys.exit({code})"
+            result = coverage.read_page([sys.executable, "-c", program], "kernel", START, END, None, time.monotonic() + 2, 512000)
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["exitCode"], code)
+            self.assertEqual(result["reason"], expected)
+            self.assertGreater(result["diagnosticBytes"], 0)
+            self.assertNotIn("private-diagnostic", json.dumps(result))
+
+    def test_nonstring_journal_messages_fail_closed_instead_of_becoming_zero_errors(self):
+        for value in (None, [69, 82, 82, 79, 82], ["first", "second"], {"message": "ERROR"}):
+            raw = json.dumps({"__REALTIME_TIMESTAMP": str(START // 1000), "__CURSOR": "s=fixture", "MESSAGE": value}).encode() + b"\n"
+            result = pipe_page(raw, kind="journal")
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["reason"], "invalid_record")
+
+    def test_installed_journalctl_accepts_constructed_kernel_argv_and_bounds_empty_read(self):
+        binary = shutil.which("journalctl")
+        if binary is None:
+            self.skipTest("journalctl CLI unavailable on this test host")
+        help_result = subprocess.run([binary, "--help"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=2, check=True)
+        self.assertIn(b"--dmesg", help_result.stdout)
+        lower = time.time_ns() + 60 * coverage.NANO
+        command = coverage.command_for({"kind": "kernel"}, IDENTITY, lower, lower + coverage.NANO)
+        self.assertIn("-k", command)
+        result = coverage.read_page(command, "kernel", lower, lower + coverage.NANO, None, time.monotonic() + 3, 512000)
+        self.assertEqual(result["counts"]["records"], 0)
+        # CI hosts need not expose a system journal. Their access diagnostics
+        # still must fail closed; an accessible empty journal must succeed.
+        if result["exitCode"] == 0 and result["diagnosticBytes"] == 0:
+            self.assertTrue(result["ok"])
+        else:
+            self.assertFalse(result["ok"])
+            self.assertIn(result["reason"], ("source_exit", "source_diagnostic"))
 
     def test_reduce_then_credit_only_oldest_completed_pages(self):
         calls = []
