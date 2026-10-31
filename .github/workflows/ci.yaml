@@ -279,6 +279,18 @@ jobs:
             qualify "$served" "$resolved"
             qualify "$resolved" "$served"
           fi
+      # The cache action saves in its post step; record its expanded input first.
+      - name: Observe Rust cache writer footprint before post-save
+        if: always()
+        continue-on-error: true
+        run: node scripts/ci-rust-cache-observation.mjs before-save "$RUNNER_TEMP/cairn-cache-observation/before-save.json"
+      - uses: actions/upload-artifact@v7.0.1
+        if: always()
+        continue-on-error: true
+        with:
+          name: rust-cache-before-save-${{ github.job }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cairn-cache-observation/before-save.json
+          retention-days: 14
   node-checks:
     services:
       postgres:
@@ -462,13 +474,18 @@ jobs:
           reference_fixture="$RUNNER_TEMP/cairn-native-reference-fixture"
           mkdir -p "$reference_fixture"
           git archive "$REFERENCE_SHA" scripts/tests deploy/nodes/native-host.py | tar -x -C "$reference_fixture"
+          python3 -B scripts/tests/native_admission_overlay.py "$reference_fixture" reference
           chmod +x reference-native/cairn reference-native/examples/native_storage_qualifier
           sudo env PATH="$PWD/.native-s3-test/bin:$PATH" CAIRN_NATIVE_DISPOSABLE_HOST=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence/reference" .native-s3-test/bin/python scripts/tests/node_s3_test.py --repo "$reference_fixture" --native-runtime reference-native/cairn --qualifier reference-native/examples/native_storage_qualifier
       - name: Qualify real ublk, S3, eviction, systemd ownership and crash recovery
         run: |
           chmod +x target/debug/cairn target/debug/examples/native_storage_qualifier
           mkdir -p native-storage-evidence
-          sudo env PATH="$PWD/.native-s3-test/bin:$PATH" CAIRN_NATIVE_DISPOSABLE_HOST=1 CAIRN_NATIVE_DOCKER_QUALIFY=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence" .native-s3-test/bin/python scripts/tests/node_s3_test.py --native-runtime target/debug/cairn --qualifier target/debug/examples/native_storage_qualifier
+          candidate_fixture="$RUNNER_TEMP/cairn-native-candidate-fixture"
+          mkdir -p "$candidate_fixture"
+          git archive HEAD scripts/tests deploy/nodes/native-host.py | tar -x -C "$candidate_fixture"
+          python3 -B scripts/tests/native_admission_overlay.py "$candidate_fixture" candidate
+          sudo env PATH="$PWD/.native-s3-test/bin:$PATH" CAIRN_NATIVE_DISPOSABLE_HOST=1 CAIRN_NATIVE_DOCKER_QUALIFY=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence" .native-s3-test/bin/python scripts/tests/node_s3_test.py --repo "$candidate_fixture" --native-runtime target/debug/cairn --qualifier target/debug/examples/native_storage_qualifier
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
