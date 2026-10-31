@@ -4,12 +4,129 @@ use common::RelayedInstallation;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 
+fn code_worker_for_target(
+    target: &std::path::Path,
+    workers: Option<&std::ffi::OsStr>,
+    legacy: Option<std::ffi::OsString>,
+    allow_remap: bool,
+) -> std::path::PathBuf {
+    if let Some(workers) = workers {
+        let workers: Vec<Value> = serde_json::from_slice(workers.as_encoded_bytes()).unwrap();
+        return workers
+            .iter()
+            .find(|worker| {
+                worker["target"]
+                    .as_str()
+                    .is_some_and(|path| std::path::Path::new(path) == target)
+            })
+            .or_else(|| {
+                if !allow_remap {
+                    return None;
+                }
+                if workers.len() == 1 {
+                    return workers.first();
+                }
+                let suffix = std::path::PathBuf::from(target.parent()?.file_name()?)
+                    .join(target.file_name()?);
+                let mut matches = workers.iter().filter(|worker| {
+                    worker["target"]
+                        .as_str()
+                        .is_some_and(|path| std::path::Path::new(path).ends_with(&suffix))
+                });
+                let matching = matches.next()?;
+                matches.next().is_none().then_some(matching)
+            })
+            .and_then(|worker| worker["binary"].as_str())
+            .map(std::path::PathBuf::from)
+            .expect("launcher supplied no code worker for this target");
+    }
+    legacy.map(std::path::PathBuf::from).expect(
+        "Use pnpm test:backend to build the isolated code worker with matching Cargo features.",
+    )
+}
+
 fn code_worker() -> std::path::PathBuf {
-    std::env::var_os("CAIRN_TEST_CODE_WORKER")
-        .map(std::path::PathBuf::from)
-        .expect(
-            "Use pnpm test:backend to build the isolated code worker with matching Cargo features.",
-        )
+    let target = std::path::Path::new(env!("CARGO_BIN_EXE_cairn-beacon"))
+        .parent()
+        .unwrap();
+    let workers = std::env::var_os("CAIRN_TEST_CODE_WORKERS");
+    code_worker_for_target(
+        target,
+        workers.as_deref(),
+        std::env::var_os("CAIRN_TEST_CODE_WORKER"),
+        std::env::var_os("CAIRN_TEST_REUSED_BUILD").is_some(),
+    )
+}
+
+#[test]
+fn code_worker_uses_the_matching_compilation_target() {
+    let root = tempfile::tempdir().unwrap();
+    let first = root.path().join("first/debug");
+    let second = root.path().join("second/debug");
+    let workers = std::ffi::OsString::from(
+        serde_json::json!([
+            { "target": first, "binary": root.path().join("first-worker") },
+            { "target": second, "binary": root.path().join("second-worker") },
+        ])
+        .to_string(),
+    );
+    assert_eq!(
+        code_worker_for_target(&first, Some(&workers), None, false),
+        root.path().join("first-worker")
+    );
+    assert_eq!(
+        code_worker_for_target(&second, Some(&workers), None, false),
+        root.path().join("second-worker")
+    );
+    assert_eq!(
+        code_worker_for_target(
+            &root.path().join("remapped/first/debug"),
+            Some(&workers),
+            None,
+            true
+        ),
+        root.path().join("first-worker")
+    );
+    let single = std::ffi::OsString::from(
+        serde_json::json!([{ "target": first, "binary": root.path().join("first-worker") }])
+            .to_string(),
+    );
+    assert_eq!(
+        code_worker_for_target(&root.path().join("remapped"), Some(&single), None, true),
+        root.path().join("first-worker")
+    );
+}
+
+#[test]
+#[should_panic(expected = "launcher supplied no code worker for this target")]
+fn code_worker_rejects_a_missing_compilation_target() {
+    code_worker_for_target(
+        std::path::Path::new("missing"),
+        Some(std::ffi::OsStr::new("[]")),
+        None,
+        false,
+    );
+}
+
+#[test]
+#[should_panic(expected = "launcher supplied no code worker for this target")]
+fn code_worker_does_not_remap_an_ordinary_build() {
+    let workers = std::ffi::OsStr::new(r#"[{"target":"first","binary":"first-worker"}]"#);
+    code_worker_for_target(std::path::Path::new("second"), Some(workers), None, false);
+}
+
+#[test]
+#[should_panic(expected = "launcher supplied no code worker for this target")]
+fn code_worker_rejects_an_ambiguous_remap() {
+    let workers = std::ffi::OsStr::new(
+        r#"[{"target":"one/triple/debug","binary":"one"},{"target":"two/triple/debug","binary":"two"}]"#,
+    );
+    code_worker_for_target(
+        std::path::Path::new("other/triple/debug"),
+        Some(workers),
+        None,
+        true,
+    );
 }
 
 #[tokio::test]
