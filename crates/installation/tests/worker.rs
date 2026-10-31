@@ -55,6 +55,107 @@ struct FixtureClock {
     millis: i64,
 }
 
+fn worker_fixture_binary(
+    target: &Path,
+    fixtures: Option<&std::ffi::OsStr>,
+    allow_remap: bool,
+) -> PathBuf {
+    if let Some(fixtures) = fixtures {
+        let fixtures: Vec<Value> = serde_json::from_slice(fixtures.as_encoded_bytes()).unwrap();
+        fixtures
+            .iter()
+            .find(|fixture| {
+                fixture["target"]
+                    .as_str()
+                    .is_some_and(|path| Path::new(path) == target)
+            })
+            .or_else(|| {
+                if !allow_remap {
+                    return None;
+                }
+                if fixtures.len() == 1 {
+                    return fixtures.first();
+                }
+                let suffix = PathBuf::from(target.parent()?.file_name()?).join(target.file_name()?);
+                let mut matches = fixtures.iter().filter(|fixture| {
+                    fixture["target"]
+                        .as_str()
+                        .is_some_and(|path| Path::new(path).ends_with(&suffix))
+                });
+                let matching = matches.next()?;
+                matches.next().is_none().then_some(matching)
+            })
+            .and_then(|fixture| fixture["binary"].as_str())
+            .map(PathBuf::from)
+            .expect("launcher supplied no worker fixture for this target")
+    } else {
+        target.join("examples/worker_fixture")
+    }
+}
+
+#[test]
+fn worker_fixture_uses_the_matching_compilation_target() {
+    let root = TempDir::new().unwrap();
+    let first = root.path().join("first/debug");
+    let second = root.path().join("second/debug");
+    let fixtures = std::ffi::OsString::from(
+        json!([
+            { "target": first, "binary": root.path().join("first-fixture") },
+            { "target": second, "binary": root.path().join("second-fixture") },
+        ])
+        .to_string(),
+    );
+    assert_eq!(
+        worker_fixture_binary(&first, Some(&fixtures), false),
+        root.path().join("first-fixture")
+    );
+    assert_eq!(
+        worker_fixture_binary(&second, Some(&fixtures), false),
+        root.path().join("second-fixture")
+    );
+    assert_eq!(
+        worker_fixture_binary(
+            &root.path().join("remapped/first/debug"),
+            Some(&fixtures),
+            true
+        ),
+        root.path().join("first-fixture")
+    );
+    let single = std::ffi::OsString::from(
+        json!([{ "target": first, "binary": root.path().join("first-fixture") }]).to_string(),
+    );
+    assert_eq!(
+        worker_fixture_binary(&root.path().join("remapped"), Some(&single), true),
+        root.path().join("first-fixture")
+    );
+}
+
+#[test]
+#[should_panic(expected = "launcher supplied no worker fixture for this target")]
+fn worker_fixture_rejects_a_missing_compilation_target() {
+    worker_fixture_binary(
+        Path::new("missing"),
+        Some(std::ffi::OsStr::new("[]")),
+        false,
+    );
+}
+
+#[test]
+#[should_panic(expected = "launcher supplied no worker fixture for this target")]
+fn worker_fixture_does_not_remap_an_ordinary_build() {
+    let fixtures = std::ffi::OsStr::new(r#"[{"target":"first","binary":"first-fixture"}]"#);
+    worker_fixture_binary(Path::new("second"), Some(fixtures), false);
+}
+
+#[test]
+#[should_panic(expected = "launcher supplied no worker fixture for this target")]
+fn worker_fixture_rejects_an_ambiguous_remap() {
+    let fixtures = std::ffi::OsStr::new(
+        r#"[{"target":"one/triple/debug","binary":"one"},{"target":"two/triple/debug","binary":"two"}]"#,
+    );
+    worker_fixture_binary(Path::new("other/triple/debug"), Some(fixtures), true);
+}
+
 impl FixtureClock {
     fn new(root: &Path) -> Self {
         let value = root.join("fixture-clock.txt");
@@ -109,15 +210,12 @@ impl Fixture {
         tokio::fs::write(&file, serde_json::to_vec(&self.service.config).unwrap())
             .await
             .unwrap();
-        let binary = std::env::var_os("CAIRN_TEST_WORKER_FIXTURE").map_or_else(
-            || {
-                std::path::Path::new(env!("CARGO_BIN_EXE_cairn"))
-                    .parent()
-                    .unwrap()
-                    .join("examples/worker_fixture")
-            },
-            PathBuf::from,
-        );
+        let target = std::path::Path::new(env!("CARGO_BIN_EXE_cairn"))
+            .parent()
+            .unwrap();
+        let fixtures = std::env::var_os("CAIRN_TEST_WORKER_FIXTURES");
+        let allow_remap = std::env::var_os("CAIRN_TEST_REUSED_BUILD").is_some();
+        let binary = worker_fixture_binary(target, fixtures.as_deref(), allow_remap);
         let mut command = Command::new(binary);
         command.arg("serve");
         command.env_remove("CAIRN_FIXTURE_CLOCK_FILE");

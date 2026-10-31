@@ -8,11 +8,17 @@ import { isolateTestCredentials } from './test-environment.mjs'
 // A coding-agent VM may expose its live auth broker to child processes. Tests
 // must use their own temporary homes and synthetic brokers instead.
 isolateTestCredentials()
-delete process.env.CAIRN_TEST_WORKER_FIXTURE
+delete process.env.CAIRN_TEST_WORKER_FIXTURES
+delete process.env.CAIRN_TEST_CODE_WORKER
+delete process.env.CAIRN_TEST_CODE_WORKERS
+delete process.env.CAIRN_TEST_REUSED_BUILD
 const nextest = process.argv[2] === '--nextest'
 const args = process.argv.slice(nextest ? 3 : 2)
 const delimiter = args.indexOf('--')
 const cargoArgs = delimiter < 0 ? args : args.slice(0, delimiter)
+const reuseOptions = new Set(['--archive-file', '--cargo-metadata', '--binaries-metadata', '--workspace-remap', '--target-dir-remap', '--build-dir-remap'])
+if (nextest && cargoArgs.some(arg => reuseOptions.has(arg.split('=')[0])))
+  process.env.CAIRN_TEST_REUSED_BUILD = '1'
 const packages = cargoArgs.flatMap((arg, index) => {
   if (arg === '-p' || arg === '--package')
     return cargoArgs[index + 1] ? [cargoArgs[index + 1]] : []
@@ -28,15 +34,21 @@ function maySelectPackage(spec, name) {
   // conservatively build the fixture in case it names the relevant package.
   if (spec.includes('://') && (!spec.includes('#') || /^\d/.test(fragment)))
     return true
-  return fragment.split('@')[0] === name
+  const pattern = fragment.split(/[@:]/)[0]
+  return /[*?[\]]/.test(pattern) ? path.matchesGlob(name, pattern) : pattern === name
 }
 
-const valuedBuildOptions = new Set(['--target', '--target-dir', '--config', '--jobs'])
-const buildSwitches = new Set(['--release', '-r', '--offline', '--frozen'])
+const valuedBuildOptions = new Set(['--target', '--target-dir', '--config', '--jobs', '--manifest-path', '--features', '-F'])
+const buildSwitches = new Set(['--release', '-r', '--offline', '--frozen', '--all-features', '--no-default-features', '--ignore-rust-version'])
 const buildArgs = []
 for (let i = 0; i < cargoArgs.length; i++) {
   const arg = cargoArgs[i]
   const name = arg.split('=')[0]
+  if ((!nextest && /^-j\d/.test(arg)) || /^-F.+/.test(arg) || (!nextest && /^-m.+/.test(arg))) {
+    buildArgs.push(arg)
+    continue
+  }
+
   if (nextest && ['--profile', '-P', '-j'].includes(name)) {
     if (!arg.includes('='))
       i++
@@ -45,7 +57,7 @@ for (let i = 0; i < cargoArgs.length; i++) {
 
   const mapped = nextest && name === '--cargo-profile'
     ? '--profile'
-    : nextest && name === '--build-jobs' ? '--jobs' : name
+    : nextest && name === '--build-jobs' ? '--jobs' : !nextest && name === '-m' ? '--manifest-path' : name
   if (valuedBuildOptions.has(mapped) || mapped === '--profile' || (!nextest && mapped === '-j')) {
     if (arg.includes('=')) {
       buildArgs.push(`${mapped}=${arg.slice(arg.indexOf('=') + 1)}`)
@@ -68,10 +80,10 @@ const testTargets = cargoArgs.flatMap((arg, index) => {
     return cargoArgs[index + 1] ? [cargoArgs[index + 1]] : []
   return arg.startsWith('--test=') ? [arg.slice('--test='.length)] : []
 })
-const explicitOtherTarget = cargoArgs.some(arg => ['--lib', '--bin', '--bins', '--example', '--examples', '--doc'].includes(arg))
+const explicitOtherTarget = cargoArgs.some(arg => ['--lib', '--bin', '--bins', '--example', '--examples', '--bench', '--benches', '--doc'].includes(arg.split('=')[0]))
 const includesAllTests = cargoArgs.some(arg => ['--tests', '--all-targets'].includes(arg))
 const needsWorkerFixture = installationSelected
-  && (includesAllTests || (testTargets.length > 0 ? testTargets.includes('worker') : !explicitOtherTarget))
+  && (includesAllTests || (testTargets.length > 0 ? testTargets.some(target => /[*?[\]]/.test(target) ? path.matchesGlob('worker', target) : target === 'worker') : !explicitOtherTarget))
 if (needsWorkerFixture) {
   const build = spawnSync('cargo', [
     'build',
@@ -95,16 +107,25 @@ if (needsWorkerFixture) {
 
   if (build.status !== 0)
     process.exit(build.status ?? 1)
-  const fixture = records.find(record => record.reason === 'compiler-artifact' && record.target?.name === 'worker_fixture' && record.executable)
-  if (!fixture)
+  const fixtures = records.filter(record => record.reason === 'compiler-artifact' && record.target?.name === 'worker_fixture' && record.executable)
+  if (fixtures.length === 0)
     throw new Error('Cargo did not produce the worker fixture')
   // Cargo test may rebuild the default example at its usual path. Preserve the
   // feature-enabled binary for this launcher invocation before that can happen.
   const directory = mkdtempSync(path.join(os.tmpdir(), 'cairn-worker-fixture-'))
   process.on('exit', () => rmSync(directory, { recursive: true, force: true }))
-  const binary = path.join(directory, 'worker_fixture')
-  copyFileSync(fixture.executable, binary)
-  process.env.CAIRN_TEST_WORKER_FIXTURE = binary
+  const artifacts = new Map()
+  for (const fixture of fixtures) {
+    const source = path.resolve(fixture.executable)
+    const target = path.dirname(path.dirname(source))
+    if (artifacts.has(target))
+      continue
+    const binary = path.join(directory, `worker_fixture-${artifacts.size}${path.extname(source)}`)
+    copyFileSync(source, binary)
+    artifacts.set(target, binary)
+  }
+
+  process.env.CAIRN_TEST_WORKER_FIXTURES = JSON.stringify([...artifacts].map(([target, binary]) => ({ target, binary })))
 }
 
 // Beacon's real MCP relay tests also execute the installation's isolated code
@@ -133,10 +154,17 @@ if (needsCodeWorker) {
 
   if (build.status !== 0)
     process.exit(build.status ?? 1)
-  const worker = records.find(record => record.reason === 'compiler-artifact' && record.target?.name === 'cairn' && record.executable)
-  if (!worker)
+  const workers = records.filter(record => record.reason === 'compiler-artifact' && record.target?.name === 'cairn' && record.executable)
+  if (workers.length === 0)
     throw new Error('Cargo did not produce the Cairn code worker')
-  process.env.CAIRN_TEST_CODE_WORKER = worker.executable
+  const targets = new Map()
+  for (const worker of workers) {
+    const binary = path.resolve(worker.executable)
+    targets.set(path.dirname(binary), binary)
+  }
+
+  process.env.CAIRN_TEST_CODE_WORKERS = JSON.stringify([...targets].map(([target, binary]) => ({ target, binary })))
+  process.env.CAIRN_TEST_CODE_WORKER = path.resolve(workers[0].executable)
 }
 
 const result = spawnSync('cargo', [...(nextest ? ['nextest', 'run'] : ['test']), '--locked', ...(selectsPackage || cargoArgs.includes('--workspace') || cargoArgs.includes('--all') ? [] : ['--workspace']), ...args], { stdio: 'inherit' })
