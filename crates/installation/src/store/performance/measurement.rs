@@ -113,7 +113,7 @@ async fn measure_lane(lane: &'static str) {
     }
 }
 
-fn sample_report(enabled: bool, reports: usize) -> (u128, u128) {
+fn sample_report(enabled: bool, reports: usize) -> (u128, u128, u128) {
     let subscriber = tracing_subscriber::fmt()
         .with_max_level(if enabled {
             tracing::level_filters::LevelFilter::INFO
@@ -135,11 +135,19 @@ fn sample_report(enabled: bool, reports: usize) -> (u128, u128) {
         };
         let cpu = process_cpu_micros();
         let started = Instant::now();
+        let mut producer_micros = 0;
         for _ in 0..reports {
             metrics.since = Instant::now() - std::time::Duration::from_secs(31);
+            let producer = Instant::now();
             metrics.record(&completed, &connection);
+            producer_micros += producer.elapsed().as_micros();
+            assert!(crate::performance::flush(std::time::Duration::from_secs(5)));
         }
-        (started.elapsed().as_micros(), process_cpu_micros() - cpu)
+        (
+            started.elapsed().as_micros(),
+            process_cpu_micros() - cpu,
+            producer_micros,
+        )
     })
 }
 
@@ -157,7 +165,7 @@ fn measure_isolated_report_overhead() {
             [true, false]
         };
         for enabled in order {
-            let (elapsed, cpu) = sample_report(enabled, REPORTS);
+            let (elapsed, cpu, producer) = sample_report(enabled, REPORTS);
             println!(
                 "{}",
                 serde_json::json!({
@@ -167,10 +175,11 @@ fn measure_isolated_report_overhead() {
                     "reports": REPORTS,
                     "elapsedMicros": elapsed,
                     "processCpuMicros": cpu,
+                    "producerMicros": producer,
                     "sqlite": rusqlite::version(),
                     "workload": "forced actual Metrics boundary, one caller, in-memory SQLite",
-                    "timing": "initialization excluded; sampling, formatting and isolation included",
-                    "limits": "local observation with sink writer; not production logging or query latency",
+                    "timing": "initialization excluded; producer enqueue and completed delivery with test-only flush included",
+                    "limits": "local sink writer; flush adds test overhead; not production logging or query latency",
                 })
             );
         }

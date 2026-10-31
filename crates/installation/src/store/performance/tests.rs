@@ -30,6 +30,35 @@ impl<'a> MakeWriter<'a> for Capture {
     }
 }
 
+// Tracing interest and the bounded diagnostic worker are process-global. Give
+// each observation fixture its own process, including under parallel libtest.
+fn isolated_observation(name: &'static str) -> bool {
+    const KEY: &str = "CAIRN_SQLITE_OBSERVATION_TEST";
+    let test = format!("store::performance::tests::{name}");
+    if std::env::var(KEY).ok().as_deref() == Some(test.as_str()) {
+        return false;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", &test, "--nocapture", "--test-threads=1"])
+        .env(KEY, &test)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("1 passed; 0 failed; 0 ignored"),
+        "isolated observation {test} did not pass exactly once:\n{stdout}\n{stderr}"
+    );
+    true
+}
+
+fn flush_diagnostics() {
+    assert!(
+        crate::performance::flush(Duration::from_secs(5)),
+        "Queued diagnostics must finish within the test deadline"
+    );
+}
+
 async fn read_probe(store: &Store, private: String) -> usize {
     store.read(move |_| Ok(private.len())).await.unwrap()
 }
@@ -67,10 +96,98 @@ fn failing_close_writer_cannot_abort_sqlite_jobs() {
     crate::test_process::run_ignored("store::performance::tests::failing_close_writer_child");
 }
 
-struct FailingWriter;
+struct BlockedOutput {
+    open: Mutex<bool>,
+    wake: std::sync::Condvar,
+    entered: std::sync::mpsc::SyncSender<()>,
+}
+
+struct BlockedWriter(Arc<BlockedOutput>);
+
+impl std::io::Write for BlockedWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let mut open = self.0.open.lock().unwrap();
+        if !*open {
+            let _ = self.0.entered.try_send(());
+        }
+        while !*open {
+            open = self.0.wake.wait(open).unwrap();
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn blocked_diagnostic_output_cannot_delay_later_sqlite_jobs() {
+    if isolated_observation("blocked_diagnostic_output_cannot_delay_later_sqlite_jobs") {
+        return;
+    }
+    let (entered, observed) = std::sync::mpsc::sync_channel(1);
+    let output = Arc::new(BlockedOutput {
+        open: Mutex::new(false),
+        wake: std::sync::Condvar::new(),
+        entered,
+    });
+    let writer = output.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || BlockedWriter(writer.clone()))
+        .finish();
+    let dispatcher = tracing::Dispatch::new(subscriber);
+    let (sender, mut receiver) = mpsc::channel::<crate::store::Job>(4);
+    let actor = std::thread::spawn(move || {
+        tracing::dispatcher::with_default(&dispatcher, || {
+            let mut connection = Connection::open_in_memory().unwrap();
+            let mut metrics = Metrics::new("write", 0, &connection);
+            for _ in 0..2 {
+                let completed = receiver.blocking_recv().unwrap()(&mut connection);
+                metrics.since = Instant::now() - Duration::from_secs(31);
+                metrics.record(&completed, &connection);
+            }
+            assert_eq!(metrics.window, 2);
+        });
+    });
+    let store = Store(Arc::new(Pool {
+        writer: sender.clone(),
+        readers: sender,
+        changes: watch::channel(0).0,
+        discarded_changes: Arc::new(AtomicU64::new(0)),
+    }));
+    store.write(|db| {
+        db.0.execute_batch("CREATE TABLE output_progress(value INTEGER); INSERT INTO output_progress VALUES (17)")?;
+        Ok(())
+    }).await.unwrap();
+    observed.recv_timeout(Duration::from_secs(5)).unwrap();
+    let read = tokio::time::timeout(
+        Duration::from_secs(1),
+        store.read(|db| {
+            Ok(db
+                .0
+                .query_row("SELECT value + 6 FROM output_progress", [], |row| {
+                    row.get::<_, i64>(0)
+                })?)
+        }),
+    )
+    .await;
+    *output.open.lock().unwrap() = true;
+    output.wake.notify_all();
+    actor.join().unwrap();
+    flush_diagnostics();
+    assert!(
+        read.is_ok(),
+        "Diagnostic output backpressure must not delay a later SQLite job"
+    );
+    assert_eq!(read.unwrap().unwrap(), 23);
+}
+
+struct FailingWriter(Arc<AtomicU64>);
 
 impl std::io::Write for FailingWriter {
     fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         panic!("synthetic SQLite diagnostic writer failure");
     }
 
@@ -91,9 +208,11 @@ async fn failing_close_writer_child() {
         // SAFETY: this child owns its core-dump limits and supplies a valid limit.
         assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_CORE, &limit) }, 0);
     }
+    let attempts = Arc::new(AtomicU64::new(0));
+    let observed_attempts = attempts.clone();
     let subscriber = tracing_subscriber::fmt()
         .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
-        .with_writer(|| FailingWriter)
+        .with_writer(move || FailingWriter(observed_attempts.clone()))
         .finish();
     let dispatcher = tracing::Dispatch::new(subscriber);
     let (sender, mut receiver) = mpsc::channel::<crate::store::Job>(4);
@@ -132,10 +251,15 @@ async fn failing_close_writer_child() {
         .unwrap();
     assert_eq!(read, 23);
     actor.join().unwrap();
+    flush_diagnostics();
+    assert_eq!(attempts.load(std::sync::atomic::Ordering::Relaxed), 2);
 }
 
 #[tokio::test]
 async fn failing_diagnostic_filter_cannot_interrupt_real_sqlite_jobs() {
+    if isolated_observation("failing_diagnostic_filter_cannot_interrupt_real_sqlite_jobs") {
+        return;
+    }
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed_calls = calls.clone();
     let filter = tracing_subscriber::filter::dynamic_filter_fn(move |metadata, _| {
@@ -193,6 +317,9 @@ async fn failing_diagnostic_filter_cannot_interrupt_real_sqlite_jobs() {
 
 #[tokio::test]
 async fn caller_costs_include_failed_work_after_its_receiver_is_abandoned() {
+    if isolated_observation("caller_costs_include_failed_work_after_its_receiver_is_abandoned") {
+        return;
+    }
     let capture = Capture::default();
     let subscriber = tracing_subscriber::fmt()
         .without_time()
@@ -225,6 +352,7 @@ async fn caller_costs_include_failed_work_after_its_receiver_is_abandoned() {
     })
     .join()
     .unwrap();
+    flush_diagnostics();
     let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
     assert!(!output.contains(private));
     let caller = output
@@ -239,6 +367,9 @@ async fn caller_costs_include_failed_work_after_its_receiver_is_abandoned() {
 
 #[tokio::test]
 async fn real_reader_jobs_report_cpu_sampling_and_caller_cost_rows() {
+    if isolated_observation("real_reader_jobs_report_cpu_sampling_and_caller_cost_rows") {
+        return;
+    }
     let capture = Capture::default();
     let subscriber = tracing_subscriber::fmt()
         .without_time()
@@ -270,6 +401,7 @@ async fn real_reader_jobs_report_cpu_sampling_and_caller_cost_rows() {
     .join()
     .unwrap();
     assert_eq!(task.await.unwrap(), "private-reader-value".len());
+    flush_diagnostics();
     let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
     assert_eq!(output.lines().count(), 2);
     assert!(output.contains("operation=\"database_actor\""));
@@ -288,6 +420,9 @@ async fn real_reader_jobs_report_cpu_sampling_and_caller_cost_rows() {
 
 #[tokio::test]
 async fn json_cost_rows_isolate_both_current_span_and_span_list() {
+    if isolated_observation("json_cost_rows_isolate_both_current_span_and_span_list") {
+        return;
+    }
     let capture = Capture::default();
     let subscriber = tracing_subscriber::fmt()
         .json()
@@ -321,6 +456,7 @@ async fn json_cost_rows_isolate_both_current_span_and_span_list() {
     let private = "synthetic-private-json-capture-never-log";
     assert_eq!(write_probe(&store, private.into()).await, private.len());
     actor.join().unwrap();
+    flush_diagnostics();
     let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
     assert!(!output.contains(private));
     assert!(!output.contains("synthetic_private_json_parent"));
@@ -338,6 +474,9 @@ async fn json_cost_rows_isolate_both_current_span_and_span_list() {
 
 #[test]
 fn per_layer_filters_cannot_restore_private_json_context() {
+    if isolated_observation("per_layer_filters_cannot_restore_private_json_context") {
+        return;
+    }
     let capture = Capture::default();
     let output = tracing_subscriber::fmt::layer()
         .json()
@@ -376,6 +515,7 @@ fn per_layer_filters_cannot_restore_private_json_context() {
             &connection,
         );
     });
+    flush_diagnostics();
     let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
     assert!(output.contains("database_actor"));
     assert!(output.contains("database_caller"));
@@ -388,6 +528,9 @@ fn per_layer_filters_cannot_restore_private_json_context() {
 
 #[test]
 fn event_only_filter_reports_without_inheriting_private_context() {
+    if isolated_observation("event_only_filter_reports_without_inheriting_private_context") {
+        return;
+    }
     let capture = Capture::default();
     let layer = tracing_subscriber::fmt::layer()
         .json()
@@ -429,6 +572,7 @@ fn event_only_filter_reports_without_inheriting_private_context() {
         assert_eq!(metrics.completed, 0);
         assert_eq!(metrics.window, 1);
     });
+    flush_diagnostics();
     let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
     assert!(!output.contains("synthetic-private-filter-never-log"));
     assert!(!output.contains("synthetic_private_filter_span"));
@@ -445,6 +589,11 @@ fn event_only_filter_reports_without_inheriting_private_context() {
 
 #[tokio::test]
 async fn writer_reports_cumulative_costs_for_real_originating_jobs_without_values() {
+    if isolated_observation(
+        "writer_reports_cumulative_costs_for_real_originating_jobs_without_values",
+    ) {
+        return;
+    }
     let capture = Capture::default();
     let subscriber = tracing_subscriber::fmt()
         .without_time()
@@ -492,6 +641,7 @@ async fn writer_reports_cumulative_costs_for_real_originating_jobs_without_value
     assert_eq!(write_probe(&store, private.into()).await, private.len());
     actor.join().unwrap();
 
+    flush_diagnostics();
     let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
     assert!(!output.contains(private));
     assert!(!output.contains("synthetic-private-parent-never-log"));
@@ -525,6 +675,9 @@ async fn writer_reports_cumulative_costs_for_real_originating_jobs_without_value
 
 #[test]
 fn caller_cost_rows_bound_cardinality_and_account_for_omitted_jobs() {
+    if isolated_observation("caller_cost_rows_bound_cardinality_and_account_for_omitted_jobs") {
+        return;
+    }
     let capture = Capture::default();
     let subscriber = tracing_subscriber::fmt()
         .without_time()
@@ -563,6 +716,7 @@ fn caller_cost_rows_bound_cardinality_and_account_for_omitted_jobs() {
             },
         );
     });
+    flush_diagnostics();
     let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
     let rows = output.lines().collect::<Vec<_>>();
     assert!(rows.len() <= 17);
@@ -590,6 +744,9 @@ fn caller_cost_rows_bound_cardinality_and_account_for_omitted_jobs() {
 
 #[test]
 fn caller_cost_rows_include_cpu_and_wall_leaders_without_duplicates() {
+    if isolated_observation("caller_cost_rows_include_cpu_and_wall_leaders_without_duplicates") {
+        return;
+    }
     let capture = Capture::default();
     let subscriber = tracing_subscriber::fmt()
         .without_time()
@@ -628,6 +785,7 @@ fn caller_cost_rows_include_cpu_and_wall_leaders_without_duplicates() {
             },
         );
     });
+    flush_diagnostics();
     let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
     assert_eq!(output.lines().count(), 17);
     for index in 0..16 {
@@ -650,6 +808,11 @@ fn caller_cost_rows_include_cpu_and_wall_leaders_without_duplicates() {
 
 #[tokio::test]
 async fn reports_originating_read_write_and_transaction_without_captured_values() {
+    if isolated_observation(
+        "reports_originating_read_write_and_transaction_without_captured_values",
+    ) {
+        return;
+    }
     let capture = Capture::default();
     let subscriber = tracing_subscriber::fmt()
         .without_time()
@@ -685,6 +848,7 @@ async fn reports_originating_read_write_and_transaction_without_captured_values(
     );
     actor.join().unwrap();
 
+    flush_diagnostics();
     let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
     assert!(!output.contains(private));
     let lines = output
@@ -720,6 +884,10 @@ async fn reports_originating_read_write_and_transaction_without_captured_values(
 
 #[test]
 fn keeps_queue_and_execution_origins_separate_and_resets_between_windows() {
+    if isolated_observation("keeps_queue_and_execution_origins_separate_and_resets_between_windows")
+    {
+        return;
+    }
     let connection = Connection::open_in_memory().unwrap();
     let mut metrics = Metrics::new("read", 0, &connection);
     let completed = |caller, queue, execution| Completed {
@@ -760,6 +928,9 @@ fn bounds_compiler_generated_names() {
 
 #[test]
 fn reports_wal_frames_without_checkpointing_or_changing_durability() {
+    if isolated_observation("reports_wal_frames_without_checkpointing_or_changing_durability") {
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let database = root.path().join("private.db");
     let connection = Connection::open(&database).unwrap();
@@ -810,6 +981,7 @@ fn reports_wal_frames_without_checkpointing_or_changing_durability() {
         );
     });
 
+    flush_diagnostics();
     let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
     assert!(output.contains("wal_available=true"));
     assert!(output.contains(&format!("wal_frames={}", before.0)));

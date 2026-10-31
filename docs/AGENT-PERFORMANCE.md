@@ -106,14 +106,23 @@ The same per-actor limits apply independently to the writer and four readers:
 at most 320 tracked names and 85 caller rows across five report windows. Reader
 work can overlap; cumulative wall time is not elapsed process time or CPU time.
 
-These records use a short-lived scoped thread with the existing subscriber and
-an empty span stack, emitting parentless events without creating or closing any
-diagnostic span. Both text and JSON current-span lists exclude the caller's
-private context, including with multiple layers or event-only filters. Avoiding
-span cleanup also prevents a second logging panic during unwinding with span
-close events enabled. Thread startup or logging failure has no fallback to the
-caller context. Disabled diagnostics do not start a thread. SQL, captured values
-and error contents remain excluded.
+These records transfer an owned, bounded window to one diagnostic worker per
+process through a 16-entry queue with nonblocking admission. One additional
+report may be executing. A full queue or busy admission drops the new report; a permanently blocked
+sink cannot grow this queue or block SQLite jobs or maintenance cleanup. Each
+report retains its subscriber and emits parentless events with an empty span
+stack, creating no diagnostic spans. Text and JSON exclude the caller's private
+context, including with layered or event-only filters. No span cleanup can cause
+a second logging panic during unwinding. Disabled diagnostics do not start the
+worker. SQL, captured values and error contents remain excluded.
+
+`diagnostic_queue_us` describes transport delay, separately from SQLite job
+`queue_us`. `diagnostic_dropped_reports_total` is a process-wide cumulative count
+of transport rejection/start/disconnection failures and callbacks that unwind;
+it does not certify delivery or detect I/O errors swallowed by a subscriber.
+These header fields apply to the caller rows sharing that actor/window. A late
+report still describes its original completed-job window. Queued diagnostics are
+not persisted or replayed across process exit.
 The shared enabled precheck catches unwinding filter callbacks and treats that
 observation as disabled. SQLite closures still execute and maintenance cleanup
 still runs when the diagnostic filter fails.
@@ -151,19 +160,26 @@ overlapping ranges do not establish a fixed per-job overhead or a gain from
 enabling diagnostics. These are local queue/no-op observations with scheduling
 variation, not production query latency, application throughput or release gains.
 
-Measure the existing report boundary separately, including span isolation:
+Measure the report producer and completed delivery separately:
 
 ```sh
 CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 pnpm test:backend -p cairn-installation --lib store::performance::measurement::measure_isolated_report_overhead -- --ignored --nocapture --test-threads=1
 ```
 
-On the same host/profile, four alternating pairs of 100 forced report boundaries
-after warmup produced medians of 74.185 microseconds wall / 77.400 microseconds
-process CPU per enabled report, versus 0.750 / 0.760 disabled. The enabled path
-includes cache/WAL inspection, one tracked caller, formatting into a sink and
-scoped-thread startup/join. It measures the complete local boundary, not just
-thread startup, real log I/O or the maximum 17 caller rows. Production boundaries
-remain at least 30 seconds apart per actor and require a completed job.
+Four alternating pairs of 100 forced report boundaries run after warmup.
+`producerMicros` measures the actor's sampling and enqueue work. Total wall and
+process CPU also include formatting into a sink and a test-only bounded flush
+after each report. The flush ensures completed delivery instead of silently
+measuring dropped bursts; its cost is present in both modes. This workload uses
+one tracked caller, not the maximum 17 caller rows or real log I/O. Production
+boundaries remain at least 30 seconds apart per actor and require a completed job;
+production code never flushes or joins the worker.
+
+On the host/profile above, all eight observations yielded median producer costs
+of 6.445 microseconds enabled and 1.000 disabled per report. Complete wall time
+including the test flush was 44.680 / 9.810 microseconds, and process CPU was
+48.055 / 12.025 microseconds. These are local observations with one caller and a
+sink writer, not guarantees for maximum cardinality or production log delivery.
 
 The same record samples the connection's pager cache at the interval boundary.
 `cache_hits`, `cache_misses` and `cache_writes` are interval deltas of counters

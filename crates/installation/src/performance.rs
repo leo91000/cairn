@@ -7,7 +7,10 @@ pub(crate) mod native;
 pub(crate) mod publication;
 
 pub use activity::{Activity, heartbeat};
-pub(crate) use isolated::without_span_context;
+pub(crate) use isolated::{Delivery, try_record};
+
+#[cfg(test)]
+pub(crate) use isolated::flush;
 
 /// A broken logging filter must not interrupt the work being observed.
 pub(crate) fn enabled() -> bool {

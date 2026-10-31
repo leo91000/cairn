@@ -121,24 +121,28 @@ impl Metrics {
         let wal_available = wal.is_some();
         let wal_values = wal.unwrap_or_default();
         let interval_ms = elapsed.as_millis().min(u128::from(u64::MAX)) as u64;
-        crate::performance::without_span_context(|| {
+        let next = Self::window(self.lane, self.index, cache, self.window.saturating_add(1));
+        let report = std::mem::replace(self, next);
+        let _ = crate::performance::try_record(move |delivery: crate::performance::Delivery| {
             tracing::info!(
                 target: "cairn_performance",
                 parent: None,
                 operation = "database_actor",
-                lane = self.lane,
-                actor = self.index,
+                lane = report.lane,
+                actor = report.index,
                 interval_ms,
-                window = self.window,
-                completed = self.completed,
-                errors = self.errors,
-                abandoned_replies = self.abandoned_replies,
-                queue_us = self.queue_us,
-                execution_us = self.execution_us,
-                max_queue_us = self.max_queue_us,
-                max_execution_us = self.max_execution_us,
-                max_queue_caller = self.max_queue_caller,
-                max_execution_caller = self.max_execution_caller,
+                diagnostic_queue_us = delivery.queue_us,
+                diagnostic_dropped_reports_total = delivery.dropped_reports_total,
+                window = report.window,
+                completed = report.completed,
+                errors = report.errors,
+                abandoned_replies = report.abandoned_replies,
+                queue_us = report.queue_us,
+                execution_us = report.execution_us,
+                max_queue_us = report.max_queue_us,
+                max_execution_us = report.max_execution_us,
+                max_queue_caller = report.max_queue_caller,
+                max_execution_caller = report.max_execution_caller,
                 cache_available,
                 cache_hits = cache_values.hits,
                 cache_misses = cache_values.misses,
@@ -150,32 +154,31 @@ impl Metrics {
                 wal_pending_frames = wal_values.pending_frames,
                 wal_autocheckpoint_frames = wal_values.autocheckpoint_frames,
                 sqlite_synchronous = wal_values.synchronous,
-                cpu_us = self.cpu_us,
-                cpu_sampled_jobs = self.cpu_sampled_jobs,
-                cpu_available = self.cpu_sampled_jobs == self.completed,
-                caller_recorded_jobs = self.callers.recorded_jobs,
-                caller_untracked_jobs = self.callers.untracked_jobs,
-                tracked_callers = self.callers.len(),
-                caller_coverage_complete = self.callers.recorded_jobs == self.completed
-                    && self.callers.untracked_jobs == 0,
+                cpu_us = report.cpu_us,
+                cpu_sampled_jobs = report.cpu_sampled_jobs,
+                cpu_available = report.cpu_sampled_jobs == report.completed,
+                caller_recorded_jobs = report.callers.recorded_jobs,
+                caller_untracked_jobs = report.callers.untracked_jobs,
+                tracked_callers = report.callers.len(),
+                caller_coverage_complete = report.callers.recorded_jobs == report.completed
+                    && report.callers.untracked_jobs == 0,
             );
-            self.callers.emit(
-                self.lane,
-                self.index,
-                self.window,
+            report.callers.emit(
+                report.lane,
+                report.index,
+                report.window,
                 interval_ms,
                 Totals {
-                    completed: self.completed,
-                    errors: self.errors,
-                    abandoned_replies: self.abandoned_replies,
-                    queue_us: self.queue_us,
-                    execution_us: self.execution_us,
-                    cpu_us: self.cpu_us,
-                    cpu_sampled_jobs: self.cpu_sampled_jobs,
+                    completed: report.completed,
+                    errors: report.errors,
+                    abandoned_replies: report.abandoned_replies,
+                    queue_us: report.queue_us,
+                    execution_us: report.execution_us,
+                    cpu_us: report.cpu_us,
+                    cpu_sampled_jobs: report.cpu_sampled_jobs,
                 },
             );
         });
-        *self = Self::window(self.lane, self.index, cache, self.window.saturating_add(1));
     }
 }
 
