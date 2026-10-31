@@ -264,17 +264,19 @@ TMPDIR=/var/tmp CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
 ```
 
 The frozen reference is from `1aa24dc825f909874852ffd24213080f9443b8db`.
-Candidate Rust inputs are crate tree `ca3018b31f84474cdec11984e00ded3724298922`;
-the sealed measurement executable SHA-256 is
-`3672a5392dcb5ac1718d3b2cd19f796590f17d541ab2024c7e131c07e495c1a5`.
+The current measurement uses clean committed source
+`2881ff133acc381f2ce845afa358f1cec759ffc8`, including the native-storage and
+updater candidate integrations, and crate tree
+`df141b7523e4e4622ab0882a9c8de1f81b00cd3f`. The sealed executable SHA-256 is
+`e5fb58fd5535bc1cbd1ede5c963cd166be34746b20401803941a1405a461a8ab`.
 Rust 1.97.1 uses development dependency defaults, installation package opt-level
 2, no debug information and no incremental compilation. This is not a release
 profile or a production measurement.
 
 Measured on 2026-10-31 on the shared Intel i9-14900K workstation described above,
-with bundled SQLite 3.53.2 and disk-backed `/var/tmp`. Task-owned compilation
-finished before the measurement; other-user Rust compilation was observed
-immediately before invocation. The host was not dedicated or isolated.
+with bundled SQLite 3.53.2 and disk-backed `/var/tmp`. Task-owned compilation and
+tests finished before the measurement batch; no Rust compiler process was
+observed immediately before that batch. The host was not dedicated or isolated.
 
 The 33,370,112-byte synthetic database has 65,536 objects and 78,644 references.
 The retiring publication owns 19,661 references. Each variant receives a fresh
@@ -283,21 +285,27 @@ Four alternating-order pairs time `BEGIN IMMEDIATE`, the actual release
 statements, cascading reference deletion and `COMMIT`. Copying, connection/PRAGMA
 setup and verification are excluded. The OS cache is warm after copying; no
 host cache eviction was attempted. The shared fixture write control takes
-1,120.257 ms wall / 840.452 ms CPU, including preparation and commit; it is not
+1,057.520 ms wall / 788.434 ms CPU, including preparation and commit; it is not
 a before/after write comparison.
 
 | Committed retirement | Reference median (ms) | Candidate median (ms) | Change |
 | --- | ---: | ---: | ---: |
-| Process CPU | 159.888 | 149.631 | -6.4% |
-| Wall time | 380.867 | 390.399 | +2.5% |
+| Process CPU | 164.867 | 151.479 | -8.1% |
+| Wall time | 321.056 | 306.205 | -4.6% |
 
 Every trial has the same 32,769 changed rows and 19,450,552 WAL bytes. Foreign-key
 checks pass. Final object/publication/reference states compare equal after
 normalizing naturally different retirement timestamps. The diagnostic JSON
 representation of that normalized state is 12,681,350 bytes; this is neither
 stored-object nor wire-format size. Database and object formats do not change.
-The CPU improvement is modest and **no wall-time improvement is demonstrated**.
-The observed wall-time increase and shared-host conditions must remain visible.
+The CPU improvement is modest. An earlier measurement on crate tree
+`ca3018b31f84474cdec11984e00ded3724298922`, sealed executable
+`3672a5392dcb5ac1718d3b2cd19f796590f17d541ab2024c7e131c07e495c1a5`, reported
+159.888 → 149.631 ms CPU (-6.4%) but 380.867 → 390.399 ms wall (+2.5%). Other-user
+Rust compilation was observed before that earlier invocation; its shared fixture
+write control was 1,120.257 ms wall / 840.452 ms CPU. Retain the wall-time increase
+alongside the current decrease: these shared-host observations do not establish
+a consistent latency benefit or production gain.
 
 A separate read-only exploration on a private offline production snapshot uses
 Node SQLite 3.53.4, a network-isolated 0.5-CPU/256-MiB container and warm OS cache.
