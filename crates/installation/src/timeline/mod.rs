@@ -160,7 +160,29 @@ fn stored_content(content: &TimelineContent) -> Result<String> {
             via: via.clone(),
             echo: *echo,
         })?,
-        TimelineContent::Notice { notice } => serde_json::to_string(notice)?,
+        TimelineContent::Notice { notice } => {
+            let mut stored = notice.clone();
+            stored.tasks.clear();
+            if let Some(account) = &mut stored.account {
+                account.agent.clear();
+                account.name.clear();
+            }
+            if let Some(retry) = &mut stored.engine_retry
+                && let Some(reason) = &mut retry.reason
+            {
+                reason.clear();
+            }
+            if let Some(limit) = &mut stored.usage_limit {
+                limit.status.clear();
+                if let Some(window) = &mut limit.window {
+                    window.clear();
+                }
+            }
+            if let Some(level) = &mut stored.level {
+                level.clear();
+            }
+            serde_json::to_string(&stored)?
+        }
     })
 }
 

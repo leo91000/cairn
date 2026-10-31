@@ -352,6 +352,21 @@ async fn oversized_notice_arguments_are_recovered_from_their_source() {
         )
         .await
         .unwrap();
+    let run = f.run.clone();
+    let stored = f
+        .service
+        .store
+        .read(move |db| {
+            Ok(db.0.query_row(
+                "SELECT content FROM timeline_entries WHERE run_id=? AND kind='notice' ORDER BY position DESC LIMIT 1",
+                [run],
+                |row| row.get::<_, String>(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert!(stored.len() < 4096);
+    assert!(!stored.contains("long task"));
     let mut stream = f.open(0).await;
     let reference = loop {
         let (_, batch) = stream.batch().await;
