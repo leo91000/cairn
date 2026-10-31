@@ -109,10 +109,15 @@ impl Fixture {
         tokio::fs::write(&file, serde_json::to_vec(&self.service.config).unwrap())
             .await
             .unwrap();
-        let binary = std::path::Path::new(env!("CARGO_BIN_EXE_cairn"))
-            .parent()
-            .unwrap()
-            .join("examples/worker_fixture");
+        let binary = std::env::var_os("CAIRN_TEST_WORKER_FIXTURE").map_or_else(
+            || {
+                std::path::Path::new(env!("CARGO_BIN_EXE_cairn"))
+                    .parent()
+                    .unwrap()
+                    .join("examples/worker_fixture")
+            },
+            PathBuf::from,
+        );
         let mut command = Command::new(binary);
         command.arg("serve");
         command.env_remove("CAIRN_FIXTURE_CLOCK_FILE");
