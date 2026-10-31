@@ -1243,9 +1243,6 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.plan-storage-reference != ''
     runs-on: ubuntu-latest
     timeout-minutes: 40
-    env:
-      PLAN_STORAGE_OUTPUT: ${{ runner.temp }}/plan-storage-evidence
-      PLAN_STORAGE_REFERENCE: ${{ inputs.plan-storage-reference }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -1257,6 +1254,9 @@ jobs:
       - name: Install compilation dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age e2fsprogs fakeroot
       - name: Qualify two actual source revisions on synthetic databases
+        env:
+          PLAN_STORAGE_OUTPUT: ${{ runner.temp }}/plan-storage-evidence
+          PLAN_STORAGE_REFERENCE: ${{ inputs.plan-storage-reference }}
         run: node scripts/qualify-plan-storage.mjs "$PLAN_STORAGE_REFERENCE"
       - uses: actions/upload-artifact@v7.0.1
         if: always()
