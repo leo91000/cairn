@@ -844,12 +844,12 @@ jobs:
             GH_VERSION=${{ needs.resolve.outputs.gh }}
             CLAUDE_VERSION=${{ needs.resolve.outputs.claude }}
             OPENCODE_VERSION=${{ needs.resolve.outputs.opencode }}
-          # GHCR deduplicates layers across main builds. PRs read the trusted
-          # main cache but skip the expensive cache upload on their critical path.
+          # Main and version tags preserve compiler layers for later qualifications.
+          # Pull request refs restore this cache without uploading to it.
           cache-from: |
             type=registry,ref=ghcr.io/${{ github.repository_owner }}/cairn:buildcache
             type=gha
-          cache-to: ${{ github.ref == 'refs/heads/main' && format('type=registry,ref=ghcr.io/{0}/cairn:buildcache,mode=max,compression=zstd,compression-level=3,ignore-error=true', github.repository_owner) || '' }}
+          cache-to: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && format('type=registry,ref=ghcr.io/{0}/cairn:buildcache,mode=max,compression=zstd,compression-level=3,ignore-error=true', github.repository_owner) || '' }}
           secrets: github_token=${{ github.token }}
           provenance: ${{ env.PUBLISH == 'true' && 'mode=max' || 'false' }}
           sbom: ${{ env.PUBLISH == 'true' }}
@@ -1024,7 +1024,7 @@ jobs:
           cache-from: |
             type=registry,ref=ghcr.io/${{ github.repository_owner }}/cairn-beacon:buildcache
             type=gha,scope=beacon
-          cache-to: ${{ github.ref == 'refs/heads/main' && format('type=registry,ref=ghcr.io/{0}/cairn-beacon:buildcache,mode=max,compression=zstd,compression-level=3,ignore-error=true', github.repository_owner) || '' }}
+          cache-to: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && format('type=registry,ref=ghcr.io/{0}/cairn-beacon:buildcache,mode=max,compression=zstd,compression-level=3,ignore-error=true', github.repository_owner) || '' }}
           provenance: ${{ env.PUBLISH == 'true' && 'mode=max' || 'false' }}
           sbom: ${{ env.PUBLISH == 'true' }}
       - uses: ./.github/actions/setup-pnpm
