@@ -6115,6 +6115,55 @@ async fn resource_reads_match_http_public_mcp_and_installation_with_live_grants(
         .await;
         assert_eq!(member.status(), StatusCode::FORBIDDEN);
     }
+    // Manage and read are separate public scopes, including when a caller uses
+    // the older management poller to retrieve a retained resource result.
+    for (_, id) in &public_operations {
+        let refused = public_call(
+            &s,
+            &["manage"],
+            "get_plugin_operation",
+            json!({"operationId":id}),
+        )
+        .await;
+        assert_eq!(refused["result"]["isError"], true, "{refused}");
+    }
+    let unverified_app = cairn_installation::http::router(s.clone()).await.unwrap();
+    for (name, args) in [
+        (
+            "list_plugin_resources",
+            json!({"pluginId":"resource-probe","instanceId":instance,"resourceType":"repository"}),
+        ),
+        (
+            "get_plugin_resource_operation",
+            json!({"operationId":public_operations[0].1}),
+        ),
+        (
+            "get_plugin_operation",
+            json!({"operationId":public_operations[0].1}),
+        ),
+    ] {
+        let mut identity = cairn_installation::auth::InstallationIdentity::trusted(
+            cairn_installation::auth::InstallationRole::Owner,
+            "fixture-owner",
+        );
+        identity.mcp_scopes = Some(vec!["read".into(), "manage".into()]);
+        let response = common::send(
+            &unverified_app,
+            common::request("POST", "/api/mcp")
+                .extension(identity)
+                .body(Body::from(
+                    json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+                "params": common::mcp_arguments(name, &args)})
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = common::read_json(response).await;
+        assert_eq!(response["result"]["isError"], true, "{response}");
+    }
+
     // A read token cannot use the new polling API to read management preparations.
     let management = s
         .plugins
@@ -6759,7 +6808,11 @@ async fn resource_poll_rechecks_its_requester_after_the_originating_authority() 
         .await
         .unwrap();
 
-    for tool in ["get_plugin_resource_operation", "get_plugin_operation"] {
+    for (tool, revoke_all) in [
+        ("get_plugin_resource_operation", true),
+        ("get_plugin_operation", true),
+        ("get_plugin_operation", false),
+    ] {
         let token = common::relay_fixture::grant(&s, &["read", "manage"]).await;
         armed.store(true, Ordering::SeqCst);
         let poll = tokio::spawn({
@@ -6773,13 +6826,17 @@ async fn resource_poll_rechecks_its_requester_after_the_originating_authority() 
         tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified())
             .await
             .unwrap();
-        s.store
-            .delete(&format!(
-                "test-relay:{}",
-                cairn_installation::auth::digest(&token)
-            ))
-            .await
-            .unwrap();
+        let key = format!("test-relay:{}", cairn_installation::auth::digest(&token));
+        if revoke_all {
+            s.store.delete(&key).await.unwrap();
+        } else {
+            // The old manage poller must also lose resource access when only
+            // read is removed while its originating authority is checked.
+            s.store
+                .set(&key, json!({"scopes":["manage"]}), None)
+                .await
+                .unwrap();
+        }
         release.notify_one();
         let (status, response) = tokio::time::timeout(std::time::Duration::from_secs(10), poll)
             .await
@@ -6789,6 +6846,143 @@ async fn resource_poll_rechecks_its_requester_after_the_originating_authority() 
             status == StatusCode::UNAUTHORIZED || response["result"]["isError"] == true,
             "{tool}: {response}"
         );
+    }
+    server.abort();
+    s.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn resource_poll_fences_package_activation_during_remote_authorization() {
+    use axum::{Json, Router, routing::post};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::sync::Notify;
+
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    s.plugins
+        .use_worker(std::path::PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
+    for (version, label) in [("1", "Old"), ("2", "New")] {
+        let source = r#"return {resources = function()
+            return {items = cairn.array({{resourceType = "repository", id = "repo", name = "LABEL"}})}
+        end}"#.replace("LABEL", label);
+        let installed = common::package_install(&s, &json!({
+            "manifest":{"id":"resource-package","name":"Resource package","version":version,"apiVersion":2,
+                "capabilities":[],"agentAccess":{},"resources":[{"name":"repository","description":"Repository"}]},
+            "source":source,
+        })).await.unwrap();
+        common::package_approve(&s, "resource-package", version, text(&installed, "digest"))
+            .await
+            .unwrap();
+    }
+    cairn_installation::plugins::registry::activate(&s, "resource-package", "1")
+        .await
+        .unwrap();
+    let saved = common::save_plugin(
+        &s,
+        "resource-package",
+        &json!({"name":"Private","enabled":true}),
+        None,
+    )
+    .await
+    .unwrap();
+    let origin_token = common::relay_fixture::grant(&s, &["read", "manage"]).await;
+    let origin_digest = cairn_installation::auth::digest(&origin_token);
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
+    let (_, started) = node_management_call(
+        &app,
+        "/mcp",
+        &origin_token,
+        "list_plugin_resources",
+        json!({"pluginId":"resource-package","instanceId":saved["id"],"resourceType":"repository"}),
+    )
+    .await;
+    let id = text(result(&started), "operation").to_owned();
+    let completed = finish_plugin_resource_call(&s, "/mcp", &origin_token, started).await;
+    assert_eq!(result(&completed)["items"][0]["name"], "Old");
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let armed = Arc::new(AtomicBool::new(false));
+    let gateway = Router::new().route(
+        "/api/relay/00000000-0000-4000-8000-000000000055/plugin-mcp-authorization",
+        post({
+            let s = s.clone();
+            let entered = entered.clone();
+            let release = release.clone();
+            let armed = armed.clone();
+            move |Json(input): Json<Value>| {
+                let s = s.clone();
+                let entered = entered.clone();
+                let release = release.clone();
+                let armed = armed.clone();
+                let origin_digest = origin_digest.clone();
+                async move {
+                    if input["credentialDigest"] == origin_digest
+                        && armed.swap(false, Ordering::SeqCst)
+                    {
+                        entered.notify_one();
+                        release.notified().await;
+                    }
+                    let current = s
+                        .store
+                        .kv(&format!("test-relay:{}", text(&input, "credentialDigest")))
+                        .await
+                        .unwrap();
+                    Json(current.is_some_and(|current| {
+                        current["scopes"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|scope| scope == &input["scope"])
+                    }))
+                }
+            }
+        }),
+    );
+    let (origin, server) = common::serve_locally(gateway).await;
+    let identity_path = s.config.data_dir.join("installation-relay/identity.json");
+    let mut identity: Value =
+        serde_json::from_slice(&tokio::fs::read(&identity_path).await.unwrap()).unwrap();
+    identity["origin"] = json!(origin);
+    tokio::fs::write(&identity_path, serde_json::to_vec(&identity).unwrap())
+        .await
+        .unwrap();
+
+    for tool in ["get_plugin_resource_operation", "get_plugin_operation"] {
+        cairn_installation::plugins::registry::activate(&s, "resource-package", "1")
+            .await
+            .unwrap();
+        armed.store(true, Ordering::SeqCst);
+        let poll = tokio::spawn({
+            let app = app.clone();
+            let token = origin_token.clone();
+            let id = id.clone();
+            async move {
+                node_management_call(&app, "/mcp", &token, tool, json!({"operationId":id})).await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified())
+            .await
+            .unwrap();
+        cairn_installation::plugins::registry::activate(&s, "resource-package", "2")
+            .await
+            .unwrap();
+        let current = s
+            .store
+            .plugin_instance(text(&saved, "id"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.revision, text(&saved, "revision"));
+        release.notify_one();
+        let (_, response) = tokio::time::timeout(std::time::Duration::from_secs(10), poll)
+            .await
+            .unwrap()
+            .unwrap();
+        if response["result"]["isError"] != true {
+            server.abort();
+            s.shutdown.cancel();
+            panic!("{tool} returned the old package result: {response}");
+        }
     }
     server.abort();
     s.shutdown.cancel();

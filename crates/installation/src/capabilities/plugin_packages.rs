@@ -71,7 +71,7 @@ pub(crate) const PLUGIN_PACKAGE_OPERATIONS: &[PluginPackageOperation] = &[
     PluginPackageOperation {
         name: "get_plugin_operation",
         scope: "manage",
-        description: "Read a plugin preparation result. Agent callers cannot read owner instance preparations.",
+        description: "Read a plugin preparation result. Resource results also require read access. Agent callers cannot read owner instance preparations.",
     },
     PluginPackageOperation {
         name: "cancel_plugin_operation",
@@ -93,6 +93,7 @@ pub(crate) struct Authority {
     owner: Option<cairn_protocol::TaskAuthorGrant>,
     public_credential: Option<String>,
     public_scope: Option<&'static str>,
+    additional_public_scope: Option<&'static str>,
 }
 
 impl Authority {
@@ -124,17 +125,19 @@ impl Authority {
             owner: Some(policy.owner),
             public_credential: None,
             public_scope: None,
+            additional_public_scope: None,
         })
     }
 
     pub(crate) async fn recheck(&self, s: &Service) -> Result<()> {
         if let Some(credential) = &self.public_credential {
-            crate::relay::authorize_plugin_mcp_scope(
-                s,
-                credential,
-                self.public_scope.unwrap_or("manage"),
-            )
-            .await?;
+            let required_scope = self.public_scope.unwrap_or("manage");
+            crate::relay::authorize_plugin_mcp_scope(s, credential, required_scope).await?;
+            if let Some(additional) = self.additional_public_scope
+                && additional != required_scope
+            {
+                crate::relay::authorize_plugin_mcp_scope(s, credential, additional).await?;
+            }
         }
         if let Some(expected) = &self.owner {
             let policy = crate::relay::task_author_policy(s).await?.ok_or_else(|| {
@@ -227,7 +230,11 @@ impl PluginPackageOperation {
         context: ResumeContext,
     ) -> Result<Value> {
         let owner = matches!(context, ResumeContext::Human(_));
-        let authority = match context {
+        let public_resource_read = match &context {
+            ResumeContext::Public(scopes, _) => Some(scopes.iter().any(|scope| scope == "read")),
+            _ => None,
+        };
+        let mut authority = match context {
             ResumeContext::Installation(bearer) => Authority {
                 bearer: Some(bearer),
                 ..Default::default()
@@ -243,7 +250,13 @@ impl PluginPackageOperation {
                     self.name,
                     "install_plugin_package" | "activate_plugin_package" | "delete_plugin_package"
                 );
-                if writes_packages && credential.is_none() {
+                let reads_resources = matches!(
+                    self.name,
+                    "list_plugin_resources"
+                        | "resolve_plugin_resource"
+                        | "get_plugin_resource_operation"
+                );
+                if (writes_packages || reads_resources) && credential.is_none() {
                     return Err(Error::unauthorized(
                         "A current public MCP authorization is required.",
                     ));
@@ -429,6 +442,21 @@ impl PluginPackageOperation {
                     &input.operation_id,
                     self.name == "get_plugin_resource_operation",
                 )?;
+                if resource_result.is_some()
+                    && let Some(can_read) = public_resource_read
+                {
+                    if !can_read {
+                        return Err(Error::forbidden(
+                            "The read scope is required for resource results.",
+                        ));
+                    }
+                    if authority.public_credential.is_none() {
+                        return Err(Error::unauthorized(
+                            "A current public MCP authorization is required.",
+                        ));
+                    }
+                    authority.additional_public_scope = Some("read");
+                }
                 if self.name == "cancel_plugin_operation" {
                     s.plugins.operations.cancel(&input.operation_id)?;
                 }

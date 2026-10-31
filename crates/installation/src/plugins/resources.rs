@@ -56,18 +56,27 @@ impl Read {
         // Recheck it after the originating authority's remote check, then take
         // one final local grant/revision snapshot after all remote I/O.
         caller.recheck(s).await?;
+        // Activation can race either remote authorization. Serialize the final
+        // package check and local snapshot with package publication.
+        let _publication = s.plugins.package_publication.lock().await;
+        self.check_package(s).await?;
         s.store
             .read(move |db| scope::authorize_in(db, &self.scope))
             .await
     }
 
-    pub(crate) async fn authorize(&self, s: &Service) -> Result<()> {
+    async fn check_package(&self, s: &Service) -> Result<()> {
         let current = registry::active(s, &self.package.manifest.id).await?;
         if current.digest != self.package.digest {
             return Err(Error::forbidden(
                 "The plugin package changed. Retry the resource read.",
             ));
         }
+        Ok(())
+    }
+
+    pub(crate) async fn authorize(&self, s: &Service) -> Result<()> {
+        self.check_package(s).await?;
         scope::authorize(s, &self.scope).await
     }
 }

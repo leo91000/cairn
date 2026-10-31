@@ -1246,8 +1246,11 @@ Read surfaces share these implementations:
   (`pluginId`, `instanceId`, `resourceType`, optional `page`/`query`) and
   `resolve_plugin_resource` (`pluginId`, `instanceId`, `resourceType`, `id`), then
   `get_plugin_resource_operation` (`operationId`). All require public MCP `read`.
-  The read polling tool cannot retrieve management preparations. Installation
-  agents also need a current grant on the instance, because discovery uses its service credentials; installation access
+  The read polling tool cannot retrieve management preparations. Retrieving a
+  resource result through the existing management poller requires both `manage`
+  and `read`; it cannot bypass the read scope. Resource reads require a current
+  verifiable public authorization, not an old scope snapshot without its credential.
+  Installation agents also need a current grant on the instance, because discovery uses its service credentials; installation access
   alone does not confer access to the service account. Authorization and instance
   grants are checked before each host capability, after slow I/O and after the handler.
   Installation-agent grants stay bound to the instance during OAuth refresh, including
