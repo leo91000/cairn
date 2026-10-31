@@ -1432,7 +1432,7 @@ mod schema_tests {
         drop(Store::open(root.path()).unwrap());
         let file = root.path().join("manager.db");
         let db = Connection::open(&file).unwrap();
-        db.execute_batch("DROP TABLE timeline_entries; DROP TABLE timeline_state; DROP TABLE run_progress; DROP TABLE plugin_hook_receipts; DROP TABLE plugin_hook_events; PRAGMA user_version=19; INSERT INTO kv(key,data) VALUES('hook-upgrade-fixture','true');").unwrap();
+        db.execute_batch("DROP TABLE skill_source_refs; DROP TABLE skill_sources; DROP TABLE artifact_visibility; DROP TABLE artifact_versions; DROP TABLE artifacts; DROP TABLE timeline_entries; DROP TABLE timeline_state; DROP TABLE run_progress; DROP TABLE plugin_hook_receipts; DROP TABLE plugin_hook_events; PRAGMA user_version=19; INSERT INTO kv(key,data) VALUES('hook-upgrade-fixture','true');").unwrap();
         drop(db);
         drop(Store::open(root.path()).unwrap());
         drop(Store::open(root.path()).unwrap());
@@ -1472,7 +1472,7 @@ mod schema_tests {
             .unwrap()
         };
         let retained = hook_schema(&db);
-        db.execute_batch("DROP TABLE timeline_entries; DROP TABLE timeline_state; DROP TABLE run_progress; PRAGMA user_version=20; INSERT INTO kv(key,data) VALUES('progress-upgrade-fixture','true');").unwrap();
+        db.execute_batch("DROP TABLE skill_source_refs; DROP TABLE skill_sources; DROP TABLE artifact_visibility; DROP TABLE artifact_versions; DROP TABLE artifacts; DROP TABLE timeline_entries; DROP TABLE timeline_state; DROP TABLE run_progress; PRAGMA user_version=20; INSERT INTO kv(key,data) VALUES('progress-upgrade-fixture','true');").unwrap();
         drop(db);
         drop(Store::open(root.path()).unwrap());
         drop(Store::open(root.path()).unwrap());
@@ -1549,12 +1549,13 @@ mod schema_tests {
     #[test]
     fn startup_steps_accept_a_database_upgraded_by_another_startup() {
         type Upgrade = fn(&mut Connection) -> Result<()>;
-        let steps: [(&str, Upgrade); 6] = [
+        let steps: [(&str, Upgrade); 7] = [
             ("accounts", crate::accounts::migration::upgrade),
             ("conversations", crate::chats::migration::upgrade),
             ("questions", crate::chats::question_migration::upgrade),
             ("attachments", crate::attachments::migration::upgrade),
             ("personal state", crate::reads::migration::upgrade),
+            ("progress", crate::worker::progress::upgrade),
             ("deliverables", crate::artifacts::migration::upgrade),
         ];
         let root = tempfile::tempdir().unwrap();

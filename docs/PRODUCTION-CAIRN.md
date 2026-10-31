@@ -80,8 +80,10 @@ Version 21 upgrades to 22 through the [timeline projection migration](migrations
 
 Version 18 then upgrades to 19 through the
 [run JSON projection migration](STORAGE-PERFORMANCE.md#run-json-projections).
-Version 19 then upgrades to 20 through the
-[typed deliverable and skill source migration](migrations/0020-typed-deliverables-and-skill-sources.md).
+Version 19 then upgrades to 20 through the plugin hook queues.
+Version 20 upgrades to 21 through the [writer-owned progress migration](migrations/0021-run-progress.md).
+Version 21 then upgrades to 22 through the
+[typed deliverable and skill source migration](migrations/0022-typed-deliverables-and-skill-sources.md).
 Stop the old manager and retain a consistent database/WAL backup first. Keep the
 installation identity, configuration, data roots, node state and object storage.
 The migration preserves node identities, credentials, configuration and references;

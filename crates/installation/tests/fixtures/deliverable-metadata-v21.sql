@@ -1,4 +1,4 @@
--- Real Store 23dee7bb: actual v18 fixture upgraded offline to schema19; all data and credentials synthetic.
+-- Real Store f836a3df: actual v19 fixture upgraded offline to schema21; all data and credentials synthetic.
 PRAGMA foreign_keys=OFF;
 BEGIN TRANSACTION;
 CREATE TABLE account_dismissals(
@@ -623,6 +623,22 @@ CREATE TABLE plugin_events(
  created_at INTEGER NOT NULL CHECK(created_at BETWEEN 0 AND 9007199254740991),
  next_attempt_at INTEGER NOT NULL CHECK(next_attempt_at BETWEEN 0 AND 9007199254740991)
 ) WITHOUT ROWID;
+CREATE TABLE plugin_hook_events(
+ id TEXT PRIMARY KEY NOT NULL,
+ instance_id TEXT NOT NULL REFERENCES plugin_instances(id) ON DELETE CASCADE,
+ revision TEXT NOT NULL,
+ package_digest TEXT NOT NULL CHECK(length(package_digest)=64),
+ external_id TEXT NOT NULL CHECK(length(external_id) BETWEEN 1 AND 200),
+ name TEXT NOT NULL,
+ payload TEXT NOT NULL CHECK(json_valid(payload) AND json_type(payload)='object' AND length(CAST(payload AS BLOB))<=262144),
+ created_at INTEGER NOT NULL CHECK(created_at BETWEEN 0 AND 9007199254740991)
+) WITHOUT ROWID;
+CREATE TABLE plugin_hook_receipts(
+ instance_id TEXT NOT NULL REFERENCES plugin_instances(id) ON DELETE CASCADE,
+ external_id TEXT NOT NULL CHECK(length(external_id) BETWEEN 1 AND 200),
+ expires_at INTEGER NOT NULL,
+ PRIMARY KEY(instance_id,external_id)
+) WITHOUT ROWID;
 CREATE TABLE plugin_http_receipts(
  id TEXT PRIMARY KEY NOT NULL,
  instance_id TEXT NOT NULL REFERENCES plugin_instances(id) ON DELETE CASCADE,
@@ -783,6 +799,7 @@ CREATE TABLE "records"(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind NOT IN 
 CREATE TABLE remote_deletions(id TEXT PRIMARY KEY,location TEXT NOT NULL,key TEXT NOT NULL,prefix INTEGER NOT NULL DEFAULT 0,retry_at INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE run_checkpoints(run_id TEXT PRIMARY KEY NOT NULL REFERENCES runs(id) ON DELETE CASCADE,state TEXT NOT NULL CHECK(json_valid(state) AND json_type(state)='object'));
 INSERT INTO "run_checkpoints" VALUES('00000000-0000-4000-8000-000000000010','{}');
+CREATE TABLE run_progress(run_id TEXT PRIMARY KEY NOT NULL REFERENCES runs(id) ON DELETE CASCADE,state TEXT NOT NULL CHECK(json_valid(state) AND json_type(state)='object'));
 CREATE TABLE runs(
   id TEXT PRIMARY KEY NOT NULL CHECK(length(id)>0),
   task_id TEXT NOT NULL CHECK(length(task_id)>0),
@@ -998,7 +1015,9 @@ CREATE VIEW run_views AS SELECT runs.*,
   '$.retry',json(CASE WHEN retry_attempt IS NULL THEN NULL ELSE json_object('attempt',retry_attempt,'limit',retry_limit,'nextAttemptAt',retry_next_at,'startedAt',retry_started_at,'deadlineAt',retry_deadline_at,'cause',json(retry_cause)) END)
 ,'$.taskName',task_name,'$.agentName',agent_name,'$.provider',provider) AS summary_data
 FROM runs;
+CREATE INDEX plugin_hook_events_instance ON plugin_hook_events(instance_id,created_at,id);
+CREATE INDEX plugin_hook_receipts_expiry ON plugin_hook_receipts(expires_at);
 DELETE FROM "sqlite_sequence";
 INSERT INTO "sqlite_sequence" VALUES('audit',780);
 COMMIT;
-PRAGMA user_version=19;
+PRAGMA user_version=21;

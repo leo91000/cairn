@@ -1,4 +1,4 @@
-# Typed deliverables and skill sources (19 → 20)
+# Typed deliverables and skill sources (21 → 22)
 
 The manager upgrades the installation database automatically at startup in one
 immediate SQLite transaction. `artifacts` identifies a run/key; `artifact_versions`
@@ -22,7 +22,7 @@ version/size constraints fail the transaction. Original rows, schema and version
 remain intact for repair and retry. Other KV data is preserved.
 
 Stop the previous manager and retain a consistent database/WAL backup before an
-upgrade. An older binary cannot open schema 20: recovery requires the retained
+upgrade. An older binary cannot open schema 22: recovery requires the retained
 backup or a compatible forward fix. This PR authorizes no production action.
 Follow the private upgrade rehearsal in `docs/PRODUCTION-CAIRN.md` before a future
 release; synthetic qualification does not replace it.
@@ -30,10 +30,12 @@ release; synthetic qualification does not replace it.
 ## Qualification
 
 `deliverable_metadata_migration` restores the committed synthetic SQL snapshot
-produced by the real Store at `23dee7bb`: the existing synthetic v18 database
+produced by the real Store at `f836a3df`: the existing synthetic v18 database
 (with artifact versions, a public link and skill sources written by the real
-`b3ebdc4b` fixture) upgraded to v19 through the actual preceding binary. The v19
-run projection view and every unrelated row/schema object must also survive. It checks metadata and unrelated rows, nullable
+`b3ebdc4b` fixture) upgraded to v19 by `23dee7bb`, then to v21 by the actual
+preceding binary. The run projection view, plugin hook queues, progress table
+and every unrelated row/schema object must also survive. It checks metadata and
+unrelated rows, nullable
 references for removed resources, the resulting FK/quick checks, reopening and
 rejection of future domain KV writes. Corruption scenarios compare all original
 table schemas/rows and `user_version` after failed startup.
