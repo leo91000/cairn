@@ -169,7 +169,7 @@
       "runId": "00000000-0000-4000-8000-000000000092",
       "nodeId": "00000000-0000-4000-8000-000000000091",
       "requiredTags": [
-        "é"
+        "\u00e9"
       ]
     },
     {
@@ -295,6 +295,55 @@
       "cpu": 1,
       "memoryMiB": 128,
       "diskMiB": 120
+    }
+  ],
+  "moveOperations": [
+    {
+      "id": "00000000-0000-4000-8000-000000000101",
+      "state": "running",
+      "result": null,
+      "error": null,
+      "errorStatus": null
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000101",
+      "state": "completed",
+      "result": {
+        "status": "moving",
+        "nodeId": "00000000-0000-4000-8000-000000000102"
+      },
+      "error": null,
+      "errorStatus": null
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000101",
+      "state": "failed",
+      "result": null,
+      "error": "Destination capacity unavailable.",
+      "errorStatus": 503
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000101",
+      "state": "cancelled",
+      "result": null,
+      "error": null,
+      "errorStatus": null
+    }
+  ],
+  "invalidMoveOperations": [
+    {
+      "id": "00000000-0000-4000-8000-000000000101",
+      "state": "unknown",
+      "result": null,
+      "error": null,
+      "errorStatus": null
+    },
+    {
+      "id": "not-a-uuid",
+      "state": "running",
+      "result": null,
+      "error": null,
+      "errorStatus": null
     }
   ]
 }

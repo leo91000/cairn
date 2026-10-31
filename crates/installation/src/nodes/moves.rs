@@ -11,13 +11,21 @@ use crate::{
 use cairn_contracts::EventKind;
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::time::Duration;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
+use tokio_util::sync::CancellationToken;
 
 const MOVE_DESCRIPTION: &str = "Move this conversation to an authorized node. Call list_nodes first to see ids, tags, shared budgets and free slots. Failure leaves the current conversation running. Success saves, pauses and resumes on the destination, interrupting running commands. Optional waitSeconds respects the configured wait limit.";
 const LIST_NODES_DESCRIPTION: &str = "List authorized execution nodes with their tags, shared CPU/RAM/disk budgets, slot availability and current resource pressure. Use a returned node id with move_to_node. Resources are shared automatically; agents do not request allocations.";
 /// A requested move waits this long for the conversation to settle before pausing it.
 const PAUSE_DELAY_MS: i64 = 2000;
 const MAX_WAIT_SECONDS: u64 = 3600;
+pub(crate) const CANCELLED_CAPACITY_WAIT: &str = "Movement capacity wait was cancelled.";
 
 pub fn tool() -> Value {
     let mut input = cairn_contracts::schema_for::<cairn_contracts::MoveToNodeInput>(
@@ -143,6 +151,8 @@ type LocalAuthorization = std::sync::Arc<dyn Fn(&Db<'_>) -> Result<()> + Send + 
 pub(crate) struct Authorization {
     local: LocalAuthorization,
     public_credential: Option<String>,
+    cancellation: CancellationToken,
+    admitted: Arc<AtomicBool>,
 }
 
 impl Default for Authorization {
@@ -159,6 +169,8 @@ impl Authorization {
         Self {
             local: std::sync::Arc::new(local),
             public_credential,
+            cancellation: CancellationToken::new(),
+            admitted: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -181,14 +193,142 @@ impl Authorization {
     }
 
     pub(crate) fn check(&self, db: &Db<'_>) -> Result<()> {
+        self.check_cancellation()?;
+        self.check_access(db)
+    }
+
+    pub(crate) fn check_access(&self, db: &Db<'_>) -> Result<()> {
         (self.local)(db)
     }
 
     pub(crate) async fn recheck(&self, s: &Service) -> Result<()> {
+        self.check_cancellation()?;
+        self.recheck_access(s).await
+    }
+
+    pub(crate) async fn recheck_access(&self, s: &Service) -> Result<()> {
         if let Some(digest) = &self.public_credential {
             crate::relay::authorize_plugin_mcp_scope(s, digest, "run").await?;
         }
         Ok(())
+    }
+
+    fn check_cancellation(&self) -> Result<()> {
+        if self.cancellation.is_cancelled() {
+            return Err(Error::conflict(CANCELLED_CAPACITY_WAIT));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+
+    pub(crate) fn admitted(&self) -> bool {
+        self.admitted.load(Ordering::Acquire)
+    }
+}
+
+/// Keep one admission per conversation. Dropping an HTTP/workspace request must
+/// clear its wait and release only an unreferenced destination reservation.
+struct AdmissionGuard {
+    service: Service,
+    run: String,
+    reservation: String,
+    until: Option<i64>,
+    authorization: Authorization,
+    active: bool,
+}
+
+impl AdmissionGuard {
+    fn new(service: &Service, run: &str, authorization: &Authorization) -> Result<Self> {
+        service.node_move_operations.claim_wait(run)?;
+        Ok(Self {
+            service: service.clone(),
+            run: run.to_owned(),
+            reservation: id(),
+            until: None,
+            authorization: authorization.clone(),
+            active: true,
+        })
+    }
+
+    async fn finish(&mut self, succeeded: bool) -> Result<()> {
+        if !succeeded {
+            Self::cleanup(&self.service, &self.run, &self.reservation, self.until).await?;
+        }
+        self.service.node_move_operations.finish_wait(&self.run);
+        self.active = false;
+        Ok(())
+    }
+
+    async fn cleanup(
+        service: &Service,
+        run: &str,
+        reservation: &str,
+        until: Option<i64>,
+    ) -> Result<()> {
+        let (owner, allocation) = (run.to_owned(), reservation.to_owned());
+        // This writer queues behind any in-flight admission transaction. A
+        // committed move owns its reservation even if its reply was dropped.
+        let unclaimed = service
+            .store
+            .transaction(move |db| {
+                if let Some(state) = db.run_state(&owner)? {
+                    let placement = db.run_placement(&owner)?;
+                    if placement.move_reservation.as_deref() == Some(allocation.as_str())
+                        || placement
+                            .move_request
+                            .as_ref()
+                            .is_some_and(|request| request.reservation == allocation)
+                    {
+                        return Ok(false);
+                    }
+                    if until.is_some() && state.capacity_wait_until == until {
+                        db.change_run(
+                            &owner,
+                            crate::runs::RunChanges {
+                                capacity_wait_until: Some(None),
+                                ..Default::default()
+                            },
+                        )?;
+                    }
+                }
+                Ok(true)
+            })
+            .await?;
+        if unclaimed {
+            super::placement::release(service, reservation).await?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for AdmissionGuard {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        self.authorization.cancel();
+        let (service, run, reservation, until) = (
+            self.service.clone(),
+            self.run.clone(),
+            self.reservation.clone(),
+            self.until,
+        );
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                if Self::cleanup(&service, &run, &reservation, until)
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(
+                        "Interrupted move cleanup failed; destination ownership retained."
+                    );
+                }
+                service.node_move_operations.finish_wait(&run);
+            });
+        }
     }
 }
 
@@ -248,6 +388,20 @@ async fn requested(
     by_agent: bool,
     authorize: Authorization,
 ) -> Result<Value> {
+    let mut guard = AdmissionGuard::new(s, text(run, "id"), &authorize)?;
+    let result = requested_inner(s, run, args, by_agent, authorize, &mut guard).await;
+    guard.finish(result.is_ok()).await?;
+    result
+}
+
+async fn requested_inner(
+    s: &Service,
+    run: &Value,
+    args: &Value,
+    by_agent: bool,
+    authorize: Authorization,
+    guard: &mut AdmissionGuard,
+) -> Result<Value> {
     if run["environmentState"].is_string() {
         return Err(Error::conflict(
             "The working environment expired. Send a new message before moving it.",
@@ -293,7 +447,8 @@ async fn requested(
             checkpoint["prepared"]["backend"].as_str(),
             Some("firecracker" | "native")
         );
-    let reservation = id();
+    let reservation = guard.reservation.clone();
+    guard.until = Some(deadline);
     let mut selecting = run.clone();
     selecting["placementTransition"] = true.into();
     selecting["targetNodeId"] = args["nodeId"].clone();
@@ -327,12 +482,17 @@ async fn requested(
     } else {
         RunStatus::Running
     };
-    if let Err(error) =
-        record_request(s, run_id, move_request, idle, expected, source, authorize).await
-    {
-        super::placement::release(s, &reservation).await?;
-        return Err(error);
-    }
+    record_request(
+        s,
+        run_id,
+        move_request,
+        idle,
+        expected,
+        source,
+        authorize.clone(),
+    )
+    .await?;
+    authorize.admitted.store(true, Ordering::Release);
     let destination = destination_name(s, selected["nodeId"].as_str()).await?;
     // The owner sees in the conversation that the agent moved itself, and what it asked for.
     let message = if by_agent {
@@ -389,6 +549,9 @@ async fn wait_for_capacity(
                 set_capacity_wait(s, run_id, Some(deadline)).await?;
                 let stopping = tokio::select! {
                     () = s.shutdown.cancelled() => true,
+                    () = authorize.cancellation.cancelled() => {
+                        return Err(Error::conflict(CANCELLED_CAPACITY_WAIT));
+                    },
                     () = tokio::time::sleep(Duration::from_secs(1)) => false,
                 };
                 if stopping {
