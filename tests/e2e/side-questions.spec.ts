@@ -141,6 +141,29 @@ test('keeps a reply filter when asking more than once', async ({ page, workspace
   await workspace.api(`/api/chats/${chat.id}/stop`, 'POST', {})
 })
 
+test('anchors an event-less question before an item ID is reused', async ({ page, workspace }) => {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Review. fixture:chat-hang', provider: 'claude' })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).canAskSideQuestion).toBe(true)
+  const run = (await workspace.api(`/api/chats/${chat.id}`)).run.id
+  workspace.service.store.event(run, 'turn.started', '')
+  workspace.service.store.event(run, 'item.completed', '', { item: { id: 'reused-reply', type: 'agent_message', text: 'First distinct reply' } })
+  const question = { id: randomUUID(), text: 'Why first?', itemId: 'reused-reply' }
+  const asked = await workspace.api(`/api/chats/${chat.id}/side-questions`, 'POST', question)
+  expect(asked.replyEventId).not.toBe('')
+  workspace.service.store.event(run, 'turn.completed', '')
+  workspace.service.store.event(run, 'item.completed', '', { item: { id: 'reused-reply', type: 'agent_message', text: 'Second distinct reply' } })
+  const retried = await workspace.api(`/api/chats/${chat.id}/side-questions`, 'POST', question)
+  expect(retried.replyEventId).toBe(asked.replyEventId)
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  const first = page.locator('.activity-message').filter({ hasText: 'First distinct reply' })
+  const second = page.locator('.activity-message').filter({ hasText: 'Second distinct reply' })
+  await expect(first.getByRole('button', { name: 'Show 1 side question about this reply' })).toBeVisible()
+  await expect(second.getByRole('button', { name: /Show .* side question/ })).toHaveCount(0)
+  await workspace.api(`/api/chats/${chat.id}/stop`, 'POST', {})
+})
+
 test('links reused native item IDs to the selected reply', async ({ page, workspace }) => {
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Review. fixture:chat-hang', provider: 'claude' })

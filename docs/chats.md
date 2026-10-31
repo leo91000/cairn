@@ -147,8 +147,7 @@ its text, so it cannot be cut through a secret before redaction. A reply holds a
 and those withdrawn while it runs. A question about a whole reply reaches the agent with
 the first 2,000 characters of that reply. Clients identify a reply by its stored
 event as well as its native item ID, so an ID reused in a later turn does not select
-the later reply. Earlier clients can omit the event and use the item-ID lookup;
-if that ID appears in multiple turns, the request is refused until it identifies an event.
+the later reply. Earlier clients can omit the event and use the item-ID lookup; Cairn stores the resolved event so later reuse cannot retarget the saved question. If that ID already appears in multiple turns, the request is refused until it identifies an event.
 The encoded side request, including its reply context and JSON envelope, must fit in one
 atomic pipe write (4,096 bytes on Linux); a larger request is reported unanswered. This
 bound keeps a stalled control channel from blocking the main reply or receiving a partial

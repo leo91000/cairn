@@ -194,10 +194,16 @@ fn save(db: &Db<'_>, question: &ChatSideQuestion) -> Result<()> {
 
 /// The start of the agent reply `item_id`, so the agent knows which reply a question is
 /// about when it quotes no passage.
-fn reply_start(db: &Db<'_>, run_id: &str, item_id: &str, event_id: Option<i64>) -> Result<String> {
+fn reply_start(
+    db: &Db<'_>,
+    run_id: &str,
+    item_id: &str,
+    event_id: Option<i64>,
+) -> Result<(String, Option<i64>)> {
     if item_id.is_empty() {
-        return Ok(String::new());
+        return Ok((String::new(), None));
     }
+    let mut resolved = event_id;
     if event_id.is_none() {
         let turns: i64 = db.0.query_row(
             "SELECT COUNT(DISTINCT COALESCE((SELECT MAX(t.id) FROM events t WHERE t.run_id=e.run_id AND t.type IN ('turn.started','turn.completed','turn.failed') AND t.id<e.id),0))
@@ -213,6 +219,11 @@ fn reply_start(db: &Db<'_>, run_id: &str, item_id: &str, event_id: Option<i64>) 
                 "This reply ID is ambiguous. Include replyEventId to identify the reply.",
             ));
         }
+        resolved = db.0.query_row(
+            "SELECT MIN(id) FROM events WHERE run_id=?1 AND json_extract(payload,'$.item.type')='agent_message' AND json_extract(payload,'$.item.id')=?2",
+            rusqlite::params![run_id, item_id],
+            |row| row.get(0),
+        )?;
     }
     let reply: Option<String> = if let Some(event_id) = event_id {
         db.0.prepare_cached(
@@ -231,7 +242,7 @@ fn reply_start(db: &Db<'_>, run_id: &str, item_id: &str, event_id: Option<i64>) 
         db
         .0
         .prepare_cached(
-            "SELECT json_extract(payload,'$.item.text') FROM events WHERE run_id=?1 AND json_extract(payload,'$.item.type')='agent_message' AND json_extract(payload,'$.item.id')=?2 ORDER BY id DESC LIMIT 1",
+            "SELECT COALESCE(json_extract(payload,'$.item.text'),text) FROM events WHERE run_id=?1 AND json_extract(payload,'$.item.type')='agent_message' AND json_extract(payload,'$.item.id')=?2 ORDER BY id DESC LIMIT 1",
         )?
         .query_row(rusqlite::params![run_id, item_id], |row| row.get(0))
         .optional()?
@@ -244,11 +255,11 @@ fn reply_start(db: &Db<'_>, run_id: &str, item_id: &str, event_id: Option<i64>) 
     };
     let reply = reply.trim();
     if reply.chars().count() <= MAX_ABOUT {
-        return Ok(reply.to_owned());
+        return Ok((reply.to_owned(), resolved));
     }
-    Ok(format!(
-        "{}…",
-        reply.chars().take(MAX_ABOUT).collect::<String>()
+    Ok((
+        format!("{}…", reply.chars().take(MAX_ABOUT).collect::<String>()),
+        resolved,
     ))
 }
 
@@ -331,7 +342,7 @@ fn same_question(existing: &ChatSideQuestion, input: &SideQuestionInput) -> bool
     existing.text == input.text
         && existing.quote == input.quote
         && existing.item_id == input.item_id
-        && existing.reply_event_id == input.reply_event_id
+        && (input.reply_event_id.is_empty() || existing.reply_event_id == input.reply_event_id)
 }
 
 /// Forgets the oldest settled side questions beyond what a conversation keeps.
@@ -417,7 +428,7 @@ fn ask(
         .ok()
         .map(|provider| serde_json::from_value(Value::from(provider.as_str())))
         .transpose()?;
-    let question = ChatSideQuestion {
+    let mut question = ChatSideQuestion {
         id: input.id,
         chat_id: chat_id.to_owned(),
         run_id: text(&run, "id").to_owned(),
@@ -432,12 +443,15 @@ fn ask(
         created_at: now(),
         settled_at: None,
     };
-    let reply = reply_start(
+    let (reply, resolved_event) = reply_start(
         db,
         &question.run_id,
         &question.item_id,
         question.reply_event_id.parse().ok(),
     )?;
+    if question.reply_event_id.is_empty() {
+        question.reply_event_id = resolved_event.map(|id| id.to_string()).unwrap_or_default();
+    }
     let about = if question.quote.is_empty() {
         reply
     } else {
@@ -854,8 +868,8 @@ mod tests {
                 )?;
             }
             db.0.execute("INSERT INTO events(id,run_id,created_at,type,text) VALUES(13,'r',0,'turn.completed','')", [])?;
-            assert_eq!(reply_start(db, "r", "reused", Some(11))?, "First reply");
-            assert_eq!(reply_start(db, "r", "reused", Some(14))?, "Later reply");
+            assert_eq!(reply_start(db, "r", "reused", Some(11))?, ("First reply".to_owned(), Some(11)));
+            assert_eq!(reply_start(db, "r", "reused", Some(14))?, ("Later reply".to_owned(), Some(14)));
             assert!(reply_start(db, "r", "another", Some(11)).is_err());
             assert!(reply_start(db, "r", "reused", None).is_err());
             // A fresh history page keeps the first snapshot's identity even though

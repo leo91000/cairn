@@ -5341,6 +5341,77 @@ async fn agents_follow_owner_sign_in_without_challenge_or_mutation_authority() {
 }
 
 #[tokio::test]
+async fn eventless_side_question_stays_on_its_reply_after_item_id_reuse() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let claude = s
+        .agent_fixture(json!({ "name": "Claude", "provider": "claude" }), None)
+        .await
+        .unwrap();
+    let (run, _) = active_run(&s, &claude).await;
+    let run_id = run["id"].as_str().unwrap();
+    let mut chat = s.chat_create(json!({})).await.unwrap();
+    chat["runId"] = run["id"].clone();
+    let chat_id = chat["id"].as_str().unwrap().to_owned();
+    s.store.save_conversation_boundary(chat).await.unwrap();
+    s.side_questions_available(run_id, true).await.unwrap();
+    let item = |text: &str| {
+        json!({
+            "item": {
+                "id": "reused",
+                "type": "agent_message",
+                "text": text,
+            },
+        })
+    };
+    s.store
+        .event(
+            run_id,
+            &EventKind::ItemCompleted,
+            "First",
+            Some(item("First")),
+        )
+        .await
+        .unwrap();
+    let request = json!({
+        "chatId": chat_id,
+        "question": {
+            "id": uuid::Uuid::new_v4(),
+            "text": "Why?",
+            "itemId": "reused",
+        },
+    });
+    let asked = public_call(&s, &["run"], "ask_chat_side_question", request.clone()).await;
+    let saved = result(&asked).clone();
+    assert!(
+        !saved["replyEventId"].as_str().unwrap().is_empty(),
+        "{asked}"
+    );
+    s.store
+        .event(run_id, &EventKind::TurnCompleted, "", None)
+        .await
+        .unwrap();
+    s.store
+        .event(
+            run_id,
+            &EventKind::ItemCompleted,
+            "Second",
+            Some(item("Second")),
+        )
+        .await
+        .unwrap();
+    let retry = call(&s, &configuration, "ask_chat_side_question", request).await;
+    assert_eq!(result(&retry)["id"], saved["id"], "{retry}");
+    assert_eq!(
+        result(&retry)["replyEventId"],
+        saved["replyEventId"],
+        "{retry}"
+    );
+}
+
+#[tokio::test]
 async fn pruned_side_question_ids_cannot_be_replayed_or_reused() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
@@ -5507,6 +5578,7 @@ async fn side_questions_are_asked_withdrawn_and_answered_beside_the_running_repl
     assert_eq!(result(&asked)["status"], "pending");
     assert_eq!(result(&asked)["runId"], run_id.as_str());
     assert_eq!(result(&asked)["provider"], "claude");
+    assert!(!result(&asked)["replyEventId"].as_str().unwrap().is_empty());
     let repeated = call(&s, &configuration, "ask_chat_side_question", first.clone()).await;
     assert_eq!(result(&asked), result(&repeated));
     let mut reused = first.clone();
@@ -5526,6 +5598,7 @@ async fn side_questions_are_asked_withdrawn_and_answered_beside_the_running_repl
     )
     .await;
     let second_id = result(&second)["id"].as_str().unwrap().to_owned();
+    assert!(!result(&second)["replyEventId"].as_str().unwrap().is_empty());
     let public = public_call(
         &s,
         &["read"],

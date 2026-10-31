@@ -236,7 +236,7 @@ about the conversation, optionally quoting a passage (`question.quote`) of one o
 its replies (`question.itemId`, the agent message's item ID). Without a quote, a
 question about a reply reaches the agent with the start of that reply. Include the
 reply's stored event ID as a decimal string in `question.replyEventId` to distinguish
-reused item IDs; it must identify an agent message in this conversation's run. It requires
+reused item IDs; it must identify an agent message in this conversation's run. If omitted, a unique item ID is resolved and its event is saved; ambiguous IDs are refused. It requires
 `canAskSideQuestion`, reported by `get_chat`, `list_chats` and
 `list_chat_side_questions` with `sideQuestionReason` (and its code,
 `sideQuestionUnavailable`) when false: Claude Code must be
