@@ -16,6 +16,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
+import build.cairn.contracts.ExecutionResources
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -625,15 +626,15 @@ abstract class NodePlacementCases {
         MockWebServer().use { server ->
             val reservation =
                 ExclusiveReservation(
-                    "reservation",
-                    "b40903f9-0487-53d0-a309-c589f0cae405",
-                    "owner",
-                    "Compilation Android",
-                    "acquired",
+                    id = "00000000-0000-4000-8000-000000000094",
+                    nodeId = "b40903f9-0487-53d0-a309-c589f0cae405",
+                    ownerRunId = "owner",
+                    reason = "Compilation Android",
+                    state = "acquired",
                 )
             val run =
                 Run(
-                    id = "neighbor",
+                    id = "00000000-0000-4000-8000-000000000095",
                     status = "running",
                     taskName = "Exécution voisine",
                     suspendedByExclusive = reservation,
@@ -780,13 +781,13 @@ abstract class NodePlacementCases {
                         val body =
                             when {
                                 path ==
-                                    "/api/installations/fixture/api/nodes/b40903f9-0487-53d0-a309-c589f0cae405/exclusive/reservation/release" -> {
+                                    "/api/installations/fixture/api/nodes/reservations/exclusive/00000000-0000-4000-8000-000000000094/release" -> {
                                     releases += request
                                     releasing.set(true)
-                                    "{}"
+                                    """{"id":"00000000-0000-4000-8000-000000000094","nodeId":"b40903f9-0487-53d0-a309-c589f0cae405","ownerRunId":"owner-run","reason":"Compilation Android","state":"releasing","createdAt":100,"expiresAt":4102444800000,"waitUntil":4102444800000,"pausedRunIds":["neighbor-one","neighbor-two"],"minimumAvailableMemoryMiB":4096}"""
                                 }
                                 path == "/api/installations/fixture/api/nodes" ->
-                                    """[{"id":"b40903f9-0487-53d0-a309-c589f0cae405","name":"Serveur réservé","status":"online","accepting":true,"executionReady":true,"capabilities":{"kvm":true},"exclusiveReservations":true,"exclusiveReservation":{"id":"reservation","nodeId":"b40903f9-0487-53d0-a309-c589f0cae405","ownerRunId":"owner-run","reason":"Compilation Android","state":"${if (releasing.get()) "releasing" else "acquired"}","createdAt":100,"expiresAt":4102444800000,"waitUntil":4102444800000,"pausedRunIds":["neighbor-one","neighbor-two"],"minimumAvailableMemoryMiB":4096}}]"""
+                                    """[{"id":"b40903f9-0487-53d0-a309-c589f0cae405","name":"Serveur réservé","status":"online","accepting":true,"executionReady":true,"capabilities":{"kvm":true},"exclusiveReservations":true,"exclusiveReservation":{"id":"00000000-0000-4000-8000-000000000094","nodeId":"b40903f9-0487-53d0-a309-c589f0cae405","ownerRunId":"owner-run","reason":"Compilation Android","state":"${if (releasing.get()) "releasing" else "acquired"}","createdAt":100,"expiresAt":4102444800000,"waitUntil":4102444800000,"pausedRunIds":["neighbor-one","neighbor-two"],"minimumAvailableMemoryMiB":4096}}]"""
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
                                 path == "/api/installations/fixture/api/overview" ->
@@ -905,12 +906,12 @@ abstract class NodePlacementCases {
             val run =
                 mutableStateOf(
                     Run(
-                        id = "neighbor",
+                        id = "00000000-0000-4000-8000-000000000095",
                         status = "running",
                         nodeId = LOCAL_NODE_ID,
                         suspendedByExclusive =
                             ExclusiveReservation(
-                                id = "reservation",
+                                id = "00000000-0000-4000-8000-000000000094",
                                 nodeId = "b40903f9-0487-53d0-a309-c589f0cae405",
                                 ownerRunId = "owner-run",
                                 reason = "Compilation Android",
@@ -1110,15 +1111,17 @@ abstract class NodePlacementCases {
                         val path = request.path!!.substringBefore('?')
                         val body =
                             when {
-                                path == "/api/installations/fixture/api/nodes/placement/run" &&
+                                path ==
+                                    "/api/installations/fixture/api/nodes/placement/00000000-0000-4000-8000-000000000095" &&
                                     request.method == "PUT" -> {
                                     saved +=
                                         wireJson
                                             .parseToJsonElement(request.body.readUtf8())
                                             .jsonObject
-                                    "{}"
+                                    """{"nodes":[],"pinnedNodeId":null,"preferredNodeId":null}"""
                                 }
-                                path == "/api/installations/fixture/api/nodes/placement/run" ->
+                                path ==
+                                    "/api/installations/fixture/api/nodes/placement/00000000-0000-4000-8000-000000000095" ->
                                     """{"nodes":[{"id":"b40903f9-0487-53d0-a309-c589f0cae405","name":"Mon serveur","status":"online"},{"id":"824f3da3-b37b-5713-9c61-06e3f54a7ff8","name":"Autre serveur","status":"online"}],"pinnedNodeId":null,"preferredNodeId":null}"""
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
@@ -1180,11 +1183,11 @@ abstract class NodePlacementCases {
                             NodePlacement(
                                 vm,
                                 Run(
-                                    id = "run",
+                                    id = "00000000-0000-4000-8000-000000000095",
                                     status = "succeeded",
                                     nodeId = "b40903f9-0487-53d0-a309-c589f0cae405",
                                     resources =
-                                        NodeResources(
+                                        ExecutionResources(
                                             cpu = 2,
                                             memoryMiB = 4096,
                                             diskMiB = 32768,
@@ -1235,9 +1238,9 @@ abstract class NodePlacementCases {
             }
             assertEquals(
                 "b40903f9-0487-53d0-a309-c589f0cae405",
-                saved[0]["preferredNodeId"]?.jsonPrimitive?.content,
+                saved[0]["selection"]?.jsonObject?.get("preferredNodeId")?.jsonPrimitive?.content,
             )
-            assertEquals(JsonNull, saved[0]["pinnedNodeId"])
+            assertEquals(JsonNull, saved[0]["selection"]?.jsonObject?.get("pinnedNodeId"))
             compose.onNodeWithText("Fixer").performScrollTo().performClick()
             compose.onNodeWithText("Enregistrer").performScrollTo().performClick()
             compose.waitUntil(10000) {
@@ -1249,9 +1252,9 @@ abstract class NodePlacementCases {
             }
             assertEquals(
                 "b40903f9-0487-53d0-a309-c589f0cae405",
-                saved[1]["pinnedNodeId"]?.jsonPrimitive?.content,
+                saved[1]["selection"]?.jsonObject?.get("pinnedNodeId")?.jsonPrimitive?.content,
             )
-            assertEquals(JsonNull, saved[1]["preferredNodeId"])
+            assertEquals(JsonNull, saved[1]["selection"]?.jsonObject?.get("preferredNodeId"))
             compose.onNodeWithText("Dernière synchronisation", substring = true).assertExists()
             compose.onNodeWithText("Préférence enregistrée", substring = true).assertExists()
             // Without a recorded provider session there is nothing to resume elsewhere yet.

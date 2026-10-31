@@ -3,7 +3,10 @@ use common::AgentFixture;
 use common::MissionFixture;
 use common::StoreAgentFixture;
 use common::account_fixture::AccountFixtures;
+
+use common::attempt_fixture::*;
 use common::node_fixture::*;
+use common::run_fixture::*;
 
 mod common;
 
@@ -37,6 +40,79 @@ use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::{Child, Command},
 };
+
+/// Signal only the checkpoint supervisor's private runner child.
+async fn kill_fixture_runner_child(saved: &Value) {
+    let process = saved["process"].clone();
+    let pid = u32::try_from(process["pid"].as_u64().unwrap()).unwrap();
+    let identity = cairn_installation::recovery::process_identity(pid)
+        .await
+        .unwrap();
+    assert_eq!(serde_json::to_value(identity).unwrap(), process);
+    // The checkpoint identifies the supervisor. Find only its runner
+    // child, validating the exact private attempt before sending a signal.
+    let runner = eventually(
+        Duration::from_secs(3),
+        Duration::from_millis(10),
+        async || {
+            // Per-thread children files require an optional kernel feature.
+            // Parent metadata is available on ordinary proc mounts as well.
+            let mut processes = tokio::fs::read_dir("/proc").await.unwrap();
+            let mut runner = None;
+            while let Some(process) = processes.next_entry().await.unwrap() {
+                let Some(child) = process
+                    .file_name()
+                    .to_str()
+                    .and_then(|name| name.parse::<i32>().ok())
+                else {
+                    continue;
+                };
+                let status = match tokio::fs::read_to_string(process.path().join("status")).await {
+                    Ok(status) => status,
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+                        ) =>
+                    {
+                        continue;
+                    }
+                    Err(error) => panic!("Cannot inspect fixture parent: {error}"),
+                };
+                let parent = status
+                    .lines()
+                    .find_map(|line| line.strip_prefix("PPid:"))
+                    .and_then(|value| value.trim().parse::<u32>().ok());
+                if parent != Some(pid) {
+                    continue;
+                }
+                let args = match tokio::fs::read(process.path().join("cmdline")).await {
+                    Ok(args) => args,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => panic!("Cannot inspect fixture child: {error}"),
+                };
+                let args = args.split(|byte| *byte == 0).collect::<Vec<_>>();
+                let command_matches = args.contains(&b"runner-client".as_slice());
+                let attempt_matches = args.contains(&text(saved, "runnerId").as_bytes());
+                if command_matches && attempt_matches {
+                    runner = Some(child);
+                }
+            }
+            runner
+        },
+    )
+    .await;
+    assert_eq!(
+        serde_json::to_value(
+            cairn_installation::recovery::process_identity(pid)
+                .await
+                .unwrap()
+        )
+        .unwrap(),
+        process
+    );
+    assert_eq!(unsafe { libc::kill(runner, libc::SIGKILL) }, 0);
+}
 
 /// The real manager runtime in a separate process, with the synthetic relay
 /// transport for installation-only worker tests. Browser access is tested
@@ -1276,7 +1352,7 @@ async fn automatic_shared_process_turns_do_not_acquire_a_managed_node_owner() {
     assert!(s.store.list("node-volumes").await.unwrap().is_empty());
     assert!(
         s.store
-            .list("node-attempts")
+            .attempts_fixture()
             .await
             .unwrap()
             .iter()
@@ -2066,7 +2142,7 @@ async fn node_slots_exceed_manager_concurrency_without_overpreparing_the_queue()
     );
     assert_eq!(queued[0]["recoveryPending"], false);
     assert_eq!(controller.plans.lock().await.len(), slots);
-    let attempts = fixture.service.store.list("node-attempts").await.unwrap();
+    let attempts = fixture.service.store.attempts().await.unwrap();
     assert_eq!(attempts.len(), slots);
     controller
         .hold
@@ -3524,36 +3600,7 @@ async fn manager_shutdown_between_turn_completion_and_wait_preserves_same_attemp
         }
         if interruption == "signal" {
             let saved = fixture.checkpoint(run_id).await;
-            let process = saved["process"].clone();
-            let pid = u32::try_from(process["pid"].as_u64().unwrap()).unwrap();
-            let identity = cairn_installation::recovery::process_identity(pid)
-                .await
-                .unwrap();
-            assert_eq!(serde_json::to_value(identity).unwrap(), process);
-            // The checkpoint identifies the supervisor. Find only its runner
-            // child, validating the exact private attempt before sending a signal.
-            let mut tasks = tokio::fs::read_dir(format!("/proc/{pid}/task"))
-                .await
-                .unwrap();
-            let mut runner = None;
-            while let Some(task) = tasks.next_entry().await.unwrap() {
-                let children = tokio::fs::read_to_string(task.path().join("children"))
-                    .await
-                    .unwrap();
-                for child in children.split_whitespace() {
-                    let args = tokio::fs::read(format!("/proc/{child}/cmdline"))
-                        .await
-                        .unwrap();
-                    let args = args.split(|byte| *byte == 0).collect::<Vec<_>>();
-                    let command_matches = args.contains(&b"runner-client".as_slice());
-                    let attempt_matches = args.contains(&text(&saved, "runnerId").as_bytes());
-                    if command_matches && attempt_matches {
-                        runner = Some(child.parse::<i32>().unwrap());
-                    }
-                }
-            }
-            let runner = runner.expect("Fixture supervisor must own its runner-client");
-            assert_eq!(unsafe { libc::kill(runner, libc::SIGKILL) }, 0);
+            kill_fixture_runner_child(&saved).await;
         }
         if matches!(interruption, "shutdown" | "cancel") {
             fixture.stop(false).await;
@@ -4468,36 +4515,7 @@ async fn manager_shutdown_between_turn_completion_and_wait_preserves_same_attemp
         }
         if interruption == "signal" {
             let saved = fixture.checkpoint(run_id).await;
-            let process = saved["process"].clone();
-            let pid = u32::try_from(process["pid"].as_u64().unwrap()).unwrap();
-            let identity = cairn_installation::recovery::process_identity(pid)
-                .await
-                .unwrap();
-            assert_eq!(serde_json::to_value(identity).unwrap(), process);
-            // The checkpoint identifies the supervisor. Find only its runner
-            // child, validating the exact private attempt before sending a signal.
-            let mut tasks = tokio::fs::read_dir(format!("/proc/{pid}/task"))
-                .await
-                .unwrap();
-            let mut runner = None;
-            while let Some(task) = tasks.next_entry().await.unwrap() {
-                let children = tokio::fs::read_to_string(task.path().join("children"))
-                    .await
-                    .unwrap();
-                for child in children.split_whitespace() {
-                    let args = tokio::fs::read(format!("/proc/{child}/cmdline"))
-                        .await
-                        .unwrap();
-                    let args = args.split(|byte| *byte == 0).collect::<Vec<_>>();
-                    let command_matches = args.contains(&b"runner-client".as_slice());
-                    let attempt_matches = args.contains(&text(&saved, "runnerId").as_bytes());
-                    if command_matches && attempt_matches {
-                        runner = Some(child.parse::<i32>().unwrap());
-                    }
-                }
-            }
-            let runner = runner.expect("Fixture supervisor must own its runner-client");
-            assert_eq!(unsafe { libc::kill(runner, libc::SIGKILL) }, 0);
+            kill_fixture_runner_child(&saved).await;
         }
         if matches!(interruption, "shutdown" | "cancel") {
             fixture.stop(false).await;
@@ -4919,7 +4937,7 @@ async fn queued_work_waits_for_node_capacity_without_failing() {
     let run_id = text(&run, "id");
     let resources = json!({"cpu": 2, "memoryMiB": 4096, "diskMiB": 32768});
     s.store
-        .update_run_boundary(run_id, json!({"requestedResources": resources}))
+        .update_run_boundary_fixture(run_id, json!({"requestedResources": resources}))
         .await
         .unwrap();
     fixture.start().await;
@@ -4954,7 +4972,7 @@ async fn queued_work_waits_for_node_capacity_without_failing() {
         .filter(|e| text(e, "text").starts_with("Waiting for capacity."))
         .count();
     assert_eq!(waits, 1, "{events:?}");
-    let attempts = s.store.list("node-attempts").await.unwrap();
+    let attempts = s.store.attempts_fixture().await.unwrap();
     assert!(attempts.is_empty(), "{attempts:?}");
     fixture.stop(false).await;
 }

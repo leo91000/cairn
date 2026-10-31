@@ -216,26 +216,28 @@ async fn finish_drain(s: &Service, node: &str, generation: String, error: Value)
 
 async fn drain(s: &Service, node: &str) -> Result<()> {
     let mut failure = None;
-    for attempt in s
-        .store
-        .list("node-attempts")
-        .await?
-        .into_iter()
-        .filter(|a| {
-            a["nodeId"] == node
-                && super::is_active_attempt(a)
-                && a["role"] == super::placement::AttemptRole::Execution.as_str()
-        })
-    {
-        let run = s.store.run(text(&attempt, "runId")).await?;
+    for attempt in s.store.attempts().await?.into_iter().filter(|a| {
+        a.node_id == node
+            && super::is_active_attempt(a)
+            && a.role == super::placement::AttemptRole::Execution
+    }) {
+        let run = s.store.run(&attempt.run_id).await?;
         let native = crate::native::policy::native(&run["snapshot"]["agent"]);
         let run_id = text(&run, "id");
         let checkpoint = super::checkpoint(s, run_id).await?;
-        if checkpoint["nodeId"] != node || checkpoint["runnerId"] != attempt["id"] {
+        if checkpoint["nodeId"] != node || checkpoint["runnerId"] != attempt.id {
             continue;
         }
         s.store
-            .update_run_boundary(run_id, json!({ "nodeState": NodeState::Updating }))
+            .update_run_placement(
+                run_id,
+                crate::nodes::run_placement::PlacementChanges {
+                    node_state: Some(serde_json::from_value(serde_json::json!(
+                        NodeState::Updating
+                    ))?),
+                    ..Default::default()
+                },
+            )
             .await?;
         s.store
             .event(
@@ -250,7 +252,7 @@ async fn drain(s: &Service, node: &str) -> Result<()> {
             .delete(format!(
                 "{}/internal/execution/{node}/runs/{}",
                 s.config.public_url.trim_end_matches('/'),
-                text(&attempt, "id")
+                attempt.id
             ))
             .bearer_auth(super::runner_secret(s).await?)
             .timeout(Duration::from_secs(if native { 300 } else { 20 }))
@@ -263,7 +265,7 @@ async fn drain(s: &Service, node: &str) -> Result<()> {
             continue;
         }
         if !native {
-            super::placement::release(s, text(&attempt, "id")).await?;
+            super::placement::release(s, &attempt.id).await?;
         }
         let mut synchronized = true;
         if run["sessionId"].is_string() {
@@ -284,7 +286,7 @@ async fn drain(s: &Service, node: &str) -> Result<()> {
             }
         }
         if native && synchronized {
-            super::placement::release(s, text(&attempt, "id")).await?;
+            super::placement::release(s, &attempt.id).await?;
         }
     }
     failure.map_or(Ok(()), Err)

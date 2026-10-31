@@ -1,6 +1,7 @@
 use crate::common::run_fixture::DbRunFixture;
 use common::MissionFixture;
 use common::StoreAgentFixture;
+use common::run_fixture::*;
 
 mod common;
 
@@ -592,7 +593,7 @@ async fn common_questionnaires_survive_replacing_the_native_session() {
             .unwrap();
         f.service
             .store
-            .update_run_boundary(&f.run, json!({ "outcome": { "status": "needs_input" } }))
+            .update_run_boundary_fixture(&f.run, json!({ "outcome": { "status": "needs_input" } }))
             .await
             .unwrap();
         f.finish().await;
