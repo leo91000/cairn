@@ -1019,3 +1019,75 @@ test('an attachment-only Plan request keeps its badge after server history reloa
   await page.reload()
   await expect(message.getByText('Plan', { exact: true })).toBeVisible()
 })
+
+for (const [fromPlan, toPlan] of [[true, false], [false, true]] as const) {
+  test(`navigation during upload cancels the original ${fromPlan ? 'Plan' : 'ordinary'} send without borrowing the destination mode`, async ({ page, workspace }) => {
+    test.setTimeout(120000)
+    await connectClaude(workspace, 'Upload navigation', `fixture-code:upload-navigation-${fromPlan}@example.test`)
+    const first = await workspace.api('/api/chats', 'POST', {})
+    const second = await workspace.api('/api/chats', 'POST', {})
+    for (const chat of [first, second]) {
+      await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: crypto.randomUUID(), text: 'Prepare upload navigation', provider: 'claude' })
+      await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 30000 }).toBe('succeeded')
+      await workspace.api(`/api/chats/${chat.id}/pause`, 'POST', { paused: true })
+    }
+
+    await page.goto(workspacePath(`/chats/${second.slug}`))
+    await authenticateWorkspace(page)
+    const toggle = page.getByRole('button', { name: 'Plan first', exact: true })
+    const message = page.getByRole('textbox', { name: 'Message', exact: true })
+    const fil = page.getByRole('complementary', { name: 'Fil' })
+    await expect(page.getByRole('button', { name: /^Agent, model, reasoning and speed/ })).toHaveAccessibleName(/Claude Code.*Opus Fixture/)
+    if (toPlan)
+      await toggle.click()
+    await message.fill('Destination draft must remain unchanged')
+    await fil.locator(`[data-fil-key="chat:${first.id}"]`).click()
+    await expect(message).toHaveValue('')
+    await expect(page.getByRole('button', { name: /^Agent, model, reasoning and speed/ })).toHaveAccessibleName(/Claude Code.*Opus Fixture/)
+    if (fromPlan)
+      await toggle.click()
+    await expect(toggle).toHaveAttribute('aria-pressed', String(fromPlan))
+    const original = `Original upload request ${fromPlan}`
+    await message.fill(original)
+    await page.getByLabel('Attach files', { exact: true }).setInputFiles([{
+      name: 'held-design.txt',
+      mimeType: 'text/plain',
+      buffer: Buffer.from('Review before execution'),
+    }])
+    let release!: () => void
+    let started!: () => void
+    let delivered!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const uploadStarted = new Promise<void>((resolve) => { started = resolve })
+    const uploadDelivered = new Promise<void>((resolve) => { delivered = resolve })
+    const posts: unknown[] = []
+    page.on('request', (request) => {
+      if (request.method() === 'POST' && request.url().endsWith(`/chats/${first.id}/messages`))
+        posts.push(request.postDataJSON())
+    })
+    await page.route(`**/chats/${first.id}/attachments/**`, async (route) => {
+      const response = await route.fetch()
+      started()
+      await gate
+      await route.fulfill({ response })
+      delivered()
+    })
+    try {
+      await page.getByRole('button', { name: 'Queue', exact: true }).click()
+      await uploadStarted
+      await fil.locator(`[data-fil-key="chat:${second.id}"]`).click()
+      await expect(message).toHaveValue('Destination draft must remain unchanged')
+      await expect(toggle).toHaveAttribute('aria-pressed', String(toPlan))
+      release()
+      await uploadDelivered
+      // The original send's finally has completed before inspecting absence of a POST.
+      await expect(page.getByRole('button', { name: 'Queue', exact: true })).toBeEnabled()
+      expect(posts).toEqual([])
+      expect((await workspace.api(`/api/chats/${first.id}`)).messages.some((item: { text: string }) => item.text === original)).toBe(false)
+      await expect(message).toHaveValue('Destination draft must remain unchanged')
+    }
+    finally {
+      release()
+    }
+  })
+}

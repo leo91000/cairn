@@ -472,3 +472,5 @@ id and use `get_plugin_operation`/`cancel_plugin_operation`. No layout change.
 Plan requests retain their badge for attachment-only messages on both clients. Native Plan, approval, stale rejection and attachment-only journeys share cases between Robolectric and instrumentation; device qualification executes `PlanTurnDeviceTest`.
 
 Large Plan proposals: both clients resolve bounded event references with checksum-bound content chunks before applying stream/history cursors. Full proposal text, reviewed identity and root/child attribution remain available; no shortened notice is used as an approvable plan.
+
+Submission authority is captured from the originating draft before asynchronous preparation. Web cancels a not-yet-submitted send when navigation changes its conversation during creation/upload; Android already captures the Plan argument and original request at invocation. Neither platform borrows another conversation’s draft to decide ordinary versus Plan execution.

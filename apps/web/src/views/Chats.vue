@@ -612,16 +612,30 @@ async function send(mode: 'queue' | 'steer' = 'queue', planApproval?: { sourceId
   const text = planApproval ? 'Implement the plan you proposed.' : originalDraft.trim()
   if ((!planApproval && !canSend.value) || busy.value)
     return
+  // Submission authority belongs to the originating draft, never the draft
+  // navigation might load while creation or attachment uploads are outstanding.
+  const requestedPlan = !planApproval && planRequested.value
+  const selectedProvider = chosenProvider.value
+  const selectedModel = model.value || inheritedAssistant.value?.model || ''
+  const selectedReasoning = reasoning.value || (!model.value ? inheritedAssistant.value?.reasoning : '') || ''
+  const selectedSpeed = speed.value || inheritedAssistant.value?.speed || ''
+  const selectedAttachments = [...attachments.value]
+  const editingMessage = editing.value
+  const target = detail.value ?? createdChat
+  const targetAgent = agentId.value
+  const targetProject = projectId.value || null
   submitting.value = true
   const origin = chatId.value
   const direct = !editing.value && ((mode === 'steer' && !detail.value?.paused) || (!responding.value && !detail.value?.paused && !pending.value.length))
   busy.value = true
   error.value = ''
   try {
-    const chat = detail.value ?? createdChat ?? await createChat(api, { agentId: agentId.value, projectId: projectId.value || null })
+    const chat = target ?? await createChat(api, { agentId: targetAgent, projectId: targetProject })
+    if (chatId.value !== origin)
+      return
     createdChat = chat
     // Items without a local file (reused or already sent records) are never uploaded again.
-    const pendingUploads = attachments.value.filter(attachment => files.has(attachment.id) && !uploaded.has(attachment.id))
+    const pendingUploads = selectedAttachments.filter(attachment => files.has(attachment.id) && !uploaded.has(attachment.id))
     for (const attachment of pendingUploads)
       attachmentStates.value[attachment.id] = { status: 'uploading' }
     const results = await Promise.allSettled(pendingUploads.map(async (attachment) => {
@@ -649,25 +663,21 @@ async function send(mode: 'queue' | 'steer' = 'queue', planApproval?: { sourceId
     if (results.some(result => result.status === 'rejected'))
       return
 
-    const attachmentIds = attachments.value.map(attachment => attachment.id)
-    // A chat can use a different model from its saved agent. Keep the displayed
-    // conversation selection explicit on the wire, including after a reload.
-    const selectedModel = model.value || inheritedAssistant.value?.model || ''
-    const selectedReasoning = reasoning.value || (!model.value ? inheritedAssistant.value?.reasoning : '') || ''
-    // The speed survives a model change, so it is inherited even with a new model.
-    const selectedSpeed = speed.value || inheritedAssistant.value?.speed || ''
+    if (chatId.value !== origin)
+      return
+    const attachmentIds = selectedAttachments.map(attachment => attachment.id)
     const content = {
       text,
       mode,
-      provider: chosenProvider.value,
+      provider: selectedProvider,
       model: selectedModel,
       reasoning: selectedReasoning,
-      plan: planRequested.value,
+      plan: requestedPlan,
       speed: selectedSpeed,
       attachmentIds,
       ...(planApproval ? { planApproval } : {}),
     }
-    const submissionKey = JSON.stringify({ chatId: chat.id, editing: editing.value, ...content })
+    const submissionKey = JSON.stringify({ chatId: chat.id, editing: editingMessage, ...content })
     // Retain the id after a network failure only for the same target and content.
     if (submission?.key !== submissionKey) {
       submission = {
@@ -683,12 +693,12 @@ async function send(mode: 'queue' | 'steer' = 'queue', planApproval?: { sourceId
         revision: '',
         status: 'queued',
         createdAt: Date.now(),
-        attachments: [...attachments.value],
+        attachments: selectedAttachments,
       }
     }
 
-    if (editing.value)
-      await editChatMessage(api, { chatId: chat.id, messageId: editing.value, message: submission.message })
+    if (editingMessage)
+      await editChatMessage(api, { chatId: chat.id, messageId: editingMessage, message: submission.message })
     else
       await sendChatMessage(api, { chatId: chat.id, message: submission.message })
     // Another conversation was opened meanwhile; its composer is not this message's.

@@ -12,6 +12,7 @@ import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.text.AnnotatedString
+import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
@@ -32,9 +33,32 @@ private const val CHAT = "00000000-0000-4000-8000-0000000000c1"
 abstract class PlanTurnCases {
     @get:Rule val compose = createComposeRule()
 
+    private var mountedFixture: Pair<MutableState<Boolean>, ViewModelStore>? = null
+
+    private fun withPlanServer(body: (MockWebServer) -> Unit) {
+        val server = MockWebServer()
+        try {
+            body(server)
+        } finally {
+            try {
+                mountedFixture?.let { (mounted, models) ->
+                    try {
+                        compose.runOnIdle { mounted.value = false }
+                        compose.waitForIdle()
+                    } finally {
+                        compose.runOnIdle { models.clear() }
+                    }
+                }
+            } finally {
+                mountedFixture = null
+                server.close()
+            }
+        }
+    }
+
     @Test
     fun attachmentOnlyPlanRequestKeepsItsIndicator() {
-        MockWebServer().use { server ->
+        withPlanServer { server ->
             val chat = Chat(id = CHAT, title = "Plan joint", runId = "run", agentId = MAIN_AGENT_ID)
             val attachment =
                 ChatAttachment(
@@ -87,7 +111,7 @@ abstract class PlanTurnCases {
         approvalJourney(false, steeringBeforeCompletion = true)
 
     private fun approvalJourney(staleApproval: Boolean, steeringBeforeCompletion: Boolean = false) {
-        MockWebServer().use { server ->
+        withPlanServer { server ->
             val streamRequests = AtomicInteger()
             val approvalResponse = CountDownLatch(1)
             val calls = CopyOnWriteArrayList<String>()
@@ -247,7 +271,7 @@ abstract class PlanTurnCases {
                     )
                 assertEquals(1, calls.size)
                 vm.api.closeStreams()
-                return@use
+                return@withPlanServer
             }
 
             // A later explicit question can still be queued as a protected plan turn.
@@ -265,7 +289,7 @@ abstract class PlanTurnCases {
 
     @Test
     fun savedPlanIntentCannotBecomeOrdinaryWithOpencode() {
-        MockWebServer().use { server ->
+        withPlanServer { server ->
             val calls = CopyOnWriteArrayList<String>()
             val initialSnapshot = CountDownLatch(1)
             val chat =
@@ -392,7 +416,7 @@ abstract class PlanTurnCases {
 
     @Test
     fun completedReceiptReplayCannotReviveAnApproachInvalidatedByClarification() {
-        MockWebServer().use { server ->
+        withPlanServer { server ->
             val calls = CopyOnWriteArrayList<String>()
             val chat =
                 Chat(
@@ -452,7 +476,7 @@ abstract class PlanTurnCases {
     }
 
     private fun pendingRevisionCannotImplement(status: String?, runStatus: String = "succeeded") {
-        MockWebServer().use { server ->
+        withPlanServer { server ->
             val calls = CopyOnWriteArrayList<String>()
             val chat =
                 Chat(
@@ -642,31 +666,37 @@ abstract class PlanTurnCases {
                 beaconOrigin = "",
             )
         val connected = mutableStateOf(false)
+        val mounted = mutableStateOf(true)
+        val models = ViewModelStore().apply { put("plan-fixture", vm) }
+        check(mountedFixture == null)
+        mountedFixture = mounted to models
         compose.setContent {
-            val state by vm.state.collectAsStateWithLifecycle()
-            LaunchedEffect(Unit) {
-                vm.state.first { it.ready && !it.busy }
-                vm.connect(server.url("/").toString())
-                if (savedDraft != null) vm.chatDrafts[CHAT] = savedDraft
-                connected.value = true
-            }
-            CairnTheme(preference = "system") {
-                if (state.session.authenticated && connected.value)
-                    Surface(
-                        Modifier.fillMaxSize(),
-                        color = MaterialTheme.colorScheme.background,
-                    ) {
-                        Box(Modifier.safeDrawingPadding()) {
-                            ChatScreen(
-                                vm,
-                                state,
-                                CHAT,
-                                openChat = {},
-                                openRun = {},
-                                back = {},
-                            )
+            if (mounted.value) {
+                val state by vm.state.collectAsStateWithLifecycle()
+                LaunchedEffect(Unit) {
+                    vm.state.first { it.ready && !it.busy }
+                    vm.connect(server.url("/").toString())
+                    if (savedDraft != null) vm.chatDrafts[CHAT] = savedDraft
+                    connected.value = true
+                }
+                CairnTheme(preference = "system") {
+                    if (state.session.authenticated && connected.value)
+                        Surface(
+                            Modifier.fillMaxSize(),
+                            color = MaterialTheme.colorScheme.background,
+                        ) {
+                            Box(Modifier.safeDrawingPadding()) {
+                                ChatScreen(
+                                    vm,
+                                    state,
+                                    CHAT,
+                                    openChat = {},
+                                    openRun = {},
+                                    back = {},
+                                )
+                            }
                         }
-                    }
+                }
             }
         }
         return vm
