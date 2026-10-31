@@ -352,11 +352,7 @@ impl Fixture {
         }
     }
 
-    async fn transfer(&self) -> Result<u64> {
-        self.transfer_measured().await.map(|(bytes, _)| bytes)
-    }
-
-    async fn transfer_measured(&self) -> Result<(u64, Value)> {
+    async fn transfer_measured(&self, window: Option<usize>) -> Result<(u64, Value)> {
         let attempt = id();
         let publication = Publication {
             s: &self.service,
@@ -381,24 +377,46 @@ impl Fixture {
         );
         let mut manifest = self.snapshot["manifest"].clone();
         manifest["blockEnvelope"] = 3.into();
-        let bytes = publication
-            .transfer_observed(&metrics, &manifest, &self.objects)
-            .await?;
+        let bytes = match window {
+            Some(window) => {
+                publication
+                    .observe_transfer(
+                        &metrics,
+                        &self.objects,
+                        publication.transfer_direct_window(&self.objects, window),
+                    )
+                    .await?
+            }
+            None => {
+                publication
+                    .transfer_observed(&metrics, &manifest, &self.objects)
+                    .await?
+            }
+        };
         Ok((bytes, metrics.snapshot()))
     }
 }
 
 #[tokio::test]
 async fn direct_window_reuses_completed_put_slots_before_a_straggler_finishes() {
+    isolated("nodes::publication::pipeline_tests::direct_window_straggler_child").await;
+}
+
+#[tokio::test]
+async fn direct_serial_reference_preserves_the_observed_barrier() {
+    isolated("nodes::publication::pipeline_tests::direct_serial_straggler_child").await;
+}
+
+#[tokio::test]
+async fn experimental_direct_window_fills_free_put_slots() {
+    isolated("nodes::publication::pipeline_tests::direct_candidate_straggler_child").await;
+}
+
+async fn isolated(child: &str) {
     // The shipped PUT semaphore is process-global. Keep unrelated fixture
     // publications from occupying its permits during this ordering witness.
     let output = tokio::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "nodes::publication::pipeline_tests::direct_window_straggler_child",
-            "--ignored",
-            "--nocapture",
-        ])
+        .args(["--exact", child, "--ignored", "--nocapture"])
         .output()
         .await
         .unwrap();
@@ -410,12 +428,28 @@ async fn direct_window_reuses_completed_put_slots_before_a_straggler_finishes() 
 #[tokio::test]
 #[ignore = "isolated process-global PUT budget child"]
 async fn direct_window_straggler_child() {
+    straggler(None, true).await;
+}
+
+#[tokio::test]
+#[ignore = "isolated process-global PUT budget child"]
+async fn direct_serial_straggler_child() {
+    straggler(Some(1), false).await;
+}
+
+#[tokio::test]
+#[ignore = "isolated process-global PUT budget child"]
+async fn direct_candidate_straggler_child() {
+    straggler(Some(2), true).await;
+}
+
+async fn straggler(window: Option<usize>, expected_overlap: bool) {
     // Two ordinary batches and one terminal block exercise the steady-state
     // scheduling separately from the existing final-summary ordering contract.
     let fixture = Fixture::new(9).await;
     let state = fixture.object_server.clone();
     let (transfer, fifth_before_release) = tokio::time::timeout(Duration::from_secs(20), async {
-        tokio::join!(fixture.transfer(), async {
+        tokio::join!(fixture.transfer_measured(window), async {
             // All three unblocked members of the first batch must finish before
             // checking that a later block can use the already-free PUT capacity.
             state.completed.acquire_many(3).await.unwrap().forget();
@@ -428,12 +462,12 @@ async fn direct_window_straggler_child() {
     })
     .await
     .expect("fixture transfer must drain even when the ordering witness fails");
-    assert_eq!(transfer.unwrap(), 9 * snapshots::BLOCK);
+    assert_eq!(transfer.unwrap().0, 9 * snapshots::BLOCK);
     assert_eq!(state.started.load(Ordering::SeqCst), 9);
     assert!(state.maximum.load(Ordering::SeqCst) <= direct::BATCH);
     assert_eq!(state.in_flight.load(Ordering::SeqCst), 0);
-    assert!(
-        fifth_before_release,
+    assert_eq!(
+        fifth_before_release, expected_overlap,
         "the sequential batch barrier left three completed PUT slots unused behind one straggler"
     );
 }

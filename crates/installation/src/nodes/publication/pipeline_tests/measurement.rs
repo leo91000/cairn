@@ -134,6 +134,7 @@ async fn direct_publication_window_comparison() {
         .collect::<Vec<_>>()
         .join("\n");
     let dataset_hash = digest::block(dataset.as_bytes());
+    let mut expected_encoded = None;
     for (case, conditions) in [
         ("control_floor", RemoteConditions::default()),
         (
@@ -156,57 +157,70 @@ async fn direct_publication_window_comparison() {
         ),
     ] {
         for trial in 0..4 {
-            fixture.reset_measurement(conditions).await;
-            let started = Instant::now();
-            let cpu = cpu_ms();
-            let (plain, manager) = fixture.transfer_measured().await.unwrap();
-            let write_ms = started.elapsed().as_secs_f64() * 1000.0;
-            let write_cpu_ms = cpu_ms() - cpu;
-            assert_eq!(plain, 128 * snapshots::BLOCK);
-            assert_eq!(fixture.object_server.started.load(Ordering::SeqCst), 128);
-            assert_eq!(fixture.object_server.in_flight.load(Ordering::SeqCst), 0);
-            assert!(fixture.object_server.maximum.load(Ordering::SeqCst) <= direct::BATCH);
-            let node = fixture
-                .node_metrics
-                .lock()
-                .unwrap()
-                .as_ref()
-                .unwrap()
-                .snapshot();
-            assert_eq!(node["stages"]["putRequest"]["completed"], 128);
-            assert_eq!(node["stages"]["putRequest"]["failedOrCancelled"], 0);
-            let encoded = fixture.object_server.encoded_bytes.load(Ordering::SeqCst);
-            assert_eq!(node["stages"]["putRequest"]["bytes"], encoded);
-            let reads = fixture.reads().await;
-            if trial == 0 {
-                continue;
+            for window in if trial % 2 == 0 { [1, 2] } else { [2, 1] } {
+                fixture.reset_measurement(conditions).await;
+                let started = Instant::now();
+                let cpu = cpu_ms();
+                let (plain, manager) = fixture.transfer_measured(Some(window)).await.unwrap();
+                let write_ms = started.elapsed().as_secs_f64() * 1000.0;
+                let write_cpu_ms = cpu_ms() - cpu;
+                assert_eq!(plain, 128 * snapshots::BLOCK);
+                assert_eq!(fixture.object_server.started.load(Ordering::SeqCst), 128);
+                assert_eq!(fixture.object_server.in_flight.load(Ordering::SeqCst), 0);
+                assert!(fixture.object_server.maximum.load(Ordering::SeqCst) <= direct::BATCH);
+                let node = fixture
+                    .node_metrics
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .snapshot();
+                assert_eq!(node["stages"]["putRequest"]["completed"], 128);
+                assert_eq!(node["stages"]["putRequest"]["failedOrCancelled"], 0);
+                let encoded = fixture.object_server.encoded_bytes.load(Ordering::SeqCst);
+                if let Some(expected) = expected_encoded {
+                    assert_eq!(
+                        encoded, expected,
+                        "same immutable objects/keys/codec must preserve encoded byte counts"
+                    );
+                } else {
+                    expected_encoded = Some(encoded);
+                }
+                assert_eq!(node["stages"]["putRequest"]["bytes"], encoded);
+                let reads = fixture.reads().await;
+                if trial == 0 {
+                    continue;
+                }
+                println!(
+                    "DIRECT_PIPELINE_PERF {}",
+                    json!({
+                        "case": case,
+                        "mode": if window == 1 { "sequential-reference" } else { "two-batch-candidate" },
+                        "maximumControlBatches": window,
+                        "plaintextBufferUpperBoundBytes": window as u64 * direct::BATCH as u64 * snapshots::BLOCK,
+                        "encodedBufferUpperBoundBytes": direct::BATCH as u64 * block_codec::MAX_ENCODED_BYTES,
+                        "trial": trial,
+                        "datasetHash": dataset_hash,
+                        "blocks": 128,
+                        "plaintextBytes": plain,
+                        "encodedBytes": encoded,
+                        "sourceReader": "raw immutable fixture file through real node Reader; no mounted block device",
+                        "writeWallMs": write_ms,
+                        "writeCpuMs": write_cpu_ms,
+                        "processHwmKiB": process_hwm_kib(),
+                        "hwmScope": "cumulative process high-water includes loopback object server and previous trials",
+                        "serverMaxPutInFlight": fixture.object_server.maximum.load(Ordering::SeqCst),
+                        "globalPutLimit": direct::BATCH,
+                        "controlDelayPerBatchMs": conditions.control_ms,
+                        "putDelayMs": conditions.put_ms,
+                        "oneInFourAdditionalTailMs": conditions.tail_ms,
+                        "aggregateObjectBodyBytesPerSecond": conditions.bytes_per_second,
+                        "reads": reads,
+                        "manager": manager,
+                        "node": node
+                    })
+                );
             }
-            println!(
-                "DIRECT_PIPELINE_PERF {}",
-                json!({
-                    "case": case,
-                    "mode": "sequential-reference",
-                    "trial": trial,
-                    "datasetHash": dataset_hash,
-                    "blocks": 128,
-                    "plaintextBytes": plain,
-                    "encodedBytes": encoded,
-                    "sourceReader": "raw immutable fixture file through real node Reader; no mounted block device",
-                    "writeWallMs": write_ms,
-                    "writeCpuMs": write_cpu_ms,
-                    "processHwmKiB": process_hwm_kib(),
-                    "hwmScope": "cumulative process high-water includes loopback object server and previous trials",
-                    "serverMaxPutInFlight": fixture.object_server.maximum.load(Ordering::SeqCst),
-                    "globalPutLimit": direct::BATCH,
-                    "controlDelayPerBatchMs": conditions.control_ms,
-                    "putDelayMs": conditions.put_ms,
-                    "oneInFourAdditionalTailMs": conditions.tail_ms,
-                    "aggregateObjectBodyBytesPerSecond": conditions.bytes_per_second,
-                    "reads": reads,
-                    "manager": manager,
-                    "node": node
-                })
-            );
         }
     }
 }
