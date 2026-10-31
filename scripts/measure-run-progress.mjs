@@ -1,5 +1,4 @@
 import { Buffer } from 'node:buffer'
-import process from 'node:process'
 import {
   mkdtempSync,
   readFileSync,
@@ -9,6 +8,7 @@ import {
 import { cpus, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { performance } from 'node:perf_hooks'
+import process from 'node:process'
 import { DatabaseSync } from 'node:sqlite'
 import { fileURLToPath } from 'node:url'
 import { prepareRunProgress, runProgressSql } from './run-progress.mjs'
