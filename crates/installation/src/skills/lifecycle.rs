@@ -30,7 +30,11 @@ impl Authority {
                 plugin_packages::Authority::human(s, &account).await?
             }
             ResumeContext::Human(_) => plugin_packages::Authority::default(),
-            ResumeContext::Installation(bearer) => plugin_packages::Authority::installation(bearer),
+            ResumeContext::Installation(bearer) => {
+                crate::installation_mcp::authorize_with_authority(s, &bearer)
+                    .await?
+                    .1
+            }
             ResumeContext::Public(scopes, credential) => {
                 if !scopes.iter().any(|scope| scope == required_scope) {
                     return Err(Error::forbidden(format!(

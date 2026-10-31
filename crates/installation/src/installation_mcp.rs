@@ -13,13 +13,28 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 pub(crate) async fn authorize(s: &Service, bearer: &str) -> Result<Value> {
-    let token = bearer.to_owned();
-    let bearer = bearer.to_owned();
-    let run = s.store.read(move |db| authorize_in(db, &bearer)).await?;
+    authorize_with_authority(s, bearer)
+        .await
+        .map(|(run, _)| run)
+}
+
+/// Retain both the execution token and semantic delegation proof across effects.
+pub(crate) async fn authorize_with_authority(
+    s: &Service,
+    bearer: &str,
+) -> Result<(Value, crate::capabilities::plugin_packages::Authority)> {
+    let caller = bearer.to_owned();
+    let token = caller.clone();
+    let read_token = caller.clone();
+    let run = s
+        .store
+        .read(move |db| authorize_in(db, &read_token))
+        .await?;
     let authority = crate::capabilities::plugin_packages::Authority::for_execution(&run)
         .with_guard(move |db| authorize_in(db, &token).map(|_| ()));
-    crate::delegation::authorize_async_with(s, &run, authority).await?;
-    Ok(run)
+    let mut authority = crate::delegation::authorize_async_with(s, &run, authority).await?;
+    authority.bearer = Some(caller);
+    Ok((run, authority))
 }
 
 pub(crate) fn authorize_in(db: &Db<'_>, bearer: &str) -> Result<Value> {

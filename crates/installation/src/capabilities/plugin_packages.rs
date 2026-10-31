@@ -240,7 +240,11 @@ impl Authority {
         scope: &'static str,
     ) -> Result<Self> {
         let authority = match context {
-            ResumeContext::Installation(bearer) => Self::installation(bearer),
+            ResumeContext::Installation(bearer) => {
+                crate::installation_mcp::authorize_with_authority(s, &bearer)
+                    .await?
+                    .1
+            }
             ResumeContext::Human(account) => Self::human(s, &account).await?,
             ResumeContext::Public(scopes, credential) => {
                 if !scopes.iter().any(|held| held == scope) {
@@ -258,13 +262,6 @@ impl Authority {
         };
         authority.recheck(s).await?;
         Ok(authority)
-    }
-
-    pub(crate) fn installation(bearer: String) -> Self {
-        Self {
-            bearer: Some(bearer),
-            ..Default::default()
-        }
     }
 
     pub(crate) fn public_scoped(public_credential: Option<String>, scope: &'static str) -> Self {
@@ -419,10 +416,11 @@ impl PluginPackageOperation {
             _ => None,
         };
         let mut authority = match context {
-            ResumeContext::Installation(bearer) => Authority {
-                bearer: Some(bearer),
-                ..Default::default()
-            },
+            ResumeContext::Installation(bearer) => {
+                crate::installation_mcp::authorize_with_authority(s, &bearer)
+                    .await?
+                    .1
+            }
             ResumeContext::Public(scopes, credential) => {
                 if !scopes.iter().any(|scope| scope == self.scope) {
                     return Err(Error::forbidden(format!(

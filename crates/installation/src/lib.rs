@@ -102,3 +102,7 @@ pub(crate) mod node_fixture;
 #[cfg(test)]
 #[path = "../tests/common/account_fixture.rs"]
 pub(crate) mod account_fixture;
+
+#[cfg(test)]
+#[path = "../tests/fixtures/plugin_grants.rs"]
+pub(crate) mod plugin_grant_fixture;

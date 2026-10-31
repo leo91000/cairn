@@ -895,6 +895,91 @@ mod migration_tests {
     use serde_json::json;
 
     #[tokio::test]
+    async fn delegated_reductions_reresolve_resource_coverage_after_publication_waits() {
+        use crate::agent_fixture::AgentFixture;
+        use crate::capabilities::{ResumeContext, plugin_packages::Authority};
+        use crate::plugin_grant_fixture::{Fixture, contribution, support};
+        use crate::validation::text;
+        use std::sync::{Arc, atomic::Ordering};
+
+        let f = Fixture::new().await;
+        f.marker("live-parent").await;
+        f.set(json!([contribution("tool", "grant_probe_post", support())]))
+            .await;
+        let child =
+            f.s.agent_fixture(
+                json!({ "name": "Child", "access": { "installation": true } }),
+                None,
+            )
+            .await
+            .unwrap();
+        let child_id = text(&child, "id");
+        f.set_for(
+            child_id,
+            json!([contribution(
+                "tool",
+                "grant_probe_post",
+                json!([{ "resourceType": "thread", "id": "support-thread" }])
+            )]),
+        )
+        .await;
+        let (_, bearer) = f.delegated(crate::config::MAIN_AGENT_ID, child_id).await;
+        let target =
+            f.s.agent_fixture(json!({ "name": "Target" }), None)
+                .await
+                .unwrap();
+        let target_id = text(&target, "id").to_owned();
+        f.set_for(
+            &target_id,
+            json!([contribution("tool", "grant_probe_other", json!([]))]),
+        )
+        .await;
+        let id = target_id.clone();
+        let before =
+            f.s.store
+                .read(move |db| db.agent_plugin_grants(&id))
+                .await
+                .unwrap();
+        let input = serde_json::from_value(json!({
+            "agentId": target_id, "revision": before.revision,
+            "grants": [], "runCredentialInstances": [],
+        }))
+        .unwrap();
+        let checked = Arc::new(tokio::sync::Notify::new());
+        let completed = checked.clone();
+        let authority = Authority::for_grants(&f.s, ResumeContext::Installation(bearer), "manage")
+            .await
+            .unwrap()
+            .with_recheck_guard(move |_| {
+                let completed = completed.clone();
+                Box::pin(async move {
+                    completed.notify_one();
+                    Ok(())
+                })
+            });
+        let publication = f.s.plugins.package_publication.lock().await;
+        let service = f.s.clone();
+        let change = tokio::spawn(async move { replace(&service, input, authority, true).await });
+        tokio::time::timeout(std::time::Duration::from_secs(10), checked.notified())
+            .await
+            .unwrap();
+        f.moved_parent.store(true, Ordering::SeqCst);
+        drop(publication);
+        let error = change.await.unwrap().unwrap_err();
+        assert_eq!(error.status, 403);
+        let after =
+            f.s.store
+                .read(move |db| db.agent_plugin_grants(&target_id))
+                .await
+                .unwrap();
+        assert_eq!(
+            after, before,
+            "a delegated reduction escaped its requester's resource ceiling"
+        );
+        f.s.shutdown.cancel();
+    }
+
+    #[tokio::test]
     async fn revoked_public_authority_cannot_widen_grants_after_the_publication_lock() {
         use axum::{Json, Router, routing::post};
         use std::sync::{
