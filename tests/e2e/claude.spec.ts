@@ -995,6 +995,7 @@ test('a proposal completed after steering remains implementable across history f
 
 test('an attachment-only Plan request keeps its badge after server history reload', async ({ page, workspace }) => {
   test.setTimeout(120000)
+  await useRelayForHttpMocks(page)
   if (!(await workspace.api('/api/accounts')).accounts.some((account: { provider: string }) => account.provider === 'claude'))
     await connectClaude(workspace)
   const chat = await workspace.api('/api/chats', 'POST', {})
