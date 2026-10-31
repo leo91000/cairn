@@ -71,6 +71,37 @@ class ContractsTest {
     }
 
     @Test
+    fun timelineCardsChangesAndWindowsRoundTripLikeRust() {
+        val root = File(System.getProperty("cairn.contractWire")).parentFile
+        val corpus =
+            json
+                .parseToJsonElement(
+                    File(root, "../../../tests/fixtures/timeline-contracts.json").readText()
+                )
+                .jsonObject
+        for (entry in corpus.getValue("entries").jsonArray) {
+            assertEquals(
+                entry,
+                json.encodeToJsonElement(json.decodeFromJsonElement<TimelineEntry>(entry)),
+            )
+        }
+        for (change in corpus.getValue("changes").jsonArray) {
+            assertEquals(
+                change,
+                json.encodeToJsonElement(json.decodeFromJsonElement<TimelineChange>(change)),
+            )
+        }
+        val window = corpus.getValue("window")
+        assertEquals(
+            window,
+            json.encodeToJsonElement(json.decodeFromJsonElement<RunTimelineOutput>(window)),
+        )
+        corpus.getValue("invalidEntries").jsonArray.forEach { value ->
+            assertFails(value.toString()) { json.decodeFromJsonElement<TimelineEntry>(value) }
+        }
+    }
+
+    @Test
     fun runDefaultsStatesAndRetryMatchRust() {
         val root = File(System.getProperty("cairn.contractWire")).parentFile
         val corpus =

@@ -48,7 +48,7 @@ abstract class CacheRefreshCases {
         MockWebServer().use { server ->
             fun frame(id: Long): String {
                 val batch =
-                    LiveBatch(
+                    timelineBatch(
                         listOf(
                             RunEvent(
                                 id = id,
@@ -61,7 +61,7 @@ abstract class CacheRefreshCases {
                         LiveState(chat = Chat(id = "f59b275f-667e-58c8-a788-33a78b29fa25")),
                         false,
                         false,
-                        "v1:fixture:1",
+                        "v2:fixture:1",
                     )
                 return "event: batch\nid: $id\ndata: ${wireJson.encodeToString(batch)}\n\n"
             }

@@ -36,7 +36,7 @@ struct Pool {
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-pub(crate) const DATABASE_VERSION: i64 = 22;
+pub(crate) const DATABASE_VERSION: i64 = 23;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -113,6 +113,8 @@ impl Store {
         }
         writer.set_prepared_statement_cache_capacity(128);
         enable_wal(&writer, Duration::from_secs(5))?;
+        // Allow durable writes on a slow disk to finish under contention.
+        writer.busy_timeout(Duration::from_secs(30))?;
         writer.execute_batch("PRAGMA foreign_keys=ON;")?;
         if !fresh && version == 11 {
             let upgraded = crate::nodes::inventory::migration::upgrade(&mut writer);
@@ -181,12 +183,16 @@ impl Store {
         }
         if !fresh && version == 20 {
             crate::worker::progress::upgrade(&mut writer)?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        }
+        if !fresh && version == 21 {
+            crate::timeline::migration::upgrade(&mut writer)?;
         }
         if !fresh {
             let tx = writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            if tx.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))? == 21 {
+            if tx.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))? == 22 {
                 crate::plugins::grants::migrate(&Db(&tx), directory)?;
-                tx.pragma_update(None, "user_version", 22)?;
+                tx.pragma_update(None, "user_version", 23)?;
             }
             tx.commit()?;
         }
@@ -231,6 +237,7 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
             tx.execute_batch(crate::reads::sql::SCHEMA)?;
             tx.execute_batch(crate::waits::sql::SCHEMA)?;
             tx.execute_batch(crate::chats::engine_switch::SCHEMA)?;
+            tx.execute_batch(crate::timeline::SCHEMA)?;
             tx.commit()?;
         }
         // total_changes also counts rows undone by a transition savepoint. Keep
@@ -811,30 +818,88 @@ impl Db<'_> {
         text: &str,
         payload: Option<&Value>,
     ) -> Result<()> {
+        self.event_at(run, kind, text, payload, now())
+    }
+
+    /// Records an event and applies it to the run's timeline in one savepoint:
+    /// a caller that catches a failure never commits half of the event.
+    pub(crate) fn event_at(
+        &self,
+        run: &str,
+        kind: &EventKind,
+        text: &str,
+        payload: Option<&Value>,
+        created_at: i64,
+    ) -> Result<()> {
         let text = text.chars().take(16000).collect::<String>();
-        self.0
-            .prepare_cached(
-                "INSERT INTO events(run_id,created_at,type,text,payload) VALUES(?,?,?,?,?)",
-            )?
-            .execute(params![
-                run,
-                now(),
-                kind.as_str(),
-                text,
-                payload.map(Value::to_string)
-            ])?;
-        // Prune in batches instead of executing a delete for every streamed delta.
-        if self.0.last_insert_rowid() % 256 == 0 {
+        self.0.execute_batch("SAVEPOINT event_record")?;
+        let before = self.0.total_changes();
+        let result = (|| {
             self.0
                 .prepare_cached(
-                    "DELETE FROM events
+                    "INSERT INTO events(run_id,created_at,type,text,payload) VALUES(?,?,?,?,?)",
+                )?
+                .execute(params![
+                    run,
+                    created_at,
+                    kind.as_str(),
+                    text,
+                    payload.map(Value::to_string)
+                ])?;
+            let id = self.0.last_insert_rowid();
+            crate::timeline::record(
+                self,
+                run,
+                crate::timeline::reducer::Event {
+                    id,
+                    created_at,
+                    kind,
+                    text: &text,
+                    payload,
+                },
+            )?;
+            // Prune in batches instead of executing a delete for every streamed delta.
+            if id % 256 == 0 {
+                let pruned = self
+                    .0
+                    .prepare_cached(
+                        "DELETE FROM events
                      WHERE run_id=?1
                        AND id<(SELECT COALESCE(MAX(id),0)-10000 FROM events WHERE run_id=?1)
                        AND run_id IN (SELECT id FROM runs WHERE trigger!='chat')",
-                )?
-                .execute([run])?;
+                    )?
+                    .execute([run])?;
+                if pruned > 0 {
+                    crate::timeline::prune(self, run)?;
+                }
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                self.0.execute_batch("RELEASE event_record")?;
+                Ok(())
+            }
+            Err(error) => {
+                self.0
+                    .execute_batch("ROLLBACK TO event_record; RELEASE event_record")?;
+                let discarded = self.0.total_changes() - before;
+                if discarded > 0
+                    && self.0.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM pragma_function_list WHERE name='cairn_discarded_changes')",
+                        [],
+                        |r| r.get::<_, bool>(0),
+                    )?
+                {
+                    self.0.query_row(
+                        "SELECT cairn_discarded_changes(?)",
+                        [i64::try_from(discarded).unwrap_or(i64::MAX)],
+                        |_| Ok(()),
+                    )?;
+                }
+                Err(error)
+            }
         }
-        Ok(())
     }
 
     /// Repair completed chats whose answer survived only in the run summary.
@@ -890,10 +955,12 @@ impl Db<'_> {
                     "recovered": true,
                 },
             });
-            self.event(&id, &EventKind::ItemCompleted, &summary, Some(&payload))?;
-            self.0.execute(
-                "UPDATE events SET created_at=? WHERE id=?",
-                params![finished, self.0.last_insert_rowid()],
+            self.event_at(
+                &id,
+                &EventKind::ItemCompleted,
+                &summary,
+                Some(&payload),
+                finished,
             )?;
         }
         Ok(())
@@ -937,7 +1004,7 @@ impl Db<'_> {
     }
 
     /// SSE is intentionally uncompressed; preserve its small initial/replay window.
-    pub(crate) fn live_events_between(
+    pub fn live_events_between(
         &self,
         run: &str,
         after: i64,
@@ -1056,6 +1123,7 @@ fn within_budget(
             kind: EventKind::from_adapter(&kind),
             text,
             display_id: None,
+            timeline: false,
             payload: payload
                 .map(serde_json::value::RawValue::from_string)
                 .transpose()?,
@@ -1364,7 +1432,7 @@ mod schema_tests {
         drop(Store::open(root.path()).unwrap());
         let file = root.path().join("manager.db");
         let db = Connection::open(&file).unwrap();
-        db.execute_batch("DROP TABLE run_progress; DROP TABLE plugin_hook_receipts; DROP TABLE plugin_hook_events; PRAGMA user_version=19; INSERT INTO kv(key,data) VALUES('hook-upgrade-fixture','true');").unwrap();
+        db.execute_batch("DROP TABLE timeline_entries; DROP TABLE timeline_state; DROP TABLE run_progress; DROP TABLE plugin_hook_receipts; DROP TABLE plugin_hook_events; PRAGMA user_version=19; INSERT INTO kv(key,data) VALUES('hook-upgrade-fixture','true');").unwrap();
         drop(db);
         drop(Store::open(root.path()).unwrap());
         drop(Store::open(root.path()).unwrap());
@@ -1404,7 +1472,7 @@ mod schema_tests {
             .unwrap()
         };
         let retained = hook_schema(&db);
-        db.execute_batch("DROP TABLE run_progress; PRAGMA user_version=20; INSERT INTO kv(key,data) VALUES('progress-upgrade-fixture','true');").unwrap();
+        db.execute_batch("DROP TABLE timeline_entries; DROP TABLE timeline_state; DROP TABLE run_progress; PRAGMA user_version=20; INSERT INTO kv(key,data) VALUES('progress-upgrade-fixture','true');").unwrap();
         drop(db);
         drop(Store::open(root.path()).unwrap());
         drop(Store::open(root.path()).unwrap());

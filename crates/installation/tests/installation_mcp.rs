@@ -1172,6 +1172,7 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "list_runs",
         "get_run",
         "read_run_history",
+        "read_run_timeline",
         "read_run_content",
     ]);
     public_names.extend([
@@ -1391,6 +1392,25 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
             .any(|record| record["event"]["type"] == "engine.retry"
                 && record["event"]["payload"] == engine)
     );
+    // The timeline gives agents the same interpreted card the apps present.
+    let timeline = call(
+        &s,
+        &configuration,
+        "read_run_timeline",
+        json!({ "runId": run["id"] }),
+    )
+    .await;
+    let cards = result(&timeline)["entries"].as_array().unwrap().clone();
+    let card = cards
+        .iter()
+        .find(|page| page["entry"]["content"]["notice"]["code"] == "engineRetry")
+        .unwrap();
+    assert_eq!(card["kind"], "complete");
+    assert_eq!(
+        card["entry"]["content"]["notice"]["engineRetry"],
+        json!({"attempt": 2, "maxRetries": 10, "reason": "overloaded", "httpStatus": null, "delayMs": null, "noResponse": false})
+    );
+    assert_eq!(card["entry"]["content"]["notice"]["prominent"], true);
     let chunk = call(
         &s,
         &configuration,
@@ -3281,6 +3301,122 @@ async fn chat_recovery_tools_preserve_confirmation_and_retention_rules() {
     .await;
     assert_eq!(result(&restored)["lifecycle"], "active");
     assert_eq!(result(&restored)["paused"], true);
+}
+
+#[tokio::test]
+async fn trashed_conversations_reject_timeline_content_on_both_mcp_surfaces() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let (target, _) = active_run(&s, &main).await;
+    let run_id = target["id"].as_str().unwrap();
+    s.store
+        .event(
+            run_id,
+            &EventKind::EngineRetry,
+            "retry",
+            Some(json!({"type":"engine.retry", "attempt":1, "reason":"overloaded"})),
+        )
+        .await
+        .unwrap();
+    s.store
+        .change_run(
+            run_id,
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Failed),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let mut chat = s.chat_create(json!({})).await.unwrap();
+    chat["runId"] = target["id"].clone();
+    let chat_id = chat["id"].as_str().unwrap().to_owned();
+    s.store.save_conversation_boundary(chat).await.unwrap();
+
+    let timeline = call(
+        &s,
+        &configuration,
+        "read_run_timeline",
+        json!({"runId": run_id}),
+    )
+    .await;
+    let entry = result(&timeline)["entries"][0]["entry"].clone();
+    let entry_id = entry["id"].as_str().unwrap().to_owned();
+    let inputs = [
+        json!({"runId":run_id, "entryId":entry_id}),
+        json!({"runId":run_id, "entryId":entry_id, "timelineSnapshot":entry}),
+    ];
+    for input in &inputs {
+        result(&call(&s, &configuration, "read_run_content", input.clone()).await);
+        result(&public_call(&s, &["read"], "read_run_content", input.clone()).await);
+    }
+
+    let deleted = call(&s, &configuration, "delete_chat", json!({"chatId":chat_id})).await;
+    assert_eq!(result(&deleted)["lifecycle"], "trash");
+    for input in inputs {
+        let installation = call(&s, &configuration, "read_run_content", input.clone()).await;
+        let public = public_call(&s, &["read"], "read_run_content", input).await;
+        assert_eq!(installation["result"]["isError"], true);
+        assert_eq!(public["result"]["isError"], true);
+    }
+}
+
+#[tokio::test]
+async fn timeline_page_counts_the_complete_wrapper_at_the_byte_limit() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (run, configuration) = active_run(&s, &main).await;
+    let run_id = run["id"].as_str().unwrap();
+    let record =
+        |text: String| json!({"item": {"id":"bounded-reply", "type":"agent_message", "text":text}});
+    s.store
+        .event(
+            run_id,
+            &EventKind::ItemUpdated,
+            "x",
+            Some(record("x".into())),
+        )
+        .await
+        .unwrap();
+    let first = call(
+        &s,
+        &configuration,
+        "read_run_timeline",
+        json!({"runId":run_id}),
+    )
+    .await;
+    let entry = result(&first)["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|page| page["entry"]["content"]["itemId"] == "bounded-reply")
+        .unwrap()["entry"]
+        .clone();
+    let entry_bytes = serde_json::to_vec(&entry).unwrap().len();
+    let text = "x".repeat(256 * 1024 - 2 - entry_bytes + 1 - 10);
+    s.store
+        .event(
+            run_id,
+            &EventKind::ItemUpdated,
+            &text,
+            Some(record(text.clone())),
+        )
+        .await
+        .unwrap();
+    for public in [false, true] {
+        let args = json!({"runId":run_id});
+        let response = if public {
+            public_call(&s, &["read"], "read_run_timeline", args).await
+        } else {
+            call(&s, &configuration, "read_run_timeline", args).await
+        };
+        let entries = result(&response)["entries"].as_array().unwrap();
+        assert!(serde_json::to_vec(entries).unwrap().len() <= 256 * 1024);
+        assert!(entries.iter().any(|page| page["kind"] == "truncated"));
+    }
 }
 
 #[tokio::test]

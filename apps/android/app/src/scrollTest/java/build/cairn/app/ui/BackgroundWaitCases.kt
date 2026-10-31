@@ -553,7 +553,7 @@ abstract class BackgroundWaitCases {
             put("status", "succeeded")
         }
         val waits =
-            timelineEntries(
+            fixtureEntries(
                     listOf(
                         RunEvent(
                             id = 1,
@@ -694,13 +694,14 @@ abstract class BackgroundWaitCases {
                 )
             val batch =
                 wireJson.encodeToString(
-                    LiveBatch(
-                        history?.invoke(chat.wakeup, now)
-                            ?: if (quota) quotaEvents(now) else listOf(waiting),
-                        LiveState(chat = chat),
-                        true,
-                        false,
-                    )
+                    timelineBatch(
+                            history?.invoke(chat.wakeup, now)
+                                ?: if (quota) quotaEvents(now) else listOf(waiting),
+                            LiveState(chat = chat),
+                            true,
+                            false,
+                        )
+                        .let { if (quota) quotaCards(it) else it }
                 )
             server.dispatcher =
                 object : Dispatcher() {
@@ -943,6 +944,43 @@ private fun quotaEvents(now: Long): List<RunEvent> {
             payload = mapOf("error" to buildJsonObject { put("message", SPEND_LIMIT) }),
         ),
         event(6, "status", "failed"),
+    )
+}
+
+/**
+ * The server's usage-limit bookkeeping for [quotaEvents]: the reply repeating the limit is an echo,
+ * the turn failure and final status stay in the run log, and the failure stays current until the
+ * turn or execution moves on. The Rust reducer tests qualify these decisions.
+ */
+private fun quotaCards(batch: LiveBatch): LiveBatch {
+    val movedOn = batch.events.any { it.type == "turn.completed" || it.text == "succeeded" }
+    return batch.copy(
+        entries =
+            batch.entries.map { change ->
+                val card = (change as build.cairn.contracts.TimelineChange.A).entry
+                val content =
+                    when (val content = card.content) {
+                        is build.cairn.contracts.TimelineContent.B ->
+                            if (content.text == SPEND_LIMIT) content.copy(echo = true) else content
+                        is build.cairn.contracts.TimelineContent.C ->
+                            content.copy(
+                                notice =
+                                    content.notice.copy(
+                                        prominent = false,
+                                        quota =
+                                            if (card.source == 5L)
+                                                build.cairn.contracts.QuotaFailure(
+                                                    current = !movedOn,
+                                                    message = SPEND_LIMIT,
+                                                    resetsAt = null,
+                                                )
+                                            else null,
+                                    )
+                            )
+                        else -> content
+                    }
+                build.cairn.contracts.TimelineChange.A(card.copy(content = content))
+            }
     )
 }
 

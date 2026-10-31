@@ -49,7 +49,7 @@ class RecentWindowResumeTest {
         )
         try {
             MockWebServer().use { server ->
-                val revision = "v1:fixture:1"
+                val revision = "v2:fixture:1"
                 val streams = CopyOnWriteArrayList<String>()
                 val olderRequests = CopyOnWriteArrayList<String>()
                 val state =
@@ -92,7 +92,7 @@ class RecentWindowResumeTest {
                                     1 ->
                                         stream(
                                             60,
-                                            LiveBatch(
+                                            timelineBatch(
                                                 (41..60).map(::message),
                                                 state,
                                                 false,
@@ -107,7 +107,7 @@ class RecentWindowResumeTest {
                                     2 ->
                                         stream(
                                             200,
-                                            LiveBatch(
+                                            timelineBatch(
                                                 (181..200).map(::message),
                                                 state,
                                                 true,
@@ -132,7 +132,7 @@ class RecentWindowResumeTest {
                                     .setHeader("Content-Type", "application/json")
                                     .setBody(
                                         wireJson.encodeToString(
-                                            HistoryPage(
+                                            timelinePage(
                                                 events = (end - 19..end).map(::message),
                                                 history = revision,
                                                 oldest = end - 19L,
@@ -216,7 +216,7 @@ class RecentWindowResumeTest {
                         olderRequests.size == 2
                     }
                     assertEquals(
-                        "/api/installations/fixture/api/chats/aa61a476-87e5-5034-b813-8a63564107d7/stream?after=60&history=v1%3Afixture%3A1&window=1&recent=1",
+                        "/api/installations/fixture/api/chats/aa61a476-87e5-5034-b813-8a63564107d7/stream?after=60&history=v2%3Afixture%3A1&window=1&recent=1",
                         streams[1],
                     )
                     // Pages loaded above the replaced events are dropped: paging resumes at

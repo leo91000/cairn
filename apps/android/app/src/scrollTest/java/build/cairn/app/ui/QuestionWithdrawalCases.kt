@@ -262,19 +262,12 @@ abstract class QuestionWithdrawalCases {
                                 val reply =
                                     "My answers to your questions:\n\n" +
                                         """[{"questionId":"platforms","question":"Quelles plateformes ?","selected":[{"id":"android","label":"Android"},{"id":"web","label":"Web"}],"comment":"Android en priorité"}]"""
-                                EventRow(
+                                MessageRow(
                                     vm,
-                                    RunEvent(
-                                        id = 1,
-                                        createdAt = 1,
-                                        type = "chat.user",
-                                        text = reply,
-                                        payload =
-                                            buildJsonObject {
-                                                put("text", reply)
-                                                put("questionId", "question")
-                                            },
-                                    ),
+                                    user = true,
+                                    questionAnswerText(reply, "question"),
+                                    emptyList(),
+                                    1,
                                 )
                             }
                         else

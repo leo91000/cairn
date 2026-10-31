@@ -281,6 +281,37 @@ async fn writes_serialize_and_failed_transactions_roll_back() {
     assert_eq!(reopened.kv("counter").await.unwrap(), Some(json!(100)));
 }
 
+/// A lock held by another SQLite connection must not discard a queued write.
+#[tokio::test]
+async fn a_slow_external_writer_can_release_its_lock_without_losing_a_transition() {
+    let root = TempDir::new().unwrap();
+    let store = Store::open(root.path()).unwrap();
+    let other = rusqlite::Connection::open(root.path().join("manager.db")).unwrap();
+    other.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+    let waiting = tokio::spawn({
+        let store = store.clone();
+        async move { store.set("after-lock", json!("preserved"), None).await }
+    });
+    // Exceed the previous five-second busy timeout while the other connection
+    // owns the real SQLite write lock.
+    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+    assert!(
+        !waiting.is_finished(),
+        "the queued write failed before the lock was released"
+    );
+    other.execute_batch("COMMIT").unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), waiting)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        store.kv("after-lock").await.unwrap(),
+        Some(json!("preserved"))
+    );
+}
+
 /// The worker integration tests patch a run from a second process while the
 /// worker patches the same run. Neither writer may drop the other's fields.
 #[tokio::test]

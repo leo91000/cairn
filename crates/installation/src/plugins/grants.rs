@@ -1003,6 +1003,107 @@ mod migration_tests {
     }
 
     #[tokio::test]
+    async fn version_22_upgrade_preserves_instance_grants_and_the_legacy_supplier() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        let agent = "00000000-0000-4000-8000-000000000031";
+        let first = "00000000-0000-4000-8000-000000000032";
+        let second = "00000000-0000-4000-8000-000000000033";
+        let ungranted = "00000000-0000-4000-8000-000000000034";
+        store
+            .transaction(move |db| {
+                for (id, name) in [(first, "A"), (second, "B"), (ungranted, "C")] {
+                    let mut instance = super::super::connections::Connection::draft(
+                        id,
+                        "github",
+                        json!({}),
+                        vec![],
+                    );
+                    instance.name = name.into();
+                    instance.enabled = true;
+                    instance.revision = "r1".into();
+                    db.save_plugin_instance(&instance)?;
+                }
+                let mut profile = crate::agent_fixture::profile(json!({ "id": agent }))?;
+                profile.settings.plugins = vec![second.into(), first.into()];
+                db.save_agent(&profile)
+            })
+            .await
+            .unwrap();
+        drop(store);
+        let db = rusqlite::Connection::open(root.path().join("manager.db")).unwrap();
+        db.execute_batch("DROP TABLE plugin_grant_resources; DROP TABLE plugin_contribution_grants; DROP TABLE plugin_credential_suppliers; PRAGMA user_version=22;").unwrap();
+        let timeline = db
+            .query_row::<String, _, _>(
+                "SELECT sql FROM sqlite_master WHERE name='timeline_entries'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let upgraded = crate::store::Store::open(root.path()).unwrap();
+        let grants = upgraded
+            .read(move |db| db.agent_plugin_grants(agent))
+            .await
+            .unwrap();
+        assert_eq!(
+            db.pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .unwrap(),
+            crate::store::DATABASE_VERSION
+        );
+        assert_eq!(
+            db.query_row::<String, _, _>(
+                "SELECT sql FROM sqlite_master WHERE name='timeline_entries'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+            timeline
+        );
+        assert_eq!(grants.grants.len(), 2);
+        assert!(
+            grants
+                .grants
+                .iter()
+                .all(|grant| matches!(grant.access, Access::Full))
+        );
+        assert!(
+            grants
+                .grants
+                .iter()
+                .any(|grant| grant.instance_id.to_string() == first)
+        );
+        assert!(
+            grants
+                .grants
+                .iter()
+                .any(|grant| grant.instance_id.to_string() == second)
+        );
+        assert!(
+            !grants
+                .grants
+                .iter()
+                .any(|grant| grant.instance_id.to_string() == ungranted)
+        );
+        assert_eq!(
+            grants
+                .run_credential_instances
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            vec![first]
+        );
+        drop(upgraded);
+        let reopened = crate::store::Store::open(root.path()).unwrap();
+        assert_eq!(
+            reopened
+                .read(move |db| db.agent_plugin_grants(agent))
+                .await
+                .unwrap(),
+            grants
+        );
+    }
+
+    #[tokio::test]
     async fn migration_retains_the_previously_enabled_name_ordered_supplier() {
         let root = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(root.path()).unwrap();

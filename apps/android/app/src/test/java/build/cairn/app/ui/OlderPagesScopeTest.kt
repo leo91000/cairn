@@ -65,7 +65,7 @@ class OlderPagesScopeTest {
                                                                         runId = "r1",
                                                                     )
                                                                 ),
-                                                            history = "v1:r1:1",
+                                                            history = "v2:r1:1",
                                                             oldest = 9,
                                                             hasOlder = false,
                                                         )
@@ -81,7 +81,7 @@ class OlderPagesScopeTest {
                                         path.endsWith("/one/stream") || path.endsWith("/two/stream")
                                     ) {
                                         val batch =
-                                            LiveBatch(
+                                            timelineBatch(
                                                 listOf(
                                                     RunEvent(
                                                         id = 10,
@@ -101,7 +101,7 @@ class OlderPagesScopeTest {
                                                 ),
                                                 false,
                                                 false,
-                                                "v1:r1:1",
+                                                "v2:r1:1",
                                                 oldest = 10,
                                                 hasOlder = true,
                                             )

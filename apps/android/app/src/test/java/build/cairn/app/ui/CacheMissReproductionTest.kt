@@ -101,7 +101,7 @@ class CacheMissReproductionTest {
                         )
                 val batch =
                     wireJson.encodeToString(
-                        LiveBatch(
+                        timelineBatch(
                             events,
                             LiveState(
                                 chat =
@@ -112,7 +112,7 @@ class CacheMissReproductionTest {
                             ),
                             reset = false,
                             more = false,
-                            history = "v1:fixture:1",
+                            history = "v2:fixture:1",
                             oldest = if (paged) 21 else null,
                             hasOlder = paged,
                         )
@@ -160,9 +160,9 @@ class CacheMissReproductionTest {
                                     .setHeader("Content-Type", "application/json")
                                     .setBody(
                                         wireJson.encodeToString(
-                                            HistoryPage(
+                                            timelinePage(
                                                 events = emptyList(),
-                                                history = "v1:fixture:1",
+                                                history = "v2:fixture:1",
                                                 oldest = 1,
                                                 hasOlder = false,
                                             )
@@ -172,7 +172,7 @@ class CacheMissReproductionTest {
                             if (request.path.orEmpty().contains("/history?")) {
                                 assertEquals("21", request.requestUrl?.queryParameter("before"))
                                 assertEquals(
-                                    "v1:fixture:1",
+                                    "v2:fixture:1",
                                     request.requestUrl?.queryParameter("history"),
                                 )
                                 olderRequested.countDown()
@@ -183,12 +183,16 @@ class CacheMissReproductionTest {
                                     .setHeader("Content-Type", "application/json")
                                     .setBody(
                                         wireJson.encodeToString(
-                                            HistoryPage(
-                                                events = (1..20).map(::message),
-                                                history = "v1:fixture:1",
-                                                oldest = 1,
-                                                hasOlder = false,
-                                            )
+                                            withTimeline((1..20).map(::message)).let {
+                                                (events, cards) ->
+                                                HistoryPage(
+                                                    entries = cards,
+                                                    events = events,
+                                                    history = "v2:fixture:1",
+                                                    oldest = 1,
+                                                    hasOlder = false,
+                                                )
+                                            }
                                         )
                                     )
                             }
@@ -263,7 +267,7 @@ class CacheMissReproductionTest {
                     }
                     compose.waitForIdle()
                     assertEquals(
-                        "/api/installations/fixture/api/chats/aa61a476-87e5-5034-b813-8a63564107d7/stream?after=$accepted&history=v1%3Afixture%3A1&window=1&recent=1",
+                        "/api/installations/fixture/api/chats/aa61a476-87e5-5034-b813-8a63564107d7/stream?after=$accepted&history=v2%3Afixture%3A1&window=1&recent=1",
                         requests[1],
                     )
                     compose.onNodeWithText("Diagnostic cache").assertIsDisplayed()

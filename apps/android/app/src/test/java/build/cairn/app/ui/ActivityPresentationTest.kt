@@ -50,7 +50,7 @@ class ActivityPresentationTest {
                     payload = kotlinx.serialization.json.JsonObject(data),
                 )
             }
-        val replay = timelineEntries(original)
+        val replay = fixtureEntries(original)
         assertEquals(3, replay.count { it.message })
         assertEquals(1, replay.count { it.plan != null })
         val kinds =
@@ -104,8 +104,7 @@ class ActivityPresentationTest {
                             kotlinx.serialization.json.JsonObject(it)
                         },
                 )
-            val waits =
-                timelineEntries(listOf(scheduled, ready), chat = true).mapNotNull { it.wait }
+            val waits = fixtureEntries(listOf(scheduled, ready), chat = true).mapNotNull { it.wait }
             assertEquals("case $index", if (immediate[index]) 2 else 1, waits.size)
             assertEquals(if (immediate[index]) "replaced" else null, waits.first().ended)
             val result = waits.last()
@@ -157,47 +156,44 @@ class ActivityPresentationTest {
     @Test
     fun `background waits are labelled in the activity log`() {
         fun waiting(vararg descriptions: String) =
-            RunEvent(
-                id = 1,
-                createdAt = 1000,
-                type = "turn.waiting",
-                text = "",
-                payload =
-                    kotlinx.serialization.json.JsonObject(
-                        mapOf(
-                            "type" to JsonPrimitive("turn.waiting"),
-                            "tasks" to
-                                buildJsonArray {
-                                    descriptions.forEach {
-                                        addJsonObject { put("description", it) }
-                                    }
-                                },
-                        )
-                    ),
+            presentNotice(
+                TimelineNotice(
+                    code = "backgroundTasks",
+                    prominent = false,
+                    state = "info",
+                    tasks = descriptions.toList(),
+                )
             )
-        val waiting = presentActivity(waiting("Build", "Watch CI"))
+        val waiting = waiting("Build", "Watch CI")
         assertEquals(ActivityKind.NOTICE, waiting.kind)
         assertEquals("En attente de tâches en arrière-plan", waiting.title)
         assertEquals("Build · Watch CI", waiting.subtitle)
         assertEquals("", waiting.output)
-        val finished = presentActivity(waiting())
+        val finished = waiting()
         assertEquals("Tâches en arrière-plan terminées", finished.title)
         assertEquals("", finished.subtitle)
         assertEquals("", finished.output)
     }
 
     @Test
-    fun `session events from screenshot have human summaries and no JSON body`() {
-        val done = presentActivity(event("turn.completed", """{"type":"turn.completed"}"""))
+    fun `session cards have human summaries and no JSON body`() {
+        fun notice(code: String) = TimelineNotice(code = code, prominent = false, state = "done")
+        val done = presentNotice(notice("turnCompleted"))
         assertEquals("Travail terminé", done.title)
         assertEquals("", done.output)
-        assertEquals("Exécution réussie", presentActivity(event("status", "succeeded")).title)
-        val account = presentActivity(event("status", "Using Codex account: Compte principal"))
+        assertEquals(
+            "Exécution réussie",
+            presentNotice(notice("runStatus").copy(status = "succeeded")).title,
+        )
+        val account =
+            presentNotice(
+                notice("accountSelected")
+                    .copy(
+                        account = build.cairn.contracts.AccountNotice("Codex", "Compte principal")
+                    )
+            )
         assertEquals("Compte Codex sélectionné", account.title)
         assertEquals("Compte principal", account.subtitle)
-        val claude = presentActivity(event("status", "Using Claude Code account: Studio"))
-        assertEquals("Compte Claude Code sélectionné", claude.title)
-        assertEquals("Studio", claude.subtitle)
     }
 
     @Test

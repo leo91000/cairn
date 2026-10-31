@@ -1,5 +1,6 @@
 import type { ChatWakeup, WaitObservation } from '../../../packages/contracts/chats'
 import type { RunEvent } from '../../../packages/contracts/contracts'
+import type { TimelineEntry } from '../../../packages/contracts/live'
 import type { AgentPlan, PlanChange, PlanProgress } from './agent-plan'
 import type { CompactionEntry } from './context-usage'
 import { describeCommand, expectedCommandOutcome } from './activity-command'
@@ -11,14 +12,7 @@ import {
   samePlan,
 } from './agent-plan'
 import { compactionEnd } from './context-usage'
-import {
-  engineAttention,
-  engineNoticeTitle,
-  engineRetryDetail,
-  engineRetryTitle,
-  usageLimitDetail,
-  usageLimitTitle,
-} from './engine-status'
+import { noticeArtifact } from './notices'
 import { questionAnswerText } from './question-answer'
 
 export const MAX_ACTIVITY_GROUP_SIZE = 30
@@ -80,7 +74,8 @@ export type ActivityEntry
     id: string
     time: number
     text: string
-    sourceId?: string
+    /** The person's message this card delivered. */
+    messageId?: string
     delivery?: string
     /** The model provider that wrote this reply, when the engine chose among several. */
     via?: string
@@ -126,12 +121,6 @@ export interface ActivityWait {
 // Where a scheduled wait's card is placed: its turn ended, or a message or another wait event came.
 const waitBoundaries = new Set(['turn.started', 'turn.completed', 'turn.failed', 'chat.user', 'chat.sleep', 'chat.wait', 'chat.wait_ready', 'chat.wakeup', 'run.wait', 'run.wait_ready', 'run.wakeup'])
 const terminalStatuses = new Set(['succeeded', 'failed', 'cancelled', 'interrupted'])
-const statusTitles: Record<string, string> = {
-  succeeded: 'Run succeeded',
-  failed: 'Run failed',
-  cancelled: 'Run cancelled',
-  interrupted: 'Run interrupted',
-}
 
 // Codex names the workspace server; Claude and OpenCode prefix the tool with it.
 const workspaceWaitTool = /^(?:mcp__)?cairn_workspace(?:__|_|\.)(?:sleep|wait_for)$/
@@ -161,54 +150,13 @@ function pretty(value: unknown) {
   return typeof value === 'string' ? value : JSON.stringify(value, null, 2) ?? ''
 }
 
-export function activityPayload(event: RunEvent) {
-  // Stderr can itself look like a protocol event; it is always process output.
-  if (event.type === 'diagnostic')
-    return {}
+function activityPayload(event: RunEvent) {
   return event.payload ?? {}
-}
-
-/** A failed attempt's reasons, its card and how many times Cairn retried its chain. */
-interface FailedAttempt {
-  messages: Set<string>
-  notice?: ActivityArtifact
-  retries?: number
-  /** Its turn or run failed, beyond a reported error. */
-  ended?: boolean
-  /** Cairn scheduled a retry that has not started yet. */
-  pending?: boolean
-  /** The card's title before it announced the retry. */
-  failedTitle?: string
-}
-
-/** Whether a notice reports a connection the provider is restoring. */
-function connectionText(raw: string) {
-  return /websocket|reconnecting\.\.\.|reconnecting\s+\d+\//i.test(raw) && /503|reconnect|falling back|connection.*(?:closed|failed)/i.test(raw)
-}
-
-// The engine's report on its own requests, distinct from a failure and from Cairn's waits.
-const engineEvents = new Set(['engine.retry', 'engine.notice', 'provider.limit'])
-
-// Adapters report a stop that Cairn requested as a failed turn.
-const stopEchoes = new Set(['Conversation stopped.', 'Claude execution stopped.', 'OpenCode execution stopped.'])
-
-/** The reason a failure event gives, or undefined when the event does not report a failure. */
-export function failureReason(event: RunEvent) {
-  const data = activityPayload(event)
-  const failure = ['turn.failed', 'runner.failed'].includes(event.type) || (event.type === 'error' && data.willRetry !== true) || (event.type === 'status' && event.text === 'failed')
-  if (!failure)
-    return undefined
-  return text(record(data.error).message) || text(data.message) || (event.type === 'status' ? '' : event.text)
 }
 
 /** Whether a reason repeats one already given; a run's recorded error may be truncated. */
 export function sameReason(given: string, reason: string) {
   return given === reason || (!!reason && given.startsWith(reason))
-}
-
-/** Whether an adapter reports a stop Cairn requested; the terminal status that follows says so. */
-export function stopEcho(event: RunEvent, reason = failureReason(event)) {
-  return event.type !== 'status' && reason !== undefined && stopEchoes.has(reason)
 }
 
 function readable(value: string) {
@@ -230,11 +178,14 @@ const collaborationTitles: Record<string, string> = {
   closeAgent: 'Closed a subagent',
 }
 
-/** Keep tool updates in their original position and fold actions between messages. */
-export function activityEntries(events: RunEvent[], chat = false, groups = new ActivityGroups(), pendingWakeup?: ChatWakeup | null): ActivityEntry[] {
+/**
+ * Keep tool updates in their original position and fold actions between messages. Timeline
+ * cards (messages, the run cycle, errors and retries) arrive interpreted by the server; they
+ * take their place among the activity, and the events they present only mark boundaries.
+ */
+export function activityEntries(events: RunEvent[], chat = false, groups = new ActivityGroups(), pendingWakeup?: ChatWakeup | null, cards: TimelineEntry[] = []): ActivityEntry[] {
   const entries: ActivityEntry[] = []
   const artifacts = new Map<string, ActivityArtifact>()
-  const messages = new Map<string, Extract<ActivityEntry, { kind: 'message' }>>()
   // By the agent's own item ID: a subagent's steps can arrive after the turn that started it.
   const subagents = new Map<string, ActivityArtifact>()
   const aliases = new Map<string, string>()
@@ -245,41 +196,7 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
   }
 
   const agentKey = (event: RunEvent, id: string) => `${event.runId}:${aliases.get(`${event.runId}:${id}`) ?? id}`
-  let connectionNotices: ActivityArtifact[] = []
-  // The engine's own retries share one notice, showing the latest, until work continues.
-  let engineRetries: ActivityArtifact[] = []
-  // The provider's usage limit shows its latest state, until it no longer applies.
-  let usageLimits: ActivityArtifact[] = []
-  // A conversation shows one card per failure. The adapter, the worker and the final status
-  // may each repeat the provider's error; only a new reason adds a card. When Cairn retries,
-  // the next attempt's card with the same reason replaces the previous one.
-  const failures = new Map<string, FailedAttempt>()
-  const retried = new Map<string, FailedAttempt>()
-  // Diagnostics keep every lifecycle event, but a final status does not repeat a reason.
-  const reported = new Map<string, Set<string>>()
-
-  function recovered() {
-    for (const notice of connectionNotices) {
-      notice.status = 'info'
-      notice.statusLabel = 'Recovered'
-      notice.subtitle = 'Connection restored; work continued'
-      notice.attention = false
-    }
-
-    connectionNotices = []
-  }
-
-  function retriesRecovered() {
-    for (const notice of engineRetries) {
-      notice.statusLabel = 'Recovered'
-      notice.attention = false
-    }
-
-    engineRetries = []
-  }
-
   let turn = 0
-  let via: string | undefined
   // The plan its updates change, until the agent finishes it or writes another one.
   let plan: Extract<ActivityEntry, { kind: 'plan' }> | undefined
   // The wait still pending, by its wakeup ID, so that its result and resumption complete it.
@@ -295,10 +212,54 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
     scheduled = undefined
   }
 
+  const sources = new Map(events.map(event => [event.id, event]))
+  let nextCard = 0
+  const placeCards = (before: number) => {
+    for (; nextCard < cards.length && cards[nextCard]!.position < before; nextCard++) {
+      const card = cards[nextCard]!
+      const content = card.content
+      if (content.kind === 'userMessage') {
+        entries.push({
+          kind: 'message',
+          role: 'user',
+          id: card.id,
+          time: content.sentAt,
+          text: questionAnswerText(content.text, content.questionId),
+          attachments: content.attachments,
+          ...(content.messageId ? { messageId: content.messageId } : {}),
+        })
+        continue
+      }
+
+      if (content.kind === 'agentMessage') {
+        // A reply repeating a failure the conversation reports stays in the run log.
+        if (!chat || !content.echo) {
+          entries.push({
+            kind: 'message',
+            id: card.id,
+            time: card.createdAt,
+            text: content.text,
+            ...(content.via ? { via: content.via } : {}),
+          })
+        }
+
+        continue
+      }
+
+      const artifact = noticeArtifact(card, content.notice, sources.get(card.source))
+      const last = entries.at(-1)
+      if (last?.kind === 'group')
+        last.artifacts.push(artifact)
+      else
+        entries.push({ kind: 'group', id: `group:${artifact.id}`, artifacts: [artifact] })
+    }
+  }
+
   // By run and item: a compaction's start and end update one divider.
   const compactions = new Map<string, CompactionEntry>()
   for (const [eventIndex, stored] of events.entries()) {
     const event = stored
+    placeCards(event.id)
     // A compaction still running when its turn or run ends did not complete.
     const end = compactionEnd(event)
     if (end) {
@@ -453,13 +414,6 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       continue
     }
 
-    // A retry chain ends with an attempt that does not fail again, or with a new message.
-    if (event.type === 'turn.completed' || event.type === 'chat.user')
-      retried.delete(event.runId)
-    // A new request after a failed turn gets its own notice, even without an attempt marker.
-    if (event.type === 'chat.user' && failures.get(event.runId)?.ended && !failures.get(event.runId)?.pending)
-      failures.delete(event.runId)
-
     if (event.type === 'chat.user') {
       // A new request gets its own plan, even when the agent carries the previous list over.
       plan = undefined
@@ -469,28 +423,11 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
         openWait = undefined
       }
 
-      entries.push({
-        kind: 'message',
-        role: 'user',
-        id: `user:${event.id}`,
-        time: typeof event.payload?.createdAt === 'number' && Number.isFinite(event.payload.createdAt) && event.payload.createdAt > 0 && event.payload.createdAt <= event.createdAt ? event.payload.createdAt : event.createdAt,
-        text: questionAnswerText(typeof event.payload?.text === 'string' ? event.payload.text : event.text, event.payload?.questionId),
-        attachments: Array.isArray(event.payload?.attachments) ? event.payload.attachments : [],
-      })
+      placeCards(event.id + 1)
       continue
     }
 
     const data = activityPayload(event)
-    const route = record(data.route)
-    // An attempt may name the provider of its replies; the next attempt ends that label.
-    if (event.type === 'status' && data.attempt === true)
-      via = undefined
-    if (event.type === 'status' && text(route.providerName)) {
-      via = text(route.providerName)
-      if (chat)
-        continue
-    }
-
     const item = record(data.item)
     const type = text(item.type)
     if (type === 'context_compaction' && event.type.startsWith('item.')) {
@@ -546,101 +483,15 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       }
     }
 
-    if (event.type === 'turn.started') {
-      // Item IDs may repeat in a later turn: a new turn's calls start afresh.
-      connectionNotices = []
-      engineRetries = []
-      usageLimits = []
+    // Item IDs may repeat in a later turn: a new turn's calls start afresh.
+    if (event.type === 'turn.started')
       turn++
-    }
-
-    const reason = failureReason(event)
-    if (event.type === 'turn.failed') {
-      // The failure's card says why the turn ended; its reconnect attempts add nothing.
-      if (chat && reason && reason !== 'Conversation interrupted.') {
-        for (const notice of connectionNotices)
-          notice.attention = false
-      }
-
-      connectionNotices = []
-      // The failure says why the turn ended; a limit that stopped it shows as the usage banner.
-      for (const notice of [...engineRetries, ...usageLimits])
-        notice.attention = false
-      engineRetries = []
-      usageLimits = []
-    }
-
-    // The engine's retries and usage limit belong to the execution that reported them. One that
-    // ends before its turn completes, stopped or failed by the runner, ends its retries
-    // unrecovered; a later execution, perhaps on another account, reports its own limit.
-    if (event.type === 'runner.failed' || (event.type === 'status' && (terminalStatuses.has(event.text) || data.attempt === true))) {
-      for (const notice of [...engineRetries, ...usageLimits])
-        notice.attention = false
-      engineRetries = []
-      usageLimits = []
-    }
-
-    // A run that ends, or is stopped while it waits, ends its retry chain: a resume starts afresh.
-    if (event.type === 'status' && terminalStatuses.has(event.text)) {
-      retried.delete(event.runId)
-      const attempt = failures.get(event.runId)
-      // The announced retry will not run: the card reports the failure again.
-      if (attempt?.pending && attempt.notice) {
-        attempt.notice.status = 'error'
-        attempt.notice.title = attempt.failedTitle ?? attempt.notice.title
-      }
-
-      if (attempt)
-        attempt.pending = false
-    }
-
-    if (event.type === 'turn.started' || (event.type === 'status' && data.attempt === true)) {
-      const previous = failures.get(event.runId)
-      if (previous?.pending)
-        retried.set(event.runId, previous)
-      failures.delete(event.runId)
-      reported.delete(event.runId)
-    }
-
-    const shown = failures.get(event.runId)
-    // A connection error is a connection notice: recovery hides it and the turn's failure replaces it.
-    // One repeating the attempt's failure, such as the final error after the last retry, folds into it.
-    const connection = event.type === 'error' && !shown?.messages.has(reason ?? '') && connectionText(Object.keys(data).length ? pretty(data) : event.text)
-    const failureMessage = chat && !connection ? reason : undefined
-    const failure = failureMessage !== undefined
-    if (failure && stopEcho(event, failureMessage))
-      continue
-    // The generic adapter error only repeats a turn failure; after an error report, it says the turn ended.
-    const repeated = !!shown && (shown.messages.has(failureMessage ?? '') || (event.type === 'status' && [...shown.messages].some(message => sameReason(message, failureMessage ?? ''))))
-    if (failure && shown && (!failureMessage || repeated || (failureMessage === 'Conversation interrupted.' && shown.ended))) {
-      shown.messages.add(failureMessage)
-      shown.ended ||= event.type !== 'error'
+    // The timeline presents this event: its card takes its place here.
+    if (event.timeline) {
+      placeCards(event.id + 1)
       continue
     }
 
-    // Cairn retries a temporary failure itself: its card says so instead of reporting a dead end.
-    if (chat && event.type === 'retry.scheduled' && shown?.notice) {
-      const retry = record(data.retry)
-      shown.retries = typeof retry.attempt === 'number' ? retry.attempt : (shown.retries ?? 0) + 1
-      shown.pending = true
-      shown.failedTitle ??= shown.notice.title
-      shown.notice.status = 'info'
-      shown.notice.title = typeof retry.limit === 'number'
-        ? `Temporary error — automatic retry ${shown.retries}/${retry.limit}`
-        : 'Temporary error — retrying automatically'
-      continue
-    }
-
-    if (event.type === 'turn.completed' || (type === 'command_execution' && event.type === 'item.completed' && item.exit_code === 0 && item.status !== 'failed'))
-      recovered()
-    // Work continues once the agent's own reply streams or its tools start, a subagent among them.
-    // Claude Code reports a request it gave up on as a completed message, which the turn's failure
-    // follows; a subagent's progress, or its resumption, says nothing about the agent's request.
-    const ownWork = !text(item.parent_id) && (
-      (event.type === 'item.started' && !(type === 'subagent' && item.resumed === true))
-      || (event.type === 'item.updated' && type !== 'subagent'))
-    if (event.type === 'turn.completed' || ownWork)
-      retriesRecovered()
     const itemId = text(item.id)
     // A subagent keeps its row when its updates arrive after the turn that started it.
     const parentArtifact = subagents.get(agentKey(event, text(item.parent_id)))
@@ -710,32 +561,8 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       continue
     }
 
-    if (type === 'agent_message') {
-      recovered()
-      const content = text(item.text) || event.text
-      const existing = messages.get(id)
-      if (existing) {
-        existing.text = content
-        existing.sourceId = `${event.runId}:${event.id}`
-      }
-      else {
-        const message = {
-          kind: 'message' as const,
-          id,
-          time: event.createdAt,
-          text: content,
-          sourceId: `${event.runId}:${event.id}`,
-          ...(via ? { via } : {}),
-        }
-        entries.push(message)
-        messages.set(id, message)
-      }
-
-      continue
-    }
-
     const status = text(item.status)
-    const failed = status === 'failed' || event.type.includes('failed') || event.type === 'error' || type === 'error' || (event.type === 'status' && event.text === 'failed') || (typeof item.exit_code === 'number' && item.exit_code !== 0)
+    const failed = status === 'failed' || event.type.includes('failed') || (typeof item.exit_code === 'number' && item.exit_code !== 0)
     const running = !failed && (status === 'in_progress' || event.type.endsWith('.started')) && event.type.startsWith('item.')
     const artifact: ActivityArtifact = {
       id,
@@ -749,7 +576,7 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       files: [],
       tasks: [],
       raw: Object.keys(data).length ? pretty(data) : event.text,
-      attention: failed || (event.type === 'status' && ['cancelled', 'interrupted'].includes(event.text)),
+      attention: failed,
     }
     const block = (label: string, value: unknown, language = 'plaintext') => {
       if (value !== undefined && value !== null && value !== '')
@@ -856,122 +683,16 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
     }
     else {
       const labels: Record<string, string> = {
-        'thread.started': 'Session connected',
-        'turn.started': 'Started working',
-        'turn.completed': 'Finished this turn',
-        'diagnostic': 'Agent diagnostic',
         'output': 'Worker output',
-        'error': 'Worker reported an error',
         'item.started': 'Tool activity',
         'item.completed': 'Work completed',
-        'turn.failed': 'The agent ran into an error',
-        'turn.waiting': 'Waiting for background tasks',
-        'engine.retry': 'Retrying the request',
-        'engine.notice': 'Claude Code notice',
-        'provider.limit': 'Usage limit',
       }
-      artifact.title = event.type === 'status' ? (statusTitles[event.text] ?? (event.text.includes(' ') ? event.text : readable(event.text))) : type ? readable(type) : labels[event.type] || readable(event.type)
+      artifact.title = type ? readable(type) : labels[event.type] || readable(event.type)
       const message = text(item.message) || text(data.message) || text(record(data.error).message)
       if (message)
         block('Details', message)
-      else if (!['status', 'thread.started', 'turn.started', 'turn.completed'].includes(event.type))
+      else
         block('Output', event.text, Object.keys(data).length ? 'json' : 'plaintext')
-      if (event.type === 'diagnostic') {
-        artifact.status = 'info'
-        artifact.verbatim = true
-      }
-
-      const usage = record(data.usage)
-      if (typeof usage.input_tokens === 'number' && typeof usage.output_tokens === 'number')
-        artifact.subtitle = `${usage.input_tokens.toLocaleString()} input · ${usage.output_tokens.toLocaleString()} output tokens`
-      if (event.type === 'turn.waiting') {
-        const tasks = Array.isArray(data.tasks) ? data.tasks.map(task => text(record(task).description)).filter(Boolean) : []
-        artifact.status = 'info'
-        if (!tasks.length)
-          artifact.title = 'Background tasks finished'
-        artifact.subtitle = tasks.join(' · ')
-      }
-
-      if (engineEvents.has(event.type)) {
-        artifact.status = 'info'
-        artifact.attention = engineAttention(event.type, data)
-      }
-
-      if (event.type === 'engine.retry') {
-        artifact.title = engineRetryTitle(data)
-        artifact.subtitle = engineRetryDetail(data)
-        for (const notice of engineRetries)
-          notice.attention = false
-        engineRetries = [artifact]
-      }
-
-      if (event.type === 'provider.limit') {
-        artifact.title = usageLimitTitle(data)
-        artifact.subtitle = usageLimitDetail(data)
-        for (const notice of usageLimits)
-          notice.attention = false
-        usageLimits = data.status === 'allowed' ? [] : [artifact]
-      }
-
-      if (event.type === 'engine.notice')
-        artifact.title = engineNoticeTitle(data)
-    }
-
-    // A speed Codex does not offer for the run's model runs at Standard: the conversation says so.
-    const applied = text(record(data.speed).applied)
-    if (event.type === 'status' && applied === 'standard') {
-      artifact.title = 'This turn runs at Standard speed'
-      artifact.subtitle = 'Codex doesn’t list the selected speed for this model here, so Cairn asks for Standard'
-      artifact.status = 'info'
-      artifact.attention = true
-    }
-
-    // Codex lists the selected speed for the turn's model, possibly after an earlier attempt did not.
-    if (event.type === 'status' && record(data.speed).confirmed === true) {
-      artifact.title = 'Selected speed requested for this turn'
-      artifact.subtitle = 'Codex lists it for this model here; the account’s plan decides whether it applies'
-      artifact.status = 'info'
-      artifact.attention = true
-    }
-
-    // Codex could not confirm the speed: the turn asks for it, but may run at Standard.
-    if (event.type === 'status' && record(data.speed).unconfirmed === true) {
-      artifact.title = 'Speed not confirmed for this turn'
-      artifact.subtitle = 'It couldn’t be confirmed for this account and model; this turn may run at Standard'
-      artifact.status = 'info'
-      artifact.attention = true
-    }
-
-    if (artifact.kind === 'notice' && ['error', 'diagnostic', 'item.completed'].includes(event.type) && connectionText(artifact.raw)) {
-      artifact.title = 'Connection interrupted'
-      artifact.attention = true
-      // The turn's reconnect attempts share one card, showing the latest.
-      for (const notice of connectionNotices)
-        notice.attention = false
-      connectionNotices.push(artifact)
-    }
-
-    if (reason) {
-      const reasons = reported.get(event.runId) ?? new Set<string>()
-      if (!chat && event.type === 'status' && reasons.has(reason))
-        artifact.blocks = []
-      reasons.add(reason)
-      reported.set(event.runId, reasons)
-    }
-
-    if (failure) {
-      const attempt = failures.get(event.runId) ?? { messages: new Set<string>() }
-      attempt.messages.add(failureMessage)
-      attempt.notice = artifact
-      attempt.ended ||= event.type !== 'error'
-      failures.set(event.runId, attempt)
-      const previous = retried.get(event.runId)
-      retried.delete(event.runId)
-      if (previous?.notice && previous.messages.has(failureMessage)) {
-        previous.notice.attention = false
-        attempt.retries = previous.retries
-        artifact.title = `The agent ran into an error after ${previous.retries} automatic ${previous.retries === 1 ? 'retry' : 'retries'}`
-      }
     }
 
     if (type === 'mcp_tool_call' && isDelegateTool(item) && artifact.status !== 'error')
@@ -1005,6 +726,7 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       entries.push({ kind: 'group', id: `group:${id}`, artifacts: [artifact] })
   }
 
+  placeCards(Infinity)
   placeScheduled()
   const knownWait = pendingWakeup && waits.get(pendingWakeup.id)
   if (knownWait && pendingWakeup?.observation && knownWait.observation === undefined)
