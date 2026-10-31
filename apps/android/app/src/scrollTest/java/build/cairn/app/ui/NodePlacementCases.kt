@@ -501,7 +501,11 @@ abstract class NodePlacementCases {
             }
             compose.onNodeWithText("Ajouter une machine").performScrollTo().performClick()
             compose.onNodeWithText("Nom de la machine").performTextInput("Desk")
-            compose.onNodeWithText("Exécution native sur l’hôte").performClick()
+            compose
+                .onNodeWithText("Exécution native sur l’hôte")
+                .performScrollTo()
+                .assertIsDisplayed()
+                .performClick()
 
             // The page renders before connect() finishes refreshing the workspace.
             compose.waitUntil(10000) {
