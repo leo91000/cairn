@@ -158,6 +158,7 @@ fn worker_fixture_rejects_an_ambiguous_remap() {
 
 impl FixtureClock {
     fn new(root: &Path) -> Self {
+        require_fixture_hooks(std::env::var_os("CAIRN_TEST_WORKER_FIXTURES").as_deref());
         let value = root.join("fixture-clock.txt");
         let millis = now();
         std::fs::write(&value, millis.to_string()).unwrap();
@@ -170,6 +171,21 @@ impl FixtureClock {
         std::fs::write(&next, self.millis.to_string()).unwrap();
         std::fs::rename(next, &self.value).unwrap();
     }
+}
+
+fn require_fixture_hooks(fixtures: Option<&std::ffi::OsStr>) {
+    assert!(
+        fixtures.is_some(),
+        "fixture clock requires worker hooks; run this test with pnpm test:backend"
+    );
+}
+
+#[test]
+#[should_panic(
+    expected = "fixture clock requires worker hooks; run this test with pnpm test:backend"
+)]
+fn fixture_clock_requires_the_backend_launcher() {
+    require_fixture_hooks(None);
 }
 
 impl Fixture {
