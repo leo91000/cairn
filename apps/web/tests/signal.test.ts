@@ -479,6 +479,8 @@ describe('the working indicator', () => {
     }
     expect(backgroundWait(announced, [reply])).toBeNull()
     expect(backgroundWait(announced, [{ ...reply, source: 1, revision: 1 }])).not.toBeNull()
+    expect(backgroundWait([...announced, waiting(4, 4000, ['Build'])], [reply]))
+      .toEqual({ tasks: ['Build'], since: 4000 })
   })
 
   it('labels background waits in the activity log', () => {

@@ -340,8 +340,11 @@ export function backgroundWait(events: RunEvent[], cards: TimelineEntry[] = []):
   })
 
   let since = announcement.createdAt
+  const latestReply = cards.reduce((latest, card) => card.content.kind === 'agentMessage' ? Math.max(latest, card.source) : latest, 0)
   for (let previous = index - 1; previous >= 0; previous--) {
     const event = events[previous]!
+    if (event.id < latestReply)
+      break
     if (event.type === 'turn.waiting' && Array.isArray(event.payload?.tasks) && event.payload.tasks.length)
       since = event.createdAt
     else if (resumesWork(event))

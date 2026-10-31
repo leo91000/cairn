@@ -99,8 +99,13 @@ internal fun backgroundWait(
     if (tasks.isEmpty()) return null
 
     var since = announcement.createdAt
+    val latestReply =
+        cards
+            .filter { it.content is build.cairn.contracts.TimelineContent.B }
+            .maxOfOrNull { it.source } ?: 0L
     for (previous in index - 1 downTo 0) {
         val event = events[previous]
+        if (event.id < latestReply) break
         val stillWaiting =
             event.type == "turn.waiting" &&
                 event.activityData()?.get("tasks").asArray()?.isNotEmpty() == true

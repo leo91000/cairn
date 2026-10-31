@@ -217,6 +217,10 @@ class WorkingIndicatorTest {
             )
         assertNull(backgroundWait(announced, listOf(reply)))
         assertNotNull(backgroundWait(announced, listOf(reply.copy(source = 1, revision = 1))))
+        assertEquals(
+            BackgroundWait(listOf("Build"), 4000),
+            backgroundWait(announced + waiting(4, 4000, "Build"), listOf(reply)),
+        )
         assertNull(backgroundWait(announced + waiting(3, 3000)))
         assertNull(backgroundWait(announced + tool(3, "cat log", running = true)))
         assertNull(backgroundWait(announced + user(3, 3000)))
