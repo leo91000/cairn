@@ -2227,7 +2227,9 @@ async fn controller_held_attempt_keeps_output_open_until_released() {
         .store(false, std::sync::atomic::Ordering::Relaxed);
     let completion: Value = serde_json::from_slice(&stream.next().await.unwrap().unwrap()).unwrap();
     assert_eq!(completion["type"], "output");
-    let payload = STANDARD.decode(completion["data"].as_str().unwrap()).unwrap();
+    let payload = STANDARD
+        .decode(completion["data"].as_str().unwrap())
+        .unwrap();
     let events: Vec<Value> = payload
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
