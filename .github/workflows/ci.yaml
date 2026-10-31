@@ -19,10 +19,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
         with:
-          ref: 2a470c3a67828e13b7afa69eab283db86a239e62
+          ref: 7c6dee0c42e92c9c79d385b16e71924328677043
       - name: Verify source and configure workspace paths
         run: |
-          test "$(git rev-parse HEAD)" = 2a470c3a67828e13b7afa69eab283db86a239e62
+          test "$(git rev-parse HEAD)" = 7c6dee0c42e92c9c79d385b16e71924328677043
           test -z "$(git status --porcelain)"
           git show -s --format='%H %T'
           mkdir -p .qualification/{tmp,tool-cache,cargo,rustup,cache,npm,pnpm,gradle,android,android-home,playwright,apt/partial}
@@ -114,10 +114,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
         with:
-          ref: 2a470c3a67828e13b7afa69eab283db86a239e62
+          ref: 7c6dee0c42e92c9c79d385b16e71924328677043
       - name: Verify source and configure workspace paths
         run: |
-          test "$(git rev-parse HEAD)" = 2a470c3a67828e13b7afa69eab283db86a239e62
+          test "$(git rev-parse HEAD)" = 7c6dee0c42e92c9c79d385b16e71924328677043
           test -z "$(git status --porcelain)"
           git show -s --format='%H %T'
           mkdir -p .qualification/{tmp,tool-cache,cargo,rustup,cache,npm,pnpm,gradle,android,android-home,playwright,apt/partial}
@@ -179,10 +179,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
         with:
-          ref: 2a470c3a67828e13b7afa69eab283db86a239e62
+          ref: 7c6dee0c42e92c9c79d385b16e71924328677043
       - name: Verify source and configure workspace paths
         run: |
-          test "$(git rev-parse HEAD)" = 2a470c3a67828e13b7afa69eab283db86a239e62
+          test "$(git rev-parse HEAD)" = 7c6dee0c42e92c9c79d385b16e71924328677043
           test -z "$(git status --porcelain)"
           git show -s --format='%H %T'
           mkdir -p .qualification/{tmp,tool-cache,cargo,rustup,cache,npm,pnpm,gradle,android,android-home,playwright,apt/partial}
@@ -253,10 +253,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
         with:
-          ref: 2a470c3a67828e13b7afa69eab283db86a239e62
+          ref: 7c6dee0c42e92c9c79d385b16e71924328677043
       - name: Verify source and configure workspace paths
         run: |
-          test "$(git rev-parse HEAD)" = 2a470c3a67828e13b7afa69eab283db86a239e62
+          test "$(git rev-parse HEAD)" = 7c6dee0c42e92c9c79d385b16e71924328677043
           test -z "$(git status --porcelain)"
           git show -s --format='%H %T'
           mkdir -p .qualification/{tmp,tool-cache,cargo,rustup,cache,npm,pnpm,gradle,android,android-home,playwright,apt/partial}
