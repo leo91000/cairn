@@ -130,6 +130,52 @@ it('renders through the relay while direct authorization is pending, then uses t
   await vi.waitFor(() => expect(state.transportRoute).toBe('direct'))
 })
 
+it('cancels pending direct authorization before redirecting and ignores its late response', async () => {
+  let authorize: (value: Response) => void = () => {}
+  const grant = () => Response.json({
+    available: true,
+    grant: {
+      claims: {
+        connection_id: 'connection',
+        account_id: 'account',
+        role: 'owner',
+        expires_at: Date.now() / 1000 + 180,
+      },
+    },
+    iceServers: [],
+  })
+  let authorizations = 0
+  const fetch = vi.fn((url: string, _options?: RequestInit) => url.endsWith('/direct/authorize') && authorizations++ === 0
+    ? new Promise<Response>(resolve => authorize = resolve)
+    : Promise.resolve(grant()))
+  vi.stubGlobal('fetch', fetch)
+  const { redirect, state } = await import('../src/api')
+  state.authenticated = true
+  state.ready = true
+  await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1))
+  const pending = fetch.mock.calls[0][1]!.signal!
+  const assign = vi.fn(() => expect(pending.aborted).toBe(true))
+  Object.assign(window.location, { assign })
+
+  redirect('https://provider.test/authorize')
+  expect(assign).toHaveBeenCalledOnce()
+  authorize(grant())
+  await vi.advanceTimersByTimeAsync(10000)
+  expect(Source.all).toHaveLength(0)
+  expect(fetch).toHaveBeenCalledTimes(1)
+  expect(Peer.all[0].channel.readyState).toBe('closed')
+
+  window.dispatchEvent(new Event('online'))
+  document.dispatchEvent(new Event('visibilitychange'))
+  await vi.advanceTimersByTimeAsync(30000)
+  expect(fetch).toHaveBeenCalledTimes(1)
+
+  // Back restores the document from its page cache and negotiates a fresh grant.
+  window.dispatchEvent(new Event('pageshow'))
+  await vi.waitFor(() => expect(Source.all).toHaveLength(1))
+  expect(fetch.mock.calls.filter(([url]) => url.endsWith('/direct/authorize'))).toHaveLength(2)
+})
+
 function reply(channel: Channel, frame: object) {
   const body = new TextEncoder().encode(JSON.stringify(frame))
   const packet = new Uint8Array(13 + body.length)
@@ -170,6 +216,27 @@ async function direct(role: 'owner' | 'member' = 'owner') {
   await vi.waitFor(() => expect(module.state.transportRoute).toBe('direct'))
   return { ...module, channel: Peer.all[0].channel, expiresAt }
 }
+
+it('closes established direct streams without opening relay streams during navigation', async () => {
+  const { redirect, channel } = await direct()
+  const { liveConnection } = await import('../src/live-connection')
+  const live = liveConnection('/chats/stream', vi.fn(), vi.fn())
+  await vi.waitFor(() => expect(channel.packets).toHaveLength(1))
+  Object.assign(window.location, { assign: vi.fn() })
+  try {
+    redirect('https://provider.test/authorize')
+    expect(Source.all[0].closed).toBe(true)
+    expect(channel.readyState).toBe('closed')
+    expect(Source.all).toHaveLength(1)
+
+    window.dispatchEvent(new Event('online'))
+    window.dispatchEvent(new Event('pageshow'))
+    await vi.waitFor(() => expect(Source.all.length).toBeGreaterThan(1))
+  }
+  finally {
+    live.close()
+  }
+})
 
 it('reads JSON from the actual direct response instead of relaying its payload', async () => {
   const { api, channel } = await direct()

@@ -1870,7 +1870,22 @@ async fn serve_controller(State(state): State<Arc<Controller>>, request: Request
             output.push_str("{\"type\":\"item.completed\",\"item\":{\"id\":\"reply\",\"type\":\"agent_message\",\"text\":\"resumed VM\"}}\n{\"type\":\"turn.completed\",\"usage\":{}}\n");
         }
         let frame = json!({ "type": "output", "stderr": false, "data": STANDARD.encode(output) });
-        return Body::from(format!("{frame}\n")).into_response();
+        // The runner bounds reconciliation after EOF; held attempts must stay live.
+        let stream = futures_util::stream::unfold(
+            (Some(format!("{frame}\n")), state),
+            |(frame, state)| async move {
+                let bytes = if let Some(frame) = frame {
+                    axum::body::Bytes::from(frame)
+                } else if state.hold.load(std::sync::atomic::Ordering::Relaxed) {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    axum::body::Bytes::from_static(b"{\"type\":\"heartbeat\"}\n")
+                } else {
+                    return None;
+                };
+                Some((Ok::<_, std::io::Error>(bytes), (None, state)))
+            },
+        );
+        return Body::from_stream(stream).into_response();
     }
     if path.ends_with("/wait") {
         while state.hold.load(std::sync::atomic::Ordering::Relaxed) {
@@ -1937,15 +1952,54 @@ async fn controller_reads_do_not_launch_vm_attempts() {
     assert!(controller.plans.lock().await.is_empty());
 }
 
+#[tokio::test(start_paused = true)]
+async fn controller_held_attempt_keeps_output_open_until_released() {
+    use futures_util::StreamExt;
+
+    let root = TempDir::new().unwrap();
+    let controller = Arc::new(Controller {
+        data: root.path().to_owned(),
+        plans: tokio::sync::Mutex::new(vec![json!({ "id": "fixture" })]),
+        failures: 0,
+        slots: 1,
+        hold: std::sync::atomic::AtomicBool::new(true),
+    });
+    let request = Request::builder()
+        .uri("/runs/fixture/logs")
+        .body(Body::empty())
+        .unwrap();
+    let response = serve_controller(State(controller.clone()), request).await;
+    let mut stream = response.into_body().into_data_stream();
+    let output: Value = serde_json::from_slice(&stream.next().await.unwrap().unwrap()).unwrap();
+    assert_eq!(output["type"], "output");
+
+    // The runner reconciles a clean output EOF after five seconds.
+    tokio::time::advance(Duration::from_secs(6)).await;
+    let heartbeat = stream
+        .next()
+        .await
+        .expect("a held attempt must keep its output connection alive")
+        .unwrap();
+    let heartbeat: Value = serde_json::from_slice(&heartbeat).unwrap();
+    assert_eq!(heartbeat["type"], "heartbeat");
+
+    controller
+        .hold
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    assert!(stream.next().await.is_none());
+}
+
 #[tokio::test]
 async fn node_slots_exceed_manager_concurrency_without_overpreparing_the_queue() {
     let mut fixture = Fixture::new().await;
+    // One extra node slot exercises the manager concurrency boundary.
+    let slots = fixture.service.config.concurrency + 1;
     fixture.stop(false).await;
     let controller = Arc::new(Controller {
         data: fixture.service.config.data_dir.clone(),
         plans: tokio::sync::Mutex::new(Vec::new()),
         failures: 0,
-        slots: 12,
+        slots,
         hold: std::sync::atomic::AtomicBool::new(true),
     });
     let app = Router::new()
@@ -1978,17 +2032,17 @@ async fn node_slots_exceed_manager_concurrency_without_overpreparing_the_queue()
         .await
         .unwrap()
         .unwrap();
-    node["slots"] = 12.into();
+    node["slots"] = slots.into();
     fixture.service.store.put_node_fixture(node).await.unwrap();
     let mut runs = Vec::new();
-    for _ in 0..13 {
+    for _ in 0..=slots {
         runs.push(fixture.enqueue("Inspect the VM fixture").await);
     }
     fixture.start().await;
     eventually(
         Duration::from_secs(20),
         Duration::from_millis(30),
-        async || (controller.plans.lock().await.len() == 12).then_some(()),
+        async || (controller.plans.lock().await.len() == slots).then_some(()),
     )
     .await;
     tokio::time::sleep(Duration::from_millis(1200)).await;
@@ -2003,7 +2057,7 @@ async fn node_slots_exceed_manager_concurrency_without_overpreparing_the_queue()
             running += 1;
         }
     }
-    assert_eq!(running, 12);
+    assert_eq!(running, slots);
     assert_eq!(queued.len(), 1);
     assert!(
         queued[0]["startedAt"].is_null(),
@@ -2011,9 +2065,9 @@ async fn node_slots_exceed_manager_concurrency_without_overpreparing_the_queue()
         queued[0]
     );
     assert_eq!(queued[0]["recoveryPending"], false);
-    assert_eq!(controller.plans.lock().await.len(), 12);
+    assert_eq!(controller.plans.lock().await.len(), slots);
     let attempts = fixture.service.store.list("node-attempts").await.unwrap();
-    assert_eq!(attempts.len(), 12);
+    assert_eq!(attempts.len(), slots);
     controller
         .hold
         .store(false, std::sync::atomic::Ordering::Relaxed);
@@ -2023,7 +2077,7 @@ async fn node_slots_exceed_manager_concurrency_without_overpreparing_the_queue()
             RunStatus::Succeeded
         );
     }
-    assert_eq!(controller.plans.lock().await.len(), 13);
+    assert_eq!(controller.plans.lock().await.len(), slots + 1);
     fixture.stop(false).await;
     server.abort();
 }

@@ -1,5 +1,6 @@
 import type { LiveBatch } from '../../../packages/contracts/live'
-import { apiUrl, installationTransport } from './api'
+import { watch } from 'vue'
+import { apiUrl, installationTransport, state } from './api'
 import { ProtocolMismatch } from './direct-channel'
 import { observeTransport } from './transport-observation'
 
@@ -44,7 +45,7 @@ export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: 
 
   function connect() {
     disconnect()
-    if (stopped)
+    if (stopped || state.redirecting)
       return
     if (!navigator.onLine) {
       status('offline')
@@ -129,6 +130,7 @@ export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: 
     status('offline')
   }
 
+  const stopNavigation = watch(() => state.redirecting, connect, { flush: 'sync' })
   window.addEventListener('cairn-transport-change', connect)
   window.addEventListener('online', connect)
   window.addEventListener('offline', offline)
@@ -140,6 +142,7 @@ export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: 
     close() {
       stopped = true
       disconnect()
+      stopNavigation()
       window.removeEventListener('cairn-transport-change', connect)
       window.removeEventListener('online', connect)
       window.removeEventListener('offline', offline)
