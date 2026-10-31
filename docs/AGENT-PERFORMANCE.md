@@ -408,3 +408,51 @@ too large (413), unsupported content type (415), limited
 status and is counted separately. Zero activity establishes that no upload
 entered this observer; it does not explain whether a client was closed, offline
 or had opted out.
+
+## Node maintenance preparation
+
+Once background preparation starts, the manager attempts one
+`node_maintenance_drain` record on `cairn_performance`, including error, deadline
+or dropped preparation.
+It aggregates the whole episode without logging individual attempts or retries.
+`outcome` is `completed`, `error`, `deadline` or `cancelled`; `phase` is the last
+phase entered. Both fields use fixed labels.
+
+`elapsed_ms` and the phase totals use a monotonic clock. The phase totals are
+`inventory_ms`, `preparation_ms`, `pause_request_ms`, `capture_ms`,
+`capture_wait_ms` and `placement_release_ms`. `capture_ms` includes the existing
+archive synchronization/publication call; `capture_wait_ms` includes the existing
+100 ms waits after native 425 responses. These are wall times, not CPU times.
+Integer millisecond rounding can make the summed phase totals slightly smaller
+than the elapsed duration.
+
+Counters distinguish `attempts`, `stale_attempts`, `pause_requests`,
+`pause_failures`, `capture_calls`, `capture_waits`, `capture_failures`,
+`placement_releases` and `placement_failures`. Requests and release calls are
+counted when entered; failures count completed error results. An interrupted
+request therefore need not increment its failure counter. Stale checkpoint
+ownership is skipped as before. A failed native archive capture retains placement.
+
+The summary captures preparation before the readiness database write. Delivery
+is asynchronous and can follow that write. It is not proof that readiness
+was persisted, the controller stopped, the node updated, or real work completed.
+`cancelled` means the manager's preparation future was dropped; a separately owned
+publication task may continue. Abrupt process termination cannot emit a summary.
+Concurrent node drains remain separate records without a node/run identifier.
+The event contains no identifiers, URLs, error strings or inherited private spans.
+One dedicated logging worker uses the captured subscriber with an empty
+thread-local span stack and creates no diagnostic spans. Callers submit bounded,
+owned observations with a nonblocking queue; no caller waits for sink IO. There
+is at most one executing report and sixteen queued reports, even with a blocked
+sink. Startup failure, admission contention, full/disconnected queue and callback
+panics drop the observation without a caller-context fallback. Normal shutdown
+can also lose pending observations. There is no per-job, attempt or retry thread.
+
+`diagnostic_queue_us` measures the report's wait before its callback starts;
+`dropped_reports_total` is the process-wide saturating count of known helper
+rejections and callback failures at that point, across all report kinds. It does
+not detect IO errors swallowed by subscriber formatting or establish successful
+log persistence. The shared `performance::enabled()` precheck catches
+subscriber/filter panics and disables that observation, so readiness persistence
+and task cleanup continue.
+The maintenance API, deadlines, retries and ownership rules are unchanged.
