@@ -243,30 +243,52 @@ struct CardRange {
     from: i64,
     upto: i64,
     window: bool,
+    earlier: bool,
     position: i64,
     id: String,
 }
 
 impl CardRange {
-    fn read(&self, db: &Db<'_>) -> Result<(Vec<TimelineEntry>, bool)> {
-        if self.window {
-            crate::timeline::window_chunk(
-                db,
-                &self.run,
-                self.from,
-                self.upto,
-                self.position,
-                &self.id,
-            )
-        } else {
-            crate::timeline::changed_chunk(
-                db,
-                &self.run,
-                self.from,
-                self.upto,
-                self.position,
-                &self.id,
-            )
+    fn read(&mut self, db: &Db<'_>) -> Result<(Vec<TimelineEntry>, bool)> {
+        loop {
+            let (entries, more) = if self.window {
+                crate::timeline::window_chunk(
+                    db,
+                    &self.run,
+                    self.from,
+                    self.upto,
+                    self.position,
+                    &self.id,
+                    self.earlier,
+                )?
+            } else {
+                crate::timeline::changed_chunk(
+                    db,
+                    &self.run,
+                    self.from,
+                    self.upto,
+                    self.position,
+                    &self.id,
+                )?
+            };
+            if let Some(last) = entries.last() {
+                self.position = if self.window && !self.earlier {
+                    last.position
+                } else {
+                    last.revision
+                };
+                self.id.clone_from(&last.id);
+            }
+            if self.window && self.earlier && !more {
+                self.earlier = false;
+                self.position = 0;
+                self.id.clear();
+                if entries.is_empty() {
+                    continue;
+                }
+                return Ok((entries, true));
+            }
+            return Ok((entries, more));
         }
     }
 }
@@ -419,14 +441,11 @@ fn read_page(
         },
         upto: cursor,
         window: tail,
+        earlier: tail,
         position: 0,
         id: String::new(),
     };
     let (entries, more_cards) = range.read(db)?;
-    if let Some(last) = entries.last() {
-        range.position = last.position;
-        range.id.clone_from(&last.id);
-    }
     let separate_cards = more_cards
         || (!entries.is_empty()
             && serde_json::to_vec(&entries)?.len() + serde_json::to_vec(&events)?.len()
@@ -646,41 +665,40 @@ impl Subscription {
             && let Some(range) = current.cards.take()
         {
             let expected = current.history.clone();
-            let next = range.clone();
+            let mut next = range.clone();
             let scope = self.scope.clone();
             let window = self.window;
             let continuation = self
                 .s
                 .store
                 .read(move |db| {
+                    let tx = rusqlite::Transaction::new_unchecked(
+                        db.0,
+                        rusqlite::TransactionBehavior::Deferred,
+                    )?;
+                    let db = Db(&tx);
                     let chat = if scope.single_chat() {
-                        crate::chats::public_stream_detail(db, &scope.id, window)?
+                        crate::chats::public_stream_detail(&db, &scope.id, window)?
                     } else {
                         Value::Null
                     };
-                    let current_run = scoped_run(db, &scope, &chat)?;
+                    let current_run = scoped_run(&db, &scope, &chat)?;
                     if text(&current_run, "id") != next.run {
                         return Ok(None);
                     }
-                    let (first, _) = event_bounds(db, &next.run)?;
+                    let (first, _) = event_bounds(&db, &next.run)?;
                     if expected != format!("v2:{}:{first}", next.run) {
                         return Err(Error::conflict(
                             "History changed while reading timeline cards.",
                         ));
                     }
-                    Ok(Some(next.read(db)?))
+                    let (entries, more) = next.read(&db)?;
+                    Ok(Some((entries, more, next)))
                 })
                 .await?;
-            if let Some((entries, more)) = continuation {
+            if let Some((entries, more, next)) = continuation {
                 current.entries = entries;
                 if more {
-                    let mut next = range;
-                    let last = current
-                        .entries
-                        .last()
-                        .expect("a bounded card page must advance");
-                    next.position = last.position;
-                    next.id.clone_from(&last.id);
                     current.cards = Some(next);
                 }
             } else {

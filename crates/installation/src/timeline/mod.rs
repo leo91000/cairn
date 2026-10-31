@@ -457,34 +457,21 @@ fn hydrate(card: Card, source: &Source, run: &str) -> TimelineEntry {
     }
 }
 
-/// Cards a live batch carries: those changed by its events, in position order.
-pub fn changed(db: &Db<'_>, run: &str, after: i64, upto: i64) -> Result<Vec<TimelineEntry>> {
-    if upto <= after {
-        return Ok(Vec::new());
-    }
-    entries(
-        db,
-        run,
-        "t.run_id=?1 AND t.revision>?2 AND t.revision<=?3 ORDER BY t.position",
-        params![run, after, upto],
-    )
-}
-
-/// A bounded part of the changes in an event range, ordered by stable position.
-/// The continuation is exclusive and remains stable when a card's revision changes.
-pub(crate) fn changed_chunk(
+/// A bounded part of the changes in an event range, ordered by revision and ID.
+/// A concurrent change past the upper bound is delivered by the next event batch.
+pub fn changed_chunk(
     db: &Db<'_>,
     run: &str,
     after: i64,
     upto: i64,
-    position: i64,
+    revision: i64,
     id: &str,
 ) -> Result<(Vec<TimelineEntry>, bool)> {
     entries_bounded(
         db,
         run,
-        "t.run_id=?1 AND t.revision>?2 AND t.revision<=?3 AND (t.position>?4 OR (t.position=?4 AND t.id>?5)) ORDER BY t.position,t.id",
-        params![run, after, upto, position, id],
+        "t.run_id=?1 AND t.revision>?2 AND t.revision<=?3 AND (t.revision>?4 OR (t.revision=?4 AND t.id>?5)) ORDER BY t.revision,t.id",
+        params![run, after, upto, revision, id],
         Some(256 * 1024 - 1024),
         false,
         true,
@@ -520,7 +507,8 @@ pub(crate) fn changes_after(
 
 /// The cards of a window that starts at `oldest`, including a card that began
 /// before it and changed within it, such as a reply still streaming.
-pub fn window(db: &Db<'_>, run: &str, oldest: i64) -> Result<Vec<TimelineEntry>> {
+#[cfg(test)]
+fn window(db: &Db<'_>, run: &str, oldest: i64) -> Result<Vec<TimelineEntry>> {
     // Two index ranges: an OR of both columns would scan every card of the run.
     let changed_earlier = SELECT.replace(
         "FROM timeline_entries t",
@@ -534,29 +522,30 @@ pub fn window(db: &Db<'_>, run: &str, oldest: i64) -> Result<Vec<TimelineEntry>>
     )
 }
 
-/// A bounded part of an opening window, ordered by stable position and ID.
-pub(crate) fn window_chunk(
+/// A bounded part of an opening window. Cards changed after an older position
+/// use revision order; the remaining cards use position order. Both paths are indexed.
+pub fn window_chunk(
     db: &Db<'_>,
     run: &str,
     oldest: i64,
     upto: i64,
     position: i64,
     id: &str,
+    earlier: bool,
 ) -> Result<(Vec<TimelineEntry>, bool)> {
-    let changed_earlier = SELECT.replace(
-        "FROM timeline_entries t",
-        "FROM timeline_entries t INDEXED BY timeline_entries_revision",
-    ) + " WHERE t.run_id=?1 AND t.revision>=?2 AND t.position<?2 AND t.revision<=?3 AND (t.position>?4 OR (t.position=?4 AND t.id>?5))";
+    let filter = if earlier {
+        "t.run_id=?1 AND t.revision>=?2 AND t.position<?2 AND t.revision<=?3 AND (t.revision>?4 OR (t.revision=?4 AND t.id>?5)) ORDER BY t.revision,t.id"
+    } else {
+        "t.run_id=?1 AND t.position>=?2 AND t.revision<=?3 AND (t.position>?4 OR (t.position=?4 AND t.id>?5)) ORDER BY t.position,t.id"
+    };
     entries_bounded(
         db,
         run,
-        &format!(
-            "t.run_id=?1 AND t.position>=?2 AND t.revision<=?3 AND (t.position>?4 OR (t.position=?4 AND t.id>?5)) UNION ALL {changed_earlier} ORDER BY 2,1"
-        ),
+        filter,
         params![run, oldest, upto, position, id],
         Some(256 * 1024 - 1024),
         false,
-        false,
+        earlier,
     )
 }
 

@@ -109,7 +109,8 @@ fn read(db: &Connection, reference: bool, after: i64, window: bool) -> Vec<u8> {
         } else {
             0
         };
-        let cards = cairn_installation::timeline::window(&store, RUN, oldest).unwrap();
+        let cursor = events.last().map_or(0, |event| event.id);
+        let cards = read_cards(&store, oldest, cursor, true);
         return serde_json::to_vec(&Wire {
             events: cairn_installation::live::ui_events(events),
             entries: cards,
@@ -120,12 +121,51 @@ fn read(db: &Connection, reference: bool, after: i64, window: bool) -> Vec<u8> {
         let cursor = events.last().map_or(after, |e| e.id);
         (events, cursor)
     };
-    let cards = cairn_installation::timeline::changed(&store, RUN, after, cursor).unwrap();
+    let cards = read_cards(&store, after, cursor, false);
     serde_json::to_vec(&Wire {
         events: cairn_installation::live::ui_events(events),
         entries: cards,
     })
     .unwrap()
+}
+
+fn read_cards(
+    db: &Db<'_>,
+    after: i64,
+    upto: i64,
+    window: bool,
+) -> Vec<cairn_contracts::TimelineEntry> {
+    let mut cards = Vec::new();
+    let mut position = 0;
+    let mut id = String::new();
+    let mut earlier = window;
+    loop {
+        let (part, more) = if window {
+            cairn_installation::timeline::window_chunk(db, RUN, after, upto, position, &id, earlier)
+        } else {
+            cairn_installation::timeline::changed_chunk(db, RUN, after, upto, position, &id)
+        }
+        .unwrap();
+        if let Some(last) = part.last() {
+            position = if window && !earlier {
+                last.position
+            } else {
+                last.revision
+            };
+            id.clone_from(&last.id);
+        }
+        cards.extend(part);
+        if !more && earlier {
+            earlier = false;
+            position = 0;
+            id.clear();
+            continue;
+        }
+        if !more {
+            break;
+        }
+    }
+    cards
 }
 
 #[tokio::test]

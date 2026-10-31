@@ -117,7 +117,7 @@ async fn ending_many_replies_does_not_amplify_a_small_live_batch() {
             break;
         }
         let last = part.last().unwrap();
-        cursor = (last.position, last.id.clone());
+        cursor = (last.revision, last.id.clone());
     }
     assert!(received.len() >= 40);
 }
