@@ -1547,6 +1547,55 @@ mod schema_tests {
     }
 
     #[test]
+    fn startup_steps_accept_a_database_upgraded_by_another_startup() {
+        type Upgrade = fn(&mut Connection) -> Result<()>;
+        let steps: [(&str, Upgrade); 6] = [
+            ("accounts", crate::accounts::migration::upgrade),
+            ("conversations", crate::chats::migration::upgrade),
+            ("questions", crate::chats::question_migration::upgrade),
+            ("attachments", crate::attachments::migration::upgrade),
+            ("personal state", crate::reads::migration::upgrade),
+            ("deliverables", crate::artifacts::migration::upgrade),
+        ];
+        let root = tempfile::tempdir().unwrap();
+        drop(Store::open(root.path()).unwrap());
+        let mut db = Connection::open(root.path().join("manager.db")).unwrap();
+        db.execute("INSERT INTO kv VALUES('startup-sentinel','true',NULL)", [])
+            .unwrap();
+        let schema = |db: &Connection| {
+            db.prepare("SELECT name,sql FROM sqlite_schema ORDER BY name")
+                .unwrap()
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        let before = schema(&db);
+        // A startup may have observed an earlier version before it waited for
+        // another startup's immediate transaction. Completed steps must be no-ops.
+        for (name, upgrade) in steps {
+            upgrade(&mut db).unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(
+                db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                DATABASE_VERSION
+            );
+            assert_eq!(schema(&db), before, "{name}");
+            assert_eq!(
+                db.query_row(
+                    "SELECT data FROM kv WHERE key='startup-sentinel'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+                "true"
+            );
+        }
+    }
+
+    #[test]
     fn existing_other_versions_fail_without_changing_the_database() {
         for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, DATABASE_VERSION + 1, 99] {
             let root = tempfile::tempdir().unwrap();
