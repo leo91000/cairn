@@ -107,14 +107,9 @@ impl Drain {
         // Formatting layers may skip a root span and restore older context.
         // Emit this single summary with an empty thread-local span stack.
         crate::performance::without_span_context(|| {
-            let root = tracing::info_span!(target: "cairn_performance", parent: None, "maintenance_summary");
-            if root.is_disabled() {
-                return;
-            }
-            let _entered = root.enter();
             tracing::info!(
                 target: "cairn_performance",
-                parent: &root,
+                parent: None,
                 operation = "node_maintenance_drain",
                 outcome = outcome.label(),
                 phase = self.phase.label(),

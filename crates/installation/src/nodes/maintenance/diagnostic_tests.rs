@@ -30,15 +30,43 @@ impl Write for Capture {
     }
 }
 
+#[derive(Clone)]
+struct PanickingWriter {
+    capture: Capture,
+    failures: Arc<AtomicUsize>,
+}
+
+impl Write for PanickingWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if std::thread::current().name() == Some("cairn-diagnostics") {
+            self.failures.fetch_add(1, Ordering::SeqCst);
+            panic!("synthetic diagnostic writer failure");
+        }
+        self.capture.write(bytes)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.capture.flush()
+    }
+}
+
 #[tokio::test]
 async fn maintenance_reports_actual_native_capture_retries_and_preserves_ownership() {
     for child in [
         "nodes::maintenance::diagnostic_tests::native_capture_retry_report_child",
-        "nodes::maintenance::diagnostic_tests::disabled_summary_span_child",
+        "nodes::maintenance::diagnostic_tests::event_only_filter_report_child",
         "nodes::maintenance::diagnostic_tests::layered_capture_retry_report_child",
         "nodes::maintenance::diagnostic_tests::panicking_filter_report_child",
+        "nodes::maintenance::diagnostic_tests::panicking_writer_report_child",
     ] {
-        let output = tokio::process::Command::new(std::env::current_exe().unwrap())
+        // Abort regressions must not create a core dump or change the parent's limits.
+        let output = tokio::process::Command::new("sh")
+            .args([
+                "-c",
+                "ulimit -c 0 && exec \"$@\"",
+                "maintenance-diagnostics-test",
+            ])
+            .arg(std::env::current_exe().unwrap())
             .args(["--exact", child, "--ignored", "--nocapture"])
             .output()
             .await
@@ -134,6 +162,29 @@ async fn panicking_filter_report_child() {
         .unwrap();
     actual_drain_reports(capture, true).await;
     assert!(failures.load(Ordering::SeqCst) > 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "isolated writer panic with span-close logging for actual maintenance path"]
+async fn panicking_writer_report_child() {
+    let capture = Capture::default();
+    let failures = Arc::new(AtomicUsize::new(0));
+    let writer = PanickingWriter {
+        capture: capture.clone(),
+        failures: failures.clone(),
+    };
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::fmt()
+            .json()
+            .with_ansi(false)
+            .with_env_filter("info")
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
+            .with_writer(move || writer.clone())
+            .finish(),
+    )
+    .unwrap();
+    actual_drain_reports(capture, true).await;
+    assert_eq!(failures.load(Ordering::SeqCst), 1);
 }
 
 async fn actual_drain_reports(capture: Capture, suppress_summary: bool) {
@@ -251,6 +302,10 @@ async fn actual_drain_reports(capture: Capture, suppress_summary: bool) {
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .filter(|row| row["fields"]["operation"] == "node_maintenance_drain")
         .collect();
+    for report in &reports {
+        assert!(report.get("span").is_none());
+        assert!(report.get("spans").is_none());
+    }
     if suppress_summary {
         assert!(reports.is_empty());
         let current = service.node_boundary(&node).await.unwrap();
@@ -402,6 +457,8 @@ fn drain_report(capture: &Capture) -> Value {
         .filter(|row| row["fields"]["operation"] == "node_maintenance_drain")
         .collect();
     assert_eq!(reports.len(), 1);
+    assert!(reports[0].get("span").is_none());
+    assert!(reports[0].get("spans").is_none());
     let encoded = reports[0].to_string();
     assert!(!encoded.contains("private-context-must-not-escape"));
     let fields = reports[0]["fields"].clone();
@@ -486,8 +543,8 @@ async fn add_attempt(
 }
 
 #[test]
-#[ignore = "isolated tracing filter that disables only the summary span"]
-fn disabled_summary_span_child() {
+#[ignore = "isolated event-only diagnostic filter with a private caller span"]
+fn event_only_filter_report_child() {
     let capture = Capture::default();
     let formatting = tracing_subscriber::fmt::layer()
         .json()
@@ -512,10 +569,6 @@ fn disabled_summary_span_child() {
     );
     let _entered = private.enter();
     Drain::new().finish(Outcome::Completed);
-    let bytes = capture.0.lock().unwrap().clone();
-    let logs = String::from_utf8(bytes).unwrap();
-    assert!(
-        !logs.contains("node_maintenance_drain"),
-        "Disabled root span must suppress the summary before JSON can inherit private context"
-    );
+    let report = drain_report(&capture);
+    assert_eq!(report["outcome"], "completed");
 }
