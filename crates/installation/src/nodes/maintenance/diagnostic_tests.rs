@@ -14,6 +14,8 @@ use std::{
     },
 };
 
+use tracing_subscriber::{Layer, layer::SubscriberExt};
+
 #[derive(Clone, Default)]
 struct Capture(Arc<Mutex<Vec<u8>>>);
 
@@ -30,22 +32,22 @@ impl Write for Capture {
 
 #[tokio::test]
 async fn maintenance_reports_actual_native_capture_retries_and_preserves_ownership() {
-    let output = tokio::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "nodes::maintenance::diagnostic_tests::native_capture_retry_report_child",
-            "--ignored",
-            "--nocapture",
-        ])
-        .output()
-        .await
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-    );
+    for child in [
+        "nodes::maintenance::diagnostic_tests::native_capture_retry_report_child",
+        "nodes::maintenance::diagnostic_tests::disabled_summary_span_child",
+    ] {
+        let output = tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", child, "--ignored", "--nocapture"])
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -398,4 +400,39 @@ async fn add_attempt(
         .await
         .unwrap();
     (run, attempt, node)
+}
+
+#[test]
+#[ignore = "isolated tracing filter that disables only the summary span"]
+fn disabled_summary_span_child() {
+    let capture = Capture::default();
+    let formatting = tracing_subscriber::fmt::layer()
+        .json()
+        .with_ansi(false)
+        .with_writer({
+            let capture = capture.clone();
+            move || capture.clone()
+        })
+        .with_filter(tracing_subscriber::filter::filter_fn(|metadata| {
+            metadata.is_event() || metadata.name() == "private_fixture_parent"
+        }));
+    tracing::subscriber::set_global_default(tracing_subscriber::registry().with(formatting))
+        .unwrap();
+    assert!(
+        tracing::info_span!(target: "cairn_performance", parent: None, "maintenance_summary")
+            .is_disabled()
+    );
+    assert!(tracing::event_enabled!(target: "cairn_performance", tracing::Level::INFO));
+    let private = tracing::info_span!(
+        "private_fixture_parent",
+        private = "private-context-must-not-escape"
+    );
+    let _entered = private.enter();
+    Drain::new().finish(Outcome::Completed);
+    let bytes = capture.0.lock().unwrap().clone();
+    let logs = String::from_utf8(bytes).unwrap();
+    assert!(
+        !logs.contains("node_maintenance_drain"),
+        "Disabled root span must suppress the summary before JSON can inherit private context"
+    );
 }

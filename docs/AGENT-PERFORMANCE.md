@@ -411,8 +411,9 @@ or had opted out.
 
 ## Node maintenance preparation
 
-The manager emits one `node_maintenance_drain` record on `cairn_performance` for
-an admitted background drain, including error, deadline or dropped preparation.
+Once background preparation starts, the manager emits one
+`node_maintenance_drain` record on `cairn_performance`, including error, deadline
+or dropped preparation.
 It aggregates the whole episode without logging individual attempts or retries.
 `outcome` is `completed`, `error`, `deadline` or `cancelled`; `phase` is the last
 phase entered. Both fields use fixed labels.
@@ -439,4 +440,6 @@ publication task may continue. Abrupt process termination cannot emit a summary.
 Concurrent node drains remain separate records without a node/run identifier.
 The event contains no identifiers, URLs, error strings or inherited private spans;
 a fixed field-free root span isolates both plain and JSON tracing formatters.
+If a logging filter disables that span, the summary is suppressed to preserve
+this isolation.
 The maintenance API, deadlines, retries and ownership rules are unchanged.

@@ -108,6 +108,9 @@ impl Drain {
         // event parent. Scope this single emission to a field-free root span.
         let root =
             tracing::info_span!(target: "cairn_performance", parent: None, "maintenance_summary");
+        if root.is_disabled() {
+            return;
+        }
         let _entered = root.enter();
         tracing::info!(
             target: "cairn_performance",
