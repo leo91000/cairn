@@ -139,7 +139,7 @@ with the reason. Adapters from earlier releases never announce it, so their inbo
 never contains side questions they could mistake for steering. Side questions never
 delay the reply: when it ends, questions still being answered are withdrawn and,
 like those still pending, marked unanswered with an explanation. Retried submissions
-are idempotent by their UUID. The answer uses the subscription of the account running
+return the retained question for the same UUID and content. Once a question is pruned, a small identity marker remains until conversation deletion and any reuse is refused. The answer uses the subscription of the account running
 the turn, and secrets masked in the conversation are masked in it too. A conversation
 keeps its 30 latest side questions, at most 5 waiting at once, with answers of up to
 20,000 characters. An oversized native answer is reported as unanswered without keeping

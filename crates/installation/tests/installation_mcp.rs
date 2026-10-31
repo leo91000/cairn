@@ -5341,6 +5341,69 @@ async fn agents_follow_owner_sign_in_without_challenge_or_mutation_authority() {
 }
 
 #[tokio::test]
+async fn pruned_side_question_ids_cannot_be_replayed_or_reused() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let claude = s
+        .agent_fixture(json!({ "name": "Claude", "provider": "claude" }), None)
+        .await
+        .unwrap();
+    let (run, _) = active_run(&s, &claude).await;
+    let run_id = run["id"].as_str().unwrap();
+    let mut chat = s.chat_create(json!({})).await.unwrap();
+    chat["runId"] = run["id"].clone();
+    let chat_id = chat["id"].as_str().unwrap().to_owned();
+    s.store.save_conversation_boundary(chat).await.unwrap();
+    s.side_questions_available(run_id, true).await.unwrap();
+    let old_id = uuid::Uuid::new_v4().to_string();
+    for index in 0..31 {
+        let question_id = if index == 0 {
+            old_id.clone()
+        } else {
+            uuid::Uuid::new_v4().to_string()
+        };
+        s.store
+            .set(
+                &format!("chat-side-question:{chat_id}:{question_id}"),
+                json!({
+                    "id": question_id, "chatId": chat_id, "runId": run_id, "text": "Old question",
+                    "quote": "", "itemId": "", "replyEventId": "", "provider": "claude",
+                    "status": "answered", "answer": "Done", "error": null,
+                    "createdAt": index, "settledAt": index + 1,
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    let fresh = call(
+        &s,
+        &configuration,
+        "ask_chat_side_question",
+        json!({
+            "chatId": chat_id, "question": { "id": uuid::Uuid::new_v4(), "text": "Fresh" },
+        }),
+    )
+    .await;
+    assert_ne!(fresh["result"]["isError"], true, "{fresh}");
+    for text in ["Old question", "Changed question"] {
+        let retry = call(
+            &s,
+            &configuration,
+            "ask_chat_side_question",
+            json!({
+                "chatId": chat_id, "question": { "id": old_id, "text": text },
+            }),
+        )
+        .await;
+        assert_eq!(retry["result"]["isError"], true, "{retry}");
+        assert!(retry.to_string().contains("no longer retained"), "{retry}");
+    }
+}
+
+#[tokio::test]
 async fn side_questions_are_asked_withdrawn_and_answered_beside_the_running_reply() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
@@ -5356,6 +5419,12 @@ async fn side_questions_are_asked_withdrawn_and_answered_beside_the_running_repl
     chat["runId"] = target["id"].clone();
     let chat_id = chat["id"].as_str().unwrap().to_owned();
     s.store.save_conversation_boundary(chat).await.unwrap();
+    s.store.event(
+        &run_id,
+        &cairn_contracts::EventKind::ItemCompleted,
+        "First the migration",
+        Some(json!({ "type": "item.completed", "item": { "id": "reply-1", "type": "agent_message", "text": "First the migration" } })),
+    ).await.unwrap();
     let ask = |text: &str| {
         json!({
             "chatId": chat_id,
@@ -5411,6 +5480,18 @@ async fn side_questions_are_asked_withdrawn_and_answered_beside_the_running_repl
     assert_eq!(result(&listed)["sideQuestionUnavailable"], "claude-release");
 
     s.side_questions_available(&run_id, true).await.unwrap();
+    let unknown = call(
+        &s,
+        &configuration,
+        "ask_chat_side_question",
+        json!({
+            "chatId": chat_id,
+            "question": { "id": uuid::Uuid::new_v4(), "text": "Why?", "itemId": "missing-reply" },
+        }),
+    )
+    .await;
+    assert_eq!(unknown["result"]["isError"], true, "{unknown}");
+    assert!(unknown.to_string().contains("Reply not found"), "{unknown}");
     // Conversation lists report the same availability as the conversation itself.
     let chats = call(&s, &configuration, "list_chats", json!({})).await;
     let listed = result(&chats)["chats"]

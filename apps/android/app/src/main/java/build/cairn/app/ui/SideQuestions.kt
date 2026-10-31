@@ -256,6 +256,8 @@ internal fun ColumnScope.SideQuestionPanel(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         if (chat.canAskSideQuestion) {
+            if (side.itemId.isNotEmpty())
+                TextButton(onClick = { side.ask("", "") }) { Text("Poser une question générale") }
             if (side.quote.isNotEmpty())
                 Surface(
                     color = MaterialTheme.colorScheme.surfaceContainerHigh,

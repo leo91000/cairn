@@ -43,7 +43,7 @@ pub(crate) const CHAT_OPERATIONS: &[ChatOperation] = &[
     ChatOperation {
         name: "ask_chat_side_question",
         scope: "run",
-        description: "Ask a question beside the running reply, optionally about a quoted passage. Claude denies requested native tools, but an operator's managed-policy PreToolUse hooks may run first and can write or have other effects. Withdrawing cannot undo effects already performed. Cairn does not steer or queue the question as a normal message or add it to conversation history. Only the qualified Claude Code release supports this; Codex and OpenCode report it unavailable. Supply a fresh UUID id; retrying with the same content returns the same question. Read the answer with list_chat_side_questions.",
+        description: "Ask a question beside the running reply, optionally about a quoted passage. Claude denies requested native tools, but an operator's managed-policy PreToolUse hooks may run first and can write or have other effects. Withdrawing cannot undo effects already performed. Cairn does not steer or queue the question as a normal message or add it to conversation history. Only the qualified Claude Code release supports this; Codex and OpenCode report it unavailable. Supply a fresh UUID id; identical retries return the retained question; pruned identities are refused. Read the answer with list_chat_side_questions.",
     },
     ChatOperation {
         name: "cancel_chat_side_question",

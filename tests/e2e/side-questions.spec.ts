@@ -133,6 +133,11 @@ test('keeps a reply filter when asking more than once', async ({ page, workspace
   const detail = await workspace.api(`/api/chats/${chat.id}`)
   expect(new Set(detail.sideQuestions.map((question: { itemId: string }) => question.itemId)).size).toBe(1)
   expect(detail.sideQuestions[0].itemId).not.toBe('')
+  await panel.getByRole('textbox', { name: 'Your question about this reply' }).fill('General draft')
+  await panel.getByRole('button', { name: 'Ask a general question instead' }).click()
+  await expect(panel.getByRole('textbox', { name: 'Your question', exact: true })).toHaveValue('General draft')
+  await panel.getByRole('button', { name: 'Ask', exact: true }).click()
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).sideQuestions.at(-1)?.itemId).toBe('')
   await workspace.api(`/api/chats/${chat.id}/stop`, 'POST', {})
 })
 

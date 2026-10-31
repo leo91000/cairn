@@ -2,7 +2,7 @@
 
 export interface SideQuestionInput {
 /**
- * Client-chosen identity: retrying with the same content returns the same question.
+ * Client-chosen identity: identical retries return the retained question; a pruned identity is refused.
  */
   id: string
   text: string

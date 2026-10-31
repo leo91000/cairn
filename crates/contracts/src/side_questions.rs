@@ -72,7 +72,7 @@ pub struct ChatSideQuestion {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SideQuestionInput {
-    /// Client-chosen identity: retrying with the same content returns the same question.
+    /// Client-chosen identity: identical retries return the retained question; a pruned identity is refused.
     #[schemars(with = "uuid::Uuid")]
     pub id: String,
     #[schemars(length(min = 1, max = 4000))]

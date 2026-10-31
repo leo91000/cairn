@@ -107,8 +107,20 @@ fn open_prefix(chat: &str) -> String {
 }
 
 /// Key prefixes of a conversation's side-question records.
-pub fn side_question_prefixes(chat: &str) -> [String; 2] {
-    [side_question_prefix(chat), open_prefix(chat)]
+pub fn side_question_prefixes(chat: &str) -> [String; 3] {
+    [
+        side_question_prefix(chat),
+        open_prefix(chat),
+        used_prefix(chat),
+    ]
+}
+
+fn used_prefix(chat: &str) -> String {
+    format!("chat-side-question-used:{chat}:")
+}
+
+fn used_key(chat: &str, id: &str) -> String {
+    format!("{}{id}", used_prefix(chat))
 }
 
 fn key(chat: &str, id: &str) -> String {
@@ -193,6 +205,9 @@ fn reply_start(db: &Db<'_>, run_id: &str, item_id: &str, event_id: Option<i64>) 
             rusqlite::params![run_id, item_id],
             |row| row.get(0),
         )?;
+        if turns == 0 {
+            return Err(Error::bad("Reply not found in this conversation."));
+        }
         if turns > 1 {
             return Err(Error::conflict(
                 "This reply ID is ambiguous. Include replyEventId to identify the reply.",
@@ -333,6 +348,9 @@ fn prune(db: &Db<'_>, chat_id: &str) -> Result<()> {
         .filter(|question| !open.contains(&question.id))
         .take(excess);
     for question in settled {
+        // Retain only the identity once the displayed content is pruned, so an
+        // arbitrarily delayed retry cannot execute the same native request again.
+        db.set(&used_key(chat_id, &question.id), &json!(true), None)?;
         db.delete(&key(chat_id, &question.id))?;
         db.delete(&open_key(chat_id, &question.id))?;
     }
@@ -359,6 +377,11 @@ fn ask(
             ));
         }
         return Ok(existing);
+    }
+    if db.kv(&used_key(chat_id, &input.id))?.is_some() {
+        return Err(Error::conflict(
+            "This side question is no longer retained; its identifier cannot be reused.",
+        ));
     }
 
     let run = db.run(chat.run_id.as_deref().unwrap_or(""))?;

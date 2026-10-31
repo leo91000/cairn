@@ -141,6 +141,13 @@ abstract class SideQuestionCases {
                         .isNotEmpty() && !vm.state.value.busy
                 }
                 compose.onNodeWithText("la migration d’abord").assertExists()
+                compose
+                    .onNodeWithText("Poser une question générale")
+                    .performScrollTo()
+                    .performClick()
+                compose.onNodeWithText("Votre question").assertExists()
+                compose.onNodeWithText("la migration d’abord").assertDoesNotExist()
+                compose.runOnIdle { side.ask("reply-1", "la migration d’abord") }
                 // The answer renders as Markdown, like replies.
                 compose.onAllNodesWithTag("side-question-answer").assertCountEquals(1)
                 compose.onNodeWithText("Réponse en cours…").assertExists()

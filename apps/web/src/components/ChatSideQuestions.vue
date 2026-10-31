@@ -227,6 +227,14 @@ defineExpose({ ask, show, unreachable })
         Claude denies attempted tools, but an operator’s managed-policy hooks can run before the denial and may have side effects. Withdrawing cannot undo effects already performed.
       </p>
       <form v-if="canAsk" class="space-y-3" @submit.prevent="send">
+        <button
+          v-if="itemId"
+          type="button"
+          class="text-xs text-accent underline"
+          @click="ask({ itemId: '', replyEventId: null, quote: '' })"
+        >
+          Ask a general question instead
+        </button>
         <blockquote v-if="quote" class="relative rounded-lg border-l-3 border-accent/50 bg-variant/60 py-2 pr-9 pl-3 text-xs leading-relaxed whitespace-pre-wrap break-words text-muted">
           {{ quote }}
           <button
