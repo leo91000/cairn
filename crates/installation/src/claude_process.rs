@@ -769,7 +769,7 @@ impl Turn<'_> {
         });
         // Writes no larger than PIPE_BUF are atomic on the nonblocking control pipe:
         // a deadline cannot leave half a JSON frame for the main turn to consume.
-        if serde_json::to_vec(&request)?.len() + 1 > libc::PIPE_BUF as usize {
+        if serde_json::to_vec(&request)?.len() + 1 > libc::PIPE_BUF {
             return self
                 .side_failed(
                     &question,
