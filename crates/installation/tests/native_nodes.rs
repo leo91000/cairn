@@ -4162,6 +4162,38 @@ async fn enrolled_native_backend_refreshes_authority_when_health_telemetry_is_mi
     server.abort();
 }
 
+async fn delegated_move_result(
+    fixture: &Fixture,
+    configuration: &Value,
+    input: Value,
+) -> cairn_contracts::NodeMoveOperation {
+    let response = delegated_call(fixture, configuration, "move_to_node", input).await;
+    assert_ne!(response["result"]["isError"], true, "{response}");
+    let started: cairn_contracts::NodeMoveStarted =
+        serde_json::from_value(response["result"]["structuredContent"]["result"].clone()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let response = delegated_call(
+                fixture,
+                configuration,
+                "get_node_move_operation",
+                json!({"operationId":started.operation}),
+            )
+            .await;
+            assert_ne!(response["result"]["isError"], true, "{response}");
+            let operation: cairn_contracts::NodeMoveOperation =
+                serde_json::from_value(response["result"]["structuredContent"]["result"].clone())
+                    .unwrap();
+            if operation.state != cairn_contracts::NodeMoveOperationState::Running {
+                return operation;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("Native directing operation did not finish")
+}
+
 #[tokio::test]
 async fn installation_can_direct_its_own_native_run_without_widening_authority_or_parent_cycle() {
     let mut f = Fixture::new().await;
@@ -4218,25 +4250,34 @@ async fn installation_can_direct_its_own_native_run_without_widening_authority_o
             .await
             .unwrap()
     );
-    let denied = delegated_call(
+    let denied = delegated_move_result(
         &f,
         &configuration,
-        "move_to_node",
         json!({ "runId": run["id"], "nodeId": additional["id"] }),
     )
     .await;
-    assert_eq!(denied["result"]["isError"], true, "{denied}");
+    assert_eq!(
+        denied.state,
+        cairn_contracts::NodeMoveOperationState::Failed
+    );
+    assert_eq!(denied.error_status, Some(403));
     assert!(f.service.store.run(text(&run, "id")).await.unwrap()["moveRequest"].is_null());
-    let moved = delegated_call(
+    let moved = delegated_move_result(
         &f,
         &configuration,
-        "move_to_node",
         json!({
             "runId":run["id"], "nodeId":f.node["id"]
         }),
     )
     .await;
-    assert_ne!(moved["result"]["isError"], true, "{moved}");
+    assert_eq!(
+        moved.state,
+        cairn_contracts::NodeMoveOperationState::Completed
+    );
+    assert_eq!(
+        serde_json::to_value(moved.result.unwrap()).unwrap()["nodeId"],
+        f.node["id"]
+    );
     let current = f.service.store.run(text(&run, "id")).await.unwrap();
     assert!(current["nativeParentRunId"].is_null());
     assert_eq!(current["nativeAuthorityNodes"], json!([f.node["id"]]));

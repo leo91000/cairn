@@ -1219,6 +1219,8 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "get_conversation_placement",
         "configure_conversation_placement",
         "move_to_node",
+        "get_node_move_operation",
+        "cancel_node_move_operation",
         "release_node_reservation",
         "list_nodes",
         "list_native_callers",

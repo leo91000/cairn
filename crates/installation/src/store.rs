@@ -1428,13 +1428,30 @@ mod schema_tests {
         }
     }
 
+    // Reconstruct the released layout from a real previous writer's database,
+    // rather than changing the version of today's placement tables.
+    fn version_nineteen_database(root: &Path) -> Connection {
+        let mut db = Connection::open(root.join("manager.db")).unwrap();
+        db.execute_batch(include_str!("../tests/fixtures/placements-v15.sql"))
+            .unwrap();
+        db.pragma_update(None, "foreign_keys", true).unwrap();
+        crate::chats::question_migration::upgrade(&mut db).unwrap();
+        crate::attachments::migration::upgrade(&mut db).unwrap();
+        crate::reads::migration::upgrade(&mut db).unwrap();
+        crate::runs::projections::upgrade(&mut db).unwrap();
+        db
+    }
+
     #[test]
     fn version_nineteen_upgrade_adds_hook_queues_without_touching_existing_work() {
         let root = tempfile::tempdir().unwrap();
-        drop(Store::open(root.path()).unwrap());
         let file = root.path().join("manager.db");
-        let db = Connection::open(&file).unwrap();
-        db.execute_batch("DROP TABLE timeline_entries; DROP TABLE timeline_state; DROP TABLE run_progress; DROP TABLE plugin_hook_receipts; DROP TABLE plugin_hook_events; PRAGMA user_version=19; INSERT INTO kv(key,data) VALUES('hook-upgrade-fixture','true');").unwrap();
+        let db = version_nineteen_database(root.path());
+        db.execute(
+            "INSERT INTO kv(key,data) VALUES('hook-upgrade-fixture','true')",
+            [],
+        )
+        .unwrap();
         drop(db);
         drop(Store::open(root.path()).unwrap());
         drop(Store::open(root.path()).unwrap());
@@ -1460,9 +1477,10 @@ mod schema_tests {
     #[test]
     fn version_twenty_upgrade_preserves_hook_schema_and_persisted_work() {
         let root = tempfile::tempdir().unwrap();
-        drop(Store::open(root.path()).unwrap());
         let file = root.path().join("manager.db");
-        let db = Connection::open(&file).unwrap();
+        let db = version_nineteen_database(root.path());
+        db.execute_batch(crate::plugins::hooks::SCHEMA).unwrap();
+        db.pragma_update(None, "user_version", 20).unwrap();
         let hook_schema = |db: &Connection| -> Vec<String> {
             db.prepare(
                 "SELECT sql FROM sqlite_schema WHERE name LIKE 'plugin_hook_%' ORDER BY name",
@@ -1474,7 +1492,11 @@ mod schema_tests {
             .unwrap()
         };
         let retained = hook_schema(&db);
-        db.execute_batch("DROP TABLE timeline_entries; DROP TABLE timeline_state; DROP TABLE run_progress; PRAGMA user_version=20; INSERT INTO kv(key,data) VALUES('progress-upgrade-fixture','true');").unwrap();
+        db.execute(
+            "INSERT INTO kv(key,data) VALUES('progress-upgrade-fixture','true')",
+            [],
+        )
+        .unwrap();
         drop(db);
         drop(Store::open(root.path()).unwrap());
         drop(Store::open(root.path()).unwrap());
