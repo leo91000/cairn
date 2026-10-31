@@ -79,6 +79,43 @@ describe('parallel CI coverage', () => {
     expect(owners.map(([name]) => name)).toEqual(['backend'])
   })
 
+  it('uploads capacity evidence before the first Rust restore and observes the writer before post-save', () => {
+    const action = parse(readFileSync(new URL('../../.github/actions/cache-rust/action.yaml', import.meta.url), 'utf8'))
+    const steps = action.runs.steps
+    const firstRestore = steps.findIndex(step => step.id === 'writer')
+    const preflight = steps.findIndex(step => step.run?.includes('ci-rust-cache-observation.mjs before-restore'))
+    const upload = steps.findIndex(step => step.with?.name?.startsWith('rust-cache-before-restore-'))
+    expect(preflight).toBeGreaterThan(-1)
+    expect(upload).toBeGreaterThan(preflight)
+    expect(firstRestore).toBeGreaterThan(upload)
+    expect(steps[preflight]['continue-on-error']).toBe(true)
+    expect(steps[upload]['continue-on-error']).toBe(true)
+    expect(steps[upload].with.path).toContain('runner.temp')
+    const after = steps.findIndex(step => step.run?.includes('ci-rust-cache-observation.mjs after-restore'))
+    const legacy = steps.findIndex(step => step.name === 'Bootstrap from the previous cache format')
+    expect(after).toBeGreaterThan(legacy)
+    expect(steps[after].if).toBe('always()')
+    const backend = quality.jobs.backend.steps
+    expect(backend.at(-2).run).toContain('ci-rust-cache-observation.mjs before-save')
+    expect(backend.at(-1).with.name).toContain('rust-cache-before-save-')
+    expect(backend.at(-2)['continue-on-error']).toBe(true)
+  })
+
+  it('observes exact archived native fixtures symmetrically while keeping original binaries and qualification flags', () => {
+    const steps = quality.jobs['native-runtime'].steps
+    const reference = steps.find(step => step.name === 'Qualify the exact reference on the current disposable host')
+    const candidate = steps.find(step => step.name === 'Qualify real ublk, S3, eviction, systemd ownership and crash recovery')
+    expect(reference.run).toContain('git archive "$REFERENCE_SHA" scripts/tests deploy/nodes/native-host.py')
+    expect(candidate.run).toContain('git archive HEAD scripts/tests deploy/nodes/native-host.py')
+    expect(reference.run).toContain('native_admission_overlay.py "$reference_fixture" reference')
+    expect(candidate.run).toContain('native_admission_overlay.py "$candidate_fixture" candidate')
+    expect(reference.run).toContain('--repo "$reference_fixture" --native-runtime reference-native/cairn --qualifier reference-native/examples/native_storage_qualifier')
+    expect(candidate.run).toContain('--repo "$candidate_fixture" --native-runtime target/debug/cairn --qualifier target/debug/examples/native_storage_qualifier')
+    expect(candidate.run).toContain('CAIRN_NATIVE_DOCKER_QUALIFY=1')
+    expect(reference.run).not.toContain('CAIRN_NATIVE_DOCKER_QUALIFY=1')
+    expect(steps.indexOf(candidate)).toBeGreaterThan(steps.indexOf(reference))
+  })
+
   it('gives installer and update fixtures their own database and web assets', () => {
     const job = quality.jobs['node-checks']
     expect(job.services.postgres.env.POSTGRES_DB).toBe('cairn_beacon_test')

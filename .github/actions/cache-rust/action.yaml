@@ -15,6 +15,19 @@ runs:
       run: |
         echo "primary=$CACHE_PREFIX-$CACHE_REVISION" >> "$GITHUB_OUTPUT"
         echo "fallback=$CACHE_PREFIX-" >> "$GITHUB_OUTPUT"
+    # Upload the small preflight before restore so a worker disk failure cannot
+    # erase the only capacity evidence. Observers never change cache policy.
+    - name: Observe capacity before restoring Rust cache
+      continue-on-error: true
+      shell: bash
+      run: node scripts/ci-rust-cache-observation.mjs before-restore "$RUNNER_TEMP/cairn-cache-observation/before-restore.json"
+    - uses: actions/upload-artifact@v7.0.1
+      if: always()
+      continue-on-error: true
+      with:
+        name: rust-cache-before-restore-${{ github.job }}-${{ github.run_attempt }}
+        path: ${{ runner.temp }}/cairn-cache-observation/before-restore.json
+        retention-days: 14
     - id: writer
       uses: actions/cache@v6.1.0
       if: inputs.save == 'true'
@@ -67,3 +80,15 @@ runs:
           target/
         key: rust-${{ runner.os }}-1.97.1-debug0-${{ hashFiles('Cargo.lock') }}
         restore-keys: rust-${{ runner.os }}-1.97.1-debug0-
+    - name: Observe capacity after restoring Rust cache
+      if: always()
+      continue-on-error: true
+      shell: bash
+      run: node scripts/ci-rust-cache-observation.mjs after-restore "$RUNNER_TEMP/cairn-cache-observation/after-restore.json"
+    - uses: actions/upload-artifact@v7.0.1
+      if: always()
+      continue-on-error: true
+      with:
+        name: rust-cache-after-restore-${{ github.job }}-${{ github.run_attempt }}
+        path: ${{ runner.temp }}/cairn-cache-observation/after-restore.json
+        retention-days: 14
