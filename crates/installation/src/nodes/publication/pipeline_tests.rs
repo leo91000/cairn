@@ -33,8 +33,8 @@ struct ObjectServer {
 impl Default for ObjectServer {
     fn default() -> Self {
         Self {
-            bodies: Default::default(),
-            blocked_object: Default::default(),
+            bodies: tokio::sync::Mutex::default(),
+            blocked_object: std::sync::Mutex::default(),
             release: Semaphore::new(0),
             completed: Semaphore::new(0),
             fifth_started: Semaphore::new(0),
@@ -250,7 +250,17 @@ impl Fixture {
             budget: 0,
             block_envelope: 3,
         };
-        publication.transfer_direct(&self.objects).await
+        let metrics = diagnostic::Metrics::new(
+            &attempt,
+            text(&self.run, "id"),
+            &self.snapshot_id,
+            "manager",
+        );
+        let mut manifest = self.snapshot["manifest"].clone();
+        manifest["blockEnvelope"] = 3.into();
+        publication
+            .transfer_observed(&metrics, &manifest, &self.objects)
+            .await
     }
 }
 
@@ -276,7 +286,9 @@ async fn direct_window_reuses_completed_put_slots_before_a_straggler_finishes() 
 #[tokio::test]
 #[ignore = "isolated process-global PUT budget child"]
 async fn direct_window_straggler_child() {
-    let fixture = Fixture::new(8).await;
+    // Two ordinary batches and one terminal block exercise the steady-state
+    // scheduling separately from the existing final-summary ordering contract.
+    let fixture = Fixture::new(9).await;
     let state = fixture.object_server.clone();
     let (transfer, fifth_before_release) = tokio::time::timeout(Duration::from_secs(20), async {
         tokio::join!(fixture.transfer(), async {
@@ -292,8 +304,8 @@ async fn direct_window_straggler_child() {
     })
     .await
     .expect("fixture transfer must drain even when the ordering witness fails");
-    assert_eq!(transfer.unwrap(), 8 * snapshots::BLOCK);
-    assert_eq!(state.started.load(Ordering::SeqCst), 8);
+    assert_eq!(transfer.unwrap(), 9 * snapshots::BLOCK);
+    assert_eq!(state.started.load(Ordering::SeqCst), 9);
     assert!(state.maximum.load(Ordering::SeqCst) <= direct::BATCH);
     assert_eq!(state.in_flight.load(Ordering::SeqCst), 0);
     assert!(
