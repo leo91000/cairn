@@ -8,6 +8,51 @@ isolateTestCredentials()
 const nextest = process.argv[2] === '--nextest'
 const args = process.argv.slice(nextest ? 3 : 2)
 const selectsPackage = args.some(arg => arg === '-p' || arg === '--package' || arg.startsWith('--package='))
+const delimiter = args.indexOf('--')
+const cargoArgs = delimiter < 0 ? args : args.slice(0, delimiter)
+const installationSelected = !selectsPackage || args.includes('--workspace')
+  || args.includes('cairn-installation') || args.includes('--package=cairn-installation')
+const testTargets = cargoArgs.flatMap((arg, index) => {
+  if (arg === '--test')
+    return cargoArgs[index + 1] ? [cargoArgs[index + 1]] : []
+  return arg.startsWith('--test=') ? [arg.slice('--test='.length)] : []
+})
+const explicitOtherTarget = cargoArgs.some(arg => ['--lib', '--bin', '--bins', '--example', '--examples', '--doc'].includes(arg))
+const needsWorkerFixture = installationSelected
+  && (testTargets.length > 0 ? testTargets.includes('worker') : !explicitOtherTarget)
+if (needsWorkerFixture) {
+  const valued = new Set(['--target', '--target-dir', '--profile', '--config', '--jobs', '-j'])
+  const switches = new Set(['--release', '--offline', '--frozen'])
+  const buildArgs = []
+  for (let i = 0; i < cargoArgs.length; i++) {
+    const arg = cargoArgs[i]
+    if (valued.has(arg.split('=')[0])) {
+      buildArgs.push(arg)
+      if (!arg.includes('=') && cargoArgs[i + 1])
+        buildArgs.push(cargoArgs[++i])
+    }
+    else if (switches.has(arg)) {
+      buildArgs.push(arg)
+    }
+  }
+
+  const build = spawnSync('cargo', [
+    'build',
+    '--locked',
+    '-p',
+    'cairn-installation',
+    '--example',
+    'worker_fixture',
+    '--features',
+    'worker-fixture-hooks',
+    ...buildArgs,
+  ], { stdio: 'inherit' })
+  if (build.error)
+    throw build.error
+  if (build.status !== 0)
+    process.exit(build.status ?? 1)
+}
+
 // Beacon's real MCP relay tests also execute the installation's isolated code
 // worker. Build it with the same profile flags before tests start, so a
 // nested Cargo invocation cannot overwrite the binary with another profile.
