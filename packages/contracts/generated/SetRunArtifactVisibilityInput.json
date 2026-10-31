@@ -12,10 +12,7 @@
       "type": "string"
     },
     "visibility": {
-      "enum": [
-        "private",
-        "public"
-      ],
+      "pattern": "^(private|public)$",
       "type": "string"
     }
   },

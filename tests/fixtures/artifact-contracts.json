@@ -1,0 +1,56 @@
+{
+  "visibilityInputs": [
+    {
+      "runId": "00000000-0000-4000-8000-000000000010",
+      "artifactId": "00000000-0000-4000-8000-000000000d01",
+      "visibility": "private"
+    },
+    {
+      "runId": "00000000-0000-4000-8000-000000000010",
+      "artifactId": "00000000-0000-4000-8000-000000000d01",
+      "visibility": "public"
+    }
+  ],
+  "invalidVisibilityInputs": [
+    {
+      "runId": "00000000-0000-4000-8000-000000000010",
+      "artifactId": "00000000-0000-4000-8000-000000000d01",
+      "visibility": "other"
+    },
+    {
+      "runId": "00000000-0000-4000-8000-000000000010",
+      "artifactId": "00000000-0000-4000-8000-000000000d01",
+      "visibility": {}
+    },
+    {
+      "runId": "00000000-0000-4000-8000-000000000010",
+      "artifactId": "00000000-0000-4000-8000-000000000d01",
+      "visibility": null
+    },
+    {
+      "runId": "00000000-0000-4000-8000-000000000010",
+      "artifactId": "00000000-0000-4000-8000-000000000d01",
+      "visibility": 0
+    }
+  ],
+  "metadata": {
+    "id": "00000000-0000-4000-8000-000000000d01",
+    "runId": "00000000-0000-4000-8000-000000000010",
+    "messageId": null,
+    "key": "report",
+    "version": 2,
+    "title": "Rapport été",
+    "name": "report.md",
+    "group": "Review",
+    "kind": "markdown",
+    "mediaType": "text/markdown",
+    "size": 262144,
+    "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "createdAt": 1700000000000,
+    "url": "/api/runs/00000000-0000-4000-8000-000000000010/artifacts/00000000-0000-4000-8000-000000000d01",
+    "visibility": "private",
+    "publicUrl": null,
+    "previewStatus": "none",
+    "excerpt": "Résumé"
+  }
+}

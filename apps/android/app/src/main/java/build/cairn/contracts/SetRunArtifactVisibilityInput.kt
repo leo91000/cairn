@@ -8,16 +8,11 @@ import kotlinx.serialization.Serializable
 data class SetRunArtifactVisibilityInput(
     val artifactId: String,
     val runId: String,
-    val visibility: Visibility,
+    val visibility: String,
 ) {
     init {
         java.util.UUID.fromString(artifactId)
         java.util.UUID.fromString(runId)
+        require(Regex("^(private|public)\$").containsMatchIn(visibility))
     }
-}
-
-@OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
-@Serializable
-class Visibility() {
-    init {}
 }

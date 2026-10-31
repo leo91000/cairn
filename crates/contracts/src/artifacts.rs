@@ -121,6 +121,7 @@ pub struct ReadRunArtifactOutput {
 pub struct SetRunArtifactVisibilityInput {
     pub run_id: RunId,
     pub artifact_id: uuid::Uuid,
+    #[schemars(with = "String", regex(pattern = "^(private|public)$"))]
     pub visibility: ArtifactVisibility,
 }
 
@@ -155,4 +156,32 @@ fn artifact_media_type() -> String {
 
 fn artifact_preview_status() -> String {
     "none".to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn artifact_visibility_uses_string_values_on_the_wire() {
+        let corpus: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/artifact-contracts.json"
+        ))
+        .unwrap();
+        for value in corpus["visibilityInputs"].as_array().unwrap() {
+            let decoded: SetRunArtifactVisibilityInput =
+                serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), *value);
+        }
+        for value in corpus["invalidVisibilityInputs"].as_array().unwrap() {
+            assert!(
+                serde_json::from_value::<SetRunArtifactVisibilityInput>(value.clone()).is_err()
+            );
+        }
+        let metadata: Deliverable = serde_json::from_value(corpus["metadata"].clone()).unwrap();
+        assert_eq!(
+            metadata,
+            serde_json::from_value(serde_json::to_value(&metadata).unwrap()).unwrap()
+        );
+    }
 }
