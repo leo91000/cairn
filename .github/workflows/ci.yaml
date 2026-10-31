@@ -552,7 +552,7 @@ jobs:
       - name: Run browser shard
         timeout-minutes: 10
         run: |
-          args=(--project="$BROWSER_PROJECTS" --workers="$BROWSER_WORKERS")
+          args=(--project="$BROWSER_PROJECTS" --workers="$BROWSER_WORKERS" --fail-on-flaky-tests)
           if [[ -n "$BROWSER_SHARD" ]]; then
             args+=(--shard="$BROWSER_SHARD")
           fi
