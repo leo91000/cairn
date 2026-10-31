@@ -414,11 +414,14 @@ async fn ensure_clean(workspace: &Value, root: &PathBuf, env: &Environment) -> R
     }
     // A revocation can interrupt a cleanup between workspaces. A retry may
     // acknowledge an already absent directory, but may never follow an alias.
+    let boundary = root
+        .parent()
+        .ok_or_else(|| Error::conflict("Managed directory is missing."))?;
     let mut ancestor = target;
     loop {
         match tokio::fs::symlink_metadata(ancestor).await {
             Ok(_) => break,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound && ancestor != root => {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && ancestor != boundary => {
                 ancestor = ancestor
                     .parent()
                     .ok_or_else(|| Error::conflict("Managed directory is missing."))?;
@@ -426,7 +429,7 @@ async fn ensure_clean(workspace: &Value, root: &PathBuf, env: &Environment) -> R
             Err(error) => return Err(error.into()),
         }
     }
-    if crate::skills::workspace(ancestor, std::slice::from_ref(root)).await? != ancestor {
+    if crate::skills::workspace(ancestor, &[boundary.to_path_buf()]).await? != ancestor {
         return Err(Error::conflict(
             "Workspace is outside this run’s managed directory.",
         ));
@@ -602,6 +605,10 @@ mod tests {
         let link = root.path().join("alias");
         std::os::unix::fs::symlink(outside.path(), &link).unwrap();
         let env = std::env::vars().collect();
+        let removed_root = root.path().join("removed-workspace-root");
+        ensure_clean(&json!({ "path": removed_root }), &removed_root, &env)
+            .await
+            .unwrap();
         let missing = root.path().join("already-removed");
         ensure_clean(
             &json!({ "path": missing }),

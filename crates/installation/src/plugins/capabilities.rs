@@ -459,6 +459,9 @@ async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
     let claim =
         super::idempotency::claim(s, &context.connection, args, context.management.as_ref())
             .await?;
+    // Claiming a durable receipt can wait behind another writer. Resolve the
+    // live resource ceiling again before a send or a cached result leaves Cairn.
+    authorize_management(s, context).await?;
     if let Some(super::idempotency::Claim::Cached(response)) = &claim {
         return Ok(response.clone());
     }
@@ -587,4 +590,93 @@ pub(crate) async fn authorize_management(s: &Service, context: &Context) -> Resu
         authority.recheck(s).await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod authorization_tests {
+    use super::*;
+    use crate::plugin_grant_fixture::{Fixture, contribution, support};
+    use cairn_contracts::PluginContributionKind;
+    use std::sync::atomic::Ordering;
+
+    #[tokio::test]
+    async fn http_rechecks_resource_coverage_after_claiming_its_receipt() {
+        let f = Fixture::new().await;
+        f.marker("live-parent").await;
+        f.set(json!([contribution("tool", "grant_probe_post", support())]))
+            .await;
+        let package = super::super::registry::active(&f.s, "grant-probe")
+            .await
+            .unwrap();
+        let instance =
+            f.s.store
+                .plugin_instance(&f.instance)
+                .await
+                .unwrap()
+                .unwrap();
+        let snapshot = super::super::grant_authorization::Snapshot::capture(
+            &f.s,
+            crate::config::MAIN_AGENT_ID,
+            None,
+            &package,
+        )
+        .await
+        .unwrap();
+        let invocation = super::super::grant_authorization::Invocation::prepare(
+            &f.s,
+            snapshot.clone(),
+            instance.clone(),
+            PluginContributionKind::Tool,
+            "grant_probe_post",
+            &json!({ "thread": "support-thread" }),
+        )
+        .await
+        .unwrap();
+        let moved = f.moved_parent.clone();
+        let preparation =
+            crate::capabilities::plugin_packages::Authority::default().with_guard(move |db| {
+                // Change only the external service's ancestry at the receipt's
+                // transaction boundary; all local revisions stay unchanged.
+                if !db.0.is_autocommit() {
+                    moved.store(true, Ordering::SeqCst);
+                }
+                Ok(())
+            });
+        let management = super::super::management::Authority::agent_action(
+            instance.clone(),
+            snapshot,
+            Some(invocation),
+        )
+        .with_preparation(Some(preparation));
+        let context = Context {
+            management: Some(management),
+            connection: instance,
+            manifest: package.manifest.clone(),
+            package_digest: Some(package.digest.clone()),
+            event: Value::Null,
+            link: None,
+            draft: None,
+        };
+        let result = http(
+            &f.s,
+            &context,
+            &json!({
+                "method": "POST",
+                "url": "https://service.example.test/upload",
+                "idempotencyKey": "resource-move-at-claim",
+            }),
+        )
+        .await;
+        assert!(
+            f.moved_parent.load(Ordering::SeqCst),
+            "receipt did not execute"
+        );
+        assert_eq!(
+            f.uploads.load(Ordering::SeqCst),
+            0,
+            "HTTP mutation escaped revoked resource coverage"
+        );
+        assert_eq!(result.unwrap_err().status, 403);
+        f.s.shutdown.cancel();
+    }
 }
