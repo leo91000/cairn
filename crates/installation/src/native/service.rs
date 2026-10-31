@@ -2780,6 +2780,48 @@ mod tests {
         (root, controller)
     }
 
+    #[tokio::test]
+    async fn bootstrap_phase_is_visible_while_real_admission_waits() {
+        let (_root, controller) = fixture().await;
+        let id = crate::config::id();
+        let admission = controller.admission.lock().await;
+        let (starting, attempt) = (controller.clone(), id.clone());
+        let start = tokio::spawn(async move { starting.start(&attempt).await });
+        tokio::task::yield_now().await;
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(1),
+            handler(
+                State(controller.clone()),
+                Request::builder()
+                    .uri(format!("/runs/{id}/bootstrap"))
+                    .header("authorization", "Bearer synthetic-private-controller-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("bootstrap observation cannot wait for admission")
+        .unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 32_768)
+            .await
+            .unwrap();
+        let health = tokio::time::timeout(Duration::from_secs(1), controller.health())
+            .await
+            .expect("observation cannot make health wait for admission");
+        start.abort();
+        let _ = start.await;
+        drop(admission);
+
+        assert_eq!(status, 200, "missing bootstrap observation: {body:?}");
+        let report: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(report["bootstrap"]["attemptId"], id);
+        assert_eq!(report["bootstrap"]["status"], "preparing");
+        assert_eq!(report["bootstrap"]["phase"], "admission_wait");
+        assert_eq!(health["activeRuns"], 0);
+    }
+
     async fn busy_disk_fixture(controller: &Controller) -> (String, String, Value) {
         let run = crate::config::id();
         let id = crate::config::id();
