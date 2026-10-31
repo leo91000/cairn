@@ -68,10 +68,6 @@ watch(() => [props.chatId, props.questions] as const, ([chatId, questions]) => {
     markSeen()
 }, { immediate: true })
 
-function markSeen() {
-  seen.value = new Set([...seen.value, ...props.questions.filter(question => question.status !== 'pending').map(question => question.id)])
-}
-
 const pending = computed(() => props.questions.filter(question => question.status === 'pending'))
 const unread = computed(() => props.questions.filter(question => question.status !== 'pending' && question.status !== 'cancelled' && !seen.value.has(question.id)))
 const shown = computed(() => props.questions.filter((question) => {
@@ -85,6 +81,11 @@ const shown = computed(() => props.questions.filter((question) => {
   const [start, end] = focusEvents.value
   return start !== undefined && end !== undefined && id >= start && id <= end
 }).toReversed())
+
+function markSeen() {
+  seen.value = new Set([...seen.value, ...shown.value.filter(question => question.status !== 'pending').map(question => question.id)])
+}
+
 const engine = computed(() => props.provider ? providers[props.provider].label : 'The agent')
 const status = computed(() => {
   if (pending.value.length)
@@ -260,7 +261,7 @@ defineExpose({ ask, show, unreachable })
       </UiAlert>
       <div v-if="focus" class="flex items-center justify-between gap-3 text-xs text-muted">
         About one reply
-        <button type="button" class="underline hover:text-ink" @click="focus = ''">
+        <button type="button" class="underline hover:text-ink" @click="focus = ''; markSeen()">
           Show all
         </button>
       </div>

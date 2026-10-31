@@ -42,6 +42,19 @@ const MAX_ANSWER: usize = 20_000;
 const MAX_ABOUT: usize = 2_000;
 const MAX_ERROR: usize = 1_000;
 
+/// Bound adapter output before serializing it into the worker's line transport.
+pub(crate) fn bounded_answer(answer: &str) -> String {
+    if answer.chars().count() > MAX_ANSWER {
+        format!("{}…", answer.chars().take(MAX_ANSWER).collect::<String>())
+    } else {
+        answer.to_owned()
+    }
+}
+
+pub(crate) fn bounded_error(error: &str) -> String {
+    error.chars().take(MAX_ERROR).collect()
+}
+
 pub(crate) const EXPIRED: &str = "The reply stopped before this side question was answered. Ask it again while the agent works, or ask in the conversation.";
 
 const OPEN: &str = "chat-side-question-open:";
@@ -492,15 +505,11 @@ fn settle(
     match outcome {
         Ok(answer) => {
             question.status = SideQuestionStatus::Answered;
-            question.answer = Some(if answer.chars().count() > MAX_ANSWER {
-                format!("{}…", answer.chars().take(MAX_ANSWER).collect::<String>())
-            } else {
-                answer.to_owned()
-            });
+            question.answer = Some(bounded_answer(answer));
         }
         Err(error) => {
             question.status = SideQuestionStatus::Failed;
-            question.error = Some(error.chars().take(MAX_ERROR).collect());
+            question.error = Some(bounded_error(error));
         }
     }
     question.settled_at = Some(now());

@@ -334,6 +334,21 @@ abstract class SideQuestionCases {
     }
 
     @Test
+    fun aFilteredSheetDoesNotMarkHiddenAnswersRead() {
+        val other = pending.copy(status = "answered", answer = "Autre réponse", settledAt = 5)
+        val side =
+            SideQuestionState().apply {
+                observe(emptyList())
+                show("reply-1")
+            }
+        side.observe(listOf(answered, other))
+        assertEquals(listOf(other.id), side.unread(listOf(answered, other)).map { it.id })
+        side.show()
+        side.observe(listOf(answered, other))
+        assertTrue(side.unread(listOf(answered, other)).isEmpty())
+    }
+
+    @Test
     fun aReplyOffersItsSideQuestionsOnlyWhileTheAgentCanAnswer() {
         val asked = mutableListOf<Pair<String, String>>()
         val shown = mutableListOf<String>()

@@ -480,7 +480,14 @@ internal fun ChatPage(
         }
     var asking by remember { mutableStateOf<ChatQuestion?>(null) }
     val side = remember(id) { SideQuestionState() }
-    LaunchedEffect(side, chat?.sideQuestions, side.open) {
+    LaunchedEffect(
+        side,
+        chat?.sideQuestions,
+        side.open,
+        side.focus,
+        side.focusEventId,
+        side.focusLastEventId,
+    ) {
         chat?.let { side.observe(it.sideQuestions) }
     }
     val sideCounts =

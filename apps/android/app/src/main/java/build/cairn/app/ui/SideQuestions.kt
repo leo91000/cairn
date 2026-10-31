@@ -114,7 +114,11 @@ internal class SideQuestionState {
      * and every answer once the sheet shows them. Call it outside composition.
      */
     fun observe(questions: List<ChatSideQuestion>) {
-        val settled = questions.filter { it.status != "pending" }.map { it.id }.toSet()
+        val settled =
+            questions
+                .filter { it.status != "pending" && (seen == null || shows(it)) }
+                .map { it.id }
+                .toSet()
         val known = seen
         if (known == null || (open && !known.containsAll(settled))) seen = known.orEmpty() + settled
     }

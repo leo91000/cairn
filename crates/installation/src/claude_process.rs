@@ -809,7 +809,7 @@ impl Turn<'_> {
                 .emit(json!({
                     "type": "chat.side.answered",
                     "sideQuestionId": question,
-                    "text": answer["response"],
+                    "text": crate::chats::side_questions::bounded_answer(text(answer, "response")),
                 }))
                 .await;
         }
@@ -832,7 +832,7 @@ impl Turn<'_> {
         self.emit(json!({
             "type": "chat.side.failed",
             "sideQuestionId": question,
-            "error": error,
+            "error": crate::chats::side_questions::bounded_error(error),
         }))
         .await
     }

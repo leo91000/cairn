@@ -1237,6 +1237,34 @@ async fn a_side_question_is_answered_natively_while_the_turn_continues() {
 }
 
 #[tokio::test]
+async fn oversized_side_responses_are_bounded_before_worker_transport() {
+    let (_root, _config, events) = with_side_questions("fixture:slow", |root, event| {
+        if event["type"] == "chat.side.available" {
+            deliver(
+                root,
+                &json!([
+                    side_question(
+                        "a1b2c3d4-0000-4000-8000-000000000001",
+                        "fixture:side-huge-answer"
+                    ),
+                    side_question(
+                        "a1b2c3d4-0000-4000-8000-000000000002",
+                        "fixture:side-huge-error"
+                    ),
+                ]),
+            );
+        }
+    })
+    .await;
+    let answer = &events[position(&events, "chat.side.answered")];
+    let error = &events[position(&events, "chat.side.failed")];
+    assert_eq!(answer["text"].as_str().unwrap().chars().count(), 20_001);
+    assert_eq!(error["error"].as_str().unwrap().chars().count(), 1_000);
+    assert!(serde_json::to_vec(answer).unwrap().len() < 2_000_000);
+    assert!(serde_json::to_vec(error).unwrap().len() < 2_000_000);
+}
+
+#[tokio::test]
 async fn a_claude_release_not_qualified_for_side_questions_never_takes_one() {
     let root = TempDir::new().unwrap();
     let c = setup(&root);

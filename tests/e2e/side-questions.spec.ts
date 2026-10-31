@@ -179,6 +179,42 @@ test('retained questions without a reply stay accessible after reopening', async
   await workspace.api(`/api/chats/${chat.id}/stop`, 'POST')
 })
 
+test('a filtered panel leaves hidden answers unread', async ({ page, workspace }) => {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Review. fixture:chat-hang', provider: 'claude' })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).canAskSideQuestion).toBe(true)
+  const run = (await workspace.api(`/api/chats/${chat.id}`)).run.id
+  workspace.service.store.event(run, 'item.completed', '', { item: { id: 'reply-a', type: 'agent_message', text: 'Reply A' } })
+  workspace.service.store.event(run, 'item.completed', '', { item: { id: 'reply-b', type: 'agent_message', text: 'Reply B' } })
+  const events = workspace.service.store.events(run, 0, 200) as Array<{ id: number, payload?: { item?: { id?: string } } }>
+  const a = events.find(event => event.payload?.item?.id === 'reply-a')!.id
+  const b = events.find(event => event.payload?.item?.id === 'reply-b')!.id
+  await workspace.api(`/api/chats/${chat.id}/side-questions`, 'POST', {
+    id: randomUUID(),
+    text: 'Question A',
+    itemId: 'reply-a',
+    replyEventId: String(a),
+  })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).sideQuestions[0]?.status).toBe('answered')
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  await page.locator('.activity-message').filter({ hasText: 'Reply A' }).getByRole('button', { name: 'Show 1 side question about this reply' }).click()
+  const panel = page.getByRole('dialog', { name: 'Side questions' })
+  await workspace.api(`/api/chats/${chat.id}/side-questions`, 'POST', {
+    id: randomUUID(),
+    text: 'fixture:side-slow Question B',
+    itemId: 'reply-b',
+    replyEventId: String(b),
+  })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).sideQuestions[1]?.status, { timeout: 10000 }).toBe('answered')
+  await expect(panel.getByText('fixture:side-slow Question B', { exact: true })).toHaveCount(0)
+  await panel.getByRole('button', { name: 'Close dialog' }).click()
+  await expect(page.getByRole('button', { name: /Side questions · Answer ready/ })).toBeVisible()
+  await page.getByRole('button', { name: /Side questions · Answer ready/ }).click()
+  await expect(panel.getByText('fixture:side-slow Question B', { exact: true }).first()).toBeVisible()
+  await workspace.api(`/api/chats/${chat.id}/stop`, 'POST')
+})
+
 test('a pending side question can be withdrawn while the reply continues', async ({ page, workspace }) => {
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Review the layout. fixture:chat-hang', provider: 'claude' })
