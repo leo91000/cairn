@@ -518,7 +518,7 @@ test('cached history survives reload before a delayed stream, then clear on logo
     await page.reload()
     await expect(page.locator('.activity-message').filter({ hasText: 'Cache persistence proof' }).first()).toBeVisible()
     await expect.poll(() => requests.length).toBeGreaterThan(0)
-    expect(new URL(requests[0]).searchParams.get('history')).toMatch(/^v1:/)
+    expect(new URL(requests[0]).searchParams.get('history')).toMatch(/^v2:/)
     expect(Number(new URL(requests[0]).searchParams.get('after'))).toBeGreaterThan(0)
   }
   finally {
@@ -801,7 +801,7 @@ test('recent history loads older pages without moving the reader and survives a 
         const request = tx.objectStore('entries').getAll()
         request.onsuccess = () => resolve(request.result.some((entry) => {
           const saved = JSON.parse(entry.text)
-          return saved.state.run?.id === runId && saved.events.length >= 350 && saved.hasOlder === false
+          return saved.state.run?.id === runId && saved.entries.length >= 350 && saved.hasOlder === false
         }))
         tx.oncomplete = () => db.close()
       }
@@ -816,7 +816,7 @@ test('recent history loads older pages without moving the reader and survives a 
       const db = open.result
       const tx = db.transaction('entries')
       const request = tx.objectStore('entries').getAll()
-      request.onsuccess = () => resolve(Math.max(0, ...request.result.map(e => JSON.parse(e.text).events.length)))
+      request.onsuccess = () => resolve(Math.max(0, ...request.result.map(e => JSON.parse(e.text).entries.length)))
       tx.oncomplete = () => db.close()
     }
   }))).toBeGreaterThanOrEqual(350)
