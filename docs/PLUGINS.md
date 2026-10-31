@@ -547,9 +547,11 @@ may revoke other tokens for the same remote account/client; deleting an instance
 only removes local credentials and data.
 
 Public MCP and the opted-in installation tool expose `list_plugins` and
-`manage_plugin` for setup, sign-in, forms, instance lifecycle and panels. Neither
-accepts `agentIds`; instance grants remain in the owner's agent editor (ADR 0051).
-Both accept `data.sharedFrom` to reuse a granted instance's shared setup.
+`manage_plugin` for setup, sign-in, forms, instance lifecycle and panels. Public
+MCP with manage access may set full instance grants through `agentIds`.
+Installation agents refuse `agentIds` and may only reduce existing grants through
+the grant API (ADR 0075). Both accept `data.sharedFrom`; agent callers may reuse
+shared setup only from a fully granted instance.
 An installation management agent also needs the separate enabled instance grant
 before using its saved credentials in a form, panel, test or reconnect. Management
 and account grants are checked again through asynchronous handlers and refreshes.
@@ -917,10 +919,11 @@ The bundled GitHub package (`plugins/github/`) is an ordinary package built on t
   permissions chosen on GitHub. The form checks the account, warns when an OAuth
   token lacks `workflow`, and keeps the login and commit identity (name and noreply
   address) as hidden settings. The panel and test show the account.
-- **Runs.** Agents granted an account on their page get `~/.config/gh/hosts.yml` for
-  the `gh` CLI, Git credentials for `https://github.com`, the commit identity (unless
-  the installation has its own) and the package's instructions. One account per
-  agent. Token formats are masked in run output.
+- **Runs.** The explicitly chosen credential supplier provides `~/.config/gh/hosts.yml`
+  for the `gh` CLI, Git credentials for `https://github.com` and the commit identity
+  (unless the installation has its own). Agents may hold multiple full or selected
+  instance grants; instructions require their own contribution or full access.
+  Removing the supplier leaves none. Token formats are masked in run output.
 - **Projects.** Projects → import from “GitHub repository” lists the account's
   repositories (owned, collaborations, organizations; 50 per page).
 - **Waits.** `github_workflow` (project, run ID, full commit SHA; a run GitHub does
@@ -1148,9 +1151,10 @@ admission/review, instance validation and completion handler remain unchanged.
 ## Hooks and resources (ADR-0075, ticket A)
 
 These declarations are additive to API v2. Existing `inbound` and conversation
-capabilities keep their behavior until the later removal ticket. Hook rules and
-resource-restricted grants ship in later tickets; declaring a hook grants nobody
-permission to act on it, and nothing consumes the hook queue yet.
+capabilities keep their behavior until the later removal ticket. Resource-restricted
+contribution grants and the delivery authorization seam are available. Hook rules
+and their engine ship in later tickets; declaring a hook grants nobody permission
+to act on it, and nothing consumes the hook queue yet.
 
 ```toml
 # Add "hooks" to capabilities and declare agentAccess for agents' future hook grants.

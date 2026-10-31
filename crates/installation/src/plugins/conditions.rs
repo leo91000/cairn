@@ -277,7 +277,9 @@ pub struct Observed {
 }
 
 pub async fn observe(s: &Service, run: &Value, condition: &Value) -> Result<Observed> {
-    observe_with(s, run, condition, None).await
+    observe_with(s, run, condition, None)
+        .await
+        .map(|(observed, _)| observed)
 }
 
 async fn observe_with(
@@ -285,7 +287,7 @@ async fn observe_with(
     run: &Value,
     condition: &Value,
     owner: Option<Arc<crate::waits::Owner>>,
-) -> Result<Observed> {
+) -> Result<(Observed, crate::capabilities::plugin_packages::Authority)> {
     let caller = run.clone();
     let source = condition.clone();
     let project = s
@@ -334,6 +336,16 @@ async fn observe_with(
         &input,
     )
     .await?;
+    let scope = Arc::new(scope);
+    let local = scope.clone();
+    let asynchronous = scope.clone();
+    let publication = crate::capabilities::plugin_packages::Authority::default()
+        .with_guard(move |db| scope::authorize_in(db, &local))
+        .with_recheck_guard(move |s| {
+            let scope = asynchronous.clone();
+            Box::pin(async move { scope::authorize(s, &scope).await })
+        });
+    let publication = crate::delegation::authorize_async_with(s, run, publication).await?;
     let payload = json!({
         "condition": declared.name,
         "input": input,
@@ -347,6 +359,7 @@ async fn observe_with(
     )
     .await
     .map_err(|_| Error::bad_gateway("The condition could not be checked in time."))??;
+    publication.recheck(s).await?;
     if serde_json::to_string(&value)?.len() > MAX_OBSERVATION_BYTES {
         return Err(Error::bad_gateway(
             "The plugin returned too large a result.",
@@ -363,11 +376,14 @@ async fn observe_with(
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_')
     });
     let Some(state) = state.filter(|state| !state.is_empty()) else {
-        return Ok(Observed {
-            result: None,
-            display: waiting_display(&value["display"]),
-            check_after,
-        });
+        return Ok((
+            Observed {
+                result: None,
+                display: waiting_display(&value["display"]),
+                check_after,
+            },
+            publication,
+        ));
     };
     let mut result = value.as_object().cloned().unwrap_or_default();
     result.remove("checkAfter");
@@ -383,11 +399,14 @@ async fn observe_with(
             .unwrap_or_else(|| "The condition cannot be observed.".into());
         result.insert("message".into(), message.into());
     }
-    Ok(Observed {
-        result: Some(Value::Object(result)),
-        display: None,
-        check_after,
-    })
+    Ok((
+        Observed {
+            result: Some(Value::Object(result)),
+            display: None,
+            check_after,
+        },
+        publication,
+    ))
 }
 
 /// One plugin condition of a wait: the whole wait (`None`), or one condition of a group.
@@ -524,7 +543,7 @@ pub async fn poll_once(s: &Service) -> Result<()> {
             )
             .await;
             s.store
-                .transaction(move |db| record(db, group, &observed, &observer))
+                .transaction(move |db| record_authorized(db, group, observed, &observer))
                 .await
         })
         .buffer_unordered(4)
@@ -554,6 +573,19 @@ fn unchanged(
         }
         None => current == expected,
     }
+}
+
+fn record_authorized(
+    db: &Db<'_>,
+    group: Vec<Watch>,
+    observed: Result<(Observed, crate::capabilities::plugin_packages::Authority)>,
+    observer: &str,
+) -> Result<()> {
+    let observed = observed.and_then(|(observed, publication)| {
+        publication.authorize(db)?;
+        Ok(observed)
+    });
+    record(db, group, &observed, observer)
 }
 
 fn record(
@@ -728,6 +760,53 @@ mod tests {
             })
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_second_granted_instance_cannot_publish_the_revoked_observers_result() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store.transaction(|db| {
+            let agent = "00000000-0000-4000-8000-000000000011";
+            let first = "00000000-0000-4000-8000-000000000012";
+            let second = "00000000-0000-4000-8000-000000000013";
+            let mut profile = crate::agent_fixture::profile(json!({ "id": agent }))?;
+            profile.settings.plugins = vec![first.into(), second.into()];
+            db.save_plugin_version("fixture", "1", &"0".repeat(64))?;
+            let mut observed_instance = None;
+            for id in [first, second] {
+                let mut instance = Connection::draft(id, "fixture", json!({}), vec![]);
+                instance.revision = "r1".into();
+                instance.enabled = true;
+                db.save_plugin_instance(&instance)?;
+                if id == first { observed_instance = Some(instance); }
+            }
+            db.save_agent(&profile)?;
+            let run = json!({ "id": "run", "taskId": "task", "status": "succeeded", "createdAt": now(),
+                "snapshot": { "agent": { "id": agent } }, "chatExecution": { "messageId": "message" } });
+            db.add_run_fixture(&run, None)?;
+            let run = db.run("run")?.unwrap();
+            db.save_conversation_boundary(&json!({ "id": "chat", "agentId": agent, "runId": "run",
+                "wakeup": { "id": "fixture-wait", "messageId": "message", "wakeAt": now()+60_000,
+                    "reason": "Fixture", "seconds": 60, "createdAt": now(),
+                    "condition": { "type": "plugin", "conditionType": "fixture_ready", "pluginId": "fixture", "input": {} } }
+            }))?;
+            let instance = observed_instance.unwrap();
+            let scope = scope::Scope::Agent { agent_id: agent.into(), instances: vec![instance.clone()] };
+            let publication = crate::capabilities::plugin_packages::Authority::default().with_guard(move |db| scope::authorize_in(db, &scope));
+            let mut revoked = instance;
+            revoked.enabled = false;
+            revoked.revision = "r2".into();
+            db.save_plugin_instance(&revoked)?;
+            let owner = crate::waits::Owner::conversation(db.conversation("chat")?.unwrap());
+            let condition = crate::waits::condition_wire(owner.wakeup.as_ref().unwrap().condition.as_ref().unwrap());
+            assert!(crate::waits::access(db, &run, &condition).is_ok(), "the other instance still grants the condition");
+            record_authorized(db, vec![(owner.into(), run.into(), None)], Ok((Observed {
+                result: Some(json!({ "state": "completed" })), display: None, check_after: None,
+            }, publication)), "run")?;
+            assert_eq!(db.conversation_boundary("chat")?.unwrap()["wakeup"]["observation"]["state"], "unavailable");
+            Ok(())
+        }).await.unwrap();
     }
 
     #[test]

@@ -32,6 +32,7 @@ struct Fixture {
     pause: Arc<AtomicBool>,
     entered: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
+    moved_parent: Arc<AtomicBool>,
 }
 
 impl Fixture {
@@ -52,10 +53,13 @@ impl Fixture {
         let pause = Arc::new(AtomicBool::new(false));
         let entered = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
+        let moved_parent = Arc::new(AtomicBool::new(false));
+        let remote_parent = moved_parent.clone();
         let (paused, arrived, resume) = (pause.clone(), entered.clone(), release.clone());
         let (origin, _server) = common::serve_locally(Router::new().route(
             "/effect",
             any(move || {
+                let moved = remote_parent.clone();
                 let (count, paused, arrived, resume) = (
                     count.clone(),
                     paused.clone(),
@@ -68,7 +72,11 @@ impl Fixture {
                         arrived.notify_one();
                         resume.notified().await;
                     }
-                    "ok"
+                    if moved.load(Ordering::SeqCst) {
+                        "general"
+                    } else {
+                        "ok"
+                    }
                 }
             }),
         ))
@@ -166,6 +174,10 @@ return {
         local parent = nil
         if input.resourceType == "channel" then parent={ resourceType="server",id="guild" } end
         if input.resourceType == "thread" then parent={ resourceType="channel",id=if input.id == "support-thread" and input.instance.settings.marker ~= "different-parent" then "support" else "general" } end
+        if input.resourceType == "thread" and input.instance.settings.marker == "live-parent" then
+            local response = cairn.http.request({url="https://service.example.test/effect"})
+            parent={resourceType="channel",id=if response.text == "general" then "general" else "support"}
+        end
         return { resourceType=input.resourceType,id=input.id,name=input.id,parent=parent }
     end,
     tool = function(input)
@@ -250,6 +262,7 @@ return {
             pause,
             entered,
             release,
+            moved_parent,
         }
     }
 
@@ -1568,4 +1581,94 @@ async fn merge_rechecks_previously_resolved_instances_before_publication() {
         f.s.store.agent(&source_id).await.unwrap().is_some(),
         "a refused merge must preserve the source"
     );
+}
+
+#[tokio::test]
+async fn gateway_reresolves_external_ancestry_after_discovery_without_a_local_revision_change() {
+    use axum::Json;
+    let f = Fixture::new().await;
+    f.marker("live-parent").await;
+    let moved = f.moved_parent.clone();
+    let effects = Arc::new(AtomicUsize::new(0));
+    let count = effects.clone();
+    let app = Router::new().fallback(any(move |Json(request): Json<Value>| {
+        let (moved, count) = (moved.clone(), count.clone());
+        async move {
+            let result = if request["method"] == "server/discover" {
+                moved.store(true, Ordering::SeqCst);
+                json!({ "supportedVersions": [cairn_installation::mcp_client::MODERN], "capabilities": { "tools": {} } })
+            } else {
+                if request["method"] == "tools/call" { count.fetch_add(1, Ordering::SeqCst); }
+                json!({ "content": [] })
+            };
+            Json(json!({ "jsonrpc": "2.0", "id": request["id"], "result": result }))
+        }
+    }));
+    let (origin, server) = common::serve_locally(app).await;
+    let remote =
+        f.s.mcp_fixture(
+            json!({ "name": "Remote", "url": origin, "auth": "none", "allowPrivateNetwork": true }),
+            None,
+        )
+        .await
+        .unwrap();
+    let child =
+        f.s.agent_fixture(
+            json!({ "name": "Child", "access": { "installation": true } }),
+            None,
+        )
+        .await
+        .unwrap();
+    f.set(json!([contribution("tool", "grant_probe_post", support())]))
+        .await;
+    f.set_for(
+        text(&child, "id"),
+        json!([contribution(
+            "tool",
+            "grant_probe_post",
+            json!([{ "resourceType": "thread", "id": "support-thread" }])
+        )]),
+    )
+    .await;
+    let (_, token) = f.delegated(MAIN_AGENT_ID, text(&child, "id")).await;
+    let before =
+        f.s.store
+            .plugin_instance(&f.instance)
+            .await
+            .unwrap()
+            .unwrap()
+            .revision;
+    let app = common::relay_fixture::router(f.s.clone()).await.unwrap();
+    let request = common::request("POST", &format!("/mcp-gateway/{}", text(&remote, "id")))
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::from(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "mutate", "arguments": {} } }).to_string())).unwrap();
+    let response = common::send(&app, request).await;
+    assert!(
+        f.moved_parent.load(Ordering::SeqCst),
+        "discovery must reach the remote service"
+    );
+    assert_eq!(
+        before,
+        f.s.store
+            .plugin_instance(&f.instance)
+            .await
+            .unwrap()
+            .unwrap()
+            .revision
+    );
+    let body = axum::body::to_bytes(response.into_body(), 1_048_576)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["error"]["code"], -32603, "{body}");
+    assert!(
+        text(&body["error"], "message").contains("resources"),
+        "{body}"
+    );
+    assert_eq!(
+        effects.load(Ordering::SeqCst),
+        0,
+        "stale ancestry authorized a gateway mutation"
+    );
+    server.abort();
 }

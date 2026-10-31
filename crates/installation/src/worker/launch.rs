@@ -447,8 +447,12 @@ impl Execution<'_> {
             }
         };
         let saved_prepared = prepared.clone();
+        let publication = authorization.clone();
         self.checkpoint
-            .update(|c| c.prepared = Some(Some(saved_prepared)))
+            .update_and_publish(
+                |c| c.prepared = Some(Some(saved_prepared)),
+                move |db| publication.authorize_in(db),
+            )
             .await?;
         authorization.recheck().await?;
         Ok((prepared, credentials, authorization))
@@ -847,16 +851,20 @@ impl Execution<'_> {
         let node_id = placement["nodeId"].as_str().map(str::to_owned);
         let runtime_id = placement["runtimeId"].clone();
         let state = s.store.run_state(&self.id).await?;
+        let publication = workspace.authorization.clone();
         self.checkpoint
-            .update(|c| {
-                c.bind_paid_admission(&runner, &state);
-                c.turn_pending = None;
-                c.recovery_deadline_ms = None;
-                c.terminal_code = None;
-                c.provider_failed = None;
-                c.node_id = Some(node_id);
-                c.runtime_id = Some(Some(runtime_id));
-            })
+            .update_and_publish(
+                |c| {
+                    c.bind_paid_admission(&runner, &state);
+                    c.turn_pending = None;
+                    c.recovery_deadline_ms = None;
+                    c.terminal_code = None;
+                    c.provider_failed = None;
+                    c.node_id = Some(node_id);
+                    c.runtime_id = Some(Some(runtime_id));
+                },
+                move |db| publication.authorize_in(db),
+            )
             .await?;
         drop(self.preparation.take());
         s.worker.notify();
@@ -882,7 +890,14 @@ impl Execution<'_> {
             "nodeState": null,
             "movementError": null,
         });
-        s.store.update_run_boundary(&self.id, patch).await?;
+        let publication = workspace.authorization.clone();
+        let run_id = self.id.clone();
+        s.store
+            .transaction(move |db| {
+                publication.authorize_in(db)?;
+                db.update_run_boundary(&run_id, &patch)
+            })
+            .await?;
         let runner_token = execution::secret(&s.config.data_dir, "runner-secret").await?;
         workspace.env.insert("RUNNER_URL".into(), runner_url);
         workspace.env.insert("RUNNER_TOKEN".into(), runner_token);

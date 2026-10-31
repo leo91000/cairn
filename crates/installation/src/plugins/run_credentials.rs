@@ -49,6 +49,8 @@ pub struct CredentialGrant {
     instance_revision: String,
     plugin: String,
     digest: String,
+    version: String,
+    builtin: bool,
     supplying: bool,
 }
 
@@ -69,6 +71,7 @@ pub struct RunCredentials {
 }
 
 /// A caller's live execution and the non-secret proofs of its fetch credentials.
+#[derive(Clone)]
 pub(crate) struct Authorization {
     service: crate::service::Service,
     authority: crate::capabilities::plugin_packages::Authority,
@@ -91,6 +94,11 @@ impl Authorization {
         }
     }
 
+    pub(crate) fn authorize_in(&self, db: &crate::store::Db<'_>) -> Result<()> {
+        self.authority.authorize(db)?;
+        self.credentials.authorize_in(db)
+    }
+
     pub(crate) async fn recheck(&self) -> Result<()> {
         self.authority.recheck(&self.service).await?;
         self.credentials.authorize(&self.service).await?;
@@ -107,27 +115,53 @@ impl RunCredentials {
                 ));
             }
         }
-        let expected = self.authorizations.clone();
-        s.store.read(move |db| {
-            for expected in expected {
-                let profile = required(db.agent(&expected.agent)?, "Agent not found")?;
-                let connection = required(db.plugin_instance(&expected.instance)?, "Credential supplier removed")?;
-                let still_supplies = !expected.supplying || (
-                    db.plugin_credential_supplier(&expected.agent, &expected.plugin)?.as_deref() == Some(expected.instance.as_str())
-                    && db.plugin_contribution(
-                        &expected.agent, &expected.instance,
-                        cairn_contracts::PluginContributionKind::RunCredentials, "",
-                    )?.is_some()
-                );
-                let unchanged = profile.revision == expected.agent_revision
-                    && connection.revision == expected.instance_revision;
+        let proof = Self {
+            authorizations: self.authorizations.clone(),
+            ..Self::default()
+        };
+        s.store.read(move |db| proof.authorize_in(db)).await
+    }
 
-                if !unchanged || !connection.enabled || !still_supplies {
-                    return Err(Error::forbidden("Run credential authorization changed during preparation. Retry the run."));
+    pub(crate) fn authorize_in(&self, db: &crate::store::Db<'_>) -> Result<()> {
+        for expected in &self.authorizations {
+            if !expected.builtin {
+                let package = db.plugin_package(&expected.plugin)?;
+                if package.active.as_deref() != Some(&expected.version)
+                    || package.approvals.get(&expected.version) != Some(&expected.digest)
+                {
+                    return Err(Error::forbidden(
+                        "The credential package changed during preparation.",
+                    ));
                 }
             }
-            Ok(())
-        }).await
+            let profile = required(db.agent(&expected.agent)?, "Agent not found")?;
+            let connection = required(
+                db.plugin_instance(&expected.instance)?,
+                "Credential supplier removed",
+            )?;
+            let still_supplies = !expected.supplying
+                || (db
+                    .plugin_credential_supplier(&expected.agent, &expected.plugin)?
+                    .as_deref()
+                    == Some(expected.instance.as_str())
+                    && db
+                        .plugin_contribution(
+                            &expected.agent,
+                            &expected.instance,
+                            cairn_contracts::PluginContributionKind::RunCredentials,
+                            "",
+                        )?
+                        .is_some());
+            let unchanged = profile.revision == expected.agent_revision
+                && connection.revision == expected.instance_revision;
+
+            if !unchanged || !connection.enabled || !still_supplies {
+                return Err(Error::forbidden(
+                    "Run credential authorization changed during preparation. Retry the run.",
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub fn fetch_for(&self, project: &Value) -> &[GitAccess] {
@@ -380,6 +414,8 @@ async fn for_run_with(
                 instance_revision: connection.revision.clone(),
                 plugin: package.manifest.id.clone(),
                 digest: package.digest.clone(),
+                version: package.manifest.version.clone(),
+                builtin: package.builtin,
                 supplying: true,
             });
             // Packages never overwrite each other's files: the first one keeps a path.
@@ -425,6 +461,8 @@ async fn for_run_with(
                     instance_revision: connection.revision.clone(),
                     plugin: package.manifest.id.clone(),
                     digest: package.digest.clone(),
+                    version: package.manifest.version.clone(),
+                    builtin: package.builtin,
                     supplying: false,
                 });
             }

@@ -156,9 +156,9 @@ impl Projects {
         .await?;
         // Recheck the grant after a potentially slow clone and before transferring anything.
         authorize(s, bearer).await?;
-        let imported = import(s, &run, attempt, project_id, &entry).await?;
+        let imported = import(s, &run, attempt, project_id, &entry, &authorization).await?;
         authorization.recheck().await?;
-        record_workspace(s, run_id, entry.clone()).await?;
+        record_workspace(s, run_id, entry.clone(), authorization).await?;
         Ok(json!({
             "projectId": project_id,
             "name": project["name"],
@@ -176,6 +176,7 @@ async fn import(
     attempt: &str,
     project_id: &str,
     entry: &Value,
+    authorization: &crate::plugins::run_credentials::Authorization,
 ) -> Result<Value> {
     let credential = crate::execution::secret(&s.config.data_dir, "runner-secret").await?;
     let node = crate::nodes::transport::url(s, text(run, "id")).await?;
@@ -184,6 +185,7 @@ async fn import(
         "source": entry["path"],
         "target": entry["path"]
     });
+    authorization.recheck().await?;
     let response = s
         .http
         .post(format!("{node}/runs/{attempt}/projects/{project_id}"))
@@ -197,12 +199,14 @@ async fn import(
                 "Project transfer was interrupted. Retry open_project; saved files are preserved.",
             )
         })?;
+    authorization.recheck().await?;
     if !response.status().is_success() {
         return Err(Error::unavailable(
             "Project could not be opened in this VM. Retry when the run is active.",
         ));
     }
     let response: Value = response.json().await.map_err(Error::internal)?;
+    authorization.recheck().await?;
     if response["ok"] != true {
         return Err(Error::unavailable("Project import was not acknowledged."));
     }
@@ -210,10 +214,16 @@ async fn import(
 }
 
 /// Adds the project to the run's opened workspaces, once.
-async fn record_workspace(s: &Service, run_id: &str, entry: Value) -> Result<()> {
+async fn record_workspace(
+    s: &Service,
+    run_id: &str,
+    entry: Value,
+    authorization: crate::plugins::run_credentials::Authorization,
+) -> Result<()> {
     let id = run_id.to_owned();
     s.store
-        .write(move |db| {
+        .transaction(move |db| {
+            authorization.authorize_in(db)?;
             let run = db
                 .run(&id)?
                 .ok_or_else(|| Error::not_found("Run not found."))?;
@@ -411,4 +421,82 @@ pub async fn rpc(s: &Service, bearer: &str, method: &str, params: &Value) -> Res
         }
     }
     Ok(json!({ "tools": tools }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn a_project_import_rechecks_the_caller_after_async_preparation() {
+        let root = tempfile::tempdir().unwrap();
+        let effects = Arc::new(AtomicUsize::new(0));
+        let count = effects.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = axum::Router::new().fallback(axum::routing::any(move || {
+            let count = count.clone();
+            async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                axum::Json(json!({ "ok": true }))
+            }
+        }));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let config = serde_json::from_value(json!({
+            "dataDir": root.path().join("data"), "home": root.path().join("home"),
+            "workspaceRoots": [root.path()], "publicUrl": "http://localhost:4310",
+            "host": "127.0.0.1", "port": 0, "codexBin": "unused", "concurrency": 1,
+            "logger": false, "workerEnabled": false, "runnerUrl": format!("http://{address}"),
+        }))
+        .unwrap();
+        let s = Service::new(config).await.unwrap();
+        let live = Arc::new(AtomicBool::new(true));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let valid = live.clone();
+        let (arrived, proceed) = (entered.clone(), release.clone());
+        let authority = crate::capabilities::plugin_packages::Authority::default()
+            .with_guard(move |_| {
+                if valid.load(Ordering::SeqCst) {
+                    Ok(())
+                } else {
+                    Err(Error::forbidden("Caller revoked"))
+                }
+            })
+            .with_recheck_guard(move |_| {
+                let (arrived, proceed) = (arrived.clone(), proceed.clone());
+                Box::pin(async move {
+                    arrived.notify_one();
+                    proceed.acquire().await.unwrap().forget();
+                    Ok(())
+                })
+            });
+        let authorization = crate::plugins::run_credentials::Authorization::new(
+            &s,
+            authority,
+            &crate::plugins::run_credentials::RunCredentials::default(),
+        );
+        let service = s.clone();
+        let imported = tokio::spawn(async move {
+            import(
+                &service,
+                &json!({ "id": "run" }),
+                "attempt",
+                "project",
+                &json!({ "path": "/private/seed" }),
+                &authorization,
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(10), entered.notified())
+            .await
+            .unwrap();
+        live.store(false, Ordering::SeqCst);
+        release.add_permits(1);
+        assert_eq!(imported.await.unwrap().unwrap_err().status, 403);
+        assert_eq!(effects.load(Ordering::SeqCst), 0);
+        server.abort();
+        s.shutdown.cancel();
+    }
 }

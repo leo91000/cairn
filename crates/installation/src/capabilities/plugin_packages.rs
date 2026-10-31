@@ -176,12 +176,7 @@ impl Authority {
             }
             Ok(())
         });
-        let authority = crate::delegation::authorize_async_with(s, run, authority).await?;
-        let run = run.clone();
-        Ok(authority.with_recheck_guard(move |s| {
-            let run = run.clone();
-            Box::pin(async move { crate::delegation::authorize_async(s, &run).await })
-        }))
+        crate::delegation::authorize_async_with(s, run, authority).await
     }
 
     pub(crate) fn for_execution(run: &Value) -> Self {

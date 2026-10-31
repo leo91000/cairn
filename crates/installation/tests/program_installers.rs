@@ -1310,7 +1310,7 @@ async fn revoked_agent_first_use_cannot_download_or_publish_a_program() {
     for metadata in [true, false] {
         let mut f = Fixture::new().await;
         common::reconfigure(&mut f.service, |config| {
-            config.runner_url = "http://runner.invalid".into()
+            config.runner_url = "http://runner.invalid".into();
         })
         .await;
         *f.publisher.release.lock().await = json!({ "version": "2.41.0" });
