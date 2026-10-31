@@ -151,6 +151,180 @@ fn artifact_call(
 }
 
 #[tokio::test]
+async fn anonymous_links_stay_revoked_while_conversation_purge_removes_artifacts() {
+    use axum::{
+        Json, Router,
+        extract::{Path, State},
+        routing::post,
+    };
+    use std::sync::Arc;
+    use tokio::sync::{Notify, mpsc};
+
+    #[derive(Clone)]
+    struct PurgeGate {
+        reached: mpsc::UnboundedSender<String>,
+        release: Arc<Notify>,
+    }
+
+    async fn delete_disk(State(gate): State<PurgeGate>, Path(run): Path<String>) -> Json<Value> {
+        gate.reached.send(run).unwrap();
+        gate.release.notified().await;
+        Json(json!({}))
+    }
+
+    let (reached, mut requests) = mpsc::unbounded_channel();
+    let release = Arc::new(Notify::new());
+    let runner = Router::new()
+        .route("/disks/{run}/delete", post(delete_disk))
+        .with_state(PurgeGate {
+            reached,
+            release: release.clone(),
+        });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let runner_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, runner).await.unwrap() });
+    let relay = RelayedInstallation::with_runner_url(Router::new(), runner_url).await;
+    let bytes = b"Public purge sentinel";
+    let (run, artifact) = seeded_artifact(&relay, bytes, "text/plain").await;
+    let file = relay
+        .installation
+        .config
+        .data_dir
+        .join("artifacts")
+        .join(&artifact);
+    let preview = file.with_file_name(format!("{artifact}.jpg"));
+    tokio::fs::write(&preview, b"Preview purge sentinel")
+        .await
+        .unwrap();
+    let mut chat = relay.installation.chat_create(json!({})).await.unwrap();
+    chat["runId"] = run.clone().into();
+    relay
+        .installation
+        .store
+        .save_conversation_boundary(chat.clone())
+        .await
+        .unwrap();
+    let shared = visibility(&relay, &run, &artifact, "public").await;
+    let public = shared["publicUrl"].as_str().unwrap();
+    let token = shared["publicToken"].as_str().unwrap().to_owned();
+
+    // This client has neither the owner's session nor a public MCP grant.
+    let anonymous = reqwest::Client::new();
+    let response = anonymous.get(public).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.bytes().await.unwrap().as_ref(), bytes);
+
+    let chat_id = chat["id"].as_str().unwrap();
+    relay.installation.chat_trash(chat_id, true).await.unwrap();
+    assert!(
+        relay
+            .installation
+            .store
+            .read({
+                let token = token.clone();
+                move |db| db.public_artifact(&token)
+            })
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        anonymous.get(public).send().await.unwrap().status(),
+        StatusCode::NOT_FOUND
+    );
+
+    let service = relay.installation.clone();
+    let purging = tokio::spawn(async move { service.cleanup_conversations().await });
+    let deleting = tokio::time::timeout(std::time::Duration::from_secs(10), requests.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(deleting, run);
+    let current = relay
+        .installation
+        .store
+        .conversation_boundary(chat_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current["lifecycle"], "purging");
+    assert!(file.exists() && preview.exists());
+    let retained = relay
+        .installation
+        .store
+        .artifact(&run, &artifact)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.visibility.as_deref(), Some("private"));
+    assert!(retained.public_token.is_none() && retained.public_url.is_none());
+    for method in [reqwest::Method::GET, reqwest::Method::HEAD] {
+        let response = anonymous.request(method, public).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(
+            !response
+                .text()
+                .await
+                .unwrap()
+                .contains("Public purge sentinel")
+        );
+    }
+
+    release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(30), purging)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        relay
+            .installation
+            .store
+            .conversation_boundary(chat_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        relay.installation.store.run(&run).await.unwrap_err().status,
+        404
+    );
+    assert!(
+        relay
+            .installation
+            .store
+            .artifacts(Some(&run))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        relay
+            .installation
+            .store
+            .read(move |db| db.public_artifact(&token))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        relay
+            .installation
+            .store
+            .read(|db| Ok(!db.0.prepare("PRAGMA foreign_key_check")?.exists([])?))
+            .await
+            .unwrap()
+    );
+    assert!(!file.exists() && !preview.exists());
+    assert_eq!(
+        anonymous.get(public).send().await.unwrap().status(),
+        StatusCode::NOT_FOUND
+    );
+    relay.close().await;
+    server.abort();
+}
+
+#[tokio::test]
 async fn admitted_artifact_reads_recheck_public_authorization() {
     use std::os::unix::{ffi::OsStrExt, fs::PermissionsExt};
     for operation in ["list_run_artifacts", "read_run_artifact"] {
