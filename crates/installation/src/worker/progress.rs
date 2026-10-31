@@ -370,23 +370,40 @@ fn valid_status(value: &Value) -> bool {
     )
 }
 
+fn web_action_fields(action: &Value) -> Option<&'static [&'static str]> {
+    Some(match action["type"].as_str()? {
+        "search" => &["type", "query", "queries"],
+        "open_page" => &["type", "url"],
+        "find_in_page" => &["type", "url", "pattern"],
+        _ => return None,
+    })
+}
+
 fn valid_web_action(action: &Value) -> bool {
+    let Some(fields) = web_action_fields(action) else {
+        return false;
+    };
     if !action.is_object() {
         return false;
     }
-    match action["type"].as_str().unwrap_or("") {
-        "search" => {
-            (action["query"].is_null() || action["query"].is_string())
-                && (action["queries"].is_null()
-                    || action["queries"]
-                        .as_array()
-                        .is_some_and(|queries| queries.iter().all(Value::is_string)))
-                && (!action["query"].is_null() || !action["queries"].is_null())
+    let search = action["type"] == "search";
+    for field in fields {
+        let value = &action[*field];
+        if search && matches!(*field, "query" | "queries") && value.is_null() {
+            continue;
         }
-        "open_page" => action["url"].is_string(),
-        "find_in_page" => action["url"].is_string() && action["pattern"].is_string(),
-        _ => false,
+        let valid = if *field == "queries" {
+            value
+                .as_array()
+                .is_some_and(|queries| queries.iter().all(Value::is_string))
+        } else {
+            value.is_string()
+        };
+        if !valid {
+            return false;
+        }
     }
+    !search || !action["query"].is_null() || !action["queries"].is_null()
 }
 
 fn semantic_detail(item: &Value) -> Map<String, Value> {
@@ -416,10 +433,9 @@ fn semantic_detail(item: &Value) -> Map<String, Value> {
                     .map(|change| project(change, &["path", "kind", "diff"]))
                     .collect(),
             ),
-            "action" if !item["action"].is_null() => project(
-                &item["action"],
-                &["type", "query", "queries", "url", "pattern"],
-            ),
+            "action" if !item["action"].is_null() => {
+                project(&item["action"], web_action_fields(&item["action"]).unwrap())
+            }
             _ => item[*field].clone(),
         };
         detail.insert((*field).to_owned(), value);
@@ -731,6 +747,36 @@ mod tests {
             assert!(!progress.observe(&event, 3));
             assert_eq!(progress.advanced_at, Some(2));
             assert!(progress.complete);
+        }
+    }
+
+    #[test]
+    fn web_variants_validate_exactly_the_fields_they_fingerprint() {
+        for action in [
+            json!({"type":"search","query":"unchanged","queries":["unchanged"]}),
+            json!({"type":"open_page","url":"https://example.test"}),
+            json!({"type":"find_in_page","url":"https://example.test","pattern":"unchanged"}),
+        ] {
+            let fields = web_action_fields(&action).unwrap();
+            for field in ["query", "queries", "url", "pattern"] {
+                for value in [json!({"duration_ms":3}), json!(3), json!(false), json!([3])] {
+                    let mut progress = progress();
+                    let mut event = json!({"type":"item.updated","item":{"id":"web","type":"web_search","action":action}});
+                    assert!(progress.observe(&event, 2));
+                    event["item"]["action"][field] = value;
+                    if fields.contains(&field) {
+                        assert!(!known_frame(&event), "{event}");
+                        assert!(progress.observe(&event, 3));
+                        assert!(!progress.complete);
+                    } else {
+                        // Values outside this variant are metadata, not evidence.
+                        assert!(known_frame(&event), "{event}");
+                        assert!(!progress.observe(&event, 3));
+                        assert!(progress.complete);
+                    }
+                    assert_eq!(progress.advanced_at, Some(2));
+                }
+            }
         }
     }
 

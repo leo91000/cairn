@@ -1581,6 +1581,9 @@ async fn unsupported_json_degrades_coverage_even_after_log_budget_is_spent() {
         json!({ "type":"item.updated", "item":{"id":"stable","type":"agent_message","text":{"duration_ms":2}} }),
         json!({ "type":"item.updated", "item":{"id":"stable","type":"agent_message","text":"stable","status":{"duration_ms":2}} }),
         json!({ "type":"item.updated", "item":{"id":"stable","type":"agent_message","text":"stable","parent_id":{"duration_ms":2}} }),
+        json!({ "type":"item.updated", "item":{"id":"web","type":"web_search","action":{"type":"search","query":{"duration_ms":2}}} }),
+        json!({ "type":"item.updated", "item":{"id":"web","type":"web_search","action":{"type":"open_page","url":{"duration_ms":2}}} }),
+        json!({ "type":"item.updated", "item":{"id":"web","type":"web_search","action":{"type":"find_in_page","url":"https://example.test","pattern":{"duration_ms":2}}} }),
         json!({ "type": "future.provider_wait" }),
         json!({ "type": "item.delta", "item": { "id": "future", "type": "agent_message" } }),
     ] {
