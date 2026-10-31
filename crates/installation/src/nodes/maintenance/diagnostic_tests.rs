@@ -36,6 +36,7 @@ async fn maintenance_reports_actual_native_capture_retries_and_preserves_ownersh
         "nodes::maintenance::diagnostic_tests::native_capture_retry_report_child",
         "nodes::maintenance::diagnostic_tests::disabled_summary_span_child",
         "nodes::maintenance::diagnostic_tests::layered_capture_retry_report_child",
+        "nodes::maintenance::diagnostic_tests::panicking_filter_report_child",
     ] {
         let output = tokio::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", child, "--ignored", "--nocapture"])
@@ -67,7 +68,7 @@ async fn native_capture_retry_report_child() {
             .finish(),
     )
     .unwrap();
-    actual_drain_reports(capture).await;
+    actual_drain_reports(capture, false).await;
 }
 
 struct Identity;
@@ -98,10 +99,44 @@ async fn layered_capture_retry_report_child() {
         !tracing::info_span!(target: "cairn_performance", parent: None, "maintenance_summary")
             .is_disabled()
     );
-    actual_drain_reports(capture).await;
+    actual_drain_reports(capture, false).await;
 }
 
-async fn actual_drain_reports(capture: Capture) {
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "isolated panicking diagnostic filter for actual maintenance path"]
+async fn panicking_filter_report_child() {
+    let capture = Capture::default();
+    let failures = Arc::new(AtomicUsize::new(0));
+    let observed = failures.clone();
+    let formatting = tracing_subscriber::fmt::layer()
+        .json()
+        .with_ansi(false)
+        .with_writer({
+            let capture = capture.clone();
+            move || capture.clone()
+        })
+        .with_filter(tracing_subscriber::filter::dynamic_filter_fn(
+            move |metadata, _| {
+                if metadata.target() == "cairn_performance"
+                    && metadata.name().starts_with("enabled ")
+                    && metadata.file().is_some_and(|file| {
+                        file.ends_with("performance/isolated.rs")
+                            || file.ends_with("src/performance.rs")
+                    })
+                {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    panic!("synthetic diagnostic filter failure");
+                }
+                true
+            },
+        ));
+    tracing::subscriber::set_global_default(tracing_subscriber::registry().with(formatting))
+        .unwrap();
+    actual_drain_reports(capture, true).await;
+    assert!(failures.load(Ordering::SeqCst) > 0);
+}
+
+async fn actual_drain_reports(capture: Capture, suppress_summary: bool) {
     let private_span = tracing::info_span!(
         "private_fixture_parent",
         private = "private-context-must-not-escape"
@@ -187,7 +222,7 @@ async fn actual_drain_reports(capture: Capture) {
         .await
         .unwrap();
     assert_eq!(reply["maintenance"], "draining");
-    tokio::time::timeout(Duration::from_secs(5), async {
+    let drained = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if !service.node_maintenance_tasks.lock().await.contains(&node) {
                 break;
@@ -195,8 +230,11 @@ async fn actual_drain_reports(capture: Capture) {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
-    .await
-    .unwrap();
+    .await;
+    assert!(
+        drained.is_ok(),
+        "Diagnostic filter failure must preserve readiness and task cleanup"
+    );
     assert_eq!(captures.load(Ordering::SeqCst), 3);
     assert_ne!(
         service
@@ -213,6 +251,15 @@ async fn actual_drain_reports(capture: Capture) {
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .filter(|row| row["fields"]["operation"] == "node_maintenance_drain")
         .collect();
+    if suppress_summary {
+        assert!(reports.is_empty());
+        let current = service.node_boundary(&node).await.unwrap();
+        assert_eq!(current["maintenance"], "ready-to-update");
+        assert!(current["maintenanceError"].is_string());
+        service.shutdown.cancel();
+        peer.abort();
+        return;
+    }
     assert_eq!(
         reports.len(),
         1,

@@ -445,6 +445,8 @@ an empty thread-local span stack, so per-layer filters cannot restore an older
 private span. It is created only at the existing summary boundary when INFO
 performance events are enabled, never per attempt or retry. Thread startup or
 logging failure drops the diagnostic without a context-bearing fallback.
+The shared `performance::enabled()` precheck catches subscriber/filter panics
+and disables that observation, so readiness persistence and task cleanup continue.
 If a logging filter disables that span, the summary is suppressed to preserve
 this isolation.
 The maintenance API, deadlines, retries and ownership rules are unchanged.
