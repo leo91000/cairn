@@ -86,6 +86,7 @@ for current behavior.
 | 0075 | [Hooks de plugins, règles sans code et droits restreints par ressource](0075-plugin-hooks-rules-and-scoped-grants.md) |
 | 0077 | [Native close with independent backend namespaces](0077-native-close-with-independent-backend-namespaces.md) |
 | 0078 | [La sémantique de la timeline appartient à Cairn](0078-cairn-timeline.md) |
+| 0079 | [Drain native filesystem access per attempt](0079-native-attempt-access-drain.md) |
 
 ## Renumbered collisions
 

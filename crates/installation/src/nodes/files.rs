@@ -228,24 +228,128 @@ async fn receive_file(
         .custom_flags(libc::O_NOFOLLOW)
         .open(target)
         .await?;
-    let mut left = size;
-    while left > 0 {
-        let frame = wire::read(reader)
-            .await?
-            .ok_or_else(|| Error::bad("Incomplete workspace transfer."))?;
-        let bytes = STANDARD
-            .decode(text(&frame, "data"))
-            .map_err(|_| Error::bad("Invalid workspace bytes."))?;
-        if bytes.is_empty() || bytes.len() > CHUNK || bytes.len() as u64 > left {
-            return Err(Error::bad("Invalid workspace chunk size."));
-        }
-        file.write_all(&bytes).await?;
-        left -= bytes.len() as u64;
-    }
+    receive_contents(reader, &mut file, size).await?;
 
     // Creation applies the node's umask; restore the transmitted mode on the open file.
     file.set_permissions(std::fs::Permissions::from_mode(mode))
         .await?;
     file.sync_all().await?;
     Ok(())
+}
+
+async fn receive_contents(
+    reader: &mut (impl AsyncBufRead + Unpin),
+    file: &mut (impl tokio::io::AsyncWrite + Unpin),
+    mut left: u64,
+) -> Result<()> {
+    let received = async {
+        while left > 0 {
+            let frame = wire::read(reader)
+                .await?
+                .ok_or_else(|| Error::bad("Incomplete workspace transfer."))?;
+            let bytes = STANDARD
+                .decode(text(&frame, "data"))
+                .map_err(|_| Error::bad("Invalid workspace bytes."))?;
+            if bytes.is_empty() || bytes.len() > CHUNK || bytes.len() as u64 > left {
+                return Err(Error::bad("Invalid workspace chunk size."));
+            }
+            file.write_all(&bytes).await?;
+            left -= bytes.len() as u64;
+        }
+        Ok::<_, Error>(())
+    }
+    .await;
+    // A Tokio file can accept bytes before its blocking write finishes. Drain
+    // that work on errors too, before callers release their filesystem guards.
+    let drained = file.flush().await;
+    received?;
+    drained?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        future::Future,
+        pin::Pin,
+        task::{Context, Poll},
+    };
+    use tokio::{io::AsyncWrite, sync::oneshot};
+
+    struct BufferedWriter {
+        started: Option<oneshot::Sender<()>>,
+        release: oneshot::Receiver<()>,
+        bytes: Vec<u8>,
+    }
+
+    impl AsyncWrite for BufferedWriter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            self.bytes.extend_from_slice(bytes);
+            Poll::Ready(Ok(bytes.len()))
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            if let Some(started) = self.started.take() {
+                let _ = started.send(());
+            }
+            match Pin::new(&mut self.release).poll(cx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(_) => Poll::Ready(Ok(())),
+            }
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            self.poll_flush(cx)
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_transfer_drains_accepted_writes_before_returning_its_error() {
+        for (frame, error) in [
+            (
+                Some(json!({ "data": "invalid-base64!" })),
+                "Invalid workspace bytes.",
+            ),
+            (
+                Some(json!({ "data": STANDARD.encode(b"too-long") })),
+                "Invalid workspace chunk size.",
+            ),
+            (None, "Incomplete workspace transfer."),
+        ] {
+            let mut stream = Vec::new();
+            wire::write(&mut stream, &json!({ "data": STANDARD.encode(b"kept") }))
+                .await
+                .unwrap();
+            if let Some(frame) = frame {
+                wire::write(&mut stream, &frame).await.unwrap();
+            }
+            let (started, draining) = oneshot::channel();
+            let (release, released) = oneshot::channel();
+            let receiving = tokio::spawn(async move {
+                let mut writer = BufferedWriter {
+                    started: Some(started),
+                    release: released,
+                    bytes: Vec::new(),
+                };
+                let result = receive_contents(&mut stream.as_slice(), &mut writer, 8).await;
+                (result, writer.bytes)
+            });
+            let drained = tokio::time::timeout(std::time::Duration::from_secs(2), draining).await;
+            let returned_too_early = receiving.is_finished();
+            let _ = release.send(());
+            let (result, bytes) = receiving.await.unwrap();
+            assert!(
+                matches!(drained, Ok(Ok(()))),
+                "error path did not drain buffered writes"
+            );
+            assert!(!returned_too_early);
+            assert_eq!(result.unwrap_err().message, error);
+            assert_eq!(bytes, b"kept");
+        }
+    }
 }
