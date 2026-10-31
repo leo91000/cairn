@@ -14,7 +14,7 @@ import { describe, expect, it } from 'vitest'
 
 const launcher = fileURLToPath(new URL('../test-backend.mjs', import.meta.url))
 
-function invoke(args, status = 0) {
+function invoke(args, status = 0, threads) {
   const directory = mkdtempSync(path.join(os.tmpdir(), 'cairn-backend-runner-'))
   try {
     const cargo = path.join(directory, 'cargo')
@@ -22,7 +22,7 @@ function invoke(args, status = 0) {
     writeFileSync(cargo, `#!/usr/bin/env node
 const fs = require('node:fs');
 const args = process.argv.slice(2);
-fs.appendFileSync(process.env.CAIRN_FIXTURE_CALLS, JSON.stringify({ args, worker: process.env.CAIRN_TEST_CODE_WORKER, auth: process.env.CAIRN_AUTH_SOCKET }) + '\\n');
+fs.appendFileSync(process.env.CAIRN_FIXTURE_CALLS, JSON.stringify({ args, worker: process.env.CAIRN_TEST_CODE_WORKER, auth: process.env.CAIRN_AUTH_SOCKET, threads: process.env.RUST_TEST_THREADS }) + '\\n');
 if (args[0] === 'build') console.log(JSON.stringify({ reason: 'compiler-artifact', target: { name: 'cairn' }, executable: '/fixture/cairn' }));
 else process.exit(Number(process.env.CAIRN_FIXTURE_STATUS));
 `)
@@ -34,6 +34,7 @@ else process.exit(Number(process.env.CAIRN_FIXTURE_STATUS));
         CAIRN_FIXTURE_CALLS: calls,
         CAIRN_FIXTURE_STATUS: `${status}`,
         CAIRN_AUTH_SOCKET: '/must-not-reach-tests',
+        RUST_TEST_THREADS: threads,
       },
       encoding: 'utf8',
     })
@@ -49,7 +50,7 @@ describe('backend test launcher', () => {
     const { calls, status } = invoke(['--doc'])
     expect(status).toBe(0)
     expect(calls[0].args).toContain('build')
-    expect(calls[1]).toEqual({ args: ['test', '--locked', '--workspace', '--doc'], worker: '/fixture/cairn' })
+    expect(calls[1]).toEqual({ args: ['test', '--locked', '--workspace', '--doc'], worker: '/fixture/cairn', threads: '4' })
   })
 
   it('isolates credentials and builds the code worker with the nextest profile', () => {
@@ -63,5 +64,10 @@ describe('backend test launcher', () => {
     const { calls, status } = invoke(['--nextest', '-p', 'cairn-installation'], 100)
     expect(status).toBe(100)
     expect(calls).toEqual([{ args: ['nextest', 'run', '--locked', '-p', 'cairn-installation'] }])
+  })
+
+  it('preserves explicit libtest concurrency', () => {
+    const { calls } = invoke(['-p', 'cairn-installation'], 0, '2')
+    expect(calls[0].threads).toBe('2')
   })
 })

@@ -4,9 +4,11 @@ use super::{metadata, private_dir, relative};
 use crate::error::{Error, Result};
 use serde_json::{Value, json};
 use std::{
+    collections::HashMap,
     io::ErrorKind,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
+    sync::{Arc, LazyLock, Mutex, Weak},
 };
 use tokio::{fs, io::AsyncWriteExt};
 
@@ -124,7 +126,7 @@ pub async fn scan(directory: &Path) -> Result<Vec<Entry>> {
 /// Every visible file of a skill with its content, read once, and the
 /// revision of exactly those contents.
 pub async fn read_all(directory: &Path) -> Result<(String, Vec<(Entry, Vec<u8>)>)> {
-    let _read = ACCESS.read().await;
+    let _read = access(skills_root(directory)).await.read_owned().await;
     read_all_locked(directory).await
 }
 
@@ -153,7 +155,7 @@ pub struct Described {
 }
 
 pub async fn describe(directory: &Path) -> Result<Described> {
-    let _read = ACCESS.read().await;
+    let _read = access(skills_root(directory)).await.read_owned().await;
     describe_locked(directory).await
 }
 
@@ -473,9 +475,33 @@ fn swap(staging: &Path, target: &Path, exists: bool) -> Result<()> {
     Ok(())
 }
 
-/// Reads hold one version for their entire walk; saves and removals wait for
-/// those readers before replacing a skill and serialize their revision checks.
-pub(super) static ACCESS: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
+/// The lock of one skills root. Reads hold one version for their entire walk;
+/// saves and removals wait for those readers before replacing a skill and
+/// serialize their revision checks. Saves fsync every file, so other roots, such
+/// as another project's skills, keep their own lock instead of waiting for them.
+pub(super) async fn access(root: &Path) -> Arc<tokio::sync::RwLock<()>> {
+    static ROOTS: LazyLock<Mutex<HashMap<PathBuf, Weak<tokio::sync::RwLock<()>>>>> =
+        LazyLock::new(Mutex::default);
+
+    // Different spellings of one existing root must share its lock.
+    let key = fs::canonicalize(root)
+        .await
+        .unwrap_or_else(|_| root.to_path_buf());
+
+    let mut roots = ROOTS.lock().unwrap();
+    if let Some(lock) = roots.get(&key).and_then(Weak::upgrade) {
+        return lock;
+    }
+    roots.retain(|_, lock| lock.strong_count() > 0);
+    let lock = Arc::new(tokio::sync::RwLock::new(()));
+    roots.insert(key, Arc::downgrade(&lock));
+    lock
+}
+
+/// The skills root that contains a skill directory.
+fn skills_root(directory: &Path) -> &Path {
+    directory.parent().unwrap_or(directory)
+}
 
 /// How a batch relates to the existing skill.
 pub enum Base<'a> {
@@ -512,7 +538,7 @@ pub(crate) async fn save_authorized(
     changes: &[Change],
     authorization: Option<Authorization<'_>>,
 ) -> Result<Described> {
-    let _save = ACCESS.write().await;
+    let _save = access(root).await.write_owned().await;
     let directory = root.join(skill);
     let exists = match kind(&directory).await? {
         Some(metadata) if metadata.is_dir() => true,
@@ -606,7 +632,7 @@ mod publication_tests {
             .unwrap();
         let store = crate::store::Store::open(&root.path().join("db")).unwrap();
         let revoked = Arc::new(AtomicBool::new(false));
-        let lock = ACCESS.write().await;
+        let lock = access(root.path()).await.write_owned().await;
         let (started, waiting) = tokio::sync::oneshot::channel();
         let pending = tokio::spawn({
             let directory = root.path().to_owned();

@@ -114,7 +114,7 @@ class HistoryPagingCostTest {
         var live =
             LiveSnapshot(
                 events = recent,
-                history = "v1:fixture:1",
+                history = "v2:fixture:1",
                 cursor = recent.last().id,
                 oldest = recent.first().id,
                 hasOlder = true,
@@ -129,7 +129,7 @@ class HistoryPagingCostTest {
         fun derive(events: List<RunEvent>): List<TimelineEntry> {
             val timeline =
                 deliveryTimeline(
-                    keys.stabilize(live.history, timelineEntries(events, chat = true)),
+                    keys.stabilize(live.history, fixtureEntries(events, chat = true)),
                     emptyList(),
                 )
             subagentTeams(timeline)
@@ -140,10 +140,11 @@ class HistoryPagingCostTest {
 
         for (loaded in 1..pageCount) {
             val events = pages[pages.size - 1 - loaded]
+            // Event paging cost: the page keeps its raw rows; cards are derived below.
             val page =
                 HistoryPage(
                     events = events,
-                    history = "v1:fixture:1",
+                    history = "v2:fixture:1",
                     oldest = events.first().id,
                     hasOlder = loaded < pageCount,
                 )
@@ -158,7 +159,7 @@ class HistoryPagingCostTest {
             val timeline = derive(displayed.events)
             val deriveMs = ms(start)
             start = System.nanoTime()
-            val entries = timelineEntries(displayed.events, chat = true)
+            val entries = fixtureEntries(displayed.events, chat = true)
             val entriesMs = ms(start)
             start = System.nanoTime()
             subagentTimeline(displayed.events)
@@ -178,9 +179,9 @@ class HistoryPagingCostTest {
 
             start = System.nanoTime()
             recentHistory(
-                CachedHistory(
+                timelineCache(
                     displayed.cursor,
-                    "v1:fixture:1",
+                    "v2:fixture:1",
                     LiveState(),
                     displayed.events,
                     oldest = displayed.oldest,

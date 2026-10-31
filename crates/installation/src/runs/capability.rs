@@ -51,9 +51,14 @@ pub(crate) const RUN_OPERATIONS: &[RunOperation] = &[
         description: "Read a previous history window selected with a 256 KiB gzip budget, at most 1,000 events and a decoded-size ceiling. Tool responses retain bounded previews; read truncated events with read_run_content. Pass history from get_run and use oldest as the next before cursor while hasOlder is true. Reconnect when the history revision changes.",
     },
     RunOperation {
+        name: "read_run_timeline",
+        scope: "read",
+        description: "Read the run's timeline, newest page first. Save the first page's changeCursor and pass it as snapshot with oldest as before for older pages. Pages can include newer revisions while the run continues. Then pass the saved cursor as changes and follow changeCursor while hasMoreChanges is true to catch up. Restart if retained history changes. A newer card revision replaces an older one. For a truncated card, pass its entryId and preview.snapshot as timelineSnapshot to read_run_content.",
+    },
+    RunOperation {
         name: "read_run_content",
         scope: "read",
-        description: "Read complete run metadata or an event in UTF-8 JSON chunks. Continue with nextOffset and sha256, restarting from zero if the content changes.",
+        description: "Read complete run metadata, an event, or a timeline card by entryId in UTF-8 JSON chunks. Continue with nextOffset and sha256, restarting from zero if the content changes.",
     },
 ];
 
@@ -72,6 +77,7 @@ impl RunOperation {
             "list_runs" => schema_for::<ListRunsInput>(Contract::Deserialize),
             "get_run" => schema_for::<GetRunInput>(Contract::Deserialize),
             "read_run_history" => schema_for::<ReadRunHistoryInput>(Contract::Deserialize),
+            "read_run_timeline" => schema_for::<ReadRunTimelineInput>(Contract::Deserialize),
             "read_run_content" => schema_for::<ReadRunContentInput>(Contract::Deserialize),
             _ => schema_for::<RunInput>(Contract::Deserialize),
         };
@@ -81,6 +87,7 @@ impl RunOperation {
             "list_runs" => schema_for::<Vec<Run>>(Contract::Serialize),
             "get_run" => schema_for::<RunHistoryOutput>(Contract::Serialize),
             "read_run_history" => schema_for::<RunHistoryWindowOutput>(Contract::Serialize),
+            "read_run_timeline" => schema_for::<RunTimelineOutput>(Contract::Serialize),
             "read_run_content" => schema_for::<RunContentOutput>(Contract::Serialize),
             _ => schema_for::<Run>(Contract::Serialize),
         };
@@ -220,9 +227,35 @@ impl RunOperation {
                     })
                     .await
             }
+            "read_run_timeline" => {
+                let input: ReadRunTimelineInput = decode(input)?;
+                input.validate().map_err(Error::bad)?;
+                s.store
+                    .read(move |db| {
+                        let tx = rusqlite::Transaction::new_unchecked(
+                            db.0,
+                            rusqlite::TransactionBehavior::Deferred,
+                        )?;
+                        let db = Db(&tx);
+                        authorize(&db)?;
+                        let run = input.run_id.to_string();
+                        db.require_run(&run)?;
+                        crate::conversation_lifecycle::require_active_run(&db, &run)?;
+                        Ok(serde_json::to_value(crate::mcp_server::run_timeline(
+                            &db, &run, &input,
+                        )?)?)
+                    })
+                    .await
+            }
             "read_run_content" => {
                 let input: ReadRunContentInput = decode(input)?;
                 if input.offset < 0
+                    || (input.event_id.is_some() && input.entry_id.is_some())
+                    || (input.timeline_snapshot.is_some() && input.entry_id.is_none())
+                    || input
+                        .entry_id
+                        .as_ref()
+                        .is_some_and(|id| id.is_empty() || id.chars().count() > 1024)
                     || input
                         .event_id
                         .is_some_and(|id| !(1..=9_007_199_254_740_991).contains(&id))
@@ -243,6 +276,9 @@ impl RunOperation {
                         )?;
                         let db = Db(&tx);
                         authorize(&db)?;
+                        let run = input.run_id.to_string();
+                        db.require_run(&run)?;
+                        crate::conversation_lifecycle::require_active_run(&db, &run)?;
                         crate::mcp_server::read_run_content(&db, &input)
                     })
                     .await
