@@ -278,13 +278,10 @@ fn artifacts(db: &Db<'_>, run: &str) -> Result<Vec<Value>> {
     if run.is_empty() {
         return Ok(Vec::new());
     }
-    let mut artifacts: Vec<_> = db
-        .keys(&format!("artifact:{run}:"))?
+    db.artifacts(Some(run))?
         .into_iter()
-        .map(|(_, v)| v)
-        .collect();
-    artifacts.sort_by_key(|v| v["createdAt"].as_i64().unwrap_or(0));
-    Ok(artifacts)
+        .map(|item| Ok(serde_json::to_value(item)?))
+        .collect()
 }
 
 fn scoped_run(db: &Db<'_>, scope: &Scope, chat: &Value) -> Result<Value> {

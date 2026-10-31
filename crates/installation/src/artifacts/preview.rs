@@ -31,7 +31,7 @@ pub(crate) fn command(program: &str) -> Command {
 }
 
 /// Reads dimensions and duration of a media file into the record.
-async fn probe(path: &Path, artifact: &mut Value) -> Result<()> {
+async fn probe(path: &Path, artifact: &mut Deliverable) -> Result<()> {
     let output = command("ffprobe")
         .args([
             "-v",
@@ -52,13 +52,17 @@ async fn probe(path: &Path, artifact: &mut Value) -> Result<()> {
         return Ok(());
     }
     let info: Value = serde_json::from_slice(&output.stdout)?;
-    artifact["width"] = info["streams"][0]["width"].clone();
-    artifact["height"] = info["streams"][0]["height"].clone();
+    artifact.width = info["streams"][0]["width"]
+        .as_u64()
+        .and_then(|n| n.try_into().ok());
+    artifact.height = info["streams"][0]["height"]
+        .as_u64()
+        .and_then(|n| n.try_into().ok());
     if let Ok(duration) = text(&info["format"], "duration").parse::<f64>()
         && duration.is_finite()
         && duration >= 0.0
     {
-        artifact["duration"] = duration.into();
+        artifact.duration = Some(duration);
     }
     Ok(())
 }
@@ -155,33 +159,18 @@ pub(crate) async fn pdf_pages(path: &Path) -> Result<Option<u64>> {
 }
 
 /// Copies the preview fields onto the stored record, if it still exists.
-async fn store(s: &Service, artifact: Value) -> Result<()> {
+async fn store(s: &Service, artifact: Deliverable) -> Result<()> {
     s.store
-        .transaction(move |db| {
-            let key = format!(
-                "artifact:{}:{}",
-                text(&artifact, "runId"),
-                text(&artifact, "id")
-            );
-            let Some(mut current) = db.kv(&key)? else {
-                return Ok(());
-            };
-            for field in ["previewStatus", "width", "height", "duration"] {
-                if let Some(value) = artifact.get(field) {
-                    current[field] = value.clone();
-                }
-            }
-            db.set(&key, &current, None)
-        })
+        .transaction(move |db| db.save_artifact_preview(&artifact))
         .await
 }
 
-pub async fn prepare(s: Service, mut artifact: Value) -> Result<()> {
-    if artifact["previewStatus"] != PreviewStatus::Pending.as_str() {
+pub async fn prepare(s: Service, mut artifact: Deliverable) -> Result<()> {
+    if artifact.preview_status != PreviewStatus::Pending.as_str() {
         return Ok(());
     }
     let _permit = JOBS.acquire().await.map_err(Error::internal)?;
-    let run = text(&artifact, "runId").to_owned();
+    let run = artifact.run_id.clone();
     let active = s
         .store
         .read(move |db| crate::conversation_lifecycle::require_active_run(db, &run))
@@ -190,9 +179,9 @@ pub async fn prepare(s: Service, mut artifact: Value) -> Result<()> {
         return Ok(());
     }
     let directory = s.config.data_dir.join("artifacts");
-    let path = directory.join(text(&artifact, "id"));
-    let target = directory.join(format!("{}.jpg", text(&artifact, "id")));
-    let kind = text(&artifact, "kind").to_owned();
+    let path = directory.join(&artifact.id);
+    let target = directory.join(format!("{}.jpg", artifact.id));
+    let kind = artifact.kind.clone();
     let job = async {
         if kind != "pdf" {
             probe(&path, &mut artifact).await?;
@@ -207,7 +196,7 @@ pub async fn prepare(s: Service, mut artifact: Value) -> Result<()> {
         Ok(Ok(false)) if kind == "audio" => PreviewStatus::None,
         _ => PreviewStatus::Unavailable,
     };
-    artifact["previewStatus"] = status.as_str().into();
+    artifact.preview_status = status.as_str().to_owned();
     store(&s, artifact).await
 }
 
@@ -218,11 +207,11 @@ pub async fn recover(s: Arc<Service>) {
     if let Err(error) = reconcile(&s).await {
         tracing::warn!(error = %error, "artifact file reconciliation failed");
     }
-    let Ok(items) = s.store.keys("artifact:").await else {
+    let Ok(items) = s.store.artifacts(None).await else {
         return;
     };
-    for (_, item) in items {
-        if item["previewStatus"] == PreviewStatus::Pending.as_str()
+    for item in items {
+        if item.preview_status == PreviewStatus::Pending.as_str()
             && let Err(error) = prepare((*s).clone(), item).await
         {
             tracing::warn!(error = %error, "artifact preview failed");
@@ -234,10 +223,10 @@ async fn reconcile(s: &Service) -> Result<()> {
     let _guard = s.artifacts.commit.lock().await;
     let known: std::collections::HashSet<String> = s
         .store
-        .keys("artifact:")
+        .artifacts(None)
         .await?
         .into_iter()
-        .map(|(_, item)| text(&item, "id").to_owned())
+        .map(|item| item.id)
         .collect();
     let directory = s.config.data_dir.join("artifacts");
     if !directory.is_dir() {

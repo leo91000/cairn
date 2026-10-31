@@ -34,21 +34,16 @@ async fn seeded_artifact(
     tokio::fs::write(directory.join(&artifact), bytes)
         .await
         .unwrap();
+    let record: cairn_contracts::Deliverable = serde_json::from_value(json!({
+        "id": artifact, "runId": run, "messageId": null,
+        "key": "report", "version": 1, "group": "", "kind": "file", "size": bytes.len(), "createdAt": 1,
+        "name": "report.html", "title": "Report", "mediaType": media_type,
+        "visibility": "private", "previewStatus": "none",
+        "url": format!("/api/runs/{run}/artifacts/{artifact}"),
+    })).unwrap();
     installation
         .store
-        .set(
-            &format!("artifact:{run}:{artifact}"),
-            json!({
-                "id": artifact,
-                "runId": run,
-                "name": "report.html",
-                "title": "Report",
-                "mediaType": media_type,
-                "visibility": "private",
-                "url": format!("/api/runs/{run}/artifacts/{artifact}"),
-            }),
-            None,
-        )
+        .transaction(move |db| db.insert_artifact(&record))
         .await
         .unwrap();
     (run, artifact)
@@ -71,6 +66,325 @@ async fn visibility(relay: &RelayedInstallation, run: &str, artifact: &str, valu
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     response.json().await.unwrap()
+}
+
+async fn reader_grant(relay: &RelayedInstallation) -> Value {
+    let installation = relay.session["installations"][0]["id"].as_str().unwrap();
+    let response = relay
+        .app
+        .client
+        .post(format!(
+            "{}/api/installations/{installation}/tokens",
+            relay.app.url
+        ))
+        .header("cookie", &relay.cookie)
+        .header("origin", &relay.app.url)
+        .header("x-csrf-token", relay.session["csrf"].as_str().unwrap())
+        .json(&json!({"label": "Artifact reader", "scopes": ["read"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    response.json().await.unwrap()
+}
+
+async fn invalidate_reader(relay: &RelayedInstallation, grant: &Value, invalidation: &str) {
+    match invalidation {
+        "revoke" => {
+            let installation = relay.session["installations"][0]["id"].as_str().unwrap();
+            let response = relay
+                .app
+                .client
+                .delete(format!(
+                    "{}/api/installations/{installation}/tokens/{}",
+                    relay.app.url,
+                    grant["id"].as_str().unwrap()
+                ))
+                .header("cookie", &relay.cookie)
+                .header("origin", &relay.app.url)
+                .header("x-csrf-token", relay.session["csrf"].as_str().unwrap())
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        "expire" => {
+            use sha2::{Digest, Sha256};
+            let changed = sqlx_core::query::query(
+                "UPDATE mcp_tokens SET expires_at = now() - interval '1 second' WHERE digest = $1",
+            )
+            .bind(hex::encode(Sha256::digest(
+                grant["token"].as_str().unwrap().as_bytes(),
+            )))
+            .execute(&relay.app.pool)
+            .await
+            .unwrap();
+            assert_eq!(changed.rows_affected(), 1);
+        }
+        _ => assert_eq!(invalidation, "none"),
+    }
+}
+
+fn artifact_call(
+    relay: &RelayedInstallation,
+    token: &str,
+    operation: &str,
+    input: Value,
+) -> reqwest::RequestBuilder {
+    relay
+        .app
+        .client
+        .post(format!("{}/mcp", relay.app.url))
+        .bearer_auth(token)
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "execute",
+                "arguments": {
+                    "code": format!("return await cairn.call({operation:?}, input);"),
+                    "input": input,
+                },
+            },
+        }))
+}
+
+#[tokio::test]
+async fn admitted_artifact_reads_recheck_public_authorization() {
+    use std::os::unix::{ffi::OsStrExt, fs::PermissionsExt};
+    for operation in ["list_run_artifacts", "read_run_artifact"] {
+        for invalidation in ["none", "revoke", "expire"] {
+            let relay = RelayedInstallation::new(axum::Router::new()).await;
+            let (run, artifact) =
+                seeded_artifact(&relay, b"Private artifact sentinel", "text/plain").await;
+            let grant = reader_grant(&relay).await;
+            let token = grant["token"].as_str().unwrap();
+
+            // Admission is proven by the real code worker starting. Hold its
+            // invocation until the owner has changed the originating grant.
+            let ready = relay.root.path().join("artifact-reader-ready");
+            let resume = relay.root.path().join("artifact-reader-resume");
+            let fifo = std::ffi::CString::new(resume.as_os_str().as_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+            let mut release = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&resume)
+                .unwrap();
+            let worker = std::env::var_os("CAIRN_TEST_CODE_WORKER")
+                .map(std::path::PathBuf::from)
+                .expect("Use the credential-isolating backend launcher");
+            let wrapper = relay.root.path().join("artifact-code-worker");
+            let quote = |path: &std::path::Path| {
+                format!("'{}'", path.to_str().unwrap().replace('\'', "'\\''"))
+            };
+            std::fs::write(
+                &wrapper,
+                format!(
+                    "#!/bin/sh\nset -eu\n: > {}\nIFS= read -r release < {}\nexec {} \"$@\"\n",
+                    quote(&ready),
+                    quote(&resume),
+                    quote(&worker),
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+            relay.installation.code_mode.use_worker(wrapper);
+            let input = if operation == "list_run_artifacts" {
+                json!({"runId": run})
+            } else {
+                json!({"runId": run, "artifactId": artifact})
+            };
+            let request = artifact_call(&relay, token, operation, input);
+            let pending = tokio::spawn(async move { request.send().await.unwrap() });
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                while !ready.exists() {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            invalidate_reader(&relay, &grant, invalidation).await;
+            std::io::Write::write_all(&mut release, b"continue\n").unwrap();
+            let response = pending.await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let response: Value = response.json().await.unwrap();
+            if invalidation == "none" {
+                assert_ne!(response["result"]["isError"], true, "{response}");
+                let value = &response["result"]["structuredContent"]["result"];
+                if operation == "list_run_artifacts" {
+                    assert_eq!(value["artifacts"][0]["id"], artifact, "{response}");
+                } else {
+                    use base64::Engine;
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(value["data"].as_str().unwrap())
+                        .unwrap();
+                    assert_eq!(bytes, b"Private artifact sentinel");
+                }
+            } else {
+                assert_eq!(
+                    response["result"]["isError"], true,
+                    "{operation}/{invalidation}: {response}"
+                );
+                assert!(
+                    response.to_string().contains("MCP authorization"),
+                    "{response}"
+                );
+                assert!(!response.to_string().contains("Private artifact sentinel"));
+            }
+            relay.close().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn artifact_reads_recheck_public_authorization_after_preparation() {
+    use axum::{Json, Router, extract::State, http::HeaderMap, routing::post};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use tokio::sync::Notify;
+
+    #[derive(Clone)]
+    struct CheckGate {
+        client: reqwest::Client,
+        target: String,
+        calls: Arc<AtomicUsize>,
+        reached: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    async fn check(
+        State(gate): State<CheckGate>,
+        headers: HeaderMap,
+        Json(input): Json<Value>,
+    ) -> Json<bool> {
+        if gate.calls.fetch_add(1, Ordering::SeqCst) == 1 {
+            gate.reached.notify_one();
+            gate.release.notified().await;
+        }
+        let allowed = gate
+            .client
+            .post(&gate.target)
+            .header("authorization", headers["authorization"].to_str().unwrap())
+            .json(&input)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json::<bool>()
+            .await
+            .unwrap();
+        Json(allowed)
+    }
+
+    for operation in ["list_run_artifacts", "read_run_artifact"] {
+        for invalidation in ["none", "revoke", "expire", "trash", "purge"] {
+            let relay = RelayedInstallation::new(Router::new()).await;
+            let (run, artifact) =
+                seeded_artifact(&relay, b"Private artifact sentinel", "text/plain").await;
+            let mut chat = relay.installation.chat_create(json!({})).await.unwrap();
+            chat["runId"] = run.clone().into();
+            relay
+                .installation
+                .store
+                .save_conversation_boundary(chat.clone())
+                .await
+                .unwrap();
+            let worker = std::env::var_os("CAIRN_TEST_CODE_WORKER")
+                .map(std::path::PathBuf::from)
+                .expect("Use the credential-isolating backend launcher");
+            relay.installation.code_mode.use_worker(worker);
+            let grant = reader_grant(&relay).await;
+            let installation = relay.session["installations"][0]["id"].as_str().unwrap();
+            let path = format!("/api/relay/{installation}/mcp-authorization");
+            let calls = Arc::new(AtomicUsize::new(0));
+            let reached = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            let gate = CheckGate {
+                client: relay.app.client.clone(),
+                target: format!("{}{path}", relay.app.url),
+                calls: calls.clone(),
+                reached: reached.clone(),
+                release: release.clone(),
+            };
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let origin = format!("http://{}", listener.local_addr().unwrap());
+            let router = Router::new().route(&path, post(check)).with_state(gate);
+            let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+            // Observe the real Beacon decision without replacing its grant
+            // authority. The second check is held until owner invalidation.
+            let identity = relay
+                .installation
+                .config
+                .data_dir
+                .join("installation-relay/identity.json");
+            let original = tokio::fs::read(&identity).await.unwrap();
+            let mut redirected: Value = serde_json::from_slice(&original).unwrap();
+            redirected["origin"] = origin.into();
+            tokio::fs::write(&identity, serde_json::to_vec(&redirected).unwrap())
+                .await
+                .unwrap();
+            let input = if operation == "list_run_artifacts" {
+                json!({"runId": run})
+            } else {
+                json!({"runId": run, "artifactId": artifact})
+            };
+            let request = artifact_call(&relay, grant["token"].as_str().unwrap(), operation, input);
+            let mut pending = tokio::spawn(async move { request.send().await.unwrap() });
+            let finished_early = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                tokio::select! {
+                    _ = reached.notified() => false,
+                    _ = &mut pending => true,
+                }
+            })
+            .await
+            .unwrap();
+            if finished_early {
+                tokio::fs::write(&identity, &original).await.unwrap();
+                server.abort();
+                relay.close().await;
+                panic!("{operation} completed without its final authorization check");
+            }
+            if matches!(invalidation, "trash" | "purge") {
+                let chat_id = chat["id"].as_str().unwrap();
+                relay.installation.chat_trash(chat_id, true).await.unwrap();
+                if invalidation == "purge" {
+                    cairn_installation::conversation_deletion::purge(
+                        &relay.installation,
+                        chat.clone(),
+                    )
+                    .await
+                    .unwrap();
+                }
+            } else {
+                invalidate_reader(&relay, &grant, invalidation).await;
+            }
+            release.notify_one();
+            let response = pending.await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let response: Value = response.json().await.unwrap();
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+            assert_eq!(
+                response["result"]["isError"] == true,
+                invalidation != "none",
+                "{operation}/{invalidation}: {response}"
+            );
+            if matches!(invalidation, "revoke" | "expire") {
+                assert!(
+                    response.to_string().contains("MCP authorization"),
+                    "{response}"
+                );
+            }
+            tokio::fs::write(&identity, &original).await.unwrap();
+            server.abort();
+            relay.close().await;
+        }
+    }
 }
 
 #[tokio::test]

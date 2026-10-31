@@ -209,6 +209,10 @@ async fn main() -> Result<()> {
 
                     Value::Null
                 }
+                "insertArtifact" => {
+                    db.insert_artifact(&serde_json::from_value(arg(0))?)?;
+                    arg(0)
+                }
                 "set" => {
                     db.set(string(0), &arg(1), arg(2).as_i64())?;
                     Value::Null

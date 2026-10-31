@@ -17,7 +17,7 @@ pub(crate) fn upgrade(connection: &mut rusqlite::Connection) -> Result<()> {
     if version == 20 {
         tx.execute_batch(SCHEMA)?;
         tx.pragma_update(None, "user_version", 21)?;
-    } else if version != 21 {
+    } else if !(21..=crate::store::DATABASE_VERSION).contains(&version) {
         return Err(crate::error::Error::bad(
             "Unexpected installation database version during progress upgrade.",
         ));

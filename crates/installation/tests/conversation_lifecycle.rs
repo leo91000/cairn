@@ -1133,22 +1133,16 @@ async fn seven_day_expiration_preserves_history_uploads_artifacts_and_public_acc
         .join(&artifact);
     std::fs::create_dir_all(artifact_path.parent().unwrap()).unwrap();
     std::fs::write(&artifact_path, "shared work").unwrap();
+    let record = common::deliverable(
+        &run,
+        &artifact,
+        &json!({
+            "publicToken": "expired-share", "publicUrl":"https://example.invalid/artifacts/expired-share", "visibility": "public"
+        }),
+    );
     app.service
         .store
-        .set(
-            &format!("artifact:{run}:{artifact}"),
-            json!({ "id": artifact, "publicToken": "expired-share", "visibility": "public" }),
-            None,
-        )
-        .await
-        .unwrap();
-    app.service
-        .store
-        .set(
-            "artifact-share:expired-share",
-            json!({ "runId": run }),
-            None,
-        )
+        .transaction(move |db| db.insert_artifact(&record))
         .await
         .unwrap();
     let workspace = app.service.config.data_dir.join("runs").join(&run);
@@ -1167,7 +1161,7 @@ async fn seven_day_expiration_preserves_history_uploads_artifacts_and_public_acc
     assert!(
         app.service
             .store
-            .kv("artifact-share:expired-share")
+            .read(|db| db.public_artifact("expired-share"))
             .await
             .unwrap()
             .is_some()

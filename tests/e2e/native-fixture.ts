@@ -80,6 +80,7 @@ export class NativeFixture {
     seedEvents: (id: string, events: Pick<RunEvent, 'type' | 'text' | 'payload'>[]) => this.call('seedEvents', id, events),
     events: (id: string, after = 0, limit = 10000): RunEvent[] => this.call('events', id, after, limit),
     chatMessages: (id: string): any[] => this.call('chatMessages', id),
+    insertArtifact: (value: unknown) => this.call('insertArtifact', value),
     set: (key: string, value: unknown, expires?: number) => this.call('set', key, value, expires),
     delete: (key: string) => this.call('delete', key),
     clearEvents: (id: string) => this.call('clearEvents', id),

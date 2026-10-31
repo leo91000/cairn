@@ -23,15 +23,15 @@ fn rehearsal_upgrades_only_the_private_copy_and_is_stable_on_reopen() {
         result,
         json!({
             "versionBefore": 15,
-            "versionAfter": 21,
+            "versionAfter": 22,
             "quickCheck": "ok",
             "foreignKeyCheck": "ok",
         })
     );
     assert_eq!(std::fs::read(&database).unwrap(), original);
     let reopened = store_migration::upgrade_copy(copy.path()).unwrap();
-    assert_eq!(reopened["versionBefore"], 21);
-    assert_eq!(reopened["versionAfter"], 21);
+    assert_eq!(reopened["versionBefore"], 22);
+    assert_eq!(reopened["versionAfter"], 22);
 }
 
 #[test]

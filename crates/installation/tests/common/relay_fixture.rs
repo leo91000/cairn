@@ -217,6 +217,10 @@ pub async fn claimed(service: &Service) -> Result<()> {
         .route(
             "/api/relay/00000000-0000-4000-8000-000000000055/plugin-mcp-authorization",
             post(fixture_plugin_authorization).with_state(Arc::new(service.clone())),
+        )
+        .route(
+            "/api/relay/00000000-0000-4000-8000-000000000055/mcp-authorization",
+            post(fixture_plugin_authorization).with_state(Arc::new(service.clone())),
         );
     let shutdown = service.shutdown.clone();
 

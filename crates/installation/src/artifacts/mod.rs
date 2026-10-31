@@ -2,7 +2,11 @@
 use cairn_contracts::EventKind;
 
 pub mod file;
+pub(crate) mod migration;
 pub mod sharing;
+pub mod sql;
+
+use cairn_contracts::Deliverable;
 
 use crate::{
     config::{id, now},
@@ -67,29 +71,6 @@ impl PreviewStatus {
     }
 }
 
-/// A newly published version (`artifact:{run}:{id}`), before its visibility is applied.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct NewArtifact<'a> {
-    id: &'a str,
-    run_id: &'a str,
-    message_id: &'a Value,
-    key: &'a str,
-    version: u64,
-    title: &'a str,
-    name: &'a str,
-    group: &'a str,
-    kind: &'static str,
-    media_type: &'static str,
-    size: u64,
-    digest: &'a str,
-    created_at: i64,
-    url: String,
-    preview_status: PreviewStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    excerpt: Option<String>,
-}
-
 pub fn tool() -> Value {
     json!({
         "name": "publish_artifact",
@@ -142,12 +123,12 @@ impl<'a> Publication<'a> {
     }
 
     /// A retry of an already committed publication from the same turn.
-    fn repeats(&self, existing: &Value, digest: &str, message_id: &Value) -> bool {
-        existing["key"] == self.key
-            && existing["digest"] == digest
-            && existing["title"] == self.title
-            && existing["group"] == self.group
-            && existing["messageId"] == *message_id
+    fn repeats(&self, existing: &Deliverable, digest: &str, message_id: Option<&str>) -> bool {
+        existing.key == self.key
+            && existing.digest.as_deref() == Some(digest)
+            && existing.title == self.title
+            && existing.group == self.group
+            && existing.message_id.as_deref() == message_id
     }
 }
 
@@ -223,19 +204,16 @@ async fn receive(response: reqwest::Response, directory: &Path) -> Result<Downlo
     })
 }
 
-fn over_limit(existing: &[Value], size: u64) -> bool {
-    let stored: u64 = existing
-        .iter()
-        .map(|v| v["size"].as_u64().unwrap_or(0))
-        .sum();
+fn over_limit(existing: &[Deliverable], size: u64) -> bool {
+    let stored: u64 = existing.iter().map(|v| v.size).sum();
     existing.len() >= MAX_VERSIONS || stored + size > MAX_TOTAL_BYTES
 }
 
-fn next_version(existing: &[Value], key: &str) -> u64 {
+fn next_version(existing: &[Deliverable], key: &str) -> u64 {
     existing
         .iter()
-        .filter(|v| v["key"] == key)
-        .map(|v| v["version"].as_u64().unwrap_or(0))
+        .filter(|v| v.key == key)
+        .map(|v| v.version)
         .max()
         .unwrap_or(0)
         + 1
@@ -291,14 +269,14 @@ impl Artifacts {
             ));
         }
         let _commit = self.commit.lock().await;
-        let existing = list(s, run_id).await?;
+        let existing = s.store.artifacts(Some(run_id)).await?;
         let repeated = existing
             .iter()
-            .find(|v| publication.repeats(v, &download.digest, message_id));
+            .find(|v| publication.repeats(v, &download.digest, message_id.as_str()));
         if let Some(item) = repeated {
             return match publication.visibility {
-                Some(value) => sharing::set(s, run_id, text(item, "id"), value, Some(bearer)).await,
-                None => Ok(item.clone()),
+                Some(value) => sharing::set(s, run_id, &item.id, value, Some(bearer)).await,
+                None => Ok(serde_json::to_value(item)?),
             };
         }
         if over_limit(&existing, download.size) {
@@ -312,25 +290,30 @@ impl Artifacts {
             .unwrap_or("download");
         let (kind, media_type) = file::classify(name, &download.sample);
         let artifact_id = id();
-        let artifact = NewArtifact {
-            id: &artifact_id,
-            run_id,
-            message_id,
-            key: publication.key,
+        let record = Deliverable {
+            id: artifact_id.clone(),
+            run_id: run_id.to_owned(),
+            message_id: message_id.as_str().map(str::to_owned),
+            key: publication.key.to_owned(),
             version: next_version(&existing, publication.key),
-            title: publication.title,
-            name,
-            group: publication.group,
-            kind,
-            media_type,
+            title: publication.title.to_owned(),
+            name: name.to_owned(),
+            group: publication.group.to_owned(),
+            kind: kind.to_owned(),
+            media_type: media_type.to_owned(),
             size: download.size,
-            digest: &download.digest,
+            digest: Some(download.digest),
             created_at: now(),
             url: format!("/api/runs/{run_id}/artifacts/{artifact_id}"),
-            preview_status: preview_status(kind, media_type),
+            preview_status: preview_status(kind, media_type).as_str().to_owned(),
             excerpt: excerpt(kind, &download.sample),
+            visibility: None,
+            public_token: None,
+            public_url: None,
+            width: None,
+            height: None,
+            duration: None,
         };
-        let record = serde_json::to_value(artifact)?;
         download
             .file
             .persist_noclobber(directory.join(&artifact_id))
@@ -344,8 +327,7 @@ impl Artifacts {
                 // metadata transaction. Only remove bytes once the database
                 // confirms they were not committed. Cancellation/uncertainty
                 // still leave reconciliation to recover(), not a Drop guard.
-                let key = format!("artifact:{run_id}:{artifact_id}");
-                if matches!(s.store.kv(&key).await, Ok(None)) {
+                if matches!(s.store.artifact(run_id, &artifact_id).await, Ok(None)) {
                     if let Err(cleanup) = tokio::fs::remove_file(directory.join(&artifact_id)).await
                     {
                         tracing::warn!(%cleanup, "Could not remove rejected artifact");
@@ -363,7 +345,7 @@ impl Artifacts {
                 tracing::warn!(error = %error, "artifact preview failed");
             }
         });
-        Ok(artifact)
+        Ok(serde_json::to_value(artifact)?)
     }
 }
 
@@ -396,9 +378,9 @@ async fn commit(
     s: &Service,
     bearer: &str,
     attempt: &str,
-    mut record: Value,
+    mut record: Deliverable,
     visibility: &str,
-) -> Result<Value> {
+) -> Result<Deliverable> {
     let visibility = visibility.to_owned();
     let origin = if visibility == "public" {
         sharing::public_origin(s).await?
@@ -409,29 +391,25 @@ async fn commit(
     let expected_attempt = attempt.to_owned();
     s.store
         .transaction(move |db| {
-            let run = text(&record, "runId").to_owned();
+            let run = record.run_id.clone();
             crate::conversation_lifecycle::require_active_run(db, &run)?;
             let current = crate::project_workspaces::authorize_in(db, &token)?;
             let checkpoint = db.checkpoint_boundary(&run)?.unwrap_or_default();
             if current["id"] != run
                 || checkpoint["runnerId"] != expected_attempt
-                || *crate::waits::execution_id(&current) != record["messageId"]
+                || crate::waits::execution_id(&current).as_str() != record.message_id.as_deref()
             {
                 return Err(Error::conflict(
                     "The active turn changed during publication.",
                 ));
             }
             sharing::apply(db, &mut record, &visibility, &origin)?;
-            db.set(
-                &format!("artifact:{run}:{}", text(&record, "id")),
-                &record,
-                None,
-            )?;
+            db.insert_artifact(&record)?;
             db.event(
                 &run,
                 &EventKind::Artifact,
-                text(&record, "title"),
-                Some(&record),
+                &record.title,
+                Some(&serde_json::to_value(&record)?),
             )?;
             Ok(record)
         })
@@ -443,15 +421,12 @@ pub(crate) mod preview;
 pub async fn list(s: &Service, run: &str) -> Result<Vec<Value>> {
     uuid(run)?;
     s.store.run(run).await?;
-    let mut items: Vec<_> = s
-        .store
-        .keys(&format!("artifact:{run}:"))
+    s.store
+        .artifacts(Some(run))
         .await?
         .into_iter()
-        .map(|(_, v)| v)
-        .collect();
-    items.sort_by_key(|v| v["createdAt"].as_i64().unwrap_or(0));
-    Ok(items)
+        .map(|item| Ok(serde_json::to_value(item)?))
+        .collect()
 }
 
 pub async fn http(
@@ -469,10 +444,7 @@ pub async fn http(
     };
     uuid(artifact)?;
     s.store.run(run).await?;
-    let record = required(
-        s.store.kv(&format!("artifact:{run}:{artifact}")).await?,
-        "Artifact not found",
-    )?;
+    let record = required(s.store.artifact(run, artifact).await?, "Artifact not found")?;
     if request
         .uri()
         .query()
@@ -483,12 +455,12 @@ pub async fn http(
     serve(s, &record, request).await
 }
 
-async fn serve(s: &Service, record: &Value, request: Request) -> Result<Response> {
-    let artifact = text(record, "id");
+async fn serve(s: &Service, record: &Deliverable, request: Request) -> Result<Response> {
+    let artifact = &record.id;
     let query: std::collections::HashMap<String, String> =
         serde_urlencoded::from_str(request.uri().query().unwrap_or("")).map_err(Error::internal)?;
     let preview = query.contains_key("preview");
-    if preview && record["previewStatus"] != PreviewStatus::Ready.as_str() {
+    if preview && record.preview_status != PreviewStatus::Ready.as_str() {
         return Err(Error::not_found("Preview is unavailable."));
     }
     let path = s.config.data_dir.join("artifacts").join(if preview {
@@ -536,7 +508,7 @@ async fn serve(s: &Service, record: &Value, request: Request) -> Result<Response
         HeaderValue::from_str(if preview {
             "image/jpeg"
         } else {
-            text(record, "mediaType")
+            &record.media_type
         })
         .map_err(Error::internal)?,
     );
@@ -552,11 +524,10 @@ async fn serve(s: &Service, record: &Value, request: Request) -> Result<Response
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static("default-src 'none'; sandbox"),
     );
-    let name: String =
-        url::form_urlencoded::byte_serialize(text(record, "name").as_bytes()).collect();
+    let name: String = url::form_urlencoded::byte_serialize(record.name.as_bytes()).collect();
     let disposition = if query.contains_key("download")
-        || record["kind"] == "file"
-        || record["mediaType"] == "image/svg+xml"
+        || record.kind == "file"
+        || record.media_type == "image/svg+xml"
     {
         "attachment"
     } else {

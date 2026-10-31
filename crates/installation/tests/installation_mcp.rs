@@ -1198,6 +1198,11 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
     ]);
     public_names.insert("upload_chat_attachment");
     public_names.insert(cairn_contracts::RESUME_RUN_ID);
+    public_names.extend([
+        "list_run_artifacts",
+        "read_run_artifact",
+        "set_run_artifact_visibility",
+    ]);
     public_names.insert("manage_plugin");
     public_names.extend([
         "list_plugins",
@@ -2894,12 +2899,9 @@ async fn chat_file_tools_read_private_artifacts_and_attachments_in_bounded_chunk
         "title": "Private report", "name": "report.bin", "size": data.len(),
         "digest": digest, "visibility": "private", "createdAt": 1,
     });
+    let artifact_record = common::deliverable(text(&target, "id"), &artifact_id, &record);
     s.store
-        .set(
-            &format!("artifact:{}:{artifact_id}", target["id"].as_str().unwrap()),
-            record,
-            None,
-        )
+        .transaction(move |db| db.insert_artifact(&artifact_record))
         .await
         .unwrap();
     tokio::fs::create_dir_all(s.config.data_dir.join("artifacts"))
@@ -7157,4 +7159,166 @@ async fn resource_poll_fences_package_activation_during_remote_authorization() {
     }
     server.abort();
     s.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn mission_deliverables_work_without_a_conversation_on_both_management_tools() {
+    for internal in [false, true] {
+        let root = TempDir::new().unwrap();
+        let s = service(&root).await;
+        let main = enabled_main(&s).await;
+        let (caller, configuration) = active_run(&s, &main).await;
+        let (target, _) = active_run(&s, &main).await;
+        let run = text(&target, "id");
+        assert!(
+            s.store
+                .read({
+                    let run = run.to_owned();
+                    move |db| db.conversation_for_run(&run)
+                })
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let id = uuid::Uuid::new_v4().to_string();
+        let bytes = (0..220_000).map(|i| (i % 251) as u8).collect::<Vec<_>>();
+        let digest = {
+            use sha2::Digest;
+            hex::encode(sha2::Sha256::digest(&bytes))
+        };
+        let item = common::deliverable(run, &id, &json!({"size":bytes.len(),"digest":digest}));
+        let second_id = uuid::Uuid::new_v4().to_string();
+        let second = common::deliverable(
+            run,
+            &second_id,
+            &json!({"version":2,"size":bytes.len(),"digest":digest}),
+        );
+        s.store
+            .transaction(move |db| {
+                db.insert_artifact(&item)?;
+                db.insert_artifact(&second)
+            })
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(s.config.data_dir.join("artifacts"))
+            .await
+            .unwrap();
+        tokio::fs::write(s.config.data_dir.join("artifacts").join(&id), &bytes)
+            .await
+            .unwrap();
+        let invoke = async |name: &str, args: Value| {
+            if internal {
+                call(&s, &configuration, name, args).await
+            } else {
+                public_call(&s, &["read", "manage"], name, args).await
+            }
+        };
+        let first = invoke("list_run_artifacts", json!({"runId":run,"limit":1})).await;
+        assert_eq!(result(&first)["artifacts"].as_array().unwrap().len(), 1);
+        assert_eq!(result(&first)["hasMore"], true);
+        let second = invoke(
+            "list_run_artifacts",
+            json!({"runId":run,"limit":1,"offset":result(&first)["nextOffset"]}),
+        )
+        .await;
+        assert_eq!(result(&second)["hasMore"], false);
+        assert_ne!(
+            result(&first)["artifacts"][0]["id"],
+            result(&second)["artifacts"][0]["id"]
+        );
+        for invalid in [
+            json!({"runId":run,"limit":0}),
+            json!({"runId":run,"offset":9007199254740992_u64}),
+        ] {
+            let denied = invoke("list_run_artifacts", invalid).await;
+            assert_eq!(denied["result"]["isError"], true);
+        }
+        let wrong = invoke(
+            "read_run_artifact",
+            json!({"runId":caller["id"],"artifactId":id}),
+        )
+        .await;
+        assert_eq!(wrong["result"]["isError"], true);
+        let mut received = Vec::new();
+        let mut offset = 0;
+        loop {
+            let response = invoke(
+                "read_run_artifact",
+                json!({"runId":run,"artifactId":id,"offset":offset}),
+            )
+            .await;
+            let chunk = result(&response);
+            assert_eq!(chunk["file"]["digest"], digest);
+            let data = base64::Engine::decode(
+                &base64::engine::general_purpose::STANDARD,
+                chunk["data"].as_str().unwrap(),
+            )
+            .unwrap();
+            assert!(data.len() <= 192 * 1024);
+            received.extend(data);
+            let Some(next) = chunk["nextOffset"].as_u64() else {
+                break;
+            };
+            offset = next;
+        }
+        assert_eq!(received, bytes);
+        let denied = public_call(
+            &s,
+            &["read"],
+            "set_run_artifact_visibility",
+            json!({"runId":run,"artifactId":id,"visibility":"public"}),
+        )
+        .await;
+        assert_eq!(denied["result"]["isError"], true);
+        let shared = invoke(
+            "set_run_artifact_visibility",
+            json!({"runId":run,"artifactId":id,"visibility":"public"}),
+        )
+        .await;
+        let token = result(&shared)["publicToken"].as_str().unwrap().to_owned();
+        assert!(
+            result(&shared)["publicUrl"]
+                .as_str()
+                .unwrap()
+                .contains(&token)
+        );
+        let private = invoke(
+            "set_run_artifact_visibility",
+            json!({"runId":run,"artifactId":id,"visibility":"private"}),
+        )
+        .await;
+        assert!(result(&private)["publicUrl"].is_null());
+        assert!(
+            s.store
+                .read(move |db| db.public_artifact(&token))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            s.store
+                .read({
+                    let run = run.to_owned();
+                    move |db| db.conversation_for_run(&run)
+                })
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // Revoking the execution's grant removes access even to another mission's files.
+        if internal {
+            s.mcps.revoke_run(&s, text(&caller, "id")).await.unwrap();
+            let token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
+                .as_str()
+                .unwrap();
+            let (status, _) = request(
+                &s,
+                token,
+                "tools/call",
+                common::mcp_arguments("list_run_artifacts", &json!({"runId":run})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+    }
 }

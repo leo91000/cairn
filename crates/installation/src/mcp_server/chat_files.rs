@@ -51,21 +51,17 @@ pub(super) async fn invoke(
             let db = &Db(&transaction);
             check(db)?;
             let chat = active_chat(db, &chat_id)?;
-            let prefix = if artifact {
-                if let Some(run) = chat["runId"].as_str() {
-                    db.require_run(run)?;
-                }
-                format!("artifact:{}:", text(&chat, "runId"))
-            } else {
-                String::new()
-            };
+            let run = text(&chat, "runId");
+            if artifact && !run.is_empty() {
+                db.require_run(run)?;
+            }
             let mut attachment_path = None;
             let result = if listing {
                 let mut values: Vec<_> = if artifact {
-                    db.keys(&prefix)?
+                    db.artifacts(Some(run))?
                         .into_iter()
-                        .map(|(_, value)| value)
-                        .collect()
+                        .map(serde_json::to_value)
+                        .collect::<std::result::Result<_, _>>()?
                 } else {
                     db.attachments(&chat_id)?
                         .into_iter()
@@ -93,10 +89,10 @@ pub(super) async fn invoke(
                     },
                 );
                 if artifact {
-                    required(
-                        db.kv(&format!("{prefix}{id}"))?,
+                    serde_json::to_value(required(
+                        db.artifact(run, id)?,
                         "File not found in this chat",
-                    )?
+                    )?)?
                 } else {
                     let upload = required(
                         db.uploaded_attachment(&chat_id, id)?,
@@ -119,6 +115,7 @@ pub(super) async fn invoke(
             text(&record, "runId"),
             text(&args, "artifactId"),
             text(&args, "visibility"),
+            std::future::ready(Ok(())),
             authorize_chat,
         )
         .await;
