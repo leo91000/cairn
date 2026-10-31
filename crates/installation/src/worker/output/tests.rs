@@ -1575,11 +1575,23 @@ async fn malformed_or_truncated_stdout_retains_monitoring_gap_without_changing_c
 async fn unsupported_json_degrades_coverage_even_after_log_budget_is_spent() {
     for event in [
         json!({}),
+        json!({ "type": "item.started" }),
+        json!({ "type": "item.updated", "item": null }),
+        json!({ "type": "item.completed", "item": [] }),
         json!({ "type": "future.provider_wait" }),
         json!({ "type": "item.delta", "item": { "id": "future", "type": "agent_message" } }),
     ] {
         let mut fixture = Fixture::new().await;
         fixture.bind_progress().await;
+        fixture.event(json!({ "type": "turn.started" })).await;
+        let advanced_at = fixture
+            .checkpoint
+            .snapshot()
+            .await
+            .progress
+            .as_ref()
+            .unwrap()
+            .advanced_at;
         fixture.log_total = LOG_BUDGET;
         fixture.event(event).await;
         let saved = RunCheckpoint::load(&fixture.service.store, &fixture.id)
@@ -1587,7 +1599,7 @@ async fn unsupported_json_degrades_coverage_even_after_log_budget_is_spent() {
             .unwrap()
             .unwrap();
         assert!(!saved.progress.as_ref().unwrap().complete);
-        assert_eq!(saved.progress.as_ref().unwrap().advanced_at, None);
+        assert_eq!(saved.progress.as_ref().unwrap().advanced_at, advanced_at);
         assert_ne!(saved.output_interrupted, Some(true));
     }
 }

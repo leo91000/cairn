@@ -297,7 +297,7 @@ fn observation_kind(kind: &str) -> bool {
     )
 }
 
-pub(super) fn known_kind(kind: &str) -> bool {
+fn known_kind(kind: &str) -> bool {
     observation_kind(kind)
         || matches!(
             kind,
@@ -311,6 +311,20 @@ pub(super) fn known_kind(kind: &str) -> bool {
                 | "item.updated"
                 | "item.completed"
         )
+}
+
+pub(super) fn known_frame(event: &Value) -> bool {
+    let kind = event["type"].as_str().unwrap_or("");
+    if !known_kind(kind) {
+        return false;
+    }
+    if matches!(kind, "item.started" | "item.updated" | "item.completed") {
+        let item = &event["item"];
+        return item.is_object()
+            && item["id"].as_str().is_some_and(|id| !id.is_empty())
+            && item["type"].as_str().is_some_and(|kind| !kind.is_empty());
+    }
+    true
 }
 
 fn semantic_fields(kind: &str) -> Option<&'static [&'static str]> {

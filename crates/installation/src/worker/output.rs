@@ -329,7 +329,7 @@ pub(super) async fn record(
     if handle_chat_control(s, id, &event).await? {
         return Ok(false);
     }
-    if !super::progress::known_kind(text(&event, "type")) {
+    if !super::progress::known_frame(&event) {
         // Even an exhausted log budget cannot certify an unsupported protocol.
         checkpoint.mark_progress_incomplete().await?;
     }
