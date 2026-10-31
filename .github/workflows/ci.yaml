@@ -110,10 +110,8 @@ jobs:
           sha256sum candidate-native/cairn candidate-native/examples/native_storage_qualifier > .qualification/candidate-sha256
       - name: Prepare disposable host block storage and synthetic S3
         run: |
-          # The native fixture explicitly creates its isolated root in /var/tmp.
-          # Back it with this runner's workspace without changing the fixture.
-          chmod 1777 .qualification/var-tmp
-          sudo mount --bind "$PWD/.qualification/var-tmp" /var/tmp
+          # Fixture data stays on the disposable runner's /var/tmp. SDKs,
+          # build products and caches use workspace-owned paths configured above.
           sudo apt-get -o Dir::Cache::archives="$PWD/.qualification/apt" -o Dir::Cache::pkgcache="$PWD/.qualification/apt/pkgcache.bin" -o Dir::Cache::srcpkgcache="$PWD/.qualification/apt/srcpkgcache.bin" update -qq
           sudo apt-get -o Dir::Cache::archives="$PWD/.qualification/apt" -o Dir::Cache::pkgcache="$PWD/.qualification/apt/pkgcache.bin" -o Dir::Cache::srcpkgcache="$PWD/.qualification/apt/srcpkgcache.bin" install -y --no-install-recommends e2fsprogs python3-venv sudo uidmap iproute2 iptables libcap2-bin
           sudo modprobe tun
