@@ -250,7 +250,7 @@ async fn relay_auth(path: &Path, value: &Value) -> Result<Value> {
         return Err(Error::bad("Invalid authentication request."));
     }
     tokio::time::timeout(Duration::from_secs(45), async {
-        let mut stream = BufReader::new(tokio::net::UnixStream::connect(path).await?);
+        let mut stream = BufReader::new(crate::unix_socket::connect(path).await?);
         crate::microvm::wire::write(stream.get_mut(), value).await?;
         crate::microvm::wire::read(&mut stream)
             .await?
@@ -494,7 +494,7 @@ pub async fn auth_listener(
     if path.exists() {
         tokio::fs::remove_file(&path).await?;
     }
-    let listener = tokio::net::UnixListener::bind(&path)?;
+    let listener = crate::unix_socket::bind(&path)?;
     tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).await?;
     loop {
         let accepted = tokio::select! {

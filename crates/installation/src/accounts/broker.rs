@@ -15,7 +15,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::{UnixListener, UnixStream},
+    net::UnixStream,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -53,7 +53,7 @@ pub async fn serve(s: &Service, lease: &Lease) -> Result<Broker> {
     if path.exists() {
         tokio::fs::remove_file(&path).await?;
     }
-    let listener = UnixListener::bind(&path)?;
+    let listener = crate::unix_socket::bind(&path)?;
     tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).await?;
     let stop = CancellationToken::new();
     let stopping = stop.clone();
@@ -117,7 +117,7 @@ async fn line(stream: &mut BufReader<UnixStream>) -> Result<Value> {
 /// The run side: one request, one response.
 pub async fn request(socket: &Path, request: &impl Serialize, timeout: Duration) -> Result<Value> {
     tokio::time::timeout(timeout, async {
-        let mut stream = UnixStream::connect(socket).await?;
+        let mut stream = crate::unix_socket::connect(socket).await?;
         let mut bytes = serde_json::to_vec(request)?;
         bytes.push(b'\n');
         stream.write_all(&bytes).await?;

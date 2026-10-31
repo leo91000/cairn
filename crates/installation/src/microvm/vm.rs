@@ -348,7 +348,7 @@ fn auth_relay(
                 continue;
             };
             // Bound concurrency and lifetime; only this run's manager socket is reachable.
-            if let Ok(mut manager) = UnixStream::connect(path).await {
+            if let Ok(mut manager) = crate::unix_socket::connect(path).await {
                 let relay = tokio::io::copy_bidirectional(&mut guest, &mut manager);
                 let _ = tokio::time::timeout(Duration::from_secs(45), relay).await;
             }
