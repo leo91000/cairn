@@ -1018,7 +1018,8 @@ async fn oversized_gateway_payloads_keep_threads_without_blocking_on_rest() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     s.plugins
         .route_sockets_to(Some(format!("ws://{}", listener.local_addr().unwrap())));
-    let upstream = tokio::spawn(async move {
+    let (phase, current_phase) = tokio::sync::watch::channel("preparing_large_frame");
+    let mut upstream = tokio::spawn(async move {
         // Construct and serialize the large frame before Hello starts heartbeat
         // timers. The mock gateway must keep reading and acknowledging beats.
         let channels = (0..12_000)
@@ -1032,14 +1033,19 @@ async fn oversized_gateway_payloads_keep_threads_without_blocking_on_rest() {
         } })
         .to_string();
         assert!(large.len() > 1_048_576);
+        phase.send_replace("accepting_connection");
         let (stream, _) = listener.accept().await.unwrap();
+        stream.set_nodelay(true).unwrap();
         let mut socket = accept_async(stream).await.unwrap();
+        phase.send_replace("sending_hello");
         send(
             &mut socket,
             json!({ "op": 10, "d": { "heartbeat_interval": 30000 } }),
         )
         .await;
+        phase.send_replace("awaiting_identify");
         assert_eq!(receive_op(&mut socket, 2).await["op"], 2);
+        phase.send_replace("sending_ready");
         send(
             &mut socket,
             json!({ "op": 0, "s": 1, "t": "READY", "d": {
@@ -1053,10 +1059,13 @@ async fn oversized_gateway_payloads_keep_threads_without_blocking_on_rest() {
         // ACK it before further dispatches: otherwise the first periodic tick
         // can correctly detect a zombie while this mock is still sending.
         send(&mut socket, json!({ "op": 1 })).await;
+        phase.send_replace("acknowledging_earlier_heartbeat");
         acknowledge_heartbeat(&mut socket, 1).await;
         // A large server's GUILD_CREATE, well over what a script receives whole.
+        phase.send_replace("sending_large_frame");
         socket.send(Message::Text(large.into())).await.unwrap();
         // A reply in a thread retained by projection, without the slow REST endpoint.
+        phase.send_replace("sending_thread_message");
         send(
             &mut socket,
             json!({ "op": 0, "s": 3, "t": "MESSAGE_CREATE", "d": {
@@ -1066,6 +1075,7 @@ async fn oversized_gateway_payloads_keep_threads_without_blocking_on_rest() {
         )
         .await;
         send(&mut socket, json!({ "op": 1 })).await;
+        phase.send_replace("acknowledging_final_heartbeat");
         let heartbeat = tokio::time::timeout(
             Duration::from_secs(1),
             acknowledge_heartbeat(&mut socket, 3),
@@ -1077,6 +1087,7 @@ async fn oversized_gateway_payloads_keep_threads_without_blocking_on_rest() {
             json!({ "op": 1, "d": 3 }),
             "the session followed the large payload"
         );
+        phase.send_replace("closing_connection");
         socket
             .close(Some(tokio_tungstenite::tungstenite::protocol::CloseFrame {
                 code: 4004.into(),
@@ -1084,16 +1095,34 @@ async fn oversized_gateway_payloads_keep_threads_without_blocking_on_rest() {
             }))
             .await
             .unwrap();
+        phase.send_replace("closed");
     });
-    let package = registry::active(&s, "discord").await.unwrap();
+    let mut package = registry::active(&s, "discord").await.unwrap();
+    // This scenario requests heartbeats at its dispatch barriers. Keep the first
+    // periodic tick beyond the outer deadline: it can otherwise correctly detect
+    // a missing ACK just before the mock's ACK or fatal close is read. Periodic
+    // heartbeats are exercised by the separate gateway lifecycle tests.
+    let gateway = package.source.modules.get_mut("gateway.luau").unwrap();
+    *gateway = format!(
+        "local math = table.clone(math)\nmath.random = function() return 0.95 end\n{gateway}"
+    );
     let stop = CancellationToken::new();
-    let result = tokio::time::timeout(
-        Duration::from_secs(20),
-        socket::run(&s, &connection, &package, &stop),
-    )
+    let result = tokio::time::timeout(Duration::from_secs(20), async {
+        let transport = socket::run(&s, &connection, &package, &stop);
+        tokio::pin!(transport);
+        tokio::select! {
+            result = &mut transport => {
+                upstream.await.unwrap();
+                result
+            }
+            result = &mut upstream => {
+                result.unwrap();
+                transport.await
+            }
+        }
+    })
     .await
-    .unwrap();
-    upstream.await.unwrap();
+    .unwrap_or_else(|_| panic!("gateway timed out during {}", *current_phase.borrow()));
     assert_eq!(result.unwrap_err().status, 403);
     let events = common::plugin_events(&s.store).await.unwrap();
     assert_eq!(events.len(), 1);
