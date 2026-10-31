@@ -282,10 +282,18 @@ async fn artifact_reads_recheck_public_authorization_after_preparation() {
     }
 
     for operation in ["list_run_artifacts", "read_run_artifact"] {
-        for invalidation in ["none", "revoke", "expire"] {
+        for invalidation in ["none", "revoke", "expire", "trash", "purge"] {
             let relay = RelayedInstallation::new(Router::new()).await;
             let (run, artifact) =
                 seeded_artifact(&relay, b"Private artifact sentinel", "text/plain").await;
+            let mut chat = relay.installation.chat_create(json!({})).await.unwrap();
+            chat["runId"] = run.clone().into();
+            relay
+                .installation
+                .store
+                .save_conversation_boundary(chat.clone())
+                .await
+                .unwrap();
             let worker = std::env::var_os("CAIRN_TEST_CODE_WORKER")
                 .map(std::path::PathBuf::from)
                 .expect("Use the credential-isolating backend launcher");
@@ -342,7 +350,20 @@ async fn artifact_reads_recheck_public_authorization_after_preparation() {
                 relay.close().await;
                 panic!("{operation} completed without its final authorization check");
             }
-            invalidate_reader(&relay, &grant, invalidation).await;
+            if matches!(invalidation, "trash" | "purge") {
+                let chat_id = chat["id"].as_str().unwrap();
+                relay.installation.chat_trash(chat_id, true).await.unwrap();
+                if invalidation == "purge" {
+                    cairn_installation::conversation_deletion::purge(
+                        &relay.installation,
+                        chat.clone(),
+                    )
+                    .await
+                    .unwrap();
+                }
+            } else {
+                invalidate_reader(&relay, &grant, invalidation).await;
+            }
             release.notify_one();
             let response = pending.await.unwrap();
             assert_eq!(response.status(), StatusCode::OK);
@@ -353,7 +374,7 @@ async fn artifact_reads_recheck_public_authorization_after_preparation() {
                 invalidation != "none",
                 "{operation}/{invalidation}: {response}"
             );
-            if invalidation != "none" {
+            if matches!(invalidation, "revoke" | "expire") {
                 assert!(
                     response.to_string().contains("MCP authorization"),
                     "{response}"
