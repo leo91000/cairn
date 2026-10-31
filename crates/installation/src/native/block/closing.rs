@@ -134,6 +134,7 @@ mod tests {
         root: std::path::PathBuf,
         flush_error: AtomicI32,
         retire_error: AtomicBool,
+        presealed: bool,
     }
 
     impl Filesystem {
@@ -179,7 +180,9 @@ mod tests {
 
         async fn seal(&self) -> Result<()> {
             self.phase(Phase::Seal).await;
-            self.volume.seal_completed().await?;
+            if !self.presealed {
+                self.volume.seal_completed().await?;
+            }
             Ok(())
         }
 
@@ -236,6 +239,7 @@ mod tests {
             root: owner.directory.clone(),
             flush_error: AtomicI32::new(0),
             retire_error: AtomicBool::new(false),
+            presealed: false,
         };
         (
             run,
@@ -255,8 +259,15 @@ mod tests {
                 entered: Notify::new(),
                 release: Semaphore::new(0),
             });
-            let (run, mut closing, operations, workspace_owner) =
+            let (run, mut closing, mut operations, workspace_owner) =
                 fixture(&state, Some(pause.clone())).await;
+            if phase == Phase::Retirement {
+                // The retirement check starts with a real sealed generation, but
+                // must not put its filesystem latency inside the entry deadline.
+                // The other phases exercise sealing through close itself.
+                operations.volume.seal_completed().await.unwrap();
+                operations.presealed = true;
+            }
             let volume = operations.volume.clone();
             let terminal = Arc::new(AtomicBool::new(false));
             let first = tokio::spawn({
@@ -355,8 +366,13 @@ mod tests {
                 entered: Notify::new(),
                 release: Semaphore::new(0),
             });
-            let (run, mut closing, operations, workspace_owner) =
+            let (run, mut closing, mut operations, workspace_owner) =
                 fixture(root.path(), Some(pause.clone())).await;
+            if phase == Phase::Retirement {
+                // Keep real sealing outside the retirement entry deadline.
+                operations.volume.seal_completed().await.unwrap();
+                operations.presealed = true;
+            }
             let directory = operations.root.clone();
             let pending = tokio::spawn(async move { closing.close(&operations).await });
             tokio::time::timeout(Duration::from_secs(2), pause.entered.notified())
