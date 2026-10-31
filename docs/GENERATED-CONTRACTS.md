@@ -930,6 +930,17 @@ the shared tool-activity sample: both apps render it in their unit tests.
 
 ## Placement, attempts and exclusive reservations (A10)
 
+Tool movements return generated `NodeMoveStarted` and are observed through
+`get_node_move_operation` (`NodeMoveOperationInput`/`NodeMoveOperation`). Results
+belong to the initiating public credential or installation execution bearer;
+polling and cancellation recheck its current authority. The bounded in-memory
+preparation uses the existing movement admission and preserves native provenance.
+An admitted move keeps its durable placement/fencing state. Pending preparations
+and their recent results are transient; after manager interruption, refresh
+placement before retrying. The HTTP and workspace movement response remains
+`MoveToNodeOutput`. Each tool poll finishes independently of the code worker's
+unchanged 30-second limit; capacity waits keep their configured bound.
+
 `placement.rs` owns placement selection, movement inputs and exclusive reservation
 views/commands. The existing registry exposes `get_conversation_placement`,
 `configure_conversation_placement`, `move_to_node` and

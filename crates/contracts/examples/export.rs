@@ -447,6 +447,9 @@ fn main() {
     export::<ConversationPlacement>(root, &mut generator, Contract::Serialize);
     export::<MoveToNodeInput>(root, &mut generator, Contract::Deserialize);
     export::<MoveToNodeOutput>(root, &mut generator, Contract::Serialize);
+    export::<NodeMoveStarted>(root, &mut generator, Contract::Serialize);
+    export::<NodeMoveOperationInput>(root, &mut generator, Contract::Deserialize);
+    export::<NodeMoveOperation>(root, &mut generator, Contract::Serialize);
     export::<ReleaseExclusiveInput>(root, &mut generator, Contract::Deserialize);
     export::<AcquireExclusiveInput>(root, &mut generator, Contract::Deserialize);
     export::<ExclusiveReservation>(root, &mut generator, Contract::Serialize);

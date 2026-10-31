@@ -6883,6 +6883,78 @@
       ],
       "type": "object"
     },
+    "NodeMoveOperation": {
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "errorStatus": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MoveToNodeOutput"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "pattern": "^(running|completed|failed|cancelled)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "state",
+        "result",
+        "error",
+        "errorStatus"
+      ],
+      "type": "object"
+    },
+    "NodeMoveOperationInput": {
+      "additionalProperties": false,
+      "properties": {
+        "operationId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "operationId"
+      ],
+      "type": "object"
+    },
+    "NodeMoveStarted": {
+      "additionalProperties": false,
+      "properties": {
+        "operation": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation"
+      ],
+      "type": "object"
+    },
     "NodeResources": {
       "additionalProperties": false,
       "properties": {

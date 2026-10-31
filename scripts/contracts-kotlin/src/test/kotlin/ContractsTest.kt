@@ -55,6 +55,10 @@ class ContractsTest {
                 json.decodeFromJsonElement<MoveToNodeInput>(json.encodeToJsonElement(move)),
             )
         }
+        for (value in corpus.getValue("moveOperations").jsonArray) {
+            val operation = json.decodeFromJsonElement<NodeMoveOperation>(value)
+            assertEquals(value, json.encodeToJsonElement(operation))
+        }
         for (value in corpus.getValue("acquisitions").jsonArray) {
             val request = json.decodeFromJsonElement<AcquireExclusiveInput>(value)
             assertEquals(

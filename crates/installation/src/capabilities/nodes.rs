@@ -28,7 +28,17 @@ pub(crate) const NODE_OPERATIONS: &[NodeOperation] = &[
     NodeOperation {
         name: "move_to_node",
         scope: "run",
-        description: "Pause, save and resume a conversation on an authorized node, preserving its backend, capacity and fencing rules. Failure preserves its environment.",
+        description: "Start a move to an authorized node, preserving backend, capacity waits and fencing. Returns an operation id; poll get_node_move_operation in separate tool calls. Failure preserves the current environment.",
+    },
+    NodeOperation {
+        name: "get_node_move_operation",
+        scope: "run",
+        description: "Read this caller's pending move or its final result. Poll in separate tool calls; waiting for capacity does not extend the code worker deadline.",
+    },
+    NodeOperation {
+        name: "cancel_node_move_operation",
+        scope: "run",
+        description: "Cancel this caller's capacity wait before admission, then poll its result. An admitted move keeps its durable fencing and recovery protocol.",
     },
     NodeOperation {
         name: "release_node_reservation",
@@ -89,7 +99,11 @@ impl NodeOperation {
             ),
             "move_to_node" => (
                 schema_for::<MoveToNodeInput>(Contract::Deserialize),
-                schema_for::<MoveToNodeOutput>(Contract::Serialize),
+                schema_for::<NodeMoveStarted>(Contract::Serialize),
+            ),
+            "get_node_move_operation" | "cancel_node_move_operation" => (
+                schema_for::<NodeMoveOperationInput>(Contract::Deserialize),
+                schema_for::<NodeMoveOperation>(Contract::Serialize),
             ),
             "release_node_reservation" => (
                 schema_for::<ReleaseExclusiveInput>(Contract::Deserialize),
@@ -124,6 +138,7 @@ impl NodeOperation {
                 schema_for::<NodeRevocation>(Contract::Serialize),
             ),
         };
+        let read_only = self.scope == "read" || self.name == "get_node_move_operation";
         json!({
             "name": self.name,
             "description": self.description,
@@ -136,9 +151,9 @@ impl NodeOperation {
                 }]
             },
             "annotations": {
-                "readOnlyHint": self.scope == "read",
-                "destructiveHint": self.scope != "read",
-                "openWorldHint": self.scope != "read"
+                "readOnlyHint": read_only,
+                "destructiveHint": !read_only,
+                "openWorldHint": !read_only
             }
         })
     }
@@ -149,6 +164,15 @@ impl NodeOperation {
         input: Value,
         context: ResumeContext,
     ) -> Result<Value> {
+        let audience = match &context {
+            ResumeContext::Human(_) => None,
+            ResumeContext::Public(_, credential) => credential
+                .as_ref()
+                .map(|credential| nodes::move_operations::Audience::Public(credential.clone())),
+            ResumeContext::Installation(bearer) => Some(
+                nodes::move_operations::Audience::Installation(crate::auth::hex_digest(bearer)),
+            ),
+        };
         let (bearer, public_credential) = match context {
             ResumeContext::Human(_) => (None, None),
             ResumeContext::Public(scopes, credential) => {
@@ -202,13 +226,37 @@ impl NodeOperation {
                 let input: MoveToNodeInput = decode(input)?;
                 input.validate().map_err(Error::bad)?;
                 let run = s.store.run(&input.run_id.to_string()).await?;
+                let authorization = nodes::moves::Authorization::new(authorize, public_credential);
+                if let Some(audience) = audience {
+                    return s.node_move_operations.start(
+                        s.clone(),
+                        run,
+                        serde_json::to_value(input)?,
+                        authorization,
+                        audience,
+                    );
+                }
                 nodes::moves::request_authorized(
                     s,
                     &run,
                     &serde_json::to_value(input)?,
-                    nodes::moves::Authorization::new(authorize, public_credential),
+                    authorization,
                 )
                 .await
+            }
+            "get_node_move_operation" | "cancel_node_move_operation" => {
+                let input: NodeMoveOperationInput = decode(input)?;
+                let audience = audience.ok_or_else(|| {
+                    Error::forbidden(
+                        "Move operation results belong to their initiating tool caller.",
+                    )
+                })?;
+                let id = input.operation_id.to_string();
+                if self.name == "cancel_node_move_operation" {
+                    s.node_move_operations.cancel(s, &id, &audience).await
+                } else {
+                    s.node_move_operations.get(s, &id, &audience).await
+                }
             }
             "release_node_reservation" => {
                 let input: ReleaseExclusiveInput = decode(input)?;

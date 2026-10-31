@@ -6,6 +6,7 @@ import viewSchema from '../../../packages/contracts/generated/ExclusiveReservati
 import statusSchema from '../../../packages/contracts/generated/ExclusiveStatusOutput.json'
 import allocationSchema from '../../../packages/contracts/generated/ExecutionResources.json'
 import moveSchema from '../../../packages/contracts/generated/MoveToNodeInput.json'
+import moveOperationSchema from '../../../packages/contracts/generated/NodeMoveOperation.json'
 import budgetSchema from '../../../packages/contracts/generated/NodeResources.json'
 import corpus from '../../../tests/fixtures/placement-contracts.json'
 
@@ -25,6 +26,11 @@ it('qualifies placement commands and every exclusive lifecycle state against Rus
   expect(status(corpus.views)).toBe(false)
   expect(status({ reservations: Array.from({ length: 21 }).fill(corpus.views[0]) })).toBe(false)
   const move = ajv.compile(moveSchema)
+  const operation = ajv.compile(moveOperationSchema)
+  for (const value of corpus.moveOperations)
+    expect(operation(value), JSON.stringify(operation.errors)).toBe(true)
+  for (const value of corpus.invalidMoveOperations)
+    expect(operation(value), JSON.stringify(value)).toBe(false)
   const acquire = ajv.compile(acquireSchema)
   for (const value of corpus.views)
     expect(view(value), JSON.stringify(view.errors)).toBe(true)

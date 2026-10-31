@@ -17,6 +17,7 @@ pub mod files;
 pub mod inventory;
 pub(crate) mod journal_acknowledgements;
 pub mod maintenance;
+pub(crate) mod move_operations;
 pub mod moves;
 pub mod native_mode;
 pub mod placement;

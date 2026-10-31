@@ -8010,7 +8010,31 @@ async fn public_move_rechecks_its_run_grant_after_waiting_for_capacity() {
                 .unwrap();
         }
         placement::release(&owner.service, &attempt).await.unwrap();
-        let response = pending.await.unwrap();
+        let started = pending.await.unwrap();
+        let operation = node_tool_value(&started)["operation"].as_str().unwrap();
+        if revoke {
+            let (status, denied) = node_tool_call(
+                &owner,
+                "/mcp",
+                &token,
+                "get_node_move_operation",
+                json!({"operationId":operation}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{denied}");
+            assert!(denied["error"].is_string(), "{denied}");
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while owner.run(&run_id).await["capacityWaitUntil"].is_number() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+        } else {
+            let completed =
+                finish_tool_move(&owner, "/mcp", &token, operation, Duration::from_secs(5)).await;
+            assert_eq!(completed["state"], "completed", "{completed}");
+        }
         let current = owner.run(&run_id).await;
         assert!(current["capacityWaitUntil"].is_null());
         let active = owner
@@ -8023,16 +8047,393 @@ async fn public_move_rechecks_its_run_grant_after_waiting_for_capacity() {
             .filter(|attempt| attempt["runId"] == run_id && attempt["released"] != true)
             .count();
         if revoke {
-            assert_eq!(response["result"]["isError"], true, "{response}");
-            assert!(response.to_string().contains("revoked"), "{response}");
             assert!(current["moveRequest"].is_null());
             assert_eq!(active, 0);
         } else {
-            assert_ne!(response["result"]["isError"], true, "{response}");
             assert_eq!(current["moveRequest"]["requiredTags"], json!(["retained"]));
             assert_eq!(active, 1);
         }
     }
+}
+
+async fn node_tool_call(
+    owner: &Owner,
+    endpoint: &str,
+    token: &str,
+    name: &str,
+    args: Value,
+) -> (StatusCode, Value) {
+    owner
+        .call(
+            "POST",
+            endpoint,
+            json!({
+                "jsonrpc":"2.0", "id":1, "method":"tools/call",
+                "params":common::mcp_arguments(name, &args),
+            }),
+            Some(token),
+        )
+        .await
+}
+
+fn node_tool_value(response: &Value) -> &Value {
+    assert_ne!(response["result"]["isError"], true, "{response}");
+    &response["result"]["structuredContent"]["result"]
+}
+
+async fn finish_tool_move(
+    owner: &Owner,
+    endpoint: &str,
+    token: &str,
+    operation: &str,
+    timeout: Duration,
+) -> Value {
+    tokio::time::timeout(timeout, async {
+        loop {
+            let (status, response) = node_tool_call(
+                owner,
+                endpoint,
+                token,
+                "get_node_move_operation",
+                json!({"operationId":operation}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{response}");
+            let result = node_tool_value(&response).clone();
+            if result["state"] != "running" {
+                break result;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap()
+}
+
+struct WaitingToolMove {
+    owner: Owner,
+    node: String,
+    run: String,
+    blocking: String,
+    token: String,
+    endpoint: &'static str,
+}
+
+impl WaitingToolMove {
+    async fn new(internal: bool) -> Self {
+        let owner = Owner::new().await;
+        let node = id();
+        let mut destination = schedulable_node(&node, &limits(2, 4096, 65536));
+        destination["slots"] = 1.into();
+        owner.put_node_fixture(destination).await;
+        owner.put("agents", json!({"id":MAIN_AGENT_ID,"provider":"codex","access":{"nodes":[node],"installation":true}})).await;
+        let agent = owner.service.agent_snapshot(MAIN_AGENT_ID).await.unwrap();
+        let mut blocking = run_record(&id(), RunStatus::Running);
+        blocking["taskId"] = id().into();
+        blocking["snapshot"] = json!({"agent":agent});
+        owner.add_run_fixture(&blocking).await;
+        let attempt = id();
+        placement::reserve(&owner.service, &blocking, &attempt)
+            .await
+            .unwrap();
+        let run_id = id();
+        let mut run = run_record(&run_id, RunStatus::Running);
+        run["taskId"] = id().into();
+        run["snapshot"] = json!({"agent":agent});
+        owner.add_run_fixture(&run).await;
+        let token = if internal {
+            let configuration = owner
+                .service
+                .mcps
+                .run_configuration(&owner.service, &owner.run(&run_id).await)
+                .await
+                .unwrap();
+            configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        } else {
+            common::relay_fixture::grant(&owner.service, &["run"]).await
+        };
+        Self {
+            owner,
+            node,
+            run: run_id,
+            blocking: attempt,
+            token,
+            endpoint: if internal {
+                "/mcp-installation"
+            } else {
+                "/mcp"
+            },
+        }
+    }
+
+    async fn start(&self) -> String {
+        let (status, response) = node_tool_call(
+            &self.owner,
+            self.endpoint,
+            &self.token,
+            "move_to_node",
+            json!({"runId":self.run,"nodeId":self.node,"waitSeconds":60}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        node_tool_value(&response)["operation"]
+            .as_str()
+            .expect("tool moves return a continuation")
+            .to_owned()
+    }
+
+    async fn wait_for_marker(&self, present: bool) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while self.owner.run(&self.run).await["capacityWaitUntil"].is_number() != present {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    async fn peer_token(&self) -> String {
+        if self.endpoint == "/mcp" {
+            return common::relay_fixture::grant(&self.owner.service, &["run"]).await;
+        }
+        let mut peer = self.owner.run(&self.run).await;
+        peer["id"] = id().into();
+        peer["taskId"] = id().into();
+        self.owner.add_run_fixture(&peer).await;
+        let configuration = self
+            .owner
+            .service
+            .mcps
+            .run_configuration(&self.owner.service, &peer)
+            .await
+            .unwrap();
+        configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_move_completes_when_capacity_opens_after_the_code_worker_deadline() {
+    async fn scenario(internal: bool) {
+        let fixture = WaitingToolMove::new(internal).await;
+        let service = fixture.owner.service.clone();
+        let destination = fixture.node.clone();
+        let blocking = fixture.blocking.clone();
+        let began = tokio::time::Instant::now();
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(40)).await;
+            // Admission requires a heartbeat within30s; keep the synthetic
+            // destination fresh when its occupied slot becomes free at40s.
+            let mut heartbeat = service
+                .store
+                .node_boundary(&destination)
+                .await
+                .unwrap()
+                .unwrap();
+            heartbeat["lastSeen"] = now().into();
+            service.store.put_node_fixture(heartbeat).await.unwrap();
+            placement::release(&service, &blocking).await.unwrap();
+        });
+        let operation = fixture.start().await;
+        assert!(began.elapsed() < Duration::from_secs(10));
+        let completed = finish_tool_move(
+            &fixture.owner,
+            fixture.endpoint,
+            &fixture.token,
+            &operation,
+            Duration::from_secs(60),
+        )
+        .await;
+        release.await.unwrap();
+        assert!(began.elapsed() >= Duration::from_secs(40));
+        assert_eq!(completed["state"], "completed", "{completed}");
+        assert_eq!(completed["result"]["nodeId"], fixture.node);
+        assert!(fixture.owner.run(&fixture.run).await["capacityWaitUntil"].is_null());
+        assert_eq!(
+            fixture.owner.run(&fixture.run).await["moveRequest"]["nodeId"],
+            fixture.node
+        );
+        let active = fixture
+            .owner
+            .service
+            .store
+            .attempts_fixture()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|attempt| attempt["runId"] == fixture.run && attempt["released"] != true)
+            .count();
+        assert_eq!(active, 1);
+    }
+    tokio::join!(scenario(false), scenario(true));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_move_cancellation_is_caller_private_and_clears_capacity_waits() {
+    for internal in [false, true] {
+        let fixture = WaitingToolMove::new(internal).await;
+        let operation = fixture.start().await;
+        fixture.wait_for_marker(true).await;
+        let peer = fixture.peer_token().await;
+        for name in ["get_node_move_operation", "cancel_node_move_operation"] {
+            let (_, denied) = node_tool_call(
+                &fixture.owner,
+                fixture.endpoint,
+                &peer,
+                name,
+                json!({"operationId":operation}),
+            )
+            .await;
+            assert_eq!(denied["result"]["isError"], true, "{denied}");
+            assert!(denied.to_string().contains("another caller"), "{denied}");
+        }
+        assert!(fixture.owner.run(&fixture.run).await["capacityWaitUntil"].is_number());
+        let (_, cancelled) = node_tool_call(
+            &fixture.owner,
+            fixture.endpoint,
+            &fixture.token,
+            "cancel_node_move_operation",
+            json!({"operationId":operation}),
+        )
+        .await;
+        node_tool_value(&cancelled);
+        let completed = finish_tool_move(
+            &fixture.owner,
+            fixture.endpoint,
+            &fixture.token,
+            &operation,
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(completed["state"], "cancelled", "{completed}");
+        let run = fixture.owner.run(&fixture.run).await;
+        assert_eq!(run["status"], "running");
+        assert!(run["capacityWaitUntil"].is_null());
+        assert!(run["moveRequest"].is_null());
+        assert!(
+            !fixture
+                .owner
+                .service
+                .store
+                .attempts_fixture()
+                .await
+                .unwrap()
+                .iter()
+                .any(|attempt| attempt["runId"] == fixture.run && attempt["released"] != true)
+        );
+        placement::release(&fixture.owner.service, &fixture.blocking)
+            .await
+            .unwrap();
+        let next = fixture.start().await;
+        let completed = finish_tool_move(
+            &fixture.owner,
+            fixture.endpoint,
+            &fixture.token,
+            &next,
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(completed["state"], "completed", "{completed}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dropped_movement_wait_clears_its_marker_without_interrupting_the_source() {
+    let fixture = WaitingToolMove::new(false).await;
+    let args = json!({"nodeId":fixture.node,"waitSeconds":60});
+    let path = format!("/api/nodes/placement/{}/move", fixture.run);
+    let request = fixture
+        .owner
+        .session
+        .authorize(fixture.owner.request("POST", &path))
+        .header("content-type", "application/json")
+        .body(Body::from(args.to_string()))
+        .unwrap();
+    let app = fixture.owner.app.clone();
+    let waiting = tokio::spawn(async move { common::send(&app, request).await });
+    fixture.wait_for_marker(true).await;
+    waiting.abort();
+    assert!(waiting.await.unwrap_err().is_cancelled());
+    fixture.wait_for_marker(false).await;
+    let run = fixture.owner.run(&fixture.run).await;
+    assert_eq!(run["status"], "running");
+    assert!(run["moveRequest"].is_null());
+    assert!(
+        !fixture
+            .owner
+            .service
+            .store
+            .attempts_fixture()
+            .await
+            .unwrap()
+            .iter()
+            .any(|attempt| attempt["runId"] == fixture.run && attempt["released"] != true)
+    );
+    placement::release(&fixture.owner.service, &fixture.blocking)
+        .await
+        .unwrap();
+    let moved = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match moves::request(&fixture.owner.service, &run, &args).await {
+                Ok(value) => break value,
+                Err(error) if error.message == "A movement is already pending." => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(error) => panic!("{error:?}"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(moved["status"], "moving");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_move_rechecks_installation_access_during_its_capacity_wait() {
+    let fixture = WaitingToolMove::new(true).await;
+    let operation = fixture.start().await;
+    fixture.wait_for_marker(true).await;
+    fixture
+        .owner
+        .put(
+            "agents",
+            json!({
+                "id": MAIN_AGENT_ID, "provider":"codex",
+                "access":{"nodes":[fixture.node],"installation":false},
+            }),
+        )
+        .await;
+    placement::release(&fixture.owner.service, &fixture.blocking)
+        .await
+        .unwrap();
+    fixture.wait_for_marker(false).await;
+    let (status, denied) = node_tool_call(
+        &fixture.owner,
+        fixture.endpoint,
+        &fixture.token,
+        "get_node_move_operation",
+        json!({"operationId":operation}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+    let run = fixture.owner.run(&fixture.run).await;
+    assert!(run["moveRequest"].is_null());
+    assert!(
+        !fixture
+            .owner
+            .service
+            .store
+            .attempts_fixture()
+            .await
+            .unwrap()
+            .iter()
+            .any(|attempt| attempt["runId"] == fixture.run && attempt["released"] != true)
+    );
 }
 
 #[tokio::test]
