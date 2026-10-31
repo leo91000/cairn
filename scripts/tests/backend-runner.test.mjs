@@ -55,13 +55,29 @@ describe('backend test launcher', () => {
   it('isolates credentials and builds the code worker with the nextest profile', () => {
     const { calls, status } = invoke(['--nextest', '--test-threads', '4', '--no-fail-fast'])
     expect(status).toBe(0)
-    expect(calls[0]).toEqual({ args: ['build', '--locked', '-p', 'cairn-installation', '--bin', 'cairn', '--message-format=json'] })
-    expect(calls[1]).toEqual({ args: ['nextest', 'run', '--locked', '--workspace', '--test-threads', '4', '--no-fail-fast'], worker: '/fixture/cairn' })
+    expect(calls[0]).toEqual({ args: ['build', '--locked', '-p', 'cairn-installation', '--example', 'worker_fixture', '--features', 'worker-fixture-hooks'] })
+    expect(calls[1]).toEqual({ args: ['build', '--locked', '-p', 'cairn-installation', '--bin', 'cairn', '--message-format=json'] })
+    expect(calls[2]).toEqual({ args: ['nextest', 'run', '--locked', '--workspace', '--test-threads', '4', '--no-fail-fast'], worker: '/fixture/cairn' })
   })
 
   it('preserves the nextest failure exit code and package selection', () => {
     const { calls, status } = invoke(['--nextest', '-p', 'cairn-installation'], 100)
     expect(status).toBe(100)
-    expect(calls).toEqual([{ args: ['nextest', 'run', '--locked', '-p', 'cairn-installation'] }])
+    expect(calls).toEqual([
+      { args: ['build', '--locked', '-p', 'cairn-installation', '--example', 'worker_fixture', '--features', 'worker-fixture-hooks'] },
+      { args: ['nextest', 'run', '--locked', '-p', 'cairn-installation'] },
+    ])
+  })
+
+  it('builds the instrumented worker fixture only when worker tests are selected', () => {
+    const worker = invoke(['-p', 'cairn-installation', '--test', 'worker', '--target-dir', '/fixture/target'])
+    expect(worker.calls[0].args).toEqual(['build', '--locked', '-p', 'cairn-installation', '--example', 'worker_fixture', '--features', 'worker-fixture-hooks', '--target-dir', '/fixture/target'])
+    expect(worker.calls[1].args).toEqual(['test', '--locked', '-p', 'cairn-installation', '--test', 'worker', '--target-dir', '/fixture/target'])
+    const other = invoke(['-p', 'cairn-installation', '--test', 'nodes'])
+    expect(other.calls).toEqual([{ args: ['test', '--locked', '-p', 'cairn-installation', '--test', 'nodes'] }])
+    const combined = invoke(['--package=cairn-installation', '--lib', '--test=worker'])
+    expect(combined.calls[0].args).toContain('worker-fixture-hooks')
+    const namedOther = invoke(['--package=cairn-installation', '--test=nodes'])
+    expect(namedOther.calls).toEqual([{ args: ['test', '--locked', '--package=cairn-installation', '--test=nodes'] }])
   })
 })

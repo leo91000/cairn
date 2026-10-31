@@ -268,6 +268,24 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
         &self,
         f: impl FnOnce(&mut Db<'_>) -> Result<T> + Send + 'static,
     ) -> Result<T> {
+        self.transaction_inner(f, false).await
+    }
+
+    /// The fixture may observe contention specifically on controller result persistence.
+    pub(crate) async fn transaction_for_observation<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&mut Db<'_>) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        self.transaction_inner(f, true).await
+    }
+
+    async fn transaction_inner<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&mut Db<'_>) -> Result<T> + Send + 'static,
+        observation: bool,
+    ) -> Result<T> {
+        #[cfg(not(feature = "worker-fixture-hooks"))]
+        let _ = observation;
         let changes = self.0.changes.clone();
         let discarded = self.0.discarded_changes.clone();
         let preparation = crate::plugins::operations::publication_cancellation();
@@ -277,6 +295,28 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
             }
             let before = db.0.total_changes();
             let discarded_before = discarded.load(Ordering::Relaxed);
+            #[cfg(feature = "worker-fixture-hooks")]
+            if observation && let Some(marker) = std::env::var_os("CAIRN_FIXTURE_OBSERVATION_BUSY")
+            {
+                db.0.busy_timeout(std::time::Duration::ZERO)?;
+                let first = rusqlite::Transaction::new_unchecked(
+                    db.0,
+                    rusqlite::TransactionBehavior::Immediate,
+                );
+                db.0.busy_timeout(std::time::Duration::from_secs(5))?;
+                match first {
+                    Ok(tx) => drop(tx),
+                    Err(rusqlite::Error::SqliteFailure(error, _))
+                        if matches!(
+                            error.code,
+                            rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                        ) =>
+                    {
+                        std::fs::write(marker, b"busy")?;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
             let tx = rusqlite::Transaction::new_unchecked(
                 db.0,
                 rusqlite::TransactionBehavior::Immediate,
