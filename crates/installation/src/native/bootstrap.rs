@@ -193,7 +193,6 @@ struct Observation {
     session: String,
     boot: Option<String>,
     invocation: u64,
-    order: u64,
     state: Mutex<State>,
     counters: [AtomicU64; Counter::ALL.len()],
     costs: [(AtomicU64, AtomicU64); Cost::ALL.len()],
@@ -514,7 +513,7 @@ impl Registry {
             .history
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let invocation = if let Some(previous) = history.reports.get(id) {
+        if let Some(previous) = history.reports.get(id) {
             let status = previous
                 .state
                 .lock()
@@ -523,39 +522,41 @@ impl Registry {
             if matches!(status, Status::Preparing | Status::Submitted) {
                 return Scope::default();
             }
-            previous.invocation.saturating_add(1)
-        } else {
-            if history.reports.len() == RETAINED {
-                let oldest = history
-                    .reports
-                    .iter()
-                    .filter(|(_, observation)| {
-                        observation
-                            .state
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .status
-                            != Status::Preparing
-                    })
-                    .min_by_key(|(_, observation)| observation.order)
-                    .map(|(id, _)| id.clone());
-                if let Some(oldest) = oldest {
-                    history.reports.remove(&oldest);
-                } else {
-                    history.omitted = history.omitted.saturating_add(1);
-                    return Scope::default();
-                }
-            }
-            1
+        }
+        // This session-wide sequence survives report eviction. Reusing an
+        // attempt after an admission rejection must never reuse its log identity.
+        let Some(invocation) = history.order.checked_add(1) else {
+            history.omitted = history.omitted.saturating_add(1);
+            return Scope::default();
         };
-        history.order = history.order.saturating_add(1);
+        if !history.reports.contains_key(id) && history.reports.len() == RETAINED {
+            let oldest = history
+                .reports
+                .iter()
+                .filter(|(_, observation)| {
+                    observation
+                        .state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .status
+                        != Status::Preparing
+                })
+                .min_by_key(|(_, observation)| observation.invocation)
+                .map(|(id, _)| id.clone());
+            if let Some(oldest) = oldest {
+                history.reports.remove(&oldest);
+            } else {
+                history.omitted = history.omitted.saturating_add(1);
+                return Scope::default();
+            }
+        }
+        history.order = invocation;
         let observation = Arc::new(Observation {
             attempt: id.into(),
             runtime: self.runtime.clone(),
             session: self.session.clone(),
             boot: self.boot.clone(),
             invocation,
-            order: history.order,
             state: Mutex::new(State {
                 run: None,
                 pinned_runtime: None,
@@ -822,6 +823,33 @@ mod tests {
         second.submitted();
         assert!(registry.begin(&id).disabled());
         assert_eq!(registry.get(&id).unwrap().status, Status::Submitted);
+    }
+
+    #[test]
+    fn invocation_identity_survives_eviction_and_never_wraps() {
+        let registry = registry();
+        let id = crate::config::id();
+        let first = registry.begin(&id);
+        first.rejected();
+        let previous = registry.get(&id).unwrap();
+        for _ in 0..RETAINED {
+            registry.begin(&crate::config::id()).submitted();
+        }
+        assert!(registry.get(&id).is_none());
+        let repeated = registry.begin(&id);
+        let current = registry.get(&id).unwrap();
+        assert_eq!(
+            current.controller_session_id,
+            previous.controller_session_id
+        );
+        assert_eq!(current.boot_id, previous.boot_id);
+        assert_eq!(current.attempt_id, previous.attempt_id);
+        assert!(current.invocation > previous.invocation);
+        repeated.rejected();
+        registry.history.lock().unwrap().order = u64::MAX;
+        assert!(registry.begin(&crate::config::id()).disabled());
+        assert_eq!(registry.get(&id).unwrap().invocation, current.invocation);
+        assert_eq!(registry.health()["omitted"], 1);
     }
 
     #[test]

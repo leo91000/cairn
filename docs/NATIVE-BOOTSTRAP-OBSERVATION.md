@@ -22,9 +22,10 @@ Authorization: Bearer <node-controller-credential>
 
 The response contains `source: "memory"` and a `bootstrap` object. Its identities
 are the attempt, optional conversation, controller runtime, pinned tooling
-runtime, optional Linux boot and unique controller session. `invocation`
-distinguishes a new admission after an earlier rejected admission on the same
-attempt. Missing context remains null, rather than being inferred from another
+runtime, optional Linux boot and unique controller session. `invocation` is a
+session-wide monotonic sequence, independent of cache eviction. It distinguishes
+a new admission after an earlier rejected admission on the same attempt.
+Missing context remains null, rather than being inferred from another
 attempt or a mutable conversation marker.
 
 The fixed phases cover admission wait, plan validation, storage admission,
