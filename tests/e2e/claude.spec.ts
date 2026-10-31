@@ -1057,9 +1057,15 @@ for (const [fromPlan, toPlan] of [[true, false], [false, true]] as const) {
     let release!: () => void
     let started!: () => void
     let delivered!: () => void
-    const gate = new Promise<void>((resolve) => { release = resolve })
-    const uploadStarted = new Promise<void>((resolve) => { started = resolve })
-    const uploadDelivered = new Promise<void>((resolve) => { delivered = resolve })
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const uploadStarted = new Promise<void>((resolve) => {
+      started = resolve
+    })
+    const uploadDelivered = new Promise<void>((resolve) => {
+      delivered = resolve
+    })
     const posts: unknown[] = []
     page.on('request', (request) => {
       if (request.method() === 'POST' && request.url().endsWith(`/chats/${first.id}/messages`))

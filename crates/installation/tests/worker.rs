@@ -46,6 +46,213 @@ struct Fixture {
     service: Arc<Service>,
     process: Option<Child>,
     url: String,
+    clock: Option<FixtureClock>,
+}
+
+struct FixtureClock {
+    value: PathBuf,
+    millis: i64,
+}
+
+fn worker_fixture_binary(
+    target: &Path,
+    fixtures: Option<&std::ffi::OsStr>,
+    allow_remap: bool,
+) -> PathBuf {
+    if let Some(fixtures) = fixtures {
+        let fixtures: Vec<Value> = serde_json::from_slice(fixtures.as_encoded_bytes()).unwrap();
+        fixtures
+            .iter()
+            .find(|fixture| {
+                fixture["target"]
+                    .as_str()
+                    .is_some_and(|path| Path::new(path) == target)
+            })
+            .or_else(|| {
+                if !allow_remap {
+                    return None;
+                }
+                if fixtures.len() == 1 {
+                    return fixtures.first();
+                }
+                let suffix = PathBuf::from(target.parent()?.file_name()?).join(target.file_name()?);
+                let mut matches = fixtures.iter().filter(|fixture| {
+                    fixture["target"]
+                        .as_str()
+                        .is_some_and(|path| Path::new(path).ends_with(&suffix))
+                });
+                let matching = matches.next()?;
+                matches.next().is_none().then_some(matching)
+            })
+            .and_then(|fixture| fixture["binary"].as_str())
+            .map(PathBuf::from)
+            .expect("launcher supplied no worker fixture for this target")
+    } else {
+        target.join("examples/worker_fixture")
+    }
+}
+
+#[test]
+fn worker_fixture_uses_the_matching_compilation_target() {
+    let root = TempDir::new().unwrap();
+    let first = root.path().join("first/debug");
+    let second = root.path().join("second/debug");
+    let fixtures = std::ffi::OsString::from(
+        json!([
+            { "target": first, "binary": root.path().join("first-fixture") },
+            { "target": second, "binary": root.path().join("second-fixture") },
+        ])
+        .to_string(),
+    );
+    assert_eq!(
+        worker_fixture_binary(&first, Some(&fixtures), false),
+        root.path().join("first-fixture")
+    );
+    assert_eq!(
+        worker_fixture_binary(&second, Some(&fixtures), false),
+        root.path().join("second-fixture")
+    );
+    assert_eq!(
+        worker_fixture_binary(
+            &root.path().join("remapped/first/debug"),
+            Some(&fixtures),
+            true
+        ),
+        root.path().join("first-fixture")
+    );
+    let single = std::ffi::OsString::from(
+        json!([{ "target": first, "binary": root.path().join("first-fixture") }]).to_string(),
+    );
+    assert_eq!(
+        worker_fixture_binary(&root.path().join("remapped"), Some(&single), true),
+        root.path().join("first-fixture")
+    );
+}
+
+#[test]
+#[should_panic(expected = "launcher supplied no worker fixture for this target")]
+fn worker_fixture_rejects_a_missing_compilation_target() {
+    worker_fixture_binary(
+        Path::new("missing"),
+        Some(std::ffi::OsStr::new("[]")),
+        false,
+    );
+}
+
+#[test]
+#[should_panic(expected = "launcher supplied no worker fixture for this target")]
+fn worker_fixture_does_not_remap_an_ordinary_build() {
+    let fixtures = std::ffi::OsStr::new(r#"[{"target":"first","binary":"first-fixture"}]"#);
+    worker_fixture_binary(Path::new("second"), Some(fixtures), false);
+}
+
+#[test]
+#[should_panic(expected = "launcher supplied no worker fixture for this target")]
+fn worker_fixture_rejects_an_ambiguous_remap() {
+    let fixtures = std::ffi::OsStr::new(
+        r#"[{"target":"one/triple/debug","binary":"one"},{"target":"two/triple/debug","binary":"two"}]"#,
+    );
+    worker_fixture_binary(Path::new("other/triple/debug"), Some(fixtures), true);
+}
+
+impl FixtureClock {
+    fn new(root: &Path) -> Self {
+        require_fixture_hooks(std::env::var_os("CAIRN_TEST_WORKER_FIXTURES").as_deref());
+        let value = root.join("fixture-clock.txt");
+        let millis = now();
+        std::fs::write(&value, millis.to_string()).unwrap();
+        Self { value, millis }
+    }
+
+    fn advance(&mut self, millis: i64) {
+        self.millis += millis;
+        let next = self.value.with_extension("next");
+        std::fs::write(&next, self.millis.to_string()).unwrap();
+        std::fs::rename(next, &self.value).unwrap();
+    }
+}
+
+fn require_fixture_hooks(fixtures: Option<&std::ffi::OsStr>) {
+    assert!(
+        fixtures.is_some(),
+        "fixture clock requires worker hooks; run this test with pnpm test:backend"
+    );
+}
+
+#[test]
+#[should_panic(
+    expected = "fixture clock requires worker hooks; run this test with pnpm test:backend"
+)]
+fn fixture_clock_requires_the_backend_launcher() {
+    require_fixture_hooks(None);
+}
+
+// Readiness is emitted only after the manager has initialized durable state,
+// bound its socket, and started the worker. Allow slow storage to finish while
+// still bounding a child that never becomes ready.
+const WORKER_STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
+
+async fn wait_for_worker_ready(child: &mut Child, limit: Duration) -> Result<String, String> {
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or("worker fixture stdout is missing")?;
+    let mut lines = BufReader::new(stdout).lines();
+    let line = tokio::time::timeout(limit, lines.next_line())
+        .await
+        .map_err(|_| format!("worker fixture did not become ready within {limit:?}"))?
+        .map_err(|error| format!("reading worker fixture readiness: {error}"))?;
+    let Some(line) = line else {
+        let status = child.try_wait().map_err(|error| error.to_string())?;
+        return Err(format!(
+            "worker fixture closed stdout before readiness (status: {status:?})"
+        ));
+    };
+    line.strip_prefix("Listening on ")
+        .map(str::to_owned)
+        .ok_or_else(|| format!("unexpected worker fixture readiness: {line}"))
+}
+
+#[tokio::test]
+async fn worker_readiness_waits_for_output_and_reports_blocked_or_exited_children() {
+    let mut delayed = Command::new("sh")
+        .args(["-c", "sleep 0.1; echo 'Listening on http://127.0.0.1:1234'"])
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    assert_eq!(
+        wait_for_worker_ready(&mut delayed, Duration::from_secs(2))
+            .await
+            .unwrap(),
+        "http://127.0.0.1:1234"
+    );
+
+    let mut blocked = Command::new("sh")
+        .args(["-c", "exec sleep 5"])
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    assert!(
+        wait_for_worker_ready(&mut blocked, Duration::from_millis(100))
+            .await
+            .unwrap_err()
+            .contains("did not become ready")
+    );
+
+    let mut exited = Command::new("sh")
+        .args(["-c", "exit 1"])
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    assert!(
+        wait_for_worker_ready(&mut exited, Duration::from_secs(2))
+            .await
+            .unwrap_err()
+            .contains("closed stdout before readiness")
+    );
 }
 
 impl Fixture {
@@ -74,6 +281,7 @@ impl Fixture {
             service,
             process: None,
             url: String::new(),
+            clock: None,
         };
         fixture.start().await;
         fixture
@@ -84,12 +292,18 @@ impl Fixture {
         tokio::fs::write(&file, serde_json::to_vec(&self.service.config).unwrap())
             .await
             .unwrap();
-        let binary = std::path::Path::new(env!("CARGO_BIN_EXE_cairn"))
+        let target = std::path::Path::new(env!("CARGO_BIN_EXE_cairn"))
             .parent()
-            .unwrap()
-            .join("examples/worker_fixture");
+            .unwrap();
+        let fixtures = std::env::var_os("CAIRN_TEST_WORKER_FIXTURES");
+        let allow_remap = std::env::var_os("CAIRN_TEST_REUSED_BUILD").is_some();
+        let binary = worker_fixture_binary(target, fixtures.as_deref(), allow_remap);
         let mut command = Command::new(binary);
         command.arg("serve");
+        command.env_remove("CAIRN_FIXTURE_CLOCK_FILE");
+        if let Some(clock) = &self.clock {
+            command.env("CAIRN_FIXTURE_CLOCK_FILE", &clock.value);
+        }
         let usage = self.root.path().join("usage.json");
         if usage.exists() {
             command.env("CAIRN_FIXTURE_USAGE", usage);
@@ -102,14 +316,9 @@ impl Fixture {
             .kill_on_drop(true)
             .spawn()
             .unwrap();
-        let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
-        let line = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+        self.url = wait_for_worker_ready(&mut child, WORKER_STARTUP_TIMEOUT)
             .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        assert!(line.starts_with("Listening on"), "{line}");
-        self.url = line.trim_start_matches("Listening on ").to_owned();
+            .unwrap_or_else(|error| panic!("{error}"));
         self.process = Some(child);
     }
 
@@ -4797,6 +5006,7 @@ async fn unlimited_runs_cancel_and_resume_without_creating_a_deadline() {
 async fn quiet_chat_protocol_keeps_a_finite_checkpoint_deadline() {
     let mut fixture = Fixture::new().await;
     fixture.stop(false).await;
+    fixture.clock = Some(FixtureClock::new(fixture.root.path()));
     let s = fixture.service.clone();
     let run = fixture.enqueue("fixture:hang").await;
     let id = text(&run, "id");
@@ -4812,17 +5022,46 @@ async fn quiet_chat_protocol_keeps_a_finite_checkpoint_deadline() {
         )
         .await
         .unwrap();
-    // Resume the final eight seconds of an existing one-minute budget.
+    // Resume the final second of an existing one-minute budget.
     common::set_checkpoint(
         &s.store,
         id,
-        json!({ "launched": false, "remainingMs": 8000 }),
+        json!({ "launched": false, "remainingMs": 1000 }),
     )
     .await;
     fixture.start().await;
     fixture
         .until(id, |r| r["sessionId"] == "fixture-chat")
         .await;
+    // Ensure the quiet turn has started before advancing its resumed budget.
+    eventually(
+        Duration::from_secs(20),
+        Duration::from_millis(30),
+        async || {
+            let path = fixture
+                .run_directory(id)
+                .join("codex/fixture-conversation.json");
+            let data = tokio::fs::read(path).await.ok()?;
+            let thread: Value = serde_json::from_slice(&data).ok()?;
+            thread["turns"]
+                .as_array()?
+                .iter()
+                .any(|turn| turn["status"] == "inProgress")
+                .then_some(())
+        },
+    )
+    .await;
+    // Real time and the fixture's monotonic timers continue while its wall
+    // clock is frozen; the resumed budget must still be intact.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let still_running = s.store.run(id).await.unwrap();
+    assert_eq!(
+        still_running["status"],
+        RunStatus::Running,
+        "{still_running}"
+    );
+    assert_eq!(fixture.checkpoint(id).await["remainingMs"], 1000);
+    fixture.clock.as_mut().unwrap().advance(1250);
     let failed = tokio::time::timeout(
         Duration::from_secs(20),
         fixture.until(id, |r| r["status"] == RunStatus::Failed),
