@@ -31,7 +31,7 @@ de bac à sable), et refuse de faire rejoindre un tour en cours qui peut déjà 
 les fichiers (`steer`). Les missions et les reprises planifiées ne sont jamais des
 tours de plan. Le drapeau est une colonne typée de `chat_messages`, et de
 `chat_questions` pour les questions posées par un tour de plan, ajoutée par la
-[migration 18 → 19](../migrations/0019-plan-requests.md), afin qu’une demande en file
+[migration 19 → 20](../migrations/0020-plan-requests.md), afin qu’une demande en file
 ou la réponse à une telle question garde sa frontière après un redémarrage.
 
 Pendant un tour de plan, Cairn applique lui-même la frontière :

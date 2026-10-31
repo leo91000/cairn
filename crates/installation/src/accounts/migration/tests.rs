@@ -69,7 +69,10 @@ async fn real_version13_database_preserves_accounts_usage_secrets_and_references
         &db,
         "SELECT json_array(id,updated_at) FROM records WHERE kind='agentAccounts' ORDER BY id",
     );
-    let runs = rows(&db, "SELECT json_array(id,data) FROM runs ORDER BY id");
+    let runs = rows(
+        &db,
+        "SELECT json_array(id,json(data)) FROM runs ORDER BY id",
+    );
     let checkpoints = rows(
         &db,
         "SELECT json_array(run_id,state) FROM run_checkpoints ORDER BY run_id",
@@ -78,7 +81,10 @@ async fn real_version13_database_preserves_accounts_usage_secrets_and_references
     let store = Store::open(root.path()).unwrap();
     assert_eq!(direct_metadata(&db), direct);
     assert_eq!(
-        rows(&db, "SELECT json_array(id,data) FROM runs ORDER BY id"),
+        rows(
+            &db,
+            "SELECT json_array(id,json(data)) FROM run_views ORDER BY id"
+        ),
         runs
     );
     assert_eq!(
@@ -142,7 +148,7 @@ async fn real_version13_database_preserves_accounts_usage_secrets_and_references
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        19
+        crate::store::DATABASE_VERSION
     );
     assert_eq!(
         db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
@@ -291,7 +297,7 @@ async fn real_version12_database_completes_both_atomic_upgrades() {
     assert_eq!(
         db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        19
+        crate::store::DATABASE_VERSION
     );
     assert_eq!(direct_metadata(&db), vec![Vec::<String>::new(); 7]);
 }

@@ -8,7 +8,7 @@ use rusqlite::{Connection, TransactionBehavior};
 pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if matches!(version, 16..=19) {
+    if matches!(version, 16..=crate::store::DATABASE_VERSION) {
         return Ok(());
     }
     if version != 15 {

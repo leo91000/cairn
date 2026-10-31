@@ -62,6 +62,7 @@ async fn real_v17_upgrade_preserves_each_accounts_reads_and_set_aside_outcomes()
     std::fs::create_dir_all(root.path().join("data")).unwrap();
     let db = previous(root.path());
     let before = snapshot(&db);
+    let runs_before = common::run_fixture::projection_rows(&db);
     let previous_state = personal_keys(&db);
     assert_eq!(previous_state.len(), 11);
     let proof: Value = serde_json::from_str(
@@ -151,6 +152,7 @@ async fn real_v17_upgrade_preserves_each_accounts_reads_and_set_aside_outcomes()
     )));
 
     let after = snapshot(&db);
+    assert_eq!(common::run_fixture::projection_rows(&db), runs_before);
     for (name, old) in &before {
         if matches!(name.as_str(), "chat_messages" | "chat_questions") {
             let (schema, rows) = &after[name];
@@ -170,7 +172,7 @@ async fn real_v17_upgrade_preserves_each_accounts_reads_and_set_aside_outcomes()
                 })
                 .collect::<Vec<_>>();
             assert_eq!(previous_rows, old.1, "preserved rows in {name}");
-        } else if name != "kv" {
+        } else if name != "kv" && name != "runs" {
             assert_eq!(after.get(name), Some(old), "unrelated table {name}");
         }
     }
@@ -209,7 +211,7 @@ async fn real_v17_upgrade_preserves_each_accounts_reads_and_set_aside_outcomes()
     assert_eq!(
         db.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
             .unwrap(),
-        19
+        20
     );
 
     // The real service serves each account its own preserved outcomes.
@@ -317,7 +319,7 @@ async fn v17_upgrade_preserves_legacy_paid_retry_and_checkpoint() {
     assert_eq!(
         db.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
             .unwrap(),
-        19
+        20
     );
 }
 
@@ -358,6 +360,6 @@ fn malformed_previous_read_state_rolls_back_schema_data_and_version() {
     assert_eq!(
         db.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
             .unwrap(),
-        19
+        20
     );
 }

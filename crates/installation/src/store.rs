@@ -35,7 +35,7 @@ struct Pool {
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-const DATABASE_VERSION: i64 = 19;
+pub(crate) const DATABASE_VERSION: i64 = 20;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -70,12 +70,7 @@ impl Store {
         let fresh = !file.exists();
         let mut writer = Connection::open(&file)?;
         let mut version: i64 = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if !fresh
-            && !matches!(
-                version,
-                11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | DATABASE_VERSION
-            )
-        {
+        if !fresh && !(11..=DATABASE_VERSION).contains(&version) {
             return Err(Error::bad(
                 "Unsupported installation database version; use a compatible release or an explicit migration.",
             ));
@@ -88,7 +83,7 @@ impl Store {
             version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
             // Another startup can finish later atomic steps while this one
             // waits for the inventory migration's immediate transaction.
-            if !matches!(version, 12 | 13 | 14 | 15 | 16 | 17 | 18 | DATABASE_VERSION) {
+            if !(12..=DATABASE_VERSION).contains(&version) {
                 upgraded?;
             }
         }
@@ -102,7 +97,7 @@ impl Store {
                 tx.execute_batch("CREATE TABLE direct_read_authorizations(grant_id TEXT NOT NULL,object TEXT NOT NULL,hash TEXT NOT NULL,run_id TEXT NOT NULL,PRIMARY KEY(grant_id,object));CREATE INDEX direct_read_authorizations_object ON direct_read_authorizations(object);")?;
                 tx.execute_batch(crate::nodes::journal_acknowledgements::SCHEMA)?;
                 tx.pragma_update(None, "user_version", 13)?;
-            } else if !matches!(current, 13 | 14 | 15 | 16 | 17 | 18 | DATABASE_VERSION) {
+            } else if !(13..=DATABASE_VERSION).contains(&current) {
                 return Err(Error::bad(
                     "Unexpected installation database version during direct storage upgrade.",
                 ));
@@ -131,6 +126,10 @@ impl Store {
             version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
         }
         if !fresh && version == 18 {
+            crate::runs::projections::upgrade(&mut writer)?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        }
+        if !fresh && version == 19 {
             crate::chats::migration::plan_requests(&mut writer)?;
         }
         if fresh {
@@ -206,6 +205,7 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
     async fn call<T: Send + 'static>(
         &self,
         tx: &mpsc::Sender<Job>,
+        caller: &'static str,
         f: impl FnOnce(&mut Db<'_>) -> Result<T> + Send + 'static,
     ) -> Result<T> {
         let queued_at = std::time::Instant::now();
@@ -217,6 +217,7 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
             let failed = result.is_err();
             let abandoned_reply = reply.send(result).is_err();
             performance::Completed {
+                caller,
                 queue: started.duration_since(queued_at),
                 execution,
                 failed,
@@ -233,7 +234,7 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
         &self,
         f: impl FnOnce(&mut Db<'_>) -> Result<T> + Send + 'static,
     ) -> Result<T> {
-        self.call(&self.0.readers, f).await
+        self.call(&self.0.readers, performance::caller(&f), f).await
     }
 
     pub async fn write<T: Send + 'static>(
@@ -243,7 +244,8 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
         let changes = self.0.changes.clone();
         let discarded = self.0.discarded_changes.clone();
         let preparation = crate::plugins::operations::publication_cancellation();
-        self.call(&self.0.writer, move |db| {
+        let caller = performance::caller(&f);
+        self.call(&self.0.writer, caller, move |db| {
             if preparation.is_some_and(|token| token.is_cancelled()) {
                 return Err(Error::conflict("Preparation was cancelled."));
             }
@@ -280,7 +282,8 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
         let changes = self.0.changes.clone();
         let discarded = self.0.discarded_changes.clone();
         let preparation = crate::plugins::operations::publication_cancellation();
-        self.call(&self.0.writer, move |db| {
+        let caller = performance::caller(&f);
+        self.call(&self.0.writer, caller, move |db| {
             if preparation.is_some_and(|token| token.is_cancelled()) {
                 return Err(Error::conflict("Preparation was cancelled."));
             }
@@ -638,7 +641,7 @@ impl Db<'_> {
             return Ok(result);
         }
         let mut rows=self.json_rows(
-            "SELECT data FROM runs WHERE status IN ('queued','running','waiting') ORDER BY created_at",
+            "SELECT data FROM run_views AS runs WHERE status IN ('queued','running','waiting') ORDER BY created_at",
             [],
         )?;
         self.hydrate_run_wakeups(&mut rows)?;
@@ -730,9 +733,11 @@ impl Db<'_> {
         values.push(limit.into());
         values.push(offset.into());
         let clause = filters.join(" AND ");
+        // Pagination values are already i64. An explicit integer expression
+        // prevents SQLite from reparsing the projection for each LIMIT binding.
         (
             format!(
-                "SELECT {fields} FROM runs WHERE {clause} ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?"
+                "SELECT {fields} FROM run_views AS runs WHERE {clause} ORDER BY created_at DESC,id DESC LIMIT CAST(? AS INTEGER) OFFSET CAST(? AS INTEGER)"
             ),
             values,
         )
@@ -1168,6 +1173,56 @@ mod schema_tests {
     }
 
     #[test]
+    fn run_pagination_reuses_its_plan_and_preserves_integer_boundaries() {
+        let root = tempfile::tempdir().unwrap();
+        drop(Store::open(root.path()).unwrap());
+        let connection = Connection::open(root.path().join("manager.db")).unwrap();
+        let db = Db(&connection);
+        for (id, created_at) in [("run-a", 1), ("run-b", 2), ("run-c", 3)] {
+            let state = serde_json::from_value(json!({
+                "id": id, "taskId": "task", "status": "succeeded", "createdAt": created_at,
+            }))
+            .unwrap();
+            db.admit_run(&state, None, &json!({}), None).unwrap();
+        }
+        for full in [false, true] {
+            for (status, task) in [
+                (None, None),
+                (Some("succeeded"), None),
+                (None, Some("task")),
+            ] {
+                for (limit, offset, expected) in [
+                    (10, 0, "run-c,run-b,run-a"),
+                    (-1, 0, "run-c,run-b,run-a"),
+                    (0, 0, ""),
+                    (1, 1, "run-b"),
+                    (i64::MAX, 2, "run-a"),
+                    (2, -1, "run-c,run-b"),
+                ] {
+                    let (query, values) = Db::run_query(status, task, limit, offset, full);
+                    let mut statement = connection.prepare_cached(&query).unwrap();
+                    let ids = statement
+                        .query_map(rusqlite::params_from_iter(values), |row| {
+                            row.get::<_, String>(0)
+                        })
+                        .unwrap()
+                        .map(|row| {
+                            let row: Value = serde_json::from_str(&row.unwrap()).unwrap();
+                            row["id"].as_str().unwrap().to_owned()
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(ids.join(","), expected);
+                    assert_eq!(
+                        statement.reset_status(rusqlite::StatementStatus::RePrepare),
+                        0,
+                        "Integer pagination must not recompile the wire projection"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn version_twelve_upgrade_preserves_data_and_fences_older_binaries() {
         let root = tempfile::tempdir().unwrap();
         drop(Store::open(root.path()).unwrap());
@@ -1220,7 +1275,7 @@ mod schema_tests {
 
     #[test]
     fn existing_other_versions_fail_without_changing_the_database() {
-        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 99] {
+        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 21, 99] {
             let root = tempfile::tempdir().unwrap();
             let db = Connection::open(root.path().join("manager.db")).unwrap();
             db.pragma_update(None, "user_version", version).unwrap();

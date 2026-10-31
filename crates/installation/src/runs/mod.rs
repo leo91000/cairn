@@ -72,6 +72,30 @@ macro_rules! wire_fields {
     };
 }
 
+pub(crate) mod projections;
+
+// SQLite computes generated columns on every row update, including VIRTUAL ones.
+// Keep wire construction on the read side so scalar updates do not parse and
+// reconstruct the frozen snapshot.
+macro_rules! projection_schema {
+    () => {
+        concat!(
+            r#"CREATE VIEW run_views AS SELECT runs.*,
+  json_set(boundary,'$.snapshot',json(snapshot),'$.summary',summary,
+"#,
+            wire_fields!(),
+            r#") AS data,
+  json_set(boundary,
+"#,
+            wire_fields!(),
+            r#",'$.taskName',task_name,'$.agentName',agent_name,'$.provider',provider) AS summary_data
+FROM runs;"#
+        )
+    };
+}
+
+pub(crate) const PROJECTION_SCHEMA: &str = projection_schema!();
+
 pub(crate) const SCHEMA: &str = concat!(
     r#"CREATE TABLE runs(
   id TEXT PRIMARY KEY NOT NULL CHECK(length(id)>0),
@@ -103,22 +127,14 @@ pub(crate) const SCHEMA: &str = concat!(
   retry_deadline_at INTEGER CHECK(retry_deadline_at BETWEEN 0 AND 9007199254740991),
   retry_cause TEXT CHECK(retry_cause IS NULL OR json_valid(retry_cause)),
   requested_by TEXT CHECK(requested_by IS NULL OR json_valid(requested_by)),
-  -- Frozen display fields are derived by SQLite once per snapshot write. Lists
-  -- need neither the snapshot's overflow pages nor repeated JSON extraction.
+  -- Stored display fields avoid loading frozen input pages for lists. SQLite
+  -- still recomputes these small projections when a row is written.
   task_name TEXT GENERATED ALWAYS AS (coalesce(json_extract(snapshot,'$.task.name'),'')) STORED,
   agent_name TEXT GENERATED ALWAYS AS (coalesce(json_extract(snapshot,'$.agent.name'),'')) STORED,
   provider TEXT GENERATED ALWAYS AS (json_extract(snapshot,'$.agent.provider')) STORED,
   snapshot TEXT CHECK(snapshot IS NULL OR json_valid(snapshot)),
   boundary TEXT NOT NULL CHECK(json_valid(boundary) AND json_type(boundary)='object' AND json_type(boundary,'$.snapshot') IS NULL),
   dedupe TEXT UNIQUE,
-  data TEXT GENERATED ALWAYS AS (json_set(boundary,'$.snapshot',json(snapshot),'$.summary',summary,
-"#,
-    wire_fields!(),
-    r#")) VIRTUAL,
-  summary_data TEXT GENERATED ALWAYS AS (json_set(boundary,
-"#,
-    wire_fields!(),
-    r#",'$.taskName',task_name,'$.agentName',agent_name,'$.provider',provider)) VIRTUAL,
   CHECK((retry_attempt IS NULL AND retry_limit IS NULL AND retry_cause IS NULL AND retry_next_at IS NULL AND retry_started_at IS NULL AND retry_deadline_at IS NULL) OR (retry_attempt IS NOT NULL AND retry_limit IS NOT NULL AND retry_cause IS NOT NULL)),
   CHECK(retry_deadline_at IS NULL OR retry_started_at IS NULL OR retry_deadline_at>=retry_started_at)
 );
@@ -127,7 +143,8 @@ CREATE INDEX runs_agent ON runs(json_extract(snapshot,'$.agent.id'));
 CREATE INDEX runs_task ON runs(task_id,created_at DESC);
 CREATE INDEX runs_created ON runs(created_at DESC,id DESC);
 CREATE UNIQUE INDEX runs_active_task ON runs(task_id) WHERE status IN ('queued','running','waiting');
-"#
+"#,
+    projection_schema!()
 );
 
 const STATE_COLUMNS: &str = "id,task_id,project_id,status,trigger,created_at,started_at,finished_at,summary,error,session_id,workspace,workspace_cleaned_at,recovery_pending,resume_available,resume_count,cancel_requested_at,account_id,account_name,account_wait_reason,account_required,capacity_wait_until,retry_attempt,retry_limit,retry_next_at,retry_started_at,retry_deadline_at,retry_cause,requested_by";

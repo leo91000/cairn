@@ -63,6 +63,16 @@ caller stopped waiting (`abandoned_replies`). Reader execution times can overlap
 do not sum them as elapsed wall time. SQL, parameters, errors and conversation or
 account identifiers are never included. Aggregation performs no database write.
 
+`max_queue_caller` names the source function of the job with the longest queue
+wait; `max_execution_caller` names the job with the longest execution. They can
+be different: the queued caller is not necessarily the source of the blockage.
+These hints come from compile-time Rust closure type names, bounded to 256 UTF-8
+bytes, and never inspect captured values. Writes and transactions retain the
+original closure's name before wrapping it. Generic helpers can share a name,
+and compiler names can change between builds; these are not stable operation
+identifiers or unique call-site IDs. Maxima reset with each actor's window, and
+equal durations retain the first completed job. There is no per-job log.
+
 The same record samples the connection's pager cache at the interval boundary.
 `cache_hits`, `cache_misses` and `cache_writes` are interval deltas of counters
 read through SQLite's 64-bit connection-status API; `cache_bytes` is the current approximate pager

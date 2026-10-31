@@ -23,6 +23,10 @@ GARAGE_IMAGE = 'dxflrs/garage@sha256:866bd13ed2038ba7e7190e840482bc27234c4afaf77
 IMAGE = re.compile(r'^ghcr\.io/leo91000/cairn@sha256:[a-f0-9]{64}$')
 
 
+class LeaseRejected(RuntimeError):
+    """An explicit manager response must never authorize unavailable-manager recovery."""
+
+
 def atomic(path, data):
     with tempfile.NamedTemporaryFile('w', dir=path.parent, encoding='utf-8', delete=False) as file:
         temporary = Path(file.name)
@@ -330,10 +334,16 @@ fetch('http://127.0.0.1:4310/internal/deployment-lease', {{
     headers: {{ 'Content-Type': 'application/json', Authorization: 'Bearer ' + token }},
     body: JSON.stringify({{ owner: {lease_owner} }}),
 }}).then(response => {{
-    if (!response.ok) process.exit(1);
+    console.log(JSON.stringify({{ status: response.status }}));
 }}).catch(() => process.exit(1));
 """
-        run(docker + ['exec', '-T', 'manager', 'node', '-e', script], timeout=10)
+        verdict = docker_output(docker[1:] + ['exec', '-T', 'manager', 'node', '-e', script])
+        status = verdict.get('status') if isinstance(verdict, dict) else None
+        if status == 200:
+            return
+        if status == 409:
+            raise LeaseRejected('Another deployment owns the installation lease. Existing image and data are retained.')
+        raise LeaseRejected('The manager refused the deployment lease. Existing image and data are retained.')
 
     def inspect(image):
         metadata = docker_output(['image', 'inspect', image])[0]
@@ -390,6 +400,8 @@ fetch('http://127.0.0.1:4310/health', {{ signal: AbortSignal.timeout(5000) }}).t
     if config.get('pendingImage'):
         try:
             lease(config['leaseOwner'])
+        except LeaseRejected:
+            raise
         except RuntimeError:
             containers = docker_output(docker[1:] + ['ps', '--all', '--format', 'json', 'manager'])
             manager = containers[0] if isinstance(containers, list) and containers else containers
@@ -400,6 +412,9 @@ fetch('http://127.0.0.1:4310/health', {{ signal: AbortSignal.timeout(5000) }}).t
                                      and not manager_health(inspect(config['pendingImage'])))
             if not config.get('leaseAcquired') or not (stopped or unavailable_candidate):
                 raise
+        else:
+            config['leaseAcquired'] = True
+            atomic(config_file, json.dumps(config))
         launch(config['pendingImage'])
         finish()
 
