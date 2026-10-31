@@ -316,7 +316,6 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
       synced.value = false
       clearTimeout(saveTimer)
       saveTimer = undefined
-      waiting = false
       if (reset) {
         resetHistory()
         cursor = 0
@@ -326,6 +325,11 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
         catchingUp.value = !!(metadata ?? detail)?.run && !inactive
         show()
       }
+      else if (waiting && cached) {
+        showSaved(cached)
+      }
+
+      waiting = false
 
       if (metadata) {
         detail = metadata
