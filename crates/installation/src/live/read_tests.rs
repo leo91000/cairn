@@ -103,6 +103,7 @@ async fn measure_conversation_reads_by_count_and_snapshot_size() {
             let list_scope = Scope::new("chats", "", "measured-account");
             let lists = ConversationLists::default();
             let mut scope = Scope::new("chats", "chat-0", "measured-account");
+            scope.timeline = true;
 
             for operation in ["list_rebuild", "live_page", "live_page_cached_list"] {
                 scope.with_list = operation == "live_page_cached_list";

@@ -23,3 +23,12 @@ La conversion avance par familles sémantiques. Un événement présenté par la
 tout double affichage. Les cartes non supprimées restent dans le journal d'exécution ; la
 conversation n'affiche que les cartes marquées `prominent` et omet les réponses `echo`.
 Le MCP public et `cairn_installation` lisent les mêmes cartes avec `read_run_timeline`.
+
+Les applications négocient les cartes du flux avec `timeline=1`. Sans cette option,
+une version déjà installée reçoit encore les événements et les deltas de réponse qu'elle
+sait présenter ; aucun calcul de cartes n'est ajouté à sa lecture. La révision d'historique
+identifie aussi la représentation : `v1` pour ces événements, `v2` pour les cartes. Les pages
+anciennes suivent cette révision validée et un changement de représentation réinitialise
+le flux. Une application récente face à un manager encore en `v1` conserve son curseur et
+son cache, indique que l'installation doit terminer sa mise à jour et réessaie avec un
+recul borné ; elle n'accepte pas une conversation sans ses réponses comme synchronisée.

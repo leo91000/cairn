@@ -51,6 +51,17 @@ afterEach(async () => {
   vi.unstubAllGlobals()
 })
 
+it('shows the installation update transition without declaring an empty conversation synchronized', async () => {
+  const scope = effectScope()
+  scopes.push(scope)
+  const live = scope.run(() => useLiveRun(() => '/chats/updating/stream'))!
+  await vi.waitFor(() => expect(liveConnection).toHaveBeenCalled())
+  vi.mocked(liveConnection).mock.calls[0]![2]('updating')
+  expect(live.connectionNotice.value).toBe('This installation must finish updating. Retrying…')
+  expect(live.synced.value).toBe(false)
+  expect(live.error.value).toBe('')
+})
+
 it('releases list delivery when a conversation is terminally unavailable', async () => {
   const scope = effectScope()
   scopes.push(scope)

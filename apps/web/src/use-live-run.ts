@@ -355,7 +355,19 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
     error,
     position,
     savePosition,
-    connectionNotice: computed(() => error.value ? '' : status.value === 'offline' ? (snapshot.value ? 'Offline · showing saved conversation' : 'Offline') : status.value === 'reconnecting' ? 'Reconnecting…' : status.value === 'connecting' && snapshot.value && slow.value ? 'Updating…' : ''),
+    connectionNotice: computed(() => {
+      if (error.value)
+        return ''
+      if (status.value === 'updating')
+        return 'This installation must finish updating. Retrying…'
+      if (status.value === 'offline')
+        return snapshot.value ? 'Offline · showing saved conversation' : 'Offline'
+      if (status.value === 'reconnecting')
+        return 'Reconnecting…'
+      if (status.value === 'connecting' && snapshot.value && slow.value)
+        return 'Updating…'
+      return ''
+    }),
     reconnect: () => connection?.reconnect(),
   }
 }
