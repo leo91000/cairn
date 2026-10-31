@@ -251,6 +251,7 @@ pub(super) async fn record(
         return Ok(false);
     }
     let Ok(event) = serde_json::from_str::<Value>(raw) else {
+        mark_output_interrupted(checkpoint).await?;
         record_raw(s, id, "output", raw, secrets, log_total).await?;
         return Ok(false);
     };
@@ -287,26 +288,7 @@ pub(super) async fn record(
         return Ok(false);
     }
     if event["type"] == "runner.output_interrupted" {
-        let id = id.to_owned();
-        checkpoint
-            .update_and_publish_if(
-                |c| {
-                    if c.output_interrupted == Some(true) {
-                        return false;
-                    }
-                    c.output_interrupted = Some(true);
-                    true
-                },
-                move |db| {
-                    db.event(
-                        &id,
-                        &EventKind::Status,
-                        "Execution output was interrupted; some activity may be missing.",
-                        None,
-                    )
-                },
-            )
-            .await?;
+        mark_output_interrupted(checkpoint).await?;
         return Ok(false);
     }
     if event["type"] == "runner.start_rejected" {
@@ -375,6 +357,32 @@ pub(super) async fn record(
         let _ = crate::chat_titles::enqueue(s, id).await;
     }
     Ok(exhausted)
+}
+
+/// Malformed/truncated stdout can have lost semantic frames. Diagnostics have
+/// their own channel and never enter this path. Preserve the gap once per attempt.
+async fn mark_output_interrupted(checkpoint: &Checkpoint) -> Result<()> {
+    if checkpoint
+        .read(|saved| saved.output_interrupted == Some(true))
+        .await
+    {
+        return Ok(());
+    }
+    let id = checkpoint.id.clone();
+    checkpoint
+        .decide(move |saved, db| {
+            if saved.output_interrupted == Some(true) {
+                return Ok(());
+            }
+            saved.output_interrupted = Some(true);
+            db.event(
+                &id,
+                &EventKind::Status,
+                "Execution output was interrupted; some activity may be missing.",
+                None,
+            )
+        })
+        .await
 }
 
 async fn record_raw(
@@ -481,6 +489,7 @@ async fn apply_event(
                 run: changed.then_some(changes),
                 failure: failure.map(|(message, cause)| (message, cause, provider_failure)),
                 completed,
+                progress_complete: super::progress::same_semantics(event, stored),
                 last_message: message,
             },
         )

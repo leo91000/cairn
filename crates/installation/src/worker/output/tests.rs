@@ -1376,6 +1376,30 @@ async fn durable_progress_is_atomic_bound_and_survives_restart_without_a_fresh_c
         .await
         .unwrap();
     fixture.event(json!({"type":"turn.started"})).await;
+    let item = json!({"type":"item.updated","item":{"id":"stable","type":"mcp_tool_call","status":"completed","result":"stable-private"}});
+    fixture.event(item.clone()).await;
+    fixture
+        .checkpoint
+        .update(|saved| saved.progress.as_mut().unwrap().advanced_at = Some(2))
+        .await
+        .unwrap();
+    record(
+        &fixture.service,
+        &Output::new(false, item.to_string()),
+        &fixture.checkpoint,
+        false,
+        &["stable-private".into()],
+        &mut fixture.log_total,
+        &mut fixture.activity,
+    )
+    .await
+    .unwrap();
+    let coverage = fixture.checkpoint.snapshot().await.progress.unwrap();
+    assert!(
+        !coverage.complete,
+        "redaction-only changes cannot certify new work"
+    );
+    assert_eq!(coverage.advanced_at, Some(2));
     fixture.event(json!({"type":"turn.completed"})).await;
     let saved = RunCheckpoint::load(&fixture.service.store, &fixture.id)
         .await
@@ -1441,4 +1465,23 @@ async fn durable_progress_is_atomic_bound_and_survives_restart_without_a_fresh_c
         stale.is_err(),
         "old execution output must not advance replacement progress"
     );
+}
+
+#[tokio::test]
+async fn malformed_or_truncated_stdout_retains_a_gap_but_diagnostics_do_not() {
+    for raw in ["{malformed".to_owned(), json!({"type":"item.updated","item":{"id":"message","type":"agent_message","text":"x".repeat(LINE_LIMIT)}}).to_string()] {
+        let mut fixture = Fixture::new().await;
+        fixture.output(Output::new(true,"diagnostic only".into())).await;
+        assert_ne!(fixture.checkpoint.snapshot().await.output_interrupted,Some(true));
+        fixture.output(Output::line(raw.as_bytes(),&[])).await;
+        assert_eq!(fixture.checkpoint.snapshot().await.output_interrupted,Some(true));
+        let saved=RunCheckpoint::load(&fixture.service.store,&fixture.id).await.unwrap().unwrap();
+        assert_eq!(saved.output_interrupted,Some(true));
+        fixture.event(json!({"type":"runner.output_interrupted"})).await;
+        let id=fixture.id.clone();
+        let gaps=fixture.service.store.read(move|db| {
+            Ok(db.events_fixture(&id,0,100)?.iter().filter(|event| event["text"]=="Execution output was interrupted; some activity may be missing.").count())
+        }).await.unwrap();
+        assert_eq!(gaps,1,"one durable gap per execution, even after repeat transport markers");
+    }
 }

@@ -18,7 +18,8 @@ controllers persist an optional `PhysicalFinalized` marker only after their
 workload and physical cleanup complete. The typed client forwards that proof
 without interleaving provider output; the writer records its attempt-bound
 `finalizedAt`. A confirmed nonzero/SIGTERM result can resolve no-progress, while
-failed flushes remain unhealthy and missing certificates remain unknown.
+failed flushes remain unhealthy even without a progress row, and missing
+certificates remain unknown.
 
 Digests cover the supported semantic item fields, excluding duration and transport
 metadata. They remain private to the installation. At 128 distinct items the
@@ -28,9 +29,13 @@ leave long turns unknown. The monitor reports a quiet tool as advisory and retai
 existing incidents; an open tool is not recovery evidence. Plans and initial
 delegated activity use stable semantic fields; spawn-tool
 completion does not end a still-running child. Duration/token/tool-use counters
-and activity notices do not refresh it. Unsupported items, missing item identities,
-unbound background waits and reused child IDs without a child-run identity make
-coverage explicitly unknown until a fresh execution. They cannot leave the
+and activity notices do not refresh it. Redaction or preview changes in semantic fields cannot manufacture progress.
+Unsupported or truncated items, missing item identities, provisional identity
+folding without replay-safe aliases, unbound background waits and reused child
+IDs without a child-run identity make
+coverage explicitly unknown until a fresh execution. Relay gaps and malformed
+or truncated stdout retain the existing durable `outputInterrupted` flag; that
+flag also prevents provider-health certification until a fresh launch. They cannot leave the
 previous provider state falsely complete.
 
 Updates of the small row are throttled to one second; phase/coverage transitions

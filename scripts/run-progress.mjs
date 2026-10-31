@@ -21,6 +21,7 @@ export const runProgressSql = `SELECT r.id,r.status,r.finished_at AS finishedAt,
   json_extract(k.state,'$.turnPending') AS turnPending,
   json_extract(k.state,'$.completed') AS providerCompleted,
   json_extract(k.state,'$.providerFailed') AS providerFailed,
+  json_extract(k.state,'$.outputInterrupted') AS outputInterrupted,
   json_extract(k.state,'$.terminalCode') AS terminalCode,
   json_extract(k.state,'$.finalizationFailureAttempt') AS finalizationFailureAttempt,
   json_extract(k.state,'$.settled.status') AS settledStatus,
@@ -68,11 +69,31 @@ export function progressOccurrence(run) {
 // Values are good / bad / unknown / expected. Only good is recovery evidence.
 export function observeRunProgress(run, now, quietMs = 20 * 60000) {
   const unknown = { status: 'unknown', phase: 'unknown' }
+  if (!['queued', 'running', 'waiting', 'succeeded', 'failed', 'cancelled', 'interrupted'].includes(run.status))
+    return unknown
+  for (const key of ['turnPending', 'providerCompleted', 'providerFailed', 'outputInterrupted', 'recoveryPending']) {
+    const value = run[key]
+    if (value != null && typeof value !== 'boolean' && value !== 0 && value !== 1)
+      return unknown
+  }
+
+  if ((run.attemptId != null && !identity(run.attemptId))
+    || (run.finalizationFailureAttempt != null && !identity(run.finalizationFailureAttempt))
+    || (run.terminalCode != null && (!Number.isSafeInteger(run.terminalCode) || run.terminalCode < 0 || run.terminalCode > 255))) {
+    return unknown
+  }
+
   if (run.turnPending === 1 || run.turnPending === true)
     return { ...unknown, phase: 'pending' }
 
   const terminal = ['succeeded', 'failed', 'interrupted', 'cancelled'].includes(run.status)
   const turn = run.activeMessageId || run.missionTurnId
+  // This durable controller failure is attempt-bound independently of progress
+  // coverage, including executions already running when the writer upgraded.
+  const failedFlush = identity(run.attemptId) && run.finalizationFailureAttempt === run.attemptId
+  if (failedFlush)
+    return { status: 'bad', phase: 'failed_flush' }
+
   const p = run.progress
   const bound = p?.version === 1 && identity(p.executionId) && identity(turn) && p.turnId === turn
     && ((identity(run.attemptId) && p.runnerId === run.attemptId) || (!run.attemptId && sameProcess(p.process, run.process)))
@@ -101,11 +122,10 @@ export function observeRunProgress(run, now, quietMs = 20 * 60000) {
   if (run.status === 'waiting' && finalized)
     return { status: run.validFutureWait === 1 || run.validFutureWait === true ? 'expected' : 'unknown', phase: 'waiting' }
 
-  const failedFlush = identity(run.attemptId) && run.finalizationFailureAttempt === run.attemptId
-  if ((terminal || run.status === 'waiting') && !finalized && !failedFlush)
+  if ((terminal || run.status === 'waiting') && !finalized)
     return { status: 'unknown', phase: 'finalizing', at: p.phaseAt }
 
-  const finalizing = failedFlush || p.phase === 'finalizing' || run.providerCompleted === 1 || run.providerCompleted === true
+  const finalizing = p.phase === 'finalizing' || run.providerCompleted === 1 || run.providerCompleted === true
     || run.providerFailed === 1 || run.providerFailed === true || (run.terminalCode !== null && run.terminalCode !== undefined)
     || run.settledStatus != null
   if (finalizing) {
@@ -114,6 +134,8 @@ export function observeRunProgress(run, now, quietMs = 20 * 60000) {
   }
 
   if (run.status !== 'running')
+    return { status: 'unknown', phase: p.phase }
+  if (run.outputInterrupted === 1 || run.outputInterrupted === true)
     return { status: 'unknown', phase: p.phase }
   if (p.complete !== 1 && p.complete !== true)
     return { ...unknown, phase: p.phase }

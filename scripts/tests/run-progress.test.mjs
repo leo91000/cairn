@@ -211,3 +211,38 @@ it('keeps new-manager/old-node terminal settlement and queued admission unknown'
   expect(observeRunProgress(read(), now).status).toBe('unknown')
   db.close()
 })
+
+it('preserves authoritative legacy flush failures independently of absent progress coverage', () => {
+  const { db, read, write } = fixture({ legacy: true })
+  write({ finalizationFailureAttempt: 'attempt', terminalCode: 70 })
+  for (const status of ['running', 'waiting', 'failed']) {
+    db.prepare('UPDATE runs SET status=?').run(status)
+    expect(observeRunProgress(read(), now)).toMatchObject({ status: 'bad', phase: 'failed_flush' })
+  }
+
+  write({ turnPending: true })
+  expect(observeRunProgress(read(), now).status).toBe('unknown')
+  write({ turnPending: false, runnerId: 'replacement' })
+  expect(observeRunProgress(read(), now).status).toBe('unknown')
+  db.close()
+})
+
+it('keeps relay or parse gaps unknown without hiding positive finalization failure', () => {
+  const { db, read, write } = fixture()
+  write({ outputInterrupted: true }, { advancedAt: now })
+  expect(observeRunProgress(read(), now).status).toBe('unknown')
+  write({ finalizationFailureAttempt: 'attempt', terminalCode: 70 })
+  expect(observeRunProgress(read(), now).status).toBe('bad')
+  write({ finalizationFailureAttempt: null, terminalCode: 0, process: null }, { finalizedAt: now })
+  db.exec('UPDATE runs SET status=\'succeeded\'')
+  expect(observeRunProgress(read(), now).status).toBe('good')
+  db.close()
+})
+
+it('does not certify unsupported checkpoint scalar types', () => {
+  const { db, read, write } = fixture()
+  write({}, { advancedAt: now })
+  for (const mutation of [{ turnPending: 'true' }, { outputInterrupted: 'true' }, { providerCompleted: 2 }, { recoveryPending: 'false' }, { attemptId: 0 }, { terminalCode: -1 }])
+    expect(observeRunProgress({ ...read(), ...mutation }, now).status).toBe('unknown')
+  db.close()
+})

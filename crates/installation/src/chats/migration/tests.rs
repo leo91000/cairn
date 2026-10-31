@@ -774,7 +774,7 @@ async fn actual_version14_preserves_conversations_accounts_leases_and_credential
         assert_eq!(
             db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            19
+            crate::store::DATABASE_VERSION
         );
         assert_eq!(snapshot(&db), retained);
         for before in &chats {

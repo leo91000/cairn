@@ -501,6 +501,7 @@ pub struct EventChanges {
     pub run: Option<crate::runs::RunChanges>,
     pub failure: Option<(String, Option<crate::run_retry::Cause>, bool)>,
     pub completed: bool,
+    pub progress_complete: bool,
     pub last_message: Option<String>,
 }
 
@@ -692,9 +693,12 @@ impl Checkpoint {
             state.last_error().is_empty() || (*provider && !state.provider_failed())
         });
         let mut progress = state.progress.clone();
-        let progress_changed = progress
-            .as_mut()
-            .is_some_and(|progress| progress.observe(&payload, now()));
+        let progress_changed = progress.as_mut().is_some_and(|progress| {
+            if !changes.progress_complete {
+                return progress.mark_incomplete();
+            }
+            progress.observe(&payload, now())
+        });
         let publish_progress = progress_changed
             && progress.as_ref().is_some_and(|next| {
                 state.progress.as_ref().is_none_or(|old| {

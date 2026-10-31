@@ -3,7 +3,7 @@
 use crate::{error::Result, recovery::ProcessIdentity, store::Db};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
@@ -108,7 +108,7 @@ impl Progress {
         }
     }
 
-    fn mark_incomplete(&mut self) -> bool {
+    pub(super) fn mark_incomplete(&mut self) -> bool {
         let changed = self.complete;
         self.complete = false;
         changed
@@ -176,32 +176,38 @@ impl Progress {
             return false;
         }
         let item = &event["item"];
+        if item["details_truncated"] == true
+            || item["replaces_id"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty())
+        {
+            // Lossy previews can change when only counters cross the transport
+            // limit. Identity folding also needs replay-safe alias ownership.
+            // Neither may invent a new substantive clock or an eternal tool.
+            return self.mark_incomplete();
+        }
         let Some(id) = item["id"].as_str().filter(|id| !id.is_empty()) else {
             return self.mark_incomplete();
         };
         let item_type = item["type"].as_str().unwrap_or("");
-        let detail = match item_type {
-            "agent_message" | "reasoning" | "subagent_message" => json!({ "text": item["text"] }),
-            "command_execution" => json!({
-                "output": item["aggregated_output"],
-                "exitCode": item["exit_code"],
-            }),
-            "mcp_tool_call" | "collab_tool_call" => {
-                json!({ "result": item["result"], "error": item["error"] })
-            }
-            "todo_list" if item["items"].is_array() => json!({ "items": item["items"] }),
-            "subagent"
-                if matches!(
-                    item["status"].as_str(),
-                    Some("in_progress" | "completed" | "failed" | "stopped")
-                ) =>
-            {
-                json!({ "result": item["result"] })
-            }
-            "file_change" => json!({ "changes": item["changes"] }),
-            "web_search" => json!({ "action": item["action"], "results": item["results"] }),
-            _ => return self.mark_incomplete(),
+        if item_type == "todo_list" && !item["items"].is_array() {
+            return self.mark_incomplete();
+        }
+        if item_type == "subagent"
+            && !matches!(
+                item["status"].as_str(),
+                Some("in_progress" | "completed" | "failed" | "stopped")
+            )
+        {
+            return self.mark_incomplete();
+        }
+        let Some(fields) = semantic_fields(item_type) else {
+            return self.mark_incomplete();
         };
+        let mut detail = Map::new();
+        for field in fields {
+            detail.insert((*field).to_owned(), item[*field].clone());
+        }
         // Event marker, elapsed time, retries and transport metadata are excluded.
         let fingerprint =
             digest(&json!({ "type": item_type, "status": item["status"], "detail": detail }));
@@ -271,6 +277,50 @@ impl Progress {
         }
         true
     }
+}
+
+fn semantic_fields(kind: &str) -> Option<&'static [&'static str]> {
+    Some(match kind {
+        "agent_message" | "reasoning" | "subagent_message" => &["text"],
+        "command_execution" => &["aggregated_output", "exit_code"],
+        "mcp_tool_call" | "collab_tool_call" => &["result", "error"],
+        "todo_list" => &["items"],
+        "subagent" => &["result"],
+        "file_change" => &["changes"],
+        "web_search" => &["action", "results"],
+        _ => return None,
+    })
+}
+
+/// Redaction/preview changes are representation changes, never work evidence.
+/// Compare borrowed fields before hashing; no unredacted data is retained.
+pub(super) fn same_semantics(source: &Value, stored: &Value) -> bool {
+    if source["type"] != stored["type"] {
+        return false;
+    }
+    if !source["type"]
+        .as_str()
+        .is_some_and(|kind| kind.starts_with("item."))
+    {
+        return true;
+    }
+    let (source, stored) = (&source["item"], &stored["item"]);
+    for field in [
+        "id",
+        "type",
+        "status",
+        "parent_id",
+        "replaces_id",
+        "details_truncated",
+    ] {
+        if source[field] != stored[field] {
+            return false;
+        }
+    }
+    let Some(fields) = semantic_fields(source["type"].as_str().unwrap_or("")) else {
+        return true; // observe() explicitly marks unsupported types incomplete.
+    };
+    fields.iter().all(|field| source[*field] == stored[*field])
 }
 
 fn digest(value: &Value) -> String {
@@ -384,6 +434,46 @@ mod tests {
             assert!(progress.observe(&json!({"type":"turn.completed"}), 5));
             assert_eq!(progress.phase, Phase::Finalizing);
         }
+    }
+
+    #[test]
+    fn guest_and_manager_previews_cannot_turn_a_counter_change_into_progress() {
+        let mut event = json!({"type":"item.updated","item":{"id":"child","type":"subagent","status":"in_progress","result":"r".repeat(5000),"prompt":"","tokens":9}});
+        let padding = crate::run_output::ACTIVITY_DETAIL_LIMIT - event.to_string().len();
+        event["item"]["prompt"] = "p".repeat(padding).into();
+        assert_eq!(
+            event.to_string().len(),
+            crate::run_output::ACTIVITY_DETAIL_LIMIT
+        );
+        let initial: Value =
+            serde_json::from_slice(&crate::run_output::event_line(&event)).unwrap();
+        assert_ne!(initial["item"]["details_truncated"], true);
+        event["item"]["tokens"] = 10.into();
+        assert_eq!(
+            event.to_string().len(),
+            crate::run_output::ACTIVITY_DETAIL_LIMIT + 1
+        );
+        for compacted in [
+            serde_json::from_slice::<Value>(&crate::run_output::event_line(&event)).unwrap(),
+            crate::run_output::compact_activity(&event, &[]),
+        ] {
+            assert_eq!(compacted["item"]["details_truncated"], true);
+            let mut progress = progress();
+            assert!(progress.observe(&initial, 2));
+            assert!(progress.observe(&compacted, 3));
+            assert!(!progress.complete);
+            assert_eq!(progress.advanced_at, Some(2));
+        }
+    }
+
+    #[test]
+    fn provisional_child_folding_becomes_unknown_without_replay_safe_alias_ownership() {
+        let mut progress = progress();
+        progress.observe(&json!({"type":"item.started","item":{"id":"provisional","type":"subagent","status":"in_progress"}}),2);
+        assert!(progress.observe(&json!({"type":"item.completed","item":{"id":"spawn","replaces_id":"provisional","type":"subagent","status":"in_progress"}}),3));
+        assert!(!progress.complete);
+        assert_eq!(progress.advanced_at, Some(2));
+        assert!(!progress.observe(&json!({"type":"item.updated","item":{"id":"spawn","type":"subagent","status":"completed","result":"report"}}),4));
     }
 
     #[test]
