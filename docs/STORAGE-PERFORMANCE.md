@@ -265,10 +265,10 @@ TMPDIR=/var/tmp CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
 
 The reference SQL is frozen from `23dee7bbce3379dc0a9358b06a89ab06d6023d23`.
 Both variants execute in the same binary and fixture. The current measurement
-uses clean committed source `0d22eff79a495fb2f3b577f0850dea36c4e22611`, including
-the runner and concurrent-startup repairs from main, and Rust crate tree
-`65eacca5ad9dbf68ab6d1c8cd039fad4b57a0afc`. The sealed executable SHA-256 is
-`ffd1c7d3936f30807e6b685985fa90bece590059594dcaecc3d3a82d706a4452`.
+uses clean committed source `35c06b5eb42107f402c847d2823479bf53de8e10`, including
+the native-storage and updater candidate integrations, and Rust crate tree
+`6993e5dc971de727f335ac129b1f2b04ca9bd05f`. The sealed executable SHA-256 is
+`dd294ce4389afd817979bb74b999ffe6bdf25adaf45281c1d67ace712b395408`.
 Rust 1.97.1 uses the development profile with the installation package optimized
 at level 2, development dependency defaults, no debug information and no
 incremental compilation. This is not a release-profile or production measurement.
@@ -286,16 +286,22 @@ process was observed immediately before invocation; this remains a shared workst
 
 | Connection | CPU / eight reads, reference → candidate (ms) | Wall / read, reference → candidate (ms) | CPU reduction |
 | --- | ---: | ---: | ---: |
-| Reused | 271.544 → 116.046 | 34.033 → 14.542 | 57.3% |
-| New | 285.945 → 136.670 | 35.871 → 17.127 | 52.2% |
+| Reused | 276.159 → 117.237 | 34.617 → 14.693 | 57.5% |
+| New | 295.957 → 139.837 | 37.095 → 17.527 | 52.8% |
 
 New-connection timings include opening, read-only/foreign-key setup and closing.
 The OS cache stays warm in both conditions; no host cache was evicted. Both
 variants share the unchanged fixture write path: its 64-row construction and
-transaction took 214.224 ms wall / 153.897 ms CPU, before timed reads. This control
+transaction took 237.422 ms wall / 156.942 ms CPU, before timed reads. This control
 includes fixture preparation and is not a separate before/after write comparison.
 The read-only query connection leaves WAL size unchanged in every case. Database,
 snapshot and output formats do not change.
+
+The preceding measurement on `0d22eff79a495fb2f3b577f0850dea36c4e22611`, Rust
+crate tree `65eacca5ad9dbf68ab6d1c8cd039fad4b57a0afc` and sealed executable
+`ffd1c7d3936f30807e6b685985fa90bece590059594dcaecc3d3a82d706a4452`, reported
+57.3% and 52.2% lower CPU for reused and new connections. Its shared fixture write
+control was 214.224 ms wall / 153.897 ms CPU.
 
 An earlier run of the same query/fixture source, before those main integrations,
 used Rust crate tree `9633411a99a706f72cf1bbd7d31d5bf6e2c60446` and sealed binary
