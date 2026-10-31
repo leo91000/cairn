@@ -19,22 +19,6 @@ data class TaskOutcome(
 typealias ChatExecution = build.cairn.contracts.ChatExecution
 
 @Serializable
-data class ExclusiveReservation(
-    val id: String,
-    val nodeId: String,
-    val ownerRunId: String,
-    val reason: String,
-    val state: String,
-    val createdAt: Long = 0,
-    val expiresAt: Long? = null,
-    val renewalPending: Boolean = false,
-    val waitUntil: Long = 0,
-    val pausedRunIds: List<String> = emptyList(),
-    val minimumAvailableMemoryMiB: Long = 0,
-    val error: String? = null,
-)
-
-@Serializable
 data class NodeBackup(
     val id: String? = null,
     val capturedAt: Long? = null,

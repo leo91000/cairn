@@ -75,7 +75,7 @@ suspend fun grantNodeAgents(
     )
 }
 
-typealias ExclusiveReservation = build.cairn.boundary.ExclusiveReservation
+typealias ExclusiveReservation = build.cairn.contracts.ExclusiveReservation
 
 fun exclusiveReservationState(state: String): String =
     when (state) {

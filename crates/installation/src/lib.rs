@@ -102,3 +102,11 @@ pub(crate) mod node_fixture;
 #[cfg(test)]
 #[path = "../tests/common/account_fixture.rs"]
 pub(crate) mod account_fixture;
+
+#[cfg(test)]
+#[path = "../tests/common/attempt_fixture.rs"]
+pub(crate) mod attempt_fixture;
+
+#[cfg(test)]
+#[path = "../tests/common/placement_migration_fixture.rs"]
+pub(crate) mod placement_migration_fixture;

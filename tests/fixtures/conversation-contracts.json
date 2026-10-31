@@ -116,6 +116,33 @@
       "id": "00000000-0000-4000-8000-000000000001",
       "environmentState": "expired",
       "environmentExpiredAt": 1700000000000
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "title": "Exclusive reservation",
+      "agentId": "00000000-0000-4000-8000-000000000001",
+      "projectId": null,
+      "runId": null,
+      "projectName": null,
+      "createdAt": 9007199254740991,
+      "updatedAt": 1,
+      "lifecycle": "active",
+      "questions": [],
+      "messages": [],
+      "suspendedByExclusive": {
+        "id": "00000000-0000-4000-8000-000000000094",
+        "nodeId": "00000000-0000-4000-8000-000000000091",
+        "ownerRunId": "00000000-0000-4000-8000-000000000092",
+        "reason": "Build",
+        "state": "acquired",
+        "createdAt": 123,
+        "expiresAt": null,
+        "renewalPending": false,
+        "waitUntil": 300123,
+        "pausedRunIds": [],
+        "minimumAvailableMemoryMiB": 0,
+        "error": null
+      }
     }
   ],
   "invalidViews": [
