@@ -238,7 +238,8 @@ impl StorageEntity for PlacementRun {
     }
 
     fn reference_schema(db: &Connection) {
-        db.execute_batch("DROP TABLE runs;").unwrap();
+        db.execute_batch("DROP VIEW run_views; DROP TABLE runs;")
+            .unwrap();
         db.execute_batch(include_str!("../fixtures/v12-runs.sql"))
             .unwrap();
     }
@@ -248,7 +249,7 @@ impl StorageEntity for PlacementRun {
     }
 
     fn reference_list(db: &Db<'_>) -> usize {
-        Self::list(db)
+        previous_run::list(db.0).len()
     }
 
     fn reference_write(&self, db: &Db<'_>, replacement: bool) {
@@ -265,6 +266,28 @@ impl StorageEntity for PlacementRun {
     fn reference_delete(db: &Db<'_>, id: &str) {
         db.0.execute("DELETE FROM runs WHERE id=?", [id]).unwrap();
     }
+}
+
+#[tokio::test]
+async fn run_placement_reference_reads_its_released_layout() {
+    let root = tempfile::tempdir().unwrap();
+    drop(Store::open(root.path()).unwrap());
+    let db = connection(&root.path().join("manager.db"));
+    PlacementRun::reference_schema(&db);
+    let state: RunState = serde_json::from_value(json!({
+        "id":identity(1),
+        "taskId":identity(20001),
+        "status":"succeeded",
+        "createdAt":1700000000000_i64,
+        "finishedAt":1700000010000_i64
+    }))
+    .unwrap();
+    let mut value = serde_json::to_value(state).unwrap();
+    value["snapshot"] = Value::Null;
+    let run = PlacementRun(value);
+    run.reference_write(&Db(&db), false);
+    assert_eq!(PlacementRun::reference_read(&Db(&db), &run.id()), run);
+    assert_eq!(PlacementRun::reference_list(&Db(&db)), 1);
 }
 
 #[tokio::test]

@@ -1,4 +1,4 @@
-//! Frozen version-12 point-reader mapping (4af96bbe), only for measurement.
+//! Frozen version-12 point/list reader mappings (4af96bbe), only for measurement.
 use cairn_contracts::{Retry, RunState};
 use cairn_installation::run_status::RunStatus;
 use serde_json::Value;
@@ -89,4 +89,23 @@ pub(super) fn read(db: &rusqlite::Connection, id: &str) -> Value {
         Ok(value)
     })
     .unwrap()
+}
+
+// Version 12 stored summary_data on runs itself. Keep its lifecycle filter and
+// pagination here instead of depending on a future Db::runs projection.
+pub(super) fn list(db: &rusqlite::Connection) -> Vec<Value> {
+    let mut statement = db
+        .prepare_cached(
+            "SELECT summary_data FROM runs WHERE NOT EXISTS (
+           SELECT 1 FROM records c
+           WHERE c.kind='chats' AND json_extract(c.data,'$.runId')=runs.id
+             AND COALESCE(json_extract(c.data,'$.lifecycle'),'active')<>'active'
+         ) ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?",
+        )
+        .unwrap();
+    let rows = statement
+        .query_map(rusqlite::params![1000, 0], |row| row.get::<_, String>(0))
+        .unwrap();
+    rows.map(|row| serde_json::from_str(&row.unwrap()).unwrap())
+        .collect()
 }
