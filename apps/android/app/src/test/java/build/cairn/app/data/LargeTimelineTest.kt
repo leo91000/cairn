@@ -17,6 +17,30 @@ import org.robolectric.annotation.Config
 @Config(sdk = [36])
 class LargeTimelineTest {
     @Test
+    fun `older stream baselines do not corrupt a newer fetched card`() {
+        fun card(revision: Long, text: String): TimelineCard =
+            wireJson.decodeFromString(
+                """{"id":"message:1:a","runId":"run","position":1,"revision":$revision,"source":$revision,"turn":1,"attempt":0,"createdAt":1,"updatedAt":$revision,"content":{"kind":"agentMessage","itemId":"a","text":"$text","state":"running"}}"""
+            )
+        val accumulator = LiveAccumulator()
+        accumulator.append(
+            emptyList(),
+            listOf(build.cairn.contracts.TimelineChange.A(card(5, "latest"))),
+        )
+        accumulator.append(
+            emptyList(),
+            listOf(build.cairn.contracts.TimelineChange.A(card(3, "old"))),
+        )
+        accumulator.append(
+            emptyList(),
+            listOf(build.cairn.contracts.TimelineChange.B("message:1:a", 4, 4, " suffix", 4)),
+        )
+        val shown = accumulator.entries.single()
+        assertEquals(5L, shown.revision)
+        assertEquals("latest", (shown.content as TimelineContent.B).text)
+    }
+
+    @Test
     fun `loads utf8 chunks before returning the card`() = runTest {
         val json =
             """{"id":"message:1:é","runId":"run","position":1,"revision":2,"source":2,"turn":1,"attempt":0,"createdAt":1,"updatedAt":2,"content":{"kind":"agentMessage","itemId":"é","text":"🦊 résultat","state":"done"}}"""

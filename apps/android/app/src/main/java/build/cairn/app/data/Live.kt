@@ -34,6 +34,7 @@ class LiveAccumulator {
 
     private var rows = listOf<RunEvent>()
     private var cards = mapOf<String, TimelineCard>()
+    private var streamCards = mapOf<String, TimelineCard>()
 
     val events: List<RunEvent>
         get() = rows
@@ -45,11 +46,13 @@ class LiveAccumulator {
         cursor = 0
         rows = emptyList()
         cards = emptyMap()
+        streamCards = emptyMap()
     }
 
     fun restore(events: List<RunEvent>, accepted: Long, entries: List<TimelineCard>) {
         rows = events.toList()
         cards = entries.associateBy { it.id }
+        streamCards = cards
         cursor = accepted
     }
 
@@ -67,25 +70,32 @@ class LiveAccumulator {
             last = event.id
         }
         val updated = cards.toMutableMap()
+        val stream = streamCards.toMutableMap()
         for (change in changes) {
             when (change) {
-                is build.cairn.contracts.TimelineChange.A -> upsert(updated, change.entry)
+                is build.cairn.contracts.TimelineChange.A -> {
+                    stream[change.entry.id] = change.entry
+                    upsert(updated, change.entry)
+                }
                 is build.cairn.contracts.TimelineChange.B -> {
-                    val card = updated[change.id]
+                    val card = stream[change.id]
                     val reply = card?.content as? build.cairn.contracts.TimelineContent.B
                     require(card != null && reply != null) { "Texte de référence manquant." }
-                    updated[change.id] =
+                    val next =
                         card.copy(
                             revision = change.revision,
                             source = change.source,
                             updatedAt = change.updatedAt,
                             content = reply.copy(text = reply.text + change.text),
                         )
+                    stream[change.id] = next
+                    upsert(updated, next)
                 }
             }
         }
         rows = next
         cards = updated
+        streamCards = stream
         cursor = maxOf(last, accepted)
     }
 }
