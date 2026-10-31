@@ -1022,3 +1022,415 @@ fn reports_wal_frames_without_checkpointing_or_changing_durability() {
         );
     }
 }
+
+#[tokio::test]
+async fn slow_commit_is_separate_from_transaction_body_and_private_context() {
+    unsafe extern "C" fn wait_during_commit(_: *mut std::ffi::c_void) -> std::ffi::c_int {
+        std::thread::sleep(Duration::from_millis(300));
+        0
+    }
+
+    if isolated_observation("slow_commit_is_separate_from_transaction_body_and_private_context") {
+        return;
+    }
+
+    let capture = Capture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_current_span(true)
+        .with_span_list(true)
+        .without_time()
+        .with_writer(capture.clone())
+        .finish();
+    let dispatcher = tracing::Dispatch::new(subscriber);
+    let (sender, mut receiver) = mpsc::channel::<crate::store::Job>(4);
+    let actor = std::thread::spawn(move || {
+        tracing::dispatcher::with_default(&dispatcher, || {
+            let mut connection = Connection::open_in_memory().unwrap();
+            connection
+                .execute_batch("CREATE TABLE transaction_phase(value TEXT)")
+                .unwrap();
+            // SAFETY: this actor exclusively owns the connection. The static
+            // callback ignores its null context, never unwinds and returns success.
+            unsafe {
+                rusqlite::ffi::sqlite3_commit_hook(
+                    connection.handle(),
+                    Some(wait_during_commit),
+                    std::ptr::null_mut(),
+                );
+            }
+            let private_span = tracing::info_span!(
+                "synthetic_private_transaction_parent",
+                private = "synthetic-private-transaction-parent-never-log"
+            );
+            let _entered = private_span.enter();
+            for _ in 0..2 {
+                receiver.blocking_recv().unwrap()(&mut connection);
+            }
+        });
+    });
+    let store = Store(Arc::new(Pool {
+        writer: sender.clone(),
+        readers: sender,
+        changes: watch::channel(0).0,
+        discarded_changes: Arc::new(AtomicU64::new(0)),
+    }));
+    let private = "synthetic-private-transaction-sql-value-never-log";
+    store
+        .transaction(move |db| {
+            db.0.execute("INSERT INTO transaction_phase VALUES (?1)", [private])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(store.revision(), 1);
+    let value = store
+        .read(|db| {
+            Ok(db
+                .0
+                .query_row("SELECT value FROM transaction_phase", [], |row| {
+                    row.get::<_, String>(0)
+                })?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(value, private);
+    actor.join().unwrap();
+    flush_diagnostics();
+
+    let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+    assert!(!output.contains(private));
+    assert!(!output.contains("synthetic_private_transaction_parent"));
+    assert!(!output.contains("synthetic-private-transaction-parent-never-log"));
+    assert!(!output.contains("INSERT INTO"));
+    let rows = output
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .filter(|row| row["fields"]["operation"] == "database_transaction")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rows.len(),
+        1,
+        "a real slow COMMIT must have one phase report"
+    );
+    let report = &rows[0];
+    assert!(report.get("span").is_none() && report.get("spans").is_none());
+    let fields = &report["fields"];
+    assert_eq!(fields["outcome"], "committed");
+    assert!(fields["commit_us"].as_u64().unwrap() >= 250_000);
+    let measured = ["begin_us", "body_us", "commit_us"]
+        .into_iter()
+        .map(|name| fields[name].as_u64().unwrap())
+        .sum::<u64>();
+    assert!(measured <= fields["total_us"].as_u64().unwrap());
+    #[cfg(target_os = "linux")]
+    {
+        assert_eq!(fields["commit_cpu_available"], true);
+        assert!(fields["commit_cpu_us"].as_u64().unwrap() <= fields["commit_us"].as_u64().unwrap());
+    }
+}
+
+fn observed_transaction_store(
+    connection: Connection,
+    jobs: usize,
+) -> (Store, std::thread::JoinHandle<()>, Capture) {
+    let capture = Capture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .without_time()
+        .with_writer(capture.clone())
+        .finish();
+    let dispatcher = tracing::Dispatch::new(subscriber);
+    let (store, actor) = transaction_actor_store(connection, jobs, dispatcher);
+    (store, actor, capture)
+}
+
+fn transaction_actor_store(
+    mut connection: Connection,
+    jobs: usize,
+    dispatcher: tracing::Dispatch,
+) -> (Store, std::thread::JoinHandle<()>) {
+    let (sender, mut receiver) = mpsc::channel::<crate::store::Job>(4);
+    let actor = std::thread::spawn(move || {
+        tracing::dispatcher::with_default(&dispatcher, || {
+            for _ in 0..jobs {
+                receiver.blocking_recv().unwrap()(&mut connection);
+            }
+        });
+    });
+    let store = Store(Arc::new(Pool {
+        writer: sender.clone(),
+        readers: sender,
+        changes: watch::channel(0).0,
+        discarded_changes: Arc::new(AtomicU64::new(0)),
+    }));
+    (store, actor)
+}
+
+fn transaction_reports(capture: &Capture) -> Vec<serde_json::Value> {
+    flush_diagnostics();
+    let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+    assert!(!output.contains("synthetic-private-transaction"));
+    assert!(!output.contains("INSERT INTO"));
+    output
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .filter(|row| row["fields"]["operation"] == "database_transaction")
+        .collect()
+}
+
+#[tokio::test]
+async fn busy_begin_reports_its_phase_without_running_the_body_or_changing_timeout() {
+    if isolated_observation(
+        "busy_begin_reports_its_phase_without_running_the_body_or_changing_timeout",
+    ) {
+        return;
+    }
+    let root = tempfile::TempDir::new().unwrap();
+    let path = root.path().join("manager.db");
+    let external = Connection::open(&path).unwrap();
+    external
+        .execute_batch(
+            "PRAGMA journal_mode=WAL; CREATE TABLE transaction_phase(value TEXT); BEGIN IMMEDIATE",
+        )
+        .unwrap();
+    let connection = Connection::open(&path).unwrap();
+    connection.busy_timeout(Duration::from_millis(300)).unwrap();
+    let (store, actor, capture) = observed_transaction_store(connection, 3);
+    let error = store
+        .transaction(|_| -> crate::error::Result<()> {
+            panic!("A failed BEGIN must not execute the transaction body")
+        })
+        .await;
+    assert!(error.is_err());
+    assert_eq!(store.revision(), 0);
+    external.execute_batch("COMMIT").unwrap();
+    store
+        .transaction(|db| {
+            db.0.execute(
+                "INSERT INTO transaction_phase VALUES (?1)",
+                ["synthetic-private-transaction-recovered"],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (rows, timeout) = store
+        .read(|db| {
+            Ok((
+                db.0.query_row("SELECT COUNT(*) FROM transaction_phase", [], |row| {
+                    row.get::<_, i64>(0)
+                })?,
+                db.0.pragma_query_value::<i64, _>(None, "busy_timeout", |row| row.get(0))?,
+            ))
+        })
+        .await
+        .unwrap();
+    assert_eq!((rows, timeout, store.revision()), (1, 300, 1));
+    actor.join().unwrap();
+    let rows = transaction_reports(&capture);
+    let failed = rows
+        .iter()
+        .filter(|row| row["fields"]["outcome"] == "begin_error")
+        .collect::<Vec<_>>();
+    assert_eq!(failed.len(), 1);
+    assert!(failed[0]["fields"]["begin_us"].as_u64().unwrap() >= 250_000);
+    assert_eq!(failed[0]["fields"]["body_us"], 0);
+    assert_eq!(failed[0]["fields"]["commit_us"], 0);
+}
+
+#[tokio::test]
+async fn slow_body_failure_preserves_the_error_rollback_and_revision() {
+    if isolated_observation("slow_body_failure_preserves_the_error_rollback_and_revision") {
+        return;
+    }
+    let connection = Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch("CREATE TABLE transaction_phase(value TEXT)")
+        .unwrap();
+    let (store, actor, capture) = observed_transaction_store(connection, 2);
+    let private = "synthetic-private-transaction-body-error-never-log";
+    let error = store
+        .transaction(move |db| -> crate::error::Result<()> {
+            db.0.execute("INSERT INTO transaction_phase VALUES (?1)", [private])?;
+            std::thread::sleep(Duration::from_millis(300));
+            Err(crate::error::Error::conflict(private))
+        })
+        .await
+        .unwrap_err();
+    assert_eq!((error.status, error.message.as_str()), (409, private));
+    let rows = store
+        .read(|db| {
+            Ok(db
+                .0
+                .query_row("SELECT COUNT(*) FROM transaction_phase", [], |row| {
+                    row.get::<_, i64>(0)
+                })?)
+        })
+        .await
+        .unwrap();
+    assert_eq!((rows, store.revision()), (0, 0));
+    actor.join().unwrap();
+    let reports = transaction_reports(&capture);
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0]["fields"]["outcome"], "body_error");
+    assert!(reports[0]["fields"]["body_us"].as_u64().unwrap() >= 250_000);
+    assert_eq!(reports[0]["fields"]["commit_us"], 0);
+}
+
+#[tokio::test]
+async fn slow_commit_failure_preserves_rollback_and_revision() {
+    unsafe extern "C" fn reject_after_waiting(_: *mut std::ffi::c_void) -> std::ffi::c_int {
+        std::thread::sleep(Duration::from_millis(300));
+        1
+    }
+    if isolated_observation("slow_commit_failure_preserves_rollback_and_revision") {
+        return;
+    }
+    let connection = Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch("CREATE TABLE transaction_phase(value TEXT)")
+        .unwrap();
+    // SAFETY: the connection is exclusively transferred to the test actor. The
+    // static hook ignores its null context and requests SQLite's normal rollback.
+    unsafe {
+        rusqlite::ffi::sqlite3_commit_hook(
+            connection.handle(),
+            Some(reject_after_waiting),
+            std::ptr::null_mut(),
+        );
+    }
+    let (store, actor, capture) = observed_transaction_store(connection, 2);
+    assert!(
+        store
+            .transaction(|db| {
+                db.0.execute(
+                    "INSERT INTO transaction_phase VALUES (?1)",
+                    ["synthetic-private-transaction-rejected"],
+                )?;
+                Ok(())
+            })
+            .await
+            .is_err()
+    );
+    let rows = store
+        .read(|db| {
+            Ok(db
+                .0
+                .query_row("SELECT COUNT(*) FROM transaction_phase", [], |row| {
+                    row.get::<_, i64>(0)
+                })?)
+        })
+        .await
+        .unwrap();
+    assert_eq!((rows, store.revision()), (0, 0));
+    actor.join().unwrap();
+    let reports = transaction_reports(&capture);
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0]["fields"]["outcome"], "commit_error");
+    assert!(reports[0]["fields"]["commit_us"].as_u64().unwrap() >= 250_000);
+}
+
+#[tokio::test]
+async fn slow_transaction_with_disabled_diagnostics_still_commits_without_a_report() {
+    if isolated_observation(
+        "slow_transaction_with_disabled_diagnostics_still_commits_without_a_report",
+    ) {
+        return;
+    }
+    let capture = Capture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::level_filters::LevelFilter::OFF)
+        .with_writer(capture.clone())
+        .finish();
+    let connection = Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch("CREATE TABLE transaction_phase(value INTEGER)")
+        .unwrap();
+    let (store, actor) = transaction_actor_store(connection, 2, tracing::Dispatch::new(subscriber));
+    store
+        .transaction(|db| {
+            db.0.execute("INSERT INTO transaction_phase VALUES (17)", [])?;
+            std::thread::sleep(Duration::from_millis(300));
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let value = store
+        .read(|db| {
+            Ok(db
+                .0
+                .query_row("SELECT value FROM transaction_phase", [], |row| {
+                    row.get::<_, i64>(0)
+                })?)
+        })
+        .await
+        .unwrap();
+    assert_eq!((value, store.revision()), (17, 1));
+    actor.join().unwrap();
+    flush_diagnostics();
+    assert!(capture.0.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn blocked_slow_transaction_report_cannot_delay_its_result_or_next_job() {
+    if isolated_observation("blocked_slow_transaction_report_cannot_delay_its_result_or_next_job") {
+        return;
+    }
+    let (entered, observed) = std::sync::mpsc::sync_channel(1);
+    let output = Arc::new(BlockedOutput {
+        open: Mutex::new(false),
+        wake: std::sync::Condvar::new(),
+        entered,
+    });
+    let writer = output.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || BlockedWriter(writer.clone()))
+        .finish();
+    let connection = Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch("CREATE TABLE transaction_phase(value INTEGER)")
+        .unwrap();
+    let (store, actor) = transaction_actor_store(connection, 2, tracing::Dispatch::new(subscriber));
+    let first = tokio::time::timeout(
+        Duration::from_secs(2),
+        store.transaction(|db| {
+            db.0.execute("INSERT INTO transaction_phase VALUES (17)", [])?;
+            std::thread::sleep(Duration::from_millis(300));
+            Ok(())
+        }),
+    )
+    .await;
+    let log_entered = observed.recv_timeout(Duration::from_secs(2));
+    let next = tokio::time::timeout(
+        Duration::from_secs(1),
+        store.read(|db| {
+            Ok(db
+                .0
+                .query_row("SELECT value + 6 FROM transaction_phase", [], |row| {
+                    row.get::<_, i64>(0)
+                })?)
+        }),
+    )
+    .await;
+    // Release even a broken implementation before assertions and actor joining.
+    *output.open.lock().unwrap() = true;
+    output.wake.notify_all();
+    actor.join().unwrap();
+    flush_diagnostics();
+    assert!(
+        first.is_ok(),
+        "A diagnostic sink must not delay the transaction reply"
+    );
+    first.unwrap().unwrap();
+    assert!(
+        log_entered.is_ok(),
+        "The real slow-transaction event must reach the blocked sink"
+    );
+    assert!(
+        next.is_ok(),
+        "A diagnostic sink must not delay a subsequent SQLite job"
+    );
+    assert_eq!(next.unwrap().unwrap(), 23);
+    assert_eq!(store.revision(), 1);
+}
