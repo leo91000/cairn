@@ -3,8 +3,10 @@ use rusqlite::Connection;
 use std::time::{Duration, Instant};
 
 mod cache;
+mod wal;
 
 use cache::Cache;
+use wal::Wal;
 
 #[cfg(test)]
 mod tests;
@@ -86,6 +88,15 @@ impl Metrics {
             .and_then(|(now, before)| now.delta(before));
         let cache_available = delta.is_some();
         let cache_values = delta.unwrap_or_default();
+        // These are point-in-time values at window end, not interval deltas.
+        // Only the writer samples WAL state; NOOP never performs a checkpoint.
+        let wal = if self.lane == "write" {
+            Wal::read(connection)
+        } else {
+            None
+        };
+        let wal_available = wal.is_some();
+        let wal_values = wal.unwrap_or_default();
         tracing::info!(
             target: "cairn_performance",
             operation = "database_actor",
@@ -106,6 +117,12 @@ impl Metrics {
             cache_misses = cache_values.misses,
             cache_writes = cache_values.writes,
             cache_bytes = cache_values.bytes,
+            wal_available,
+            wal_frames = wal_values.frames,
+            wal_checkpointed_frames = wal_values.checkpointed_frames,
+            wal_pending_frames = wal_values.pending_frames,
+            wal_autocheckpoint_frames = wal_values.autocheckpoint_frames,
+            sqlite_synchronous = wal_values.synchronous,
         );
         *self = Self::window(self.lane, self.index, cache);
     }
