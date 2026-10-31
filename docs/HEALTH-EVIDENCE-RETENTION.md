@@ -80,6 +80,12 @@ This contract neither acknowledges incidents or coverage gaps nor clears cursors
 outbox entries or recovery state. A clean new observation does not erase evidence
 of a transient incident awaiting delivery.
 
+The private ownership policy suppresses notifications only for a proven matching
+owner. Malformed ownership records cannot stop observation or hide fresh evidence.
+It passes the original registry unchanged to this archive engine: an unknown
+protection record still blocks every archive mutation and produces an explicit
+diagnostic, rather than being replaced with an empty protection list.
+
 ## Validation
 
 Run `node --test scripts/tests/health-evidence-retention.node.mjs`. The normal
