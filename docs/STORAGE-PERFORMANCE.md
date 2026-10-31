@@ -236,3 +236,75 @@ Public executable SHA-256 values:
 
 Use post-release actor queue/CPU measurements and the actual workload to assess
 production impact. Retain raw numeric observations outside the repository.
+
+## Publication reference retirement
+
+Retirement marks a publication's exclusively owned objects as unused before
+deleting its references. The outer membership predicate guarantees one reference
+from the retiring publication. Since `(publication, object)` is unique and both
+columns are non-null, any second reference means another publication still owns
+the object. The query now checks that second index entry without loading the
+reference table's publication value. The existing object index, ACK fences,
+transaction boundary, timestamp rules and GC grace period remain unchanged.
+
+The bundled SQLite 3.53.2 plan guard fails on the reference table lookup and
+passes with the covering index. The differential regression checks all 32 owner
+sets across four object states, including unowned objects and existing unused
+timestamps. The complete shared-block module passes 14 tests; two optional
+measurements remain separately selected.
+
+Run the paired committed-transaction measurement alone:
+
+```sh
+TMPDIR=/var/tmp CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
+  pnpm test:backend -p cairn-installation \
+  --config 'profile.dev.package.cairn-installation.opt-level=2' \
+  --lib nodes::shared_blocks::retirement_tests::retirement_transaction_measurement \
+  -- --exact --ignored --nocapture --test-threads=1
+```
+
+The frozen reference is from `1aa24dc825f909874852ffd24213080f9443b8db`.
+Candidate Rust inputs are crate tree `ca3018b31f84474cdec11984e00ded3724298922`;
+the sealed measurement executable SHA-256 is
+`3672a5392dcb5ac1718d3b2cd19f796590f17d541ab2024c7e131c07e495c1a5`.
+Rust 1.97.1 uses development dependency defaults, installation package opt-level
+2, no debug information and no incremental compilation. This is not a release
+profile or a production measurement.
+
+Measured on 2026-10-31 on the shared Intel i9-14900K workstation described above,
+with bundled SQLite 3.53.2 and disk-backed `/var/tmp`. Task-owned compilation
+finished before the measurement; other-user Rust compilation was observed
+immediately before invocation. The host was not dedicated or isolated.
+
+The 33,370,112-byte synthetic database has 65,536 objects and 78,644 references.
+The retiring publication owns 19,661 references. Each variant receives a fresh
+copy and SQLite connection, WAL mode and enabled foreign keys before timing.
+Four alternating-order pairs time `BEGIN IMMEDIATE`, the actual release
+statements, cascading reference deletion and `COMMIT`. Copying, connection/PRAGMA
+setup and verification are excluded. The OS cache is warm after copying; no
+host cache eviction was attempted. The shared fixture write control takes
+1,120.257 ms wall / 840.452 ms CPU, including preparation and commit; it is not
+a before/after write comparison.
+
+| Committed retirement | Reference median (ms) | Candidate median (ms) | Change |
+| --- | ---: | ---: | ---: |
+| Process CPU | 159.888 | 149.631 | -6.4% |
+| Wall time | 380.867 | 390.399 | +2.5% |
+
+Every trial has the same 32,769 changed rows and 19,450,552 WAL bytes. Foreign-key
+checks pass. Final object/publication/reference states compare equal after
+normalizing naturally different retirement timestamps. The diagnostic JSON
+representation of that normalized state is 12,681,350 bytes; this is neither
+stored-object nor wire-format size. Database and object formats do not change.
+The CPU improvement is modest and **no wall-time improvement is demonstrated**.
+The observed wall-time increase and shared-host conditions must remain visible.
+
+A separate read-only exploration on a private offline production snapshot uses
+Node SQLite 3.53.4, a network-isolated 0.5-CPU/256-MiB container and warm OS cache.
+Selected object IDs compare equal in memory, with no IDs or contents exported.
+For 2,270-reference and 17,405-reference publications, median selection CPU is
+34.465 → 22.521 ms and 245.698 → 144.805 ms respectively. Empty and 29-reference
+cases rise from 0.054 → 0.055 ms and 0.224 → 0.238 ms. These SELECT-only figures
+exclude writes, cascading deletion and commit and cannot replace the actual
+bundled-SQLite transaction measurement. Production effect still requires
+post-release CPU, actor-queue and storage observations under the real workload.
