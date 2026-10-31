@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { runInNewContext } from 'node:vm'
 import { describe, expect, it } from 'vitest'
 import { parse } from 'yaml'
@@ -58,25 +58,57 @@ describe('parallel CI coverage', () => {
     }
   })
 
-  it('refreshes one compiled cache per commit and restores compatible earlier builds', () => {
-    const action = parse(readFileSync(new URL('../../.github/actions/cache-rust/action.yaml', import.meta.url), 'utf8'))
-    const key = action.runs.steps.find(step => step.id === 'key')
-    expect(key.env.CACHE_REVISION).toContain('github.sha')
-    expect(key.run).toContain('primary=$CACHE_PREFIX-$CACHE_REVISION')
-    expect(key.run).toContain('fallback=$CACHE_PREFIX-')
-    const writer = action.runs.steps.find(step => step.uses?.startsWith('actions/cache@'))
-    const reader = action.runs.steps.find(step => step.uses?.startsWith('actions/cache/restore@'))
-    expect(writer.if).toBe('inputs.save == \'true\'')
-    expect(reader.if).toBe('inputs.save != \'true\'')
-    expect(writer.with).toEqual(reader.with)
-    expect(writer.with['restore-keys']).toContain('steps.key.outputs.fallback')
-    const bootstrap = action.runs.steps.find(step => step.id === 'bootstrap')
-    expect(bootstrap.run).toContain('! -d target/debug/deps')
-    const legacy = action.runs.steps.find(step => step.name === 'Bootstrap from the previous cache format')
-    expect(legacy.if).toContain('steps.bootstrap.outputs.needed == \'true\'')
-    expect(legacy.with.path.trim().split('\n').map(line => line.trim())).toEqual(['~/.cargo/registry/', '~/.cargo/git/', 'target/'])
-    const owners = Object.entries(quality.jobs).filter(([, job]) => job.steps?.some(step => step.uses === './.github/actions/cache-rust' && step.with?.save === true))
-    expect(owners.map(([name]) => name)).toEqual(['backend'])
+  it('keeps shared Rust preparation cold and preserves only exact native reference caching', () => {
+    expect(existsSync(new URL('../../.github/actions/cache-rust/action.yaml', import.meta.url))).toBe(false)
+    for (const name of ['build', 'rust-check', 'backend', 'node-checks']) {
+      const steps = quality.jobs[name].steps
+      expect(steps.some(step => step.uses === './.github/actions/cache-rust')).toBe(false)
+      expect(steps.some(step => step.uses?.startsWith('actions/cache'))).toBe(false)
+    }
+
+    const referenceCaches = quality.jobs['native-runtime'].steps.filter(step => step.uses?.startsWith('actions/cache'))
+    expect(referenceCaches).toHaveLength(2)
+    for (const step of referenceCaches) {
+      expect(step.with.path).toBe('reference-native/')
+      expect(step.with.key).toContain('steps.native-reference-key.outputs.key')
+    }
+
+    expect(referenceCaches[0].with.key).toBe(referenceCaches[1].with.key)
+  })
+
+  it('observes capacity around actual cold builds without introducing a cache or writer mode', () => {
+    const action = parse(readFileSync(new URL('../../.github/actions/observe-rust-build/action.yaml', import.meta.url), 'utf8'))
+    expect(Object.keys(action.inputs)).toEqual(['phase'])
+    expect(action.runs.steps.some(step => step.uses?.startsWith('actions/cache'))).toBe(false)
+    const observation = action.runs.steps.find(step => step.run?.includes('ci-rust-build-observation.mjs'))
+    expect(observation['continue-on-error']).toBe(true)
+    const upload = action.runs.steps.find(step => step.uses?.startsWith('actions/upload-artifact'))
+    expect(upload['continue-on-error']).toBe(true)
+    expect(upload.with.path).toContain('runner.temp')
+    for (const name of ['build', 'rust-check', 'backend', 'node-checks']) {
+      const steps = quality.jobs[name].steps
+      const before = steps.findIndex(step => step.uses === './.github/actions/observe-rust-build' && step.with?.phase === 'before-build')
+      const after = steps.findIndex(step => step.uses === './.github/actions/observe-rust-build' && step.with?.phase === 'after-build')
+      expect(before).toBeGreaterThan(-1)
+      expect(after).toBeGreaterThan(before)
+      expect(after).toBe(steps.length - 1)
+      expect(steps[after].if).toBe('always()')
+    }
+  })
+
+  it('observes exact archived native fixtures symmetrically while keeping original binaries and qualification flags', () => {
+    const steps = quality.jobs['native-runtime'].steps
+    const reference = steps.find(step => step.name === 'Qualify the exact reference on the current disposable host')
+    const candidate = steps.find(step => step.name === 'Qualify real ublk, S3, eviction, systemd ownership and crash recovery')
+    expect(reference.run).toContain('git archive "$REFERENCE_SHA" scripts/tests deploy/nodes/native-host.py')
+    expect(candidate.run).toContain('git archive HEAD scripts/tests deploy/nodes/native-host.py')
+    expect(reference.run).toContain('native_admission_overlay.py "$reference_fixture" reference')
+    expect(candidate.run).toContain('native_admission_overlay.py "$candidate_fixture" candidate')
+    expect(reference.run).toContain('--repo "$reference_fixture" --native-runtime reference-native/cairn --qualifier reference-native/examples/native_storage_qualifier')
+    expect(candidate.run).toContain('--repo "$candidate_fixture" --native-runtime target/debug/cairn --qualifier target/debug/examples/native_storage_qualifier')
+    expect(candidate.run).toContain('CAIRN_NATIVE_DOCKER_QUALIFY=1')
+    expect(reference.run).not.toContain('CAIRN_NATIVE_DOCKER_QUALIFY=1')
+    expect(steps.indexOf(candidate)).toBeGreaterThan(steps.indexOf(reference))
   })
 
   it('gives installer and update fixtures their own database and web assets', () => {
