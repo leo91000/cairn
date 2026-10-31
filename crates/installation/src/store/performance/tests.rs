@@ -6,6 +6,7 @@ use std::{
 };
 use tokio::sync::{mpsc, watch};
 use tracing_subscriber::fmt::MakeWriter;
+use tracing_subscriber::prelude::*;
 
 #[derive(Clone, Default)]
 struct Capture(Arc<Mutex<Vec<u8>>>);
@@ -39,6 +40,413 @@ async fn write_probe(store: &Store, private: String) -> usize {
 
 async fn transaction_probe(store: &Store, private: String) -> usize {
     store.transaction(move |_| Ok(private.len())).await.unwrap()
+}
+
+async fn sql_cost_probe(store: &Store, private: String) -> i64 {
+    store
+        .write(move |db| {
+            let mut statement = db.0.prepare_cached("SELECT length(?1)")?;
+            let mut total = 0;
+            for _ in 0..1024 {
+                total += statement.query_row([&private], |row| row.get::<_, i64>(0))?;
+            }
+            Ok(total)
+        })
+        .await
+        .unwrap()
+}
+
+async fn failed_cost_probe(store: &Store, private: String) -> crate::error::Result<usize> {
+    store
+        .transaction(move |_| Err(crate::error::Error::bad(private)))
+        .await
+}
+
+#[tokio::test]
+async fn caller_costs_include_failed_work_after_its_receiver_is_abandoned() {
+    let capture = Capture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(capture.clone())
+        .finish();
+    let dispatcher = tracing::Dispatch::new(subscriber);
+    let (sender, mut receiver) = mpsc::channel::<crate::store::Job>(4);
+    let store = Store(Arc::new(Pool {
+        writer: sender.clone(),
+        readers: sender,
+        changes: watch::channel(0).0,
+        discarded_changes: Arc::new(AtomicU64::new(0)),
+    }));
+    let private = "synthetic-private-failed-caller-never-log";
+    let task = tokio::spawn(async move { failed_cost_probe(&store, private.into()).await });
+    let job = receiver.recv().await.unwrap();
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    std::thread::spawn(move || {
+        tracing::dispatcher::with_default(&dispatcher, || {
+            let mut connection = Connection::open_in_memory().unwrap();
+            let mut metrics = Metrics::new("write", 0, &connection);
+            let completed = job(&mut connection);
+            assert!(completed.failed);
+            assert!(completed.abandoned_reply);
+            metrics.since = Instant::now() - Duration::from_secs(31);
+            metrics.record(&completed, &connection);
+        });
+    })
+    .join()
+    .unwrap();
+    let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+    assert!(!output.contains(private));
+    let caller = output
+        .lines()
+        .find(|line| line.contains("operation=\"database_caller\""))
+        .unwrap();
+    assert!(caller.contains("failed_cost_probe"));
+    assert!(caller.contains("completed=1"));
+    assert!(caller.contains("errors=1"));
+    assert!(caller.contains("abandoned_replies=1"));
+}
+
+#[tokio::test]
+async fn real_reader_jobs_skip_cpu_sampling_and_caller_cost_rows() {
+    let capture = Capture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(capture.clone())
+        .finish();
+    let dispatcher = tracing::Dispatch::new(subscriber);
+    let (writer, _writer_receiver) = mpsc::channel::<crate::store::Job>(4);
+    let (readers, mut receiver) = mpsc::channel::<crate::store::Job>(4);
+    let store = Store(Arc::new(Pool {
+        writer,
+        readers,
+        changes: watch::channel(0).0,
+        discarded_changes: Arc::new(AtomicU64::new(0)),
+    }));
+    let task = tokio::spawn(async move { read_probe(&store, "private-reader-value".into()).await });
+    let job = receiver.recv().await.unwrap();
+    std::thread::spawn(move || {
+        tracing::dispatcher::with_default(&dispatcher, || {
+            let mut connection = Connection::open_in_memory().unwrap();
+            let mut metrics = Metrics::new("read", 0, &connection);
+            let completed = job(&mut connection);
+            assert!(completed.cpu.is_none());
+            metrics.since = Instant::now() - Duration::from_secs(31);
+            metrics.record(&completed, &connection);
+            assert_eq!(metrics.callers.len(), 0);
+        });
+    })
+    .join()
+    .unwrap();
+    assert_eq!(task.await.unwrap(), "private-reader-value".len());
+    let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+    assert_eq!(output.lines().count(), 1);
+    assert!(output.contains("operation=\"database_actor\""));
+    assert!(output.contains("cpu_available=false"));
+    assert!(output.contains("cpu_sampled_jobs=0"));
+    assert!(!output.contains("database_caller"));
+    assert!(!output.contains("private-reader-value"));
+}
+
+#[tokio::test]
+async fn json_cost_rows_isolate_both_current_span_and_span_list() {
+    let capture = Capture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_current_span(true)
+        .with_span_list(true)
+        .without_time()
+        .with_writer(capture.clone())
+        .finish();
+    let dispatcher = tracing::Dispatch::new(subscriber);
+    let (sender, mut receiver) = mpsc::channel::<crate::store::Job>(4);
+    let actor = std::thread::spawn(move || {
+        tracing::dispatcher::with_default(&dispatcher, || {
+            let mut connection = Connection::open_in_memory().unwrap();
+            let mut metrics = Metrics::new("write", 0, &connection);
+            let private_span = tracing::info_span!(
+                "synthetic_private_json_parent",
+                private = "synthetic-private-json-parent-never-log"
+            );
+            let _entered = private_span.enter();
+            let completed = receiver.blocking_recv().unwrap()(&mut connection);
+            metrics.since = Instant::now() - Duration::from_secs(31);
+            metrics.record(&completed, &connection);
+        });
+    });
+    let store = Store(Arc::new(Pool {
+        writer: sender.clone(),
+        readers: sender,
+        changes: watch::channel(0).0,
+        discarded_changes: Arc::new(AtomicU64::new(0)),
+    }));
+    let private = "synthetic-private-json-capture-never-log";
+    assert_eq!(write_probe(&store, private.into()).await, private.len());
+    actor.join().unwrap();
+    let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+    assert!(!output.contains(private));
+    assert!(!output.contains("synthetic_private_json_parent"));
+    assert!(!output.contains("synthetic-private-json-parent-never-log"));
+    let rows = output
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| {
+        row["span"]["name"] == "database_metrics"
+            && row["spans"] == serde_json::json!([{ "name": "database_metrics" }])
+    }));
+}
+
+#[test]
+fn disabled_diagnostic_span_suppresses_event_without_inheriting_private_context() {
+    let capture = Capture::default();
+    let layer = tracing_subscriber::fmt::layer()
+        .json()
+        .with_current_span(true)
+        .with_span_list(true)
+        .without_time()
+        .with_writer(capture.clone())
+        .with_filter(tracing_subscriber::filter::filter_fn(|metadata| {
+            metadata.is_event() || metadata.name() == "synthetic_private_filter_span"
+        }));
+    let subscriber = tracing_subscriber::registry().with(layer);
+    tracing::subscriber::with_default(subscriber, || {
+        let private_span = tracing::info_span!(
+            "synthetic_private_filter_span",
+            private = "synthetic-private-filter-never-log"
+        );
+        let _entered = private_span.enter();
+        let disabled = tracing::info_span!(
+            target: "cairn_performance",
+            parent: None,
+            "database_metrics"
+        );
+        assert!(disabled.is_disabled());
+        assert!(tracing::event_enabled!(target: "cairn_performance", tracing::Level::INFO));
+        let connection = Connection::open_in_memory().unwrap();
+        let mut metrics = Metrics::new("write", 0, &connection);
+        metrics.since = Instant::now() - Duration::from_secs(31);
+        metrics.record(
+            &Completed {
+                caller: "fixed_filter_test_caller",
+                queue: Duration::ZERO,
+                execution: Duration::ZERO,
+                cpu: None,
+                failed: false,
+                abandoned_reply: false,
+            },
+            &connection,
+        );
+        assert_eq!(metrics.completed, 0);
+        assert_eq!(metrics.window, 1);
+    });
+    assert!(capture.0.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn writer_reports_cumulative_costs_for_real_originating_jobs_without_values() {
+    let capture = Capture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(capture.clone())
+        .finish();
+    let dispatcher = tracing::Dispatch::new(subscriber);
+    let (sender, mut receiver) = mpsc::channel::<crate::store::Job>(4);
+    let actor = std::thread::spawn(move || {
+        tracing::dispatcher::with_default(&dispatcher, || {
+            let mut connection = Connection::open_in_memory().unwrap();
+            let mut metrics = Metrics::new("write", 0, &connection);
+            let private_span = tracing::info_span!(
+                "synthetic_private_parent",
+                private = "synthetic-private-parent-never-log"
+            );
+            let _entered = private_span.enter();
+            for index in 0..4 {
+                let job = receiver.blocking_recv().unwrap();
+                let completed = job(&mut connection);
+                if index == 3 {
+                    metrics.since = Instant::now() - Duration::from_secs(31);
+                }
+                metrics.record(&completed, &connection);
+            }
+            assert_eq!(metrics.callers.len(), 0);
+            assert_eq!(metrics.cpu_us, 0);
+            assert_eq!(metrics.cpu_sampled_jobs, 0);
+            assert_eq!(metrics.window, 1);
+        });
+    });
+    let store = Store(Arc::new(Pool {
+        writer: sender.clone(),
+        readers: sender,
+        changes: watch::channel(0).0,
+        discarded_changes: Arc::new(AtomicU64::new(0)),
+    }));
+    let private = "synthetic-private-caller-cost-never-log";
+    for _ in 0..3 {
+        assert_eq!(
+            sql_cost_probe(&store, private.into()).await,
+            i64::try_from(private.len()).unwrap() * 1024
+        );
+    }
+    assert_eq!(write_probe(&store, private.into()).await, private.len());
+    actor.join().unwrap();
+
+    let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+    assert!(!output.contains(private));
+    assert!(!output.contains("synthetic-private-parent-never-log"));
+    assert!(!output.contains("SELECT"));
+    let callers = output
+        .lines()
+        .filter(|line| line.contains("operation=\"database_caller\""))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        callers.len(),
+        2,
+        "Writer diagnostics must report cumulative costs per originating function"
+    );
+    let repeated = callers
+        .iter()
+        .find(|line| line.contains("sql_cost_probe"))
+        .unwrap();
+    assert!(repeated.contains("completed=3"));
+    let repeated_cpu_jobs = if cfg!(target_os = "linux") { 3 } else { 0 };
+    assert!(repeated.contains(&format!("cpu_sampled_jobs={repeated_cpu_jobs}")));
+    assert!(repeated.contains("execution_us="));
+    assert!(repeated.contains("cpu_us="));
+    let once = callers
+        .iter()
+        .find(|line| line.contains("tests::write_probe"))
+        .unwrap();
+    assert!(once.contains("completed=1"));
+    let once_cpu_jobs = if cfg!(target_os = "linux") { 1 } else { 0 };
+    assert!(once.contains(&format!("cpu_sampled_jobs={once_cpu_jobs}")));
+}
+
+#[test]
+fn caller_cost_rows_bound_cardinality_and_account_for_omitted_jobs() {
+    let capture = Capture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(capture.clone())
+        .finish();
+    let mut callers = Callers::default();
+    for index in 0..66 {
+        let name: &'static str =
+            Box::leak(format!("bounded_test_caller_{index:02}").into_boxed_str());
+        callers.record(&Completed {
+            caller: name,
+            queue: Duration::from_micros(2),
+            execution: Duration::from_micros(20),
+            cpu: Some(Duration::from_micros(10)),
+            failed: false,
+            abandoned_reply: false,
+        });
+    }
+    assert_eq!(callers.len(), 64);
+    assert_eq!(callers.recorded_jobs, 66);
+    assert_eq!(callers.untracked_jobs, 2);
+    tracing::subscriber::with_default(subscriber, || {
+        callers.emit(
+            0,
+            7,
+            30_000,
+            Totals {
+                completed: 66,
+                queue_us: 132,
+                execution_us: 1320,
+                cpu_us: 660,
+                cpu_sampled_jobs: 66,
+                ..Totals::default()
+            },
+        );
+    });
+    let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+    let rows = output.lines().collect::<Vec<_>>();
+    assert!(rows.len() <= 17);
+    assert!(!output.contains("bounded_test_caller_64"));
+    assert!(!output.contains("bounded_test_caller_65"));
+    let total = |field: &str| {
+        rows.iter()
+            .map(|row| {
+                row.split_whitespace()
+                    .find_map(|token| token.strip_prefix(&format!("{field}=")))
+                    .unwrap()
+                    .parse::<u64>()
+                    .unwrap()
+            })
+            .sum::<u64>()
+    };
+    assert_eq!(total("completed"), 66);
+    assert_eq!(total("queue_us"), 132);
+    assert_eq!(total("execution_us"), 1320);
+    assert_eq!(total("cpu_us"), 660);
+    assert_eq!(total("cpu_sampled_jobs"), 66);
+    assert!(rows.iter().any(|row| row.contains("other=true")));
+    assert!(rows.iter().all(|row| row.contains("window=7")));
+}
+
+#[test]
+fn caller_cost_rows_include_cpu_and_wall_leaders_without_duplicates() {
+    let capture = Capture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(capture.clone())
+        .finish();
+    let mut callers = Callers::default();
+    for index in 0..17 {
+        let name: &'static str =
+            Box::leak(format!("ranked_test_caller_{index:02}").into_boxed_str());
+        callers.record(&Completed {
+            caller: name,
+            queue: Duration::ZERO,
+            execution: Duration::from_micros(if index < 8 { 100 } else { 1 }),
+            cpu: Some(Duration::from_micros(if (8..16).contains(&index) {
+                100
+            } else {
+                1
+            })),
+            failed: false,
+            abandoned_reply: false,
+        });
+    }
+    tracing::subscriber::with_default(subscriber, || {
+        callers.emit(
+            0,
+            0,
+            30_000,
+            Totals {
+                completed: 17,
+                execution_us: 809,
+                cpu_us: 809,
+                cpu_sampled_jobs: 17,
+                ..Totals::default()
+            },
+        );
+    });
+    let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+    assert_eq!(output.lines().count(), 17);
+    for index in 0..16 {
+        assert_eq!(
+            output
+                .matches(&format!("ranked_test_caller_{index:02}\""))
+                .count(),
+            1
+        );
+    }
+    assert!(!output.contains("ranked_test_caller_16"));
+    let other = output
+        .lines()
+        .find(|row| row.contains("other=true"))
+        .unwrap();
+    assert!(other.contains("completed=1"));
+    assert!(other.contains("execution_us=1"));
+    assert!(other.contains("cpu_us=1"));
 }
 
 #[tokio::test]
@@ -80,8 +488,18 @@ async fn reports_originating_read_write_and_transaction_without_captured_values(
 
     let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
     assert!(!output.contains(private));
-    let lines = output.lines().collect::<Vec<_>>();
+    let lines = output
+        .lines()
+        .filter(|line| line.contains("operation=\"database_actor\""))
+        .collect::<Vec<_>>();
     assert_eq!(lines.len(), 3);
+    assert_eq!(
+        output
+            .lines()
+            .filter(|line| line.contains("operation=\"database_caller\""))
+            .count(),
+        3
+    );
     for (line, origin) in lines
         .iter()
         .zip(["read_probe", "write_probe", "transaction_probe"])
@@ -109,6 +527,7 @@ fn keeps_queue_and_execution_origins_separate_and_resets_between_windows() {
         caller,
         queue: Duration::from_micros(queue),
         execution: Duration::from_micros(execution),
+        cpu: None,
         failed: false,
         abandoned_reply: false,
     };
@@ -184,6 +603,7 @@ fn reports_wal_frames_without_checkpointing_or_changing_durability() {
                 caller: "fixed_test_caller",
                 queue: Duration::ZERO,
                 execution: Duration::ZERO,
+                cpu: None,
                 failed: false,
                 abandoned_reply: false,
             },
@@ -201,7 +621,20 @@ fn reports_wal_frames_without_checkpointing_or_changing_durability() {
     for private in ["synthetic-private", "private_values", "UPDATE", "INSERT"] {
         assert!(!output.contains(private));
     }
-    assert_eq!(output.lines().count(), 1);
+    assert_eq!(
+        output
+            .lines()
+            .filter(|line| line.contains("operation=\"database_actor\""))
+            .count(),
+        1
+    );
+    assert_eq!(
+        output
+            .lines()
+            .filter(|line| line.contains("operation=\"database_caller\""))
+            .count(),
+        1
+    );
     assert_eq!(frames(), before);
     assert_eq!(connection.total_changes(), changes_before);
     assert_eq!(std::fs::read(&database).unwrap(), database_before);

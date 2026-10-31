@@ -80,6 +80,58 @@ and compiler names can change between builds; these are not stable operation
 identifiers or unique call-site IDs. Maxima reset with each actor's window, and
 equal durations retain the first completed job. There is no per-job log.
 
+The writer also reports cumulative costs by those same bounded caller names.
+`database_caller` records share the writer's `window` and `interval_ms` with
+`database_actor`. Only the first 64 distinct callers in a window are tracked;
+the union of the eight highest execution-wall totals and eight highest CPU totals
+produces at most 16 caller records. One additional `caller="other"` record accounts
+for all remaining jobs, including names that exceeded the tracking capacity.
+`caller_recorded_jobs`, `caller_untracked_jobs` and `caller_coverage_complete` make
+incomplete tracking explicit. The selected callers are not necessarily the
+global leaders when capacity was exceeded. Counts and cumulative queue, execution
+and sampled CPU times reconcile with the actor totals; there is no per-job log or
+new reporting timer. Counters and caller storage reset at the existing boundary.
+
+On Linux, two thread-CPU clock samples bracket each writer closure, including its
+transaction commit and excluding queue admission and reply delivery. Readers do
+not sample CPU. A disabled performance target skips the clocks and caller
+tracking. `cpu_sampled_jobs` identifies how many completed jobs have valid CPU
+evidence; `cpu_available=false` means the reported CPU sum covers only that subset,
+not that the remaining jobs used no CPU. Unsupported platforms and failed or
+regressed clock samples stay unavailable. These sums exclude actor bookkeeping,
+report formatting and other process threads, and are not process CPU utilization.
+Times are rounded down to microseconds per job. Compare cumulative CPU and wall
+time before distinguishing repeated computation from disk or other waits.
+
+These records use a field-free root diagnostic span while emitting. Both text
+and JSON current-span lists exclude the caller's private context. A filter that
+disables that root span suppresses the report rather than falling back to a
+private current span. SQL, captured values and error contents remain excluded.
+No query, checkpoint, database setting, durability or scheduling policy changes.
+
+Measure per-job collection overhead separately from application latency on Linux:
+
+```sh
+CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 pnpm test:backend -p cairn-installation --lib store::performance::measurement::measure_writer_cost_sampling_overhead -- --ignored --nocapture --test-threads=1
+```
+
+The test alternates four enabled/disabled pairs on the same candidate, with
+20,000 no-op writer jobs per observation after warmup. Initialization is excluded;
+the actual queue, closure dispatch and actor teardown are included. It uses
+in-memory SQLite and does not force a report boundary, so periodic formatting is
+outside this measurement. Disabled diagnostics are the reference, not an older
+released binary.
+
+On 2026-10-31, the test profile with these flags, SQLite 3.53.2, Linux
+7.2.11-arch1-1 and an i9-14900K host with 32 logical CPUs produced median costs
+of 11.761 microseconds wall / 13.751 microseconds process CPU per disabled job,
+versus 12.948 / 16.704 enabled. The median differences were 1.187 microseconds
+wall and 2.952 microseconds CPU per job. All eight observations were retained;
+one pair favored enabled diagnostics. Host load was approximately 9.71 / 18.10 /
+15.30. These overlapping local observations describe collection overhead on a
+no-op workload, not production query latency, application throughput or a release
+performance gain.
+
 The same record samples the connection's pager cache at the interval boundary.
 `cache_hits`, `cache_misses` and `cache_writes` are interval deltas of counters
 read through SQLite's 64-bit connection-status API; `cache_bytes` is the current approximate pager
