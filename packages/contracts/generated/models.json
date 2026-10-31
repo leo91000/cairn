@@ -168,6 +168,22 @@
         }
       ]
     },
+    "AccountNotice": {
+      "properties": {
+        "agent": {
+          "description": "The engine's product name, as Cairn's status reported it.",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "agent",
+        "name"
+      ],
+      "type": "object"
+    },
     "AccountProviderInput": {
       "additionalProperties": false,
       "properties": {
@@ -3141,6 +3157,61 @@
       ],
       "type": "object"
     },
+    "EngineRetry": {
+      "properties": {
+        "attempt": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "delayMs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "httpStatus": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "maxRetries": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "noResponse": {
+          "type": "boolean"
+        },
+        "reason": {
+          "description": "The engine's reason code, such as `overloaded` or `rate_limit`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "attempt",
+        "maxRetries",
+        "reason",
+        "httpStatus",
+        "delayMs",
+        "noResponse"
+      ],
+      "type": "object"
+    },
     "EventPreview": {
       "properties": {
         "createdAt": {
@@ -3632,6 +3703,14 @@
     },
     "HistoryPage": {
       "properties": {
+        "entries": {
+          "default": [],
+          "description": "Timeline cards that first appeared within this page or last changed in it.",
+          "items": {
+            "$ref": "#/definitions/TimelineEntry"
+          },
+          "type": "array"
+        },
         "events": {
           "items": {
             "$ref": "#/definitions/RunEvent"
@@ -3651,6 +3730,7 @@
       },
       "required": [
         "events",
+        "entries",
         "history",
         "oldest",
         "hasOlder"
@@ -9350,6 +9430,34 @@
       ],
       "type": "object"
     },
+    "QuotaFailure": {
+      "properties": {
+        "current": {
+          "description": "The latest limit of the current turn or execution, until work moves on.",
+          "type": "boolean"
+        },
+        "message": {
+          "description": "The engine's own report of the limit.",
+          "type": "string"
+        },
+        "resetsAt": {
+          "description": "When the engine said the limit resets.",
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "message",
+        "resetsAt",
+        "current"
+      ],
+      "type": "object"
+    },
     "ReadChatContentInput": {
       "additionalProperties": false,
       "properties": {
@@ -9403,6 +9511,15 @@
     "ReadRunContentInput": {
       "additionalProperties": false,
       "properties": {
+        "entryId": {
+          "description": "Read a complete interpreted timeline card instead of a raw event.",
+          "maxLength": 1024,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "eventId": {
           "format": "int64",
           "maximum": 9007199254740991,
@@ -9465,6 +9582,55 @@
         "runId",
         "before",
         "history"
+      ],
+      "type": "object"
+    },
+    "ReadRunTimelineInput": {
+      "additionalProperties": false,
+      "properties": {
+        "before": {
+          "default": 9007199254740991,
+          "description": "Cards that first appeared before this position; the newest page by default.",
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "changes": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TimelineCursor"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Resume the change feed from a cursor returned by this operation."
+        },
+        "runId": {
+          "description": "Wire UUID for an existing run; distinct from a mission/task identifier.",
+          "format": "uuid",
+          "type": "string"
+        },
+        "snapshot": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TimelineCursor"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Pin older pages to the first page's cursor. A change requires restarting."
+        }
+      },
+      "required": [
+        "runId",
+        "before",
+        "changes",
+        "snapshot"
       ],
       "type": "object"
     },
@@ -10281,6 +10447,12 @@
         "encoding": {
           "type": "string"
         },
+        "entryId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "eventId": {
           "format": "int64",
           "type": [
@@ -10367,6 +10539,10 @@
         },
         "text": {
           "type": "string"
+        },
+        "timeline": {
+          "description": "The timeline presents this event. Clients render it only through its\ncard and read it as a boundary of families that are not converted yet.",
+          "type": "boolean"
         },
         "type": {
           "type": "string"
@@ -11089,6 +11265,44 @@
         "name",
         "prompt",
         "agentId"
+      ],
+      "type": "object"
+    },
+    "RunTimelineOutput": {
+      "description": "Tool windows use the same cards with explicit previews for oversized content.",
+      "properties": {
+        "changeCursor": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/TimelineCursor"
+            }
+          ],
+          "description": "Save the first page's cursor, then request changes after loading the pages."
+        },
+        "entries": {
+          "items": {
+            "$ref": "#/definitions/TimelineEntryPage"
+          },
+          "type": "array"
+        },
+        "hasMoreChanges": {
+          "type": "boolean"
+        },
+        "hasOlder": {
+          "type": "boolean"
+        },
+        "oldest": {
+          "description": "Pass as `before` for the previous page while hasOlder is true.",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "entries",
+        "oldest",
+        "hasOlder",
+        "changeCursor",
+        "hasMoreChanges"
       ],
       "type": "object"
     },
@@ -12323,6 +12537,531 @@
         }
       ]
     },
+    "TimelineChange": {
+      "description": "A live change of one card. A stream sends `append` only for a reply whose text\ngrows after the text it already delivered; any other change sends the card.",
+      "oneOf": [
+        {
+          "properties": {
+            "entry": {
+              "$ref": "#/definitions/TimelineEntry"
+            },
+            "kind": {
+              "const": "upsert",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "entry"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "append",
+              "type": "string"
+            },
+            "revision": {
+              "format": "int64",
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "source": {
+              "format": "int64",
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "text": {
+              "type": "string"
+            },
+            "updatedAt": {
+              "format": "int64",
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "revision",
+            "source",
+            "updatedAt",
+            "text"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TimelineContent": {
+      "oneOf": [
+        {
+          "description": "A message the person sent, as delivered to the agent. A private answer\narrives as its placeholder; the answer itself never enters the timeline.",
+          "properties": {
+            "attachments": {
+              "items": {
+                "$ref": "#/definitions/ChatAttachment"
+              },
+              "type": "array"
+            },
+            "kind": {
+              "const": "userMessage",
+              "type": "string"
+            },
+            "messageId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "questionId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "sentAt": {
+              "description": "When the person sent it, at or before its delivery.",
+              "format": "int64",
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "text",
+            "sentAt",
+            "attachments"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The agent's reply. Successive snapshots of the same reply replace its text.",
+          "properties": {
+            "echo": {
+              "description": "The reply only repeats a failure or usage limit the conversation already\nreports; a conversation omits it, the run log keeps it.",
+              "type": "boolean"
+            },
+            "itemId": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "agentMessage",
+              "type": "string"
+            },
+            "state": {
+              "pattern": "^(running|done|info|error|stopped)$",
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            },
+            "via": {
+              "description": "The model provider that wrote this reply, when the engine chose among several.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "itemId",
+            "text",
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "notice",
+              "type": "string"
+            },
+            "notice": {
+              "$ref": "#/definitions/TimelineNotice"
+            }
+          },
+          "required": [
+            "kind",
+            "notice"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TimelineCursor": {
+      "additionalProperties": false,
+      "description": "A cursor over card revisions, bound to the retained event history.",
+      "properties": {
+        "history": {
+          "type": "string"
+        },
+        "id": {
+          "description": "None means all cards at this revision have been delivered.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "revision",
+        "id",
+        "history"
+      ],
+      "type": "object"
+    },
+    "TimelineEntry": {
+      "description": "One card of a run's timeline. Its identity is stable across pages, turns and\nreconnections; a newer revision of the same card replaces the older one.",
+      "properties": {
+        "attempt": {
+          "description": "Execution attempts Cairn started before the card, after the first one.",
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "content": {
+          "$ref": "#/definitions/TimelineContent"
+        },
+        "createdAt": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "position": {
+          "description": "Event sequence where the card first appeared. Pages are ordered by position.",
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "revision": {
+          "description": "Change cursor: the event sequence of the card's latest change, distinct\nfrom its position. A card changed by a later event keeps its position.",
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "source": {
+          "description": "The event holding the card's current content; read it whole with read_run_content.",
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "turn": {
+          "description": "Engine turns started before the card, counted from the run's first event.",
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "updatedAt": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "runId",
+        "position",
+        "revision",
+        "source",
+        "turn",
+        "attempt",
+        "createdAt",
+        "updatedAt",
+        "content"
+      ],
+      "type": "object"
+    },
+    "TimelineEntryPage": {
+      "oneOf": [
+        {
+          "properties": {
+            "entry": {
+              "$ref": "#/definitions/TimelineEntry"
+            },
+            "kind": {
+              "const": "complete",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "entry"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The card's identity and cursor; read the card by entryId with read_run_content.",
+          "properties": {
+            "kind": {
+              "const": "truncated",
+              "type": "string"
+            },
+            "preview": {
+              "$ref": "#/definitions/TimelinePreview"
+            },
+            "totalBytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "preview",
+            "totalBytes"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TimelineNotice": {
+      "description": "What a lifecycle, error or retry card reports. Clients localize the code and\nits arguments; `detail` is only ever content reported by the work itself.",
+      "properties": {
+        "account": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AccountNotice"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "code": {
+          "pattern": "^(sessionStarted|turnStarted|turnCompleted|backgroundTasks|runStatus|accountSelected|speed|failure|error|connection|retryScheduled|engineRetry|usageLimit|engineNotice|diagnostic)$",
+          "type": "string"
+        },
+        "detail": {
+          "description": "The engine's or worker's own words, such as a failure reason or stderr.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "engineRetry": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/EngineRetry"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "level": {
+          "description": "An engine notice's level, as the engine reports it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "origin": {
+          "description": "Where a failure was reported: the turn, the run, the engine or the runner.",
+          "pattern": "^(turn|run|engine|runner)$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prominent": {
+          "description": "A conversation shows the card. Other cards remain in the run log only.",
+          "type": "boolean"
+        },
+        "quota": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/QuotaFailure"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The engine stopped on the account's usage limit."
+        },
+        "recovered": {
+          "description": "Work continued after this interruption or engine retry.",
+          "type": "boolean"
+        },
+        "retried": {
+          "description": "Automatic retries Cairn made before this failure repeated.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "retry": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TimelineRetry"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Cairn scheduled this retry of the failure; it has not started yet."
+        },
+        "speed": {
+          "pattern": "^(standard|confirmed|unconfirmed)$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "pattern": "^(running|done|info|error|stopped)$",
+          "type": "string"
+        },
+        "status": {
+          "description": "The run status a `runStatus` card reports.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tasks": {
+          "description": "Background tasks a turn waits for.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TokenUsage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "usageLimit": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/UsageLimit"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "code",
+        "state",
+        "prominent"
+      ],
+      "type": "object"
+    },
+    "TimelinePreview": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "description": "The card's kind: userMessage, agentMessage or notice.",
+          "type": "string"
+        },
+        "position": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "revision": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "source": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "position",
+        "revision",
+        "source",
+        "kind",
+        "text"
+      ],
+      "type": "object"
+    },
+    "TimelineRetry": {
+      "properties": {
+        "attempt": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "limit": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "attempt",
+        "limit"
+      ],
+      "type": "object"
+    },
+    "TokenUsage": {
+      "properties": {
+        "inputTokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "outputTokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "inputTokens",
+        "outputTokens"
+      ],
+      "type": "object"
+    },
     "UpdateMcpInput": {
       "additionalProperties": false,
       "properties": {
@@ -12437,6 +13176,40 @@
         "attachmentId",
         "name",
         "data"
+      ],
+      "type": "object"
+    },
+    "UsageLimit": {
+      "properties": {
+        "blocked": {
+          "type": "boolean"
+        },
+        "resetsAt": {
+          "description": "When the window resets. A limit no longer applies afterwards.",
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "status": {
+          "description": "The provider's status, such as `allowed`, `allowed_warning` or `rejected`.",
+          "type": "string"
+        },
+        "window": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "status",
+        "window",
+        "blocked",
+        "resetsAt"
       ],
       "type": "object"
     },
