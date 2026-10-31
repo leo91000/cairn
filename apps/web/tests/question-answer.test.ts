@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest'
-import { activityEntries } from '../src/activity'
 import { questionAnswerText } from '../src/question-answer'
+import { fixtureEntries } from './timeline-fixture'
 
 const text = `My answers to your questions:\n\n${JSON.stringify([{
   questionId: 'platforms',
@@ -10,7 +10,7 @@ const text = `My answers to your questions:\n\n${JSON.stringify([{
 }])}`
 
 it('presents selected labels and multiline comments in history while preserving ordinary messages', () => {
-  const entries = activityEntries([{
+  const entries = fixtureEntries([{
     id: 1,
     runId: 'run',
     createdAt: 1,

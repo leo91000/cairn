@@ -68,8 +68,10 @@ class ActivityViewsTest {
         compose.setContent {
             ActivityFixture {
                 Page {
-                    timelineEntries(events, chat = true).forEach { entry ->
-                        ChatNotice(presentActivity(entry.events.single()))
+                    fixtureEntries(events, chat = true).forEach { entry ->
+                        (entry.card?.content as? build.cairn.contracts.TimelineContent.C)?.let {
+                            ChatNotice(it.notice)
+                        }
                     }
                 }
             }
@@ -105,7 +107,33 @@ class ActivityViewsTest {
                     text = "Using Codex account: Compte principal",
                 ),
             )
-        compose.setContent { ActivityFixture { Page { events.forEach { ActivityCard(it) } } } }
+        // The run log presents each lifecycle event from the server's card.
+        val (covered, cards) = withTimeline(events)
+        val notices = cards.associate {
+            it.source to (it.content as build.cairn.contracts.TimelineContent.C).notice
+        }
+        val account =
+            notices
+                .getValue(3)
+                .copy(
+                    code = "accountSelected",
+                    account = build.cairn.contracts.AccountNotice("Codex", "Compte principal"),
+                )
+        compose.setContent {
+            ActivityFixture {
+                Page {
+                    covered.forEach {
+                        ActivityCard(
+                            it,
+                            presentNotice(
+                                if (it.id == 3L) account else notices.getValue(it.id),
+                                it,
+                            ),
+                        )
+                    }
+                }
+            }
+        }
         compose.onNodeWithText("Compte Codex sélectionné").assertExists()
         compose.onNodeWithText("Travail terminé").performClick()
         compose.onAllNodesWithText("\"type\"", substring = true).assertCountEquals(0)

@@ -148,7 +148,7 @@ class SignalJourneyTest {
 
     private fun stream(state: LiveState, events: List<RunEvent> = emptyList()): MockResponse {
         val frame =
-            "event: batch\nid: 1\ndata: ${wireJson.encodeToString(LiveBatch(events, state, true, false))}\n\n"
+            "event: batch\nid: 1\ndata: ${wireJson.encodeToString(timelineBatch(events, state, true, false))}\n\n"
         return MockResponse()
             .setHeader("Content-Type", "text/event-stream")
             .setBody(frame + ": keepalive\n\n".repeat(100000))

@@ -9,46 +9,9 @@ class ConversationPresentationTest {
     @Test
     fun `later admission waits do not borrow a recovered quota message or reset`() {
         val old = "You've hit your individual spend limit · resets Monday 3pm (UTC)"
-        fun failure(id: Long, message: String) =
-            RunEvent(
-                id = id,
-                createdAt = id,
-                type = "turn.failed",
-                text = "",
-                payload =
-                    kotlinx.serialization.json.JsonObject(
-                        buildJsonObject {
-                            put("error", buildJsonObject { put("message", message) })
-                        }
-                    ),
-                runId = "run",
-            )
-        val failed = listOf(failure(1, old))
-        val recovered =
-            failed +
-                listOf(
-                    RunEvent(
-                        id = 2,
-                        createdAt = 2,
-                        type = "turn.started",
-                        text = "",
-                        runId = "run",
-                    ),
-                    RunEvent(
-                        id = 3,
-                        createdAt = 3,
-                        type = "turn.completed",
-                        text = "",
-                        runId = "run",
-                    ),
-                    RunEvent(
-                        id = 4,
-                        createdAt = 4,
-                        type = "status",
-                        text = "succeeded",
-                        runId = "run",
-                    ),
-                )
+        // The server marks a usage-limit failure current until its turn or execution moves on.
+        val failed = listOf(failureCard(1, old, quota = true))
+        val recovered = listOf(failureCard(1, old, quota = true, current = false))
         val admission =
             Run(
                 id = "run",
@@ -94,105 +57,13 @@ class ConversationPresentationTest {
         val waiting = admission.copy(status = "running", accountWaitReason = "Usage exhausted.")
         assertEquals("", chatQuota(waiting, recovered)!!.message)
         val current = "You've hit your usage limit · resets Tuesday 9am (UTC)"
-        val interrupted = recovered + failure(5, current)
+        val interrupted = recovered + failureCard(5, current, quota = true)
         assertEquals(current, chatQuota(waiting, interrupted)!!.message)
         assertEquals("Tuesday 9am (UTC)", chatQuota(waiting, interrupted)!!.reset)
         assertEquals(
             current,
             chatQuota(waiting.copy(status = "failed", error = current), failed)!!.message,
         )
-    }
-
-    @Test
-    fun `quota history supports structured failures and retry notices`() {
-        val text = "Account usage is exhausted."
-        fun event(id: Long, type: String, payload: JsonObject? = null, raw: String = "") =
-            RunEvent(
-                id = id,
-                createdAt = id,
-                type = type,
-                text = raw,
-                payload = (payload)?.let { kotlinx.serialization.json.JsonObject(it) },
-                runId = "run",
-            )
-        val reply =
-            event(
-                2,
-                "item.completed",
-                buildJsonObject {
-                    put(
-                        "item",
-                        buildJsonObject {
-                            put("id", "echo")
-                            put("type", "agent_message")
-                            put("text", text)
-                        },
-                    )
-                },
-            )
-        for ((key, value) in
-            listOf("code" to "usage_limit_reached", "codexErrorInfo" to "usageLimitExceeded")) {
-            val failure = buildJsonObject {
-                put(key, value)
-                put("message", text)
-            }
-            val history = listOf(event(1, "turn.started"), reply, event(3, "error", failure))
-            assertEquals(setOf(2L, 3L), quotaHiddenEvents(history))
-            val waiting =
-                Run(
-                    id = "run",
-                    status = "running",
-                    accountWaitReason = "Usage exhausted.",
-                    taskId = "",
-                )
-            assertEquals(text, chatQuota(waiting, history)!!.message)
-            val retrying =
-                history.dropLast(1) +
-                    event(3, "error", JsonObject(failure + ("willRetry" to JsonPrimitive(true))))
-            assertTrue(quotaHiddenEvents(retrying).isEmpty())
-        }
-    }
-
-    @Test
-    fun `a reply that only repeats the turn failure folds into its notice`() {
-        val overloaded = "API Error: 529 Overloaded"
-        fun event(id: Long, type: String, payload: JsonObject? = null, raw: String = "") =
-            RunEvent(
-                id = id,
-                createdAt = id,
-                type = type,
-                text = raw,
-                payload = (payload)?.let { kotlinx.serialization.json.JsonObject(it) },
-                runId = "run",
-            )
-        fun reply(id: Long, text: String) =
-            event(
-                id,
-                "item.completed",
-                buildJsonObject {
-                    put(
-                        "item",
-                        buildJsonObject {
-                            put("id", "m$id")
-                            put("type", "agent_message")
-                            put("text", text)
-                        },
-                    )
-                },
-            )
-        val error = buildJsonObject {
-            put("error", buildJsonObject { put("message", overloaded) })
-        }
-        val history =
-            listOf(
-                event(1, "chat.user", raw = "Hello"),
-                event(2, "turn.started"),
-                reply(3, "Work is preserved."),
-                reply(4, overloaded),
-                event(5, "turn.failed", error),
-                event(6, "status", error, raw = "failed"),
-            )
-        assertEquals(setOf(4L), quotaHiddenEvents(history))
     }
 
     @Test
@@ -228,20 +99,7 @@ class ConversationPresentationTest {
     @Test
     fun `a failed run's banner is hidden once its reason shows as a failure notice`() {
         val capacity = "Selected model is at capacity. Please try a different model."
-        val failure =
-            RunEvent(
-                id = 1,
-                createdAt = 1,
-                type = "turn.failed",
-                text = capacity,
-                payload =
-                    kotlinx.serialization.json.JsonObject(
-                        buildJsonObject {
-                            put("error", buildJsonObject { put("message", capacity) })
-                        }
-                    ),
-                runId = "run",
-            )
+        val failure = failureCard(1, capacity)
         val chat =
             Chat(
                 id = "chat",
@@ -260,61 +118,52 @@ class ConversationPresentationTest {
         assertFalse(
             failureShown(chat.copy(run = chat.run!!.copy(status = "queued")), listOf(failure))
         )
-        // The timeline drops an adapter's report of a stop: it cannot stand for the reason.
+        // The server keeps an adapter's stop echo and usage-limit bookkeeping out of the
+        // conversation: such a card cannot stand for the reason.
         val stop = "Claude execution stopped."
-        val echo =
-            failure.copy(
-                text = stop,
-                payload =
-                    (buildJsonObject { put("error", buildJsonObject { put("message", stop) }) })
-                        ?.let { kotlinx.serialization.json.JsonObject(it) },
-            )
+        val echo = failureCard(1, stop, prominent = false)
         assertFalse(failureShown(chat.copy(run = chat.run!!.copy(error = stop)), listOf(echo)))
         // A run records at most 10,000 characters of its error.
         val truncated = chat.copy(run = chat.run!!.copy(error = capacity.take(20)))
         assertTrue(failureShown(truncated, listOf(failure)))
-        // Quota bookkeeping hides the failed status of an exhausted turn: the banner keeps its
-        // reason.
-        val limit = "You've hit your usage limit"
-        val timeLimit = "Run exceeded its time limit."
-        val exhausted =
-            listOf(
-                RunEvent(
-                    id = 1,
-                    createdAt = 1,
-                    type = "turn.started",
-                    text = "",
-                    runId = "run",
-                ),
-                RunEvent(
-                    id = 2,
-                    createdAt = 2,
-                    type = "turn.failed",
-                    text = limit,
-                    payload =
-                        kotlinx.serialization.json.JsonObject(
-                            buildJsonObject {
-                                put("error", buildJsonObject { put("message", limit) })
-                            }
-                        ),
-                    runId = "run",
-                ),
-                RunEvent(
-                    id = 3,
-                    createdAt = 3,
-                    type = "status",
-                    text = "failed",
-                    payload =
-                        kotlinx.serialization.json.JsonObject(
-                            buildJsonObject {
-                                put("error", buildJsonObject { put("message", timeLimit) })
-                            }
-                        ),
-                    runId = "run",
-                ),
-            )
-        assertFalse(failureShown(chat.copy(run = chat.run!!.copy(error = timeLimit)), exhausted))
     }
+
+    private fun failureCard(
+        id: Long,
+        message: String,
+        quota: Boolean = false,
+        current: Boolean = true,
+        prominent: Boolean = !quota,
+    ) =
+        TimelineCard(
+            attempt = 0,
+            content =
+                build.cairn.contracts.TimelineContent.C(
+                    TimelineNotice(
+                        code = "failure",
+                        detail = message,
+                        origin = "turn",
+                        prominent = prominent,
+                        quota =
+                            if (quota)
+                                build.cairn.contracts.QuotaFailure(
+                                    current = current,
+                                    message = message,
+                                    resetsAt = null,
+                                )
+                            else null,
+                        state = "error",
+                    )
+                ),
+            createdAt = id,
+            id = "notice:$id",
+            position = id,
+            revision = id,
+            runId = "run",
+            source = id,
+            turn = 1,
+            updatedAt = id,
+        )
 
     private val first = ChatMessage(id = "one", text = "Bonjour")
     private val second = ChatMessage(id = "two", text = "Ensuite")
@@ -658,15 +507,23 @@ class ConversationPresentationTest {
             )
         assertEquals(listOf("one"), chatDelivery(chat, emptyList()).sending.map { it.message.id })
         val ack =
-            RunEvent(
-                id = 1,
-                createdAt = 1,
-                type = "chat.user",
-                text = "Bonjour",
-                payload =
-                    kotlinx.serialization.json.JsonObject(
-                        mapOf("messageId" to JsonPrimitive("one"))
+            TimelineCard(
+                attempt = 0,
+                content =
+                    build.cairn.contracts.TimelineContent.A(
+                        attachments = emptyList(),
+                        messageId = "one",
+                        sentAt = 1,
+                        text = "Bonjour",
                     ),
+                createdAt = 1,
+                id = "user:1",
+                position = 1,
+                revision = 1,
+                runId = "run",
+                source = 1,
+                turn = 0,
+                updatedAt = 1,
             )
         assertTrue(chatDelivery(chat, listOf(ack), first).sending.isEmpty())
     }

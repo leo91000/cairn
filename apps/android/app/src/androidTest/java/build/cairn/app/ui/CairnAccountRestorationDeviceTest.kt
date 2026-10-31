@@ -68,7 +68,7 @@ class CairnAccountRestorationDeviceTest {
                     cacheKey,
                     CachedHistory(
                         7,
-                        "v1:restore:1",
+                        "v2:restore:1",
                         LiveState(),
                         listOf(
                             RunEvent(
