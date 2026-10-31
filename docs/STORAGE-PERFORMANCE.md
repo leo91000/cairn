@@ -236,3 +236,69 @@ Public executable SHA-256 values:
 
 Use post-release actor queue/CPU measurements and the actual workload to assess
 production impact. Retain raw numeric observations outside the repository.
+
+## Publication candidate selection
+
+The publisher and disk-status monitor share one candidate query. Its backup and
+storage fields already live in the physical run boundary. Filtering the complete
+wire projection reconstructed the frozen snapshot for each predicate, including
+rows that were rejected. The query now filters those unchanged boundary fields
+and constructs the full wire value only for selected rows. Publication revisions,
+dirty-disk protection, legacy envelopes, ownership and scheduling retain their
+existing conditions.
+
+A deterministic SQLite plan regression detects wire construction in eligibility
+predicates. It fails on the reference with eight `json_set` calls and passes after
+the change with none. A differential fixture checks 588 combinations of status,
+storage mode, dirty bytes and backup encodings, including nulls and legacy envelope
+values, against the frozen reference query. Selected wire strings remain identical.
+
+Reproduce the paired real-Store query and JSON-decoding measurement, alone:
+
+```sh
+TMPDIR=/var/tmp CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
+  pnpm test:backend -p cairn-installation \
+  --config 'profile.dev.package.cairn-installation.opt-level=2' \
+  --lib nodes::publication::selection_tests::candidate_scan_measurement \
+  -- --exact --ignored --nocapture --test-threads=1
+```
+
+The reference SQL is frozen from `23dee7bbce3379dc0a9358b06a89ab06d6023d23`.
+Both variants execute in the same binary and fixture; candidate Rust inputs match
+crate tree `9633411a99a706f72cf1bbd7d31d5bf6e2c60446`. The sealed executable SHA-256
+is `e9083c344d97c462879af472acf64ed8a9f9dc40008cb293db78c77bcf777213`.
+Rust 1.97.1 uses the development profile with the installation package optimized
+at level 2, development dependency defaults, no debug information and no
+incremental compilation. This is not a release-profile or production measurement.
+
+Measured on 2026-10-31 on the same Intel i9-14900K workstation described above,
+with disk-backed `/var/tmp`, bundled SQLite 3.53.2 and a 9,355,264-byte database.
+The fixture contains 64 runs with 128 KiB instructions; each query selects 32 runs
+and returns 4,249,534 wire bytes. Timed reads use the actual `Db::json_rows` JSON
+decoder, equality assertions and identical result ordering. Four alternating-order
+pairs per connection condition each execute eight reads per variant. CPU cells
+are medians of the four process-CPU batches. Wall cells are the median of each
+batch's elapsed time divided by eight, rather than individual-call percentiles.
+Task-owned compilation finished before execution; this remains a shared workstation.
+
+| Connection | CPU / eight reads, reference → candidate (ms) | Wall / read, reference → candidate (ms) | CPU reduction |
+| --- | ---: | ---: | ---: |
+| Reused | 266.842 → 117.633 | 33.436 → 14.740 | 55.9% |
+| New | 296.460 → 150.541 | 37.165 → 18.884 | 49.2% |
+
+New-connection timings include opening, read-only/foreign-key setup and closing.
+The OS cache stays warm in both conditions; no host cache was evicted. Both
+variants share the unchanged fixture write path: its 64-row construction and
+transaction took 178.449 ms wall / 156.614 ms CPU, before timed reads. This control
+includes fixture preparation and is not a separate before/after write comparison.
+The read-only query connection leaves WAL size unchanged in every case. Database,
+snapshot and output formats do not change.
+
+An additional exploratory check on a private offline production snapshot used
+Node SQLite 3.53.4, a 0.5-CPU/256-MiB network-isolated container and warm OS cache.
+Both queries selected the same 140 rows and 11,782,175 wire bytes; median SQL-only
+CPU fell from 1,381.122 ms to 161.821 ms across four alternating pairs. Its workload,
+SQLite version and decoding boundary differ from the real-Store measurement, so
+those figures are not interchangeable. No live database query or service was
+started for that experiment. Production effect still requires post-release
+CPU, actor-queue and synchronization observations under the actual workload.
