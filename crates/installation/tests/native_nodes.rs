@@ -4250,6 +4250,15 @@ async fn installation_can_direct_its_own_native_run_without_widening_authority_o
             .await
             .unwrap()
     );
+    let checked = current.clone();
+    let outside_ceiling = additional.clone();
+    assert!(
+        !f.service
+            .store
+            .read(move |db| policy::allows(db, &checked, &outside_ceiling))
+            .await
+            .unwrap()
+    );
     let denied = delegated_move_result(
         &f,
         &configuration,
@@ -4260,7 +4269,17 @@ async fn installation_can_direct_its_own_native_run_without_widening_authority_o
         denied.state,
         cairn_contracts::NodeMoveOperationState::Failed
     );
-    assert_eq!(denied.error_status, Some(403));
+    // Placement filters nodes outside the native ceiling before selection;
+    // its established no-authorized-node result is 503, not a grant mutation.
+    assert_eq!(denied.error_status, Some(503), "{denied:?}");
+    assert!(
+        denied
+            .error
+            .as_deref()
+            .unwrap()
+            .starts_with(placement::NO_CAPACITY),
+        "{denied:?}"
+    );
     assert!(f.service.store.run(text(&run, "id")).await.unwrap()["moveRequest"].is_null());
     let moved = delegated_move_result(
         &f,
