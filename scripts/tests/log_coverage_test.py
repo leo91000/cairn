@@ -115,6 +115,64 @@ class CoverageTests(unittest.TestCase):
         self.assertEqual(result["partialCounts"]["records"], 1)
         self.assertEqual(calls[1][0], START)
 
+    def test_repeated_dense_cycles_persist_retry_width_and_progress_past_overlap(self):
+        cursor = START + 5 * coverage.NANO
+        prior = None
+        widths = []
+        def dense_reader(command, kind, lower, upper, anchor, deadline, allowance):
+            widths.append(upper - lower)
+            needed = (upper - lower) * 120000 // coverage.NANO
+            ok = needed <= allowance
+            return {"ok": ok, "counts": empty_with_record(), "workBytes": min(needed, allowance + 1),
+                    "eof": ok, "exitCode": 0 if ok else None, "reason": None if ok else "byte_budget",
+                    "anchorFound": True, "anchor": {"at": str(upper - 1), "key": str(upper)}}
+        for cycle in range(10):
+            result = coverage.collect(request(since=coverage.iso(cursor - 5 * coverage.NANO), previous=prior),
+                                      lambda *_: IDENTITY, dense_reader, now_ns=END + 3 * coverage.NANO)
+            if cycle == 0:
+                self.assertEqual(result["pages"], 0)
+                self.assertLess(int(result["pageSpanNs"]), 70 * coverage.NANO)
+            prior = {"identity": result["identity"], "anchor": result["anchor"], "pageSpanNs": result["pageSpanNs"]}
+            cursor = max(cursor, coverage.timestamp(result["coveredThrough"]))
+            if result["caughtUp"]:
+                break
+        self.assertEqual(cursor, END)
+        self.assertLess(cycle, 9)
+        self.assertEqual(widths.count(70 * coverage.NANO), 1)
+
+    def test_dense_real_child_pipes_progress_on_next_tick_with_five_second_overlap(self):
+        def dense_pipe(command, kind, lower, upper, anchor, deadline, allowance):
+            read_since = min(lower, int(anchor["at"])) if anchor else lower
+            start_index = max(0, (read_since - START + 9999999) // 10000000)
+            program = "import os\n" + f"start={START};end={upper};index={start_index}\n" + """try:
+ while start+index*10000000<end:
+  at=start+index*10000000;sec,nano=divmod(at,1000000000)
+  import datetime as d
+  stamp=d.datetime.fromtimestamp(sec,d.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S')+f'.{nano:09d}Z'
+  os.write(1,(stamp+' 2026-10-31T10:24:19Z INFO fixture: '+'x'*1140+'\\n').encode());index+=1
+except BrokenPipeError:pass
+"""
+            return coverage.read_page([sys.executable, "-c", program], kind, lower, upper, anchor, deadline, allowance)
+        cursor = START + 5 * coverage.NANO
+        prior = None
+        for _ in range(2):
+            result = coverage.collect(request(since=coverage.iso(cursor - 5 * coverage.NANO), previous=prior),
+                                      lambda *_: IDENTITY, dense_pipe, now_ns=END + 3 * coverage.NANO)
+            prior = {"identity": result["identity"], "anchor": result["anchor"], "pageSpanNs": result["pageSpanNs"]}
+            cursor = max(cursor, coverage.timestamp(result["coveredThrough"]))
+        self.assertGreater(cursor, START + 6 * coverage.NANO)
+
+    def test_time_limited_page_reduction_survives_the_next_invocation(self):
+        def reader(command, kind, lower, upper, anchor, deadline, allowance):
+            ok = upper - lower <= 35 * coverage.NANO
+            return {"ok": ok, "counts": coverage.empty_counts(), "workBytes": 0, "eof": ok, "exitCode": 0 if ok else None,
+                    "reason": None if ok else "time_budget", "anchorFound": True, "anchor": None}
+        first = coverage.collect(request(maxAttempts=1), lambda *_: IDENTITY, reader, now_ns=END + 3 * coverage.NANO)
+        self.assertEqual(first["pages"], 0)
+        second = coverage.collect(request(previous={"identity": IDENTITY, "pageSpanNs": first["pageSpanNs"]}),
+                                  lambda *_: IDENTITY, reader, now_ns=END + 3 * coverage.NANO)
+        self.assertTrue(second["caughtUp"])
+
     def test_source_clock_bootstrap_and_missing_anchor_are_explicit(self):
         def reader(*_):
             return {"ok": True, "counts": coverage.empty_counts(), "workBytes": 0, "eof": True,

@@ -1,6 +1,6 @@
 // Validate the small counters-only wire contract before trusting any watermark.
 const counters = ['records', 'bytes', 'errors', 'panics', 'leasesExpired', 'fencing', 'journalOpen', 'kernelIO', 'hungTask', 'unclassified', 'stdout', 'stderr', 'trace', 'debug', 'info', 'warnings']
-const fields = new Set(['version', 'identity', 'window', 'coveredThrough', 'anchor', 'continuity', 'continuityUnknown', 'sourceChanged', 'complete', 'caughtUp', 'pages', 'attempts', 'counts', 'partialCounts', 'workBytes', 'limits', 'lastExitCode', 'eof', 'elapsedMs'])
+const fields = new Set(['version', 'identity', 'window', 'coveredThrough', 'anchor', 'pageSpanNs', 'continuity', 'continuityUnknown', 'sourceChanged', 'complete', 'caughtUp', 'pages', 'attempts', 'counts', 'partialCounts', 'workBytes', 'limits', 'lastExitCode', 'eof', 'elapsedMs'])
 const continuityKinds = new Set(['anchor_confirmed', 'anchor_missing', 'source_changed', 'unproven_bootstrap'])
 
 export function validateLogCoverage(response, since, until) {
@@ -14,6 +14,7 @@ export function validateLogCoverage(response, since, until) {
     || Date.parse(data.window?.since) !== lower || Date.parse(data.window?.until) !== upper
     || !Number.isSafeInteger(data.pages) || data.pages < 0 || data.pages > 8
     || !Number.isSafeInteger(data.attempts) || data.attempts < data.pages || data.attempts > 8
+    || typeof data.pageSpanNs !== 'string' || !/^\d{1,14}$/.test(data.pageSpanNs) || Number(data.pageSpanNs) < 1000000 || Number(data.pageSpanNs) > 70000000000
     || !continuityKinds.has(data.continuity) || data.continuityUnknown !== (data.continuity !== 'anchor_confirmed')
     || !data.identity || typeof data.identity.id !== 'string' || data.identity.id.length > 256
     || typeof data.identity.epoch !== 'string' || data.identity.epoch.length > 64
@@ -58,6 +59,8 @@ export function applyLogCoverage(previous, response, {
   const state = {
     identity: data.identity,
     anchor: data.anchor,
+    pageSpanNs: data.pageSpanNs,
+    backlog: !data.caughtUp,
     gapSince: gap ? gapSince : null,
     gapReason: gap ? newGap ? data.continuity : previous?.gapReason : null,
     gapKey: gap ? gapKey : null,

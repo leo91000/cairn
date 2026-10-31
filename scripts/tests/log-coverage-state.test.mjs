@@ -11,6 +11,7 @@ function response(changes = {}) {
     ok: true,
     data: {
       version: 1,
+      pageSpanNs: '70000000000',
       window: { since, until },
       coveredThrough: until,
       identity: { id: 'fixture', epoch: 'one' },
@@ -46,6 +47,8 @@ it('credits the real completed old page without confusing it with catch-up', () 
   expect(result.ok).toBe(true)
   expect(result.data.complete).toBe(false)
   expect(result.data.state.coveredThrough).toBe(Date.parse(through))
+  expect(result.data.state.backlog).toBe(true)
+  expect(result.data.state.pageSpanNs).toBe('70000000000')
 })
 
 it('retains unknown history until an explicit acknowledgement and observed continuity', () => {

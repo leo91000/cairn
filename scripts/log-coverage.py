@@ -202,6 +202,7 @@ def collect(request, get_metadata=metadata, reader=read_page, now_ns=None):
     budget = min(10_000, max(100, request.get("timeBudgetMs", 10_000)))
     deadline = began + budget / 1000
     work_limit = min(2 * 1024 * 1024, max(1024, request.get("workBytes", 2 * 1024 * 1024)))
+    page_limit = min(512000, work_limit)
     max_attempts = min(8, max(1, request.get("maxAttempts", 8)))
     lower = timestamp(request["since"])
     requested_upper = timestamp(request["until"])
@@ -218,12 +219,15 @@ def collect(request, get_metadata=metadata, reader=read_page, now_ns=None):
     counts, partial = empty_counts(), empty_counts()
     through, work, pages, attempts = lower, 0, 0, 0
     reasons = set()
-    span = min(70 * NANO, upper - lower)
+    previous_span = str(prior.get("pageSpanNs", 70 * NANO))
+    if not previous_span.isdigit() or not 1_000_000 <= int(previous_span) <= 70 * NANO:
+        raise ValueError("page_span")
+    span = int(previous_span)
     last = None
     while through < upper and attempts < max_attempts and work < work_limit and time.monotonic() < deadline - 0.5:
         end = min(through + span, upper)
         read_since = min(through, int(anchor["at"])) if anchor else through
-        allowance = min(work_limit - work, 512000)
+        allowance = min(work_limit - work, page_limit)
         last = reader(command_for(request, identity, read_since, end), request["kind"], through, end,
                       anchor, deadline - 0.5, allowance)
         attempts += 1
@@ -233,6 +237,10 @@ def collect(request, get_metadata=metadata, reader=read_page, now_ns=None):
             reasons.add(last["reason"] or "source_exit")
             if last["reason"] not in ("byte_budget", "time_budget") or span <= 1_000_000:
                 break
+            if last["reason"] == "byte_budget" and allowance < page_limit:
+                # A shortened final allowance says nothing about page density.
+                # Preserve the learned width for the next fresh work budget.
+                break
             span //= 2
             continue
         if anchor and not last["anchorFound"]:
@@ -240,6 +248,8 @@ def collect(request, get_metadata=metadata, reader=read_page, now_ns=None):
         merge_counts(counts, last["counts"])
         anchor = last["anchor"] or anchor
         through, pages = end, pages + 1
+    if through == requested_upper and work < work_limit // 2 and attempts < 4:
+        span = min(70 * NANO, span * 2)
     after = get_metadata(request, deadline)
     if after != identity:
         continuity = "source_changed"
@@ -247,7 +257,7 @@ def collect(request, get_metadata=metadata, reader=read_page, now_ns=None):
     caught_up = through == requested_upper
     available = through == upper
     return {"version": 1, "identity": identity, "window": {"since": iso(lower), "until": iso(requested_upper), "sourceUntil": iso(upper)},
-            "coveredThrough": iso(through), "anchor": anchor, "continuity": continuity,
+            "coveredThrough": iso(through), "anchor": anchor, "pageSpanNs": str(span), "continuity": continuity,
             "continuityUnknown": continuity != "anchor_confirmed", "sourceChanged": continuity == "source_changed",
             "complete": caught_up and available and continuity != "source_changed" and bool(last and last["ok"]), "caughtUp": caught_up,
             "pages": pages, "attempts": attempts, "counts": counts, "partialCounts": partial,
