@@ -75,6 +75,27 @@ impl Fixture {
         }
     }
 
+    async fn bind_progress(&self) {
+        self.service
+            .store
+            .update_run_boundary(&self.id, json!({ "missionTurnId": "progress-turn" }))
+            .await
+            .unwrap();
+        self.checkpoint
+            .update(|saved| {
+                saved.runner_id = Some(Some("progress-attempt".into()));
+                saved.progress = Some(crate::worker::progress::Progress::launched(
+                    "progress-execution".into(),
+                    Some("progress-attempt".into()),
+                    None,
+                    Some("progress-turn".into()),
+                    1,
+                ));
+            })
+            .await
+            .unwrap();
+    }
+
     async fn output(&mut self, output: Output) {
         record(
             &self.service,
@@ -1468,20 +1489,127 @@ async fn durable_progress_is_atomic_bound_and_survives_restart_without_a_fresh_c
 }
 
 #[tokio::test]
-async fn malformed_or_truncated_stdout_retains_a_gap_but_diagnostics_do_not() {
-    for raw in ["{malformed".to_owned(), json!({"type":"item.updated","item":{"id":"message","type":"agent_message","text":"x".repeat(LINE_LIMIT)}}).to_string()] {
+async fn malformed_or_truncated_stdout_retains_monitoring_gap_without_changing_control_policy() {
+    let malformed = "{malformed".to_owned();
+    let oversized = json!({
+        "type": "item.updated",
+        "item": {
+            "id": "message",
+            "type": "agent_message",
+            "text": "x".repeat(LINE_LIMIT),
+        },
+    })
+    .to_string();
+    for raw in [malformed, oversized] {
         let mut fixture = Fixture::new().await;
-        fixture.output(Output::new(true,"diagnostic only".into())).await;
-        assert_ne!(fixture.checkpoint.snapshot().await.output_interrupted,Some(true));
-        fixture.output(Output::line(raw.as_bytes(),&[])).await;
-        assert_eq!(fixture.checkpoint.snapshot().await.output_interrupted,Some(true));
-        let saved=RunCheckpoint::load(&fixture.service.store,&fixture.id).await.unwrap().unwrap();
-        assert_eq!(saved.output_interrupted,Some(true));
-        fixture.event(json!({"type":"runner.output_interrupted"})).await;
-        let id=fixture.id.clone();
-        let gaps=fixture.service.store.read(move|db| {
-            Ok(db.events_fixture(&id,0,100)?.iter().filter(|event| event["text"]=="Execution output was interrupted; some activity may be missing.").count())
-        }).await.unwrap();
-        assert_eq!(gaps,1,"one durable gap per execution, even after repeat transport markers");
+        fixture.bind_progress().await;
+        fixture.output(Output::new(false, " \t ".into())).await;
+        fixture
+            .output(Output::new(true, "diagnostic only".into()))
+            .await;
+        assert!(
+            fixture
+                .checkpoint
+                .snapshot()
+                .await
+                .progress
+                .as_ref()
+                .unwrap()
+                .complete
+        );
+        assert_ne!(
+            fixture.checkpoint.snapshot().await.output_interrupted,
+            Some(true)
+        );
+
+        fixture.output(Output::line(raw.as_bytes(), &[])).await;
+        assert!(
+            !fixture
+                .checkpoint
+                .snapshot()
+                .await
+                .progress
+                .as_ref()
+                .unwrap()
+                .complete
+        );
+        let saved = RunCheckpoint::load(&fixture.service.store, &fixture.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!saved.progress.as_ref().unwrap().complete);
+        assert_ne!(saved.output_interrupted, Some(true));
+
+        // Only an explicit trusted relay marker changes the existing control flag.
+        fixture
+            .event(json!({ "type": "runner.output_interrupted" }))
+            .await;
+        fixture
+            .event(json!({ "type": "runner.output_interrupted" }))
+            .await;
+        assert_eq!(
+            fixture.checkpoint.snapshot().await.output_interrupted,
+            Some(true)
+        );
+        let id = fixture.id.clone();
+        let gaps = fixture
+            .service
+            .store
+            .read(move |db| {
+                Ok(db
+                    .events_fixture(&id, 0, 100)?
+                    .iter()
+                    .filter(|event| {
+                        event["text"]
+                            == "Execution output was interrupted; some activity may be missing."
+                    })
+                    .count())
+            })
+            .await
+            .unwrap();
+        assert_eq!(gaps, 1);
     }
+}
+
+#[tokio::test]
+async fn unsupported_json_degrades_coverage_even_after_log_budget_is_spent() {
+    for event in [
+        json!({}),
+        json!({ "type": "future.provider_wait" }),
+        json!({ "type": "item.delta", "item": { "id": "future", "type": "agent_message" } }),
+    ] {
+        let mut fixture = Fixture::new().await;
+        fixture.bind_progress().await;
+        fixture.log_total = LOG_BUDGET;
+        fixture.event(event).await;
+        let saved = RunCheckpoint::load(&fixture.service.store, &fixture.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!saved.progress.as_ref().unwrap().complete);
+        assert_eq!(saved.progress.as_ref().unwrap().advanced_at, None);
+        assert_ne!(saved.output_interrupted, Some(true));
+    }
+}
+
+#[tokio::test]
+async fn normal_native_certificate_framing_does_not_report_lost_output() {
+    let mut fixture = Fixture::new().await;
+    fixture.bind_progress().await;
+    let stream = concat!(
+        "{\"type\":\"turn.completed\"}\n",
+        "\n{\"type\":\"runner.finalized\",\"attemptId\":\"progress-attempt\",\"physicalFinalized\":true}\n"
+    );
+    let (send, mut receive) = mpsc::channel(8);
+    read_output(stream.as_bytes(), false, send, Vec::new()).await;
+    while let Some(output) = receive.recv().await {
+        fixture.output(output).await;
+    }
+    let saved = RunCheckpoint::load(&fixture.service.store, &fixture.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(saved.output_interrupted, Some(true));
+    assert!(saved.progress.as_ref().unwrap().complete);
+    assert!(saved.progress.as_ref().unwrap().finalized_at.is_some());
 }

@@ -250,8 +250,11 @@ pub(super) async fn record(
         record_raw(s, id, "diagnostic", raw, secrets, log_total).await?;
         return Ok(false);
     }
+    if raw.trim().is_empty() {
+        return Ok(false);
+    }
     let Ok(event) = serde_json::from_str::<Value>(raw) else {
-        mark_output_interrupted(checkpoint).await?;
+        checkpoint.mark_progress_incomplete().await?;
         record_raw(s, id, "output", raw, secrets, log_total).await?;
         return Ok(false);
     };
@@ -326,6 +329,10 @@ pub(super) async fn record(
     if handle_chat_control(s, id, &event).await? {
         return Ok(false);
     }
+    if !super::progress::known_kind(text(&event, "type")) {
+        // Even an exhausted log budget cannot certify an unsupported protocol.
+        checkpoint.mark_progress_incomplete().await?;
+    }
     let exhausted = run_output::exhausted(&event);
     // Every activity item has its own detail limit, regardless of earlier output.
     let conversation = event["item"]["type"] == "agent_message"
@@ -359,8 +366,8 @@ pub(super) async fn record(
     Ok(exhausted)
 }
 
-/// Malformed/truncated stdout can have lost semantic frames. Diagnostics have
-/// their own channel and never enter this path. Preserve the gap once per attempt.
+/// The trusted relay explicitly reports lost output. Other unsupported frames
+/// affect monitoring coverage only, without changing provider/replay policy.
 async fn mark_output_interrupted(checkpoint: &Checkpoint) -> Result<()> {
     if checkpoint
         .read(|saved| saved.output_interrupted == Some(true))

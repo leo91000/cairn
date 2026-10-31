@@ -789,6 +789,32 @@ impl Checkpoint {
         Ok(())
     }
 
+    /// A monitor coverage gap is not a provider/control failure. Persist only
+    /// the bounded progress row; leave execution and retry policy unchanged.
+    pub(super) async fn mark_progress_incomplete(&self) -> Result<()> {
+        let mut state = self.state.lock().await;
+        let Some(current) = state.progress.as_ref().filter(|progress| progress.complete) else {
+            return Ok(());
+        };
+        let mut progress = current.clone();
+        progress.mark_incomplete();
+        let id = self.id.clone();
+        let saved = self
+            .store
+            .transaction(move |db| {
+                if !progress.bound_in(db, &id)? {
+                    return Err(crate::error::Error::conflict(
+                        "Execution changed while recording a coverage gap.",
+                    ));
+                }
+                progress.store_in(db, &id)?;
+                Ok(progress)
+            })
+            .await?;
+        state.progress = Some(saved);
+        Ok(())
+    }
+
     pub async fn persist(&self) -> Result<()> {
         self.update(|_| {}).await
     }

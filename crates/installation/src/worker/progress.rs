@@ -167,13 +167,16 @@ impl Progress {
             return true;
         }
         if kind == "turn.waiting" {
-            if self.items.values().any(|item| item.tool && !item.completed) {
-                return false;
-            }
+            // tasks[] names engine background tasks, not arbitrary open items.
+            // Until every alias can be bound, an open tool cannot certify it.
             return self.mark_incomplete();
         }
         if !matches!(kind, "item.started" | "item.updated" | "item.completed") {
-            return false;
+            return if observation_kind(kind) {
+                false
+            } else {
+                self.mark_incomplete()
+            };
         }
         let item = &event["item"];
         if item["details_truncated"] == true
@@ -277,6 +280,37 @@ impl Progress {
         }
         true
     }
+}
+
+fn observation_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "diagnostic"
+            | "output"
+            | "status"
+            | "thread.started"
+            | "context.usage"
+            | "engine.retry"
+            | "engine.notice"
+            | "provider.limit"
+            | "error"
+    )
+}
+
+pub(super) fn known_kind(kind: &str) -> bool {
+    observation_kind(kind)
+        || matches!(
+            kind,
+            "turn.started"
+                | "turn.completed"
+                | "turn.failed"
+                | "runner.failed"
+                | "runner.finalized"
+                | "turn.waiting"
+                | "item.started"
+                | "item.updated"
+                | "item.completed"
+        )
 }
 
 fn semantic_fields(kind: &str) -> Option<&'static [&'static str]> {
@@ -401,7 +435,6 @@ mod tests {
         child["item"]["tool_uses"] = 7.into();
         child["item"]["activity"] = "Generated activity notice".into();
         assert!(!progress.observe(&child, 3));
-        assert!(!progress.observe(&json!({"type":"turn.waiting"}), 4));
         assert_eq!(progress.phase, Phase::Tool);
         assert_eq!(progress.advanced_at, Some(2));
         child["type"] = "item.updated".into();
@@ -421,6 +454,9 @@ mod tests {
     #[test]
     fn unsupported_items_and_unbound_waits_make_coverage_unknown_without_new_progress() {
         for event in [
+            json!({}),
+            json!({"type":"future.provider_wait"}),
+            json!({"type":"item.delta","item":{"id":"future","type":"agent_message","text":"unsupported kind"}}),
             json!({"type":"item.started","item":{"id":"future","type":"new_provider_item"}}),
             json!({"type":"item.updated","item":{"type":"agent_message","text":"missing ID"}}),
             json!({"type":"turn.waiting"}),
@@ -474,6 +510,18 @@ mod tests {
         assert!(!progress.complete);
         assert_eq!(progress.advanced_at, Some(2));
         assert!(!progress.observe(&json!({"type":"item.updated","item":{"id":"spawn","type":"subagent","status":"completed","result":"report"}}),4));
+    }
+
+    #[test]
+    fn a_background_wait_cannot_borrow_an_unrelated_open_tool() {
+        let mut progress = progress();
+        progress.observe(&json!({"type":"item.started","item":{"id":"child-a","type":"subagent","status":"in_progress"}}),2);
+        assert!(progress.observe(
+            &json!({"type":"turn.waiting","tasks":[{"id":"background-b"}]}),
+            3
+        ));
+        assert!(!progress.complete);
+        assert_eq!(progress.advanced_at, Some(2));
     }
 
     #[test]
