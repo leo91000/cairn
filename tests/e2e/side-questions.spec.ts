@@ -130,7 +130,8 @@ test('links reused native item IDs to the selected reply', async ({ page, worksp
   workspace.service.store.event(run, 'turn.started', '')
   workspace.service.store.event(run, 'item.updated', '', { item: { id: 'reused-reply', type: 'agent_message', text: 'First draft' } })
   workspace.service.store.event(run, 'item.completed', '', { item: { id: 'reused-reply', type: 'agent_message', text: 'First distinct reply' } })
-  workspace.service.store.event(run, 'turn.started', '')
+  // Claude emits completion, not a new turn.started, between turns.
+  workspace.service.store.event(run, 'turn.completed', '')
   workspace.service.store.event(run, 'item.completed', '', { item: { id: 'reused-reply', type: 'agent_message', text: 'Second distinct reply' } })
   await expect(workspace.api(`/api/chats/${chat.id}/side-questions`, 'POST', {
     id: randomUUID(),

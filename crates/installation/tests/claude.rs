@@ -1294,6 +1294,46 @@ async fn closed_side_control_does_not_fail_a_completed_main_turn() {
 }
 
 #[tokio::test]
+async fn closed_control_before_side_request_does_not_fail_the_main_turn() {
+    let (root, _config, events) =
+        with_side_questions("fixture:slow fixture:close-before-side", |root, event| {
+            if event["type"] == "chat.side.available" {
+                deliver(
+                    root,
+                    &json!([side_question(
+                        "a1b2c3d4-0000-4000-8000-000000000001",
+                        "Why?"
+                    )]),
+                );
+            }
+        })
+        .await;
+    assert!(position(&events, "chat.side.failed") < position(&events, "turn.completed"));
+    assert!(root.path().join("result.claude-receipt.json").exists());
+}
+
+#[tokio::test]
+async fn side_control_frame_larger_than_pipe_atomic_limit_is_refused_whole() {
+    let (root, config, events) = with_side_questions("fixture:slow", |root, event| {
+        if event["type"] == "chat.side.available" {
+            deliver(
+                root,
+                &json!([side_question(
+                    "a1b2c3d4-0000-4000-8000-000000000001",
+                    &"\u{1}".repeat(1000)
+                )]),
+            );
+        }
+    })
+    .await;
+    let failure = &events[position(&events, "chat.side.failed")];
+    assert!(failure["error"].as_str().unwrap().contains("too large"));
+    assert!(events.iter().any(|event| event["type"] == "turn.completed"));
+    assert!(root.path().join("result.claude-receipt.json").exists());
+    assert!(!config.home.join(".claude/side-questions.jsonl").exists());
+}
+
+#[tokio::test]
 async fn synthetic_side_error_preserves_secret_boundaries_for_worker_redaction() {
     let (_root, _config, events) = with_side_questions("fixture:slow", |root, event| {
         if event["type"] == "chat.side.available" {

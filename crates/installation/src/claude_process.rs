@@ -57,7 +57,7 @@ const CONTEXT_REQUEST: &str = "cairn-context-";
 /// How long a finished execution waits for the context report requested at a compaction
 /// boundary. Claude Code answers it locally, after the command's result.
 const CONTEXT_REPORT_WAIT: Duration = Duration::from_secs(5);
-const SIDE_CANCEL_WAIT: Duration = Duration::from_millis(100);
+const SIDE_CONTROL_WAIT: Duration = Duration::from_millis(100);
 
 const DENIED: &str =
     "This tool is outside the agent's access policy. Ask the user in your response.";
@@ -767,8 +767,25 @@ impl Turn<'_> {
                 "question": side["text"],
             },
         });
-        send(&mut self.stdin, request).await?;
-        self.sides.insert(request_id, question);
+        // Writes no larger than PIPE_BUF are atomic on the nonblocking control pipe:
+        // a deadline cannot leave half a JSON frame for the main turn to consume.
+        if serde_json::to_vec(&request)?.len() + 1 > libc::PIPE_BUF as usize {
+            return self
+                .side_failed(
+                    &question,
+                    "This side question is too large for the agent control channel.",
+                )
+                .await;
+        }
+        match tokio::time::timeout(SIDE_CONTROL_WAIT, send(&mut self.stdin, request)).await {
+            Ok(Ok(())) => {
+                self.sides.insert(request_id, question);
+            }
+            Ok(Err(_)) | Err(_) => {
+                self.side_failed(&question, "The agent could not receive this side question.")
+                    .await?;
+            }
+        }
         Ok(())
     }
 
@@ -800,7 +817,7 @@ impl Turn<'_> {
     /// reading its control channel. Each bounded send is best effort.
     async fn cancel_side_request(&mut self, request: &str) {
         let cancel = json!({ "type": "control_cancel_request", "request_id": request });
-        let _ = tokio::time::timeout(SIDE_CANCEL_WAIT, send(&mut self.stdin, cancel)).await;
+        let _ = tokio::time::timeout(SIDE_CONTROL_WAIT, send(&mut self.stdin, cancel)).await;
     }
 
     /// The reply to a side question. Claude reports a missing or synthetic answer

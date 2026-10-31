@@ -188,7 +188,7 @@ fn reply_start(db: &Db<'_>, run_id: &str, item_id: &str, event_id: Option<i64>) 
     }
     if event_id.is_none() {
         let turns: i64 = db.0.query_row(
-            "SELECT COUNT(DISTINCT COALESCE((SELECT MAX(t.id) FROM events t WHERE t.run_id=e.run_id AND t.type='turn.started' AND t.id<e.id),0))
+            "SELECT COUNT(DISTINCT COALESCE((SELECT MAX(t.id) FROM events t WHERE t.run_id=e.run_id AND t.type IN ('turn.started','turn.completed','turn.failed') AND t.id<e.id),0))
              FROM events e WHERE e.run_id=?1 AND json_extract(e.payload,'$.item.type')='agent_message' AND json_extract(e.payload,'$.item.id')=?2",
             rusqlite::params![run_id, item_id],
             |row| row.get(0),
@@ -203,7 +203,7 @@ fn reply_start(db: &Db<'_>, run_id: &str, item_id: &str, event_id: Option<i64>) 
         db.0.prepare_cached(
             "SELECT COALESCE(json_extract(e.payload,'$.item.text'),e.text) FROM events e
              WHERE e.run_id=?1 AND e.id>=?2
-               AND e.id<COALESCE((SELECT MIN(t.id) FROM events t WHERE t.run_id=?1 AND t.type='turn.started' AND t.id>?2),9223372036854775807)
+               AND e.id<COALESCE((SELECT MIN(t.id) FROM events t WHERE t.run_id=?1 AND t.type IN ('turn.started','turn.completed','turn.failed') AND t.id>?2),9223372036854775807)
                AND json_extract(e.payload,'$.item.type')='agent_message' AND json_extract(e.payload,'$.item.id')=?3
                AND COALESCE(json_extract(e.payload,'$.item.text'),e.text)!=''
                AND EXISTS (SELECT 1 FROM events a WHERE a.run_id=?1 AND a.id=?2 AND json_extract(a.payload,'$.item.type')='agent_message' AND json_extract(a.payload,'$.item.id')=?3)
@@ -827,7 +827,7 @@ mod tests {
                     rusqlite::params![id, json!({ "item": { "type": "agent_message", "id": "reused", "text": text } }).to_string()],
                 )?;
             }
-            db.0.execute("INSERT INTO events(id,run_id,created_at,type,text) VALUES(13,'r',0,'turn.started','')", [])?;
+            db.0.execute("INSERT INTO events(id,run_id,created_at,type,text) VALUES(13,'r',0,'turn.completed','')", [])?;
             assert_eq!(reply_start(db, "r", "reused", Some(11))?, "First reply");
             assert_eq!(reply_start(db, "r", "reused", Some(14))?, "Later reply");
             assert!(reply_start(db, "r", "another", Some(11)).is_err());

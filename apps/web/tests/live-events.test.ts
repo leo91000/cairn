@@ -12,7 +12,7 @@ it('preserves messages and tool order across batches, duplicates, reconnect and 
     text,
     payload: type.startsWith('item.') ? { item: { id: 'same', type: 'agent_message', text } } : undefined,
   })
-  const input = [event(1, 'turn.started'), event(2, 'item.updated', 'Hello'), event(3, 'item.updated', 'Hello world'), event(4, 'item.completed', 'Hello world!'), event(5, 'turn.started'), event(6, 'item.updated', 'Next'), event(7, 'item.completed', 'Next answer')]
+  const input = [event(1, 'turn.started'), event(2, 'item.updated', 'Hello'), event(3, 'item.updated', 'Hello world'), event(4, 'item.completed', 'Hello world!'), event(5, 'turn.completed'), event(6, 'item.updated', 'Next'), event(7, 'item.completed', 'Next answer')]
   const reducer = new LiveEvents()
   const actual: RunEvent[] = []
   reducer.append(actual, input.slice(0, 3))

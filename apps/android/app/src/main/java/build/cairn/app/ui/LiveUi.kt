@@ -656,7 +656,7 @@ internal fun timelineEntries(
                 }
                 continue
             }
-            if (event.type == "turn.started") {
+            if (event.type in setOf("turn.started", "turn.completed", "turn.failed")) {
                 positions.clear()
             }
             val item = event.item()

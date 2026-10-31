@@ -558,6 +558,9 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       turn++
     }
 
+    if (event.type === 'turn.completed' || event.type === 'turn.failed')
+      turn++
+
     const reason = failureReason(event)
     if (event.type === 'turn.failed') {
       // The failure's card says why the turn ended; its reconnect attempts add nothing.

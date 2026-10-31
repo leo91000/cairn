@@ -306,6 +306,8 @@ else {
     appendFileSync(path.join(home, 'inputs.jsonl'), `${JSON.stringify(value)}\n`)
     const prompt = value.message.content.filter(b => b.type === 'text').map(b => b.text).join('\n')
     const correlation = { user_message_uuid: value.uuid }
+    if (prompt.includes('fixture:close-before-side'))
+      process.stdin.destroy()
     if (working) {
       const first = working
       working = undefined

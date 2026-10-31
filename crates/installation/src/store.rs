@@ -955,7 +955,7 @@ impl Db<'_> {
 CASE WHEN json_extract(e.payload,'$.item.type')='agent_message'
  AND COALESCE(json_extract(e.payload,'$.item.id'),'')!='' THEN (
  SELECT MIN(a.id) FROM events a WHERE a.run_id=e.run_id AND a.id<=e.id
-  AND a.id>COALESCE((SELECT MAX(t.id) FROM events t WHERE t.run_id=e.run_id AND t.type='turn.started' AND t.id<e.id),0)
+  AND a.id>COALESCE((SELECT MAX(t.id) FROM events t WHERE t.run_id=e.run_id AND t.type IN ('turn.started','turn.completed','turn.failed') AND t.id<e.id),0)
   AND json_extract(a.payload,'$.item.type')='agent_message'
   AND json_extract(a.payload,'$.item.id')=json_extract(e.payload,'$.item.id')
 ) ELSE NULL END FROM events e
@@ -966,7 +966,7 @@ WHERE e.run_id=? AND e.id>? AND e.id<? AND (
   SELECT 1 FROM events n WHERE n.run_id=e.run_id
    AND json_extract(n.payload,'$.item.type')='agent_message'
    AND json_extract(n.payload,'$.item.id')=json_extract(e.payload,'$.item.id')
-   AND n.id>e.id AND n.id<COALESCE((SELECT t.id FROM events t WHERE t.run_id=e.run_id AND t.type='turn.started' AND t.id>e.id ORDER BY t.id LIMIT 1),9223372036854775807)
+   AND n.id>e.id AND n.id<COALESCE((SELECT t.id FROM events t WHERE t.run_id=e.run_id AND t.type IN ('turn.started','turn.completed','turn.failed') AND t.id>e.id ORDER BY t.id LIMIT 1),9223372036854775807)
  )) ORDER BY e.id DESC LIMIT ?";
         let mut stmt = self.0.prepare_cached(sql)?;
         let mut rows = stmt.query_map(params![run, after, before, limit + 1], event_row)?;
