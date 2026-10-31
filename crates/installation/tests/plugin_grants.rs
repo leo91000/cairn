@@ -234,8 +234,8 @@ return {
                     "/api/agents/{}/plugin-grants",
                     body["agentId"].as_str().unwrap_or(MAIN_AGENT_ID)
                 ),
-                query: Default::default(),
-                headers: Default::default(),
+                query: std::collections::HashMap::default(),
+                headers: axum::http::HeaderMap::default(),
                 body,
                 identity: Some(InstallationIdentity::trusted(
                     InstallationRole::Owner,
@@ -265,7 +265,11 @@ return {
 }
 
 fn contribution(kind: &str, name: &str, resources: Value) -> Value {
-    json!({"kind":kind,"name":name,"resources":resources})
+    let mut fields = serde_json::Map::new();
+    fields.insert("kind".into(), kind.into());
+    fields.insert("name".into(), name.into());
+    fields.insert("resources".into(), resources);
+    Value::Object(fields)
 }
 
 fn support() -> Value {
