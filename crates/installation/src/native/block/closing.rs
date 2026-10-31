@@ -103,11 +103,13 @@ mod tests {
     };
     use serde_json::json;
     use std::{
+        future::{Future, poll_fn},
         path::Path,
         sync::{
             Arc,
             atomic::{AtomicBool, AtomicI32, Ordering},
         },
+        task::Poll,
         time::Duration,
     };
     use tokio::sync::{Notify, Semaphore};
@@ -300,24 +302,41 @@ mod tests {
             let (_, mut second_state, second_operations, second_owner) =
                 fixture(&state, None).await;
             let second_started = std::time::Instant::now();
-            let second = tokio::time::timeout(
-                Duration::from_millis(250),
-                StorageClose::default().finish(&state, second_state.close(&second_operations)),
-            )
-            .await;
+            let second_entered = AtomicBool::new(false);
+            let mut storage_close = StorageClose::default();
+            let second = storage_close.finish(&state, async {
+                second_entered.store(true, Ordering::SeqCst);
+                second_state.close(&second_operations).await
+            });
+            tokio::pin!(second);
+
+            // An uncontended storage gate drains in one poll. Check admission
+            // before awaiting real fsync/journal work, whose latency is not an SLA.
+            let first_poll = poll_fn(|cx| Poll::Ready(second.as_mut().poll(cx))).await;
+            let independently_admitted = second_entered.load(Ordering::SeqCst);
+            if !independently_admitted {
+                // Settle both fixtures even when a retained gate regresses.
+                pause.release.add_permits(1);
+            }
+            let second = match first_poll {
+                Poll::Ready(result) => result,
+                Poll::Pending => second.await,
+            };
             eprintln!(
-                "close_sample phase={phase:?} independent_completed={} independent_elapsed_us={}",
-                second.is_ok(),
+                "close_sample phase={phase:?} independent_admission={independently_admitted} independent_elapsed_us={}",
                 second_started.elapsed().as_micros()
             );
-            pause.release.add_permits(1);
+            if independently_admitted {
+                assert!(!terminal.load(Ordering::SeqCst));
+                pause.release.add_permits(1);
+            }
             assert_eq!(first.await.unwrap().unwrap(), Completion::Flushed);
             drop(second_owner);
             assert!(
-                second.is_ok(),
-                "{phase:?} blocked an unrelated physical close"
+                independently_admitted,
+                "{phase:?} retained the storage gate during physical close"
             );
-            assert_eq!(second.unwrap().unwrap(), Completion::Flushed);
+            assert_eq!(second.unwrap(), Completion::Flushed);
             let mut bytes = [0; 9];
             volume.read_at(0, &mut bytes).unwrap();
             assert_eq!(&bytes, b"preserved");
