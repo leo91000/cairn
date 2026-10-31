@@ -10,8 +10,26 @@ data class TimelinePreview(
     val kind: String,
     val position: Long,
     val revision: Long,
+    val snapshot: Snapshot,
     val source: Long,
     val text: String,
+) {
+    init {}
+}
+
+@OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+@Serializable
+data class Snapshot(
+    val attempt: Long,
+    val content: TimelineContent,
+    val createdAt: Long,
+    val id: String,
+    val position: Long,
+    val revision: Long,
+    val runId: String,
+    val source: Long,
+    val turn: Long,
+    val updatedAt: Long,
 ) {
     init {}
 }

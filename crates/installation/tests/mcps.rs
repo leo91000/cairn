@@ -415,12 +415,20 @@ async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
     assert_eq!(reply["preview"]["kind"], "agentMessage");
     assert_eq!(reply["preview"]["source"], event_id);
     let entry_id = reply["preview"]["id"].as_str().unwrap();
+    let snapshot = reply["preview"]["snapshot"].clone();
     assert!(entry_id.len() > 1024 && entry_id.chars().count() <= 1024);
+    let mismatched = mcp
+        .bounded(
+            "read_run_content",
+            json!({"runId":run_id,"entryId":"other","timelineSnapshot":snapshot}),
+        )
+        .await;
+    assert_eq!(mismatched["result"]["isError"], true, "{mismatched}");
     let mut offset = 0;
     let mut digest = Value::Null;
     let mut contents = String::new();
     loop {
-        let mut input = json!({"runId": run_id, "entryId": entry_id, "offset": offset});
+        let mut input = json!({"runId": run_id, "entryId": entry_id, "timelineSnapshot": snapshot, "offset": offset});
         if !digest.is_null() {
             input["sha256"] = digest.clone();
         }
@@ -432,22 +440,22 @@ async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
         if chunk["nextOffset"].is_null() {
             break;
         }
+        if offset == 0 {
+            s.store
+                .event(
+                    run_id,
+                    &EventKind::ItemUpdated,
+                    "Updated answer",
+                    Some(json!({"item": {"id": "é".repeat(600), "type": "agent_message", "text": "Updated answer"}})),
+                )
+                .await
+                .unwrap();
+        }
         offset = chunk["nextOffset"].as_u64().unwrap();
     }
     let complete: Value = serde_json::from_str(&contents).unwrap();
     assert_eq!(complete["id"], entry_id);
     assert_eq!(complete["content"]["text"], payload["item"]["text"]);
-    s.store
-        .event(
-            run_id,
-            &EventKind::ItemUpdated,
-            "Updated answer",
-            Some(
-                json!({"item": {"id": "é".repeat(600), "type": "agent_message", "text": "Updated answer"}}),
-            ),
-        )
-        .await
-        .unwrap();
     let older_during_stream = mcp
         .bounded(
             "read_run_timeline",

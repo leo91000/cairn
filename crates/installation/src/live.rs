@@ -884,63 +884,68 @@ fn split_large(
 ) -> Result<(Vec<TimelineEntry>, Vec<LargeTimelineReference>)> {
     let mut complete = Vec::new();
     let mut large = Vec::new();
-    for mut entry in entries {
+    for entry in entries {
         if crate::validation::encoded_size(&entry)? <= PAGE_BYTES - 1024 {
             complete.push(entry);
             continue;
         }
-        match &mut entry.content {
-            TimelineContent::UserMessage {
-                text,
-                message_id,
-                question_id,
-                sent_at,
-                attachments,
-            } => {
-                text.clear();
-                *message_id = None;
-                *question_id = None;
-                *sent_at = 0;
-                attachments.clear();
-            }
-            TimelineContent::AgentMessage { item_id, text, .. } => {
-                item_id.clear();
-                text.clear();
-            }
-            TimelineContent::Notice { notice } => {
-                if let Some(detail) = &mut notice.detail {
-                    detail.clear();
-                }
-                if let Some(status) = &mut notice.status {
-                    status.clear();
-                }
-                if let Some(quota) = &mut notice.quota {
-                    quota.message.clear();
-                }
-                if let Some(retry) = &mut notice.engine_retry
-                    && let Some(reason) = &mut retry.reason
-                {
-                    reason.clear();
-                }
-                if let Some(limit) = &mut notice.usage_limit {
-                    limit.status.clear();
-                    if let Some(window) = &mut limit.window {
-                        window.clear();
-                    }
-                }
-                if let Some(level) = &mut notice.level {
-                    level.clear();
-                }
-                if let Some(account) = &mut notice.account {
-                    account.agent.clear();
-                    account.name.clear();
-                }
-                notice.tasks.clear();
-            }
-        }
-        large.push(LargeTimelineReference { snapshot: entry });
+        large.push(large_reference(entry));
     }
     Ok((complete, large))
+}
+
+/// Remove source-owned fields while retaining the exact card revision metadata.
+pub(crate) fn large_reference(mut entry: TimelineEntry) -> LargeTimelineReference {
+    match &mut entry.content {
+        TimelineContent::UserMessage {
+            text,
+            message_id,
+            question_id,
+            sent_at,
+            attachments,
+        } => {
+            text.clear();
+            *message_id = None;
+            *question_id = None;
+            *sent_at = 0;
+            attachments.clear();
+        }
+        TimelineContent::AgentMessage { item_id, text, .. } => {
+            item_id.clear();
+            text.clear();
+        }
+        TimelineContent::Notice { notice } => {
+            if let Some(detail) = &mut notice.detail {
+                detail.clear();
+            }
+            if let Some(status) = &mut notice.status {
+                status.clear();
+            }
+            if let Some(quota) = &mut notice.quota {
+                quota.message.clear();
+            }
+            if let Some(retry) = &mut notice.engine_retry
+                && let Some(reason) = &mut retry.reason
+            {
+                reason.clear();
+            }
+            if let Some(limit) = &mut notice.usage_limit {
+                limit.status.clear();
+                if let Some(window) = &mut limit.window {
+                    window.clear();
+                }
+            }
+            if let Some(level) = &mut notice.level {
+                level.clear();
+            }
+            if let Some(account) = &mut notice.account {
+                account.agent.clear();
+                account.name.clear();
+            }
+            notice.tasks.clear();
+        }
+    }
+    LargeTimelineReference { snapshot: entry }
 }
 
 /// Wire-only compression of streaming replies. Persisted cards and history pages

@@ -191,7 +191,7 @@
   ],
   "window": {
     "entries": [
-      { "kind": "truncated", "preview": { "id": "message:4:answer", "position": 40, "revision": 41, "source": 41, "kind": "agentMessage", "text": "Début" }, "totalBytes": 2000000 },
+      { "kind": "truncated", "preview": { "id": "message:4:answer", "position": 40, "revision": 41, "source": 41, "kind": "agentMessage", "text": "Début", "snapshot": { "id": "message:4:answer", "runId": "00000000-0000-4000-8000-000000000001", "position": 40, "revision": 41, "source": 41, "turn": 4, "attempt": 0, "createdAt": 1700000000040, "updatedAt": 1700000000041, "content": { "kind": "agentMessage", "itemId": "", "text": "", "state": "running" } } }, "totalBytes": 2000000 },
       {
         "kind": "complete",
         "entry": {

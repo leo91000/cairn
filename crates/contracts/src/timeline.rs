@@ -423,7 +423,7 @@ pub enum TimelineEntryPage {
     Complete {
         entry: Box<TimelineEntry>,
     },
-    /// The card's identity and cursor; read the card by entryId with read_run_content.
+    /// Read the card using its entryId and snapshot with read_run_content.
     Truncated {
         preview: TimelinePreview,
         #[ts(type = "number")]
@@ -444,6 +444,8 @@ pub struct TimelinePreview {
     /// The card's kind: userMessage, agentMessage or notice.
     pub kind: String,
     pub text: String,
+    /// Source-backed snapshot for stable chunk reads while the card changes.
+    pub snapshot: Box<TimelineEntry>,
 }
 
 #[cfg(test)]

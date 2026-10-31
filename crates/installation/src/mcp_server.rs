@@ -926,6 +926,7 @@ pub(crate) fn run_timeline(
                     source: entry.source,
                     kind: kind.to_owned(),
                     text: text[..end].to_owned(),
+                    snapshot: Box::new(crate::live::large_reference(entry).snapshot),
                 },
             }
         };
@@ -1020,7 +1021,20 @@ pub(crate) fn read_run_content(
 ) -> Result<Value> {
     let run_id = args.run_id.to_string();
     let id = run_id.as_str();
-    let data = if let Some(entry_id) = &args.entry_id {
+    let data = if let Some(snapshot) = &args.timeline_snapshot {
+        db.require_run(id)?;
+        if args.entry_id.as_deref() != Some(snapshot.id.as_str())
+            || args.event_id.is_some()
+            || encoded_size(snapshot)? > RUN_PAGE_BYTES - 1024
+        {
+            return Err(Error::bad("Invalid timeline content reference."));
+        }
+        serde_json::to_string(&crate::timeline::snapshot_from_source(
+            db,
+            id,
+            (**snapshot).clone(),
+        )?)?
+    } else if let Some(entry_id) = &args.entry_id {
         db.require_run(id)?;
         serde_json::to_string(&required(
             crate::timeline::entry(db, id, entry_id)?,

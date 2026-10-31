@@ -912,7 +912,9 @@ so very large cards take proportionally more CPU to fetch; this is a known limit
 
 `read_run_timeline` (`read` scope) gives public MCP and `cairn_installation` the
 same cards, newest page first, with `complete`/`truncated` pages bounded like the
-other run windows; a truncated card can be read by `entryId` through `read_run_content`.
+other run windows; pass a truncated card's `entryId` and `preview.snapshot` as
+`timelineSnapshot` to `read_run_content`. The immutable source-backed reference
+keeps chunks consistent even while the live reply changes.
 Save the first page's `changeCursor` and pass it as `snapshot` while loading older
 pages; they may reflect updates received after that cursor. After paging, pass
 the saved cursor as `changes` and follow returned cursors until

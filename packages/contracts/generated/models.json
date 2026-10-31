@@ -9597,6 +9597,17 @@
             "string",
             "null"
           ]
+        },
+        "timelineSnapshot": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TimelineEntry"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Immutable card reference returned with a truncated timeline preview."
         }
       },
       "required": [
@@ -12870,7 +12881,7 @@
           "type": "object"
         },
         {
-          "description": "The card's identity and cursor; read the card by entryId with read_run_content.",
+          "description": "Read the card using its entryId and snapshot with read_run_content.",
           "properties": {
             "kind": {
               "const": "truncated",
@@ -13052,6 +13063,14 @@
           "format": "int64",
           "type": "integer"
         },
+        "snapshot": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/TimelineEntry"
+            }
+          ],
+          "description": "Source-backed snapshot for stable chunk reads while the card changes."
+        },
         "source": {
           "format": "int64",
           "type": "integer"
@@ -13066,7 +13085,8 @@
         "revision",
         "source",
         "kind",
-        "text"
+        "text",
+        "snapshot"
       ],
       "type": "object"
     },

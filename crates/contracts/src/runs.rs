@@ -298,6 +298,9 @@ pub struct ReadRunContentInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(min = 1, max = 1024))]
     pub entry_id: Option<String>,
+    /// Immutable card reference returned with a truncated timeline preview.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeline_snapshot: Option<Box<crate::TimelineEntry>>,
     #[serde(default, deserialize_with = "wire_integer")]
     #[schemars(range(min = 0_i64, max = 9007199254740991_i64))]
     #[ts(type = "number")]
