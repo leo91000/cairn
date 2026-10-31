@@ -1,15 +1,17 @@
 import type { RunEvent } from '../../../packages/contracts/contracts'
-import type { LiveState } from '../../../packages/contracts/live'
+import type { LiveState, TimelineEntry } from '../../../packages/contracts/live'
 
 export interface ReadingPosition { top: number, follow: boolean }
 export interface CachedHistory {
   oldest?: number
   hasOlder?: boolean
-  version: 1
+  version: 2
   cursor: number
   history: string
   state: LiveState
   events: RunEvent[]
+  /** Timeline cards; cards are interpreted by the server, never derived from events. */
+  entries: TimelineEntry[]
   savedAt: number
   position?: ReadingPosition
 }
@@ -40,14 +42,15 @@ export function knownScope(session: string) {
 }
 
 function valid(value: CachedHistory): boolean {
-  return value?.version === 1 && typeof value.history === 'string' && value.history.startsWith('v1:')
-    && Number.isSafeInteger(value.cursor) && value.cursor >= 0 && Array.isArray(value.events)
+  return value?.version === 2 && typeof value.history === 'string' && value.history.startsWith('v2:')
+    && Number.isSafeInteger(value.cursor) && value.cursor >= 0 && Array.isArray(value.events) && Array.isArray(value.entries)
     && !!value.state && Array.isArray(value.state.artifacts)
     && (value.state.run === null || typeof value.state.run?.id === 'string')
     && (value.state.chat === null || (typeof value.state.chat?.id === 'string' && Array.isArray(value.state.chat.messages)))
     && (!value.position || (Number.isFinite(value.position.top) && value.position.top >= 0 && typeof value.position.follow === 'boolean'))
     && Number.isFinite(value.savedAt) && Date.now() - value.savedAt < TTL
     && value.events.every(e => !!e && typeof e.text === 'string' && Number.isSafeInteger(e.id) && e.id > 0 && e.id <= value.cursor && typeof e.type === 'string')
+    && value.entries.every(card => !!card && typeof card.id === 'string' && Number.isSafeInteger(card.position) && Number.isSafeInteger(card.revision) && typeof card.content?.kind === 'string')
 }
 
 // Saved conversations indexed by age and size for bounded eviction.
@@ -204,10 +207,23 @@ export function clearHistoryCache() {
 
 export function recentHistory(value: CachedHistory): CachedHistory {
   let size = JSON.stringify(value.state).length * 2 + 4096
-  const ordered = value.events.toSorted((a, b) => a.id - b.id)
+  const activeWaits = new Set(value.entries.filter(card => card.content.kind === 'notice'
+    && card.content.notice.code === 'backgroundTasks'
+    && card.content.notice.waitingSince !== undefined))
+  for (const card of activeWaits)
+    size += JSON.stringify(card).length * 2 + 2
+  const groups = new Map<number, number>()
+  for (const event of value.events)
+    groups.set(event.id, (groups.get(event.id) ?? 0) + JSON.stringify(event).length * 2 + 2)
+  for (const card of value.entries) {
+    if (!activeWaits.has(card))
+      groups.set(card.source, (groups.get(card.source) ?? 0) + JSON.stringify(card).length * 2 + 2)
+  }
+
+  const ordered = [...groups.keys()].toSorted((a, b) => a - b)
   let start = ordered.length
   while (start > 0) {
-    const bytes = JSON.stringify(ordered[start - 1]).length * 2 + 2
+    const bytes = groups.get(ordered[start - 1]!)!
     if (size + bytes > MAX_HISTORY)
       break
     size += bytes
@@ -216,11 +232,12 @@ export function recentHistory(value: CachedHistory): CachedHistory {
 
   if (!start)
     return value
-  const oldest = ordered[start]?.id ?? value.cursor + 1
+  const oldest = ordered[start] ?? value.cursor + 1
   const events = value.events.filter(e => e.id >= oldest)
   return {
     ...value,
     events,
+    entries: value.entries.filter(card => card.source >= oldest || activeWaits.has(card)),
     oldest,
     hasOlder: true,
     position: undefined,

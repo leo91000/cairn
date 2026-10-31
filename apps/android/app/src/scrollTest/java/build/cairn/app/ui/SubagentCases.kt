@@ -159,7 +159,7 @@ abstract class SubagentCases {
                             val first = initial.getAndSet(false)
                             val batch =
                                 wireJson.encodeToString(
-                                    LiveBatch(
+                                    timelineBatch(
                                         if (first) events else emptyList(),
                                         LiveState(chat = current.get()),
                                         first,

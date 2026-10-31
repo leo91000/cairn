@@ -15,6 +15,8 @@ data class RunEvent(
     val payload: JsonObject? = null,
     val runId: String = "",
     val text: String,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val timeline: Boolean? = null,
     val type: String,
 ) {
     init {

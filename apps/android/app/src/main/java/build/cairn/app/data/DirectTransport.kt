@@ -107,6 +107,11 @@ class DirectTransport(private val installationId: String?, private val switched:
         val selection = request.tag(Selection::class.java)
         val channel = if (selection != null) selection.channel else channelFor(request)
         val clientMessage = hasClientMessageId(request, prefix)
+        val snapshotRead =
+            request.method == "POST" &&
+                request.url.encodedPath.startsWith(prefix) &&
+                Regex("(chats|runs)/[^/]+/timeline-content")
+                    .matches(request.url.encodedPath.removePrefix(prefix))
         var replayedMessage = false
         if (channel != null) {
             try {
@@ -122,7 +127,8 @@ class DirectTransport(private val installationId: String?, private val switched:
                         chain.call().isCanceled() ||
                         (error !is DirectNotSent &&
                             request.method !in setOf("GET", "HEAD") &&
-                            !clientMessage)
+                            !clientMessage &&
+                            !snapshotRead)
                 )
                     throw error
                 replayedMessage = clientMessage && error !is DirectNotSent

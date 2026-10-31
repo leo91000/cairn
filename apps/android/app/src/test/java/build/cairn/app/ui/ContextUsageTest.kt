@@ -113,7 +113,7 @@ class ContextUsageTest {
             put("post_tokens", 9_100)
         }
         val entries =
-            timelineEntries(
+            fixtureEntries(
                 listOf(
                     RunEvent(
                         id = 1,
@@ -175,7 +175,7 @@ class ContextUsageTest {
                 runId = runId,
             )
         fun state(vararg events: RunEvent) =
-            timelineEntries(listOf(started) + events, chat = true).mapNotNull { it.compaction }
+            fixtureEntries(listOf(started) + events, chat = true).mapNotNull { it.compaction }
 
         // Codex fails the turn, or the run is stopped, without completing the compaction item.
         assertEquals("failed", state(end("turn.failed")).single().state)

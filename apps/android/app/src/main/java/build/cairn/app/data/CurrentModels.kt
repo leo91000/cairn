@@ -84,9 +84,19 @@ data class LiveBatch(
     val history: String? = null,
     val oldest: Long? = null,
     val hasOlder: Boolean = false,
+    /** Timeline cards: the window's snapshot, or the cards these events changed. */
+    val entries: List<TimelineChange> = emptyList(),
+    val largeEntries: List<build.cairn.contracts.LargeTimelineReference> = emptyList(),
 )
 
 typealias HistoryPage = build.cairn.contracts.HistoryPage
+
+/** A timeline card the server interpreted; the UI's own feed rows are `ui.TimelineEntry`. */
+typealias TimelineCard = build.cairn.contracts.TimelineEntry
+
+typealias TimelineChange = build.cairn.contracts.TimelineChange
+
+typealias TimelineNotice = build.cairn.contracts.TimelineNotice
 
 typealias ReasoningOption = build.cairn.contracts.ReasoningOption
 

@@ -147,63 +147,34 @@ abstract class RetryNoticeCases {
 
     @Test
     fun chatShowsOneRetryNoticePerFailureChainWithItsRetryTitle() {
-        fun failure(id: Long, message: String) =
-            RunEvent(
-                id = id,
-                createdAt = id * 1000,
-                type = "turn.failed",
-                text = message,
-                payload =
-                    kotlinx.serialization.json.JsonObject(
-                        mapOf("error" to buildJsonObject { put("message", message) })
-                    ),
-            )
-        fun retry(id: Long) =
-            RunEvent(
-                id = id,
-                createdAt = id * 1000,
-                type = "retry.scheduled",
-                text = "Temporary agent error.",
-                payload =
-                    kotlinx.serialization.json.JsonObject(
-                        mapOf(
-                            "retry" to
-                                buildJsonObject {
-                                    put("attempt", 1)
-                                    put("limit", 3)
-                                }
-                        )
-                    ),
+        fun failure(
+            position: Long,
+            message: String,
+            retry: build.cairn.contracts.TimelineRetry? = null,
+            retried: Long? = null,
+            prominent: Boolean = true,
+        ) =
+            noticeCard(
+                position,
+                TimelineNotice(
+                    code = "failure",
+                    detail = message,
+                    origin = "turn",
+                    prominent = prominent,
+                    retried = retried,
+                    retry = retry,
+                    state = if (retry != null) "info" else "error",
+                ),
             )
         val capacity = "Selected model is at capacity. Please try a different model."
         val connection = "WebSocket connection failed: 503 Service Unavailable"
-        var events by
-            mutableStateOf(
-                listOf(
-                    RunEvent(
-                        id = 1,
-                        createdAt = 1000,
-                        type = "turn.started",
-                        text = "",
-                    ),
-                    failure(2, capacity),
-                    retry(3),
-                )
-            )
+        val retry = build.cairn.contracts.TimelineRetry(attempt = 1, limit = 3)
+        // The server's cards: the failure announces Cairn's retry.
+        var cards by mutableStateOf(listOf(failure(2, capacity, retry)))
         compose.setContent {
             CairnTheme {
                 Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                    Column(Modifier.safeDrawingPadding()) {
-                        timelineEntries(events, chat = true)
-                            .filter { it.notice }
-                            .forEach { entry ->
-                                ChatNotice(
-                                    presentActivity(entry.events.single()),
-                                    entry.noticeTitle,
-                                    entry.retrying,
-                                )
-                            }
-                    }
+                    Column(Modifier.safeDrawingPadding()) { ConversationNotices(cards) }
                 }
             }
         }
@@ -213,32 +184,19 @@ abstract class RetryNoticeCases {
         compose.onAllNodesWithText(capacity).assertCountEquals(1)
         capture("failure-retrying")
 
-        events =
-            events +
-                RunEvent(
-                    id = 4,
-                    createdAt = 4000,
-                    type = "turn.started",
-                    text = "",
-                ) +
-                failure(5, capacity)
+        // The retried attempt failed the same way: its card replaces the first one.
+        cards =
+            listOf(
+                failure(2, capacity, retry, prominent = false),
+                failure(5, capacity, retried = 1),
+            )
         compose
             .onNodeWithText("L’agent a rencontré une erreur après 1 nouvelle tentative automatique")
             .assertIsDisplayed()
         compose.onAllNodesWithText(capacity).assertCountEquals(1)
 
         // A retry title says more than the connection pattern of its reason.
-        events =
-            listOf(
-                RunEvent(
-                    id = 1,
-                    createdAt = 1000,
-                    type = "turn.started",
-                    text = "",
-                ),
-                failure(2, connection),
-                retry(3),
-            )
+        cards = listOf(failure(2, connection, retry))
         compose
             .onNodeWithText("Erreur temporaire — nouvelle tentative automatique 1/3")
             .assertIsDisplayed()

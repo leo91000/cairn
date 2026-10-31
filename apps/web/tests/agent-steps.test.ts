@@ -1,7 +1,7 @@
 import type { RunEvent } from '../../../packages/contracts/contracts'
 import { describe, expect, it } from 'vitest'
-import { activityEntries } from '../src/activity'
 import { actionSentence, agentSteps } from '../src/agent-steps'
+import { fixtureEntries } from './timeline-fixture'
 
 let id = 0
 
@@ -44,7 +44,7 @@ function edit(...paths: string[]): RunEvent {
 }
 
 function artifacts(events: RunEvent[], chat = true) {
-  return activityEntries(events, chat).flatMap(entry => entry.kind === 'group' ? entry.artifacts : [])
+  return fixtureEntries(events, chat).flatMap(entry => entry.kind === 'group' ? entry.artifacts : [])
 }
 
 describe('agent steps', () => {

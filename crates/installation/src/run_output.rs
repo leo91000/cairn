@@ -329,6 +329,11 @@ fn activity_preview(value: &Value, limit: usize, secrets: Option<&[String]>) -> 
     format!("{}…", &text[..text.floor_char_boundary(limit)]).into()
 }
 
+/// Codex's and Claude Code's report that the account's usage limit was reached.
+pub(crate) fn exhausted_message(message: &str) -> bool {
+    EXHAUSTED.is_match(message.trim())
+}
+
 pub fn exhausted(event: &Value) -> bool {
     if event["willRetry"] == true || !["turn.failed", "error"].contains(&text(event, "type")) {
         return false;
