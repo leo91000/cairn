@@ -13,7 +13,7 @@ renewals, checkpoint writes, diagnostics, retries and unchanged item snapshots
 cannot advance its timestamp. Provider completion/failure enters a sticky
 finalizing phase; neither a late item nor completed=false clears that phase.
 Only a newly launched execution replaces it. Terminal status, process absence,
-released reservations and even code zero do not certify settlement. Current
+released reservations and even code zero do not certify settlement. Current native
 controllers persist an optional `PhysicalFinalized` marker only after their
 workload and physical cleanup complete. The typed client forwards that proof
 without interleaving provider output; the writer records its attempt-bound
@@ -25,8 +25,13 @@ metadata. They remain private to the installation. At 128 distinct items the
 record stops certifying complete coverage for that execution rather than evicting
 old identities and accepting replays as new work. This conservative limit can
 leave long turns unknown. The monitor reports a quiet tool as advisory and retains
-existing incidents; an open tool is not recovery evidence. Unsupported adapter
-items do not certify progress.
+existing incidents; an open tool is not recovery evidence. Plans and initial
+delegated activity use stable semantic fields; spawn-tool
+completion does not end a still-running child. Duration/token/tool-use counters
+and activity notices do not refresh it. Unsupported items, missing item identities,
+unbound background waits and reused child IDs without a child-run identity make
+coverage explicitly unknown until a fresh execution. They cannot leave the
+previous provider state falsely complete.
 
 Updates of the small row are throttled to one second; phase/coverage transitions
 publish immediately. Unpublished digest changes remain in memory only after the
@@ -41,15 +46,19 @@ whose progress writer contract it cannot maintain. As with other installation
 migrations, stop the old manager and retain a consistent database/WAL backup
 before upgrading. Use a forward fix or an explicitly compatible recovery image;
 rolling back the manager binary after version 20 is unsupported. Nodes and guests
-do not open this database. Current nodes emit an optional completion certificate;
+do not open this database. Current native nodes emit an optional completion
+certificate;
 older clients ignore the extra JSON field and older nodes retain their existing
 behavior. A new manager cannot certify old-node finalization from a legacy exit
 marker, including code zero. A bound progress row on a new manager does not
 change this: terminal or registered-wait outcomes without physical proof remain
 unknown, preserving existing incidents; explicit failed flushes remain unhealthy.
-Local shared-process development has no controller
-certificate and conservatively retains unknown terminal finalization. Guests do
-not change. Upgrade matching manager/node versions to obtain the new evidence.
+Local shared-process development has no controller certificate and conservatively
+retains unknown terminal finalization. VM completion remains unknown: its current
+best-effort shutdown discards
+retirement/accounting errors, so a guest exit cannot produce a physical certificate.
+VM and guest execution/recovery behavior do not change. Upgrade matching
+manager/native-node versions to obtain the new evidence.
 A collector on a version-19 manager remains compatible via the helper's missing
 `run_progress` fallback and reports unknown. This PR does not deploy software or
 apply a migration to any running installation.

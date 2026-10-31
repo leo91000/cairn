@@ -108,6 +108,12 @@ impl Progress {
         }
     }
 
+    fn mark_incomplete(&mut self) -> bool {
+        let changed = self.complete;
+        self.complete = false;
+        changed
+    }
+
     pub fn confirm_finalized(&mut self, at: i64) {
         self.finalized_at.get_or_insert(at);
         if self.phase != Phase::Finalizing {
@@ -147,6 +153,9 @@ impl Progress {
         if self.phase == Phase::Finalizing {
             return false;
         }
+        if !self.complete {
+            return false;
+        }
         if kind == "turn.started" {
             if self.provider_started {
                 return false;
@@ -157,31 +166,72 @@ impl Progress {
             self.advanced_at = Some(at);
             return true;
         }
+        if kind == "turn.waiting" {
+            if self.items.values().any(|item| item.tool && !item.completed) {
+                return false;
+            }
+            return self.mark_incomplete();
+        }
         if !matches!(kind, "item.started" | "item.updated" | "item.completed") {
             return false;
         }
         let item = &event["item"];
         let Some(id) = item["id"].as_str().filter(|id| !id.is_empty()) else {
-            return false;
+            return self.mark_incomplete();
         };
         let item_type = item["type"].as_str().unwrap_or("");
         let detail = match item_type {
-            "agent_message" | "reasoning" => json!({ "text": item["text"] }),
+            "agent_message" | "reasoning" | "subagent_message" => json!({ "text": item["text"] }),
             "command_execution" => json!({
                 "output": item["aggregated_output"],
                 "exitCode": item["exit_code"],
             }),
-            "mcp_tool_call" => json!({ "result": item["result"], "error": item["error"] }),
+            "mcp_tool_call" | "collab_tool_call" => {
+                json!({ "result": item["result"], "error": item["error"] })
+            }
+            "todo_list" if item["items"].is_array() => json!({ "items": item["items"] }),
+            "subagent"
+                if matches!(
+                    item["status"].as_str(),
+                    Some("in_progress" | "completed" | "failed" | "stopped")
+                ) =>
+            {
+                json!({ "result": item["result"] })
+            }
             "file_change" => json!({ "changes": item["changes"] }),
             "web_search" => json!({ "action": item["action"], "results": item["results"] }),
-            _ => return false,
+            _ => return self.mark_incomplete(),
         };
         // Event marker, elapsed time, retries and transport metadata are excluded.
         let fingerprint =
             digest(&json!({ "type": item_type, "status": item["status"], "detail": detail }));
-        let key = digest(&Value::String(id.to_owned()));
-        let completed =
-            kind == "item.completed" || item["status"] == "completed" || item["status"] == "failed";
+        let key = digest(&json!([item["parent_id"], id]));
+        if item_type == "todo_list"
+            && item["items"].as_array().is_some_and(Vec::is_empty)
+            && !self.items.contains_key(&key)
+        {
+            return false;
+        }
+        // Completing a spawn tool does not complete its still-running child.
+        let completed = if item_type == "subagent" {
+            matches!(
+                item["status"].as_str(),
+                Some("completed" | "failed" | "stopped")
+            )
+        } else {
+            kind == "item.completed" || item["status"] == "completed" || item["status"] == "failed"
+        };
+        if item_type == "subagent"
+            && !completed
+            && self
+                .items
+                .get(&key)
+                .is_some_and(|previous| previous.completed)
+        {
+            // Reopening a stable child ID needs its own run identity. Until the
+            // protocol supplies one, do not invent coverage for resumed work.
+            return self.mark_incomplete();
+        }
         if self.items.get(&key).is_some_and(|previous| {
             previous.fingerprint == fingerprint && (previous.completed || !completed)
         }) {
@@ -190,9 +240,7 @@ impl Progress {
         if !self.items.contains_key(&key) && self.items.len() >= MAX_ITEMS {
             // Never evict then mistake a replay for a new item. Coverage remains
             // unknown until a fresh execution; memory and serialized state stay bounded.
-            let changed = self.complete;
-            self.complete = false;
-            return changed;
+            return self.mark_incomplete();
         }
         let completed = completed
             || self
@@ -201,7 +249,7 @@ impl Progress {
                 .is_some_and(|previous| previous.completed);
         let tool = matches!(
             item_type,
-            "command_execution" | "mcp_tool_call" | "web_search"
+            "command_execution" | "mcp_tool_call" | "web_search" | "subagent" | "collab_tool_call"
         );
         self.items.insert(
             key,
@@ -246,13 +294,7 @@ mod tests {
     #[test]
     fn diagnostic_heartbeat_and_unchanged_snapshots_do_not_certify_work() {
         let mut progress = progress();
-        for kind in [
-            "diagnostic",
-            "status",
-            "engine.retry",
-            "turn.waiting",
-            "context.usage",
-        ] {
+        for kind in ["diagnostic", "status", "engine.retry", "context.usage"] {
             assert!(!progress.observe(&json!({ "type": kind }), 10));
         }
         assert_eq!(progress.advanced_at, None);
@@ -294,6 +336,74 @@ mod tests {
             &json!({"type":"item.completed","item":{"id":"two","type":"command_execution"}}),
             5
         ));
+    }
+
+    #[test]
+    fn delegated_work_uses_semantics_not_spawn_completion_or_heartbeat_counters() {
+        let mut progress = progress();
+        let mut child = json!({"type":"item.started","item":{"id":"child","type":"subagent","status":"in_progress","prompt":"private"}});
+        assert!(progress.observe(&child, 2));
+        assert_eq!(progress.phase, Phase::Tool);
+        child["type"] = "item.completed".into();
+        child["item"]["background"] = true.into();
+        child["item"]["duration_ms"] = 1000.into();
+        child["item"]["tokens"] = 123.into();
+        child["item"]["tool_uses"] = 7.into();
+        child["item"]["activity"] = "Generated activity notice".into();
+        assert!(!progress.observe(&child, 3));
+        assert!(!progress.observe(&json!({"type":"turn.waiting"}), 4));
+        assert_eq!(progress.phase, Phase::Tool);
+        assert_eq!(progress.advanced_at, Some(2));
+        child["type"] = "item.updated".into();
+        child["item"]["status"] = "completed".into();
+        child["item"]["result"] = "Actual report".into();
+        assert!(progress.observe(&child, 5));
+        assert_eq!(progress.phase, Phase::Provider);
+        child["item"]["status"] = "in_progress".into();
+        assert!(progress.observe(&child, 6));
+        assert!(
+            !progress.complete,
+            "reused child IDs need a child-run identity"
+        );
+        assert_eq!(progress.advanced_at, Some(5));
+    }
+
+    #[test]
+    fn unsupported_items_and_unbound_waits_make_coverage_unknown_without_new_progress() {
+        for event in [
+            json!({"type":"item.started","item":{"id":"future","type":"new_provider_item"}}),
+            json!({"type":"item.updated","item":{"type":"agent_message","text":"missing ID"}}),
+            json!({"type":"turn.waiting"}),
+        ] {
+            let mut progress = progress();
+            progress.observe(&json!({"type":"turn.started"}), 2);
+            assert!(progress.observe(&event, 3));
+            assert!(!progress.complete);
+            assert_eq!(progress.advanced_at, Some(2));
+            assert!(!progress.observe(&event, 4));
+            assert!(progress.observe(&json!({"type":"turn.completed"}), 5));
+            assert_eq!(progress.phase, Phase::Finalizing);
+        }
+    }
+
+    #[test]
+    fn plan_snapshots_and_child_namespaces_are_semantic_and_bounded() {
+        let mut progress = progress();
+        let mut plan = json!({"type":"item.updated","item":{"id":"plan","type":"todo_list","items":[{"text":"private plan","status":"pending"}]}});
+        assert!(progress.observe(&plan, 2));
+        plan["item"]["duration_ms"] = 100.into();
+        assert!(!progress.observe(&plan, 3));
+        plan["item"]["items"][0]["status"] = "completed".into();
+        assert!(progress.observe(&plan, 4));
+        for parent in [Value::Null, Value::String("child".into())] {
+            assert!(progress.observe(&json!({"type":"item.completed","item":{"id":"same-id","parent_id":parent,"type":"subagent_message","text":"Actual result"}}), 5));
+        }
+        assert_eq!(progress.items.len(), 3);
+        assert!(
+            !serde_json::to_string(&progress)
+                .unwrap()
+                .contains("private plan")
+        );
     }
 
     #[test]
@@ -377,14 +487,15 @@ mod compatibility_tests {
             .canonicalize()
             .unwrap();
         let script = format!(
-            "import {{DatabaseSync}} from 'node:sqlite';const m=await import({});const db=new DatabaseSync(process.argv[1],{{readOnly:true}});const row=m.decodeRunProgress(m.prepareRunProgress(db).get('progress-compat'));if(m.observeRunProgress(row,3).status!==process.argv[2])process.exit(1);db.close();",
+            "import {{DatabaseSync}} from 'node:sqlite';const m=await import({});const db=new DatabaseSync(process.argv[1],{{readOnly:true}});const row=m.decodeRunProgress(m.prepareRunProgress(db).get('progress-compat'));if(m.observeRunProgress(row,Number(process.argv[3])).status!==process.argv[2])process.exit(1);db.close();",
             serde_json::to_string(&helper.to_string_lossy()).unwrap()
         );
-        let check = |expected: &str| {
+        let check_at = |expected: &str, at: i64| {
             let result = std::process::Command::new("node")
                 .args(["--input-type=module", "-e", &script])
                 .arg(&database)
                 .arg(expected)
+                .arg(at.to_string())
                 .output()
                 .unwrap();
             assert!(
@@ -393,6 +504,7 @@ mod compatibility_tests {
                 String::from_utf8_lossy(&result.stderr)
             );
         };
+        let check = |expected: &str| check_at(expected, 3);
         check("unknown");
         crate::reads::migration::upgrade(&mut connection).unwrap();
         crate::runs::projections::upgrade(&mut connection).unwrap();
@@ -417,5 +529,18 @@ mod compatibility_tests {
             .store_in(&Db(&connection), "progress-compat")
             .unwrap();
         check("good");
+        progress.observe(&json!({"type":"item.completed","item":{"id":"child","type":"subagent","status":"in_progress"}}),2);
+        progress
+            .store_in(&Db(&connection), "progress-compat")
+            .unwrap();
+        check_at("expected", 2_000_003);
+        progress.observe(
+            &json!({"type":"item.updated","item":{"id":"unknown","type":"future_activity"}}),
+            3,
+        );
+        progress
+            .store_in(&Db(&connection), "progress-compat")
+            .unwrap();
+        check_at("unknown", 2_000_003);
     }
 }
