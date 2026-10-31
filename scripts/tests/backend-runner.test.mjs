@@ -90,6 +90,24 @@ describe('backend test launcher', () => {
     expect(combined.calls[0].args).toContain('worker-fixture-hooks')
     const namedOther = invoke(['--package=cairn-installation', '--test=nodes'])
     expect(namedOther.calls).toEqual([{ args: ['test', '--locked', '--package=cairn-installation', '--test=nodes'] }])
+    for (const selector of ['--tests', '--all-targets']) {
+      const additive = invoke(['-p', 'cairn-installation', '--lib', selector])
+      expect(additive.calls[0].args).toContain('worker-fixture-hooks')
+      expect(additive.calls[1].fixtureContents).toBe('instrumented')
+    }
+
+    const short = invoke(['-pcairn-installation', '--test', 'worker'])
+    expect(short.calls[0].args).toContain('worker-fixture-hooks')
+    expect(short.calls[1].args).not.toContain('--workspace')
+    const shortOther = invoke(['-pcairn-contracts', '--test', 'fixture'])
+    expect(shortOther.calls).toEqual([{ args: ['test', '--locked', '-pcairn-contracts', '--test', 'fixture'] }])
+    for (const spec of ['cairn-installation@0.52.3', 'path+file:///fixture#cairn-installation@0.52.3']) {
+      const versioned = invoke(['-p', spec, '--test', 'worker'])
+      expect(versioned.calls[0].args).toContain('worker-fixture-hooks')
+    }
+
+    const beacon = invoke(['--package=cairn-beacon@0.52.3', '--test', 'relay'])
+    expect(beacon.calls[0].args).toContain('cairn')
   })
 
   it('propagates a fixture build failure without launching tests', () => {
@@ -104,6 +122,7 @@ describe('backend test launcher', () => {
     expect(calls[0].args).toContain('-r')
     expect(calls[1].args).toContain('-r')
     expect(calls[2].fixtureContents).toBe('instrumented')
+    expect(calls[2].args.filter(arg => arg === '--workspace')).toHaveLength(1)
   })
 
   it('distinguishes Nextest settings from Cargo build profile and jobs', () => {
