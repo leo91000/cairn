@@ -1,0 +1,151 @@
+"""Synthetic records only; exercise real bounded child pipes and collector pages."""
+import importlib.util
+import json
+import pathlib
+import subprocess
+import sys
+import time
+import unittest
+
+SPEC = importlib.util.spec_from_file_location("coverage", pathlib.Path(__file__).parents[1] / "log-coverage.py")
+coverage = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(coverage)
+START = coverage.timestamp("2026-10-31T10:24:19Z")
+END = START + 70 * coverage.NANO
+IDENTITY = {"id": "a" * 64, "epoch": "2026-10-30T00:00:00Z"}
+
+
+def request(**changes):
+    return {"kind": "docker", "container": "fixture", "since": coverage.iso(START), "until": coverage.iso(END), **changes}
+
+
+def pipe_page(records, lower=START, upper=END, **options):
+    # Split both timestamps/UTF-8 and severity across writes. No real logs/files.
+    command = [sys.executable, "-c", "import os,sys; data=" + repr(records) + "; [os.write(1,data[i:i+7]) for i in range(0,len(data),7)]"]
+    return coverage.read_page(command, options.pop("kind", "docker"), lower, upper, options.pop("anchor", None),
+                              time.monotonic() + options.pop("seconds", 2), options.pop("bytes_limit", 512000), **options)
+
+
+def line(index, message="INFO service: private-sentinel é"):
+    return (coverage.iso(START + index * 1000000) + " 2026-10-31T10:24:19Z " + message + "\n").encode()
+
+
+class CoverageTests(unittest.TestCase):
+    def test_fewer_than_tail_cap_can_omit_most_of_a_closed_window(self):
+        full = b"".join(line(i, "ERROR service: early") if i == 0 else line(i) for i in range(1009))
+        full_result = pipe_page(full)
+        tail_result = pipe_page(b"".join(full.splitlines(keepends=True)[-392:]))
+        self.assertEqual(full_result["counts"]["records"], 1009)
+        self.assertEqual(tail_result["counts"]["records"], 392)
+        self.assertTrue(392 < 400)  # The old watcher incorrectly called this complete.
+        self.assertEqual(full_result["counts"]["errors"], 1)
+        self.assertEqual(tail_result["counts"]["errors"], 0)
+
+    def test_record_counts_do_not_decide_eof_coverage(self):
+        for count in (399, 400, 401, 1009):
+            with self.subTest(count=count):
+                result = pipe_page(b"".join(line(i) for i in range(count)))
+                self.assertTrue(result["ok"])
+                self.assertEqual(result["counts"]["records"], count)
+                self.assertEqual(result["counts"]["info"], count)
+                self.assertNotIn("private-sentinel", json.dumps(result))
+
+    def test_half_open_boundaries_and_identical_timestamps(self):
+        data = line(0) + line(0) + line(1000)
+        result = pipe_page(data, upper=START + coverage.NANO)
+        self.assertEqual(result["counts"]["records"], 2)
+        self.assertEqual(result["anchor"]["at"], str(START))
+
+    def test_severity_is_a_prefix_not_a_word_in_an_info_message(self):
+        data = line(0, "INFO service: ERROR and panicked at are quoted text")
+        data += line(1, "ERROR service: lease_expired")
+        data += (coverage.iso(START + 2000000) + " thread 'worker' panicked at fixture\n").encode()
+        data += (coverage.iso(START + 3000000) + " \x1b[31munknown formatter\n").encode()
+        result = pipe_page(data)
+        self.assertTrue(result["ok"])
+        self.assertEqual([result["counts"][key] for key in ("errors", "panics", "leasesExpired", "unclassified")], [1, 1, 1, 1])
+
+    def test_incomplete_huge_and_invalid_records_never_get_coverage_credit(self):
+        for data, reason in ((line(0)[:-1], "incomplete_record"), (line(0) + b"x" * 20000, "record_limit"),
+                             (b"private-secret-error\n", "invalid_record"), (line(0), "byte_budget")):
+            with self.subTest(reason=reason):
+                result = pipe_page(data, bytes_limit=32 if reason == "byte_budget" else 512000)
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["reason"], reason)
+                self.assertNotIn("private-secret", json.dumps(result))
+
+    def test_nonzero_exit_and_silent_pipe_do_not_claim_eof_success(self):
+        for code, expected in (("import sys; sys.exit(3)", "source_exit"), ("import time; time.sleep(2)", "time_budget")):
+            result = coverage.read_page([sys.executable, "-c", code], "docker", START, END, None, time.monotonic() + .15, 512000)
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["reason"], expected)
+
+    def test_journal_unit_and_kernel_decode_json_without_exporting_messages(self):
+        data = json.dumps({"__REALTIME_TIMESTAMP": str(START // 1000), "__CURSOR": "s=fixture", "MESSAGE": "EXT4-fs error private"}).encode() + b"\n"
+        result = pipe_page(data, kind="kernel")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["counts"]["kernelIO"], 1)
+        hung = json.dumps({"__REALTIME_TIMESTAMP": str(START // 1000), "__CURSOR": "s=second", "MESSAGE": "task jbd2 blocked in I/O wait for more than122seconds"}).encode() + b"\n"
+        self.assertEqual(pipe_page(hung, kind="kernel")["counts"]["hungTask"], 1)
+        self.assertNotIn("EXT4", json.dumps(result))
+        command = coverage.command_for({"kind": "journal", "unit": "fixture.service"}, IDENTITY, START, END)
+        self.assertNotIn("-n", command)
+        self.assertIn("--all", command)
+        self.assertIn("--output-fields=__REALTIME_TIMESTAMP,__CURSOR,MESSAGE", command)
+        null_message = json.dumps({"__REALTIME_TIMESTAMP": str(START // 1000), "__CURSOR": "s=null", "MESSAGE": None}).encode() + b"\n"
+        self.assertFalse(pipe_page(null_message, kind="journal")["ok"])
+        large = json.dumps({"__REALTIME_TIMESTAMP": str(START // 1000), "__CURSOR": "s=large", "MESSAGE": "2026-10-31T10:24:19Z ERROR service: " + "x" * 5000}).encode() + b"\n"
+        self.assertEqual(pipe_page(large, kind="journal")["counts"]["errors"], 1)
+        self.assertIn("--until", command)
+        self.assertNotIn("--tail", coverage.command_for(request(), IDENTITY, START, END))
+
+    def test_reduce_then_credit_only_oldest_completed_pages(self):
+        calls = []
+        def reader(command, kind, lower, upper, anchor, deadline, allowance):
+            calls.append((lower, upper))
+            ok = upper - lower <= 35 * coverage.NANO
+            return {"ok": ok, "counts": empty_with_record(), "workBytes": 100, "eof": ok, "exitCode": 0 if ok else None,
+                    "reason": None if ok else "byte_budget", "anchorFound": True,
+                    "anchor": {"at": str(upper - 1), "key": str(upper)}}
+        result = coverage.collect(request(maxAttempts=2), lambda *_: IDENTITY, reader, now_ns=END + 3 * coverage.NANO)
+        self.assertEqual(result["coveredThrough"], coverage.iso(START + 35 * coverage.NANO))
+        self.assertFalse(result["caughtUp"])
+        self.assertEqual(result["pages"], 1)
+        self.assertEqual(result["counts"]["records"], 1)
+        self.assertEqual(result["partialCounts"]["records"], 1)
+        self.assertEqual(calls[1][0], START)
+
+    def test_source_clock_bootstrap_and_missing_anchor_are_explicit(self):
+        def reader(*_):
+            return {"ok": True, "counts": coverage.empty_counts(), "workBytes": 0, "eof": True,
+                    "exitCode": 0, "reason": None, "anchorFound": False, "anchor": None}
+        result = coverage.collect(request(), lambda *_: IDENTITY, reader, now_ns=END)
+        self.assertFalse(result["caughtUp"])
+        self.assertEqual(result["coveredThrough"], coverage.iso(END - 2 * coverage.NANO))
+        prior = {"identity": IDENTITY, "anchor": {"at": str(START), "key": "old"}}
+        result = coverage.collect(request(previous=prior), lambda *_: IDENTITY, reader, now_ns=END + 3 * coverage.NANO)
+        self.assertEqual(result["continuity"], "anchor_missing")
+        self.assertTrue(result["continuityUnknown"])
+
+    def test_source_change_between_pages_discards_watermark(self):
+        values = iter((IDENTITY, {**IDENTITY, "epoch": "2026-10-31T00:00:00Z"}))
+        def reader(*_):
+            return {"ok": True, "counts": coverage.empty_counts(), "workBytes": 0, "eof": True,
+                    "exitCode": 0, "reason": None, "anchorFound": True, "anchor": None}
+        result = coverage.collect(request(), lambda *_: next(values), reader, now_ns=END + 3 * coverage.NANO)
+        self.assertTrue(result["sourceChanged"])
+        self.assertEqual(result["coveredThrough"], coverage.iso(START))
+        self.assertFalse(result["complete"])
+
+    def test_cli_error_does_not_echo_request_or_exception_content(self):
+        result = subprocess.run([sys.executable, str(SPEC.origin), "--request", '{"kind":"private-secret"}'], capture_output=True, check=True)
+        self.assertEqual(json.loads(result.stdout), {"ok": False, "reason": "source_or_request_failure"})
+        self.assertEqual(result.stderr, b"")
+
+
+def empty_with_record():
+    return {**coverage.empty_counts(), "records": 1}
+
+
+if __name__ == "__main__":
+    unittest.main()
