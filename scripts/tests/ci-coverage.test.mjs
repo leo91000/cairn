@@ -128,6 +128,19 @@ describe('parallel CI coverage', () => {
     expect(quality.jobs['network-bench'].strategy['fail-fast']).toBe(false)
   })
 
+  it('runs the actual missing-only network preparer before every unchanged topology suite', () => {
+    for (const name of ['network-bench', 'android-direct']) {
+      const steps = quality.jobs[name].steps
+      expect(steps.some(step => step.run === `node scripts/prepare-network-tools.mjs ${name}`)).toBe(true)
+      expect(steps.some(step => step.run?.startsWith('sudo apt-get update'))).toBe(false)
+    }
+
+    const network = quality.jobs['network-bench'].steps.find(step => step.name === 'Validate real network topology and authenticated sessions')
+    expect(network.run).toContain('python3 tests/network_bench_test.py')
+    expect(network.run).toContain('python3 tests/network_probe_test.py')
+    expect(network.run).toContain('python3 tests/stun_docker_test.py')
+  })
+
   it('runs every native network scenario once with one shared APK producer', () => {
     const build = quality.jobs['android-direct-build']
     const device = quality.jobs['android-direct']
@@ -151,6 +164,24 @@ describe('parallel CI coverage', () => {
     for (const projects of ['journeys*', 'layout-webkit-*'])
       expect(groups.filter(group => group.projects === projects).map(group => group.shard).sort()).toEqual(['1/4', '2/4', '3/4', '4/4'])
     expect(groups.filter(group => group.projects === 'layout-chromium-*')).toHaveLength(1)
+  })
+
+  it('builds and delivers the SQL fixture before real Postgres and browser qualification without psql installation', () => {
+    const build = quality.jobs.build.steps
+    expect(build.find(step => step.name === 'Build the browser-test backend and frontend').run).toContain('--example beacon_sql_fixture')
+    expect(build.find(step => step.with?.name === 'browser-backend').with.path).toContain('target/debug/examples/beacon_sql_fixture')
+    for (const name of ['browser', 'network-bench', 'android-direct']) {
+      const steps = quality.jobs[name].steps
+      expect(steps.some(step => step.run?.includes('chmod +x') && step.run.includes('target/debug/examples/beacon_sql_fixture'))).toBe(true)
+    }
+
+    const steps = quality.jobs.browser.steps
+    expect(steps.some(step => step.run?.includes('postgresql-client'))).toBe(false)
+    const sql = steps.findIndex(step => step.run === 'pnpm exec tsx scripts/qualify-beacon-sql-fixture.ts')
+    const journeys = steps.findIndex(step => step.run?.includes('pnpm test:e2e'))
+    expect(sql).toBeGreaterThan(-1)
+    expect(sql).toBeLessThan(journeys)
+    expect(quality.jobs.browser.services.postgres.image).toContain('postgres:17-alpine@sha256:')
   })
 
   it('keeps the browser execution deadline independent of slow preparation and evidence upload', () => {

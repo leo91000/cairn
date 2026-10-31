@@ -43,6 +43,37 @@ archive contents, or peak disk-use measurement. They do not reconstruct the
 historical failed runner's capacity. Incremental output is measured separately;
 compilation still runs with its existing incremental/debug settings.
 
+## Fixture preparation without unnecessary package acquisition
+
+Browser shards use the test-only `beacon_sql_fixture` example built with their
+existing backend artifact instead of installing `psql` at runtime. The synchronous
+TypeScript helper sends its connection URL and raw SQL batch on stdin. It keeps
+schema/options and simple-query transaction behavior while exposing only fixed
+failure codes. The example is not included in production binaries or images.
+Each shard first qualifies the actual helper and artifact against disposable
+Postgres 17; see [the fixture contract](../tests/e2e/README.md).
+
+Network and Android jobs run `prepare-network-tools.mjs` before their existing
+qualification. Its CLI refuses invocation outside GitHub CI. It checks actual
+executable tools under the privileged PATH,
+including cleanup's external `kill`, and records bounded numeric versions,
+iptables backend and the noninteractive sudo/namespace-list checks. Complete
+hosts make no APT calls. Missing tools select only packages from the fixed map;
+installation errors and unsuccessful final probes stop preparation. Before,
+APT-stage and ready records are uploaded with the existing evidence artifacts.
+The tool-version probes have a bounded ten-second read; qualification and package
+installation keep the existing job deadlines without added retries.
+
+All network groups still require `conntrack`: their unchanged shared test suite
+uses its real CLI even when selected NAT scenarios do not. Android's selected
+scenarios do not require that CLI. The checks do not claim to prove namespace
+creation, packet routing or cleanup; the subsequent real qualification does that.
+
+This avoids a needless package-manager dependency on already complete hosts. It
+does not repair the mirror or identify the silent historical APT subphase. Missing
+packages still need acquisition, and network jobs retain Playwright's separate
+`install --with-deps chromium` path. The workflow is not universally APT-free.
+
 ## Native admission diagnostics
 
 The complete reference and candidate qualifications retain their original order,
@@ -52,7 +83,7 @@ HTTP response. Removing those statements must restore the complete original AST
 and exact original text. An incompatible or repeated overlay is refused. Actual
 fixture hashes are logged to prove provenance.
 
-Only `POST /runs/{UUID}` with HTTP409 can emit an observation. A response of at most
+Only `POST /runs/{UUID}` with HTTP 409 can emit an observation. A response of at most
 4096 bytes containing exactly one `error` string is compared to fixed
 source-defined literals. Output contains only reference/candidate role, route
 label, synthetic attempt UUID, status, fixed reason code and response length.
@@ -62,7 +93,7 @@ the original HTTP exception. No request, assertion, phase, Docker flag, retry or
 policy is changed. The existing CI reference selector supplies the actual base
 commit; no historical reference is imposed permanently.
 
-Guard tests intentionally produce some409 responses. Their presence alone does
+Guard tests intentionally produce some 409 responses. Their presence alone does
 not establish a failed admission. A cause must be correlated with an unhandled
 request and failing phase. A passing observation of the historical fixture does
 not prove a repair; non-reproduction is recorded as such. Local API/privacy tests
