@@ -479,7 +479,7 @@ pub fn changed_chunk(
         db,
         run,
         "t.run_id=?1 AND t.revision>?2 AND t.revision<=?3 AND (t.revision>?4 OR (t.revision=?4 AND t.id>?5)) ORDER BY t.revision,t.id",
-        params![run, after, upto, revision, id],
+        params![run, after, upto, revision.max(after), id],
         Some(256 * 1024 - 1024),
         false,
         true,
@@ -641,11 +641,14 @@ pub fn window_chunk(
     } else {
         "t.run_id=?1 AND t.position>=?2 AND t.revision<=?3 AND (t.position>?4 OR (t.position=?4 AND t.id>?5)) ORDER BY t.position,t.id"
     };
+    // SQLite uses the pagination cursor as the index seek bound. Clamp it to
+    // the window so the first page does not scan every older card in the run.
+    let cursor = position.max(oldest.saturating_sub(1));
     entries_bounded(
         db,
         run,
         filter,
-        params![run, oldest, upto, position, id],
+        params![run, oldest, upto, cursor, id],
         Some(256 * 1024 - 1024),
         false,
         earlier,
