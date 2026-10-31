@@ -49,6 +49,7 @@ async fn real_v16_upgrade_preserves_metadata_files_quota_and_every_unrelated_tab
     std::fs::create_dir_all(root.path().join("data")).unwrap();
     let db = previous(root.path());
     let before = snapshot(&db);
+    let runs_before = common::run_fixture::projection_rows(&db);
     let uploads: Vec<Value> = db
         .prepare("SELECT data FROM kv WHERE key LIKE 'chat-attachment:%' ORDER BY key")
         .unwrap()
@@ -87,8 +88,9 @@ async fn real_v16_upgrade_preserves_metadata_files_quota_and_every_unrelated_tab
         assert_eq!(serde_json::to_value(saved.metadata).unwrap(), a);
     }
     let after = snapshot(&db);
+    assert_eq!(common::run_fixture::projection_rows(&db), runs_before);
     for (name, old) in &before {
-        if name != "kv" {
+        if name != "kv" && name != "runs" {
             assert_eq!(after.get(name), Some(old), "unrelated table {name}");
         }
     }
@@ -118,7 +120,7 @@ async fn real_v16_upgrade_preserves_metadata_files_quota_and_every_unrelated_tab
     assert_eq!(
         db.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
             .unwrap(),
-        18
+        19
     );
     let s = Service::new(common::config(root.path())).await.unwrap();
     let proof = s.store.kv("d2-fixture-proof").await.unwrap().unwrap();

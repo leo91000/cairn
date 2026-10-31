@@ -86,7 +86,7 @@ pub(crate) fn merge(
         }
     }
     let runs = db.json_rows(
-        "SELECT data FROM runs WHERE json_extract(snapshot,'$.agent.id')=?",
+        "SELECT data FROM run_views AS runs WHERE json_extract(snapshot,'$.agent.id')=?",
         [source_id],
     )?;
     if runs.iter().any(|run| {

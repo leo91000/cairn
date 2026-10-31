@@ -43,7 +43,7 @@ fn legacy_publication(run: &Value) -> bool {
 /// Running executions and stopped on-demand disks with unpublished writes or an
 /// unfinished publication, including a mission parked before demand was saved.
 pub(super) const SYNC_CANDIDATES: &str =
-    "SELECT data FROM runs WHERE status='running'
+    "SELECT data FROM run_views AS runs WHERE status='running'
         OR json_extract(data,'$.backup.requestedRevision') > COALESCE(json_extract(data,'$.backup.acknowledgedRevision'),0)
         OR (status IN ('succeeded','failed','cancelled','interrupted','queued','waiting')
              AND json_extract(data,'$.storage.mode')='on-demand'

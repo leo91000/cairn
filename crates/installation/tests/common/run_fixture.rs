@@ -176,3 +176,38 @@ impl RunFixture for Store {
             .await
     }
 }
+
+/// Compare every physical field and both wire projections across v18 -> v19.
+/// Only their SQL location changes: the values must remain byte-for-byte equal.
+pub fn projection_rows(connection: &rusqlite::Connection) -> Vec<Vec<rusqlite::types::Value>> {
+    let current: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='view' AND name='run_views')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let source = if current { "run_views" } else { "runs" };
+    let mut columns = connection
+        .prepare(&format!("PRAGMA table_xinfo({source})"))
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    columns.sort();
+    let fields = columns
+        .into_iter()
+        .map(|name| format!("\"{name}\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut statement = connection
+        .prepare(&format!("SELECT {fields} FROM {source} ORDER BY id"))
+        .unwrap();
+    let count = statement.column_count();
+    statement
+        .query_map([], |row| (0..count).map(|index| row.get(index)).collect())
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+}

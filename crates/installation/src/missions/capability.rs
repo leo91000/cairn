@@ -178,7 +178,7 @@ impl MissionOperation {
                         actor.authorize(&db)?;
 
                         let query = format!(
-                            "SELECT {} FROM runs WHERE id IN (
+                            "SELECT {} FROM run_views AS runs WHERE id IN (
                             SELECT (SELECT id FROM runs WHERE task_id=missions.id
                                 ORDER BY created_at DESC,id DESC LIMIT 1) FROM missions
                         ) ORDER BY created_at DESC,id DESC",

@@ -1069,7 +1069,7 @@ pub(crate) async fn revoke(
 /// for a machine that can never return under this identity.
 fn release_placements(db: &Db<'_>, node: &str) -> Result<u64> {
     let runs = db.json_rows(
-        "SELECT data FROM runs
+        "SELECT data FROM run_views AS runs
          WHERE json_extract(data,'$.pinnedNodeId')=?1 OR json_extract(data,'$.preferredNodeId')=?1",
         [node],
     )?;
