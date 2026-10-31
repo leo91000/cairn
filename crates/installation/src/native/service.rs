@@ -4140,6 +4140,95 @@ mod tests {
         (fixture, controller, run, attempt, environment)
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_artifact_request_drains_its_admitted_io_before_close() {
+        let (_fixture, controller, run, id, environment) = artifact_fixture().await;
+        let path = environment.join("tmp/result");
+        tokio::fs::write(&path, b"preserved artifact bytes")
+            .await
+            .unwrap();
+        let (opening, release) = crate::artifacts::file::tests::delay_open(&path);
+        let export = tokio::spawn({
+            let controller = controller.clone();
+            let id = id.clone();
+            async move {
+                route(
+                    controller,
+                    request(
+                        &format!("/runs/{id}/artifact"),
+                        &json!({ "runId": run, "path": "/tmp/result" }),
+                    ),
+                )
+                .await
+            }
+        });
+        let opened =
+            tokio::task::spawn_blocking(move || opening.recv_timeout(Duration::from_secs(5)))
+                .await
+                .unwrap();
+        if opened.is_err() {
+            let _ = release.send(());
+        }
+        opened.expect("artifact must reach its real blocking filesystem open");
+        export.abort();
+        assert!(export.await.unwrap_err().is_cancelled());
+        controller
+            .active
+            .lock()
+            .await
+            .get(&id)
+            .unwrap()
+            .stop
+            .cancel();
+        let pool_retained = crate::file_lock::exclusive(
+            &controller.state.join("storage.lock"),
+            "admitted filesystem work must retain pool ownership",
+        )
+        .is_err();
+        let entered = Arc::new(Notify::new());
+        let closing = tokio::spawn({
+            let controller = controller.clone();
+            let entered = entered.clone();
+            async move {
+                StorageClose::default()
+                    .finish(&controller.state, async {
+                        entered.notify_one();
+                        Ok(block::Completion::Flushed)
+                    })
+                    .await
+            }
+        });
+        let drained_too_early =
+            tokio::time::timeout(Duration::from_millis(100), entered.notified())
+                .await
+                .is_ok();
+        // Always release the actual blocking operation before an assertion.
+        let _ = release.send(());
+        let closed = tokio::time::timeout(Duration::from_secs(5), closing).await;
+        assert!(
+            pool_retained,
+            "request cancellation detached IO from its ownership"
+        );
+        assert!(
+            !drained_too_early,
+            "close raced an admitted filesystem open"
+        );
+        assert_eq!(
+            closed.unwrap().unwrap().unwrap(),
+            block::Completion::Flushed
+        );
+        assert_eq!(
+            tokio::fs::read(path).await.unwrap(),
+            b"preserved artifact bytes"
+        );
+        assert_eq!(
+            std::fs::read_dir(controller.state.join("exports"))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
     #[tokio::test]
     async fn tmp_artifact_uses_the_ephemeral_path_and_rejects_redirects() {
         let (_fixture, controller, run, attempt, environment) = artifact_fixture().await;

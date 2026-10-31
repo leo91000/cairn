@@ -197,6 +197,10 @@ jobs:
       - name: Check all Rust targets for a backend-only qualification
         if: inputs.backend-only == true
         run: pnpm validate:pr rust
+      - name: Qualify native controller concurrency before building every test binary
+        run: >-
+          node scripts/test-backend.mjs --nextest -p cairn-installation --lib
+          -E 'test(native::service::tests::)' --no-capture
       - name: Run backend tests across binaries with isolated credentials
         run: |
           set -o pipefail
