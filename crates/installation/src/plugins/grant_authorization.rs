@@ -27,7 +27,8 @@ pub(crate) struct Snapshot {
     revision: String,
     requester: Option<(String, String)>,
     bearer: Option<(String, bool)>,
-    run_id: Option<String>,
+    run_id: Option<(String, Value)>,
+    wait_owner: Option<Arc<crate::waits::Owner>>,
     package: Arc<Package>,
 }
 
@@ -82,6 +83,7 @@ impl Snapshot {
                     requester,
                     bearer,
                     run_id: None,
+                    wait_owner: None,
                     package,
                 })
             })
@@ -101,15 +103,41 @@ impl Snapshot {
                 requesting_agent(db, &caller)
             })
             .await?;
-        snapshot.run_id = Some(text(run, "id").into());
+        snapshot.run_id = Some((
+            text(run, "id").into(),
+            crate::waits::execution_id(run).clone(),
+        ));
         Ok(snapshot)
+    }
+
+    pub(crate) async fn for_wait(
+        s: &Service,
+        run: &Value,
+        package: &Package,
+        owner: Arc<crate::waits::Owner>,
+    ) -> Result<Self> {
+        let mut snapshot = Self::for_run(s, run, package).await?;
+        snapshot.wait_owner = Some(owner);
+        Ok(snapshot)
+    }
+
+    fn authority(&self) -> crate::capabilities::plugin_packages::Authority {
+        let expected = self.clone();
+        crate::capabilities::plugin_packages::Authority::default()
+            .with_guard(move |db| expected.authorize(db))
     }
 
     pub(crate) async fn recheck(&self, s: &Service) -> Result<()> {
         let expected = self.clone();
         s.store.read(move |db| expected.authorize(db)).await?;
         if let Some((requester, _)) = &self.requester {
-            Box::pin(super::grants::check_coverage(s, requester, &self.agent)).await?;
+            Box::pin(super::grants::check_coverage_authorized(
+                s,
+                requester,
+                &self.agent,
+                Some(self.authority()),
+            ))
+            .await?;
         }
         let expected = self.clone();
         s.store.read(move |db| expected.authorize(db)).await
@@ -136,8 +164,27 @@ impl Snapshot {
                 return Err(denied());
             }
         }
-        if let Some(run_id) = &self.run_id {
+        if let Some((run_id, execution)) = &self.run_id {
             let run = required(db.run(run_id)?, "Run not found")?;
+            if crate::waits::execution_id(&run) != execution || !run["cancelRequestedAt"].is_null()
+            {
+                return Err(denied());
+            }
+            if let Some(expected) = &self.wait_owner {
+                let current = required(expected.reload(db)?, "Wait no longer exists")?;
+                if current.run_id() != run_id
+                    || current.wakeup.as_ref().map(|wait| &wait.id)
+                        != expected.wakeup.as_ref().map(|wait| &wait.id)
+                    || !current.resumable(&run)
+                {
+                    return Err(denied());
+                }
+            } else if !crate::run_status::RunStatus::of(&run)
+                .is_some_and(crate::run_status::RunStatus::is_active)
+                || crate::waits::Owner::for_run(db, &run)?.run_id() != run_id
+            {
+                return Err(denied());
+            }
             crate::delegation::authorize_run(db, &run)?;
             if run["snapshot"]["agent"]["id"] != self.agent
                 || requesting_agent(db, &run)? != self.requester
@@ -328,7 +375,13 @@ impl Invocation {
             return Err(denied());
         }
         if let Some((requester, _)) = &self.snapshot.requester {
-            super::grants::check_coverage(s, requester, &self.snapshot.agent).await?;
+            super::grants::check_coverage_authorized(
+                s,
+                requester,
+                &self.snapshot.agent,
+                Some(self.snapshot.authority()),
+            )
+            .await?;
         }
         let fields = fields(&package.manifest, self.kind, &self.name)?;
         for (agent, grant) in grants {

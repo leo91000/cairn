@@ -998,15 +998,8 @@ async fn proxy(
     params: Value,
 ) -> Result<Value> {
     let _guard = s.mcps.lock(id).await;
-    let (server, scope) = s.mcps.grant(s, id, bearer).await?;
-    let authorize = {
-        let id = id.to_owned();
-        let bearer = bearer.to_owned();
-        move |db: &crate::store::Db<'_>| {
-            crate::mcps::grant_in(db, &id, &bearer)?;
-            Ok(())
-        }
-    };
+    let (server, scope, authority) = s.mcps.grant_authorized(s, id, bearer).await?;
+    let authorize = { move |db: &crate::store::Db<'_>| authority.authorize(db) };
     if method == "tools/call" && !scope.allows(text(&params, "name")) {
         return Err(Error::forbidden("This tool is unavailable to this agent."));
     }
@@ -1042,6 +1035,12 @@ async fn proxy(
         result
     }
     .await;
+    s.store
+        .read({
+            let authorize = authorize.clone();
+            move |db| authorize(db)
+        })
+        .await?;
     if let Err(error) = &result {
         // Recheck the same gateway grant before publishing a failure after network work.
         s.mcps

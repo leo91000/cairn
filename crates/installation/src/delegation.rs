@@ -422,7 +422,16 @@ pub async fn delegate(s: &Service, bearer: &str, input: &Value) -> Result<Value>
     let caller = crate::project_workspaces::authorize(s, bearer).await?;
     let requester_id = text(&caller["snapshot"]["agent"], "id").to_owned();
     let target_id = text(&engine, "id").to_owned();
-    let revisions = crate::plugins::grants::check_coverage(s, &requester_id, &target_id).await?;
+    let token = bearer.to_owned();
+    let authority = crate::capabilities::plugin_packages::Authority::for_execution(&caller)
+        .with_guard(move |db| crate::project_workspaces::authorize_in(db, &token).map(|_| ()));
+    let revisions = crate::plugins::grants::check_coverage_authorized(
+        s,
+        &requester_id,
+        &target_id,
+        Some(authority),
+    )
+    .await?;
     let (bearer, input) = (bearer.to_owned(), input.clone());
     let result = s
         .store
@@ -660,6 +669,20 @@ pub(crate) fn authorize_run(db: &Db<'_>, run: &Value) -> Result<()> {
 }
 
 pub(crate) async fn authorize_async(s: &Service, run: &Value) -> Result<()> {
+    authorize_async_with(
+        s,
+        run,
+        crate::capabilities::plugin_packages::Authority::for_execution(run),
+    )
+    .await?;
+    Ok(())
+}
+
+pub(crate) async fn authorize_async_with(
+    s: &Service,
+    run: &Value,
+    authority: crate::capabilities::plugin_packages::Authority,
+) -> Result<crate::capabilities::plugin_packages::Authority> {
     let run = run.clone();
     let pair = s
         .store
@@ -674,16 +697,41 @@ pub(crate) async fn authorize_async(s: &Service, run: &Value) -> Result<()> {
             let parent = db
                 .conversation(&lineage.chat_id)?
                 .filter(|chat| chat.lifecycle == cairn_contracts::ConversationLifecycle::Active);
-            Ok(parent.map(|parent| {
-                (
-                    parent.agent_id,
-                    text(&run["snapshot"]["agent"], "id").to_owned(),
-                )
-            }))
+            parent
+                .map(|parent| {
+                    let target = text(&run["snapshot"]["agent"], "id").to_owned();
+                    let revisions = (
+                        required(db.agent(&parent.agent_id)?, "Requesting agent not found")?
+                            .revision,
+                        required(db.agent(&target)?, "Agent not found")?.revision,
+                    );
+                    Ok((parent.agent_id, target, revisions))
+                })
+                .transpose()
         })
         .await?;
-    if let Some((parent, target)) = pair {
-        crate::plugins::grants::check_coverage(s, &parent, &target).await?;
+    if let Some((parent, target, revisions)) = pair {
+        let (left, right) = (parent.clone(), target.clone());
+        let authority = authority.with_guard(move |db| {
+            if required(db.agent(&left)?, "Requesting agent not found")?.revision != revisions.0
+                || required(db.agent(&right)?, "Agent not found")?.revision != revisions.1
+            {
+                return Err(Error::forbidden(
+                    "Delegated plugin grants changed. Retry the action.",
+                ));
+            }
+            Ok(())
+        });
+        crate::plugins::grants::check_coverage_authorized(
+            s,
+            &parent,
+            &target,
+            Some(authority.clone()),
+        )
+        .await?;
+        authority.recheck(s).await?;
+        return Ok(authority);
     }
-    Ok(())
+    authority.recheck(s).await?;
+    Ok(authority)
 }

@@ -94,9 +94,43 @@ pub(crate) struct Authority {
     public_credential: Option<String>,
     public_scope: Option<&'static str>,
     additional_public_scope: Option<&'static str>,
+    guard: Option<Arc<LocalGuard>>,
 }
 
+type LocalGuard = dyn Fn(&Db<'_>) -> Result<()> + Send + Sync;
+
 impl Authority {
+    pub(crate) fn for_execution(run: &Value) -> Self {
+        let id = crate::validation::text(run, "id").to_owned();
+        let execution = crate::waits::execution_id(run).clone();
+        Self::default().with_guard(move |db| {
+            let run = crate::error::required(db.run(&id)?, "Run not found")?;
+            if crate::waits::execution_id(&run) != &execution
+                || !run["cancelRequestedAt"].is_null()
+                || !crate::run_status::RunStatus::of(&run)
+                    .is_some_and(crate::run_status::RunStatus::is_active)
+                || crate::waits::Owner::for_run(db, &run)?.run_id() != id
+            {
+                return Err(Error::forbidden("The calling execution ended or changed."));
+            }
+            crate::delegation::authorize_run(db, &run)
+        })
+    }
+
+    pub(crate) fn with_guard(
+        mut self,
+        guard: impl Fn(&Db<'_>) -> Result<()> + Send + Sync + 'static,
+    ) -> Self {
+        let previous = self.guard.take();
+        self.guard = Some(Arc::new(move |db| {
+            if let Some(previous) = &previous {
+                previous(db)?;
+            }
+            guard(db)
+        }));
+        self
+    }
+
     pub(crate) async fn for_grants(
         s: &Service,
         context: ResumeContext,
@@ -153,6 +187,7 @@ impl Authority {
             public_credential: None,
             public_scope: None,
             additional_public_scope: None,
+            guard: None,
         })
     }
 
@@ -183,6 +218,9 @@ impl Authority {
     }
 
     pub(crate) fn authorize(&self, db: &Db<'_>) -> Result<()> {
+        if let Some(guard) = &self.guard {
+            guard(db)?;
+        }
         if let Some(bearer) = &self.bearer {
             crate::installation_mcp::authorize_in(db, bearer)?;
         }

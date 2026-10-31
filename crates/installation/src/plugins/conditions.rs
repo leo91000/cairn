@@ -277,6 +277,15 @@ pub struct Observed {
 }
 
 pub async fn observe(s: &Service, run: &Value, condition: &Value) -> Result<Observed> {
+    observe_with(s, run, condition, None).await
+}
+
+async fn observe_with(
+    s: &Service,
+    run: &Value,
+    condition: &Value,
+    owner: Option<Arc<crate::waits::Owner>>,
+) -> Result<Observed> {
     let caller = run.clone();
     let source = condition.clone();
     let project = s
@@ -311,7 +320,11 @@ pub async fn observe(s: &Service, run: &Value, condition: &Value) -> Result<Obse
             object.remove(key);
         }
     }
-    let snapshot = super::grant_authorization::Snapshot::for_run(s, run, &package).await?;
+    let snapshot = if let Some(owner) = owner {
+        super::grant_authorization::Snapshot::for_wait(s, run, &package, owner).await?
+    } else {
+        super::grant_authorization::Snapshot::for_run(s, run, &package).await?
+    };
     let scope = super::grant_authorization::contribution_scope(
         s,
         snapshot,
@@ -438,39 +451,80 @@ fn watched(owner: &crate::waits::Owner, run: &Value, time: i64) -> Vec<Slot> {
 }
 
 pub async fn poll_once(s: &Service) -> Result<()> {
-    let groups=s.store.read(|db| {
-        let mut groups=BTreeMap::<String,Vec<Watch>>::new();
-        let mut owners=Vec::new();
-        for record in db.conversations()? {owners.push(crate::waits::Owner::conversation(record));}
-        for record in db.waiting_run_records()? {owners.push(crate::waits::Owner::mission(record));}
-        for owner in owners {
-            let Some(run)=db.run(owner.run_id())? else {continue;};
-            let owner=Arc::new(owner);
-            let run=Arc::new(run);
-            for slot in watched(&owner,&run,now()) {
-                let condition=condition_of(owner.wakeup.as_ref().unwrap(),slot).unwrap();
-                let wire=crate::waits::condition_wire(condition);
-                let project_id=&wire["projectId"];
-                let granted_origin=crate::project_workspaces::catalog(&run).into_iter().find(|p|&p["id"]==project_id).map(|p|p["origin"].clone());
-                let key=json!({"agentId":run["snapshot"]["agent"]["id"],"access":policy(&run["snapshot"]["agent"]),"condition":condition,"projectOrigin":granted_origin}).to_string();
-                groups.entry(key).or_default().push((owner.clone(),run.clone(),slot));
+    let groups = s
+        .store
+        .read(|db| {
+            let mut groups = BTreeMap::<String, Vec<Watch>>::new();
+            let mut owners = Vec::new();
+            for record in db.conversations()? {
+                owners.push(crate::waits::Owner::conversation(record));
             }
-        }
-        let mut groups=groups.into_values().collect::<Vec<_>>();
-        groups.sort_by_key(|group|group.iter().filter_map(|(owner,_,slot)| {
-            let w=owner.wakeup.as_ref()?;
-            match slot {Some(index)=>w.members.as_ref()?.get(*index)?.next_check_at,None=>w.progress.next_check_at}
-        }).min().unwrap_or(0));
-        groups.truncate(BATCH_SIZE);
-        Ok(groups)
-    }).await?;
+            for record in db.waiting_run_records()? {
+                owners.push(crate::waits::Owner::mission(record));
+            }
+            for owner in owners {
+                let Some(run) = db.run(owner.run_id())? else {
+                    continue;
+                };
+                let owner = Arc::new(owner);
+                let run = Arc::new(run);
+                for slot in watched(&owner, &run, now()) {
+                    let condition = condition_of(owner.wakeup.as_ref().unwrap(), slot).unwrap();
+                    let wire = crate::waits::condition_wire(condition);
+                    let project_id = &wire["projectId"];
+                    let granted_origin = crate::project_workspaces::catalog(&run)
+                        .into_iter()
+                        .find(|p| &p["id"] == project_id)
+                        .map(|p| p["origin"].clone());
+                    let requester = db
+                        .conversation_for_run(text(&run, "id"))?
+                        .and_then(|chat| chat.requested_by);
+                    let key = json!({
+                        "agentId": run["snapshot"]["agent"]["id"],
+                        "access": policy(&run["snapshot"]["agent"]),
+                        "condition": condition,
+                        "projectOrigin": granted_origin,
+                        "requester": requester,
+                    })
+                    .to_string();
+                    groups
+                        .entry(key)
+                        .or_default()
+                        .push((owner.clone(), run.clone(), slot));
+                }
+            }
+            let mut groups = groups.into_values().collect::<Vec<_>>();
+            groups.sort_by_key(|group| {
+                group
+                    .iter()
+                    .filter_map(|(owner, _, slot)| {
+                        let w = owner.wakeup.as_ref()?;
+                        match slot {
+                            Some(index) => w.members.as_ref()?.get(*index)?.next_check_at,
+                            None => w.progress.next_check_at,
+                        }
+                    })
+                    .min()
+                    .unwrap_or(0)
+            });
+            groups.truncate(BATCH_SIZE);
+            Ok(groups)
+        })
+        .await?;
     let results = stream::iter(groups)
         .map(|group| async move {
             let (first, run, slot) = &group[0];
             let condition = condition_of(first.wakeup.as_ref().unwrap(), *slot).unwrap();
-            let observed = observe(s, run, &crate::waits::condition_wire(condition)).await;
+            let observer = text(run, "id").to_owned();
+            let observed = observe_with(
+                s,
+                run,
+                &crate::waits::condition_wire(condition),
+                Some(first.clone()),
+            )
+            .await;
             s.store
-                .transaction(move |db| record(db, group, &observed))
+                .transaction(move |db| record(db, group, &observed, &observer))
                 .await
         })
         .buffer_unordered(4)
@@ -502,7 +556,12 @@ fn unchanged(
     }
 }
 
-fn record(db: &Db<'_>, group: Vec<Watch>, observed: &Result<Observed>) -> Result<()> {
+fn record(
+    db: &Db<'_>,
+    group: Vec<Watch>,
+    observed: &Result<Observed>,
+    observer: &str,
+) -> Result<()> {
     for (expected, observed_run, slot) in group {
         let Some(mut owner) = expected.reload(db)? else {
             continue;
@@ -524,7 +583,9 @@ fn record(db: &Db<'_>, group: Vec<Watch>, observed: &Result<Observed>) -> Result
         let result = match (&authorized, observed) {
             (Err(error), _) => Some(json!({"state":"unavailable","message":error.message})),
             (Ok(()), Ok(value)) => value.result.clone(),
-            (Ok(()), Err(error)) if matches!(error.status, 403 | 404 | 409) => {
+            (Ok(()), Err(error))
+                if matches!(error.status, 403 | 404 | 409) && owner.run_id() == observer =>
+            {
                 Some(json!({"state":"unavailable","message":error.message}))
             }
             _ => None,

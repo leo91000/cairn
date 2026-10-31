@@ -637,8 +637,38 @@ impl Mcps {
         id: &str,
         bearer: &str,
     ) -> Result<(McpServer, GrantScope)> {
+        let (server, scope, _) = self.grant_authorized(s, id, bearer).await?;
+        Ok((server, scope))
+    }
+
+    pub(crate) async fn grant_authorized(
+        &self,
+        s: &Service,
+        id: &str,
+        bearer: &str,
+    ) -> Result<(
+        McpServer,
+        GrantScope,
+        crate::capabilities::plugin_packages::Authority,
+    )> {
         let (id, bearer) = (id.to_owned(), bearer.to_owned());
-        s.store.read(move |db| grant_in(db, &id, &bearer)).await
+        let (key, token) = (id.clone(), bearer.clone());
+        let (server, scope, run) = s
+            .store
+            .read(move |db| {
+                let (server, scope) = grant_in(db, &key, &token)?;
+                let grant = crate::error::required(
+                    db.mcp_run_grant(&grant_key(&token))?,
+                    "MCP grant not found",
+                )?;
+                let run = crate::error::required(db.run(&grant.run_id)?, "Run not found")?;
+                Ok((server, scope, run))
+            })
+            .await?;
+        let authority = crate::capabilities::plugin_packages::Authority::for_execution(&run)
+            .with_guard(move |db| grant_in(db, &id, &bearer).map(|_| ()));
+        let authority = crate::delegation::authorize_async_with(s, &run, authority).await?;
+        Ok((server, scope, authority))
     }
 
     pub async fn revoke_run(&self, s: &Service, id: &str) -> Result<()> {
@@ -734,5 +764,6 @@ pub(crate) fn grant_in(db: &Db<'_>, id: &str, bearer: &str) -> Result<(McpServer
     if !covers(&current, agent) {
         return Err(Error::forbidden("Agent permissions were reduced."));
     }
+    crate::delegation::authorize_run(db, &run)?;
     Ok((server, scope.clone()))
 }

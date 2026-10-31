@@ -13,9 +13,12 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 pub(crate) async fn authorize(s: &Service, bearer: &str) -> Result<Value> {
+    let token = bearer.to_owned();
     let bearer = bearer.to_owned();
     let run = s.store.read(move |db| authorize_in(db, &bearer)).await?;
-    crate::delegation::authorize_async(s, &run).await?;
+    let authority = crate::capabilities::plugin_packages::Authority::for_execution(&run)
+        .with_guard(move |db| authorize_in(db, &token).map(|_| ()));
+    crate::delegation::authorize_async_with(s, &run, authority).await?;
     Ok(run)
 }
 

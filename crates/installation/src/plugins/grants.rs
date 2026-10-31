@@ -726,14 +726,6 @@ pub(crate) fn contribution_ceiling_in(db: &Db<'_>, requester: &str, target: &str
 
 /// Resolve selected resource roots afresh rather than trusting stored labels or
 /// ancestry. Return revisions so a mutation can recheck the same profiles locally.
-pub(crate) async fn check_coverage(
-    s: &crate::service::Service,
-    requester: &str,
-    target: &str,
-) -> Result<(String, String)> {
-    check_coverage_authorized(s, requester, target, None).await
-}
-
 pub(crate) async fn check_coverage_authorized(
     s: &crate::service::Service,
     requester: &str,
@@ -773,6 +765,18 @@ async fn check_coverage_inner(
             ))
         })
         .await?;
+    let (left, right) = (requester.clone(), target.clone());
+    let expected = (current.revision.clone(), proposed.revision.clone());
+    let authority = Some(authority.unwrap_or_default().with_guard(move |db| {
+        if required(db.agent(&left)?, "Requesting agent not found")?.revision != expected.0
+            || required(db.agent(&right)?, "Agent not found")?.revision != expected.1
+        {
+            return Err(Error::forbidden(
+                "Plugin grants changed during resource coverage resolution.",
+            ));
+        }
+        Ok(())
+    }));
     if requester != target {
         for next in &proposed.grants {
             let held = current

@@ -205,7 +205,9 @@ impl Files {
         let file = self.get(&context.connection, text(value, "id"))?;
         let mut file = file.lock().unwrap();
         if let Some(authority) = &context.management {
-            file.origin = authority.transfer_origin();
+            if let Some(origin) = authority.transfer_origin() {
+                file.origin = Some(origin);
+            }
             if file.origin.is_none() {
                 file.uploaded_by = authority.snapshot().map(|snapshot| snapshot.agent);
             }

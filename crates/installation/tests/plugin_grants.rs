@@ -11,7 +11,7 @@ use cairn_installation::{
     service::Service,
     validation::text,
 };
-use common::{AgentFixture, MissionFixture};
+use common::{AgentFixture, McpFixture, MissionFixture};
 use serde_json::{Value, json};
 use std::{
     path::PathBuf,
@@ -26,6 +26,7 @@ struct Fixture {
     _root: TempDir,
     s: Arc<Service>,
     bearer: String,
+    run: String,
     instance: String,
     posts: Arc<AtomicUsize>,
     pause: Arc<AtomicBool>,
@@ -156,12 +157,21 @@ return {
             return {items=cairn.array({})}
         end
         if input.id == "unknown" then return {} end
+        if input.instance.settings.marker == "resolver-effects" then
+            pcall(function() cairn.http.request({url="https://service.example.test/effect"}) end)
+            pcall(function() cairn.http.request({url="https://service.example.test/effect"}) end)
+        end
         local parent = nil
         if input.resourceType == "channel" then parent={ resourceType="server",id="guild" } end
         if input.resourceType == "thread" then parent={ resourceType="channel",id=if input.id == "support-thread" then "support" else "general" } end
         return { resourceType=input.resourceType,id=input.id,name=input.id,parent=parent }
     end,
     tool = function(input)
+        if input.input.copy then
+            local destination = cairn.files.create({instance=input.instances[1].id,name="copy.txt",data=""})
+            local original = cairn.files.read({instance=input.instances[1].id,id=input.input.copy})
+            return cairn.files.append({instance=input.instances[1].id,id=destination.id,offset=0,data=original.data,encoding=original.encoding})
+        end
         if input.input.download then
             return cairn.http.request({instance=input.instances[1].id,url="https://service.example.test/effect",responseFile={name="private.txt"}})
         end
@@ -172,7 +182,15 @@ return {
     command = function(input)
         return cairn.http.request({ instance=input.instances[1].id,method="POST",url="https://service.example.test/effect" })
     end,
-    condition = function(input) return {state="completed"} end,
+    condition = function(input)
+        local marker = input.instances[1].settings.marker
+        if marker == "condition-pending" then return {state="waiting"} end
+        if marker == "condition-effects" then
+            pcall(function() cairn.http.request({instance=input.instances[1].id,url="https://service.example.test/effect"}) end)
+            pcall(function() cairn.http.request({instance=input.instances[1].id,url="https://service.example.test/effect"}) end)
+        end
+        return {state="completed"}
+    end,
 }
 "#;
         let installed =
@@ -217,12 +235,64 @@ return {
             _root: root,
             s,
             bearer: text(&config["env"], "CAIRN_MCP_RUN_TOKEN").into(),
+            run: text(&run, "id").into(),
             instance: text(&instance, "id").into(),
             posts,
             pause,
             entered,
             release,
         }
+    }
+
+    async fn marker(&self, value: &str) {
+        let mut instance = self
+            .s
+            .store
+            .plugin_instance(&self.instance)
+            .await
+            .unwrap()
+            .unwrap();
+        instance.settings["marker"] = value.into();
+        instance.revision = cairn_installation::config::id();
+        self.s
+            .store
+            .transaction(move |db| db.save_plugin_instance(&instance))
+            .await
+            .unwrap();
+    }
+
+    async fn delegated(&self, requester: &str, target: &str) -> (String, String) {
+        self.s
+            .agent_fixture(
+                json!({ "access": { "delegation": true, "installation": true } }),
+                Some(requester),
+            )
+            .await
+            .unwrap();
+        let parent = self
+            .s
+            .chat_create(json!({ "agentId": requester }))
+            .await
+            .unwrap();
+        let parent_id = text(&parent, "id");
+        self.s
+            .chat_send(
+                parent_id,
+                json!({ "id": cairn_installation::config::id(), "text": "Delegate" }),
+            )
+            .await
+            .unwrap();
+        let parent_token = running_conversation(&self.s, parent_id).await;
+        let task = cairn_installation::delegation::delegate(
+            &self.s,
+            &parent_token,
+            &json!({ "agentId": target, "task": "Scoped task" }),
+        )
+        .await
+        .unwrap();
+        let chat = text(&task, "chatId").to_owned();
+        let token = running_conversation(&self.s, &chat).await;
+        (chat, token)
     }
 
     async fn api(&self, method: &str, body: Value) -> Result<Value> {
@@ -919,4 +989,277 @@ async fn cross_agent_descendant_reductions_keep_the_callers_instance_boundary() 
         )
         .await;
     assert_ne!(allowed["result"]["isError"], true, "{allowed}");
+}
+
+#[tokio::test]
+async fn nested_coverage_effects_stop_when_the_calling_token_is_revoked() {
+    let f = Fixture::new().await;
+    let child =
+        f.s.agent_fixture(
+            json!({ "name": "Child", "access": { "installation": true } }),
+            None,
+        )
+        .await
+        .unwrap();
+    let child_id = text(&child, "id");
+    f.set(json!([contribution("tool", "grant_probe_post", support())]))
+        .await;
+    f.set_for(
+        child_id,
+        json!([contribution(
+            "tool",
+            "grant_probe_post",
+            json!([
+                { "resourceType": "thread", "id": "support-thread" },
+            ])
+        )]),
+    )
+    .await;
+    let (chat, token) = f.delegated(MAIN_AGENT_ID, child_id).await;
+    let run = f.s.chat_detail(&chat).await.unwrap()["run"].clone();
+    f.marker("resolver-effects").await;
+    f.pause.store(true, Ordering::SeqCst);
+    let action = cairn_installation::project_workspaces::authorize(&f.s, &token);
+    let revoke = async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), f.entered.notified())
+            .await
+            .unwrap();
+        f.s.mcps.revoke_run(&f.s, text(&run, "id")).await.unwrap();
+        f.release.notify_one();
+    };
+    let (result, ()) = tokio::join!(action, revoke);
+    assert!(result.is_err());
+    assert_eq!(f.posts.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn appending_a_protected_transfer_retains_its_source_authority() {
+    let f = Fixture::new().await;
+    let grants = json!([
+        contribution("tool", "grant_probe_post", support()),
+        contribution("tool", "grant_probe_other", json!([])),
+    ]);
+    f.set(grants).await;
+    let original = agents::call_tool(
+        &f.s,
+        &f.bearer,
+        "grant_probe_post",
+        &json!({ "channel": "support", "download": true }),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let copied = agents::call_tool(
+        &f.s,
+        &f.bearer,
+        "grant_probe_other",
+        &json!({ "copy": original["file"]["id"] }),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let request = json!({ "plugin": "grant-probe", "file": { "method": "read", "instance": f.instance, "id": copied["id"] } });
+    assert_eq!(
+        agents::command(&f.s, &f.bearer, &request).await.unwrap()["value"]["data"],
+        "b2s"
+    );
+    f.set(json!([contribution(
+        "tool",
+        "grant_probe_other",
+        json!([])
+    )]))
+    .await;
+    assert!(agents::command(&f.s, &f.bearer, &request).await.is_err());
+}
+
+#[tokio::test]
+async fn gateway_calls_recheck_the_requesters_resource_coverage() {
+    let f = Fixture::new().await;
+    let remote =
+        f.s.mcp_fixture(
+            json!({
+                "name": "Remote", "url": "https://service.example.test/mcp", "auth": "none",
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let child =
+        f.s.agent_fixture(
+            json!({ "name": "Child", "access": { "installation": true } }),
+            None,
+        )
+        .await
+        .unwrap();
+    let child_id = text(&child, "id");
+    f.set(json!([contribution("tool", "grant_probe_post", support())]))
+        .await;
+    f.set_for(
+        child_id,
+        json!([contribution(
+            "tool",
+            "grant_probe_post",
+            json!([
+                { "resourceType": "thread", "id": "support-thread" },
+            ])
+        )]),
+    )
+    .await;
+    let (_, token) = f.delegated(MAIN_AGENT_ID, child_id).await;
+    assert!(
+        f.s.mcps
+            .grant(&f.s, text(&remote, "id"), &token)
+            .await
+            .is_ok()
+    );
+    f.set(json!([contribution(
+        "tool",
+        "grant_probe_post",
+        json!([
+            { "resourceType": "channel", "id": "general" },
+        ])
+    )]))
+    .await;
+    let app = common::relay_fixture::router(f.s.clone()).await.unwrap();
+    let request = common::request("POST", &format!("/mcp-gateway/{}", text(&remote, "id")))
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::from(
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {} }).to_string(),
+        ))
+        .unwrap();
+    let response = common::send(&app, request).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(f.posts.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn cancelled_mission_observations_stop_before_the_next_host_effect() {
+    let f = Fixture::new().await;
+    f.set(json!([contribution("condition", "ready", json!([]))]))
+        .await;
+    f.marker("condition-pending").await;
+    let scheduled = cairn_installation::waits::schedule(
+        &f.s,
+        &f.bearer,
+        &json!({
+            "conditions": [{ "type": "grant-probe_ready", "pluginId": "grant-probe" }],
+            "reason": "Wait for probe", "timeoutSeconds": 600,
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(scheduled["deferred"], true, "{scheduled}");
+    f.s.store
+        .change_run(
+            &f.run,
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Waiting),
+                recovery_pending: Some(false),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    f.marker("condition-effects").await;
+    f.pause.store(true, Ordering::SeqCst);
+    let observe = cairn_installation::plugins::conditions::poll_once(&f.s);
+    let cancel = async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), f.entered.notified())
+            .await
+            .unwrap();
+        f.s.worker.cancel(&f.s, &f.run).await.unwrap();
+        f.release.notify_one();
+    };
+    let (result, ()) = tokio::join!(observe, cancel);
+    result.unwrap();
+    assert_eq!(f.posts.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn condition_watchers_keep_distinct_requester_authority() {
+    let f = Fixture::new().await;
+    let other =
+        f.s.agent_fixture(json!({ "name": "Other requester" }), None)
+            .await
+            .unwrap();
+    let child =
+        f.s.agent_fixture(
+            json!({ "name": "Child", "access": { "installation": true } }),
+            None,
+        )
+        .await
+        .unwrap();
+    let other_id = text(&other, "id");
+    let child_id = text(&child, "id");
+    let parent_grants = json!([
+        contribution("tool", "grant_probe_post", support()),
+        contribution("condition", "ready", json!([])),
+    ]);
+    f.set(parent_grants.clone()).await;
+    f.set_for(other_id, parent_grants).await;
+    f.set_for(
+        child_id,
+        json!([
+            contribution(
+                "tool",
+                "grant_probe_post",
+                json!([{ "resourceType": "thread", "id": "support-thread" }])
+            ),
+            contribution("condition", "ready", json!([])),
+        ]),
+    )
+    .await;
+    let (first_chat, first_token) = f.delegated(MAIN_AGENT_ID, child_id).await;
+    let (second_chat, second_token) = f.delegated(other_id, child_id).await;
+    f.marker("condition-pending").await;
+    for (chat, token) in [(&first_chat, &first_token), (&second_chat, &second_token)] {
+        let result = cairn_installation::waits::schedule(
+            &f.s,
+            token,
+            &json!({
+                "conditions": [{ "type": "grant-probe_ready", "pluginId": "grant-probe" }],
+                "reason": "Wait for probe", "timeoutSeconds": 600,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["deferred"], true, "{result}");
+        let run = f.s.chat_detail(chat).await.unwrap()["run"].clone();
+        f.s.store
+            .change_run(
+                text(&run, "id"),
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Succeeded),
+                    recovery_pending: Some(false),
+                    session_id: Some(Some("saved-session".into())),
+                    workspace: Some(Some("/saved/workspace".into())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+    f.set(json!([
+        contribution(
+            "tool",
+            "grant_probe_post",
+            json!([{ "resourceType": "channel", "id": "general" }])
+        ),
+        contribution("condition", "ready", json!([])),
+    ]))
+    .await;
+    f.marker("ready").await;
+    cairn_installation::plugins::conditions::poll_once(&f.s)
+        .await
+        .unwrap();
+    let first = f.s.chat_detail(&first_chat).await.unwrap();
+    let second = f.s.chat_detail(&second_chat).await.unwrap();
+    assert_eq!(
+        first["wakeup"]["observation"]["state"], "unavailable",
+        "{first}"
+    );
+    assert_eq!(
+        second["wakeup"]["observation"]["state"], "completed",
+        "{second}"
+    );
 }

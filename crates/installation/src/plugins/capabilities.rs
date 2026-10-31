@@ -123,7 +123,10 @@ pub async fn effect(s: &Service, context: &Context, method: &str, args: Value) -
                     .await?;
             }
             let result = s.plugins.files.call(&context.connection, method, &args)?;
-            if matches!(method, "files.create" | "files.composeMime") {
+            if matches!(
+                method,
+                "files.create" | "files.composeMime" | "files.append"
+            ) {
                 s.plugins.files.bind(context, &result)?;
             }
             Ok(result)
