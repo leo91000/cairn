@@ -149,7 +149,10 @@ qui ne résout aucune version. Résultats du 2026-10-27 :
 - Sur une node native dont le processus de travail garde une capacité héritée, ou
   dont `/tmp` est monté depuis un répertoire inaccessible, bubblewrap refuse de
   démarrer : les commandes du shell échouent sans effet pendant le tour de plan.
-  La qualification ci-dessus retire ces capacités et donne à Codex un `/tmp` privé.
+  La qualification ci-dessus retire ces capacités. Si un `/tmp` privé est nécessaire,
+  il entoure le runner de tests entier : chaque Session supervise ainsi directement
+  le binaire natif. Un wrapper bubblewrap par processus peut se terminer avant son
+  enfant et laisser son writer actif à la reprise ; ce montage n’est pas utilisé.
 - La CI qualifie les versions qu’elle résout, sur un exécuteur Ubuntu où bubblewrap
   et socat sont installés et où les espaces de noms utilisateur non privilégiés sont
   permis ; elle ne mesure pas chaque configuration de node. OpenCode refuse les tours

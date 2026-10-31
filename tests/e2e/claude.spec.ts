@@ -46,8 +46,18 @@ test.afterEach(async ({ workspace }) => {
   }
 
   for (const run of workspace.service.store.runs()) {
-    if (!existingRunIds.has(run.id) && ['queued', 'running', 'waiting'].includes(run.status))
-      await workspace.api(`/api/runs/${run.id}/cancel`, 'POST')
+    if (!existingRunIds.has(run.id) && ['queued', 'running', 'waiting'].includes(run.status)) {
+      try {
+        await workspace.api(`/api/runs/${run.id}/cancel`, 'POST')
+      }
+      catch (error) {
+        // A background request can finish between the snapshot and cancellation.
+        // Accept only that explicit refusal, with a durably terminal run.
+        if (!(error instanceof Error) || !error.message.includes('This run has already finished.'))
+          throw error
+        expect(['succeeded', 'failed', 'cancelled', 'interrupted']).toContain(workspace.service.store.run(run.id)?.status)
+      }
+    }
   }
 
   await expect.poll(async () => {
@@ -724,6 +734,8 @@ test('a Plan draft never becomes ordinary when its engine resolves to OpenCode',
 
 test('a plan turn proposes without changes and Implement continues the same chat', async ({ page, workspace }, testInfo) => {
   test.setTimeout(120000)
+  // This scenario orders competing requests at the HTTP acceptance boundary.
+  await useRelayForHttpMocks(page)
   if (!(await workspace.api('/api/accounts')).accounts.some((a: { provider: string }) => a.provider === 'claude'))
     expect((await connectClaude(workspace)).state).toBe('complete')
   const chat = await workspace.api('/api/chats', 'POST', {})
@@ -785,6 +797,7 @@ test('a plan turn proposes without changes and Implement continues the same chat
   await expect(proposal.getByRole('button', { name: 'Implement' })).toBeEnabled()
 
   // B reaches the manager after A captured its card, but before A's approval POST.
+  await expect(page.getByRole('status', { name: 'Connection route' })).toHaveAttribute('data-transport-route', 'relay')
   // A client refetch cannot close this interleaving: the manager must reject it.
   await workspace.api(`/api/chats/${chat.id}/pause`, 'POST', { paused: true })
   await page.reload()

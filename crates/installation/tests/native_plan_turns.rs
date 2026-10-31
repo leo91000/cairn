@@ -4,6 +4,9 @@
 //! used: the model is a local scripted API, and every write targets the test's scratch
 //! directory. Run through the credential-isolated backend launcher, for example:
 //! `CLAUDE_NATIVE_BIN=… pnpm test:backend -p cairn-installation --test native_plan_turns -- --ignored --nocapture`.
+//! If this host needs a private `/tmp`, put that mount around the whole test runner,
+//! not each native process. Session shutdown must reap the actual native child before
+//! a replacement resumes its persisted thread; a bubblewrap monitor can exit sooner.
 mod common;
 
 use axum::{Router, body::Bytes, routing::post};
@@ -634,13 +637,6 @@ async fn native_codex_plan_turn_blocks_writes_network_and_subagent_effects() {
     } else {
         "exec"
     };
-    // NATIVE_PROBE_PRIVATE_TMP runs Codex with its own /tmp, where its sandbox can bind
-    // its sockets, on a node whose /tmp is a bind mount from a directory it cannot reach.
-    let exec = if std::env::var("NATIVE_PROBE_PRIVATE_TMP").is_ok() {
-        format!("{exec} bwrap --dev-bind / / --tmpfs /tmp --")
-    } else {
-        exec.to_owned()
-    };
     let launcher = root.path().join("codex-launcher");
     std::fs::write(
         &launcher,
@@ -925,11 +921,6 @@ async fn native_codex_plan_turn_bounds_a_subagent_an_earlier_turn_started() {
         "exec setpriv --inh-caps=-all --ambient-caps=-all --"
     } else {
         "exec"
-    };
-    let exec = if std::env::var("NATIVE_PROBE_PRIVATE_TMP").is_ok() {
-        format!("{exec} bwrap --dev-bind / / --tmpfs /tmp --")
-    } else {
-        exec.to_owned()
     };
     let launcher = root.path().join("codex-launcher");
     std::fs::write(
