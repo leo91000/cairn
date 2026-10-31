@@ -751,7 +751,7 @@ internal fun timelineEntries(
                                     card = card,
                                 )
                             )
-                        } else if (!chat && folded.none { it.id == card.source }) {
+                        } else if (!chat && card.source !in sourceIds) {
                             // A card can change in this window while its source is on an older
                             // page.
                             flushActivity()
