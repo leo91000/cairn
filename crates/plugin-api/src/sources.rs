@@ -52,6 +52,19 @@ pub fn module_path(path: &str) -> bool {
 }
 
 impl Sources {
+    /// The exact manifest and files loaded by a worker, using the registry's
+    /// approval format. Keep this stable for packages without new declarations.
+    pub fn digest(&self, manifest: &crate::Manifest) -> serde_json::Result<String> {
+        use sha2::{Digest, Sha256};
+        let files = self.files().collect::<BTreeMap<_, _>>();
+        let material = format!(
+            "cairn-package\n{}\n{}",
+            serde_json::to_string(manifest)?,
+            serde_json::to_string(&files)?
+        );
+        Ok(format!("{:x}", Sha256::digest(material.as_bytes())))
+    }
+
     /// Bytes of Luau in the whole package.
     pub fn size(&self) -> usize {
         self.main.len() + self.modules.values().map(String::len).sum::<usize>()

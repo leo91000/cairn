@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { PluginProject, PluginProjectPage } from '../../../../packages/contracts/contracts'
+import type { PluginProject } from '../../../../packages/contracts/contracts'
 import type { PluginSourceChoice } from '../plugin-sources'
 import {
   computed,
@@ -9,7 +9,7 @@ import {
   ref,
   watch,
 } from 'vue'
-import { api } from '../api'
+import { listSourceProjects } from '../../../../packages/contracts/generated/listSourceProjects'
 import {
   Check,
   ExternalLink,
@@ -20,7 +20,8 @@ import {
   SearchX,
   X,
 } from '../icons'
-import { projectMatches, projectsPath, updatedLabel } from '../plugin-sources'
+import { pluginRequest } from '../plugin-operations'
+import { projectMatches, updatedLabel } from '../plugin-sources'
 import { iconButton } from '../ui'
 import Icon from './Icon.vue'
 import PluginMark from './PluginMark.vue'
@@ -62,7 +63,13 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    const page = await api<PluginProjectPage>(projectsPath(props.source.pluginId, props.source.source, props.instance, nextPage.value))
+    const page = await listSourceProjects(pluginRequest, {
+      pluginId: props.source.pluginId,
+      source: props.source.source,
+      instance: props.instance,
+      page: nextPage.value,
+      query: '',
+    })
     if (asked !== generation)
       return
     const known = new Set(projects.value.map(project => project.id))

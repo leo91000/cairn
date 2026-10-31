@@ -1,6 +1,6 @@
 import type { PluginOperationResult } from '../../../packages/contracts/generated/typescript/PluginOperationResult'
 import { getPluginOperation } from '../../../packages/contracts/generated/getPluginOperation'
-import { api } from './api'
+import { api, ApiError } from './api'
 
 /** Installation continues on the manager while each relay request stays short. */
 export async function pluginOperation<T = unknown>(path: string, body?: unknown, method = 'POST'): Promise<T> {
@@ -18,7 +18,7 @@ export async function pluginRequest<T>(path: string, options: RequestInit): Prom
     if (operation.state === 'completed')
       return operationResult(operation.result!) as T
     if (operation.state === 'failed' || operation.state === 'cancelled')
-      throw new Error(operation.error || 'Plugin preparation failed.')
+      throw new ApiError(operation.error || 'Plugin preparation failed.', operation.errorStatus ?? 502)
     await new Promise(resolve => setTimeout(resolve, 500))
   }
 
@@ -27,6 +27,12 @@ export async function pluginRequest<T>(path: string, options: RequestInit): Prom
 
 function operationResult(result: PluginOperationResult): unknown {
   switch (result.kind) {
+    case 'project': return result.project
+    case 'sourceProjects': case 'resourcePage': return result.page
+    case 'resourceAncestry': return result.resolution
+    case 'skillImport': return result.imported
+    case 'skillSource': return result.status
+    case 'skillBundle': return result.bundle
     case 'package': return result.version
     case 'program': return result.program
     case 'management': {

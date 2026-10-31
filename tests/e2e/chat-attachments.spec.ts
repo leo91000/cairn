@@ -248,15 +248,26 @@ test('uploads images and files, previews them and preserves attachments while ed
   await expectChatReady(page)
   await expect.poll(async () => (await workspace.api(`/api/chats/${chatId}`)).messages.every((m: { status: string }) => m.status === 'delivered')).toBe(true)
   await expect(page.getByLabel('Attach files', { exact: true })).toBeEnabled()
+  // Reload can restore a paused reading position. Exercise that state deliberately:
+  // an offscreen attachment is visible to Playwright but its preview stays lazy.
+  await page.locator('.activity-scroll').evaluate(element => element.scrollTop = 30)
+  await expect(page.getByRole('button', { name: 'Latest messages', exact: true })).toBeVisible()
   await page.getByLabel('Attach files', { exact: true }).setInputFiles([{ ...image, name: 'image-only.png' }])
   await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveValue('')
   await page.getByRole('button', { name: 'Send', exact: true }).click()
-  const single = page.locator('.activity-message').getByRole('button', { name: 'Preview image-only.png', exact: true })
+  const singleMessage = page.locator('.activity-message').filter({ has: page.getByRole('button', { name: 'Preview image-only.png', exact: true }) })
+  const single = singleMessage.getByRole('button', { name: 'Preview image-only.png', exact: true })
   await expect(single).toBeVisible()
+  // Acknowledgement replaces the optimistic row. Measure the settled image, since a
+  // detached image can remain complete while its bounding rectangle is 0 × 0.
+  await expect(singleMessage.getByRole('status')).toHaveCount(0)
   // The installation records the picture's 1440 × 1000 size, so the placeholder and the
   // picture take the same box: the conversation does not move when the preview loads.
   const box = /^width: 15rem; height: 10\.416\d*rem;$/
   await expect(single.locator('img, .animate-pulse').first()).toHaveAttribute('style', box)
+  await expect(single).not.toBeInViewport()
+  await single.scrollIntoViewIfNeeded()
+  await expect(single).toBeInViewport()
   await expect(single.locator('img')).toHaveJSProperty('complete', true)
   await expect(single.locator('img')).toHaveAttribute('style', box)
   const loaded = await single.locator('img').evaluate(img => img.getBoundingClientRect().width / img.getBoundingClientRect().height)

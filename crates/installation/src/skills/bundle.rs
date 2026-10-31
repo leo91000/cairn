@@ -145,6 +145,7 @@ async fn read_all_locked(directory: &Path) -> Result<(String, Vec<(Entry, Vec<u8
 }
 
 /// A skill's files with their revision.
+#[derive(Clone)]
 pub struct Described {
     pub revision: String,
     pub files: Vec<Value>,
@@ -496,17 +497,20 @@ pub async fn save(
     save_authorized(root, skill, base, changes, None).await
 }
 
-pub(crate) type Authorization = (
-    crate::store::Store,
-    Box<dyn FnOnce(&crate::store::Db<'_>) -> Result<()> + Send>,
-);
+type PublicationCheck = Box<dyn FnOnce(&crate::store::Db<'_>, &Described) -> Result<()> + Send>;
+
+pub(crate) struct Authorization<'a> {
+    pub store: crate::store::Store,
+    pub recheck: std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>>,
+    pub authorize: PublicationCheck,
+}
 
 pub(crate) async fn save_authorized(
     root: &Path,
     skill: &str,
     base: Base<'_>,
     changes: &[Change],
-    authorization: Option<Authorization>,
+    authorization: Option<Authorization<'_>>,
 ) -> Result<Described> {
     let _save = ACCESS.write().await;
     let directory = root.join(skill);
@@ -550,10 +554,19 @@ pub(crate) async fn save_authorized(
         validate(&staging, skill, before).await?;
         let described = describe_locked(&staging).await?;
         let prepared = staging.clone();
-        if let Some((store, authorize)) = authorization {
+        let publication = described.clone();
+        if let Some(Authorization {
+            store,
+            recheck,
+            authorize,
+        }) = authorization
+        {
+            // External owner/public proofs must be fresh after the lock wait and
+            // staging. Local execution/source revisions remain transactional.
+            recheck.await?;
             store
                 .transaction(move |db| {
-                    authorize(db)?;
+                    authorize(db, &publication)?;
                     swap(&prepared, &directory, exists)
                 })
                 .await?;
@@ -569,4 +582,101 @@ pub(crate) async fn save_authorized(
         let _ = fs::remove_dir_all(&staging).await;
     }
     result
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    #[tokio::test]
+    async fn revoked_external_proof_after_lock_wait_leaves_the_bundle_and_metadata_intact() {
+        let root = tempfile::tempdir().unwrap();
+        let content = b"---\nname: review\ndescription: Review changes\n---\nBefore.";
+        let changes = [Change::Write {
+            path: "SKILL.md".into(),
+            bytes: content.to_vec(),
+            executable: None,
+        }];
+        let saved = save(root.path(), "review", Base::Create, &changes)
+            .await
+            .unwrap();
+        let store = crate::store::Store::open(&root.path().join("db")).unwrap();
+        let revoked = Arc::new(AtomicBool::new(false));
+        let lock = ACCESS.write().await;
+        let (started, waiting) = tokio::sync::oneshot::channel();
+        let pending = tokio::spawn({
+            let directory = root.path().to_owned();
+            let proof = revoked.clone();
+            let store = store.clone();
+            let revision = saved.revision.clone();
+            async move {
+                let staging_root = directory.clone();
+                let authorization = Authorization {
+                    store,
+                    recheck: Box::pin(async move {
+                        // The proof must be checked after staging, not merely
+                        // before waiting for the shared file lock.
+                        assert!(
+                            std::fs::read_dir(staging_root)
+                                .unwrap()
+                                .flatten()
+                                .any(|entry| entry
+                                    .file_name()
+                                    .to_string_lossy()
+                                    .starts_with(".review.staging-"))
+                        );
+                        if proof.load(Ordering::SeqCst) {
+                            return Err(Error::forbidden("External proof revoked"));
+                        }
+                        Ok(())
+                    }),
+                    authorize: Box::new(|db, _| db.set("published", &json!(true), None)),
+                };
+                started.send(()).unwrap();
+                save_authorized(
+                    &directory,
+                    "review",
+                    Base::Edit(&revision),
+                    &[Change::Write {
+                        path: "SKILL.md".into(),
+                        bytes: b"---\nname: review\ndescription: Review changes\n---\nAfter."
+                            .to_vec(),
+                        executable: None,
+                    }],
+                    Some(authorization),
+                )
+                .await
+            }
+        });
+        waiting.await.unwrap();
+        assert!(!pending.is_finished());
+        revoked.store(true, Ordering::SeqCst);
+        drop(lock);
+        assert_eq!(pending.await.unwrap().err().unwrap().status, 403);
+        assert_eq!(
+            describe(&root.path().join("review"))
+                .await
+                .unwrap()
+                .revision,
+            saved.revision
+        );
+        assert_eq!(
+            fs::read(root.path().join("review/SKILL.md")).await.unwrap(),
+            content
+        );
+        assert!(store.kv("published").await.unwrap().is_none());
+        assert!(
+            !std::fs::read_dir(root.path())
+                .unwrap()
+                .flatten()
+                .any(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".review.staging-"))
+        );
+    }
 }

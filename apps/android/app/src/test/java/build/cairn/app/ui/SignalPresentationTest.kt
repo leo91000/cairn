@@ -810,7 +810,7 @@ class SignalPresentationTest {
                             archived = true,
                         ),
                     ),
-                skills = listOf(Skill("revue", "Guide de revue")),
+                skills = listOf(Skill(name = "revue", description = "Guide de revue")),
             )
         val chats =
             listOf(

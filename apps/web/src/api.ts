@@ -11,6 +11,7 @@ import { listAgents } from '../../../packages/contracts/generated/listAgents'
 import { listMcps } from '../../../packages/contracts/generated/listMcps'
 import { listMissions } from '../../../packages/contracts/generated/listMissions'
 import { listProjects } from '../../../packages/contracts/generated/listProjects'
+import { listSkills } from '../../../packages/contracts/generated/listSkills'
 import { beaconOrigin, installationHost } from './beacon-location'
 import { clientPerformance } from './client-performance'
 import { ProtocolMismatch } from './direct-channel'
@@ -54,9 +55,9 @@ watch(() => state.signingOut || (state.ready && !state.authenticated), (clear) =
     void clearHistoryCache()
 }, { flush: 'sync' })
 export const installationTransport = new InstallationTransport(state)
-watch(() => [state.ready, state.authenticated, state.installationId, state.signingOut, state.installationOnline], () => {
+watch(() => [state.ready, state.authenticated, state.installationId, state.signingOut, state.redirecting, state.installationOnline], () => {
   installationTransport.availabilityChanged(state.installationOnline)
-  if (beaconEntry && state.ready && state.authenticated && !state.signingOut)
+  if (beaconEntry && state.ready && state.authenticated && !state.signingOut && !state.redirecting)
     installationTransport.start()
   else if (typeof window !== 'undefined')
     installationTransport.stop()
@@ -434,21 +435,30 @@ export function ownerPage(path: string) {
 
 export async function refreshSkills() {
   const scope = connectionScope()
-  const skills = await api<Skill[]>('/skills')
+  const skills = await listSkills(api, {})
   if (connectionScope() === scope && state.authenticated && !state.signingOut)
     state.skills = skills
 }
 
+let mcpRefresh = 0
+export async function refreshMcps() {
+  const request = ++mcpRefresh
+  const scope = connectionScope()
+  const mcps = state.installationRole === 'owner' ? (await listMcps(api, {})).mcps : []
+  if (request === mcpRefresh && connectionScope() === scope && state.authenticated && !state.signingOut)
+    state.mcps = mcps
+}
+
 export async function refresh() {
   const scope = connectionScope()
-  let lists: [Agent[], Project[], Task[], Skill[], McpView[]]
+  let lists: [Agent[], Project[], Task[], Skill[], void]
   try {
     lists = await Promise.all([
       listAgents(api, {}).then(output => output.agents),
       listProjects(api, {}).then(output => output.projects),
       listMissions(api, {}).then(output => output.tasks),
-      api<Skill[]>('/skills'),
-      state.installationRole === 'owner' ? listMcps(api, {}).then(result => result.mcps) : Promise.resolve([]),
+      listSkills(api, {}),
+      refreshMcps(),
     ])
   }
   catch (error) {
@@ -459,13 +469,12 @@ export async function refresh() {
 
   if (connectionScope() !== scope || !state.authenticated || state.signingOut)
     return
-  const [agents, projects, tasks, skills, mcps] = lists
+  const [agents, projects, tasks, skills] = lists
   Object.assign(state, {
     agents,
     projects,
     tasks,
     skills,
-    mcps,
     workspaceLoaded: true,
   })
 }

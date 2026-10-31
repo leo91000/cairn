@@ -5,6 +5,7 @@ import {
   it,
   vi,
 } from 'vitest'
+import { state } from '../src/api'
 import { liveConnection } from '../src/live-connection'
 
 class Source extends EventTarget {
@@ -24,6 +25,7 @@ class Source extends EventTarget {
 
 beforeEach(() => {
   vi.useFakeTimers()
+  state.redirecting = false
   Source.instances = []
   vi.stubGlobal('EventSource', Source)
   vi.stubGlobal('window', new EventTarget())
@@ -153,4 +155,24 @@ it('replays from zero with a reset when a cached consumer baseline is invalid', 
   Source.instances[1].batch('10', '{"events":[],"reset":false,"more":true,"history":"v1:r:1"}')
   expect(accept.mock.calls[1][0].reset).toBe(true)
   connection.close()
+})
+
+it('suspends live streams during navigation and resumes even when direct remains unavailable', () => {
+  const connection = liveConnection('/chats/stream', vi.fn(), vi.fn())
+  expect(Source.instances).toHaveLength(1)
+  state.redirecting = true
+  expect(Source.instances[0].closed).toBe(true)
+
+  window.dispatchEvent(new Event('cairn-transport-change'))
+  window.dispatchEvent(new Event('online'))
+  window.dispatchEvent(new Event('pageshow'))
+  vi.advanceTimersByTime(60000)
+  expect(Source.instances).toHaveLength(1)
+
+  state.redirecting = false
+  expect(Source.instances).toHaveLength(2)
+  connection.close()
+  state.redirecting = true
+  state.redirecting = false
+  expect(Source.instances).toHaveLength(2)
 })

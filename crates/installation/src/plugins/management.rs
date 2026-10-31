@@ -19,6 +19,18 @@ pub struct Authority {
 }
 
 impl Authority {
+    pub(crate) fn resource_read(
+        preparation: crate::capabilities::plugin_packages::Authority,
+        instance: connections::Connection,
+    ) -> Self {
+        Self {
+            bearer: preparation.bearer.clone(),
+            preparation: Some(preparation),
+            instance: Some(Box::new(instance)),
+            shared: None,
+        }
+    }
+
     pub(crate) fn authorize(&self, db: &crate::store::Db<'_>) -> Result<()> {
         let Some(bearer) = &self.bearer else {
             return Ok(());

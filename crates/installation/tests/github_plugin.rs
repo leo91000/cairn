@@ -13,7 +13,7 @@ mod common;
 use cairn_installation::{
     config::MAIN_AGENT_ID,
     execution,
-    plugins::{connections, device_flow, projects, registry, run_credentials},
+    plugins::{connections, device_flow, registry, run_credentials},
     project_workspaces, run_output,
     service::Service,
     validation::text,
@@ -40,6 +40,7 @@ async fn fixture() -> Fixture {
     .await
     .unwrap();
     github.attach(&s);
+    common::relay_fixture::claimed(&s).await.unwrap();
     Fixture { root, s, github }
 }
 
@@ -454,15 +455,18 @@ async fn repositories_are_listed_and_imported_with_the_instance() {
         query: serde_urlencoded::from_str(query).unwrap(),
         headers: axum::http::HeaderMap::default(),
         body: Value::Null,
-        identity: None,
+        identity: Some(cairn_installation::auth::InstallationIdentity::trusted(
+            cairn_installation::auth::InstallationRole::Owner,
+            "fixture-owner",
+        )),
     };
-    let page = projects::list(
+    let page = cairn_installation::api::dispatch(
         &f.s,
-        "github",
         &input(&format!("source=repositories&instance={instance}")),
     )
     .await
     .unwrap();
+    let page = common::resource_result(&f.s, page).await.unwrap();
     let items = page["items"].as_array().unwrap();
     assert_eq!(items.len(), 2);
     assert_eq!(items[0]["id"], "fixture/repo");
@@ -473,7 +477,9 @@ async fn repositories_are_listed_and_imported_with_the_instance() {
     assert!(page["nextPage"].is_null());
 
     let request = json!({ "pluginId": "github", "source": "repositories", "instance": instance, "id": "fixture/repo" });
-    let project = projects::import(&f.s, &request).await.unwrap();
+    let project = common::owner_api_route(&f.s, "POST", "/api/projects/import", request.clone())
+        .await
+        .unwrap();
     assert_eq!(project["name"], "repo");
     assert_eq!(project["baseBranch"], "trunk");
     assert_eq!(project["source"]["pluginId"], "github");
@@ -485,22 +491,27 @@ async fn repositories_are_listed_and_imported_with_the_instance() {
     );
     // Imports are idempotent and the listing marks the repository.
     assert_eq!(
-        projects::import(&f.s, &request).await.unwrap()["id"],
+        common::owner_api_route(&f.s, "POST", "/api/projects/import", request.clone())
+            .await
+            .unwrap()["id"],
         project["id"]
     );
-    let page = projects::list(
+    let page = cairn_installation::api::dispatch(
         &f.s,
-        "github",
         &input(&format!("source=repositories&instance={instance}")),
     )
     .await
     .unwrap();
+    let page = common::resource_result(&f.s, page).await.unwrap();
     assert_eq!(page["items"][0]["imported"], true);
     let mut unknown = request.clone();
     unknown["source"] = "elsewhere".into();
     unknown["id"] = "fixture/other".into();
     assert_eq!(
-        projects::import(&f.s, &unknown).await.unwrap_err().status,
+        common::owner_api_route(&f.s, "POST", "/api/projects/import", unknown)
+            .await
+            .unwrap_err()
+            .status,
         404
     );
 }
@@ -541,4 +552,76 @@ async fn live_device_sign_in_against_github() {
         .await
         .unwrap();
     println!("LIVE_GITHUB_TEST {test}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pending_project_import_excludes_only_its_own_installation() {
+    let first = fixture().await;
+    let other = fixture().await;
+    let started = first.root.path().join("import-started");
+    let released = first.root.path().join("import-released");
+    let mut requests = Vec::new();
+    for fixture in [&first, &other] {
+        std::fs::write(
+            fixture.s.config.home.join(".gitconfig"),
+            format!(
+                "[url \"file://{}/missing/\"]\n\tinsteadOf = https://github.com/\n",
+                fixture.root.path().display()
+            ),
+        )
+        .unwrap();
+        fixture.github.state(&json!({"repositories":{"fixture/repo":{"full_name":"fixture/repo","name":"repo","default_branch":"main"}}}));
+        let instance = github::instance(&fixture.s, "Source", "synthetic-project-token", &[]).await;
+        requests.push(json!({"pluginId":"github","source":"repositories","instance":instance,"id":"fixture/repo"}));
+    }
+    first.github.state(&json!({"repositories":{"fixture/repo":{"full_name":"fixture/repo","name":"repo","default_branch":"main"}}, "gate":{"path":"repos/fixture/repo","started":started,"released":released}}));
+    let service = first.s.clone();
+    let body = requests[0].clone();
+    let pending = tokio::spawn(async move {
+        common::owner_api_route(&service, "POST", "/api/projects/import", body).await
+    });
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while !started.exists() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        common::owner_api_route(
+            &first.s,
+            "POST",
+            "/api/projects/import",
+            requests[0].clone()
+        )
+        .await
+        .unwrap_err()
+        .status,
+        409
+    );
+    // The other installation reaches its own local Git fixture, rather than
+    // inheriting the first installation's import conflict. No real remote is used.
+    let independent = tokio::time::timeout(
+        Duration::from_secs(15),
+        common::owner_api_route(
+            &other.s,
+            "POST",
+            "/api/projects/import",
+            requests[1].clone(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(independent.unwrap_err().status, 400);
+    assert!(
+        other
+            .github
+            .api_calls()
+            .iter()
+            .any(|call| call["path"] == "repos/fixture/repo")
+    );
+    std::fs::write(released, "release").unwrap();
+    assert_eq!(pending.await.unwrap().unwrap_err().status, 400);
+    assert!(first.s.store.projects().await.unwrap().is_empty());
+    assert!(other.s.store.projects().await.unwrap().is_empty());
 }

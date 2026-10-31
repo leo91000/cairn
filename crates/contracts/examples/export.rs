@@ -24,6 +24,170 @@ fn main() {
     let root = Path::new(&root);
     fs::create_dir_all(root).unwrap();
     let mut generator = SchemaSettings::draft07().for_serialize().into_generator();
+    export::<ReadSkillInput>(root, &mut generator, Contract::Deserialize);
+    export::<SkillInput>(root, &mut generator, Contract::Deserialize);
+    export::<ListSkillsInput>(root, &mut generator, Contract::Deserialize);
+    export::<Skill>(root, &mut generator, Contract::Deserialize);
+    export::<SkillSource>(root, &mut generator, Contract::Deserialize);
+    export::<SkillFile>(root, &mut generator, Contract::Deserialize);
+    export::<SkillLimits>(root, &mut generator, Contract::Deserialize);
+    export::<SkillBundle>(root, &mut generator, Contract::Deserialize);
+    export::<SkillFileContent>(root, &mut generator, Contract::Deserialize);
+    export::<SkillUpload>(root, &mut generator, Contract::Deserialize);
+    export::<SkillImport>(root, &mut generator, Contract::Deserialize);
+    export::<SkillArchiveChunk>(root, &mut generator, Contract::Deserialize);
+    export::<SkillDiffLine>(root, &mut generator, Contract::Deserialize);
+    export::<SkillSourceChange>(root, &mut generator, Contract::Deserialize);
+    export::<SkillSourceVersion>(root, &mut generator, Contract::Deserialize);
+    export::<SkillSourceStatus>(root, &mut generator, Contract::Deserialize);
+    export::<SkillChange>(root, &mut generator, Contract::Deserialize);
+    export::<EditSkillFilesInput>(root, &mut generator, Contract::Deserialize);
+    export::<SaveSkillInput>(root, &mut generator, Contract::Deserialize);
+    export::<ReadSkillFileInput>(root, &mut generator, Contract::Deserialize);
+    export::<ExportSkillArchiveInput>(root, &mut generator, Contract::Deserialize);
+    export::<StageSkillUploadInput>(root, &mut generator, Contract::Deserialize);
+    export::<UpdateSkillSourceInput>(root, &mut generator, Contract::Deserialize);
+    export::<DeleteSkillOutput>(root, &mut generator, Contract::Deserialize);
+    export::<ForgetSkillSourceOutput>(root, &mut generator, Contract::Deserialize);
+    export::<SkillMetadata>(root, &mut generator, Contract::Deserialize);
+    export::<ImportSkillInput>(root, &mut generator, Contract::Deserialize);
+    export::<ImportProjectInput>(root, &mut generator, Contract::Deserialize);
+    export::<ListSourceProjectsInput>(root, &mut generator, Contract::Deserialize);
+    export::<PluginProject>(root, &mut generator, Contract::Deserialize);
+    export::<PluginProjectPage>(root, &mut generator, Contract::Deserialize);
+    let skill_clients = serde_json::json!([
+        {
+            "name": "listSkills",
+            "input": "ListSkillsInput",
+            "output": "Skill",
+            "method": "GET",
+            "path": "/skills",
+            "query": [
+                "scope"
+            ],
+            "optionalQuery": [
+                "scope"
+            ],
+            "array": true
+        },
+        {
+            "name": "readSkillBundle",
+            "input": "SkillInput",
+            "output": "SkillBundle",
+            "method": "GET",
+            "path": "/skills/{scope}/{name}/bundle"
+        },
+        {
+            "name": "readSkillFile",
+            "input": "ReadSkillFileInput",
+            "output": "SkillFileContent",
+            "method": "GET",
+            "path": "/skills/{scope}/{name}/file",
+            "query": [
+                "path"
+            ]
+        },
+        {
+            "name": "editSkillFiles",
+            "input": "EditSkillFilesInput",
+            "output": "SkillBundle",
+            "method": "POST",
+            "path": "/skills/{scope}/{name}/bundle"
+        },
+        {
+            "name": "saveSkill",
+            "input": "SaveSkillInput",
+            "output": "SkillMetadata",
+            "method": "PUT",
+            "path": "/skills/{scope}/{name}"
+        },
+        {
+            "name": "importSkill",
+            "deferred": true,
+            "input": "ImportSkillInput",
+            "output": "SkillImport",
+            "method": "POST",
+            "path": "/skills/import"
+        },
+        {
+            "name": "deleteSkill",
+            "input": "SkillInput",
+            "output": "DeleteSkillOutput",
+            "method": "DELETE",
+            "path": "/skills/{scope}/{name}"
+        },
+        {
+            "name": "exportSkillArchive",
+            "input": "ExportSkillArchiveInput",
+            "output": "SkillArchiveChunk",
+            "method": "GET",
+            "path": "/skills/{scope}/{name}/archive",
+            "query": [
+                "offset",
+                "revision"
+            ],
+            "optionalQuery": [
+                "revision"
+            ]
+        },
+        {
+            "name": "getSkillSourceStatus",
+            "deferred": true,
+            "input": "SkillInput",
+            "output": "SkillSourceStatus",
+            "method": "GET",
+            "path": "/skills/{scope}/{name}/source"
+        },
+        {
+            "name": "updateSkillSource",
+            "deferred": true,
+            "input": "UpdateSkillSourceInput",
+            "output": "SkillBundle",
+            "method": "POST",
+            "path": "/skills/{scope}/{name}/source/update"
+        },
+        {
+            "name": "forgetSkillSource",
+            "input": "SkillInput",
+            "output": "ForgetSkillSourceOutput",
+            "method": "DELETE",
+            "path": "/skills/{scope}/{name}/source"
+        },
+        {
+            "name": "stageSkillUpload",
+            "input": "StageSkillUploadInput",
+            "output": "SkillUpload",
+            "method": "POST",
+            "path": "/skills/stage"
+        },
+        {
+            "name": "importProject",
+            "deferred": true,
+            "input": "ImportProjectInput",
+            "output": "Project",
+            "method": "POST",
+            "path": "/projects/import"
+        },
+        {
+            "name": "listSourceProjects",
+            "deferred": true,
+            "input": "ListSourceProjectsInput",
+            "output": "PluginProjectPage",
+            "method": "GET",
+            "path": "/plugins/{pluginId}/projects",
+            "query": [
+                "source",
+                "instance",
+                "page",
+                "query"
+            ]
+        }
+    ]);
+    fs::write(
+        root.join("skill-clients.json"),
+        serde_json::to_string_pretty(&skill_clients).unwrap() + "\n",
+    )
+    .unwrap();
     export::<CodingAgentAccount>(root, &mut generator, Contract::Deserialize);
     export::<CodingAgentAccounts>(root, &mut generator, Contract::Deserialize);
     export::<AccountUsage>(root, &mut generator, Contract::Deserialize);
@@ -606,6 +770,10 @@ fn main() {
     export::<ProgramRelease>(root, &mut generator, Contract::Serialize);
     export::<InstalledProgram>(root, &mut generator, Contract::Serialize);
     export::<ProgramState>(root, &mut generator, Contract::Serialize);
+    export::<ListPluginResourcesInput>(root, &mut generator, Contract::Deserialize);
+    export::<ListPluginResourcesOutput>(root, &mut generator, Contract::Serialize);
+    export::<ResolvePluginResourceInput>(root, &mut generator, Contract::Deserialize);
+    export::<ResolvePluginResourceOutput>(root, &mut generator, Contract::Serialize);
     export::<ListPluginProgramsInput>(root, &mut generator, Contract::Deserialize);
     export::<ListPluginProgramsOutput>(root, &mut generator, Contract::Serialize);
     export::<InstallPluginPackageInput>(root, &mut generator, Contract::Deserialize);
@@ -712,6 +880,9 @@ fn main() {
         {"name": "installPluginPackage", "input": "InstallPluginPackageInput", "output": "PackageVersion", "method": "POST", "path": "/plugins/packages"},
         {"deferred": true, "name": "approvePluginPackage", "input": "ApprovePluginPackageInput", "output": "PackageVersion", "method": "POST", "path": "/plugins/packages/{pluginId}/approve"},
         {"deferred": true, "name": "activatePluginPackage", "input": "ActivatePluginPackageInput", "output": "PackageVersion", "method": "POST", "path": "/plugins/packages/{pluginId}/activate"},
+        {"name": "getPluginResourceOperation", "input": "PluginOperationInput", "output": "PluginOperation", "method": "GET", "path": "/plugins/resources/operations/{operationId}"},
+        {"name": "listPluginResources", "input": "ListPluginResourcesInput", "output": "ListPluginResourcesOutput", "method": "GET", "deferred": true, "path": "/plugins/{pluginId}/connections/{instanceId}/resources", "query": ["resourceType", "page", "query"]},
+        {"name": "resolvePluginResource", "input": "ResolvePluginResourceInput", "output": "ResolvePluginResourceOutput", "method": "GET", "deferred": true, "path": "/plugins/{pluginId}/connections/{instanceId}/resources/ancestors", "query": ["resourceType", "id"]},
         {"name": "listPluginPrograms", "input": "ListPluginProgramsInput", "output": "ListPluginProgramsOutput", "method": "GET", "path": "/plugins/{pluginId}/programs"},
         {"name": "getPluginOperation", "input": "PluginOperationInput", "output": "PluginOperation", "method": "GET", "path": "/plugins/packages/operations/{operationId}"},
         { "name": "preparePluginProgram", "input": "PluginProgramInput", "output": "ProgramState", "method": "POST", "path": "/plugins/programs/prepare", "deferred": true },

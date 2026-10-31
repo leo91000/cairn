@@ -566,6 +566,11 @@ pub(crate) fn operations() -> Vec<Value> {
             .iter()
             .map(crate::capabilities::settings::SettingsOperation::descriptor),
     );
+    operations.extend(
+        crate::capabilities::RESOURCE_OPERATIONS
+            .iter()
+            .map(crate::capabilities::ResourceOperation::descriptor),
+    );
     operations
 }
 
@@ -687,6 +692,18 @@ pub(crate) async fn operation(
             .await;
     }
     if let Some(op) = crate::capabilities::node_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Public(
+                    scopes.to_vec(),
+                    credential.map(str::to_owned),
+                ),
+            )
+            .await;
+    }
+    if let Some(op) = crate::capabilities::resource_operation(name) {
         return op
             .invoke(
                 s,
@@ -967,72 +984,8 @@ pub(crate) async fn invoke(
         | "set_chat_artifact_visibility"
         | "list_chat_attachments"
         | "read_chat_attachment" => chat_files::invoke(s, name, args, bearer).await,
-        "list_skills" | "read_skill" | "save_skill" | "edit_skill_files" => {
-            skills_tool(s, name, &args, bearer).await
-        }
 
         _ => Err(Error::not_found("Unknown tool")),
-    }
-}
-
-async fn skills_tool(s: &Service, name: &str, args: &Value, bearer: Option<&str>) -> Result<Value> {
-    let project_id = args["projectId"].as_str();
-    let project = match project_id {
-        Some(id) => Some(std::path::PathBuf::from(
-            s.get_project(id).await?.settings.path,
-        )),
-        None => None,
-    };
-    let project = project.as_deref();
-    let scope = project_id.unwrap_or("global");
-    let skill = text(args, "name");
-    match name {
-        "list_skills" => {
-            let mut skills = s.skills.list(scope, project).await?;
-            s.attach_skill_usage(&mut skills).await?;
-            Ok(skills.into())
-        }
-        "read_skill" => {
-            if let Some(path) = args["path"].as_str() {
-                return s.skills.read(skill, path, project).await;
-            }
-            let mut bundle = s.skills.bundle(scope, skill, project).await?;
-            crate::skills::sources::source(s, scope, skill, &mut bundle).await?;
-            Ok(bundle)
-        }
-        "edit_skill_files" => {
-            let (changes, uploads) = s.skills.changes(&args["changes"]).await?;
-            let saved = s
-                .skills
-                .apply_authorized(
-                    skill,
-                    args["base"].as_str(),
-                    &changes,
-                    project,
-                    Some((
-                        s.store.clone(),
-                        Box::new(crate::installation_mcp::management_authorization(bearer)),
-                    )),
-                )
-                .await?;
-            s.skills.discard(&uploads).await;
-            let mut bundle = crate::skills::bundle_response(scope, skill, &saved);
-            crate::skills::sources::source(s, scope, skill, &mut bundle).await?;
-            Ok(bundle)
-        }
-        _ => {
-            s.skills
-                .save_authorized(
-                    skill,
-                    text(args, "content"),
-                    project,
-                    Some((
-                        s.store.clone(),
-                        Box::new(crate::installation_mcp::management_authorization(bearer)),
-                    )),
-                )
-                .await
-        }
     }
 }
 

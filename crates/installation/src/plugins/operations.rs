@@ -55,6 +55,7 @@ struct Entry {
     operation: Operation,
     audience: Audience,
     cancellation: tokio_util::sync::CancellationToken,
+    resource: Option<Arc<super::resources::Read>>,
 }
 
 pub struct Operations {
@@ -78,6 +79,26 @@ impl Operations {
         audience: Audience,
         work: impl Future<Output = Result<PluginOperationResult>> + Send + 'static,
     ) -> Result<Value> {
+        self.start_with_resource(s, audience, None, work)
+    }
+
+    pub(crate) fn start_resource_read(
+        &self,
+        s: Arc<Service>,
+        audience: Audience,
+        resource: Arc<super::resources::Read>,
+        work: impl Future<Output = Result<PluginOperationResult>> + Send + 'static,
+    ) -> Result<Value> {
+        self.start_with_resource(s, audience, Some(resource), work)
+    }
+
+    fn start_with_resource(
+        &self,
+        s: Arc<Service>,
+        audience: Audience,
+        resource: Option<Arc<super::resources::Read>>,
+        work: impl Future<Output = Result<PluginOperationResult>> + Send + 'static,
+    ) -> Result<Value> {
         let permit =
             self.slots.clone().try_acquire_owned().map_err(|_| {
                 Error::too_many_requests("Plugin preparation is busy. Retry shortly.")
@@ -99,12 +120,14 @@ impl Operations {
                 id.clone(),
                 Entry {
                     audience,
+                    resource,
                     cancellation: cancellation.clone(),
                     operation: Operation {
                         id: id.clone(),
                         state: State::Running,
                         result: None,
                         error: None,
+                        error_status: None,
                     },
                 },
             );
@@ -147,6 +170,7 @@ impl Operations {
                     }
                     Err(error) => {
                         operation.state = State::Failed;
+                        operation.error_status = Some(error.status);
                         operation.error = Some(error.message);
                     }
                 }
@@ -166,6 +190,21 @@ impl Operations {
             ));
         }
         Ok(())
+    }
+
+    pub(crate) fn resource_read(
+        &self,
+        id: &str,
+        resource_only: bool,
+    ) -> Result<Option<Arc<super::resources::Read>>> {
+        let entries = self.entries.lock().unwrap();
+        let entry = entries
+            .get(id)
+            .ok_or_else(|| Error::not_found("Operation not found."))?;
+        if resource_only && entry.resource.is_none() {
+            return Err(Error::forbidden("This is not a resource read operation."));
+        }
+        Ok(entry.resource.clone())
     }
 
     pub(crate) fn cancel(&self, id: &str) -> Result<()> {

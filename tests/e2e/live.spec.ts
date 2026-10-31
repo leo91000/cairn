@@ -1,6 +1,8 @@
 import type { BrowserContext, Page } from '@playwright/test'
 import type { RunEvent } from '../../packages/contracts/contracts'
 import { createHash, randomUUID } from 'node:crypto'
+import { writeFile } from 'node:fs/promises'
+import path from 'node:path'
 import {
   signIn as authenticateWorkspace,
   expect,
@@ -381,6 +383,9 @@ test('two independent clients follow deltas, recover offline, refresh mid-answer
   initializeRepository(workspace.projectPath)
   const chat = await workspace.api('/api/chats', 'POST', {})
   const contexts: BrowserContext[] = []
+  // Workspace cleanup removes this control only after stopping its provider process.
+  const streamLimit = path.join(workspace.projectPath, `fixture-stream-${randomUUID()}`)
+  const releaseThrough = (part: number) => writeFile(streamLimit, String(part))
   const signIn = async (target: Page) => {
     await useRelayForHttpMocks(target)
     await target.goto(workspacePath(workspace.url))
@@ -403,19 +408,23 @@ test('two independent clients follow deltas, recover offline, refresh mid-answer
     contexts.push(second)
     const other = await second.newPage()
     await Promise.all([signIn(page), signIn(other)])
-    await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'fixture:stream' })
+    await releaseThrough(5)
+    await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: `fixture:stream\nfixture:stream-limit:${streamLimit}` })
     await expect(message(page)).toContainText('005')
     await expect(message(other)).toContainText('005')
     // The beacon transport permits one finite read before its first live batch.
     // Once connected, deltas must arrive without recurring history/metadata reads.
     requests.length = 0
     await second.setOffline(true)
+    await releaseThrough(20)
     await expect(message(page)).toContainText('020')
     await expect(other.getByRole('region', { name: 'Chat workspace', exact: true }).getByRole('status').filter({ hasText: /Offline|Reconnecting/ })).toBeVisible()
     await second.setOffline(false)
+    await releaseThrough(25)
     await expect(message(other)).toContainText('025')
     expect(requests.some(url => /\/events\?|\/artifacts$/.test(url))).toBe(false)
     await page.reload()
+    await releaseThrough(35)
     await expect(message(page)).toContainText('035')
     requests.length = 0
     await expect(message(page)).not.toContainText('100')
@@ -423,6 +432,14 @@ test('two independent clients follow deltas, recover offline, refresh mid-answer
     await page.emulateMedia({ colorScheme: 'dark' })
     await expectSingleScroll(page)
     await page.screenshot({ path: test.info().outputPath('stream-mobile-dark.png'), animations: 'disabled' })
+    // Each delivery deadline covers a bounded batch, independent of producer cadence.
+    for (let part = 40; part <= 100; part += 5) {
+      await releaseThrough(part)
+      const checkpoint = String(part).padStart(3, '0')
+      await expect(message(page)).toContainText(checkpoint)
+      await expect(message(other)).toContainText(checkpoint)
+    }
+
     await expect(message(page)).toContainText('100')
     await expect(message(other)).toContainText('100')
     await expect(message(page)).toHaveCount(1)
@@ -713,10 +730,31 @@ test('recent history loads older pages without moving the reader and survives a 
     trigger: 'history-fixture',
   })
 
-  for (let i = 0; i < 350; i++) {
+  const previousEventId = workspace.service.store.events(original.id).at(-1)?.id ?? 0
+  const events = Array.from({ length: 350 }, (_, i) => {
     const text = `Paged line ${String(i).padStart(3, '0')}. A paragraph to retain a stable reading position.`
-    workspace.service.store.event(run.id, 'item.completed', text, { item: { id: `page-${i}`, type: 'agent_message', text } })
-  }
+    return { type: 'item.completed', text, payload: { item: { id: `page-${i}`, type: 'agent_message', text } } }
+  })
+  workspace.service.store.seedEvents(run.id, events)
+
+  const savedEvents = workspace.service.store.events(run.id)
+  expect(savedEvents).toHaveLength(350)
+  expect(savedEvents.map(({
+    runId,
+    type,
+    text,
+    payload,
+  }) => ({
+    runId,
+    type,
+    text,
+    payload,
+  }))).toEqual(
+    events.map(event => ({ runId: run.id, ...event })),
+  )
+  expect(savedEvents[0].id).toBeGreaterThan(previousEventId)
+  expect(new Set(savedEvents.map(event => event.id)).size).toBe(350)
+  expect(savedEvents.every((event, index) => index === 0 || event.id > savedEvents[index - 1].id)).toBe(true)
 
   await page.goto(workspacePath(`${workspace.url}/runs/${run.id}`))
   await authenticateWorkspace(page)

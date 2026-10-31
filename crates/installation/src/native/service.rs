@@ -130,6 +130,55 @@ struct Attempt {
     suspension: Arc<super::suspension::Suspension>,
 }
 
+#[derive(Default)]
+pub(super) struct StorageClose {
+    mutations_drained: bool,
+}
+
+impl StorageClose {
+    pub(super) async fn finish(
+        &mut self,
+        state: &Path,
+        closing: impl std::future::Future<Output = Result<block::Completion>>,
+    ) -> Result<block::Completion> {
+        if !self.mutations_drained {
+            // Cancellation is already published and the workload is fenced.
+            // Drain admitted mutations once; later ones observe cancellation.
+            drop(disk::lock(state).await?);
+            self.mutations_drained = true;
+        }
+        // The clean backend namespace removes host mount-inventory coupling.
+        closing.await
+    }
+}
+
+fn completion_status(previous: i32, completion: block::Completion) -> (i32, bool) {
+    (
+        completion.exit_code(previous),
+        completion == block::Completion::FailedFlush,
+    )
+}
+
+fn exit_record(code: i32, finalization_failed: bool) -> String {
+    if finalization_failed {
+        json!({ "StatusCode": code, "FinalizationFailed": true }).to_string()
+    } else {
+        code.to_string()
+    }
+}
+
+async fn preserve_interrupted_exit(marker: &std::path::Path) -> Result<()> {
+    let exit = marker.with_extension("exit");
+    if !exit.exists() {
+        atomic_write(
+            &exit,
+            crate::runner::CONTROLLER_INTERRUPTED.to_string().as_bytes(),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 struct Controller {
     data: PathBuf,
@@ -149,6 +198,7 @@ struct Controller {
     telemetry: health::Telemetry,
     stop: CancellationToken,
     identity: Arc<systemd::Identity>,
+    backend_namespace: storage::ublk::BackendNamespace,
 }
 
 impl Controller {
@@ -443,6 +493,7 @@ impl Controller {
                     crate::runner::CONTROLLER_FAILED
                 }
             };
+            let mut finalization_failed = false;
             // Deliver the result path consumed by the node connector.
             let result = root.join("data/output/result.md");
             if let Ok(file) = crate::artifacts::file::open_export(&result, &root.join("data")).await
@@ -471,17 +522,38 @@ impl Controller {
                 };
                 let had_mount = mounted.is_some();
                 if let Some(mounted) = mounted {
+                    let mut storage_close = StorageClose::default();
                     loop {
-                        let result = async {
-                            let _disk = disk::lock(&controller.state).await?;
-                            mounted.mount.lock().await.close().await
-                        }
-                        .await;
+                        let result = storage_close
+                            .finish(&controller.state, async {
+                                mounted.mount.lock().await.close().await
+                            })
+                            .await;
                         match result {
                             Ok(completion) => {
-                                code = completion.exit_code(code);
-                                if completion == block::Completion::FailedFlush {
-                                    let _ = controller.append(&id, true, b"Native filesystem could not be flushed; the durable crash prefix was retained.\n").await;
+                                (code, finalization_failed) = completion_status(code, completion);
+                                if finalization_failed {
+                                    tracing::error!(
+                                        attempt = id,
+                                        "Native filesystem could not be flushed; the durable crash prefix was retained"
+                                    );
+                                    let exit = exit_record(code, true);
+                                    if !matches!(
+                                        tokio::time::timeout(
+                                            Duration::from_secs(1),
+                                            atomic_write(
+                                                &controller.file(&id, "exit"),
+                                                exit.as_bytes()
+                                            )
+                                        )
+                                        .await,
+                                        Ok(Ok(()))
+                                    ) {
+                                        tracing::error!(
+                                            attempt = id,
+                                            "Native flush evidence could not be saved before physical cleanup"
+                                        );
+                                    }
                                 }
                                 break;
                             }
@@ -517,7 +589,25 @@ impl Controller {
             }
             // The active marker must survive until suspension accounting is
             // finalized, so recovery can close it after any controller crash.
-            let _ = atomic_write(&controller.file(&id, "exit"), code.to_string().as_bytes()).await;
+            let exit = exit_record(code, finalization_failed);
+            let mut retry_delay = Duration::from_secs(1);
+            loop {
+                match crate::runner::write_final_result(
+                    &controller.file(&id, "exit"),
+                    exit.as_bytes(),
+                    finalization_failed,
+                )
+                .await
+                {
+                    Ok(()) => break,
+                    Err(error) if finalization_failed => {
+                        tracing::error!(attempt = id, %error, "Native completion must be saved before releasing the attempt");
+                        tokio::time::sleep(retry_delay).await;
+                        retry_delay = (retry_delay * 2).min(Duration::from_secs(30));
+                    }
+                    Err(_) => break,
+                }
+            }
             let _ = tokio::fs::remove_file(controller.file(&id, "active")).await;
             controller.active.lock().await.remove(&id);
             controller.capacity.lock().await.attempts.remove(&id);
@@ -641,7 +731,14 @@ impl Controller {
             let result: Result<(bool, block::Mounted)> = async {
                 self.check_preparation_space(plan).await?;
                 let from_base = self.bases().initialize(plan, stop).await?;
-                let mounted = block::mount(&self.state, text(plan, "runId"), plan, stop).await?;
+                let mounted = block::mount(
+                    &self.state,
+                    text(plan, "runId"),
+                    plan,
+                    stop,
+                    &self.backend_namespace,
+                )
+                .await?;
                 Ok((from_base, mounted))
             }
             .await;
@@ -1288,7 +1385,19 @@ impl Controller {
         uuid(id)?;
         // Publish cancellation before waiting for an admission that may itself
         // be waiting for storage. Its waiter observes this durable marker.
-        atomic_write(&self.file(id, "stopped"), b"1").await?;
+        let written = tokio::time::timeout(
+            Duration::from_secs(1),
+            atomic_write(&self.file(id, "stopped"), b"1"),
+        )
+        .await;
+        if !matches!(written, Ok(Ok(()))) {
+            if let Some(attempt) = self.active.lock().await.get(id) {
+                attempt.stop.cancel();
+            }
+            return Err(Error::unavailable(
+                "Could not persist the native stop marker.",
+            ));
+        }
         let _admission = self.admission.lock().await;
         self.stop_admitted(id).await
     }
@@ -1298,7 +1407,19 @@ impl Controller {
             self.record_stop(id, "controller_shutdown", Value::Null)
                 .await;
         }
-        atomic_write(&self.file(id, "stopped"), b"1").await?;
+        let written = tokio::time::timeout(
+            Duration::from_secs(1),
+            atomic_write(&self.file(id, "stopped"), b"1"),
+        )
+        .await;
+        if !matches!(written, Ok(Ok(()))) {
+            if let Some(attempt) = self.active.lock().await.get(id) {
+                attempt.stop.cancel();
+            }
+            return Err(Error::unavailable(
+                "Could not persist the native stop marker.",
+            ));
+        }
         let requested = self.active.lock().await.get(id).and_then(|attempt| {
             if attempt.stop.is_cancelled() {
                 return None;
@@ -1365,10 +1486,12 @@ impl Controller {
                 if released
                     && let Ok(code) = tokio::fs::read_to_string(controller.file(&id, "exit")).await
                 {
-                    let result = code
-                        .parse::<i32>()
-                        .map(|code| Bytes::from(json!({ "StatusCode": code }).to_string()))
-                        .map_err(std::io::Error::other);
+                    let result = match code.parse::<i32>() {
+                        Ok(code) => Ok(Bytes::from(json!({ "StatusCode": code }).to_string())),
+                        Err(_) => serde_json::from_str::<Value>(&code)
+                            .map(|value| Bytes::from(value.to_string()))
+                            .map_err(std::io::Error::other),
+                    };
                     return Some((result, (controller, id, true)));
                 }
                 tokio::time::sleep(Duration::from_secs(1)).await;
@@ -2210,14 +2333,11 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
     }
     for (attempt, run, marker) in interrupted {
         block::recover_completed(&state, &run, &attempt).await?;
-        atomic_write(
-            &marker.with_extension("exit"),
-            crate::runner::CONTROLLER_INTERRUPTED.to_string().as_bytes(),
-        )
-        .await?;
+        preserve_interrupted_exit(&marker).await?;
         tokio::fs::remove_file(marker).await?;
     }
     recover_preparations(&data, &state).await?;
+    let backend_namespace = storage::ublk::BackendNamespace::create(&state)?;
     let budget_path = state.join(crate::microvm::budget::FILE);
     let checked = load_budget(&budget_path).await?;
     let budget = serde_json::to_value(&checked)?;
@@ -2249,6 +2369,7 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
         telemetry: health::Telemetry::default(),
         stop: stop.clone(),
         identity,
+        backend_namespace,
     };
     controller.recover_exclusive().await?;
     let exclusive_monitor = tokio::spawn(controller.clone().monitor_exclusive());
@@ -2649,6 +2770,7 @@ mod tests {
             log_lock: Arc::default(),
             telemetry: health::Telemetry::default(),
             stop: CancellationToken::new(),
+            backend_namespace: storage::ublk::BackendNamespace::unavailable_for_test(),
             identity: Arc::new(systemd::Identity {
                 user: "synthetic-workload".into(),
                 uid: 65534,
@@ -3296,6 +3418,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn close_drains_admitted_mutations_then_allows_policy_changes_and_refuses_late_mutations()
+    {
+        let (_fixture, controller) = fixture().await;
+        let (run, id, _) = busy_disk_fixture(&controller).await;
+        let stop = CancellationToken::new();
+        stop.cancel();
+        controller.active.lock().await.insert(
+            id.clone(),
+            Attempt {
+                run: run.clone(),
+                expires: None,
+                stop,
+                started: true,
+                protection: None,
+                suspension: Arc::new(super::super::suspension::Suspension::new(
+                    &controller.state,
+                    &id,
+                )),
+            },
+        );
+        let admitted = disk::lock(&controller.state).await.unwrap();
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let closing = tokio::spawn({
+            let controller = controller.clone();
+            let entered = entered.clone();
+            let release = release.clone();
+            async move {
+                StorageClose::default()
+                    .finish(&controller.state, async {
+                        entered.notify_one();
+                        release.notified().await;
+                        Ok(block::Completion::Flushed)
+                    })
+                    .await
+            }
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), entered.notified())
+                .await
+                .is_err()
+        );
+        assert!(!closing.is_finished());
+        drop(admitted);
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .unwrap();
+        let result = async {
+            let policy = storage::policy::Configuration {
+                generation: 1,
+                policy: storage::policy::Policy {
+                    reserve_mi_b: 64,
+                    reserve_percent: 1,
+                    memory_cache_mi_b: 128,
+                    ..storage::policy::Policy::default()
+                },
+            };
+            route(
+                controller.clone(),
+                request("/storage-policy", &json!(policy)),
+            )
+            .await?;
+            let mut budget = controller.budget.lock().await.clone();
+            budget["slots"] = 2.into();
+            route(controller.clone(), request("/node-budget", &budget)).await?;
+            for path in [
+                format!("/runs/{id}/artifact"),
+                format!("/runs/{id}/projects/{}", crate::config::id()),
+            ] {
+                let error = route(controller.clone(), request(&path, &json!({"runId":run})))
+                    .await
+                    .unwrap_err();
+                assert_eq!(error.status, 403);
+            }
+            assert!(controller.active.lock().await.contains_key(&id));
+            assert!(controller.leases.lock().await.contains_key(&id));
+            assert!(!controller.file(&id, "exit").exists());
+            Ok::<_, Error>(())
+        };
+        let result = tokio::time::timeout(Duration::from_secs(2), result).await;
+        release.notify_one();
+        assert_eq!(closing.await.unwrap().unwrap(), block::Completion::Flushed);
+        result.unwrap().unwrap();
+    }
+
+    #[tokio::test]
     async fn native_wait_streams_heartbeats_until_physical_ownership_is_released() {
         use futures_util::StreamExt;
 
@@ -3351,6 +3559,145 @@ mod tests {
         }
         let result: Value = serde_json::from_slice(&received).unwrap();
         assert_eq!(result, json!({ "StatusCode": 17 }));
+    }
+
+    #[tokio::test]
+    async fn failed_native_flush_survives_read_only_final_write_after_cleanup() {
+        use futures_util::StreamExt;
+        use std::os::unix::fs::PermissionsExt;
+        let (_fixture, controller) = fixture().await;
+        let attempt = crate::config::id();
+        let (code, failed) = completion_status(1, block::Completion::FailedFlush);
+        let record = exit_record(code, failed);
+        controller.active.lock().await.insert(
+            attempt.clone(),
+            Attempt {
+                run: crate::config::id(),
+                expires: None,
+                stop: CancellationToken::new(),
+                started: true,
+                protection: None,
+                suspension: Arc::new(super::super::suspension::Suspension::new(
+                    &controller.state,
+                    &attempt,
+                )),
+            },
+        );
+        atomic_write(&controller.file(&attempt, "exit"), record.as_bytes())
+            .await
+            .unwrap();
+        let marker = controller.file(&attempt, "active");
+        atomic_write(&marker, b"run").await.unwrap();
+        preserve_interrupted_exit(&marker).await.unwrap();
+        let response = handler(
+            State(controller.clone()),
+            request(&format!("/runs/{attempt}/wait"), &json!({})),
+        )
+        .await
+        .unwrap();
+        let mut body = response.into_body().into_data_stream();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), body.next())
+                .await
+                .is_err()
+        );
+        let other_path = controller.file(&crate::config::id(), "exit");
+        std::os::unix::fs::symlink(controller.file(&attempt, "exit"), &other_path).unwrap();
+        std::fs::set_permissions(&controller.state, std::fs::Permissions::from_mode(0o500))
+            .unwrap();
+        let written = crate::runner::write_final_result(
+            &controller.file(&attempt, "exit"),
+            record.as_bytes(),
+            true,
+        )
+        .await;
+        let other = crate::runner::write_final_result(&other_path, record.as_bytes(), true).await;
+        std::fs::write(controller.file(&attempt, "exit"), b"{broken").unwrap();
+        let corrupt = crate::runner::write_final_result(
+            &controller.file(&attempt, "exit"),
+            record.as_bytes(),
+            true,
+        )
+        .await;
+        std::fs::write(controller.file(&attempt, "exit"), record.as_bytes()).unwrap();
+        std::fs::set_permissions(&controller.state, std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        assert!(
+            written.is_ok(),
+            "a committed failure must not require another write: {written:?}"
+        );
+        assert!(other.is_err() && corrupt.is_err());
+        let hardlink = controller.file(&crate::config::id(), "exit");
+        std::fs::hard_link(controller.file(&attempt, "exit"), &hardlink).unwrap();
+        std::fs::set_permissions(&controller.state, std::fs::Permissions::from_mode(0o500))
+            .unwrap();
+        let other = crate::runner::write_final_result(&hardlink, record.as_bytes(), true).await;
+        std::fs::set_permissions(&controller.state, std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        std::fs::remove_file(hardlink).unwrap();
+        assert!(other.is_err());
+        controller.active.lock().await.remove(&attempt);
+        let mut received = Vec::new();
+        while let Some(bytes) = tokio::time::timeout(Duration::from_secs(2), body.next())
+            .await
+            .unwrap()
+        {
+            received.extend_from_slice(&bytes.unwrap());
+        }
+        assert_eq!(
+            serde_json::from_slice::<Value>(&received).unwrap(),
+            json!({ "StatusCode": 70, "FinalizationFailed": true })
+        );
+        for _ in 0..2 {
+            let response = handler(
+                State(controller.clone()),
+                request(&format!("/runs/{attempt}/wait"), &json!({})),
+            )
+            .await
+            .unwrap();
+            let body = axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap();
+            let result: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                result,
+                json!({ "StatusCode": 70, "FinalizationFailed": true })
+            );
+        }
+        let (code, failed) = completion_status(1, block::Completion::Flushed);
+        assert_eq!(exit_record(code, failed), "1");
+    }
+
+    #[tokio::test]
+    async fn native_stop_cancels_workload_when_stop_marker_cannot_be_written() {
+        let (_root, controller) = fixture().await;
+        let id = crate::config::id();
+        let stop = CancellationToken::new();
+        controller.active.lock().await.insert(
+            id.clone(),
+            Attempt {
+                run: crate::config::id(),
+                expires: None,
+                stop: stop.clone(),
+                started: true,
+                protection: None,
+                suspension: Arc::new(super::super::suspension::Suspension::new(
+                    &controller.state,
+                    &id,
+                )),
+            },
+        );
+        tokio::fs::create_dir(controller.file(&id, "stopped"))
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), controller.stop_attempt(&id))
+                .await
+                .unwrap()
+                .is_err()
+        );
+        assert!(stop.is_cancelled());
+        assert!(controller.active.lock().await.contains_key(&id));
     }
 
     #[tokio::test]

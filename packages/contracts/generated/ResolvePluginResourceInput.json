@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "instanceId": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "pluginId": {
+      "type": "string"
+    },
+    "resourceType": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "pluginId",
+    "instanceId",
+    "resourceType",
+    "id"
+  ],
+  "title": "ResolvePluginResourceInput",
+  "type": "object"
+}

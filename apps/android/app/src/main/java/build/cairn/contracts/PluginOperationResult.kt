@@ -11,25 +11,74 @@ sealed interface PluginOperationResult {
 
     @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
     @Serializable
+    @SerialName("project")
+    data class A(val project: Project) : PluginOperationResult {
+        init {}
+    }
+
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @Serializable
+    @SerialName("sourceProjects")
+    data class B(val page: PluginProjectPage) : PluginOperationResult {
+        init {}
+    }
+
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @Serializable
+    @SerialName("skillImport")
+    data class C(val imported: SkillImport) : PluginOperationResult {
+        init {}
+    }
+
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @Serializable
+    @SerialName("skillSource")
+    data class D(val status: SkillSourceStatus) : PluginOperationResult {
+        init {}
+    }
+
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @Serializable
+    @SerialName("skillBundle")
+    data class E(val bundle: SkillBundle) : PluginOperationResult {
+        init {}
+    }
+
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @Serializable
     @SerialName("package")
-    data class A(val version: PackageVersion) : PluginOperationResult {
+    data class F(val version: PackageVersion) : PluginOperationResult {
         init {}
     }
 
     @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
     @Serializable
     @SerialName("program")
-    data class B(val program: ProgramState) : PluginOperationResult {
+    data class G(val program: ProgramState) : PluginOperationResult {
         init {}
     }
 
     @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
     @Serializable
     @SerialName("management")
-    data class C(
+    data class H(
         val output: ManagePluginOutput,
         val wrapped: Boolean,
     ) : PluginOperationResult {
+        init {}
+    }
+
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @Serializable
+    @SerialName("resourcePage")
+    data class I(val page: ListPluginResourcesOutput) : PluginOperationResult {
+        init {}
+    }
+
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @Serializable
+    @SerialName("resourceAncestry")
+    data class J(val resolution: ResolvePluginResourceOutput) : PluginOperationResult {
         init {}
     }
 }

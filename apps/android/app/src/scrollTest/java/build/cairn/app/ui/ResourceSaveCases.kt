@@ -496,9 +496,11 @@ abstract class ResourceSaveCases {
                             .content,
                     )
                 }
-                assertTrue(
-                    mutations.first().second["creationId"]!!.jsonPrimitive.content.isNotBlank()
-                )
+                if (kind == "import") assertFalse("creationId" in mutations.first().second)
+                else
+                    assertTrue(
+                        mutations.first().second["creationId"]!!.jsonPrimitive.content.isNotBlank()
+                    )
                 if (loseResponse) assertEquals(mutations[0].second, mutations[1].second)
             } finally {
                 allowCatalog.countDown()

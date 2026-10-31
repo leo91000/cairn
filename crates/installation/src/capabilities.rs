@@ -23,13 +23,14 @@ impl ResumeContext {
             .identity
             .as_ref()
             .ok_or_else(|| Error::unauthorized("A verified identity is required."))?;
+        Ok(Self::identity(identity))
+    }
+
+    pub(crate) fn identity(identity: &crate::auth::InstallationIdentity) -> Self {
         if let Some(scopes) = &identity.mcp_scopes {
-            return Ok(Self::Public(
-                scopes.clone(),
-                identity.mcp_credential_digest.clone(),
-            ));
+            return Self::Public(scopes.clone(), identity.mcp_credential_digest.clone());
         }
-        Ok(Self::Human(identity.account_id.clone()))
+        Self::Human(identity.account_id.clone())
     }
 }
 
@@ -591,3 +592,9 @@ pub(crate) use personal::{PERSONAL_OPERATIONS, personal_operation};
 pub(crate) mod settings;
 
 pub(crate) use settings::{SETTINGS_OPERATIONS, settings_operation};
+
+mod resources;
+
+pub(crate) use resources::{
+    RESOURCE_OPERATIONS, ResourceOperation, resource_operation, stage_resource_upload,
+};

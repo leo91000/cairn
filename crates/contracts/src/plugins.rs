@@ -448,6 +448,68 @@ pub enum PluginPersonAction {
     Remove,
 }
 
+/// A resource identity is scoped to a plugin instance and a declared type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginResourceRef {
+    pub resource_type: String,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginResource {
+    pub resource_type: String,
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub parent: Option<PluginResourceRef>,
+}
+
+fn resource_page() -> i64 {
+    1
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ListPluginResourcesInput {
+    pub plugin_id: String,
+    pub instance_id: PluginInstanceId,
+    pub resource_type: String,
+    #[serde(default = "resource_page", deserialize_with = "wire_integer")]
+    #[schemars(range(min = 1_i64, max = 10000_i64))]
+    #[ts(type = "number")]
+    pub page: i64,
+    #[serde(default)]
+    pub query: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ListPluginResourcesOutput {
+    pub items: Vec<PluginResource>,
+    #[schemars(range(min = 1_i64, max = 10000_i64))]
+    #[ts(type = "number | null")]
+    pub next_page: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResolvePluginResourceInput {
+    pub plugin_id: String,
+    pub instance_id: PluginInstanceId,
+    pub resource_type: String,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResolvePluginResourceOutput {
+    pub resource: PluginResource,
+    /// Nearest parent first, through the root. Cairn resolves each parent itself.
+    pub ancestors: Vec<PluginResource>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

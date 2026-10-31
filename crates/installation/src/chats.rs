@@ -1095,6 +1095,11 @@ fn continue_run(
     checkpoint.terminal_code = Some(None);
     checkpoint.controller_recoveries = None;
     checkpoint.controller_recovery_reservation = None;
+    checkpoint.provider_failure_attempt = None;
+    checkpoint.finalization_failure_attempt = None;
+    checkpoint.move_recovery_reservation = None;
+    checkpoint.provider_retry_reservation = None;
+    checkpoint.pending_paid_admission = None;
     checkpoint.controller_observation = None;
     checkpoint.remaining_ms = Some(crate::run_limits::budget_ms(agent));
     checkpoint.last_message = None;
@@ -1281,7 +1286,7 @@ fn from_run(db: &Db<'_>, run_id: &str, origin: &crate::native::policy::Origin) -
     )?;
     // Work already delegated by this run still returns to its new conversation.
     let dependents = db.json_rows(
-        "SELECT data FROM runs WHERE json_extract(requested_by,'$.runId')=?",
+        "SELECT data FROM run_views AS runs WHERE json_extract(requested_by,'$.runId')=?",
         [run_id],
     )?;
     for dependent in dependents {

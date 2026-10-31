@@ -33,7 +33,7 @@ pub async fn maintain(s: Arc<Service>) {
         last_idle = Instant::now();
         let (after, cutoff) = (cursor.clone(), now().saturating_sub(IDLE_MS));
         let runs = s.store.read(move |db| db.json_rows(
-            "SELECT r.data FROM runs r WHERE r.id>?1
+            "SELECT r.data FROM run_views r WHERE r.id>?1
              AND status IN ('succeeded','failed','cancelled','interrupted')
              AND json_extract(r.data,'$.finishedAt')<=?2
              AND json_extract(r.data,'$.storage.mode')='on-demand'
@@ -96,7 +96,7 @@ fn pressure_page(db: &Db<'_>, node: &str) -> Result<Vec<Value>> {
         (SELECT MAX(json_extract(a.data,'$.releasedAt')) FROM records a
          WHERE a.kind='node-attempts' AND json_extract(a.data,'$.runId')=r.id),0)";
     let query = format!(
-        "SELECT json_set(r.data,'$._evictionIdleAt',{idle_at}) FROM runs r
+        "SELECT json_set(r.data,'$._evictionIdleAt',{idle_at}) FROM run_views r
          WHERE status IN ('succeeded','failed','cancelled','interrupted','queued')
          AND ({idle_at}>?2 OR ({idle_at}=?2 AND r.id>?3))
          AND EXISTS(SELECT 1 FROM records v WHERE v.kind='node-volumes'
