@@ -10,6 +10,10 @@ on:
         description: Run backend tests and doctests without release resolution or image jobs
         type: boolean
         default: false
+      plan-storage-reference:
+        description: Optional full base SHA for typed Plan storage measurements and the old-version fence
+        type: string
+        default: ''
       browser-workers:
         description: Workers per browser group for performance comparisons
         type: choice
@@ -1233,3 +1237,30 @@ jobs:
           CAIRN_RELEASE_SSH_KEY: ${{ secrets.CAIRN_RELEASE_SSH_KEY }}
           DEPLOY_INSTALLATION_IMAGE: ghcr.io/${{ github.repository_owner }}/cairn@${{ needs.resolve.outputs.digest || needs.image.outputs.digest }}
         run: node scripts/production-release.mjs verify
+
+  plan-storage:
+    name: Plan storage layout and version fence
+    if: github.event_name == 'workflow_dispatch' && inputs.plan-storage-reference != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      PLAN_STORAGE_OUTPUT: ${{ runner.temp }}/plan-storage-evidence
+      PLAN_STORAGE_REFERENCE: ${{ inputs.plan-storage-reference }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-pnpm
+        with:
+          install: false
+      - run: rustup toolchain install 1.97.1 --profile minimal && rustup default 1.97.1
+      - name: Install compilation dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age e2fsprogs fakeroot
+      - name: Qualify two actual source revisions on synthetic databases
+        run: node scripts/qualify-plan-storage.mjs "$PLAN_STORAGE_REFERENCE"
+      - uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: plan-storage-qualification
+          path: ${{ runner.temp }}/plan-storage-evidence/
+          if-no-files-found: error

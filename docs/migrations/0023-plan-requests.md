@@ -26,3 +26,12 @@ upgrades the real version-14 fixture of migration 0015 through the version-16
 questions, version-17 attachments, version-18 read-state and version-19
 run-projection, plugin-hook, run-progress and timeline migrations, then checks
 the unchanged rows, repeated opens, a stored plan request and the column constraints.
+
+The reproducible two-source qualification runs only on an ephemeral CI runner:
+set `plan-storage-reference` to the exact reviewed base SHA when dispatching
+`Quality and container`. It builds the actual reference and candidate, runs the
+same 1,000-record typed message/question workload in three alternating trials,
+and executes the old manager against a synthetic upgraded copy. It never opens
+production data. Raw timings, encoded/domain bytes, database bytes, CPU, host and
+profile evidence are uploaded as `plan-storage-qualification`; do not confuse cold
+SQLite connections with a cold OS/device cache or claim production/network latency.
