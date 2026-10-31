@@ -76,6 +76,8 @@ test('OAuth navigation does not leave background polls running in the departing 
     await direct.promise
     const card = page.locator('.mcp-card').filter({ hasText: 'Slow OAuth' })
     await card.getByRole('button', { name: 'Connect', exact: true }).click()
+    // The provider deliberately delays navigation; check connection readiness after its return.
+    await page.waitForURL(url => url.pathname.endsWith('/mcps/callback'))
     await expect(card.getByText('Connected', { exact: true })).toBeVisible()
     expect(provider.exchanges).toBe(1)
     expect(errors).toEqual([])
