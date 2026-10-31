@@ -408,40 +408,10 @@ To attribute this change's incremental cost, compare the old and new source
 with the identical fixture, compiler flags and host conditions. Retain every
 observation and separate no-op overhead from real storage or production latency.
 
-On 2026-10-31, four alternating old/new source pairs used the identical fixture
-on `ecf323e4` and the phase-timing implementation. Each process produced four
-enabled/disabled pairs of 20,000 transactions after warmup: 64 observations in
-total, 16 per source/state. Conditions were the test profile, two Cargo jobs,
-dev/test debug information and incremental compilation disabled, SQLite 3.53.2,
-Linux 7.2.11-arch1-1 and an i9-14900K host with 32 logical CPUs. Median costs in
-microseconds per transaction were:
-
-| Source | Disabled wall / process CPU | Enabled wall / process CPU |
-| --- | --- | --- |
-| Before phase timing | 14.44 / 17.21 | 14.36 / 17.59 |
-| With phase timing | 13.88 / 16.53 | 17.44 / 21.06 |
-
-Enabled source-pair wall differences ranged from +1.51 to +5.05 microseconds;
-disabled differences changed sign. A second unpinned 64-observation experiment
-after static lint cleanup produced enabled medians of 11.35 / 13.81 before and
-11.29 / 13.64 after, wall / process CPU respectively. These differing results
-do not establish a fixed incremental cost from the unpinned observations.
-
-A third 64-observation experiment verified the first job's CPU sampling mode in
-every observation and restricted both processes to the same two logical CPUs
-(0 and 2, on distinct physical cores). Other application affinities were not
-changed. On the same host/profile, its medians were:
-
-| Source, fixed two-CPU affinity | Disabled wall / process CPU | Enabled wall / process CPU |
-| --- | --- | --- |
-| Before phase timing | 8.12 / 9.39 | 8.65 / 10.44 |
-| With phase timing | 8.27 / 9.50 | 9.73 / 11.48 |
-
-All 192 observations from the three experiments are retained. The controlled
-comparison observes about one additional microsecond per empty transaction in
-this test profile. It neither measures release-profile overhead nor predicts
-production storage latency. These fixtures do not force slow-report delivery,
-which is separate from the completed report-delivery measurement above.
+Record exact reference/candidate identities, host conditions and every measured
+observation in the PR description. Keep raw evidence in temporary files or CI
+artifacts. Separate test-profile observer cost from release-profile overhead and
+production storage latency.
 
 ## Reading a slow run
 
