@@ -136,3 +136,7 @@ corruption repair with a replacement incarnation, and ownership-aware collection
 Ownership checks and strict format rejection remain covered.
 Codec tests include independently produced v2 fixtures, authenticated
 malformed frames and cancellation while a blocking decode is queued.
+
+The bounded direct node-publication scheduling fixture, resource bounds and
+controlled reference/candidate measurements are described in
+[Direct publication scheduling reference](DIRECT-PUBLICATION-PERFORMANCE.md).
