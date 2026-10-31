@@ -41,6 +41,19 @@ export interface LiveRunOptions {
   savedAs?: (state: LiveState) => string | undefined
 }
 
+function acceptCacheRevision(metadata?: LiveState) {
+  if (!metadata?.cacheRevision)
+    return
+  const revisionKey = state.installationId ? `conversation-cache-revision:${state.installationId}` : 'conversation-cache-revision'
+  try {
+    if (localStorage.getItem(revisionKey) !== metadata.cacheRevision) {
+      void clearHistoryCache()
+      localStorage.setItem(revisionKey, metadata.cacheRevision)
+    }
+  }
+  catch { void clearHistoryCache() }
+}
+
 // A view shows its own stream only: switching paths clears the previous data at once, so
 // a saved conversation shows immediately and anything else waits for its first snapshot.
 export function useLiveRun(path: () => string | undefined, options: LiveRunOptions = {}) {
@@ -217,16 +230,7 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
       const apply = (large: TimelineEntry[]) => {
         if (signal?.aborted || disposed || current !== generation)
           return
-        if (batch.state?.cacheRevision) {
-          const revisionKey = state.installationId ? `conversation-cache-revision:${state.installationId}` : 'conversation-cache-revision'
-          try {
-            if (localStorage.getItem(revisionKey) !== batch.state.cacheRevision) {
-              void clearHistoryCache()
-              localStorage.setItem(revisionKey, batch.state.cacheRevision)
-            }
-          }
-          catch { void clearHistoryCache() }
-        }
+        acceptCacheRevision(batch.state)
 
         const reset = batch.reset || (history && batch.history !== history)
           || (batch.state && detail?.run?.id !== batch.state.run?.id)
@@ -303,6 +307,7 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
     }, cached ? { cursor: cached.cursor, history: cached.history } : undefined, () => position.value?.follow ?? true, options.list ? '&list=1' : '', (metadata, legacyHistory) => {
       if (disposed || current !== generation)
         return false
+      acceptCacheRevision(metadata)
       const inactive = metadata?.chat?.lifecycle === 'trash' || metadata?.chat?.lifecycle === 'purging'
       const changedRun = metadata !== undefined && (!metadata.run || inactive || detail?.run?.id !== metadata.run.id)
       const changedHistory = !!history && history !== legacyHistory.replace(/^v1:/, 'v2:')

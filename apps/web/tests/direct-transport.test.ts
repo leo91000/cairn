@@ -1,3 +1,4 @@
+import type { CachedHistory } from '../src/history-cache'
 import { Buffer } from 'node:buffer'
 import { gzipSync } from 'node:zlib'
 import {
@@ -536,7 +537,7 @@ it('moves live streams between routes using only the accepted cursor and history
   connection.close()
 })
 
-it.each(['transport failure', 'trash', 'purging', 'retention'])('invalidates saved work after %s while waiting for the manager update', async (scenario) => {
+it.each(['transport failure', 'trash', 'purging', 'retention', 'cache revision'])('invalidates saved work after %s while waiting for the manager update', async (scenario) => {
   const { state } = await import('../src/api')
   const {
     cacheScope,
@@ -553,7 +554,7 @@ it.each(['transport failure', 'trash', 'purging', 'retention'])('invalidates sav
   state.ready = true
   const route = '/chats/c/stream'
   const cache = await cacheScope(`${state.installationId}:${state.csrf}`)
-  await writeHistory(cache, route, {
+  const saved: CachedHistory = {
     version: 2,
     cursor: 7,
     history: 'v2:r:1',
@@ -579,7 +580,13 @@ it.each(['transport failure', 'trash', 'purging', 'retention'])('invalidates sav
     oldest: 1,
     hasOlder: false,
     savedAt: Date.now(),
-  })
+
+  }
+  await writeHistory(cache, route, saved)
+  const otherRoute = '/chats/other/stream'
+  await writeHistory(cache, otherRoute, saved)
+  if (scenario === 'cache revision')
+    vi.stubGlobal('localStorage', { getItem: vi.fn(() => 'previous'), setItem: vi.fn() })
   const scope = effectScope()
   try {
     const live = scope.run(() => useLiveRun(() => route, { list: true }))!
@@ -595,7 +602,14 @@ it.each(['transport failure', 'trash', 'purging', 'retention'])('invalidates sav
         history: scenario === 'retention' ? 'v1:r:5' : scenario === 'transport failure' ? 'v1:r:1' : 'v1::0',
         state: scenario === 'trash' || scenario === 'purging'
           ? { run: null, chat: { id: 'c', lifecycle: scenario, messages: [] }, artifacts: [] }
-          : undefined,
+          : scenario === 'cache revision'
+            ? {
+                run: null,
+                chat: null,
+                artifacts: [],
+                cacheRevision: 'deleted-elsewhere',
+              }
+            : undefined,
       }),
     }))
     expect(live.connectionNotice.value).toContain('finish updating')
@@ -612,7 +626,7 @@ it.each(['transport failure', 'trash', 'purging', 'retention'])('invalidates sav
       expect(new URL(resumed.url, 'https://cairn.test').searchParams.get('after')).toBe('0')
       expect(new URL(resumed.url, 'https://cairn.test').searchParams.get('history')).toBeNull()
       expect(live.synced.value).toBe(false)
-      if (scenario !== 'retention') {
+      if (scenario !== 'retention' && scenario !== 'cache revision') {
         expect(live.snapshot.value?.chat?.lifecycle).toBe(scenario)
         expect(live.snapshot.value?.run).toBeNull()
         expect(live.catchingUp.value).toBe(false)
@@ -620,6 +634,11 @@ it.each(['transport failure', 'trash', 'purging', 'retention'])('invalidates sav
     }
 
     expect(live.timeline.value).toHaveLength(0)
+    if (scenario === 'cache revision') {
+      await vi.waitFor(() => expect(peekHistory(cache, otherRoute)).toBeUndefined())
+      expect(localStorage.setItem).toHaveBeenCalledWith('conversation-cache-revision:install', 'deleted-elsewhere')
+    }
+
     await vi.waitFor(() => expect(peekHistory(cache, route)).toBeUndefined())
   }
   finally {
