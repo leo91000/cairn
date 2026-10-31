@@ -16,6 +16,13 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use std::time::Duration;
 
+mod diagnostic;
+
+use diagnostic::{Drain, Outcome, Phase};
+
+#[cfg(test)]
+mod diagnostic_tests;
+
 /// Maintenance progress of a node, persisted in `node.maintenance`.
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -179,22 +186,31 @@ async fn start_drain(s: &Service, node: &str) -> Result<Value> {
     }
     let service = s.clone();
     tokio::spawn(async move {
-        let result =
-            tokio::time::timeout(Duration::from_secs(timeout), drain(&service, &node)).await;
-        let error = match result {
-            Ok(Ok(())) => Value::Null,
-            Ok(Err(error)) => error.message.into(),
-            Err(_) => {
-                "Preparation deadline reached; the node must stop its controller before updating."
-                    .into()
-            }
-        };
+        let error = prepare(&service, &node, Duration::from_secs(timeout)).await;
         if let Err(error) = finish_drain(&service, &node, generation, error).await {
             tracing::warn!(error = %error, "failed to record node maintenance readiness");
         }
         service.node_maintenance_tasks.lock().await.remove(&node);
     });
     Ok(json!({ "maintenance": Maintenance::Draining }))
+}
+
+/// Runs the existing bounded drain before readiness is persisted. Keeping this
+/// future separate also makes cancellation observable when its owner drops it.
+async fn prepare(s: &Service, node: &str, timeout: Duration) -> Value {
+    let mut diagnostic = Drain::new();
+    let result = tokio::time::timeout(timeout, drain(s, node, &mut diagnostic)).await;
+    let (outcome, error) = match result {
+        Ok(Ok(())) => (Outcome::Completed, Value::Null),
+        Ok(Err(error)) => (Outcome::Error, error.message.into()),
+        Err(_) => (
+            Outcome::Deadline,
+            "Preparation deadline reached; the node must stop its controller before updating."
+                .into(),
+        ),
+    };
+    diagnostic.finish(outcome);
+    error
 }
 
 /// Reports readiness only for the drain that is still current.
@@ -214,7 +230,7 @@ async fn finish_drain(s: &Service, node: &str, generation: String, error: Value)
         .await
 }
 
-async fn drain(s: &Service, node: &str) -> Result<()> {
+async fn drain(s: &Service, node: &str, diagnostic: &mut Drain) -> Result<()> {
     let mut failure = None;
     for attempt in s
         .store
@@ -227,11 +243,14 @@ async fn drain(s: &Service, node: &str) -> Result<()> {
                 && a["role"] == super::placement::AttemptRole::Execution.as_str()
         })
     {
+        diagnostic.attempts += 1;
+        diagnostic.next(Phase::Preparation);
         let run = s.store.run(text(&attempt, "runId")).await?;
         let native = crate::native::policy::native(&run["snapshot"]["agent"]);
         let run_id = text(&run, "id");
         let checkpoint = super::checkpoint(s, run_id).await?;
         if checkpoint["nodeId"] != node || checkpoint["runnerId"] != attempt["id"] {
+            diagnostic.stale_attempts += 1;
             continue;
         }
         s.store
@@ -245,6 +264,8 @@ async fn drain(s: &Service, node: &str) -> Result<()> {
                 None,
             )
             .await?;
+        diagnostic.next(Phase::PauseRequest);
+        diagnostic.pause_requests += 1;
         let stopped = s
             .http
             .delete(format!(
@@ -257,25 +278,31 @@ async fn drain(s: &Service, node: &str) -> Result<()> {
             .send()
             .await;
         if !stopped.is_ok_and(|r| r.status().is_success()) {
+            diagnostic.pause_failures += 1;
             failure = Some(Error::unavailable(
                 "Node did not confirm maintenance pause.",
             ));
             continue;
         }
         if !native {
-            super::placement::release(s, text(&attempt, "id")).await?;
+            release_placement(s, text(&attempt, "id"), diagnostic).await?;
         }
         let mut synchronized = true;
         if run["sessionId"].is_string() {
             loop {
+                diagnostic.next(Phase::Capture);
+                diagnostic.capture_calls += 1;
                 match super::publication::capture_for_update(s, &run, node).await {
                     Ok(_) => break,
                     Err(error) if native && error.status == 425 => {
                         // The enclosing drain deadline bounds this wait. Keep
                         // placement until the node's stopped archive is ready.
+                        diagnostic.capture_waits += 1;
+                        diagnostic.next(Phase::CaptureWait);
                         tokio::time::sleep(Duration::from_millis(100)).await;
                     }
                     Err(error) => {
+                        diagnostic.capture_failures += 1;
                         failure = Some(error);
                         synchronized = false;
                         break;
@@ -284,8 +311,18 @@ async fn drain(s: &Service, node: &str) -> Result<()> {
             }
         }
         if native && synchronized {
-            super::placement::release(s, text(&attempt, "id")).await?;
+            release_placement(s, text(&attempt, "id"), diagnostic).await?;
         }
     }
     failure.map_or(Ok(()), Err)
+}
+
+async fn release_placement(s: &Service, attempt: &str, diagnostic: &mut Drain) -> Result<()> {
+    diagnostic.next(Phase::PlacementRelease);
+    diagnostic.placement_releases += 1;
+    let result = super::placement::release(s, attempt).await;
+    if result.is_err() {
+        diagnostic.placement_failures += 1;
+    }
+    result
 }

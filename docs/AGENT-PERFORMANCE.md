@@ -408,3 +408,35 @@ too large (413), unsupported content type (415), limited
 status and is counted separately. Zero activity establishes that no upload
 entered this observer; it does not explain whether a client was closed, offline
 or had opted out.
+
+## Node maintenance preparation
+
+The manager emits one `node_maintenance_drain` record on `cairn_performance` for
+an admitted background drain, including error, deadline or dropped preparation.
+It aggregates the whole episode without logging individual attempts or retries.
+`outcome` is `completed`, `error`, `deadline` or `cancelled`; `phase` is the last
+phase entered. Both fields use fixed labels.
+
+`elapsed_ms` and the phase totals use a monotonic clock. The phase totals are
+`inventory_ms`, `preparation_ms`, `pause_request_ms`, `capture_ms`,
+`capture_wait_ms` and `placement_release_ms`. `capture_ms` includes the existing
+archive synchronization/publication call; `capture_wait_ms` includes the existing
+100 ms waits after native 425 responses. These are wall times, not CPU times.
+Integer millisecond rounding can make the summed phase totals slightly smaller
+than the elapsed duration.
+
+Counters distinguish `attempts`, `stale_attempts`, `pause_requests`,
+`pause_failures`, `capture_calls`, `capture_waits`, `capture_failures`,
+`placement_releases` and `placement_failures`. Requests and release calls are
+counted when entered; failures count completed error results. An interrupted
+request therefore need not increment its failure counter. Stale checkpoint
+ownership is skipped as before. A failed native archive capture retains placement.
+
+The summary precedes the readiness database write. It is not proof that readiness
+was persisted, the controller stopped, the node updated, or real work completed.
+`cancelled` means the manager's preparation future was dropped; a separately owned
+publication task may continue. Abrupt process termination cannot emit a summary.
+Concurrent node drains remain separate records without a node/run identifier.
+The event contains no identifiers, URLs, error strings or inherited private spans;
+a fixed field-free root span isolates both plain and JSON tracing formatters.
+The maintenance API, deadlines, retries and ownership rules are unchanged.
