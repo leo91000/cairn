@@ -227,7 +227,7 @@ impl Files {
         let snapshot = context
             .management
             .as_ref()
-            .and_then(|authority| authority.snapshot());
+            .and_then(super::management::Authority::snapshot);
         if let Some(origin) = origin {
             origin.authorize(s, &context.connection, snapshot).await?;
             if let Some(authority) = &context.management {

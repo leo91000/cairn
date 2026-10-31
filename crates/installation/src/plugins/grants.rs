@@ -49,8 +49,7 @@ pub(crate) fn migrate(db: &Db<'_>, directory: &std::path::Path) -> Result<()> {
         // A temporarily unavailable package must keep the exact legacy choice.
         // It cannot supply anything until its approved code loads again.
         let supplies = super::registry::upgrade_package(db, directory, &instance.plugin_id)
-            .map(|package| package.manifest.run_credentials.is_some())
-            .unwrap_or(true);
+            .map_or(true, |package| package.manifest.run_credentials.is_some());
         for agent in &instance.agent_ids {
             db.0.execute(
                 "INSERT OR IGNORE INTO plugin_credential_suppliers VALUES(?,?,NULL)",

@@ -73,23 +73,81 @@ impl Fixture {
         ))
         .await;
         s.plugins.route_http_to(Some(origin));
-        let shape = json!({"type":"object","additionalProperties":false,"properties":{
-            "download":{"type":"boolean"},"two":{"type":"boolean"},"channel":{"type":"string"},"thread":{"type":"string"},"server":{"type":"string"},"author":{"type":"string"},"instance":{"type":"string"},
-            "items":{"type":"array","items":{"type":"object","properties":{"channel":{"type":"string"}}}}
-        }});
+        let shape = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "download": { "type": "boolean" },
+                "two": { "type": "boolean" },
+                "channel": { "type": "string" },
+                "thread": { "type": "string" },
+                "server": { "type": "string" },
+                "author": { "type": "string" },
+                "instance": { "type": "string" },
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": { "channel": { "type": "string" } },
+                    },
+                },
+            },
+        });
         let fields = json!([
-            {"path":"/channel","resourceType":"channel"},{"path":"/thread","resourceType":"thread"},
-            {"path":"/server","resourceType":"server"},{"path":"/author","resourceType":"person"},
-            {"path":"/items/*/channel","resourceType":"channel"}
+            { "path": "/channel", "resourceType": "channel" },
+            { "path": "/thread", "resourceType": "thread" },
+            { "path": "/server", "resourceType": "server" },
+            { "path": "/author", "resourceType": "person" },
+            { "path": "/items/*/channel", "resourceType": "channel" },
         ]);
-        let installed=common::package_install(&s,&json!({"manifest":{
-            "id":"grant-probe","name":"Grant probe","version":"1","apiVersion":2,"agentAccess":{},"capabilities":["http","hooks","timers","files"],"settings":[{"key":"marker","title":"Marker","type":"string","default":"first"}],"runCredentials":{"files":[{"path":".config/probe/value","content":"{{settings.marker}}"}]},"hosts":["service.example.test"],"instructions":"probe instructions",
-            "resources":[{"name":"server","description":"Server"},{"name":"channel","description":"Channel","parentType":"server"},{"name":"thread","description":"Thread","parentType":"channel"},{"name":"person","description":"Person"}],
-            "tools":[{"name":"grant_probe_post","description":"Post","inputSchema":shape,"resourceFields":fields},{"name":"grant_probe_other","description":"Other","inputSchema":{"type":"object"}}],
-            "commands":[{"name":"post","description":"Post","arguments":[{"name":"channel","description":"Channel","positional":true,"resourceType":"channel"}],"output":"json"}],
-            "hooks":[{"name":"message","description":"Message","payloadSchema":shape,"resourceFields":fields}],
-            "conditions":[{"name":"ready","description":"Ready","inputSchema":{"type":"object","additionalProperties":false}}]
-        },"source":r#"
+        let manifest = json!({
+            "id": "grant-probe",
+            "name": "Grant probe",
+            "version": "1",
+            "apiVersion": 2,
+            "agentAccess": {},
+            "capabilities": ["http", "hooks", "timers", "files"],
+            "settings": [{
+                "key": "marker", "title": "Marker", "type": "string", "default": "first",
+            }],
+            "runCredentials": {
+                "files": [{ "path": ".config/probe/value", "content": "{{settings.marker}}" }],
+            },
+            "hosts": ["service.example.test"],
+            "instructions": "probe instructions",
+            "resources": [
+                { "name": "server", "description": "Server" },
+                { "name": "channel", "description": "Channel", "parentType": "server" },
+                { "name": "thread", "description": "Thread", "parentType": "channel" },
+                { "name": "person", "description": "Person" },
+            ],
+            "tools": [
+                {
+                    "name": "grant_probe_post", "description": "Post",
+                    "inputSchema": shape, "resourceFields": fields,
+                },
+                {
+                    "name": "grant_probe_other", "description": "Other",
+                    "inputSchema": { "type": "object" },
+                },
+            ],
+            "commands": [{
+                "name": "post", "description": "Post", "output": "json",
+                "arguments": [{
+                    "name": "channel", "description": "Channel",
+                    "positional": true, "resourceType": "channel",
+                }],
+            }],
+            "hooks": [{
+                "name": "message", "description": "Message",
+                "payloadSchema": shape, "resourceFields": fields,
+            }],
+            "conditions": [{
+                "name": "ready", "description": "Ready",
+                "inputSchema": { "type": "object", "additionalProperties": false },
+            }],
+        });
+        let source = r#"
 return {
     resources = function(input)
         if input.op == "list" then
@@ -116,7 +174,11 @@ return {
     end,
     condition = function(input) return {state="completed"} end,
 }
-"#})).await.unwrap();
+"#;
+        let installed =
+            common::package_install(&s, &json!({ "manifest": manifest, "source": source }))
+                .await
+                .unwrap();
         common::package_approve(&s, "grant-probe", "1", text(&installed, "digest"))
             .await
             .unwrap();
@@ -801,4 +863,56 @@ async fn deferred_resource_effects_retain_the_delegation_resource_ceiling() {
     .unwrap();
     assert_eq!(state["state"], "failed", "{state}");
     assert_eq!(f.posts.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn cross_agent_descendant_reductions_keep_the_callers_instance_boundary() {
+    let f = Fixture::new().await;
+    let child =
+        f.s.agent_fixture(json!({ "name": "Child" }), None)
+            .await
+            .unwrap();
+    let child_id = text(&child, "id");
+    let before = f
+        .set_for(
+            child_id,
+            json!([contribution("tool", "grant_probe_post", support())]),
+        )
+        .await;
+    let request = json!({
+        "agentId": child_id,
+        "revision": before["revision"],
+        "grants": [{
+            "instanceId": f.instance,
+            "access": {
+                "type": "selected",
+                "contributions": [contribution("tool", "grant_probe_post", json!([
+                    { "resourceType": "thread", "id": "support-thread" },
+                ]))],
+            },
+        }],
+        "runCredentialInstances": [],
+    });
+    let denied = f
+        .mcp(
+            "/mcp-installation",
+            &f.bearer,
+            "replace_agent_plugin_grants",
+            request.clone(),
+        )
+        .await;
+    assert_eq!(denied["result"]["isError"], true, "{denied}");
+    assert_eq!(f.posts.load(Ordering::SeqCst), 0);
+
+    f.set(json!([contribution("instructions", "", json!([]))]))
+        .await;
+    let allowed = f
+        .mcp(
+            "/mcp-installation",
+            &f.bearer,
+            "replace_agent_plugin_grants",
+            request,
+        )
+        .await;
+    assert_ne!(allowed["result"]["isError"], true, "{allowed}");
 }

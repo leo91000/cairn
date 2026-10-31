@@ -26,13 +26,23 @@ impl Service {
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
         let (target, source) = (input.target_id.to_string(), input.source_id.to_string());
-        let revisions = crate::plugins::grants::check_coverage_authorized(
+        let coverage = crate::plugins::grants::check_coverage_authorized(
             self,
             &target,
             &source,
             resource_authority.clone(),
         )
-        .await?;
+        .await;
+        let revisions = match coverage {
+            Ok(revisions) => revisions,
+            Err(error) if error.status == 403 => {
+                if let Some(authority) = &resource_authority {
+                    authority.recheck(self).await?;
+                }
+                return Err(Error::conflict(error.message));
+            }
+            Err(error) => return Err(error),
+        };
         self.missions
             .merge_agents(self, input, move |db| {
                 authorize(db)?;
