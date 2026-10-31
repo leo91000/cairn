@@ -92,7 +92,7 @@ const emit = defineEmits<{
   position: [value: ReadingPosition, key?: string]
   pauseWait: []
   resumeQuota: []
-  implement: []
+  implement: [sourceId: string]
   codingAgentSwitched: [provider: Provider]
 }>()
 const skillNames = computed(() => new Set(props.skills ?? []))
@@ -507,7 +507,7 @@ defineExpose({
                       class="text-sm"
                       :disabled="!canImplement"
                       title="Queue an implementation request in this conversation"
-                      @click="emit('implement')"
+                      @click="emit('implement', entry.sourceId)"
                     >
                       <Icon :name="Hammer" :size="14" />Implement
                     </UiButton>

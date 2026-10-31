@@ -2719,6 +2719,26 @@ async fn both_mcp_endpoints_manage_chat_queues_and_lifecycle() {
         )
         .await;
         assert_eq!(result(&uploaded)["id"], attachment_id);
+        // Both public MCP and the built-in tool retain the acceptance precondition;
+        // neither may discard it and queue an ordinary request on a missing proposal.
+        let stale = invoke(
+            "send_chat_message",
+            json!({
+                "chatId": chat_id,
+                "message": {
+                    "id": uuid::Uuid::new_v4(), "text": "Implement the plan you proposed.",
+                    "planApproval": {"sourceId":"missing:1", "revision":"stale"},
+                },
+            }),
+        )
+        .await;
+        assert_eq!(stale["result"]["isError"], true, "{stale}");
+        assert!(
+            s.chat_detail(chat_id).await.unwrap()["messages"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
         let args = json!({
             "chatId": chat_id,
             "message": { "id": message_id, "text": "First message", "attachmentIds": [attachment_id] },

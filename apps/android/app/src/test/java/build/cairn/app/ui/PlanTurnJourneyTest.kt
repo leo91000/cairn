@@ -9,8 +9,10 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.text.AnnotatedString
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
@@ -18,6 +20,7 @@ import java.io.File
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.*
 import okhttp3.mockwebserver.*
@@ -54,13 +57,22 @@ class PlanTurnJourneyTest {
     }
 
     @Test
-    fun `plan requests show their badge and implementing the proposed plan sends an ordinary message`() {
+    fun `plan requests show their badge and implementing the proposed plan sends an ordinary message`() =
+        approvalJourney(false)
+
+    @Test
+    fun `stale implementation approval reports the conflict and keeps the composer empty`() =
+        approvalJourney(true)
+
+    private fun approvalJourney(staleApproval: Boolean) {
         MockWebServer().use { server ->
+            val streamRequests = AtomicInteger()
             val calls = CopyOnWriteArrayList<String>()
             val chat =
                 Chat(
                     id = CHAT,
                     title = "Composeur",
+                    revision = "reviewed-revision",
                     agentId = MAIN_AGENT_ID,
                     agentName = "Agent principal",
                     runId = "run",
@@ -100,6 +112,7 @@ class PlanTurnJourneyTest {
                     RunEvent(id = 2, createdAt = 1789315190000, type = "turn.started", text = ""),
                     RunEvent(
                         id = 3,
+                        runId = "run",
                         createdAt = 1789315191000,
                         type = "item.completed",
                         text = "",
@@ -121,7 +134,15 @@ class PlanTurnJourneyTest {
                     ),
                     RunEvent(id = 4, createdAt = 1789315192000, type = "turn.completed", text = ""),
                 )
-            val vm = mountPlanChat(server, chat, events, calls)
+            val vm =
+                mountPlanChat(
+                    server,
+                    chat,
+                    events,
+                    calls,
+                    rejectApproval = staleApproval,
+                    streamRequests = streamRequests,
+                )
             compose.waitUntil(20000) {
                 compose.onAllNodesWithTag("proposed-plan").fetchSemanticsNodes().isNotEmpty()
             }
@@ -130,15 +151,36 @@ class PlanTurnJourneyTest {
             screenshot("plan-turn")
 
             // An idle proposal can be explicitly implemented as an ordinary message.
+            val initialStreams = streamRequests.get()
             compose.onNodeWithTag("implement-plan").assertIsEnabled().performClick()
             compose.waitUntil(20000) { calls.size == 1 }
             val implementing = wireJson.parseToJsonElement(calls[0]).jsonObject
             assertEquals(false, implementing["plan"]?.jsonPrimitive?.boolean)
+            val approval = implementing["planApproval"]!!.jsonObject
+            assertEquals("reviewed-revision", approval["revision"]!!.jsonPrimitive.content)
+            assertEquals("run:3", approval["sourceId"]!!.jsonPrimitive.content)
             assertEquals(
                 "Implémente le plan que tu as proposé.",
                 implementing["text"]?.jsonPrimitive?.content,
             )
             compose.onNodeWithTag("plan-toggle").assertIsNotSelected()
+            if (staleApproval) {
+                compose.waitUntil(20000) { streamRequests.get() > initialStreams }
+                compose.waitUntil(20000) {
+                    vm.state.value.error?.contains("proposed plan changed") == true
+                }
+                compose
+                    .onNode(hasSetTextAction())
+                    .assert(
+                        SemanticsMatcher.expectValue(
+                            SemanticsProperties.EditableText,
+                            AnnotatedString(""),
+                        )
+                    )
+                assertEquals(1, calls.size)
+                vm.api.closeStreams()
+                return@use
+            }
 
             // A later explicit question can still be queued as a protected plan turn.
             compose.onNodeWithTag("plan-toggle").assertIsEnabled().performClick()
@@ -345,6 +387,8 @@ class PlanTurnJourneyTest {
         calls: CopyOnWriteArrayList<String>,
         savedDraft: ChatDraft? = null,
         initialSnapshot: CountDownLatch? = null,
+        rejectApproval: Boolean = false,
+        streamRequests: AtomicInteger? = null,
     ): CairnViewModel {
         val batch = wireJson.encodeToString(LiveBatch(events, LiveState(chat = chat), true, false))
         server.dispatcher =
@@ -352,6 +396,7 @@ class PlanTurnJourneyTest {
                 override fun dispatch(request: RecordedRequest): MockResponse {
                     val path = request.path!!.substringBefore('?')
                     if (path == "/api/installations/fixture/api/chats/$CHAT/stream") {
+                        streamRequests?.incrementAndGet()
                         check(initialSnapshot?.await(20, TimeUnit.SECONDS) != false)
                         val initial = "event: batch\nid: 4\ndata: $batch\n\n"
                         return MockResponse()
@@ -366,6 +411,13 @@ class PlanTurnJourneyTest {
                     if (path == "/api/installations/fixture/api/chats/$CHAT/messages") {
                         val sent = request.body.readUtf8()
                         calls += sent
+                        if (rejectApproval)
+                            return MockResponse()
+                                .setResponseCode(409)
+                                .setHeader("Content-Type", "application/json")
+                                .setBody(
+                                    """{"error":"The proposed plan changed. Refresh the conversation and review it before implementing."}"""
+                                )
                         // The accepted message echoes its id, like the installation.
                         val id = wireJson.parseToJsonElement(sent).jsonObject["id"]
                         return MockResponse()

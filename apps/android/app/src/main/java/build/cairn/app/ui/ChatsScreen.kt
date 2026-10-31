@@ -55,6 +55,7 @@ import build.cairn.contracts.ConfirmChatInput
 import build.cairn.contracts.CreateChatInput
 import build.cairn.contracts.EditChatMessage
 import build.cairn.contracts.EditChatMessageInput
+import build.cairn.contracts.PlanApproval
 import build.cairn.contracts.QuestionAnswerInput
 import build.cairn.contracts.ResumeRunInput
 import build.cairn.contracts.SendChatMessageInput
@@ -688,7 +689,7 @@ internal fun ChatPage(
         submissionKey = ""
         submissionId = ""
     }
-    fun send(mode: String, plan: Boolean = planRequested) {
+    fun send(mode: String, plan: Boolean = planRequested, planApproval: PlanApproval? = null) {
         vm.perform {
             require(!plan || planAvailable) {
                 "Le mode Plan nécessite Codex ou Claude Code. Désactivez Plan pour une demande ordinaire."
@@ -734,7 +735,9 @@ internal fun ChatPage(
             val selectedSpeed = speed.ifBlank { defaultSpeed }
             val content =
                 EditChatMessage(
-                    text = draft.trim(),
+                    text =
+                        if (planApproval != null) "Implémente le plan que tu as proposé."
+                        else draft.trim(),
                     mode = mode,
                     provider = chosenProvider,
                     model = selectedModel,
@@ -743,7 +746,8 @@ internal fun ChatPage(
                     speed = selectedSpeed,
                     attachmentIds = attachments.map { it.attachment.id },
                 )
-            val key = "$chatId/${editing.orEmpty()}/${wireJson.encodeToJsonElement(content)}"
+            val key =
+                "$chatId/${editing.orEmpty()}/${wireJson.encodeToJsonElement(content)}/$planApproval"
             if (key != submissionKey) {
                 submissionKey = key
                 submissionId = UUID.randomUUID().toString()
@@ -753,7 +757,7 @@ internal fun ChatPage(
                     ChatMessage(
                         id = submissionId,
                         chatId = chatId,
-                        text = draft.trim(),
+                        text = content.text,
                         model = selectedModel,
                         reasoning = selectedReasoning,
                         mode = mode,
@@ -779,6 +783,7 @@ internal fun ChatPage(
                                     model = content.model,
                                     reasoning = content.reasoning,
                                     plan = content.plan == true,
+                                    planApproval = planApproval,
                                     speed = content.speed.orEmpty(),
                                     attachmentIds = content.attachmentIds,
                                 ),
@@ -790,6 +795,10 @@ internal fun ChatPage(
                     )
             } catch (e: Exception) {
                 outgoing = null
+                if (planApproval != null && e is ApiException && e.status == 409) {
+                    clearDraft()
+                    live.reconnect()
+                }
                 throw e
             }
             clearDraft()
@@ -820,7 +829,7 @@ internal fun ChatPage(
     }
     // Leaving plan mode is explicit: this queues an ordinary turn in the same conversation, with
     // the agent's usual permissions.
-    fun implementPlan() {
+    fun implementPlan(entry: TimelineEntry) {
         if (
             draft.isNotBlank() ||
                 attachments.isNotEmpty() ||
@@ -831,8 +840,14 @@ internal fun ChatPage(
         )
             return
         planning = false
-        composer.setTextAndPlaceCursorAtEnd("Implémente le plan que tu as proposé.")
-        send("queue", plan = false)
+        val event = entry.events.lastOrNull() ?: return
+        val revision = chat?.revision ?: return
+        send(
+            "queue",
+            plan = false,
+            planApproval =
+                PlanApproval(sourceId = "${event.runId}:${event.id}", revision = revision),
+        )
     }
     fun steerQueued(message: ChatMessage) {
         vm.perform {
@@ -1403,7 +1418,8 @@ internal fun ChatPage(
                                                 active = active,
                                                 livePlan = livePlan,
                                                 implement =
-                                                    if (it.key == implementable) ::implementPlan
+                                                    if (it.key == implementable)
+                                                        ({ implementPlan(it) })
                                                     else null,
                                                 canImplement =
                                                     !state.busy &&

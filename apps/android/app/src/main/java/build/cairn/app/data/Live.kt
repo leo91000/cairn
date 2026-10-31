@@ -130,6 +130,8 @@ data class LiveSnapshot(
     val epoch: Int = 0,
     /** Tells the stream whether the reader follows the latest output, from the reading position. */
     val followLatest: (Boolean) -> Unit = {},
+    /** Reopens this stream to fetch the current conversation after a refused action. */
+    val reconnect: () -> Unit = {},
 )
 
 private fun CairnApi.frames(

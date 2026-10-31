@@ -2152,3 +2152,126 @@ async fn quota_switch_keeps_a_plan_turn_on_an_engine_that_enforces_it() {
     restarted.shutdown.cancel();
     restarted.worker.close().await;
 }
+
+#[tokio::test]
+async fn implementation_approval_is_atomic_with_concurrent_requests_and_retries() {
+    let app = App::new().await;
+    let chat = app.create_chat().await;
+    let chat_id = text(&chat, "id").to_owned();
+    let run = id();
+    app.add_finished_run(
+        &run,
+        RunStatus::Succeeded,
+        json!({ "snapshot": { "agent": { "provider": "codex" } } }),
+        "Plan request",
+    )
+    .await;
+    let c = chat_id.clone();
+    let r = run.clone();
+    app.service
+        .store
+        .transaction(move |db| {
+            let mut chat = db.conversation_boundary(&c)?.unwrap();
+            chat["runId"] = r.clone().into();
+            db.save_conversation_boundary(&chat)?;
+            db.event(
+                &r,
+                &EventKind::ItemCompleted,
+                "Reviewed plan",
+                Some(&json!({
+                    "type": "item.completed",
+                    "item": { "id": "proposal", "type": "proposed_plan", "text": "Reviewed plan" },
+                })),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let path = chat_path(&chat);
+    let (_, snapshot) = app.get(&path).await;
+    let r = run.clone();
+    let event_id = app
+        .service
+        .store
+        .read(move |db| {
+            Ok(db
+                .0
+                .query_row("SELECT MAX(id) FROM events WHERE run_id=?", [r], |row| {
+                    row.get::<_, i64>(0)
+                })?)
+        })
+        .await
+        .unwrap();
+    let approval = json!({
+        "sourceId": format!("{run}:{event_id}"), "revision": snapshot["revision"],
+    });
+    let messages = format!("{path}/messages");
+    let first_request = json!({
+        "id": id(), "text": "Implement the plan you proposed.", "planApproval": approval,
+    });
+    let mut competing_request = first_request.clone();
+    competing_request["id"] = id().into();
+    // Two clients approve the same snapshot concurrently: exactly one can be accepted.
+    let (first_result, competing_result) = tokio::join!(
+        app.request("POST", &messages, first_request.clone()),
+        app.request("POST", &messages, competing_request.clone()),
+    );
+    let (accepted, first) = if first_result.0 == StatusCode::OK {
+        assert_eq!(
+            competing_result.0,
+            StatusCode::CONFLICT,
+            "{competing_result:?}"
+        );
+        (first_request, first_result.1)
+    } else {
+        assert_eq!(first_result.0, StatusCode::CONFLICT, "{first_result:?}");
+        assert_eq!(competing_result.0, StatusCode::OK, "{competing_result:?}");
+        (competing_request, competing_result.1)
+    };
+    let (status, retry) = app.request("POST", &messages, accepted).await;
+    assert_eq!(status, StatusCode::OK, "{retry}");
+    assert_eq!(first["id"], retry["id"]);
+    // Remove the accepted request, then capture the refreshed idle boundary.
+    app.request(
+        "DELETE",
+        &format!("{messages}/{}", text(&first, "id")),
+        Value::Null,
+    )
+    .await;
+    let (_, snapshot) = app.get(&path).await;
+    let stale =
+        json!({ "sourceId": format!("{run}:{event_id}"), "revision": snapshot["revision"] });
+    // B is accepted after A captured the card, before A's request reaches the manager.
+    let revision = json!({ "id": id(), "text": "Revise the approach", "plan": true });
+    let (status, body) = app.request("POST", &messages, revision).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = app
+        .request(
+            "POST",
+            &messages,
+            json!({
+                "id": id(), "text": "Implement the plan you proposed.", "planApproval": stale,
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let (_, after) = app.get(&path).await;
+    assert!(
+        after["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|message| { message["text"] != "Implement the plan you proposed." })
+    );
+    // Manually written ordinary messages keep their ordinary queue semantics.
+    assert_eq!(
+        app.request(
+            "POST",
+            &messages,
+            json!({ "id": id(), "text": "An ordinary follow-up" })
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+}

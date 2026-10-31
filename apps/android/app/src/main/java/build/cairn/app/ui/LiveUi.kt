@@ -56,6 +56,7 @@ fun rememberLive(
     val enabled = workspace.session.authenticated && !workspace.signingOut
     val api = if (enabled) vm.api else null
     var value by remember(path, api) { mutableStateOf(LiveSnapshot()) }
+    var reconnectGeneration by remember(path, api) { mutableIntStateOf(0) }
     val session = remember(path, api) { LiveSession() }
     // Retained pager pages become previews and then selected again without being restored.
     // Recheck their latest snapshot at selection, before a frame of old content can show.
@@ -91,7 +92,7 @@ fun rememberLive(
     var loadingOlder by remember(path, api) { mutableStateOf(false) }
     var olderError by remember(path, api) { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(path, api, owner, streaming) {
+    LaunchedEffect(path, api, owner, streaming, reconnectGeneration) {
         if (enabled && api != null) {
             var cacheGeneration = vm.historyCache.generation
             val key = vm.historyCache.key(api.cacheScope, api.csrf, path)
@@ -236,6 +237,7 @@ fun rememberLive(
             }
         },
         followLatest = { session.followsLatest = it },
+        reconnect = { reconnectGeneration++ },
     )
 }
 

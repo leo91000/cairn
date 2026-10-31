@@ -33,6 +33,16 @@
           "description": "Plan turn: the agent explores and proposes an approach without changing files, using\nshell network access or calling tools with external effects. Send a later message\nwithout plan to implement it. Unavailable with OpenCode.",
           "type": "boolean"
         },
+        "planApproval": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PlanApproval"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "provider": {
           "default": "",
           "pattern": "^(|codex|claude|opencode)$",
@@ -58,6 +68,25 @@
       },
       "required": [
         "id"
+      ],
+      "type": "object"
+    },
+    "PlanApproval": {
+      "additionalProperties": false,
+      "description": "A transient acceptance precondition for the explicit Implement action.\nRetried accepted message IDs return their original result before checking freshness.",
+      "properties": {
+        "revision": {
+          "maxLength": 120,
+          "type": "string"
+        },
+        "sourceId": {
+          "maxLength": 200,
+          "type": "string"
+        }
+      },
+      "required": [
+        "sourceId",
+        "revision"
       ],
       "type": "object"
     }

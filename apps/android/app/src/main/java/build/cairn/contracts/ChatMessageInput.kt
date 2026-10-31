@@ -11,6 +11,8 @@ data class ChatMessageInput(
     val mode: String = "queue",
     val model: String = "",
     val plan: Boolean = false,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val planApproval: PlanApproval? = null,
     val provider: String = "",
     val reasoning: String = "",
     val speed: String = "",

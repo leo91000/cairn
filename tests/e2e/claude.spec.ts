@@ -784,6 +784,36 @@ test('a plan turn proposes without changes and Implement continues the same chat
   await page.reload()
   await expect(proposal.getByRole('button', { name: 'Implement' })).toBeEnabled()
 
+  // B reaches the manager after A captured its card, but before A's approval POST.
+  // A client refetch cannot close this interleaving: the manager must reject it.
+  await workspace.api(`/api/chats/${chat.id}/pause`, 'POST', { paused: true })
+  await page.reload()
+  await expect(proposal.getByRole('button', { name: 'Implement' })).toBeEnabled()
+  const concurrentRevision = crypto.randomUUID()
+  let interceptedApproval: { sourceId: string, revision: string } | undefined
+  const routePattern = `**/chats/${chat.id}/messages`
+  await page.route(routePattern, async (route) => {
+    const input = route.request().postDataJSON()
+    interceptedApproval = input.planApproval
+    await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
+      id: concurrentRevision,
+      text: 'Revise before approval',
+      provider: 'claude',
+      plan: true,
+    })
+    await route.continue()
+  }, { times: 1 })
+  await proposal.getByRole('button', { name: 'Implement' }).click()
+  await expect(page.getByText('The proposed plan changed.', { exact: false })).toBeVisible()
+  expect(interceptedApproval?.sourceId).toMatch(new RegExp(`^${conversation}:\\d+$`))
+  expect(interceptedApproval?.revision).toBeTruthy()
+  const afterStale = await workspace.api(`/api/chats/${chat.id}`)
+  expect(afterStale.messages.filter((m: { text: string }) => m.text === 'Implement the plan you proposed.')).toHaveLength(0)
+  await workspace.api(`/api/chats/${chat.id}/messages/${concurrentRevision}`, 'DELETE')
+  await workspace.api(`/api/chats/${chat.id}/pause`, 'POST', { paused: false })
+  await page.reload()
+  await expect(proposal.getByRole('button', { name: 'Implement' })).toBeEnabled()
+
   // Leaving plan mode is an ordinary message in the same chat, with the agent's usual access.
   await proposal.getByRole('button', { name: 'Implement' }).click()
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.chatExecution?.text, { timeout: 30000 }).toBe('Implement the plan you proposed.')

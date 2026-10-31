@@ -707,6 +707,59 @@ fn require_sendable(
     Ok(())
 }
 
+/// Called inside the same manager write transaction as queue insertion. A delayed client
+/// cannot approve a proposal after another writer accepted a revision or implementation.
+fn require_current_proposal(
+    db: &Db<'_>,
+    chat: &Conversation,
+    messages: &[Message],
+    message: &Message,
+    approval: &cairn_contracts::PlanApproval,
+) -> Result<()> {
+    let stale = || {
+        Error::conflict(
+            "The proposed plan changed. Refresh the conversation and review it before implementing.",
+        )
+    };
+    if message.plan
+        || message.mode != MessageMode::Queue
+        || chat.revision != approval.revision
+        || messages
+            .iter()
+            .any(|m| matches!(m.status, MessageStatus::Queued | MessageStatus::Sending))
+    {
+        return Err(stale());
+    }
+    let run_id = chat.run_id.as_deref().ok_or_else(stale)?;
+    let run = db.run(run_id)?.ok_or_else(stale)?;
+    if run_is_active(&run) || run["recoveryPending"] == true {
+        return Err(stale());
+    }
+    let event: Option<i64> =
+        db.0.query_row(
+            "SELECT id FROM events WHERE run_id=? AND type='item.completed'
+         AND json_extract(payload,'$.item.type')='proposed_plan'
+         AND COALESCE(json_extract(payload,'$.item.parent_id'),'')=''
+         ORDER BY id DESC LIMIT 1",
+            [run_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let event_id = event.ok_or_else(stale)?;
+    if approval.source_id != format!("{run_id}:{event_id}") {
+        return Err(stale());
+    }
+    let later_request: bool = db.0.query_row(
+        "SELECT EXISTS(SELECT 1 FROM events WHERE run_id=? AND id>? AND type='chat.user')",
+        rusqlite::params![run_id, event_id],
+        |row| row.get(0),
+    )?;
+    if later_request {
+        return Err(stale());
+    }
+    Ok(())
+}
+
 pub(crate) fn send(
     db: &Db<'_>,
     chat_id: &str,
@@ -718,6 +771,11 @@ pub(crate) fn send(
     authorize_conversation(db, &mut chat, origin)?;
     require_live(&chat)?;
     crate::attachments::message(db, chat_id, &mut values)?;
+    let approval: Option<cairn_contracts::PlanApproval> = values
+        .get("planApproval")
+        .filter(|value| !value.is_null())
+        .map(|value| serde_json::from_value(value.clone()))
+        .transpose()?;
     let mut values: Message = serde_json::from_value(values)?;
     let messages = db.conversation_messages(chat_id)?;
     // Retried submissions are idempotent; a reused identifier with other content is not.
@@ -731,6 +789,9 @@ pub(crate) fn send(
             ));
         }
         return Ok(serde_json::to_value(existing)?);
+    }
+    if let Some(approval) = approval {
+        require_current_proposal(db, &chat, &messages, &values, &approval)?;
     }
     require_sendable(db, &chat, &messages, &values.id)?;
     validate_speed(db, &chat, &values)?;

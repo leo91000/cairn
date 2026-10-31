@@ -89,7 +89,15 @@ Cairn.
 Le passage à l’implémentation est explicite : un message ordinaire dans le même fil,
 envoyé depuis le composeur ou le bouton **Implement** / **Implémenter** du dernier
 plan proposé. Il s’exécute avec les droits courants de l’agent, contrôlés comme
-avant par `covers` : il n’élargit aucun droit.
+avant par `covers` : il n’élargit aucun droit. Le bouton transmet `planApproval`
+(identité de l’événement principal affiché et révision du fil). Dans la transaction
+qui accepte le message, Cairn exige cette révision, la dernière proposition
+principale et l’absence de demande en attente ou de tour actif. Une approbation
+périmée échoue en conflit et les clients rafraîchissent le fil ; elle ne devient
+jamais une demande ordinaire sans précondition. Un retry du même message déjà
+accepté garde son résultat idempotent. Cette précondition transitoire ne change ni
+le format des messages persistés ni les messages écrits librement au composeur.
+Les interfaces MCP publique et installation utilisent le même contrat d’envoi.
 
 Un plan proposé est un contenu de conversation, pas une activité d’outil : il traverse
 le transport et le stockage du manager sans l’aperçu de 16 Kio des outils (seulement

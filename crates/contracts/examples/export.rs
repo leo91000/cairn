@@ -125,6 +125,7 @@ fn main() {
     export::<ConversationId>(root, &mut generator, Contract::Deserialize);
     export::<CreateChatInput>(root, &mut generator, Contract::Deserialize);
     export::<ChatInput>(root, &mut generator, Contract::Deserialize);
+    export::<PlanApproval>(root, &mut generator, Contract::Deserialize);
     export::<ChatMessageInput>(root, &mut generator, Contract::Deserialize);
     export::<SendChatMessageInput>(root, &mut generator, Contract::Deserialize);
     export::<RenameChatInput>(root, &mut generator, Contract::Deserialize);

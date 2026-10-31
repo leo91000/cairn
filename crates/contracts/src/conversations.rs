@@ -485,9 +485,23 @@ pub struct ChatInput {
     pub chat_id: ConversationId,
 }
 
+/// A transient acceptance precondition for the explicit Implement action.
+/// Retried accepted message IDs return their original result before checking freshness.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlanApproval {
+    #[schemars(length(max = 200))]
+    pub source_id: String,
+    #[schemars(length(max = 120))]
+    pub revision: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatMessageInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub plan_approval: Option<PlanApproval>,
     #[serde(deserialize_with = "uuid_string")]
     #[schemars(with = "uuid::Uuid")]
     pub id: String,
@@ -521,6 +535,16 @@ pub struct ChatMessageInput {
 
 impl ChatMessageInput {
     pub fn validate(&mut self) -> Result<(), String> {
+        if let Some(approval) = &self.plan_approval
+            && (approval.source_id.is_empty()
+                || approval.source_id.len() > 200
+                || approval.revision.is_empty()
+                || approval.revision.len() > 120
+                || self.plan
+                || self.mode != MessageMode::Queue)
+        {
+            return Err("Invalid plan approval.".into());
+        }
         self.text = self.text.trim().to_owned();
         self.model = self.model.trim().to_owned();
         if self.text.chars().count() > 50000

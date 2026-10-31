@@ -35,6 +35,7 @@ import { stopChat } from '../../../../packages/contracts/generated/stopChat'
 import { failureReason, sameReason, stopEcho } from '../activity'
 import {
   api,
+  ApiError,
   apiUpload,
   refreshSkills,
   state,
@@ -602,10 +603,10 @@ function newConversation() {
   void router.push('/chats').finally(() => loadDraft())
 }
 
-async function send(mode: 'queue' | 'steer' = 'queue') {
+async function send(mode: 'queue' | 'steer' = 'queue', planApproval?: { sourceId: string, revision: string }) {
   const originalDraft = draft.value
-  const text = originalDraft.trim()
-  if (!canSend.value || busy.value)
+  const text = planApproval ? 'Implement the plan you proposed.' : originalDraft.trim()
+  if ((!planApproval && !canSend.value) || busy.value)
     return
   submitting.value = true
   const origin = chatId.value
@@ -660,6 +661,7 @@ async function send(mode: 'queue' | 'steer' = 'queue') {
       plan: planRequested.value,
       speed: selectedSpeed,
       attachmentIds,
+      ...(planApproval ? { planApproval } : {}),
     }
     const submissionKey = JSON.stringify({ chatId: chat.id, editing: editing.value, ...content })
     // Retain the id after a network failure only for the same target and content.
@@ -706,6 +708,16 @@ async function send(mode: 'queue' | 'steer' = 'queue') {
   catch (e) {
     outgoing.value = null
     error.value = (e as Error).message
+    if (planApproval) {
+      // Reconnect for a current snapshot after a refused stale approval. Keep the
+      // original request ID for an uncertain response, never silently approve anew.
+      if (e instanceof ApiError && e.status === 409) {
+        draft.value = ''
+        submission = undefined
+      }
+
+      live.reconnect()
+    }
   }
   finally {
     busy.value = false
@@ -792,12 +804,11 @@ function edit(message: ChatMessage) {
 
 // Leaving plan mode is explicit: this queues an ordinary turn in the same conversation,
 // with the agent's usual permissions.
-async function implementPlan() {
+async function implementPlan(sourceId: string) {
   if (hasDraft.value || editing.value || active.value || pending.value.length || delivery.value.sending.length)
     return
   planning.value = false
-  draft.value = 'Implement the plan you proposed.'
-  await send()
+  await send('queue', { sourceId, revision: detail.value!.revision })
 }
 
 // The view stays mounted across conversations: reset what belongs to the previous one.

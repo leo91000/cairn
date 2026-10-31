@@ -317,7 +317,7 @@ async fn v17_upgrade_preserves_legacy_paid_retry_and_checkpoint() {
     assert_eq!(
         db.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
             .unwrap(),
-        18
+        19
     );
 }
 
