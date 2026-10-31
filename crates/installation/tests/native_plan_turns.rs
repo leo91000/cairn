@@ -411,6 +411,7 @@ async fn native_claude_plan_turn_blocks_writes_network_and_subagent_effects() {
         .rfind(|event| event["item"]["type"] == "proposed_plan")
         .expect("no proposed plan");
     assert_eq!(proposed["item"]["text"], PROPOSAL);
+    assert_eq!(proposed["item"]["request_id"], "plan");
     let exit = transcript(&requests)
         .into_iter()
         .find(|call| call["id"] == tool_id("main", 9))
