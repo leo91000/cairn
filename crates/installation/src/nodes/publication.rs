@@ -36,6 +36,9 @@ const DIRECT_PUBLICATIONS: usize = 16;
 
 mod direct_reader;
 
+#[cfg(test)]
+mod pipeline_tests;
+
 fn legacy_publication(run: &Value) -> bool {
     run["backup"]["id"].is_string() && run["backup"]["blockEnvelope"] != 3
 }
