@@ -100,7 +100,7 @@ async fn bind(path: &Path) -> Result<(UnixListener, Socket)> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
-    let listener = UnixListener::bind(path)?;
+    let listener = crate::unix_socket::bind(path)?;
     owners.insert(path.to_owned(), generation);
     drop(owners);
 
