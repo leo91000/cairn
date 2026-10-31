@@ -4,9 +4,11 @@ import type { PluginBrand } from './PluginBrand'
 import type { PluginCommand } from './PluginCommand'
 import type { PluginCondition } from './PluginCondition'
 import type { PluginCredential } from './PluginCredential'
+import type { PluginHook } from './PluginHook'
 import type { PluginInstances } from './PluginInstances'
 import type { PluginProgram } from './PluginProgram'
 import type { PluginProjectSource } from './PluginProjectSource'
+import type { PluginResourceType } from './PluginResourceType'
 import type { PluginRunCredentials } from './PluginRunCredentials'
 import type { PluginSetup } from './PluginSetup'
 import type { PluginSkillSource } from './PluginSkillSource'
@@ -38,6 +40,8 @@ export interface PluginManifest {
   agentAccess?: PluginAgentAccess | null
   commands?: Array<PluginCommand>
   tools?: Array<PluginTool>
+  hooks?: Array<PluginHook>
+  resources?: Array<PluginResourceType>
   /**
    * Added to the prompt of runs whose agent is granted on an enabled instance.
    */

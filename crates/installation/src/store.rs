@@ -36,7 +36,7 @@ struct Pool {
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-pub(crate) const DATABASE_VERSION: i64 = 19;
+pub(crate) const DATABASE_VERSION: i64 = 20;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -163,6 +163,20 @@ impl Store {
         }
         if !fresh && version == 18 {
             crate::runs::projections::upgrade(&mut writer)?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        }
+        if !fresh && version == 19 {
+            let tx = writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let current: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+            if current == 19 {
+                tx.execute_batch(crate::plugins::hooks::SCHEMA)?;
+                tx.pragma_update(None, "user_version", DATABASE_VERSION)?;
+            } else if current != DATABASE_VERSION {
+                return Err(Error::bad(
+                    "Unexpected database version during plugin hooks upgrade.",
+                ));
+            }
+            tx.commit()?;
         }
         if fresh {
             let tx = writer.transaction()?;
@@ -193,6 +207,7 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
             tx.execute_batch(crate::plugins::instances::SCHEMA)?;
             tx.execute_batch(crate::plugins::state::SCHEMA)?;
             tx.execute_batch(crate::plugins::queues::SCHEMA)?;
+            tx.execute_batch(crate::plugins::hooks::SCHEMA)?;
             crate::plugins::registry::initialize(&Db(&tx))?;
             tx.execute_batch(crate::agent_grants::SCHEMA)?;
             tx.execute_batch(crate::missions::SCHEMA)?;
@@ -1330,6 +1345,35 @@ mod schema_tests {
     }
 
     #[test]
+    fn version_nineteen_upgrade_adds_hook_queues_without_touching_existing_work() {
+        let root = tempfile::tempdir().unwrap();
+        drop(Store::open(root.path()).unwrap());
+        let file = root.path().join("manager.db");
+        let db = Connection::open(&file).unwrap();
+        db.execute_batch("DROP TABLE plugin_hook_receipts; DROP TABLE plugin_hook_events; PRAGMA user_version=19; INSERT INTO kv(key,data) VALUES('hook-upgrade-fixture','true');").unwrap();
+        drop(db);
+        drop(Store::open(root.path()).unwrap());
+        drop(Store::open(root.path()).unwrap());
+        let db = Connection::open(file).unwrap();
+        assert_eq!(
+            db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            DATABASE_VERSION
+        );
+        assert!(db.table_exists(None, "plugin_hook_events").unwrap());
+        assert!(db.table_exists(None, "plugin_hook_receipts").unwrap());
+        assert_eq!(
+            db.query_row(
+                "SELECT data FROM kv WHERE key='hook-upgrade-fixture'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "true"
+        );
+    }
+
+    #[test]
     fn version_twelve_upgrade_preserves_data_and_fences_older_binaries() {
         let root = tempfile::tempdir().unwrap();
         drop(Store::open(root.path()).unwrap());
@@ -1382,7 +1426,7 @@ mod schema_tests {
 
     #[test]
     fn existing_other_versions_fail_without_changing_the_database() {
-        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 99] {
+        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 21, 99] {
             let root = tempfile::tempdir().unwrap();
             let db = Connection::open(root.path().join("manager.db")).unwrap();
             db.pragma_update(None, "user_version", version).unwrap();

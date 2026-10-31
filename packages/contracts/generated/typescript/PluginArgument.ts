@@ -14,4 +14,8 @@ export interface PluginArgument {
    */
   pattern?: string | null
   maxLength?: number | null
+  /**
+   * The resource type identified by this argument.
+   */
+  resourceType?: string | null
 }
