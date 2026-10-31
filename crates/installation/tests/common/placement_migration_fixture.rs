@@ -6,6 +6,8 @@ use rusqlite::Connection;
 pub fn previous_layout(db: &Connection) {
     db.execute_batch("PRAGMA foreign_keys=OFF;
 DROP VIEW IF EXISTS run_views;
+DROP TABLE IF EXISTS timeline_entries;
+DROP TABLE IF EXISTS timeline_state;
 DROP TABLE IF EXISTS run_progress;
 DROP TABLE exclusive_members; DROP TABLE exclusive_paused_runs; DROP TABLE exclusive_reservations; DROP TABLE exclusive_sequence;
 DROP TABLE attempts; DROP TABLE placements;
