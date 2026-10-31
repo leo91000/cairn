@@ -137,7 +137,7 @@ class LargeTimelineTest {
                     listOf(event),
                     api.readLargeEvents("/runs/run/stream", listOf(preview)),
                 )
-                assertEquals("/runs/run/event-content", server.takeRequest().path)
+                assertEquals("/api/runs/run/event-content", server.takeRequest().path)
                 val request =
                     wireJson.parseToJsonElement(server.takeRequest().body.readUtf8()).toString()
                 org.junit.Assert.assertTrue(request.contains("\"sha256\":\"${"a".repeat(64)}\""))

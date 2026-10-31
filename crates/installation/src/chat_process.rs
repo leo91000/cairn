@@ -217,6 +217,14 @@ impl Cursors {
 // operational identity across turns without changing provider message UUIDs.
 const OPERATIONAL_ID: &str = "cairn-runtime-disk:";
 
+/// Item notifications may precede the initial turn/start response. Keep them
+/// bounded and unacknowledged until the native process accepts that request.
+#[derive(Default)]
+struct StartingItems {
+    items: Vec<(Value, String)>,
+    bytes: usize,
+}
+
 struct Chat<'a> {
     session: &'a mut Session,
     events: mpsc::Sender<Value>,
@@ -243,6 +251,7 @@ struct Chat<'a> {
     planning: bool,
     /// Human request preceding the current native proposal, retained through history replay.
     proposal_request: Option<String>,
+    starting_items: Option<StartingItems>,
 }
 
 impl Chat<'_> {
@@ -287,6 +296,19 @@ impl Chat<'_> {
     }
 
     async fn item(&mut self, item: Value, kind: &str) -> Result<()> {
+        if let Some(starting) = &mut self.starting_items {
+            let bytes = crate::validation::encoded_size(&item)? + kind.len();
+            if starting.items.len() >= 4096
+                || bytes > (128 * 1024 * 1024_usize).saturating_sub(starting.bytes)
+            {
+                return Err(Error::bad_gateway(
+                    "Codex sent too much item data before accepting the turn.",
+                ));
+            }
+            starting.bytes += bytes;
+            starting.items.push((item, kind.to_owned()));
+            return Ok(());
+        }
         let user_input_result = item["type"] == "functionCallOutput"
             && ["request_user_input", "request_user_input_async"].contains(&text(&item, "name"));
         if user_input_result {
@@ -1027,10 +1049,19 @@ impl Chat<'_> {
         };
         let params = serde_json::to_value(params)?;
         self.turn_submitted = true;
+        self.starting_items = self.planning.then(StartingItems::default);
         let started = self.request("turn/start", params).await?;
         self.turn = text(&started["turn"], "id").to_owned();
+        let starting = self.starting_items.take();
         self.acknowledge(text(&plan["execution"], "messageId"))
             .await?;
+        // The durable initial request must precede proposals that the server sent
+        // before its acceptance reply. Rejected starts never flush these items.
+        if let Some(starting) = starting {
+            for (item, kind) in starting.items {
+                self.item(item, &kind).await?;
+            }
+        }
         // Only an attempt Codex accepted says how it asks for the speed, after its message.
         if let Some(notice) = speed_notice {
             self.emit(notice).await?;
@@ -1307,6 +1338,7 @@ async fn run_session(
         compacted: false,
         planning: false,
         proposal_request: None,
+        starting_items: None,
     };
     let mut result = chat.execute(&plan).await;
     if let Err(error) = &result

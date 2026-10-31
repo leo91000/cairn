@@ -2443,3 +2443,171 @@ async fn implementation_rejects_newer_unfinished_root_lifecycles() {
         }
     }
 }
+
+#[tokio::test]
+async fn early_codex_plan_is_approved_only_after_its_start_is_accepted() {
+    use cairn_installation::chat_process;
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+
+    for resumed in [false, true] {
+        for rejected in [false, true] {
+            let app = App::new().await;
+            let root = app._root.path();
+            let home = root.join("early-codex");
+            let inbox = root.join("early-inbox");
+            std::fs::create_dir(&home).unwrap();
+            std::fs::create_dir(&inbox).unwrap();
+            let mut config = app.service.config.clone();
+            config.codex_bin = common::fixture("codex.mjs");
+            let mut plan = json!({
+                "execution": {"messageId": id(), "text": "Earlier request", "recovery": false},
+                "instructions": "Test instructions", "inputDirectory": inbox,
+                "output": root.join("early-result.md"), "cwd": root,
+                "model": "", "reasoning": "medium", "sandbox": "yolo",
+                "writableRoots": [], "args": [],
+            });
+            if resumed {
+                let (tx, mut rx) = mpsc::channel(64);
+                let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+                chat_process::run(&config, &home, plan.clone(), tx, CancellationToken::new())
+                    .await
+                    .unwrap();
+                drain.await.unwrap();
+                plan["sessionId"] = "fixture-chat".into();
+            }
+            let request_id = id();
+            plan["execution"]["messageId"] = request_id.clone().into();
+            plan["execution"]["text"] = if rejected {
+                "fixture:early-plan-rejected"
+            } else {
+                "fixture:early-plan"
+            }
+            .into();
+            plan["planning"] = true.into();
+            plan["sandbox"] = "read-only".into();
+            let (tx, mut rx) = mpsc::channel(64);
+            let (cfg, native_home) = (config.clone(), home.clone());
+            let stop = CancellationToken::new();
+            let native_stop = stop.clone();
+            let task = tokio::spawn(async move {
+                chat_process::run(&cfg, &native_home, plan, tx, native_stop).await
+            });
+            let collected = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                let mut events = Vec::new();
+                let mut premature = false;
+                let mut gate_seen = false;
+                while let Some(event) = rx.recv().await {
+                    // This notification follows the early plan on the native pipe,
+                    // while the fixture withholds BOTH its initial user item and RPC reply.
+                    if event["type"] == "context.usage" && event["usage"]["contextTokens"] == 12345
+                    {
+                        premature = events.iter().any(|event: &Value| {
+                            event["item"]["type"] == "proposed_plan"
+                                || (event["type"] == "chat.delivered"
+                                    && event["messageId"] == request_id)
+                        });
+                        gate_seen = true;
+                        // Always release, even on the old failing implementation.
+                        std::fs::write(home.join("fixture-early-plan-release"), "release").unwrap();
+                    }
+                    events.push(event);
+                }
+                (events, premature, gate_seen)
+            })
+            .await;
+            stop.cancel();
+            let result = task.await.unwrap();
+            let (events, premature, gate_seen) = collected.expect("bounded native start handshake");
+            assert!(gate_seen);
+            assert!(
+                !premature,
+                "request/proposal emitted before native acceptance: {events:?}"
+            );
+            if rejected {
+                assert!(result.is_err());
+                assert!(
+                    !events
+                        .iter()
+                        .any(|event| event["item"]["type"] == "proposed_plan"
+                            || (event["type"] == "chat.delivered"
+                                && event["messageId"] == request_id))
+                );
+                continue;
+            }
+            result.unwrap();
+            let delivered = events
+                .iter()
+                .position(|event| {
+                    event["type"] == "chat.delivered" && event["messageId"] == request_id
+                })
+                .unwrap();
+            let completed = events
+                .iter()
+                .position(|event| {
+                    event["type"] == "item.completed" && event["item"]["type"] == "proposed_plan"
+                })
+                .unwrap();
+            assert!(delivered < completed);
+            assert_eq!(events[completed]["item"]["request_id"], request_id);
+
+            // Store the actual adapter emission order, then exercise the public
+            // HTTP/common send acceptance contract against that durable history.
+            let chat = app.create_chat().await;
+            let (chat_id, run) = (text(&chat, "id").to_owned(), id());
+            app.add_finished_run(
+                &run,
+                RunStatus::Succeeded,
+                json!({"snapshot":{"agent":{"provider":"codex"}}}),
+                "Earlier context",
+            )
+            .await;
+            let r = run.clone();
+            let source = app
+                .service
+                .store
+                .transaction(move |db| {
+                    let mut chat = db.conversation_boundary(&chat_id)?.unwrap();
+                    chat["runId"] = r.clone().into();
+                    db.save_conversation_boundary(&chat)?;
+                    let mut source = 0_i64;
+                    for event in events {
+                        if event["type"] == "chat.delivered" {
+                            db.event(
+                                &r,
+                                &EventKind::ChatUser,
+                                "Plan request",
+                                Some(&json!({"messageId":event["messageId"], "plan":event["messageId"] == request_id})),
+                            )?;
+                        } else if event["type"]
+                            .as_str()
+                            .is_some_and(|kind| kind.starts_with("item."))
+                        {
+                            let kind = serde_json::from_value(event["type"].clone())?;
+                            db.event(&r, &kind, text(&event["item"], "text"), Some(&event))?;
+                            if event["type"] == "item.completed" && event["item"]["type"] == "proposed_plan" {
+                                source = db.0.query_row(
+                                    "SELECT MAX(id) FROM events WHERE run_id=?",
+                                    [&r],
+                                    |row| row.get(0),
+                                )?;
+                            }
+                        }
+                    }
+                    Ok(source)
+                })
+                .await
+                .unwrap();
+            let path = chat_path(&chat);
+            let (_, snapshot) = app.get(&path).await;
+            let input = json!({"id":id(), "text":"Implement the plan you proposed.",
+                "planApproval":{"sourceId":format!("{run}:{source}"), "revision":snapshot["revision"]}});
+            for _ in 0..2 {
+                let (status, body) = app
+                    .request("POST", &format!("{path}/messages"), input.clone())
+                    .await;
+                assert_eq!(status, StatusCode::OK, "resumed={resumed}: {body}");
+            }
+        }
+    }
+}
