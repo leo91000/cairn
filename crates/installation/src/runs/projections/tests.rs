@@ -79,7 +79,7 @@ fn version_eighteen_upgrade_preserves_exact_wire_projection_and_reopens() {
 
     let store = Store::open(root.path()).unwrap();
     let connection = Connection::open(root.path().join("manager.db")).unwrap();
-    assert_eq!(version(&connection), 19);
+    assert_eq!(version(&connection), crate::store::DATABASE_VERSION);
     assert_eq!(retained_schema(&connection), schema_before);
     assert_eq!(projections(&connection, "run_views"), expected);
     let removed: i64 = connection
@@ -178,7 +178,7 @@ fn concurrent_startups_converge_on_one_preserved_projection() {
         .map(|handle| handle.join().unwrap())
         .collect::<Vec<_>>();
     let connection = Connection::open(root.path().join("manager.db")).unwrap();
-    assert_eq!(version(&connection), 19);
+    assert_eq!(version(&connection), crate::store::DATABASE_VERSION);
     assert_eq!(projections(&connection, "run_views"), expected);
     drop(stores);
 }

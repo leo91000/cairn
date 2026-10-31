@@ -172,7 +172,9 @@ impl Store {
                 tx.execute_batch(crate::plugins::hooks::SCHEMA)?;
                 tx.pragma_update(None, "user_version", DATABASE_VERSION)?;
             } else if current != DATABASE_VERSION {
-                return Err(Error::bad("Unexpected database version during plugin hooks upgrade."));
+                return Err(Error::bad(
+                    "Unexpected database version during plugin hooks upgrade.",
+                ));
             }
             tx.commit()?;
         }
