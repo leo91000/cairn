@@ -41,12 +41,7 @@ pub struct Package {
 
 /// What the owner approves: the manifest and every Luau file, by path.
 fn digest(manifest: &Manifest, source: &Sources) -> Result<String> {
-    let files = source.files().collect::<BTreeMap<_, _>>();
-    Ok(crate::auth::hex_digest(&format!(
-        "cairn-package\n{}\n{}",
-        serde_json::to_string(manifest)?,
-        serde_json::to_string(&files)?
-    )))
+    Ok(source.digest(manifest)?)
 }
 
 fn package(format: &str, manifest: &str, source: Sources, builtin: bool) -> Result<Package> {
@@ -58,14 +53,18 @@ fn package(format: &str, manifest: &str, source: Sources, builtin: bool) -> Resu
             Error::bad(message)
         }
     })?;
-    if manifest
+    for schema in manifest
         .conditions
         .iter()
-        .any(|condition| jsonschema::validator_for(&condition.input_schema).is_err())
+        .map(|c| &c.input_schema)
+        .chain(manifest.tools.iter().map(|t| &t.input_schema))
+        .chain(manifest.hooks.iter().map(|h| &h.payload_schema))
     {
-        return Err(Error::bad(
-            "A plugin condition has an invalid input schema.",
-        ));
+        if jsonschema::validator_for(schema).is_err() {
+            return Err(Error::bad(
+                "A plugin contribution has an invalid JSON schema.",
+            ));
+        }
     }
     for program in &manifest.programs {
         if !program.installer.is_empty() && !source.modules.contains_key(&program.installer) {
@@ -557,6 +556,7 @@ async fn set_active(
                 return Err(Error::forbidden("This version is no longer approved."));
             }
             db.activate_plugin_version(&plugin, &version, &digest, approve)?;
+            db.invalidate_plugin_hooks(&plugin, &digest)?;
             db.audit(
                 if approve {
                     "plugin.package.approved"

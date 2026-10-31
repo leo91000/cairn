@@ -248,6 +248,12 @@ pub enum PluginOperationResult {
         output: ManagePluginOutput,
         wrapped: bool,
     },
+    ResourcePage {
+        page: Box<ListPluginResourcesOutput>,
+    },
+    ResourceAncestry {
+        resolution: Box<ResolvePluginResourceOutput>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]

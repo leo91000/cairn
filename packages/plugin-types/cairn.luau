@@ -29,6 +29,10 @@
 --   form              the owner edits an instance (instanceForm)
     --                     { values, previous?, credential, secrets, instance?, changed?, submit }
 --                     -> FormResult; http and exec use the draft's credential and secrets
+--   resources         instance resource discovery (one-shot)
+--                     { op = "list", resourceType, page, query, instance }
+--                       -> ResourcePage
+--                     { op = "resolve", resourceType, id, instance } -> Resource
 --   projects          a `projectSources` request, for the owner through one instance
 --                     { op = "list", source, page, query, instance }
 --                       -> { items = { { id, name, description?, defaultBranch?, badges?,
@@ -135,6 +139,14 @@ export type Inbound = {
     body: { [string]: Json }?, -- what the person wrote; kept only for allowed people
 }
 
+-- capability "hooks": transport/socket or timer handlers only. Queue admission
+-- returns false on a duplicate or full backlog/receipt ledger. Retry full queues
+-- using the same ID. No rules consume these events until the rule engine ships.
+export type HookEmission = { name: string, id: string, payload: { [string]: Json } }
+export type ResourceRef = { resourceType: string, id: string }
+export type Resource = { resourceType: string, id: string, name: string, parent: ResourceRef? }
+export type ResourcePage = { items: { Resource }, nextPage: number? }
+
 export type HttpResponse = {
     status: number,
     -- content-type, retry-after, link and x-* headers.
@@ -216,6 +228,7 @@ export type Cairn = {
     },
     -- capability "inbound": Cairn keeps it only if the person is allowed (approval mode
     -- records a request without content). Returns whether it was queued.
+    hooks: { emit: (event: HookEmission) -> boolean },
     inbound: { accept: (message: Inbound) -> boolean },
     -- With "socket" or "inbound": the state the owner sees, "connecting" or "connected".
     instance: { status: (state: string, message: string?) -> () },

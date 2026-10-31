@@ -148,7 +148,7 @@ async fn version11_startup_conserves_inventory_credentials_and_references() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        19
+        crate::store::DATABASE_VERSION
     );
     for table in [
         "direct_storage_grants",
@@ -302,7 +302,7 @@ async fn legacy_missing_defaults_and_revocation_are_retained() {
     assert_eq!(node.storage, cairn_contracts::NodeStoragePolicy::default());
     assert!(
         migration::upgrade(&mut db).is_err(),
-        "The inventory-only helper must not rewrite version14"
+        "The inventory-only helper must not rewrite an upgraded database"
     );
 }
 
@@ -315,12 +315,12 @@ async fn empty_version11_inventory_upgrades_without_creating_a_node() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        19
+        crate::store::DATABASE_VERSION
     );
 }
 
 #[tokio::test]
-async fn concurrent_startups_complete_the_version11_to15_chain_without_repeating_metadata_ddl() {
+async fn concurrent_startups_complete_all_upgrades_without_repeating_metadata_ddl() {
     let root = tempfile::tempdir().unwrap();
     drop(version11(root.path()).await);
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
@@ -339,7 +339,7 @@ async fn concurrent_startups_complete_the_version11_to15_chain_without_repeating
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        19
+        crate::store::DATABASE_VERSION
     );
     assert_eq!(
         db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))

@@ -169,10 +169,11 @@ async fn fixture_plugin_authorization(
         .store
         .kv(&format!("test-relay:{}", text(&input, "credentialDigest")))
         .await?;
+    let required_scope = input["scope"].as_str().unwrap_or("manage");
     Ok(Json(context.is_some_and(|context| {
         context["scopes"]
             .as_array()
-            .is_some_and(|scopes| scopes.iter().any(|scope| scope == "manage"))
+            .is_some_and(|scopes| scopes.iter().any(|scope| scope == required_scope))
     })))
 }
 
