@@ -1224,6 +1224,8 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "set_agent_avatar",
         "list_agents",
         "get_agent",
+        "get_agent_plugin_grants",
+        "replace_agent_plugin_grants",
         "save_agent",
         "replace_agent",
         "preview_agent",

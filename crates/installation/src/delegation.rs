@@ -219,11 +219,13 @@ fn target_agent(db: &Db<'_>, run: &Value, input: &DelegateTaskInput) -> Result<V
             })
         });
     let exclusive_nodes = crate::agent_grants::exclusive_nodes(&current);
-    let live_grants =
-        crate::plugins::grants::covers_in(db, text(&current, "id"), text(&agent, "id"))?
-            && crate::agent_grants::exclusive_nodes(&agent)
-                .iter()
-                .all(|node| exclusive_nodes.contains(node));
+    let live_grants = crate::plugins::grants::contribution_ceiling_in(
+        db,
+        text(&current, "id"),
+        text(&agent, "id"),
+    )? && crate::agent_grants::exclusive_nodes(&agent)
+        .iter()
+        .all(|node| exclusive_nodes.contains(node));
     // Wildcard node grants do not include an administrator review. A narrower
     // reviewed target must not give an unreviewed requester host privileges.
     let administrator_reviews = !crate::native::policy::supports(&agent, "native")
@@ -417,10 +419,22 @@ pub async fn delegate(s: &Service, bearer: &str, input: &Value) -> Result<Value>
             )));
         }
     }
+    let caller = crate::project_workspaces::authorize(s, bearer).await?;
+    let requester_id = text(&caller["snapshot"]["agent"], "id").to_owned();
+    let target_id = text(&engine, "id").to_owned();
+    let revisions = crate::plugins::grants::check_coverage(s, &requester_id, &target_id).await?;
     let (bearer, input) = (bearer.to_owned(), input.clone());
     let result = s
         .store
-        .transaction(move |db| create(db, &bearer, &input, &engine))
+        .transaction(move |db| {
+            if required(db.agent(&requester_id)?, "Requesting agent not found")?.revision
+                != revisions.0
+                || required(db.agent(&target_id)?, "Agent not found")?.revision != revisions.1
+            {
+                return Err(Error::conflict("Plugin grants changed during delegation."));
+            }
+            create(db, &bearer, &input, &engine)
+        })
         .await?;
     s.worker.notify();
     Ok(serde_json::to_value(result)?)
@@ -632,11 +646,44 @@ pub(crate) fn authorize_run(db: &Db<'_>, run: &Value) -> Result<()> {
     )?;
     if policy(&parent_agent)["delegation"] != true
         || !covers(&parent_agent, &current)
-        || !crate::plugins::grants::covers_in(db, &parent.agent_id, text(&current, "id"))?
+        || !crate::plugins::grants::contribution_ceiling_in(
+            db,
+            &parent.agent_id,
+            text(&current, "id"),
+        )?
     {
         return Err(Error::forbidden(
             "The requesting agent no longer covers this delegated task's contributions and resources.",
         ));
+    }
+    Ok(())
+}
+
+pub(crate) async fn authorize_async(s: &Service, run: &Value) -> Result<()> {
+    let run = run.clone();
+    let pair = s
+        .store
+        .read(move |db| {
+            authorize_run(db, &run)?;
+            let Some(chat) = db.conversation_for_run(text(&run, "id"))? else {
+                return Ok(None);
+            };
+            let Some(lineage) = chat.requested_by else {
+                return Ok(None);
+            };
+            let parent = db
+                .conversation(&lineage.chat_id)?
+                .filter(|chat| chat.lifecycle == cairn_contracts::ConversationLifecycle::Active);
+            Ok(parent.map(|parent| {
+                (
+                    parent.agent_id,
+                    text(&run["snapshot"]["agent"], "id").to_owned(),
+                )
+            }))
+        })
+        .await?;
+    if let Some((parent, target)) = pair {
+        crate::plugins::grants::check_coverage(s, &parent, &target).await?;
     }
     Ok(())
 }

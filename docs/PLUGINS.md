@@ -1293,3 +1293,74 @@ the caller's captured authority (`plugins::resources::prepare_resolve`).
 Trusted host callers also have the synchronous `plugins::resources::resolve`
 wrapper. Resolve current ancestry before enforcing a grant; labels and retained
 picker results confer no authority.
+
+## Agent contribution grants (ADR-0075, ticket C)
+
+`GET /api/agents/{agentId}/plugin-grants` returns the agent's revision, per-instance
+`grants` and `runCredentialInstances`. `PUT` replaces this view at that revision.
+The public MCP exposes the same `get_agent_plugin_grants` (read) and
+`replace_agent_plugin_grants` (manage) operations. Installation agents can read and
+reduce only; changing to a different credential supplier counts as an expansion.
+Both generated web and Android clients expose these contracts. The grant editor
+belongs to ticket D; existing `AgentSettings.plugins` clients continue to read and
+write full access only and preserve selected grants on other instances.
+
+```json
+{
+  "agentId": "00000000-0000-4000-8000-000000000010",
+  "revision": "the-current-agent-revision",
+  "grants": [{
+    "instanceId": "00000000-0000-4000-8000-000000000011",
+    "access": {
+      "type": "selected",
+      "contributions": [{
+        "kind": "tool",
+        "name": "discord_post",
+        "resources": [{ "resourceType": "channel", "id": "support" }]
+      }]
+    }
+  }],
+  "runCredentialInstances": []
+}
+```
+
+`access: { "type": "full" }` includes current and future contributions of that
+instance. Selected contribution kinds are `tool`, `command`, `hook`,
+`runCredentials`, `instructions`, `condition`, `projectSource` and `skillSource`.
+Their names match the manifest; instructions and run credentials use an empty
+name. Only tools, commands and hooks accept resource restrictions. Restrictions
+of each type cover its descendants. All designated resources in those hierarchies
+must resolve under the allowed roots; missing, unknown or contradictory references
+fail before dispatch. Other types, such as a message's author, remain unrestricted.
+An explicit `runCredentials` contribution must also be the package's chosen
+supplier; a full grant on another instance never supplies its credentials.
+
+The SQL schema advances from 21 to 22. Existing grants remain full access per
+instance. Migration retains the old enabled, name-ordered credential supplier of
+active packages that declare run credentials. Removing the selected instance or
+its credential grant leaves a cleared supplier, including across restart and
+unrelated profile saves. An old editor's first full grant can initialize a choice;
+a cleared choice requires the owner's explicit selection. Setup's final grant is
+full access; shared setup for an installation agent still requires full access on
+the source instance. Host Git fetches for authorized projects keep their separate
+existing instance ordering; they do not publish other accounts' run credentials.
+
+Tool and command scopes expose only matching instances. Their retained authority
+checks current agent and requester revisions, instance revisions and approved
+package identity before host effects, OAuth refresh publication, and result
+return. Resource ancestry is resolved by the host, never inferred from labels.
+Delegated plugin actions verify both contributions and resources against the
+requester, including descendant resource roots; asynchronous checks are followed
+by local revision checks. Once its requesting conversation is deleted, a task's
+own agent provides its authority.
+
+Ticket F must call `plugins::grant_authorization::authorize_hook_delivery` with
+the execution agent, instance, declared hook name and payload before delivery; a
+refusal means no delivery. It does not consume or recreate A's durable queue.
+Ticket E/F must implement `plugins::grants::rule_uses` from their canonical rule
+store, returning the tools/hooks and resource restrictions each rule uses on its
+execution agent, regardless of rule state or budget. The reduction guard protects
+those uses. Until the full ADR-0075 conversation provenance is established, every
+current account's rule is protected; E's provenance integration may exclude only
+the eligible conversation's own account. No rule-writing, emergency-pause or
+budget authority is introduced here.

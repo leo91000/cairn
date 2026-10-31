@@ -9,7 +9,7 @@ use crate::{
     error::{Error, Result},
     plugins::{
         capabilities::target,
-        connections::{self, Connection, credential_key},
+        connections::{self, Connection},
         registry::{self, Package},
         scope::{self, Scope},
     },
@@ -111,7 +111,15 @@ async fn origin(
             })?
         }
     };
-    let authority = authority.instance(s, &connection, &package, cairn_contracts::PluginContributionKind::SkillSource, source).await?;
+    let authority = authority
+        .instance(
+            s,
+            &connection,
+            &package,
+            cairn_contracts::PluginContributionKind::SkillSource,
+            source,
+        )
+        .await?;
     Ok(Origin {
         package,
         source: source.to_owned(),
@@ -123,7 +131,10 @@ async fn origin(
 async fn call(s: &Service, origin: &Origin, payload: Value) -> Result<Value> {
     origin.authority.check_local(s).await?;
     let scope = Scope::Instance(Box::new(origin.connection.clone()));
-    let scope = match origin.authority.management() {Some(management)=>Scope::Managed(Box::new(scope),management),None=>scope};
+    let scope = match origin.authority.management() {
+        Some(management) => Scope::Managed(Box::new(scope), management),
+        None => scope,
+    };
     let mut payload = payload;
     payload["source"] = origin.source.clone().into();
     payload["instance"] = scope.instances()[0].clone();
@@ -247,16 +258,15 @@ async fn fetch(s: &Service, origin: &Origin, file: &File) -> Result<Vec<u8>> {
             request = request.header(name, value);
         }
     }
+    let management = origin.authority.management();
     if let Some(rule) = &manifest.credential
-        && let Some(token) = s
-            .vault
-            .get(&credential_key(&origin.connection.id))
-            .await?
-            .map(|value| text(&value, "token").to_owned())
-            .filter(|token| !token.is_empty())
+        && let Some(token) =
+            crate::plugins::oauth::access_token_managed(s, &origin.connection, management.as_ref())
+                .await?
     {
         request = request.header(rule.header.as_str(), format!("{}{token}", rule.prefix));
     }
+    origin.authority.recheck(s).await?;
     let response = request
         .send()
         .await

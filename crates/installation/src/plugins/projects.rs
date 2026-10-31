@@ -104,7 +104,15 @@ pub(crate) async fn list(
     let package = registry::active(s, plugin_id).await?;
     let source = input.source.as_str();
     let connection = instance(s, &package, source, &input.instance).await?;
-    let authority = authority.instance(s, &connection, &package, cairn_contracts::PluginContributionKind::ProjectSource, source).await?;
+    let authority = authority
+        .instance(
+            s,
+            &connection,
+            &package,
+            cairn_contracts::PluginContributionKind::ProjectSource,
+            source,
+        )
+        .await?;
     let page = input.page;
     let search = &input.query;
     if !(1..=10000).contains(&page)
@@ -116,7 +124,10 @@ pub(crate) async fn list(
         ));
     }
     let scope = Scope::Instance(Box::new(connection));
-    let scope = match authority.management() {Some(management)=>Scope::Managed(Box::new(scope),management),None=>scope};
+    let scope = match authority.management() {
+        Some(management) => Scope::Managed(Box::new(scope), management),
+        None => scope,
+    };
     let payload = json!({
         "op": "list",
         "source": source,
@@ -159,7 +170,15 @@ pub(crate) async fn import(
     let instance_id = command.instance.as_str();
     uuid(instance_id)?;
     let connection = instance(s, &package, source, instance_id).await?;
-    let authority = authority.instance(s, &connection, &package, cairn_contracts::PluginContributionKind::ProjectSource, source).await?;
+    let authority = authority
+        .instance(
+            s,
+            &connection,
+            &package,
+            cairn_contracts::PluginContributionKind::ProjectSource,
+            source,
+        )
+        .await?;
     let item_id = plain(&Value::String(command.id.clone()), 200)
         .filter(|id| !id.is_empty())
         .ok_or_else(|| Error::bad("Choose a project to import."))?;
@@ -177,7 +196,10 @@ pub(crate) async fn import(
         }
     }
     let scope = Scope::Instance(Box::new(connection.clone()));
-    let scope = match authority.management() {Some(management)=>Scope::Managed(Box::new(scope),management),None=>scope};
+    let scope = match authority.management() {
+        Some(management) => Scope::Managed(Box::new(scope), management),
+        None => scope,
+    };
     let payload = json!({
         "op": "resolve",
         "source": source,

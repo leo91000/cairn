@@ -34,6 +34,12 @@ impl PluginContributionKind {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PluginContributionGrant {
+    #[schemars(
+        with = "String",
+        pattern(
+            "^(tool|command|hook|runCredentials|instructions|condition|projectSource|skillSource)$"
+        )
+    )]
     pub kind: PluginContributionKind,
     /// Empty for instructions and runCredentials, which are single contributions.
     #[schemars(length(max = 200))]

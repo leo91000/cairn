@@ -52,7 +52,9 @@ pub fn authorize_in(db: &crate::store::Db<'_>, bearer: &str) -> Result<Value> {
 
 pub async fn authorize(s: &Service, bearer: &str) -> Result<Value> {
     let bearer = bearer.to_owned();
-    s.store.read(move |db| authorize_in(db, &bearer)).await
+    let run = s.store.read(move |db| authorize_in(db, &bearer)).await?;
+    crate::delegation::authorize_async(s, &run).await?;
+    Ok(run)
 }
 
 /// Whether the registered project still matches the one this run was granted.

@@ -1,5 +1,19 @@
 [
   {
+    "input": "AgentInput",
+    "method": "GET",
+    "name": "getAgentPluginGrants",
+    "output": "AgentPluginGrants",
+    "path": "/agents/{agentId}/plugin-grants"
+  },
+  {
+    "input": "ReplaceAgentPluginGrantsInput",
+    "method": "PUT",
+    "name": "replaceAgentPluginGrants",
+    "output": "AgentPluginGrants",
+    "path": "/agents/{agentId}/plugin-grants"
+  },
+  {
     "input": "SetAgentAvatarInput",
     "method": "POST",
     "name": "setAgentAvatar",

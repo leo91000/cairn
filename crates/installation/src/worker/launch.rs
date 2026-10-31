@@ -317,10 +317,7 @@ impl Execution<'_> {
                 "Agent access was reduced after this run was queued. Run the task again with the current policy.",
             ));
         }
-        let caller = self.run.clone();
-        s.store
-            .read(move |db| crate::delegation::authorize_run(db, &caller))
-            .await?;
+        crate::delegation::authorize_async(s, self.run).await?;
         let current_policy = policy(&current);
         self.run["snapshot"]["agent"]["access"]["nodes"] = current_policy["nodes"].clone();
         let snapshot = serde_json::from_value(self.run["snapshot"].clone())?;
@@ -380,6 +377,8 @@ impl Execution<'_> {
         for (key, value) in mcp["env"].as_object().unwrap() {
             env.insert(key.clone(), value.as_str().unwrap_or("").into());
         }
+        crate::delegation::authorize_async(s, self.run).await?;
+        credentials.authorize(s).await?;
         timing.finish();
         Ok(Workspace {
             prepared,
@@ -403,9 +402,9 @@ impl Execution<'_> {
                 .await?;
         }
         let saved = self.checkpoint.snapshot().await;
-        let agent_id = text(&self.run["snapshot"]["agent"], "id");
         let projects = crate::project_workspaces::catalog(self.run);
-        let credentials = crate::plugins::run_credentials::for_run(s, agent_id, &projects).await?;
+        let credentials =
+            crate::plugins::run_credentials::for_execution(s, self.run, &projects).await?;
         let prepared = match saved.prepared() {
             Some(prepared) => {
                 execution::restore(self.run, prepared.clone(), &s.config, &credentials).await?

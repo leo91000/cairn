@@ -130,9 +130,10 @@ impl Authority {
         }
     }
 
-    pub(crate) fn public(public_credential: Option<String>) -> Self {
+    pub(crate) fn public_scoped(public_credential: Option<String>, scope: &'static str) -> Self {
         Self {
             public_credential,
+            public_scope: Some(scope),
             ..Default::default()
         }
     }

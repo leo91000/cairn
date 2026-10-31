@@ -74,9 +74,10 @@ async fn record_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Res
             Some(("get_agent_plugin_grants", json!({ "agentId": id })))
         }
         ("PUT", ["agents", id, "plugin-grants"]) => {
-            let mut body = input.body.clone();
-            body["agentId"] = json!(id);
-            Some(("replace_agent_plugin_grants", body))
+            if input.body["agentId"] != *id {
+                return Err(Error::bad("Agent identity does not match the path."));
+            }
+            Some(("replace_agent_plugin_grants", input.body.clone()))
         }
         ("GET", ["agents"]) => Some(("list_agents", json!({}))),
         ("GET", ["agents", id]) => Some(("get_agent", json!({ "agentId": id }))),

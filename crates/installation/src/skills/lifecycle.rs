@@ -42,8 +42,13 @@ impl Authority {
                         "A current public MCP authorization is required.",
                     ));
                 }
-                plugin_packages::Authority::public(
-                    credential.filter(|_| required_scope == "manage"),
+                plugin_packages::Authority::public_scoped(
+                    credential,
+                    if required_scope == "read" {
+                        "read"
+                    } else {
+                        "manage"
+                    },
                 )
             }
         };
@@ -85,23 +90,45 @@ impl Authority {
             ));
         }
         if let Some(bearer) = &self.preparation.bearer {
-            let run = crate::installation_mcp::authorize(s,bearer).await?;
-            let agent=crate::validation::text(&run["snapshot"]["agent"],"id");
-            let snapshot=crate::plugins::grant_authorization::Snapshot::capture(s,agent,Some(bearer),package).await?;
-            let invocation=crate::plugins::grant_authorization::Invocation::prepare(s,snapshot.clone(),instance.clone(),kind,name,&serde_json::Value::Null).await?;
-            authority.management=Some(crate::plugins::management::Authority::agent_action(instance.clone(),snapshot,Some(invocation)));
+            let run = crate::installation_mcp::authorize(s, bearer).await?;
+            let agent = crate::validation::text(&run["snapshot"]["agent"], "id");
+            let snapshot = crate::plugins::grant_authorization::Snapshot::capture_installation(
+                s, agent, bearer, package,
+            )
+            .await?;
+            let invocation = crate::plugins::grant_authorization::Invocation::prepare(
+                s,
+                snapshot.clone(),
+                instance.clone(),
+                kind,
+                name,
+                &serde_json::Value::Null,
+            )
+            .await?;
+            authority.management = Some(crate::plugins::management::Authority::agent_action(
+                instance.clone(),
+                snapshot,
+                Some(invocation),
+            ));
         } else {
-            authority.management=Some(crate::plugins::management::Authority::resource_read(self.preparation.clone(),instance.clone()));
+            authority.management = Some(crate::plugins::management::Authority::resource_read(
+                self.preparation.clone(),
+                instance.clone(),
+            ));
         }
         authority.recheck(s).await?;
         Ok(authority)
     }
 
-    pub(crate) fn management(&self) -> Option<crate::plugins::management::Authority> { self.management.clone() }
+    pub(crate) fn management(&self) -> Option<crate::plugins::management::Authority> {
+        self.management.clone()
+    }
 
     pub(crate) fn authorize(&self, db: &Db<'_>) -> Result<()> {
         self.preparation.authorize(db)?;
-        if let Some(management)=&self.management { management.authorize(db)?; }
+        if let Some(management) = &self.management {
+            management.authorize(db)?;
+        }
         if let Some(expected) = &self.project {
             let current = db
                 .project(&expected.id.to_string())?
@@ -127,7 +154,6 @@ impl Authority {
             if !expected.enabled {
                 return Err(Error::forbidden("This plugin instance is disabled."));
             }
-
         }
         Ok(())
     }
@@ -139,7 +165,9 @@ impl Authority {
 
     pub(crate) async fn recheck(&self, s: &Service) -> Result<()> {
         self.preparation.recheck(s).await?;
-        if let Some(management)=&self.management { management.recheck(s).await?; }
+        if let Some(management) = &self.management {
+            management.recheck(s).await?;
+        }
         self.check_local(s).await
     }
 

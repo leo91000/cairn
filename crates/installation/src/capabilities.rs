@@ -418,6 +418,15 @@ impl AgentOperation {
         input: Value,
         context: ResumeContext,
     ) -> Result<Value> {
+        Box::pin(self.invoke_inner(s, input, context)).await
+    }
+
+    async fn invoke_inner(
+        &self,
+        s: &Arc<Service>,
+        input: Value,
+        context: ResumeContext,
+    ) -> Result<Value> {
         use cairn_contracts::*;
         if matches!(
             self.name,

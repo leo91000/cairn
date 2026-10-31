@@ -16,7 +16,7 @@ pub struct Authority {
     pub(crate) preparation: Option<crate::capabilities::plugin_packages::Authority>,
     instance: Option<Box<connections::Connection>>,
     shared: Option<Box<connections::Connection>>,
-    snapshot: Option<super::grant_authorization::Snapshot>,
+    snapshot: Option<Arc<super::grant_authorization::Snapshot>>,
     invocation: Option<Arc<super::grant_authorization::Invocation>>,
     partial: bool,
 }
@@ -79,7 +79,7 @@ impl Authority {
             preparation: None,
             instance: Some(Box::new(instance)),
             shared: None,
-            snapshot: Some(snapshot),
+            snapshot: Some(Arc::new(snapshot)),
             invocation,
             partial: true,
         }
@@ -114,7 +114,8 @@ pub(crate) async fn invoke(
         crate::installation_mcp::authorize(s, bearer).await?;
     }
     // Even an empty submitted selection is forbidden to an agent.
-    if matches!(&input, Command::Save { data, .. } if data.agent_ids.is_some()) && !owner {
+    if matches!(&input, Command::Save { data, .. } if data.agent_ids.is_some()) && bearer.is_some()
+    {
         return Err(Error::forbidden(
             "Grant plugin instances from the owner's agent editor.",
         ));
@@ -351,8 +352,9 @@ pub(crate) async fn invoke(
                     Output::Form { form: value }
                 }
                 Command::Save { data, .. } => {
-                    // Public MCP also lacks owner authority to grant agents or native execution.
-                    if data.agent_ids.is_some() && !owner {
+                    // Public manage can grant full access on new instances;
+                    // installation agents can never grant it.
+                    if data.agent_ids.is_some() && bearer.is_some() {
                         return Err(Error::forbidden(
                             "Grant plugin instances from the owner's agent editor.",
                         ));

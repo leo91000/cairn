@@ -185,7 +185,7 @@ impl Store {
         if !fresh {
             let tx = writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             if tx.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))? == 21 {
-                crate::plugins::grants::migrate(&Db(&tx))?;
+                crate::plugins::grants::migrate(&Db(&tx), directory)?;
                 tx.pragma_update(None, "user_version", 22)?;
             }
             tx.commit()?;

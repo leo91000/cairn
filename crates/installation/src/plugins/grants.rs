@@ -40,11 +40,29 @@ CREATE TABLE IF NOT EXISTS plugin_credential_suppliers(
 
 /// Called once by the schema upgrade. Preserve exactly the old name-ordered,
 /// enabled supplier; subsequent removals retain a NULL tombstone, never a fallback.
-pub(crate) fn migrate(db: &Db<'_>) -> Result<()> {
+pub(crate) fn migrate(db: &Db<'_>, directory: &std::path::Path) -> Result<()> {
     db.0.execute_batch(SCHEMA)?;
-    db.0.execute_batch("INSERT OR IGNORE INTO plugin_credential_suppliers(agent_id,plugin_id,instance_id)
-SELECT g.agent_id,i.plugin_id,i.id FROM instance_grants g JOIN plugin_instances i ON i.id=g.instance_id
-WHERE i.enabled=1 ORDER BY i.name,i.id;")?;
+    let mut instances = db.plugin_instances()?;
+    instances.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
+    let mut chosen = std::collections::BTreeSet::new();
+    for instance in instances {
+        let Ok(package) = super::registry::upgrade_package(db, directory, &instance.plugin_id)
+        else {
+            continue;
+        };
+        if package.manifest.run_credentials.is_none() {
+            continue;
+        }
+        for agent in &instance.agent_ids {
+            db.0.execute(
+                "INSERT OR IGNORE INTO plugin_credential_suppliers VALUES(?,?,NULL)",
+                params![agent, instance.plugin_id],
+            )?;
+            if instance.enabled && chosen.insert((agent.clone(), instance.plugin_id.clone())) {
+                db.0.execute("UPDATE plugin_credential_suppliers SET instance_id=? WHERE agent_id=? AND plugin_id=?",params![instance.id,agent,instance.plugin_id])?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -207,17 +225,23 @@ pub(crate) fn access_covers(current: &Access, proposed: &Access) -> bool {
 // suffice for the synchronous ceiling; effect authorization resolves live ancestry.
 fn resources_cover(current: &[PluginResourceRef], proposed: &[PluginResourceRef]) -> bool {
     current.is_empty()
-        || (!proposed.is_empty()
-            && current.iter().all(|restriction| {
-                proposed
+        || current
+            .iter()
+            .map(|r| &r.resource_type)
+            .collect::<std::collections::BTreeSet<_>>()
+            .iter()
+            .all(|kind| {
+                let mut selected = proposed
                     .iter()
-                    .any(|r| r.resource_type == restriction.resource_type)
+                    .filter(|r| &r.resource_type == *kind)
+                    .peekable();
+                selected.peek().is_some()
+                    && selected.all(|next| {
+                        current.iter().any(|held| {
+                            held.resource_type == next.resource_type && held.id == next.id
+                        })
+                    })
             })
-            && proposed.iter().all(|r| {
-                current
-                    .iter()
-                    .any(|held| held.resource_type == r.resource_type && held.id == r.id)
-            }))
 }
 
 pub(crate) fn covers_in(db: &Db<'_>, requester: &str, target: &str) -> Result<bool> {
@@ -242,21 +266,18 @@ pub(crate) fn covers_in(db: &Db<'_>, requester: &str, target: &str) -> Result<bo
 pub(crate) fn protect_rule_uses(
     db: &Db<'_>,
     agent: &str,
-    before: &AgentPluginGrants,
+    _before: &AgentPluginGrants,
     after: &cairn_contracts::ReplaceAgentPluginGrantsInput,
 ) -> Result<()> {
     for usage in rule_uses(db, agent)? {
-        let previous = before
-            .grants
-            .iter()
-            .find(|g| g.instance_id == usage.instance_id);
         let proposed = after
             .grants
             .iter()
             .find(|g| g.instance_id == usage.instance_id);
-        if previous.is_some_and(|previous| {
-            proposed.is_none_or(|proposed| !access_covers(&proposed.access, &previous.access))
-        }) {
+        let used = Access::Selected {
+            contributions: vec![usage.contribution],
+        };
+        if proposed.is_none_or(|proposed| !access_covers(&proposed.access, &used)) {
             return Err(Error::forbidden(
                 "An agent cannot reduce a grant used by another account's rule, or by any account's rule outside an eligible conversation.",
             ));
@@ -267,6 +288,7 @@ pub(crate) fn protect_rule_uses(
 
 pub(crate) struct RuleGrantUse {
     pub instance_id: PluginInstanceId,
+    pub contribution: PluginContributionGrant,
 }
 
 pub(crate) fn rule_uses(_db: &Db<'_>, _agent: &str) -> Result<Vec<RuleGrantUse>> {
@@ -372,6 +394,86 @@ pub(crate) async fn replace(
             ));
         }
     }
+    let mut reduction_snapshots = Vec::new();
+    if reduce_only {
+        let agent = id.clone();
+        let before = s
+            .store
+            .read(move |db| db.agent_plugin_grants(&agent))
+            .await?;
+        if before.revision != input.revision {
+            return Err(Error::conflict(
+                "This agent changed. Reload it before saving.",
+            ));
+        }
+        if input
+            .run_credential_instances
+            .iter()
+            .any(|id| !before.run_credential_instances.contains(id))
+        {
+            return Err(Error::forbidden(
+                "Installation agents cannot choose another credential supplier.",
+            ));
+        }
+        for next in &input.grants {
+            let held = before
+                .grants
+                .iter()
+                .find(|held| held.instance_id == next.instance_id)
+                .ok_or_else(|| {
+                    Error::forbidden("Installation agents cannot grant another instance.")
+                })?;
+            if access_covers(&held.access, &next.access) {
+                continue;
+            }
+            let (
+                Access::Selected {
+                    contributions: current,
+                },
+                Access::Selected {
+                    contributions: proposed,
+                },
+            ) = (&held.access, &next.access)
+            else {
+                return Err(Error::forbidden(
+                    "Installation agents cannot widen plugin access.",
+                ));
+            };
+            let bearer = authority
+                .bearer
+                .as_deref()
+                .ok_or_else(|| Error::forbidden("A calling execution is required."))?;
+            let caller = crate::installation_mcp::authorize(s, bearer).await?;
+            let caller_agent = crate::validation::text(&caller["snapshot"]["agent"], "id");
+            let (instance, package) = &packages[&next.instance_id.to_string()];
+            let snapshot = super::grant_authorization::Snapshot::capture_installation(
+                s,
+                caller_agent,
+                bearer,
+                package,
+            )
+            .await?;
+            for next in proposed {
+                let held = current
+                    .iter()
+                    .find(|held| held.kind == next.kind && held.name == next.name)
+                    .ok_or_else(|| {
+                        Error::forbidden("Installation agents cannot add a contribution.")
+                    })?;
+                super::grant_authorization::resource_set_covered(
+                    s,
+                    package,
+                    instance,
+                    caller_agent,
+                    held,
+                    &next.resources,
+                    snapshot.clone(),
+                )
+                .await?;
+            }
+            reduction_snapshots.push(snapshot);
+        }
+    }
     authority.recheck(s).await?;
     let _publication = s.plugins.package_publication.lock().await;
     for (_, package) in packages.values() {
@@ -385,39 +487,68 @@ pub(crate) async fn replace(
             ));
         }
     }
-    s.store.transaction(move |db| {
-        authority.authorize(db)?;
-        let before = db.agent_plugin_grants(&id)?;
-        if before.revision != input.revision { return Err(Error::conflict("This agent changed. Reload it before saving.")); }
-        for (instance, _) in packages.values() { super::connections::check_revision(db, instance)?; }
-        if reduce_only {
-            let covered = input.grants.iter().all(|next| before.grants.iter().any(|held| held.instance_id == next.instance_id && access_covers(&held.access, &next.access))) && input.run_credential_instances.iter().all(|id| before.run_credential_instances.contains(id));
-            if !covered { return Err(Error::forbidden("Installation agents may only read or reduce plugin grants, never widen them or choose another credential supplier.")); }
-            protect_rule_uses(db, &id, &before, &input)?;
-        }
-        let mut agent = required(db.agent(&id)?, "Agent not found")?;
-        agent.settings.plugins = input.grants.iter().filter(|g| matches!(g.access, Access::Full)).map(|g| g.instance_id.to_string()).collect();
-        agent.revision = crate::config::id();
-        db.save_agent(&agent)?;
-        db.0.execute("DELETE FROM plugin_contribution_grants WHERE agent_id=?", [&id])?;
-        for grant in &input.grants {
-            if let Access::Selected { contributions } = &grant.access {
-                for contribution in contributions {
-                    db.0.execute("INSERT INTO plugin_contribution_grants VALUES(?,?,?,?)", params![id,grant.instance_id.to_string(),contribution.kind.key(),contribution.name])?;
-                    for resource in &contribution.resources {
-                        db.0.execute("INSERT INTO plugin_grant_resources VALUES(?,?,?,?,?,?)", params![id,grant.instance_id.to_string(),contribution.kind.key(),contribution.name,resource.resource_type,resource.id])?;
+    s.store
+        .transaction(move |db| {
+            authority.authorize(db)?;
+            let before = db.agent_plugin_grants(&id)?;
+
+            if before.revision != input.revision {
+                return Err(Error::conflict("This agent changed. Reload it before saving."));
+            }
+
+            for (instance, _) in packages.values() {
+                super::connections::check_revision(db, instance)?;
+            }
+
+            if reduce_only {
+                for snapshot in &reduction_snapshots {
+                    snapshot.authorize(db)?;
+                }
+                protect_rule_uses(db, &id, &before, &input)?;
+            }
+
+            let mut agent = required(db.agent(&id)?, "Agent not found")?;
+            agent.settings.plugins = input.grants.iter()
+                .filter(|grant| matches!(grant.access, Access::Full))
+                .map(|grant| grant.instance_id.to_string()).collect();
+            agent.revision = crate::config::id();
+            db.save_agent(&agent)?;
+
+            db.0.execute("DELETE FROM plugin_contribution_grants WHERE agent_id=?", [&id])?;
+            for grant in &input.grants {
+                if let Access::Selected { contributions } = &grant.access {
+                    let instance = grant.instance_id.to_string();
+                    for contribution in contributions {
+                        db.0.execute(
+                            "INSERT INTO plugin_contribution_grants VALUES(?,?,?,?)",
+                            params![id, instance, contribution.kind.key(), contribution.name],
+                        )?;
+                        for resource in &contribution.resources {
+                            db.0.execute(
+                                "INSERT INTO plugin_grant_resources VALUES(?,?,?,?,?,?)",
+                                params![
+                                    id, instance, contribution.kind.key(), contribution.name,
+                                    resource.resource_type, resource.id,
+                                ],
+                            )?;
+                        }
                     }
                 }
             }
-        }
-        db.0.execute("UPDATE plugin_credential_suppliers SET instance_id=NULL WHERE agent_id=?", [&id])?;
-        for supplier in &input.run_credential_instances {
-            let (instance, _) = &packages[&supplier.to_string()];
-            db.0.execute("INSERT INTO plugin_credential_suppliers VALUES(?,?,?) ON CONFLICT(agent_id,plugin_id) DO UPDATE SET instance_id=excluded.instance_id", params![id,instance.plugin_id,instance.id])?;
-        }
-        db.audit("agent.plugin_grants.changed", &serde_json::json!({"agentId":id}))?;
-        db.agent_plugin_grants(&id)
-    }).await
+
+            db.0.execute("UPDATE plugin_credential_suppliers SET instance_id=NULL WHERE agent_id=?", [&id])?;
+            for supplier in &input.run_credential_instances {
+                let (instance, _) = &packages[&supplier.to_string()];
+                db.0.execute(
+                    "INSERT INTO plugin_credential_suppliers VALUES(?,?,?) ON CONFLICT(agent_id,plugin_id) DO UPDATE SET instance_id=excluded.instance_id",
+                    params![id, instance.plugin_id, instance.id],
+                )?;
+            }
+
+            db.audit("agent.plugin_grants.changed", &serde_json::json!({ "agentId": id }))?;
+            db.agent_plugin_grants(&id)
+        })
+        .await
 }
 
 #[cfg(test)]
@@ -513,5 +644,190 @@ mod tests {
             &current,
             &grant("post", vec![("channel", "general")])
         ));
+    }
+}
+
+/// Local half of delegated authorization. Resource ancestry needs asynchronous
+/// host resolution; callers must also run `check_coverage` before acting.
+pub(crate) fn contribution_ceiling_in(db: &Db<'_>, requester: &str, target: &str) -> Result<bool> {
+    if requester == target {
+        return Ok(true);
+    }
+    let current = db.agent_plugin_grants(requester)?;
+    let proposed = db.agent_plugin_grants(target)?;
+    Ok(proposed.grants.iter().all(|next| {
+        current.grants.iter().any(|held| {
+            if held.instance_id != next.instance_id {
+                return false;
+            }
+            match (&held.access, &next.access) {
+                (Access::Full, _) => true,
+                (_, Access::Full) => false,
+                (
+                    Access::Selected {
+                        contributions: current,
+                    },
+                    Access::Selected {
+                        contributions: proposed,
+                    },
+                ) => proposed.iter().all(|next| {
+                    current.iter().any(|held| {
+                        held.kind == next.kind
+                            && held.name == next.name
+                            && (held.resources.is_empty() || !next.resources.is_empty())
+                    })
+                }),
+            }
+        })
+    }) && proposed
+        .run_credential_instances
+        .iter()
+        .all(|id| current.run_credential_instances.contains(id)))
+}
+
+/// Resolve selected resource roots afresh rather than trusting stored labels or
+/// ancestry. Return revisions so a mutation can recheck the same profiles locally.
+pub(crate) async fn check_coverage(
+    s: &crate::service::Service,
+    requester: &str,
+    target: &str,
+) -> Result<(String, String)> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(40),
+        Box::pin(check_coverage_inner(s, requester, target)),
+    )
+    .await
+    .map_err(|_| Error::unavailable("Resource coverage could not be resolved in time."))?
+}
+
+async fn check_coverage_inner(
+    s: &crate::service::Service,
+    requester: &str,
+    target: &str,
+) -> Result<(String, String)> {
+    let (requester, target) = (requester.to_owned(), target.to_owned());
+    let (left, right) = (requester.clone(), target.clone());
+    let (current, proposed) = s
+        .store
+        .read(move |db| {
+            if !contribution_ceiling_in(db, &left, &right)? {
+                return Err(Error::forbidden(
+                    "The requesting agent does not cover the delegated plugin contributions.",
+                ));
+            }
+            Ok((
+                db.agent_plugin_grants(&left)?,
+                db.agent_plugin_grants(&right)?,
+            ))
+        })
+        .await?;
+    if requester != target {
+        for next in &proposed.grants {
+            let held = current
+                .grants
+                .iter()
+                .find(|held| held.instance_id == next.instance_id)
+                .ok_or_else(|| Error::forbidden("Plugin instance not covered."))?;
+            if let (
+                Access::Selected {
+                    contributions: current,
+                },
+                Access::Selected {
+                    contributions: proposed,
+                },
+            ) = (&held.access, &next.access)
+            {
+                let instance = required(
+                    s.store
+                        .plugin_instance(&next.instance_id.to_string())
+                        .await?,
+                    "Plugin instance not found",
+                )?;
+                let package = super::registry::active(s, &instance.plugin_id).await?;
+                let snapshot =
+                    super::grant_authorization::Snapshot::capture(s, &requester, None, &package)
+                        .await?;
+                for next in proposed {
+                    let held = current
+                        .iter()
+                        .find(|held| held.kind == next.kind && held.name == next.name)
+                        .ok_or_else(|| Error::forbidden("Plugin contribution not covered."))?;
+                    super::grant_authorization::resource_set_covered(
+                        s,
+                        &package,
+                        &instance,
+                        &requester,
+                        held,
+                        &next.resources,
+                        snapshot.clone(),
+                    )
+                    .await?;
+                }
+            }
+        }
+    }
+    let revisions = (current.revision.clone(), proposed.revision.clone());
+    let expected = revisions.clone();
+    s.store
+        .read(move |db| {
+            if required(db.agent(&requester)?, "Requesting agent not found")?.revision != expected.0
+                || required(db.agent(&target)?, "Agent not found")?.revision != expected.1
+            {
+                return Err(Error::conflict(
+                    "Plugin grants changed during delegation authorization.",
+                ));
+            }
+            Ok(())
+        })
+        .await?;
+    Ok(revisions)
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn migration_retains_the_previously_enabled_name_ordered_supplier() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        let directory = root.path().to_path_buf();
+        store
+            .transaction(move |db| {
+                let mut profile = crate::agent_fixture::profile(
+                    json!({"id":"00000000-0000-4000-8000-000000000022"}),
+                )?;
+                let earlier = "00000000-0000-4000-8000-000000000020";
+                let later = "00000000-0000-4000-8000-000000000021";
+                for (id, name) in [(earlier, "A"), (later, "Z")] {
+                    let mut instance = super::super::connections::Connection::draft(
+                        id,
+                        "github",
+                        json!({}),
+                        Vec::new(),
+                    );
+                    instance.name = name.into();
+                    instance.enabled = true;
+                    instance.revision = "r1".into();
+                    db.save_plugin_instance(&instance)?;
+                }
+                profile.settings.plugins = vec![later.into(), earlier.into()];
+                db.save_agent(&profile)?;
+                let agent = profile.id.to_string();
+                db.0.execute("DELETE FROM plugin_credential_suppliers", [])?;
+                migrate(db, &directory)?;
+                assert_eq!(
+                    db.plugin_credential_supplier(&agent, "github")?.as_deref(),
+                    Some(earlier)
+                );
+                assert_eq!(
+                    db.agent(&agent)?.unwrap().settings.plugins,
+                    vec![later, earlier]
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 }

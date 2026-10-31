@@ -26,9 +26,9 @@ pub(crate) struct Snapshot {
     pub agent: String,
     revision: String,
     requester: Option<(String, String)>,
-    bearer: Option<String>,
+    bearer: Option<(String, bool)>,
     run_id: Option<String>,
-    package: Package,
+    package: Arc<Package>,
 }
 
 impl Snapshot {
@@ -38,14 +38,37 @@ impl Snapshot {
         bearer: Option<&str>,
         package: &Package,
     ) -> Result<Self> {
+        Self::capture_with(s, agent, bearer, false, package).await
+    }
+
+    pub(crate) async fn capture_installation(
+        s: &Service,
+        agent: &str,
+        bearer: &str,
+        package: &Package,
+    ) -> Result<Self> {
+        Self::capture_with(s, agent, Some(bearer), true, package).await
+    }
+
+    async fn capture_with(
+        s: &Service,
+        agent: &str,
+        bearer: Option<&str>,
+        installation: bool,
+        package: &Package,
+    ) -> Result<Self> {
         let agent = agent.to_owned();
-        let bearer = bearer.map(str::to_owned);
-        let package = package.clone();
+        let bearer = bearer.map(|bearer| (bearer.to_owned(), installation));
+        let package = Arc::new(package.clone());
         s.store
             .read(move |db| {
                 let profile = required(db.agent(&agent)?, "Agent not found")?;
-                let requester = if let Some(bearer) = &bearer {
-                    let run = crate::project_workspaces::authorize_in(db, bearer)?;
+                let requester = if let Some((bearer, installation)) = &bearer {
+                    let run = if *installation {
+                        crate::installation_mcp::authorize_in(db, bearer)?
+                    } else {
+                        crate::project_workspaces::authorize_in(db, bearer)?
+                    };
                     if run["snapshot"]["agent"]["id"] != agent {
                         return Err(denied());
                     }
@@ -66,14 +89,18 @@ impl Snapshot {
     }
 
     pub(crate) async fn for_run(s: &Service, run: &Value, package: &Package) -> Result<Self> {
-        let mut snapshot = Self::capture(s, text(&run["snapshot"]["agent"], "id"), None, package).await?;
+        let mut snapshot =
+            Self::capture(s, text(&run["snapshot"]["agent"], "id"), None, package).await?;
         let caller = run.clone();
         let expected = snapshot.clone();
-        snapshot.requester = s.store.read(move |db| {
-            expected.authorize(db)?;
-            crate::delegation::authorize_run(db, &caller)?;
-            requesting_agent(db, &caller)
-        }).await?;
+        snapshot.requester = s
+            .store
+            .read(move |db| {
+                expected.authorize(db)?;
+                crate::delegation::authorize_run(db, &caller)?;
+                requesting_agent(db, &caller)
+            })
+            .await?;
         snapshot.run_id = Some(text(run, "id").into());
         Ok(snapshot)
     }
@@ -87,8 +114,12 @@ impl Snapshot {
                 return Err(denied());
             }
         }
-        if let Some(bearer) = &self.bearer {
-            let run = crate::project_workspaces::authorize_in(db, bearer)?;
+        if let Some((bearer, installation)) = &self.bearer {
+            let run = if *installation {
+                crate::installation_mcp::authorize_in(db, bearer)?
+            } else {
+                crate::project_workspaces::authorize_in(db, bearer)?
+            };
             if run["snapshot"]["agent"]["id"] != self.agent
                 || requesting_agent(db, &run)? != self.requester
             {
@@ -98,7 +129,11 @@ impl Snapshot {
         if let Some(run_id) = &self.run_id {
             let run = required(db.run(run_id)?, "Run not found")?;
             crate::delegation::authorize_run(db, &run)?;
-            if run["snapshot"]["agent"]["id"] != self.agent || requesting_agent(db, &run)? != self.requester { return Err(denied()); }
+            if run["snapshot"]["agent"]["id"] != self.agent
+                || requesting_agent(db, &run)? != self.requester
+            {
+                return Err(denied());
+            }
         }
         if !self.package.builtin {
             let current = db.plugin_package(&self.package.manifest.id)?;
@@ -190,6 +225,9 @@ impl Invocation {
             != package.digest
         {
             return Err(denied());
+        }
+        if let Some((requester, _)) = &self.snapshot.requester {
+            super::grants::check_coverage(s, requester, &self.snapshot.agent).await?;
         }
         let fields = fields(&package.manifest, self.kind, &self.name)?;
         for (agent, grant) in grants {
@@ -313,7 +351,10 @@ async fn authorize_resources(
             .iter()
             .filter(|kind| descendant(&package.manifest, &field.resource_type, kind))
             .collect::<Vec<_>>();
-        if relevant.is_empty() {
+        let ancestor = types
+            .iter()
+            .any(|kind| descendant(&package.manifest, kind, &field.resource_type));
+        if relevant.is_empty() && !ancestor {
             continue;
         }
         for id in designated(input, &field.path)? {
@@ -334,7 +375,9 @@ async fn authorize_resources(
         }
         let input = ResolvePluginResourceInput {
             plugin_id: package.manifest.id.clone(),
-            instance_id: PluginInstanceId::parse(&instance.id)?,
+            instance_id: uuid::Uuid::parse_str(&instance.id)
+                .map(cairn_contracts::PluginInstanceId)
+                .map_err(|_| denied())?,
             resource_type: reference.resource_type.clone(),
             id: reference.id.clone(),
         };
@@ -368,14 +411,21 @@ async fn authorize_resources(
     }
     // A supplied channel and thread must name one consistent hierarchy. Multiple
     // resources of the same type may legitimately be selected (batch operations).
-    for reference in &references {
-        for ((kind, _), chain) in &resolved {
-            if kind != &reference.resource_type
-                && descendant(&package.manifest, kind, &reference.resource_type)
-                && !chain
-                    .iter()
-                    .any(|r| r.resource_type == reference.resource_type && r.id == reference.id)
-            {
+    for ((kind, _), chain) in &resolved {
+        let ancestor_types = references
+            .iter()
+            .filter(|r| {
+                r.resource_type != *kind && descendant(&package.manifest, kind, &r.resource_type)
+            })
+            .map(|r| &r.resource_type)
+            .collect::<BTreeSet<_>>();
+        for ancestor_type in ancestor_types {
+            if !chain.iter().any(|parent| {
+                &parent.resource_type == ancestor_type
+                    && references
+                        .iter()
+                        .any(|r| r.resource_type == parent.resource_type && r.id == parent.id)
+            }) {
                 return Err(denied());
             }
         }
@@ -406,30 +456,76 @@ pub async fn authorize_hook_delivery(
     Ok(())
 }
 
-// Keep the UUID conversion local to this authorization module.
-struct PluginInstanceId;
-
-impl PluginInstanceId {
-    fn parse(id: &str) -> Result<cairn_contracts::PluginInstanceId> {
-        uuid::Uuid::parse_str(id)
-            .map(cairn_contracts::PluginInstanceId)
-            .map_err(|_| denied())
-    }
-}
-
-pub(crate) async fn contribution_scope(s: &Service, snapshot: Snapshot, instances: Vec<Connection>, kind: Kind, name: &str, input: &Value) -> Result<super::scope::Scope> {
+pub(crate) async fn contribution_scope(
+    s: &Service,
+    snapshot: Snapshot,
+    instances: Vec<Connection>,
+    kind: Kind,
+    name: &str,
+    input: &Value,
+) -> Result<super::scope::Scope> {
     let mut allowed = Vec::new();
     let mut authorities = Vec::new();
     for instance in instances {
         match Invocation::prepare(s, snapshot.clone(), instance.clone(), kind, name, input).await {
             Ok(invocation) => {
-                authorities.push((instance.id.clone(), super::management::Authority::agent_action(instance.clone(), snapshot.clone(), Some(invocation))));
+                authorities.push((
+                    instance.id.clone(),
+                    super::management::Authority::agent_action(
+                        instance.clone(),
+                        snapshot.clone(),
+                        Some(invocation),
+                    ),
+                ));
                 allowed.push(instance);
-            },
-            Err(error) if matches!(error.status, 400 | 403 | 404 | 502) => {},
+            }
+            Err(error) if matches!(error.status, 400 | 403 | 404 | 502) => {}
             Err(error) => return Err(error),
         }
     }
-    if allowed.is_empty() { return Err(denied()); }
-    Ok(super::scope::Scope::Contributions(Box::new(super::scope::Scope::Agent {agent_id:snapshot.agent,instances:allowed}),authorities))
+    if allowed.is_empty() {
+        return Err(denied());
+    }
+    Ok(super::scope::Scope::Contributions(
+        Box::new(super::scope::Scope::Agent {
+            agent_id: snapshot.agent,
+            instances: allowed,
+        }),
+        authorities,
+    ))
+}
+
+pub(crate) async fn resource_set_covered(
+    s: &Service,
+    package: &Package,
+    instance: &Connection,
+    agent: &str,
+    held: &PluginContributionGrant,
+    proposed: &[PluginResourceRef],
+    snapshot: Snapshot,
+) -> Result<()> {
+    let mut input = serde_json::Map::new();
+    let fields = proposed
+        .iter()
+        .enumerate()
+        .map(|(index, resource)| {
+            let key = format!("r{index}");
+            input.insert(key.clone(), Value::String(resource.id.clone()));
+            ResourceField {
+                path: format!("/{key}"),
+                resource_type: resource.resource_type.clone(),
+            }
+        })
+        .collect::<Vec<_>>();
+    authorize_resources(
+        s,
+        package,
+        instance,
+        agent,
+        held,
+        &fields,
+        &Value::Object(input),
+        Some(snapshot),
+    )
+    .await
 }

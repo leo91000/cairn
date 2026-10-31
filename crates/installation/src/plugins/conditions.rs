@@ -33,8 +33,12 @@ pub fn is_condition(condition: &Value) -> bool {
 async fn granted(s: &Service, agent_id: &str) -> Result<Vec<(Package, Vec<Connection>)>> {
     let mut by_plugin = BTreeMap::<String, Vec<Connection>>::new();
     for connection in s.store.plugin_instances().await? {
-        let (agent,id) = (agent_id.to_owned(),connection.id.clone());
-        if connection.enabled && s.store.read(move |db| db.has_plugin_grant(&agent,&id)).await? {
+        let (agent, id) = (agent_id.to_owned(), connection.id.clone());
+        if connection.enabled
+            && s.store
+                .read(move |db| db.has_plugin_grant(&agent, &id))
+                .await?
+        {
             by_plugin
                 .entry(connection.plugin_id.clone())
                 .or_default()
@@ -55,15 +59,27 @@ async fn granted(s: &Service, agent_id: &str) -> Result<Vec<(Package, Vec<Connec
     Ok(output)
 }
 
-async fn allowed_instances(s: &Service, agent: &str, instances: &[Connection], name: &str) -> Result<Vec<Connection>> {
-    let (agent,name,instances)=(agent.to_owned(),name.to_owned(),instances.to_vec());
-    s.store.read(move |db| {
-        let mut allowed=Vec::new();
-        for instance in instances {
-            if db.plugin_contribution(&agent,&instance.id,Kind::Condition,&name)?.is_some() {allowed.push(instance);}
-        }
-        Ok(allowed)
-    }).await
+async fn allowed_instances(
+    s: &Service,
+    agent: &str,
+    instances: &[Connection],
+    name: &str,
+) -> Result<Vec<Connection>> {
+    let (agent, name, instances) = (agent.to_owned(), name.to_owned(), instances.to_vec());
+    s.store
+        .read(move |db| {
+            let mut allowed = Vec::new();
+            for instance in instances {
+                if db
+                    .plugin_contribution(&agent, &instance.id, Kind::Condition, &name)?
+                    .is_some()
+                {
+                    allowed.push(instance);
+                }
+            }
+            Ok(allowed)
+        })
+        .await
 }
 
 /// The `wait_for` schema of one condition: its type, the project when pinned to one,
@@ -100,10 +116,15 @@ fn schema(package: &Package, condition: &cairn_plugin_api::Condition) -> Value {
 
 /// Condition schemas for the agent, for the `wait_for` tool.
 pub async fn schemas(s: &Service, agent_id: &str) -> Result<Vec<Value>> {
-    let mut output=Vec::new();
+    let mut output = Vec::new();
     for (package, instances) in granted(s, agent_id).await? {
         for condition in &package.manifest.conditions {
-            if !allowed_instances(s, agent_id, &instances, &condition.name).await?.is_empty() { output.push(schema(&package,condition)); }
+            if !allowed_instances(s, agent_id, &instances, &condition.name)
+                .await?
+                .is_empty()
+            {
+                output.push(schema(&package, condition));
+            }
         }
     }
     Ok(output)
@@ -132,7 +153,12 @@ pub async fn normalize(s: &Service, agent_id: &str, condition: &Value) -> Result
     }
     for (package, instances) in granted(s, agent_id).await? {
         if let Some(declared) = package.manifest.condition_of_type(kind) {
-            if allowed_instances(s,agent_id,&instances,&declared.name).await?.is_empty() { continue; }
+            if allowed_instances(s, agent_id, &instances, &declared.name)
+                .await?
+                .is_empty()
+            {
+                continue;
+            }
             let schema = schema(&package, declared);
             let mut condition = condition.clone();
             if let Some(object) = condition.as_object_mut() {
@@ -154,10 +180,20 @@ pub async fn normalize(s: &Service, agent_id: &str, condition: &Value) -> Result
 pub(crate) fn access(db: &Db<'_>, run: &Value, condition: &Value) -> Result<()> {
     let agent_id = text(&run["snapshot"]["agent"], "id");
     let plugin = text(condition, "pluginId");
-    let name = text(condition,"type").strip_prefix(&format!("{plugin}_")).unwrap_or("");
+    let name = text(condition, "type")
+        .strip_prefix(&format!("{plugin}_"))
+        .unwrap_or("");
     let mut granted = false;
     for instance in db.plugin_instances()? {
-        if instance.enabled && instance.plugin_id == plugin && db.plugin_contribution(agent_id, &instance.id, Kind::Condition, name)?.is_some() { granted=true; break; }
+        if instance.enabled
+            && instance.plugin_id == plugin
+            && db
+                .plugin_contribution(agent_id, &instance.id, Kind::Condition, name)?
+                .is_some()
+        {
+            granted = true;
+            break;
+        }
     }
     if !granted {
         return Err(Error::forbidden(
@@ -275,8 +311,16 @@ pub async fn observe(s: &Service, run: &Value, condition: &Value) -> Result<Obse
             object.remove(key);
         }
     }
-    let snapshot = super::grant_authorization::Snapshot::for_run(s,run,&package).await?;
-    let scope = super::grant_authorization::contribution_scope(s,snapshot,instances,Kind::Condition,&declared.name,&input).await?;
+    let snapshot = super::grant_authorization::Snapshot::for_run(s, run, &package).await?;
+    let scope = super::grant_authorization::contribution_scope(
+        s,
+        snapshot,
+        instances,
+        Kind::Condition,
+        &declared.name,
+        &input,
+    )
+    .await?;
     let payload = json!({
         "condition": declared.name,
         "input": input,

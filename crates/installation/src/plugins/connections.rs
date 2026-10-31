@@ -181,11 +181,6 @@ pub(crate) fn check_revision(db: &Db<'_>, expected: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// The connection's secret, for host-side injection only. Never sent to plugin code.
-pub(crate) async fn credential(s: &Service, connection: &Connection) -> Result<Option<String>> {
-    super::oauth::access_token(s, connection).await
-}
-
 pub(crate) async fn status(
     s: &Service,
     connection: &Connection,

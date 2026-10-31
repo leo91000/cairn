@@ -161,7 +161,7 @@ pub async fn run(s: &Service, context: &Context, args: &Value) -> Result<Value> 
         Some(tokio::select! {
             biased;
             () = s.shutdown.cancelled() => return Err(Error::unavailable("The installation is shutting down.")),
-            result = s.plugins.program_caches.acquire(identity, config, reusable, generation) => result?,
+            result = s.plugins.program_caches.acquire_authorized(identity, config, reusable, generation, ||Box::pin(capabilities::authorize_management(s,context))) => result?,
         })
     } else {
         None
@@ -197,6 +197,7 @@ pub async fn run(s: &Service, context: &Context, args: &Value) -> Result<Value> 
             cache.socket(),
         );
     }
+    capabilities::authorize_management(s, context).await?;
     let mut child = command.spawn().map_err(|_| {
         Error::unavailable("The program could not start. Is it installed on this server?")
     })?;
