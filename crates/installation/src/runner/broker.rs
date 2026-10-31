@@ -243,6 +243,13 @@ impl Broker {
         let stop = self.stop.child_token();
         let (done, receiver) = watch::channel(false);
         let physical_teardown = reservation.subscribe_teardown();
+        // A successful start exposes the log immediately, including during disk
+        // preparation and guest boot. Preserve bytes left by an admission retry.
+        tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.state_file(id, "log"))
+            .await?;
         atomic_write(&self.state_file(id, "run"), plan.run_id().as_bytes()).await?;
         atomic_write(&self.state_file(id, "active"), b"1").await?;
         active.insert(
@@ -563,7 +570,179 @@ async fn vm_plan_run_id(path: &Path) -> Result<Option<String>> {
 #[cfg(test)]
 mod ownership_tests {
     use super::*;
+    use futures_util::StreamExt;
     use serde_json::json;
+    use tokio::io::AsyncWriteExt;
+
+    async fn startup_plan(broker: &Broker, run: &str) -> String {
+        // Complete the interrupted attribution used by pending_claim's fixtures.
+        crate::storage::environment::recover(&broker.state)
+            .await
+            .unwrap();
+        let id = crate::config::id();
+        let plans = broker.data.join("runner-plans");
+        crate::skills::private_dir(&plans).await.unwrap();
+        tokio::fs::write(broker.data.join("runner-secret"), b"fixture")
+            .await
+            .unwrap();
+        atomic_write(
+            &plans.join(format!("{id}.json")),
+            &serde_json::to_vec(&json!({
+                "id": id,
+                "runId": run,
+                "expires": null,
+                "cwd": broker.data.join("runs").join(run).join("workspace"),
+                "imports": [],
+                "storage": {},
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        id
+    }
+
+    async fn log_response(
+        broker: &Broker,
+        id: &str,
+        offset: u64,
+    ) -> Result<axum::response::Response> {
+        let request = axum::extract::Request::builder()
+            .uri(format!("/runs/{id}/logs?cursor=1&offset={offset}"))
+            .header("authorization", "Bearer fixture")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        super::super::routes::handler(axum::extract::State(broker.clone()), request).await
+    }
+
+    #[tokio::test]
+    async fn accepted_start_streams_heartbeats_before_guest_preparation_and_preserves_cursors() {
+        let root = tempfile::tempdir().unwrap();
+        let (broker, run) = pending_claim(root.path()).await;
+        let id = startup_plan(&broker, &run).await;
+        // Hold the production disk ownership gate to keep preparation pending,
+        // without starting a VMM or requiring guest credentials.
+        let owner = crate::storage::environment::ownership(&broker.state, &run, "fixture")
+            .await
+            .unwrap();
+        broker.start(&id).await.unwrap();
+        let response = log_response(&broker, &id, 0).await;
+        if response.is_err() {
+            drop(owner);
+            broker.stop(&id).await.unwrap();
+            panic!("accepted attempts must expose their log before guest preparation");
+        }
+        let mut stream = response.unwrap().into_body().into_data_stream();
+        let heartbeat = tokio::time::timeout(Duration::from_secs(3), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(heartbeat, b"{\"type\":\"heartbeat\"}\n".as_slice());
+        assert!(broker.active.lock().await[&id].socket.get().is_none());
+        assert!(!broker.state_file(&id, "exit").exists());
+
+        // Retries and concurrent replays must retain the same empty stream.
+        let (first, second) = tokio::join!(broker.start(&id), broker.start(&id));
+        first.unwrap();
+        second.unwrap();
+        let path = broker.state_file(&id, "log");
+        let mut writer = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .await
+            .unwrap();
+        let event = Event::Output {
+            stderr: false,
+            data: STANDARD.encode("after preparation"),
+        };
+        wire::write(&mut writer, &event).await.unwrap();
+        writer.flush().await.unwrap();
+        let chunk = tokio::time::timeout(Duration::from_secs(3), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let packet: Value = serde_json::from_slice(&chunk).unwrap();
+        assert_eq!(
+            packet["event"]["data"],
+            STANDARD.encode("after preparation")
+        );
+        let offset = packet["offset"].as_u64().unwrap();
+        assert_eq!(offset, tokio::fs::metadata(&path).await.unwrap().len());
+        broker.start(&id).await.unwrap();
+        assert_eq!(tokio::fs::metadata(&path).await.unwrap().len(), offset);
+        drop(stream);
+
+        // Reconnecting from the acknowledged boundary must omit the first event,
+        // then deliver the controller's startup failure and an explicit end.
+        let response = log_response(&broker, &id, offset).await.unwrap();
+        drop(owner);
+        broker.stop(&id).await.unwrap();
+        let bytes = tokio::time::timeout(
+            Duration::from_secs(3),
+            axum::body::to_bytes(response.into_body(), 10000),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let packets = bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(packets.last().unwrap()["type"], "end");
+        assert_eq!(
+            packets
+                .iter()
+                .filter(|packet| packet["type"] == "log")
+                .count(),
+            2
+        );
+        assert!(
+            packets
+                .iter()
+                .all(|packet| packet["event"] != serde_json::to_value(&event).unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_log_creation_failure_does_not_publish_or_occupy_an_attempt() {
+        let root = tempfile::tempdir().unwrap();
+        let (broker, run) = pending_claim(root.path()).await;
+        let id = startup_plan(&broker, &run).await;
+        tokio::fs::create_dir(broker.state_file(&id, "log"))
+            .await
+            .unwrap();
+        assert!(broker.start(&id).await.is_err());
+        assert!(!broker.active.lock().await.contains_key(&id));
+        assert!(!broker.state_file(&id, "run").exists());
+        assert!(!broker.state_file(&id, "active").exists());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while broker.pool.health().await.occupied != 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn startup_preserves_output_left_before_attempt_registration() {
+        let root = tempfile::tempdir().unwrap();
+        let (broker, run) = pending_claim(root.path()).await;
+        let id = startup_plan(&broker, &run).await;
+        let owner = crate::storage::environment::ownership(&broker.state, &run, "fixture")
+            .await
+            .unwrap();
+        let path = broker.state_file(&id, "log");
+        let previous = b"{\"type\":\"output\",\"stderr\":false,\"data\":\"YQ==\"}\n";
+        tokio::fs::write(&path, previous).await.unwrap();
+        broker.start(&id).await.unwrap();
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), previous);
+        drop(owner);
+        broker.stop(&id).await.unwrap();
+    }
 
     #[tokio::test]
     async fn deadline_stops_its_volume_while_the_registry_is_contended() {
