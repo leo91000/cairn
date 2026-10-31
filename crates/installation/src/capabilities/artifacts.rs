@@ -16,6 +16,11 @@ async fn recheck_read(
     credential: Option<&str>,
     run: String,
 ) -> Result<()> {
+    if let Some(credential) = credential {
+        crate::relay::authorize_read_mcp(s, credential).await?;
+    }
+    // A conversation may be trashed or purged during the remote check.
+    // Fence the prepared result against current local state after that await.
     s.store
         .read(move |db| {
             authority.authorize(db)?;
@@ -24,9 +29,6 @@ async fn recheck_read(
             Ok(())
         })
         .await?;
-    if let Some(credential) = credential {
-        crate::relay::authorize_read_mcp(s, credential).await?;
-    }
     Ok(())
 }
 
