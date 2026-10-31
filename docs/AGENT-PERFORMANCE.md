@@ -439,7 +439,12 @@ was persisted, the controller stopped, the node updated, or real work completed.
 publication task may continue. Abrupt process termination cannot emit a summary.
 Concurrent node drains remain separate records without a node/run identifier.
 The event contains no identifiers, URLs, error strings or inherited private spans;
-a fixed field-free root span isolates both plain and JSON tracing formatters.
+a fixed field-free root span and a short-lived scoped logging thread isolate
+plain and JSON tracing formatters. The thread uses the current subscriber with
+an empty thread-local span stack, so per-layer filters cannot restore an older
+private span. It is created only at the existing summary boundary when INFO
+performance events are enabled, never per attempt or retry. Thread startup or
+logging failure drops the diagnostic without a context-bearing fallback.
 If a logging filter disables that span, the summary is suppressed to preserve
 this isolation.
 The maintenance API, deadlines, retries and ownership rules are unchanged.

@@ -104,37 +104,38 @@ impl Drain {
         let now = Instant::now();
         self.settle(now);
         let milliseconds = |phase: Phase| self.durations[phase.index()].as_millis() as u64;
-        // JSON formatters can include the current span independently of the
-        // event parent. Scope this single emission to a field-free root span.
-        let root =
-            tracing::info_span!(target: "cairn_performance", parent: None, "maintenance_summary");
-        if root.is_disabled() {
-            return;
-        }
-        let _entered = root.enter();
-        tracing::info!(
-            target: "cairn_performance",
-            parent: &root,
-            operation = "node_maintenance_drain",
-            outcome = outcome.label(),
-            phase = self.phase.label(),
-            elapsed_ms = now.saturating_duration_since(self.started).as_millis() as u64,
-            inventory_ms = milliseconds(Phase::Inventory),
-            preparation_ms = milliseconds(Phase::Preparation),
-            pause_request_ms = milliseconds(Phase::PauseRequest),
-            capture_ms = milliseconds(Phase::Capture),
-            capture_wait_ms = milliseconds(Phase::CaptureWait),
-            placement_release_ms = milliseconds(Phase::PlacementRelease),
-            attempts = self.attempts,
-            stale_attempts = self.stale_attempts,
-            pause_requests = self.pause_requests,
-            pause_failures = self.pause_failures,
-            capture_calls = self.capture_calls,
-            capture_waits = self.capture_waits,
-            capture_failures = self.capture_failures,
-            placement_releases = self.placement_releases,
-            placement_failures = self.placement_failures,
-        );
+        // Formatting layers may skip a root span and restore older context.
+        // Emit this single summary with an empty thread-local span stack.
+        crate::performance::without_span_context(|| {
+            let root = tracing::info_span!(target: "cairn_performance", parent: None, "maintenance_summary");
+            if root.is_disabled() {
+                return;
+            }
+            let _entered = root.enter();
+            tracing::info!(
+                target: "cairn_performance",
+                parent: &root,
+                operation = "node_maintenance_drain",
+                outcome = outcome.label(),
+                phase = self.phase.label(),
+                elapsed_ms = now.saturating_duration_since(self.started).as_millis() as u64,
+                inventory_ms = milliseconds(Phase::Inventory),
+                preparation_ms = milliseconds(Phase::Preparation),
+                pause_request_ms = milliseconds(Phase::PauseRequest),
+                capture_ms = milliseconds(Phase::Capture),
+                capture_wait_ms = milliseconds(Phase::CaptureWait),
+                placement_release_ms = milliseconds(Phase::PlacementRelease),
+                attempts = self.attempts,
+                stale_attempts = self.stale_attempts,
+                pause_requests = self.pause_requests,
+                pause_failures = self.pause_failures,
+                capture_calls = self.capture_calls,
+                capture_waits = self.capture_waits,
+                capture_failures = self.capture_failures,
+                placement_releases = self.placement_releases,
+                placement_failures = self.placement_failures,
+            );
+        });
     }
 }
 

@@ -35,6 +35,7 @@ async fn maintenance_reports_actual_native_capture_retries_and_preserves_ownersh
     for child in [
         "nodes::maintenance::diagnostic_tests::native_capture_retry_report_child",
         "nodes::maintenance::diagnostic_tests::disabled_summary_span_child",
+        "nodes::maintenance::diagnostic_tests::layered_capture_retry_report_child",
     ] {
         let output = tokio::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", child, "--ignored", "--nocapture"])
@@ -66,6 +67,41 @@ async fn native_capture_retry_report_child() {
             .finish(),
     )
     .unwrap();
+    actual_drain_reports(capture).await;
+}
+
+struct Identity;
+
+impl<S: tracing::Subscriber> Layer<S> for Identity {}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "isolated layered JSON tracing dispatcher for actual maintenance path"]
+async fn layered_capture_retry_report_child() {
+    let capture = Capture::default();
+    let formatting = tracing_subscriber::fmt::layer()
+        .json()
+        .with_ansi(false)
+        .with_writer({
+            let capture = capture.clone();
+            move || capture.clone()
+        })
+        .with_filter(tracing_subscriber::filter::filter_fn(|metadata| {
+            metadata.is_event() || metadata.name() == "private_fixture_parent"
+        }));
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::registry()
+            .with(Identity)
+            .with(formatting),
+    )
+    .unwrap();
+    assert!(
+        !tracing::info_span!(target: "cairn_performance", parent: None, "maintenance_summary")
+            .is_disabled()
+    );
+    actual_drain_reports(capture).await;
+}
+
+async fn actual_drain_reports(capture: Capture) {
     let private_span = tracing::info_span!(
         "private_fixture_parent",
         private = "private-context-must-not-escape"
