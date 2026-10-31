@@ -429,9 +429,6 @@ impl PluginPackageOperation {
                     &input.operation_id,
                     self.name == "get_plugin_resource_operation",
                 )?;
-                if resource_result.is_some() {
-                    authority.recheck(s).await?;
-                }
                 if self.name == "cancel_plugin_operation" {
                     s.plugins.operations.cancel(&input.operation_id)?;
                 }
@@ -439,9 +436,10 @@ impl PluginPackageOperation {
             }
             _ => return Err(Error::not_found("Unknown plugin package operation.")),
         };
-        s.store.read(move |db| authority.authorize(db)).await?;
+        let check = authority.clone();
+        s.store.read(move |db| check.authorize(db)).await?;
         if let Some(read) = resource_result {
-            read.authorize(s).await?;
+            read.authorize_result(s, &authority).await?;
         }
         Ok(result)
     }

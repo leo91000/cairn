@@ -14,7 +14,7 @@ use cairn_contracts::{
 };
 use cairn_plugin_api::Manifest;
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, sync::Arc};
 
 fn plain(value: &str, max: usize) -> bool {
     !value.is_empty() && value.len() <= max && !value.chars().any(char::is_control)
@@ -46,6 +46,21 @@ pub(crate) struct Read {
 }
 
 impl Read {
+    pub(crate) async fn authorize_result(
+        self: Arc<Self>,
+        s: &Service,
+        caller: &Authority,
+    ) -> Result<()> {
+        self.authorize(s).await?;
+        // The poller can differ from the originating public authorization.
+        // Recheck it after the originating authority's remote check, then take
+        // one final local grant/revision snapshot after all remote I/O.
+        caller.recheck(s).await?;
+        s.store
+            .read(move |db| scope::authorize_in(db, &self.scope))
+            .await
+    }
+
     pub(crate) async fn authorize(&self, s: &Service) -> Result<()> {
         let current = registry::active(s, &self.package.manifest.id).await?;
         if current.digest != self.package.digest {
