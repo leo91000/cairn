@@ -103,7 +103,7 @@ async fn populate(service: &Service, count: usize) -> Value {
                 db.insert_artifact(&common::deliverable(
                     run,
                     artifact.as_str().unwrap(),
-                    json!({}),
+                    &json!({}),
                 ))?;
                 db.save_checkpoint_boundary(run, &json!({ "completed": true }))?;
             }

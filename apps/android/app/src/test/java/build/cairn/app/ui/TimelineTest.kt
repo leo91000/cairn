@@ -622,10 +622,10 @@ class TimelineTest {
                     event(5, "item.completed", "answer-2", "agent_message"),
                 )
             )
-        fun file(id: String, message: String, version: Int, time: Long) =
+        fun file(id: String, message: String, version: Long, time: Long) =
             build.cairn.app.data.Deliverable(
-                id,
-                "run",
+                id = id,
+                runId = "run",
                 messageId = message,
                 key = "report",
                 version = version,

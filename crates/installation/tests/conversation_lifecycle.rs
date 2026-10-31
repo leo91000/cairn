@@ -1136,7 +1136,7 @@ async fn seven_day_expiration_preserves_history_uploads_artifacts_and_public_acc
     let record = common::deliverable(
         &run,
         &artifact,
-        json!({
+        &json!({
             "publicToken": "expired-share", "publicUrl":"https://example.invalid/artifacts/expired-share", "visibility": "public"
         }),
     );
