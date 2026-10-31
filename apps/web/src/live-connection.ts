@@ -33,7 +33,8 @@ export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: 
     clearTimeout(watchdog)
   }
 
-  function retry() {
+  function retry(awaitingTimeline = false) {
+    waitingForTimeline = awaitingTimeline
     disconnect()
     if (stopped)
       return
@@ -94,8 +95,7 @@ export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: 
         if (!Array.isArray(batch.events) || typeof batch.reset !== 'boolean' || typeof batch.more !== 'boolean')
           throw new Error('Invalid stream batch')
         if (windowed && batch.history?.startsWith('v1:')) {
-          waitingForTimeline = true
-          retry()
+          retry(true)
           return
         }
 

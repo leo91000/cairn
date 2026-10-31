@@ -7,7 +7,7 @@ import {
   it,
   vi,
 } from 'vitest'
-import { nextTick } from 'vue'
+import { effectScope, nextTick } from 'vue'
 
 class Source extends EventTarget {
   static all: Source[] = []
@@ -500,7 +500,7 @@ it('moves live streams between routes using only the accepted cursor and history
   const connection = liveConnection('/chats/c/stream', accept, vi.fn(), { cursor: 7, history: 'v1' })
   await vi.waitFor(() => expect(channel.packets.length).toBe(1))
   const request = JSON.parse(new TextDecoder().decode(channel.packets[0].subarray(13)))
-  expect(request.path).toBe('/api/chats/c/stream?after=7&history=v1&window=1')
+  expect(request.path).toBe('/api/chats/c/stream?after=7&history=v1&window=1&timeline=1')
   reply(channel, {
     type: 'stream_start',
     id: request.id,
@@ -534,6 +534,82 @@ it('moves live streams between routes using only the accepted cursor and history
   }))
   expect(accept.mock.calls[1][0].events).toEqual([finished])
   connection.close()
+})
+
+it('clears revoked conversation content when a stream fails while waiting for the manager update', async () => {
+  const { state } = await import('../src/api')
+  const {
+    cacheScope,
+    clearHistoryCache,
+    peekHistory,
+    writeHistory,
+  } = await import('../src/history-cache')
+  const { useLiveRun } = await import('../src/use-live-run')
+  vi.stubGlobal('fetch', vi.fn((url: string) => Promise.resolve(url.endsWith('/direct/authorize')
+    ? Response.json({ available: false })
+    : Response.json({ error: 'Access revoked' }, { status: 403 }))))
+  state.csrf = 'test-csrf'
+  state.authenticated = true
+  state.ready = true
+  const route = '/chats/c/stream'
+  const cache = await cacheScope(`${state.installationId}:${state.csrf}`)
+  await writeHistory(cache, route, {
+    version: 2,
+    cursor: 7,
+    history: 'v2:r:1',
+    state: { run: null, chat: null, artifacts: [] },
+    events: [],
+    entries: [{
+      id: 'message:1:a',
+      runId: 'r',
+      position: 1,
+      revision: 7,
+      source: 7,
+      turn: 1,
+      attempt: 0,
+      createdAt: 1,
+      updatedAt: 7,
+      content: {
+        kind: 'agentMessage',
+        itemId: 'a',
+        text: 'Saved reply',
+        state: 'done',
+      },
+    }],
+    oldest: 1,
+    hasOlder: false,
+    savedAt: Date.now(),
+  })
+  const scope = effectScope()
+  try {
+    const live = scope.run(() => useLiveRun(() => route, { list: true }))!
+    await vi.waitFor(() => expect(Source.all.some(source => source.url.includes('/chats/c/stream?'))).toBe(true))
+    expect(live.timeline.value).toHaveLength(1)
+    const first = Source.all.find(source => source.url.includes('/chats/c/stream?'))!
+    first.dispatchEvent(new MessageEvent('batch', {
+      lastEventId: '9',
+      data: JSON.stringify({
+        events: [],
+        reset: true,
+        more: false,
+        history: 'v1:r:1',
+      }),
+    }))
+    expect(live.connectionNotice.value).toContain('finish updating')
+    await vi.advanceTimersByTimeAsync(500)
+    const resumed = Source.all.filter(source => source.url.includes('/chats/c/stream?')).at(-1)!
+    expect(resumed).not.toBe(first)
+    resumed.onerror?.()
+    await vi.waitFor(() => expect(live.error.value).toBe('Access revoked'))
+    expect(live.timeline.value).toHaveLength(0)
+    expect(live.snapshot.value).toBeUndefined()
+    expect(live.carriesList.value).toBe(false)
+    await vi.waitFor(() => expect(peekHistory(cache, route)).toBeUndefined())
+  }
+  finally {
+    scope.stop()
+    await clearHistoryCache()
+  }
 })
 
 it('reuses the client message identifier on fallback and accepts an already used identifier', async () => {
