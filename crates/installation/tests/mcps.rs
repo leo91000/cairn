@@ -317,7 +317,8 @@ async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
     // One event can exceed the transport ceiling on its own. Its original content
     // must remain available, including escaped characters and multi-byte Unicode.
     let large = "\0\"\\🦊é".repeat(250_000);
-    let payload = json!({ "item": { "id": "large", "type": "agent_message", "text": large } });
+    let payload =
+        json!({ "item": { "id": "é".repeat(600), "type": "agent_message", "text": large } });
     s.store
         .event(
             run_id,
@@ -406,6 +407,7 @@ async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
     assert_eq!(reply["preview"]["kind"], "agentMessage");
     assert_eq!(reply["preview"]["source"], event_id);
     let entry_id = reply["preview"]["id"].as_str().unwrap();
+    assert!(entry_id.len() > 1024 && entry_id.chars().count() <= 1024);
     let mut offset = 0;
     let mut digest = Value::Null;
     let mut contents = String::new();
@@ -433,7 +435,7 @@ async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
             &EventKind::ItemUpdated,
             "Updated answer",
             Some(
-                json!({"item": {"id": "large", "type": "agent_message", "text": "Updated answer"}}),
+                json!({"item": {"id": "é".repeat(600), "type": "agent_message", "text": "Updated answer"}}),
             ),
         )
         .await

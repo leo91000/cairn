@@ -7,6 +7,8 @@ use cairn_contracts::{EventKind, RunState};
 use cairn_installation::store::{Db, Store};
 use rusqlite::Connection;
 use serde_json::{Value, json};
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
 
 use super::event_measurement::frozen;
 
@@ -191,6 +193,33 @@ async fn timeline_storage_layouts() {
                     }));
                 }
                 let cold_cpu = cpu() - start_cpu;
+                // Evict only this benchmark's database, never the host-wide page cache.
+                // Checkpoint first so the measured read does not depend on a cached WAL.
+                #[cfg(target_os = "linux")]
+                let (os_cold, os_cold_cpu) = {
+                    db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+                    let file = std::fs::File::open(&path).unwrap();
+                    file.sync_all().unwrap();
+                    let mut samples = Vec::new();
+                    let start_cpu = cpu();
+                    for _ in 0..10 {
+                        // SAFETY: the descriptor remains open, and the advice covers the file.
+                        let result = unsafe {
+                            libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED)
+                        };
+                        assert_eq!(result, 0, "could not evict benchmark database pages");
+                        let fresh = connection(&path);
+                        std::hint::black_box(measured(&mut samples, || {
+                            read(&fresh, reference, i64::MAX, true)
+                        }));
+                    }
+                    (Some(distribution(&samples)), Some(cpu() - start_cpu))
+                };
+                #[cfg(not(target_os = "linux"))]
+                let (os_cold, os_cold_cpu): (
+                    Option<serde_json::Value>,
+                    Option<i64>,
+                ) = (None, None);
                 let mut writes = Vec::new();
                 let start_cpu = cpu();
                 for n in count..count + 200 {
@@ -214,7 +243,31 @@ async fn timeline_storage_layouts() {
                     .collect();
                 println!(
                     "TIMELINE_STORAGE {}",
-                    json!({"reference":reference,"rows":count,"repetition":repetition,"dbBytes":std::fs::metadata(&path).unwrap().len(),"walBytes":wal,"encodedPayloadBytes":payload,"pages":pages,"openingWireBytes":opening_wire_bytes,"batchWireBytes":batch_bytes,"bulkWriteUs":bulk_us,"batch":distribution(&batches),"opening":distribution(&opening),"connectionColdOpening":distribution(&cold),"write":distribution(&writes),"cpuUs":{"bulkWrite":bulk_cpu,"batch100":batch_cpu,"opening100":opening_cpu,"cold50IncludingOpen":cold_cpu,"write200":write_cpu}})
+                    json!({
+                        "reference": reference,
+                        "rows": count,
+                        "repetition": repetition,
+                        "dbBytes": std::fs::metadata(&path).unwrap().len(),
+                        "walBytes": wal,
+                        "encodedPayloadBytes": payload,
+                        "pages": pages,
+                        "openingWireBytes": opening_wire_bytes,
+                        "batchWireBytes": batch_bytes,
+                        "bulkWriteUs": bulk_us,
+                        "batch": distribution(&batches),
+                        "opening": distribution(&opening),
+                        "connectionColdOpening": distribution(&cold),
+                        "osColdOpening": os_cold,
+                        "write": distribution(&writes),
+                        "cpuUs": {
+                            "bulkWrite": bulk_cpu,
+                            "batch100": batch_cpu,
+                            "opening100": opening_cpu,
+                            "cold50IncludingOpen": cold_cpu,
+                            "osCold10IncludingOpen": os_cold_cpu,
+                            "write200": write_cpu,
+                        },
+                    })
                 );
             }
         }

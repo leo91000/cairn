@@ -254,7 +254,7 @@ impl RunOperation {
                     || input
                         .entry_id
                         .as_ref()
-                        .is_some_and(|id| id.is_empty() || id.len() > 1024)
+                        .is_some_and(|id| id.is_empty() || id.chars().count() > 1024)
                     || input
                         .event_id
                         .is_some_and(|id| !(1..=9_007_199_254_740_991).contains(&id))
