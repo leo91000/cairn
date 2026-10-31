@@ -100,15 +100,11 @@ async fn populate(service: &Service, count: usize) -> Value {
                         "text": "x".repeat(512),
                     }))?;
                 }
-                db.set(
-                    &format!("artifact:{run}:{}", artifact.as_str().unwrap()),
-                    &json!({
-                        "id": artifact,
-                        "runId": run,
-                        "visibility": "private",
-                    }),
-                    None,
-                )?;
+                db.insert_artifact(&common::deliverable(
+                    run,
+                    artifact.as_str().unwrap(),
+                    json!({}),
+                ))?;
                 db.save_checkpoint_boundary(run, &json!({ "completed": true }))?;
             }
             Ok(())
@@ -262,7 +258,7 @@ async fn trial(count: usize, chained: bool, repeat: usize) {
             "runs": db.0.query_row("SELECT count(*) FROM runs", [], |row| row.get::<_, i64>(0))?,
             "events": db.0.query_row("SELECT count(*) FROM events", [], |row| row.get::<_, i64>(0))?,
             "messages": db.0.query_row("SELECT count(*) FROM chat_messages", [], |row| row.get::<_, i64>(0))?,
-            "artifacts": db.keys("artifact:")?.len(),
+            "artifacts": db.artifacts(None)?.len(),
             "checkpoints": db.0.query_row("SELECT count(*) FROM run_checkpoints", [], |row| row.get::<_, i64>(0))?,
         }))
     }).await.unwrap();

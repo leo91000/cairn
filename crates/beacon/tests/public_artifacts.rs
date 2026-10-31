@@ -34,21 +34,16 @@ async fn seeded_artifact(
     tokio::fs::write(directory.join(&artifact), bytes)
         .await
         .unwrap();
+    let record: cairn_contracts::Deliverable = serde_json::from_value(json!({
+        "id": artifact, "runId": run, "messageId": null,
+        "key": "report", "version": 1, "group": "", "kind": "file", "size": bytes.len(), "createdAt": 1,
+        "name": "report.html", "title": "Report", "mediaType": media_type,
+        "visibility": "private", "previewStatus": "none",
+        "url": format!("/api/runs/{run}/artifacts/{artifact}"),
+    })).unwrap();
     installation
         .store
-        .set(
-            &format!("artifact:{run}:{artifact}"),
-            json!({
-                "id": artifact,
-                "runId": run,
-                "name": "report.html",
-                "title": "Report",
-                "mediaType": media_type,
-                "visibility": "private",
-                "url": format!("/api/runs/{run}/artifacts/{artifact}"),
-            }),
-            None,
-        )
+        .transaction(move |db| db.insert_artifact(&record))
         .await
         .unwrap();
     (run, artifact)

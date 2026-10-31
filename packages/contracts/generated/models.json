@@ -3031,6 +3031,138 @@
       ],
       "type": "object"
     },
+    "Deliverable": {
+      "additionalProperties": false,
+      "properties": {
+        "createdAt": {
+          "default": 0,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "digest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "duration": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "excerpt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "group": {
+          "default": "",
+          "type": "string"
+        },
+        "height": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "kind": {
+          "default": "file",
+          "pattern": "^(image|video|audio|pdf|markdown|code|file)$",
+          "type": "string"
+        },
+        "mediaType": {
+          "default": "application/octet-stream",
+          "type": "string"
+        },
+        "messageId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "default": "",
+          "type": "string"
+        },
+        "previewStatus": {
+          "default": "none",
+          "pattern": "^(pending|ready|unavailable|none)$",
+          "type": "string"
+        },
+        "publicToken": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "publicUrl": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runId": {
+          "type": "string"
+        },
+        "size": {
+          "default": 0,
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "title": {
+          "default": "",
+          "type": "string"
+        },
+        "url": {
+          "default": "",
+          "type": "string"
+        },
+        "version": {
+          "default": 1,
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "visibility": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "width": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "runId",
+        "key"
+      ],
+      "type": "object"
+    },
     "EditChatMessage": {
       "additionalProperties": false,
       "properties": {
@@ -4247,6 +4379,64 @@
       },
       "required": [
         "projects"
+      ],
+      "type": "object"
+    },
+    "ListRunArtifactsInput": {
+      "additionalProperties": false,
+      "properties": {
+        "limit": {
+          "default": 50,
+          "format": "uint32",
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "offset": {
+          "default": 0,
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runId": {
+          "description": "Wire UUID for an existing run; distinct from a mission/task identifier.",
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId",
+        "offset",
+        "limit"
+      ],
+      "type": "object"
+    },
+    "ListRunArtifactsOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "artifacts": {
+          "items": {
+            "$ref": "#/definitions/Deliverable"
+          },
+          "type": "array"
+        },
+        "hasMore": {
+          "type": "boolean"
+        },
+        "nextOffset": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "artifacts",
+        "nextOffset",
+        "hasMore"
       ],
       "type": "object"
     },
@@ -9400,6 +9590,74 @@
       ],
       "type": "object"
     },
+    "ReadRunArtifactInput": {
+      "additionalProperties": false,
+      "properties": {
+        "artifactId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "offset": {
+          "default": 0,
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runId": {
+          "description": "Wire UUID for an existing run; distinct from a mission/task identifier.",
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId",
+        "artifactId",
+        "offset"
+      ],
+      "type": "object"
+    },
+    "ReadRunArtifactOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "type": "string"
+        },
+        "encoding": {
+          "type": "string"
+        },
+        "file": {
+          "$ref": "#/definitions/Deliverable"
+        },
+        "nextOffset": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "offset": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "totalBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "file",
+        "encoding",
+        "offset",
+        "totalBytes",
+        "data",
+        "nextOffset"
+      ],
+      "type": "object"
+    },
     "ReadRunContentInput": {
       "additionalProperties": false,
       "properties": {
@@ -11365,6 +11623,33 @@
       "required": [
         "taskId",
         "dismissal"
+      ],
+      "type": "object"
+    },
+    "SetRunArtifactVisibilityInput": {
+      "additionalProperties": false,
+      "properties": {
+        "artifactId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "runId": {
+          "description": "Wire UUID for an existing run; distinct from a mission/task identifier.",
+          "format": "uuid",
+          "type": "string"
+        },
+        "visibility": {
+          "enum": [
+            "private",
+            "public"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId",
+        "artifactId",
+        "visibility"
       ],
       "type": "object"
     },

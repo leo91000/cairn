@@ -719,7 +719,7 @@ class LiveTest {
 
     @Test
     fun `artifact identity is origin scoped and only the latest version of each key is selected`() {
-        val older = Deliverable("old", "run", key = "report", version = 1)
+        val older = Deliverable(id = "old", runId = "run", key = "report", version = 1)
         val latest = older.copy(id = "new", version = 2)
         val anotherRun = older.copy(runId = "other")
         assertEquals(

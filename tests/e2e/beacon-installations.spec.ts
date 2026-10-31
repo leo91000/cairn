@@ -299,7 +299,7 @@ test('selects installations, remembers the last one and honours deep workspace U
     }
     await mkdir(join(root, 'data', 'artifacts'), { recursive: true })
     await writeFile(join(root, 'data', 'artifacts', artifact.id), '# Notes from my machine')
-    seed.store.set(`artifact:${run.id}:${artifact.id}`, artifact)
+    seed.store.insertArtifact(artifact)
     seed.store.event(run.id, 'item.completed', 'Notes', {
       item: {
         id: 'notes-reply',

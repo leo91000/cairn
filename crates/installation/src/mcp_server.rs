@@ -571,6 +571,11 @@ pub(crate) fn operations() -> Vec<Value> {
             .iter()
             .map(crate::capabilities::ResourceOperation::descriptor),
     );
+    operations.extend(
+        crate::capabilities::ARTIFACT_OPERATIONS
+            .iter()
+            .map(crate::capabilities::artifacts::ArtifactOperation::descriptor),
+    );
     operations
 }
 
@@ -606,6 +611,18 @@ pub(crate) async fn operation(
     name: &str,
     args: Value,
 ) -> Result<Value> {
+    if let Some(op) = crate::capabilities::artifact_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Public(
+                    scopes.to_vec(),
+                    credential.map(str::to_owned),
+                ),
+            )
+            .await;
+    }
     if let Some(operation) = crate::capabilities::plugin_package_operation(name) {
         return operation
             .invoke(

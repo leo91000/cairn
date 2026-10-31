@@ -162,7 +162,8 @@ pub(crate) async fn remove(
     let directory = s.skills.directory(name, project).await?;
     authority.recheck(s).await?;
     let key = format!("{scope}/{name}");
-    let source = super::sources::key(scope, name);
+    let source_scope = scope.to_owned();
+    let source_name = name.to_owned();
     let detail = serde_json::json!({"scope": scope, "name": name});
     s.store
         .transaction(move |db| {
@@ -179,7 +180,7 @@ pub(crate) async fn remove(
                 ));
             }
             std::fs::remove_dir_all(directory)?;
-            db.delete(&source)?;
+            db.forget_skill_source(&source_scope, &source_name)?;
             db.audit("skill.deleted", &detail)
         })
         .await

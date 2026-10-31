@@ -249,7 +249,7 @@ test('owner shares an installation and member works without management controls'
     }
     await mkdir(join(root, 'data', 'artifacts'), { recursive: true })
     await writeFile(join(root, 'data', 'artifacts', report.id), '# Shared report')
-    seed.store.set(`artifact:${runId}:${report.id}`, report)
+    seed.store.insertArtifact(report)
     seed.store.event(runId, 'artifact', report.title, report)
     await member.goto(`${installationUrl}runs/${runId}`)
     await member.getByRole('button', { name: 'Open Shared report', exact: true }).click()

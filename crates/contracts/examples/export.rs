@@ -24,6 +24,12 @@ fn main() {
     let root = Path::new(&root);
     fs::create_dir_all(root).unwrap();
     let mut generator = SchemaSettings::draft07().for_serialize().into_generator();
+    export::<ListRunArtifactsInput>(root, &mut generator, Contract::Deserialize);
+    export::<ListRunArtifactsOutput>(root, &mut generator, Contract::Deserialize);
+    export::<ReadRunArtifactInput>(root, &mut generator, Contract::Deserialize);
+    export::<ReadRunArtifactOutput>(root, &mut generator, Contract::Deserialize);
+    export::<SetRunArtifactVisibilityInput>(root, &mut generator, Contract::Deserialize);
+    export::<Deliverable>(root, &mut generator, Contract::Deserialize);
     export::<ReadSkillInput>(root, &mut generator, Contract::Deserialize);
     export::<SkillInput>(root, &mut generator, Contract::Deserialize);
     export::<ListSkillsInput>(root, &mut generator, Contract::Deserialize);
@@ -1151,6 +1157,11 @@ fn main() {
         ) {
             definitions.insert(name, schema);
         }
+    }
+    let mut artifact_decoder = SchemaSettings::draft07().for_deserialize().into_generator();
+    artifact_decoder.subschema_for::<Deliverable>();
+    for (name, schema) in artifact_decoder.take_definitions(true) {
+        definitions.insert(name, schema);
     }
     let mut node_decoder = SchemaSettings::draft07().for_deserialize().into_generator();
     node_decoder.subschema_for::<ExecutionNode>();
