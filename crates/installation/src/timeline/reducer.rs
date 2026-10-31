@@ -932,9 +932,7 @@ impl<C: Cards> Reducer<'_, C> {
         if state == TimelineState::Done {
             let replies = &mut self.state.echoes.replies;
             replies.retain(|reply| reply.card != id);
-            if text.len() <= REASON_BYTES {
-                remember(replies, fingerprinted);
-            }
+            remember(replies, fingerprinted);
             self.state.replies.retain(|reply| *reply != id);
         } else if !self.state.replies.contains(&id) {
             self.state.replies.push(id);

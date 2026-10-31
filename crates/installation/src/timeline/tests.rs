@@ -92,6 +92,40 @@ async fn private_answer_marker_hides_historical_and_live_payload_text() {
     assert!(!format!("{live:?}").contains(secret));
 }
 
+#[test]
+fn unicode_change_cursor_accepts_the_same_card_id_limit_as_storage() {
+    let mut input: cairn_contracts::ReadRunTimelineInput = serde_json::from_value(
+        serde_json::json!({"runId": CODEX, "changes": {"revision": 1, "id": "é".repeat(1024), "history": "v2:test"}}),
+    )
+    .unwrap();
+    assert!(input.validate().is_ok());
+    input.changes.as_mut().unwrap().id = Some("é".repeat(1025));
+    assert!(input.validate().is_err());
+}
+
+#[test]
+fn long_failure_reply_is_hidden_when_failure_arrives_after_reply() {
+    let failure = "long failure ".repeat(500);
+    let cards = replay(&[
+        (EventKind::ChatUser, "Go", Value::Null),
+        (EventKind::TurnStarted, "", Value::Null),
+        (
+            EventKind::ItemCompleted,
+            "",
+            serde_json::json!({"item": {"id": "a", "type": "agent_message", "text": failure}}),
+        ),
+        (
+            EventKind::TurnFailed,
+            &failure,
+            serde_json::json!({"error": {"message": failure}}),
+        ),
+    ]);
+    assert!(cards.iter().any(|card| matches!(
+        &card.content,
+        TimelineContent::AgentMessage { echo: true, .. }
+    )));
+}
+
 #[tokio::test]
 async fn long_engine_item_ids_survive_migration_and_live_updates() {
     let root = tempfile::tempdir().unwrap();

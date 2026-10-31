@@ -367,7 +367,7 @@ impl ReadRunTimelineInput {
                         || cursor
                             .id
                             .as_ref()
-                            .is_some_and(|id| id.is_empty() || id.len() > 1024)
+                            .is_some_and(|id| id.is_empty() || id.chars().count() > 1024)
                 })
         {
             return Err("Invalid timeline cursor.".into());
