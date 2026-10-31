@@ -3,7 +3,6 @@ import type { McpInput, McpView } from '../../../../packages/contracts/mcp'
 import { twMerge } from 'tailwind-merge'
 import {
   computed,
-  onBeforeUnmount,
   onMounted,
   ref,
 } from 'vue'
@@ -13,7 +12,6 @@ import { cancelMcpConnection } from '../../../../packages/contracts/generated/ca
 import { createMcp } from '../../../../packages/contracts/generated/createMcp'
 import { deleteMcp } from '../../../../packages/contracts/generated/deleteMcp'
 import { disconnectMcp } from '../../../../packages/contracts/generated/disconnectMcp'
-import { listMcps } from '../../../../packages/contracts/generated/listMcps'
 import { testMcp } from '../../../../packages/contracts/generated/testMcp'
 import { updateMcp } from '../../../../packages/contracts/generated/updateMcp'
 import {
@@ -21,6 +19,7 @@ import {
   date,
   notify,
   redirect,
+  refreshMcps,
   state,
 } from '../api'
 import Empty from '../components/Empty.vue'
@@ -69,7 +68,6 @@ const envRows = ref<{
   value: string
   saved: boolean
 }[]>([])
-let disposed = false
 const filtered = computed(() => state.mcps.filter(item => `${item.name} ${item.url} ${item.command}`.toLowerCase().includes(query.value.toLowerCase())))
 const tools = computed(() => inspecting.value?.tools.filter(tool => `${tool.name} ${tool.description || ''}`.toLowerCase().includes(toolQuery.value.toLowerCase())) || [])
 const labels = {
@@ -82,9 +80,7 @@ const labels = {
 async function load() {
   loading.value = true
   try {
-    const { mcps: items } = await listMcps(api, {})
-    if (!disposed)
-      state.mcps = items
+    await refreshMcps()
   }
   catch (e) {
     error.value = (e as Error).message
@@ -108,9 +104,6 @@ onMounted(() => {
       notify(message)
     router.replace({ query: {} })
   }
-})
-onBeforeUnmount(() => {
-  disposed = true
 })
 
 function edit(item?: McpView) {
