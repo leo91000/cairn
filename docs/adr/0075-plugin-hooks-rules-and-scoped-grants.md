@@ -101,8 +101,10 @@ dans les limites ci-dessous, jamais les accorder. Un agent délégué
 ([ADR-0059](0059-delegated-tasks.md)) doit être couvert par son demandeur contribution
 par contribution et ressource par ressource, pas seulement instance par instance ; la
 couverture est revérifiée à chaque action de la tâche, pas seulement à sa création.
-Une fois la conversation demandeuse supprimée, la tâche déléguée exige l’accès à son
-propre agent.
+Supprimer la conversation demandeuse révoque le tour délégué en cours, y compris
+s’il attend une reprise automatique, et laisse en pause les demandes déjà en file.
+Une fois cette conversation supprimée, toute
+nouvelle reprise de la tâche déléguée exige l’accès à son propre agent.
 
 ### Accès des comptes aux agents
 

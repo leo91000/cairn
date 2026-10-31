@@ -1351,8 +1351,9 @@ package identity before host effects, OAuth refresh publication, and result
 return. Resource ancestry is resolved by the host, never inferred from labels.
 Delegated plugin actions verify both contributions and resources against the
 requester, including descendant resource roots; asynchronous checks are followed
-by local revision checks. Once its requesting conversation is deleted, a task's
-own agent provides its authority.
+by revision checks. Deleting the requester stops its current delegated turns and
+pauses their queued follow-ups. A later authorized continuation uses the task's own
+agent access, without reviving the deleted requester's execution grants.
 
 Ticket F must call `plugins::grant_authorization::authorize_hook_delivery` with
 the execution agent, instance, declared hook name and payload before delivery; a

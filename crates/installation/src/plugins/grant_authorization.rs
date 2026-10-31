@@ -312,6 +312,20 @@ impl Invocation {
     }
 
     pub(crate) fn remember_transfer(&self, origin: Arc<TransferOrigin>) -> Result<()> {
+        let same_permission = origin.instance.id == self.instance.id
+            && origin.instance.revision == self.instance.revision
+            && origin.package.digest == self.snapshot.package.digest
+            && origin.kind == self.kind
+            && origin.name == self.name
+            && origin.input == self.input;
+        if same_permission {
+            // Reading our earlier output adds only its source permissions. Do
+            // not grow a chain of identical roots for each appended chunk.
+            for dependency in &origin.dependencies {
+                self.remember_transfer(dependency.clone())?;
+            }
+            return Ok(());
+        }
         let mut transfers = self.transfers.lock().unwrap();
         if !transfers.iter().any(|known| Arc::ptr_eq(known, &origin)) {
             if transfers.len() >= 256 {

@@ -6559,13 +6559,14 @@ async fn resource_handlers_do_not_send_after_grant_revocation_during_oauth_refre
         "list_plugin_resources",
         "resolve_plugin_resource",
         "import_project",
+        "run_credentials_fetch",
     ] {
         let root = TempDir::new().unwrap();
         let s = service(&root).await;
         s.plugins
             .use_worker(std::path::PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
         let main = enabled_main(&s).await;
-        let (_, configuration) = active_run(&s, &main).await;
+        let (run, configuration) = active_run(&s, &main).await;
         let started = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
         let service_calls = Arc::new(AtomicUsize::new(0));
@@ -6663,16 +6664,19 @@ async fn resource_handlers_do_not_send_after_grant_revocation_during_oauth_refre
             }))
             .await
             .unwrap();
-        s.agent_fixture(json!({ "plugins": [instance] }), Some(MAIN_AGENT_ID))
-            .await
-            .unwrap();
-        assert!(
+        if operation != "run_credentials_fetch" {
+            s.agent_fixture(json!({ "plugins": [instance] }), Some(MAIN_AGENT_ID))
+                .await
+                .unwrap();
+        }
+        assert_eq!(
             s.store
                 .plugin_instance(&instance)
                 .await
                 .unwrap()
                 .unwrap()
-                .grants(MAIN_AGENT_ID)
+                .grants(MAIN_AGENT_ID),
+            operation != "run_credentials_fetch",
         );
         if operation == "import_project" {
             let current = common::owner_api_route(
@@ -6715,6 +6719,18 @@ async fn resource_handlers_do_not_send_after_grant_revocation_during_oauth_refre
             args = json!({"pluginId":"resource-refresh","source":"repositories","instance":instance,"id":"repo"});
         }
         let invoke = async {
+            if operation == "run_credentials_fetch" {
+                let empty =
+                    cairn_installation::plugins::run_credentials::for_execution(&s, &run, &[])
+                        .await
+                        .unwrap();
+                assert!(empty.git.is_empty());
+                assert_eq!(refresh_calls.load(Ordering::SeqCst), 0);
+                let result = cairn_installation::plugins::run_credentials::for_execution(&s, &run, &[json!({
+                    "id": uuid::Uuid::new_v4().to_string(), "origin": "https://api.example.test/repo.git",
+                })]).await;
+                return json!({ "result": { "isError": result.is_err() } });
+            }
             let started = call(&s, &configuration, operation, args).await;
             let response = if operation == "import_project" {
                 started
@@ -6735,7 +6751,9 @@ async fn resource_handlers_do_not_send_after_grant_revocation_during_oauth_refre
         };
         let revoke = async {
             started.notified().await;
-            if operation == "import_project" {
+            if operation == "run_credentials_fetch" {
+                s.worker.cancel(&s, text(&run, "id")).await.unwrap();
+            } else if operation == "import_project" {
                 let mut current = common::owner_api_route(
                     &s,
                     "GET",
@@ -6762,11 +6780,13 @@ async fn resource_handlers_do_not_send_after_grant_revocation_during_oauth_refre
             let current = s.store.plugin_instance(&instance).await.unwrap().unwrap();
             assert_eq!(current.revision, saved["revision"].as_str().unwrap());
             // Plugin grants are independent of the run's installation access.
-            let still_authorized = call(&s, &configuration, "list_plugins", json!({})).await;
-            assert_ne!(
-                still_authorized["result"]["isError"], true,
-                "{still_authorized}"
-            );
+            if operation != "run_credentials_fetch" {
+                let still_authorized = call(&s, &configuration, "list_plugins", json!({})).await;
+                assert_ne!(
+                    still_authorized["result"]["isError"], true,
+                    "{still_authorized}"
+                );
+            }
             release.notify_one();
         };
         let (response, ()) = tokio::time::timeout(std::time::Duration::from_secs(15), async {

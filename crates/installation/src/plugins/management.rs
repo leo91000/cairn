@@ -22,6 +22,43 @@ pub struct Authority {
 }
 
 impl Authority {
+    /// The host's fetch of a run-authorized project does not grant credentials
+    /// to the agent. Retain execution, package and instance revocation checks.
+    pub(crate) fn host_fetch(
+        preparation: crate::capabilities::plugin_packages::Authority,
+        instance: connections::Connection,
+        package: &registry::Package,
+    ) -> Self {
+        let expected = instance.clone();
+        let package = package.clone();
+        let preparation = preparation.with_guard(move |db| {
+            connections::check_revision(db, &expected)?;
+            if !expected.enabled {
+                return Err(Error::forbidden(
+                    "The fetch credential instance is disabled.",
+                ));
+            }
+            if !package.builtin {
+                let current = db.plugin_package(&package.manifest.id)?;
+                if current.active.as_deref() != Some(&package.manifest.version)
+                    || current.approvals.get(&package.manifest.version) != Some(&package.digest)
+                {
+                    return Err(Error::forbidden("The fetch credential package changed."));
+                }
+            }
+            Ok(())
+        });
+        Self {
+            bearer: None,
+            preparation: Some(preparation),
+            instance: Some(Box::new(instance)),
+            shared: None,
+            snapshot: None,
+            invocation: None,
+            partial: false,
+        }
+    }
+
     pub(crate) fn resource_read(
         preparation: crate::capabilities::plugin_packages::Authority,
         instance: connections::Connection,
@@ -73,6 +110,9 @@ impl Authority {
     }
 
     pub(crate) fn authorize(&self, db: &crate::store::Db<'_>) -> Result<()> {
+        if let Some(preparation) = &self.preparation {
+            preparation.authorize(db)?;
+        }
         if let Some(snapshot) = &self.snapshot {
             snapshot.authorize(db)?;
         }

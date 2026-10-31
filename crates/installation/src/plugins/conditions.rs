@@ -698,6 +698,7 @@ mod tests {
                         None,
                     )],
                     &Err(stale_denial),
+                    "run",
                 )?;
                 assert_eq!(db.conversation_boundary("chat")?.unwrap(), chat);
                 assert!(db.events_fixture("run", 0, 10)?.is_empty());
@@ -716,6 +717,7 @@ mod tests {
                         None,
                     )],
                     &fresh,
+                    "run",
                 )?;
                 assert_eq!(
                     db.conversation_boundary("chat")?.unwrap()["wakeup"]["observation"]["state"],

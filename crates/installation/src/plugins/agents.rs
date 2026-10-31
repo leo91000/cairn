@@ -253,11 +253,20 @@ pub async fn call_tool(
 ) -> Result<Option<Value>> {
     let run = authorize(s, bearer).await?;
     let (agent_id, agent) = agent(&run);
-    let Some((package, instances)) = granted(s, &agent_id, None, None)
+    let Some((package, instances)) = granted(s, &agent_id, None, Some((Kind::Tool, name)))
         .await?
         .into_iter()
         .find(|(package, _)| package.manifest.tool(name).is_some())
     else {
+        if granted(s, &agent_id, None, None)
+            .await?
+            .iter()
+            .any(|(package, _)| package.manifest.tool(name).is_some())
+        {
+            return Err(Error::forbidden(
+                "This plugin tool is not granted to the agent.",
+            ));
+        }
         return Ok(None);
     };
     let tool = package.manifest.tool(name).expect("found above");

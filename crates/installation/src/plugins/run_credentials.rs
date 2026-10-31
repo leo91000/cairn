@@ -49,6 +49,7 @@ pub struct CredentialGrant {
     instance_revision: String,
     plugin: String,
     digest: String,
+    supplying: bool,
 }
 
 /// What one run receives from the instances its agent is granted.
@@ -81,15 +82,17 @@ impl RunCredentials {
             for expected in expected {
                 let profile = required(db.agent(&expected.agent)?, "Agent not found")?;
                 let connection = required(db.plugin_instance(&expected.instance)?, "Credential supplier removed")?;
-                let supplier = db.plugin_credential_supplier(&expected.agent, &expected.plugin)?;
-                let granted = db.plugin_contribution(
-                    &expected.agent, &expected.instance,
-                    cairn_contracts::PluginContributionKind::RunCredentials, "",
-                )?.is_some();
+                let still_supplies = !expected.supplying || (
+                    db.plugin_credential_supplier(&expected.agent, &expected.plugin)?.as_deref() == Some(expected.instance.as_str())
+                    && db.plugin_contribution(
+                        &expected.agent, &expected.instance,
+                        cairn_contracts::PluginContributionKind::RunCredentials, "",
+                    )?.is_some()
+                );
                 let unchanged = profile.revision == expected.agent_revision
                     && connection.revision == expected.instance_revision;
 
-                if !unchanged || !connection.enabled || !granted || supplier.as_deref() != Some(&expected.instance) {
+                if !unchanged || !connection.enabled || !still_supplies {
                     return Err(Error::forbidden("Run credential authorization changed during preparation. Retry the run."));
                 }
             }
@@ -222,11 +225,8 @@ pub async fn for_run(s: &Service, agent_id: &str, projects: &[Value]) -> Result<
     for_run_with(s, agent_id, projects, None).await
 }
 
-pub(crate) async fn for_execution(
-    s: &Service,
-    run: &Value,
-    projects: &[Value],
-) -> Result<RunCredentials> {
+/// Prepare credentials under the current run's revocable execution authority.
+pub async fn for_execution(s: &Service, run: &Value, projects: &[Value]) -> Result<RunCredentials> {
     for_run_with(
         s,
         text(&run["snapshot"]["agent"], "id"),
@@ -244,6 +244,26 @@ async fn for_run_with(
 ) -> Result<RunCredentials> {
     let mut credentials = RunCredentials::default();
     let mut fetch_order = Vec::new();
+    let fetch_authority = if let Some(run) = run {
+        let profile = required(s.store.agent(agent_id).await?, "Agent not found")?;
+        let (agent, revision) = (agent_id.to_owned(), profile.revision);
+        let expected_revision = revision.clone();
+        let authority = crate::capabilities::plugin_packages::Authority::for_execution(run)
+            .with_guard(move |db| {
+                if required(db.agent(&agent)?, "Agent not found")?.revision != expected_revision {
+                    return Err(Error::forbidden(
+                        "Run permissions changed during fetch preparation.",
+                    ));
+                }
+                Ok(())
+            });
+        Some((
+            crate::delegation::authorize_async_with(s, run, authority).await?,
+            revision,
+        ))
+    } else {
+        None
+    };
     for (package, owned) in instances(s).await? {
         let (agent, plugin) = (agent_id.to_owned(), package.manifest.id.clone());
         let supplier = s
@@ -306,6 +326,7 @@ async fn for_run_with(
                 instance_revision: connection.revision.clone(),
                 plugin: package.manifest.id.clone(),
                 digest: package.digest.clone(),
+                supplying: true,
             });
             // Packages never overwrite each other's files: the first one keeps a path.
             for (path, content) in rendered.files {
@@ -324,7 +345,35 @@ async fn for_run_with(
             .iter()
             .filter(|c| Some(c.id.as_str()) != granted.map(|g| g.id.as_str()))
         {
-            let rendered = render_instance(s, &package, connection, None).await?;
+            if projects.is_empty()
+                || package
+                    .manifest
+                    .run_credentials
+                    .as_ref()
+                    .is_none_or(|run| run.git.is_empty())
+            {
+                continue;
+            }
+            let authority = fetch_authority.as_ref().map(|(preparation, _)| {
+                super::management::Authority::host_fetch(
+                    preparation.clone(),
+                    connection.clone(),
+                    &package,
+                )
+            });
+            let rendered = render_instance(s, &package, connection, authority.as_ref()).await?;
+            if let Some(authority) = &authority {
+                authority.recheck(s).await?;
+                credentials.authorizations.push(CredentialGrant {
+                    agent: agent_id.into(),
+                    agent_revision: fetch_authority.as_ref().unwrap().1.clone(),
+                    instance: connection.id.clone(),
+                    instance_revision: connection.revision.clone(),
+                    plugin: package.manifest.id.clone(),
+                    digest: package.digest.clone(),
+                    supplying: false,
+                });
+            }
             fetch_order.push((connection.id.clone(), rendered.git));
         }
     }
@@ -335,6 +384,9 @@ async fn for_run_with(
                 .fetch
                 .insert(text(project, "id").to_owned(), access);
         }
+    }
+    if let Some((authority, _)) = &fetch_authority {
+        authority.recheck(s).await?;
     }
     credentials.authorize(s).await?;
     Ok(credentials)

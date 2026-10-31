@@ -167,6 +167,13 @@ return {
         return { resourceType=input.resourceType,id=input.id,name=input.id,parent=parent }
     end,
     tool = function(input)
+        if input.input.chunks then
+            local destination = if input.input.target then cairn.files.read({instance=input.instances[1].id,id=input.input.target}) else cairn.files.create({instance=input.instances[1].id,name="chunks.txt",data=""})
+            for _ = 1, input.input.chunks do
+                destination = cairn.files.append({instance=input.instances[1].id,id=destination.id,offset=destination.size,data="chunk"})
+            end
+            return destination
+        end
         if input.input.copy then
             local destination = cairn.files.create({instance=input.instances[1].id,name="copy.txt",data=""})
             local original = cairn.files.read({instance=input.instances[1].id,id=input.input.copy})
@@ -599,6 +606,10 @@ async fn running_conversation(s: &Arc<Service>, chat: &str) -> String {
         .await
         .unwrap();
     let config = s.mcps.run_configuration(s, &run).await.unwrap();
+    s.store
+        .save_checkpoint_boundary(run_id, json!({ "completed": true, "launched": true }))
+        .await
+        .unwrap();
     text(&config["env"], "CAIRN_MCP_RUN_TOKEN").into()
 }
 
@@ -1262,4 +1273,220 @@ async fn condition_watchers_keep_distinct_requester_authority() {
         second["wakeup"]["observation"]["state"], "completed",
         "{second}"
     );
+}
+
+#[tokio::test]
+async fn instruction_only_packages_cannot_shadow_a_granted_tool() {
+    let f = Fixture::new().await;
+    let mut grants = Vec::new();
+    for plugin in ["foo", "foo-bar"] {
+        let installed = common::package_install(&f.s, &json!({
+            "manifest": {
+                "id": plugin, "name": plugin, "version": "1", "apiVersion": 2,
+                "capabilities": [], "agentAccess": {}, "instructions": "Fixture",
+                "tools": [{ "name": "foo_bar_read", "description": "Read", "inputSchema": { "type": "object" } }],
+            },
+            "source": format!("return {{ tool = function(input) return {{ source = '{plugin}' }} end }}"),
+        })).await.unwrap();
+        common::package_approve(&f.s, plugin, "1", text(&installed, "digest"))
+            .await
+            .unwrap();
+        let instance = common::save_plugin(
+            &f.s,
+            plugin,
+            &json!({ "name": plugin, "enabled": true }),
+            None,
+        )
+        .await
+        .unwrap();
+        grants.push(json!({
+            "instanceId": instance["id"],
+            "access": { "type": "selected", "contributions": if plugin == "foo" {
+                json!([contribution("instructions", "", json!([]))])
+            } else {
+                json!([contribution("tool", "foo_bar_read", json!([]))])
+            } },
+        }));
+    }
+    let current = f.api("GET", json!({})).await.unwrap();
+    f.api(
+        "PUT",
+        json!({
+            "agentId": MAIN_AGENT_ID, "revision": current["revision"],
+            "grants": grants, "runCredentialInstances": [],
+        }),
+    )
+    .await
+    .unwrap();
+    let tools = agents::tools(&f.s, &f.bearer).await.unwrap();
+    assert_eq!(
+        tools
+            .iter()
+            .filter(|tool| tool["name"] == "foo_bar_read")
+            .count(),
+        1
+    );
+    let result = agents::call_tool(&f.s, &f.bearer, "foo_bar_read", &json!({}))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result["source"], "foo-bar");
+}
+
+#[tokio::test]
+async fn repeated_appends_preserve_the_supported_chunked_transfer_size() {
+    let f = Fixture::new().await;
+    f.set(json!([contribution(
+        "tool",
+        "grant_probe_other",
+        json!([])
+    )]))
+    .await;
+    let result = agents::call_tool(
+        &f.s,
+        &f.bearer,
+        "grant_probe_other",
+        &json!({ "chunks": 90 }),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let target = result["id"].clone();
+    for size in [900, 1350] {
+        let result = agents::call_tool(
+            &f.s,
+            &f.bearer,
+            "grant_probe_other",
+            &json!({ "chunks": 90, "target": target }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result["size"], size);
+    }
+}
+
+#[tokio::test]
+async fn requester_deletion_stops_the_turn_without_blocking_a_fresh_authorized_turn() {
+    let f = Fixture::new().await;
+    let child =
+        f.s.agent_fixture(json!({ "name": "Child" }), None)
+            .await
+            .unwrap();
+    let child_id = text(&child, "id");
+    f.set(json!([contribution("tool", "grant_probe_post", support())]))
+        .await;
+    f.set_for(
+        child_id,
+        json!([contribution("tool", "grant_probe_post", support())]),
+    )
+    .await;
+    let (child_chat, token) = f.delegated(MAIN_AGENT_ID, child_id).await;
+    let child_detail = f.s.chat_detail(&child_chat).await.unwrap();
+    let parent = text(&child_detail["requester"], "chatId");
+    agents::call_tool(
+        &f.s,
+        &token,
+        "grant_probe_post",
+        &json!({ "channel": "support" }),
+    )
+    .await
+    .unwrap();
+    f.s.chat_trash(parent, true).await.unwrap();
+    let stopped =
+        f.s.store
+            .run(text(&child_detail["run"], "id"))
+            .await
+            .unwrap();
+    assert_eq!(stopped["status"], "cancelled", "{stopped}");
+    let effects = f.posts.load(Ordering::SeqCst);
+    assert!(
+        agents::call_tool(
+            &f.s,
+            &token,
+            "grant_probe_post",
+            &json!({ "channel": "support" })
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(f.posts.load(Ordering::SeqCst), effects);
+
+    f.s.chat_pause(&child_chat, false).await.unwrap();
+    f.s.chat_send(
+        &child_chat,
+        json!({ "id": cairn_installation::config::id(), "text": "Continue with this agent" }),
+    )
+    .await
+    .unwrap();
+    let fresh = running_conversation(&f.s, &child_chat).await;
+    agents::call_tool(
+        &f.s,
+        &fresh,
+        "grant_probe_post",
+        &json!({ "channel": "support" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(f.posts.load(Ordering::SeqCst), effects + 1);
+}
+
+#[tokio::test]
+async fn deleting_an_idle_requester_pauses_its_unstarted_delegated_work() {
+    let f = Fixture::new().await;
+    f.s.agent_fixture(
+        json!({ "access": { "delegation": true } }),
+        Some(MAIN_AGENT_ID),
+    )
+    .await
+    .unwrap();
+    let child =
+        f.s.agent_fixture(json!({ "name": "Child" }), None)
+            .await
+            .unwrap();
+    let parent =
+        f.s.chat_create(json!({ "agentId": MAIN_AGENT_ID }))
+            .await
+            .unwrap();
+    let parent_id = text(&parent, "id");
+    f.s.chat_send(
+        parent_id,
+        json!({ "id": cairn_installation::config::id(), "text": "Delegate" }),
+    )
+    .await
+    .unwrap();
+    let token = running_conversation(&f.s, parent_id).await;
+    let task = cairn_installation::delegation::delegate(
+        &f.s,
+        &token,
+        &json!({ "agentId": child["id"], "task": "Pending task" }),
+    )
+    .await
+    .unwrap();
+    let child_id = text(&task, "chatId");
+    assert!(f.s.chat_detail(child_id).await.unwrap()["run"].is_null());
+    let parent_run = f.s.chat_detail(parent_id).await.unwrap()["run"].clone();
+    f.s.store
+        .change_run(
+            text(&parent_run, "id"),
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Succeeded),
+                recovery_pending: Some(false),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        f.s.chat_trash(parent_id, false).await.unwrap_err().status,
+        409
+    );
+    assert_eq!(f.s.chat_detail(child_id).await.unwrap()["paused"], false);
+    f.s.chat_trash(parent_id, true).await.unwrap();
+    assert_eq!(f.s.chat_detail(child_id).await.unwrap()["paused"], true);
+    f.s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    assert!(f.s.chat_detail(child_id).await.unwrap()["run"].is_null());
+    assert_eq!(f.s.store.run(&f.run).await.unwrap()["status"], "running");
 }
