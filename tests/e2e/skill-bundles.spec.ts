@@ -906,4 +906,7 @@ test('reviews a source update as a diff before replacing local files', async ({ 
   await update.getByRole('button', { name: 'Replace my edits', exact: true }).click()
   await expect.poll(() => updated?.version).toBe(latest)
   expect(updated!.base).toMatch(/\w{16,}/)
+  await expect(page.getByRole('dialog', { name: 'Edit skill' }).getByText('Skill updated from its source', { exact: true })).toBeVisible()
+  // The update refreshes the skill list; finish its route handlers before teardown disposes their responses.
+  await page.unrouteAll({ behavior: 'wait' })
 })
