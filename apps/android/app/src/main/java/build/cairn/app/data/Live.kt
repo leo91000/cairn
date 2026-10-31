@@ -283,24 +283,31 @@ class LiveSession {
 
 suspend fun CairnApi.readLargeTimeline(
     path: String,
-    previews: List<build.cairn.contracts.TimelinePreview>,
+    previews: List<build.cairn.contracts.LargeTimelineReference>,
 ): List<TimelineCard> {
     val cards = mutableListOf<TimelineCard>()
     for (preview in previews) {
+        val snapshot = preview.snapshot
         val text = StringBuilder()
         var offset = 0L
         var checksum: String? = null
         var total: Long? = null
         while (true) {
-            val query =
-                "entryId=${segment(preview.id)}&offset=$offset" +
-                    (checksum?.let { "&sha256=${segment(it)}" } ?: "")
             val part =
-                get<build.cairn.contracts.RunContentOutput>(
-                    path.removeSuffix("/stream") + "/timeline-content?$query"
+                send<build.cairn.contracts.RunContentOutput>(
+                    "POST",
+                    path.removeSuffix("/stream") + "/timeline-content",
+                    wireJson.encodeToJsonElement(
+                        build.cairn.contracts.ReadLargeTimelineInput(
+                            snapshot = snapshot,
+                            offset = offset,
+                            sha256 = checksum,
+                        )
+                    ),
                 )
             require(
-                part.entryId == preview.id &&
+                part.entryId == snapshot.id &&
+                    part.runId == snapshot.runId &&
                     part.offset == offset &&
                     (checksum == null || part.sha256 == checksum) &&
                     (total == null || part.totalBytes == total)
@@ -320,10 +327,11 @@ suspend fun CairnApi.readLargeTimeline(
         }
         val card = wireJson.decodeFromString<TimelineCard>(text.toString())
         require(
-            card.id == preview.id &&
-                card.position == preview.position &&
-                card.revision >= preview.revision &&
-                (card.revision != preview.revision || card.source == preview.source)
+            card.id == snapshot.id &&
+                card.runId == snapshot.runId &&
+                card.position == snapshot.position &&
+                card.revision == snapshot.revision &&
+                card.source == snapshot.source
         ) {
             "Carte de chronologie modifiée."
         }

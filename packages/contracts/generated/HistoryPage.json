@@ -129,6 +129,18 @@
       ],
       "type": "object"
     },
+    "LargeTimelineReference": {
+      "description": "Metadata for an oversized card. Its source-backed fields are fetched from\nthe immutable source event before the client applies this snapshot.",
+      "properties": {
+        "snapshot": {
+          "$ref": "#/definitions/TimelineEntry"
+        }
+      },
+      "required": [
+        "snapshot"
+      ],
+      "type": "object"
+    },
     "QuotaFailure": {
       "properties": {
         "current": {
@@ -527,41 +539,6 @@
       ],
       "type": "object"
     },
-    "TimelinePreview": {
-      "properties": {
-        "id": {
-          "type": "string"
-        },
-        "kind": {
-          "description": "The card's kind: userMessage, agentMessage or notice.",
-          "type": "string"
-        },
-        "position": {
-          "format": "int64",
-          "type": "integer"
-        },
-        "revision": {
-          "format": "int64",
-          "type": "integer"
-        },
-        "source": {
-          "format": "int64",
-          "type": "integer"
-        },
-        "text": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "id",
-        "position",
-        "revision",
-        "source",
-        "kind",
-        "text"
-      ],
-      "type": "object"
-    },
     "TimelineRetry": {
       "properties": {
         "attempt": {
@@ -659,7 +636,7 @@
     "largeEntries": {
       "description": "Oversized timeline cards, fetched in bounded chunks before this page is applied.",
       "items": {
-        "$ref": "#/definitions/TimelinePreview"
+        "$ref": "#/definitions/LargeTimelineReference"
       },
       "type": "array"
     },

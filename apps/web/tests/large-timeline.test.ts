@@ -10,16 +10,8 @@ import { readLargeTimeline } from '../src/large-timeline'
 
 vi.mock('../src/api', () => ({ api: vi.fn() }))
 
-const preview = {
-  id: 'message:1:é',
-  position: 1,
-  revision: 2,
-  source: 2,
-  kind: 'agentMessage',
-  text: '',
-}
 const card: TimelineEntry = {
-  id: preview.id,
+  id: 'message:1:é',
   runId: 'run',
   position: 1,
   revision: 2,
@@ -35,6 +27,7 @@ const card: TimelineEntry = {
     state: 'done',
   },
 }
+const preview = { snapshot: { ...card, content: { ...card.content, itemId: '', text: '' } } }
 
 beforeEach(() => vi.mocked(api).mockReset())
 
@@ -48,7 +41,8 @@ it('reassembles UTF-8 chunks before returning a full card', async () => {
   const total = encoder.encode(json).length
   vi.mocked(api)
     .mockResolvedValueOnce({
-      entryId: preview.id,
+      entryId: card.id,
+      runId: card.runId,
       offset: 0,
       totalBytes: total,
       sha256: 'a'.repeat(64),
@@ -56,7 +50,8 @@ it('reassembles UTF-8 chunks before returning a full card', async () => {
       nextOffset: next,
     })
     .mockResolvedValueOnce({
-      entryId: preview.id,
+      entryId: card.id,
+      runId: card.runId,
       offset: next,
       totalBytes: total,
       sha256: 'a'.repeat(64),
@@ -64,13 +59,15 @@ it('reassembles UTF-8 chunks before returning a full card', async () => {
       nextOffset: null,
     })
   expect(await readLargeTimeline('/runs/run/stream', [preview])).toEqual([card])
-  expect(vi.mocked(api).mock.calls[1][0]).toContain(`offset=${next}`)
-  expect(vi.mocked(api).mock.calls[1][0]).toContain(`sha256=${'a'.repeat(64)}`)
+  const body = JSON.parse(vi.mocked(api).mock.calls[1][1]!.body as string)
+  expect(body.offset).toBe(next)
+  expect(body.sha256).toBe('a'.repeat(64))
 })
 
 it('rejects an inconsistent chunk instead of accepting a partial card', async () => {
   vi.mocked(api).mockResolvedValueOnce({
-    entryId: preview.id,
+    entryId: card.id,
+    runId: card.runId,
     offset: 0,
     totalBytes: 10,
     sha256: 'a'.repeat(64),

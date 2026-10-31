@@ -333,6 +333,13 @@ fn reads_payload(content: &TimelineContent) -> bool {
         TimelineContent::Notice { notice } => {
             (notice.detail.is_some() && notice.code != cairn_contracts::NoticeCode::Diagnostic)
                 || notice.quota.is_some()
+                || notice.code == cairn_contracts::NoticeCode::BackgroundTasks
+                || notice
+                    .engine_retry
+                    .as_ref()
+                    .is_some_and(|retry| retry.reason.is_some())
+                || notice.usage_limit.is_some()
+                || notice.level.is_some()
         }
         _ => true,
     }
@@ -431,6 +438,7 @@ fn hydrate(card: Card, source: &Source, run: &str) -> TimelineEntry {
             echo,
         },
         TimelineContent::Notice { mut notice } => {
+            reducer::source_notice_fields(&mut notice, &event);
             if notice.detail.is_some() {
                 notice.detail = reducer::notice_detail(&event, notice.code);
             }
@@ -485,6 +493,101 @@ pub(crate) fn entry(db: &Db<'_>, run: &str, id: &str) -> Result<Option<TimelineE
             .into_iter()
             .next(),
     )
+}
+
+/// Rehydrate the referenced snapshot from its immutable source event. Later
+/// revisions of the same card do not change the bytes returned for this snapshot.
+pub(crate) fn snapshot_from_source(
+    db: &Db<'_>,
+    run: &str,
+    snapshot: TimelineEntry,
+) -> Result<TimelineEntry> {
+    use crate::error::{Error, required};
+    if snapshot.run_id != run
+        || snapshot.source < snapshot.position
+        || snapshot.source > snapshot.revision
+    {
+        return Err(Error::bad("Invalid timeline snapshot."));
+    }
+    let valid: bool = db.0.query_row(
+        "SELECT EXISTS(SELECT 1 FROM timeline_entries WHERE run_id=?1 AND id=?2 AND position=?3 AND revision>=?4)",
+        params![run, snapshot.id, snapshot.position, snapshot.revision],
+        |row| row.get(0),
+    )?;
+    if !valid {
+        return Err(Error::conflict("Timeline snapshot is no longer retained."));
+    }
+    let event = required(
+        db.event_page(run, snapshot.source - 1, 1)?
+            .into_iter()
+            .find(|event| event.id == snapshot.source),
+        "Timeline source is no longer retained",
+    )?;
+    let payload = event
+        .payload
+        .as_ref()
+        .and_then(|value| serde_json::from_str::<Value>(value.get()).ok());
+    let matches = match &snapshot.content {
+        TimelineContent::UserMessage { .. } => {
+            event.kind == EventKind::ChatUser && snapshot.id == format!("user:{}", event.id)
+        }
+        TimelineContent::AgentMessage { .. } => {
+            matches!(
+                event.kind,
+                EventKind::ItemStarted | EventKind::ItemUpdated | EventKind::ItemCompleted
+            ) && payload.as_ref().is_some_and(|payload| {
+                let item = &payload["item"];
+                item["type"] == "agent_message"
+                    && snapshot.id
+                        == reducer::reply_id(
+                            snapshot.attempt,
+                            snapshot.turn,
+                            event.id,
+                            item["id"].as_str().unwrap_or(""),
+                        )
+            })
+        }
+        TimelineContent::Notice { .. } => snapshot.id == format!("notice:{}", event.id),
+    };
+    if !matches {
+        return Err(Error::bad("Timeline source does not match the card."));
+    }
+    let mut card = Card {
+        id: snapshot.id,
+        position: snapshot.position,
+        revision: snapshot.revision,
+        source: snapshot.source,
+        turn: snapshot.turn,
+        attempt: snapshot.attempt,
+        created_at: snapshot.created_at,
+        updated_at: snapshot.updated_at,
+        content: snapshot.content,
+    };
+    if let TimelineContent::AgentMessage { item_id, .. } = &mut card.content {
+        *item_id = payload
+            .as_ref()
+            .and_then(|value| value["item"]["id"].as_str())
+            .unwrap_or("")
+            .to_owned();
+    }
+    if matches!(card.content, TimelineContent::AgentMessage { .. }) {
+        return Ok(hydrate_reply(
+            card,
+            &event.text,
+            event.payload.as_ref().map(|value| value.get()),
+            run,
+        ));
+    }
+    Ok(hydrate(
+        card,
+        &Source {
+            created_at: event.created_at,
+            kind: event.kind,
+            text: event.text,
+            payload,
+        },
+        run,
+    ))
 }
 
 pub(crate) fn changes_after(

@@ -110,7 +110,7 @@
             "text": "Looking at the build. Fixed."
           },
           "createdAt": 1793314623557,
-          "id": "message:1:msg_1",
+          "id": "message:0:1:msg_1",
           "position": 6,
           "revision": 12,
           "runId": "00000000-0000-4000-8000-0000000000a1",
@@ -281,7 +281,7 @@
             "via": "OpenRouter"
           },
           "createdAt": 1793314623558,
-          "id": "message:2:msg_1",
+          "id": "message:0:2:msg_1",
           "position": 19,
           "revision": 19,
           "runId": "00000000-0000-4000-8000-0000000000a1",
@@ -965,7 +965,7 @@
             "text": "Working on it"
           },
           "createdAt": 1793314623559,
-          "id": "message:1:c-msg-0",
+          "id": "message:0:1:c-msg-0",
           "position": 36,
           "revision": 40,
           "runId": "00000000-0000-4000-8000-0000000000a2",
@@ -1267,7 +1267,7 @@
             "text": "Partial"
           },
           "createdAt": 1793314623560,
-          "id": "message:1:o-1",
+          "id": "message:0:1:o-1",
           "position": 45,
           "revision": 47,
           "runId": "00000000-0000-4000-8000-0000000000a3",
@@ -1380,7 +1380,7 @@
             "text": "I’ll review the CSS support matrix, check the implementation, and run the compatibility tests.\n\nStarting with **sibling functions** and the files that describe Baseline coverage."
           },
           "createdAt": 0,
-          "id": "message:0:message-1",
+          "id": "message:0:0:message-1",
           "position": 49,
           "revision": 49,
           "runId": "00000000-0000-4000-8000-0000000000a4",
@@ -1397,7 +1397,7 @@
             "text": "The parser already recognizes both functions. I found one gap in the round-trip coverage, so I’m adding a small regression test.\n\n```css\n.card {\n  opacity: calc(sibling-index() / sibling-count());\n}\n```"
           },
           "createdAt": 9,
-          "id": "message:0:message-2",
+          "id": "message:0:0:message-2",
           "position": 58,
           "revision": 58,
           "runId": "00000000-0000-4000-8000-0000000000a4",
@@ -1414,7 +1414,7 @@
             "text": "### Ready for review\n\nThe regression is covered and all checks passed.\n\n- **8 tests passed**, including both sibling functions.\n- TypeScript checks are clean.\n- The changeset is ready for the next patch release.\n\nThe changes are small and preserve the existing authoring behavior.\n\n[{\"id\":34375012123,\"head\":\"f467d688bbc17c2d5d62eff454480d61c299c95f\",\"status\":\"completed\",\"conclusion\":\"success\",\"jobs\":[{\"name\":\"changes\",\"conclusion\":\"success\"},{\"name\":\"changeset-policy\",\"conclusion\":\"success\"},{\"name\":\"native-quality\",\"conclusion\":\"success\"},{\"name\":\"wasm-quality\",\"conclusion\":\"success\"},{\"name\":\"documentation\",\"conclusion\":\"success\"},{\"name\":\"native-foreign-bindings (s390x-unknown-linux-gnu)\",\"conclusion\":\"success\"},{\"name\":\"native-musl-bindings (x86_64-unknown-linux-musl, ubuntu-24.04)\",\"conclusion\":\"success\"},{\"name\":\"browser-compatibility\",\"conclusion\":\"success\"},{\"name\":\"minimum-node\",\"conclusion\":\"success\"},{\"name\":\"quality\",\"conclusion\":\"success\"},{\"name\":\"native-bindings (aarch64-apple-darwin, macos-15)\",\"conclusion\":\"success\"},{\"name\":\"node-current-signal\",\"conclusion\":\"skipped\"}]}]\n\nimplementation-pr {\"baseRefOid\":\"bde80b7848503fd55b73032804761375c2ea9832\",\"body\":\"\",\"files\":[\".changeset/september-baseline-authoring.md\",\".github/workflows/ci.yml\",\"compatibility/css-authoring-coverage.json\",\"compatibility/css-authoring-probes.json\",\"compatibility/css-feature-target.json\",\"crates/sheetom-core/src/declaration_state.rs\",\"crates/sheetom-core/src/extension_value.rs\",\"crates/sheetom-core/src/lib.rs\",\"crates/sheetom-native/src/lib.rs\",\"crates/sheetom-wasm/src/lib.rs\",\"docs/css-baseline-gap-audit.md\",\"scripts/generate-css-feature-target.ts\"],\"headRefOid\":\"f467d688bbc17c2d5d62eff454480d61c299c95f\",\"title\":\"Refresh CSS Baseline authoring support\"}"
           },
           "createdAt": 14,
-          "id": "message:0:message-3",
+          "id": "message:0:0:message-3",
           "position": 63,
           "revision": 63,
           "runId": "00000000-0000-4000-8000-0000000000a4",

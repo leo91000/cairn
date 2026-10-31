@@ -300,7 +300,7 @@ struct Batch {
     events: Vec<crate::store::Event>,
     entries: Vec<TimelineChange>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    large_entries: Vec<TimelinePreview>,
+    large_entries: Vec<LargeTimelineReference>,
     reset: bool,
     more: bool,
     history: String,
@@ -313,7 +313,8 @@ struct Batch {
 }
 
 use cairn_contracts::{
-    HistoryPage, TimelineChange, TimelineContent, TimelineEntry, TimelinePreview, TimelineState,
+    HistoryPage, LargeTimelineReference, TimelineChange, TimelineContent, TimelineEntry,
+    TimelineState,
 };
 
 #[cfg(test)]
@@ -821,17 +822,16 @@ pub async fn history(s: &Service, kind: &str, id: &str, input: &Input) -> Result
 /// Fetch a referenced oversized card in bounded, checksum-verified chunks.
 pub async fn content(s: &Service, kind: &str, id: &str, input: &Input) -> Result<Value> {
     uuid(id)?;
-    let entry = input
-        .query
-        .get("entryId")
-        .cloned()
-        .ok_or_else(|| Error::bad("A timeline entry is required."))?;
-    if entry.is_empty() || entry.chars().count() > 1024 {
+    let input: cairn_contracts::ReadLargeTimelineInput =
+        serde_json::from_value(input.body.clone())?;
+    if input.snapshot.id.is_empty()
+        || input.snapshot.id.chars().count() > 1024
+        || !(0..=9_007_199_254_740_991).contains(&input.offset)
+        || crate::validation::encoded_size(&input.snapshot)? > PAGE_BYTES
+    {
         return Err(Error::bad("Invalid timeline entry."));
     }
-    let offset = input.number("offset", 0, 0, 9_007_199_254_740_991)?;
-    let sha = input.query.get("sha256").cloned();
-    if sha.as_ref().is_some_and(|value| {
+    if input.sha256.as_ref().is_some_and(|value| {
         value.len() != 64
             || !value
                 .bytes()
@@ -855,11 +855,12 @@ pub async fn content(s: &Service, kind: &str, id: &str, input: &Input) -> Result
             let args: cairn_contracts::ReadRunContentInput =
                 serde_json::from_value(serde_json::json!({
                     "runId": run,
-                    "entryId": entry,
-                    "offset": offset,
-                    "sha256": sha,
+                    "entryId": input.snapshot.id,
+                    "offset": input.offset,
+                    "sha256": input.sha256,
                 }))?;
-            crate::mcp_server::read_run_content(&db, &args)
+            let snapshot = crate::timeline::snapshot_from_source(&db, &run, input.snapshot)?;
+            crate::mcp_server::chunk_run_content(&serde_json::to_string(&snapshot)?, &args)
         })
         .await
 }
@@ -878,27 +879,66 @@ pub fn ui_events(events: Vec<crate::store::Event>) -> Vec<crate::store::Event> {
 }
 
 /// A large card is fetched separately; the reference contains no partial content.
-fn split_large(entries: Vec<TimelineEntry>) -> Result<(Vec<TimelineEntry>, Vec<TimelinePreview>)> {
+fn split_large(
+    entries: Vec<TimelineEntry>,
+) -> Result<(Vec<TimelineEntry>, Vec<LargeTimelineReference>)> {
     let mut complete = Vec::new();
     let mut large = Vec::new();
-    for entry in entries {
+    for mut entry in entries {
         if crate::validation::encoded_size(&entry)? <= PAGE_BYTES - 1024 {
             complete.push(entry);
             continue;
         }
-        let kind = match &entry.content {
-            TimelineContent::UserMessage { .. } => "userMessage",
-            TimelineContent::AgentMessage { .. } => "agentMessage",
-            TimelineContent::Notice { .. } => "notice",
-        };
-        large.push(TimelinePreview {
-            id: entry.id,
-            position: entry.position,
-            revision: entry.revision,
-            source: entry.source,
-            kind: kind.to_owned(),
-            text: String::new(),
-        });
+        match &mut entry.content {
+            TimelineContent::UserMessage {
+                text,
+                message_id,
+                question_id,
+                sent_at,
+                attachments,
+            } => {
+                text.clear();
+                *message_id = None;
+                *question_id = None;
+                *sent_at = 0;
+                attachments.clear();
+            }
+            TimelineContent::AgentMessage { item_id, text, .. } => {
+                item_id.clear();
+                text.clear();
+            }
+            TimelineContent::Notice { notice } => {
+                if let Some(detail) = &mut notice.detail {
+                    detail.clear();
+                }
+                if let Some(status) = &mut notice.status {
+                    status.clear();
+                }
+                if let Some(quota) = &mut notice.quota {
+                    quota.message.clear();
+                }
+                if let Some(retry) = &mut notice.engine_retry
+                    && let Some(reason) = &mut retry.reason
+                {
+                    reason.clear();
+                }
+                if let Some(limit) = &mut notice.usage_limit {
+                    limit.status.clear();
+                    if let Some(window) = &mut limit.window {
+                        window.clear();
+                    }
+                }
+                if let Some(level) = &mut notice.level {
+                    level.clear();
+                }
+                if let Some(account) = &mut notice.account {
+                    account.agent.clear();
+                    account.name.clear();
+                }
+                notice.tasks.clear();
+            }
+        }
+        large.push(LargeTimelineReference { snapshot: entry });
     }
     Ok((complete, large))
 }
@@ -909,9 +949,9 @@ fn split_large(entries: Vec<TimelineEntry>) -> Result<(Vec<TimelineEntry>, Vec<T
 struct Replies(HashMap<String, (String, Option<String>, bool)>);
 
 impl Replies {
-    fn forget(&mut self, entries: &[TimelinePreview]) {
+    fn forget(&mut self, entries: &[LargeTimelineReference]) {
         for entry in entries {
-            self.0.remove(&entry.id);
+            self.0.remove(&entry.snapshot.id);
         }
     }
 

@@ -29,7 +29,7 @@ test('large timeline answers load completely through bounded content chunks', as
   })
   const chunks: number[] = []
   page.on('response', (response) => {
-    if (response.url().includes('/timeline-content?'))
+    if (response.url().includes('/timeline-content'))
       chunks.push(response.status())
   })
   await page.goto(workspacePath(`${workspace.url}/runs/${run.id}`))

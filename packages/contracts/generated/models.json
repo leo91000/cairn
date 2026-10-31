@@ -3726,7 +3726,7 @@
         "largeEntries": {
           "description": "Oversized timeline cards, fetched in bounded chunks before this page is applied.",
           "items": {
-            "$ref": "#/definitions/TimelinePreview"
+            "$ref": "#/definitions/LargeTimelineReference"
           },
           "type": "array"
         },
@@ -3996,6 +3996,18 @@
         "release",
         "archiveSha256",
         "binarySha256"
+      ],
+      "type": "object"
+    },
+    "LargeTimelineReference": {
+      "description": "Metadata for an oversized card. Its source-backed fields are fetched from\nthe immutable source event before the client applies this snapshot.",
+      "properties": {
+        "snapshot": {
+          "$ref": "#/definitions/TimelineEntry"
+        }
+      },
+      "required": [
+        "snapshot"
       ],
       "type": "object"
     },
@@ -9490,6 +9502,36 @@
       },
       "required": [
         "chatId",
+        "offset",
+        "sha256"
+      ],
+      "type": "object"
+    },
+    "ReadLargeTimelineInput": {
+      "additionalProperties": false,
+      "description": "Reads the original source-backed content for a referenced card snapshot.",
+      "properties": {
+        "offset": {
+          "default": 0,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sha256": {
+          "default": null,
+          "pattern": "^[0-9a-f]{64}$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "snapshot": {
+          "$ref": "#/definitions/TimelineEntry"
+        }
+      },
+      "required": [
+        "snapshot",
         "offset",
         "sha256"
       ],

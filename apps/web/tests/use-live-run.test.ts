@@ -81,10 +81,10 @@ it('loads a referenced card before exposing a completed stream batch', async () 
     createdAt: 1,
     updatedAt: 2,
     content: {
-      kind: 'agentMessage',
+      kind: 'agentMessage' as const,
       itemId: 'a',
       text: 'full answer',
-      state: 'done',
+      state: 'done' as const,
     },
   }
   const data = JSON.stringify(card)
@@ -99,18 +99,12 @@ it('loads a referenced card before exposing a completed stream batch', async () 
     reset: false,
     more: false,
     history: 'v2:r:1',
-    largeEntries: [{
-      id: card.id,
-      position: 1,
-      revision: 2,
-      source: 2,
-      kind: 'agentMessage',
-      text: '',
-    }],
+    largeEntries: [{ snapshot: { ...card, content: { ...card.content, itemId: '', text: '' } } }],
   }, 2)
   expect(live.timeline.value).toHaveLength(0)
   resolve?.({
     entryId: card.id,
+    runId: card.runId,
     offset: 0,
     totalBytes: new TextEncoder().encode(data).length,
     sha256: 'a'.repeat(64),

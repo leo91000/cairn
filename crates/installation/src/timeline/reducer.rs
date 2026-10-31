@@ -392,6 +392,40 @@ pub(crate) fn notice_detail(event: &Event<'_>, code: NoticeCode) -> Option<Strin
     (!detail.is_empty()).then_some(detail)
 }
 
+/// Source-owned notice fields, reconstructed identically during replay and hydration.
+pub(crate) fn source_notice_fields(notice: &mut TimelineNotice, event: &Event<'_>) {
+    let data = event.data();
+    if notice.code == NoticeCode::BackgroundTasks {
+        notice.tasks = data["tasks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|task| text(task, "description").trim().to_owned())
+            .filter(|task| !task.is_empty())
+            .collect();
+    }
+    if let Some(account) = &mut notice.account
+        && let Some(found) = ACCOUNT.captures(event.text)
+    {
+        account.agent = found[1].to_owned();
+        account.name = found[2].trim().to_owned();
+    }
+    if let Some(retry) = &mut notice.engine_retry
+        && retry.reason.is_some()
+    {
+        retry.reason = data["reason"].as_str().map(str::to_owned);
+    }
+    if let Some(limit) = &mut notice.usage_limit {
+        limit.status = text(data, "status").to_owned();
+        if limit.window.is_some() {
+            limit.window = data["window"].as_str().map(str::to_owned);
+        }
+    }
+    if notice.level.is_some() {
+        notice.level = data["level"].as_str().map(str::to_owned);
+    }
+}
+
 /// The text a reply or message reads from its source event.
 pub(crate) fn message_text(event: &Event<'_>) -> String {
     match event.kind {
@@ -407,6 +441,22 @@ pub(crate) fn message_text(event: &Event<'_>) -> String {
             let reply = text(event.item(), "text");
             if reply.is_empty() { event.text } else { reply }.to_owned()
         }
+    }
+}
+
+pub(crate) fn reply_id(attempt: i64, turn: i64, event: i64, item_id: &str) -> String {
+    if item_id.is_empty() {
+        return format!("message:{event}");
+    }
+    let plain = format!("message:{attempt}:{turn}:{item_id}");
+    if plain.chars().count() <= 1024 {
+        plain
+    } else {
+        // A distinct namespace prevents a long ID from colliding with a short ID.
+        format!(
+            "message-hash:{attempt}:{turn}:{}",
+            crate::auth::hex_digest(item_id)
+        )
     }
 }
 
@@ -544,7 +594,7 @@ impl<C: Cards> Reducer<'_, C> {
         if matches!(kind, EventKind::TurnCompleted | EventKind::ChatUser) {
             self.state.retried = None;
         }
-        if matches!(kind, EventKind::TurnStarted | EventKind::ChatUser) {
+        if matches!(kind, EventKind::TurnStarted | EventKind::ChatUser) || event.attempt_marker() {
             self.state.echoes = Echoes::default();
         }
         let moves_on = matches!(
@@ -595,7 +645,7 @@ impl<C: Cards> Reducer<'_, C> {
             kind,
             EventKind::TurnCompleted | EventKind::TurnFailed | EventKind::RunnerFailed
         ) || event.status(TERMINAL);
-        if ended || *kind == EventKind::TurnStarted {
+        if ended || *kind == EventKind::TurnStarted || event.attempt_marker() {
             self.settle_replies()?;
         }
         if *kind == EventKind::TurnStarted {
@@ -880,21 +930,7 @@ impl<C: Cards> Reducer<'_, C> {
     fn reply(&mut self, item: &Value) -> Result<()> {
         let event = self.event;
         let item_id = text(item, "id");
-        let id = if item_id.is_empty() {
-            format!("message:{}", event.id)
-        } else {
-            let plain = format!("message:{}:{item_id}", self.state.turn);
-            if plain.chars().count() <= 1024 {
-                plain
-            } else {
-                // A distinct namespace prevents a long ID from colliding with a literal short ID.
-                format!(
-                    "message-hash:{}:{}",
-                    self.state.turn,
-                    crate::auth::hex_digest(item_id)
-                )
-            }
-        };
+        let id = reply_id(self.state.attempt, self.state.turn, event.id, item_id);
         let state = if *event.kind == EventKind::ItemCompleted {
             TimelineState::Done
         } else {
@@ -971,13 +1007,6 @@ impl<C: Cards> Reducer<'_, C> {
             }
             EventKind::TurnWaiting => {
                 notice.state = TimelineState::Info;
-                notice.tasks = data["tasks"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .map(|task| text(task, "description").trim().to_owned())
-                    .filter(|task| !task.is_empty())
-                    .collect();
                 NoticeCode::BackgroundTasks
             }
             EventKind::TurnFailed => {
@@ -1012,10 +1041,10 @@ impl<C: Cards> Reducer<'_, C> {
                     notice.state = TimelineState::Info;
                     notice.prominent = true;
                     NoticeCode::Speed
-                } else if let Some(account) = ACCOUNT.captures(event.text) {
+                } else if ACCOUNT.is_match(event.text) {
                     notice.account = Some(AccountNotice {
-                        agent: account[1].to_owned(),
-                        name: account[2].trim().to_owned(),
+                        agent: String::new(),
+                        name: String::new(),
                     });
                     NoticeCode::AccountSelected
                 } else {
@@ -1043,7 +1072,7 @@ impl<C: Cards> Reducer<'_, C> {
                 notice.engine_retry = Some(EngineRetry {
                     attempt: count(&data["attempt"]),
                     max_retries: count(&data["maxRetries"]).filter(|limit| *limit > 0),
-                    reason: data["reason"].as_str().map(str::to_owned),
+                    reason: data["reason"].as_str().map(|_| String::new()),
                     http_status: count(&data["status"]).filter(|status| *status > 0),
                     delay_ms: data["delayMs"].as_u64(),
                     no_response: data["noResponse"].is_object(),
@@ -1055,8 +1084,8 @@ impl<C: Cards> Reducer<'_, C> {
                 notice.state = TimelineState::Info;
                 notice.prominent = status != "allowed";
                 notice.usage_limit = Some(UsageLimit {
-                    status: status.to_owned(),
-                    window: data["window"].as_str().map(str::to_owned),
+                    status: String::new(),
+                    window: data["window"].as_str().map(|_| String::new()),
                     blocked: data["blocked"] == true,
                     resets_at: data["resetsAt"].as_i64().filter(|reset| *reset >= 0),
                 });
@@ -1067,7 +1096,7 @@ impl<C: Cards> Reducer<'_, C> {
                 notice.state = TimelineState::Info;
                 notice.prominent =
                     matches!(level, "warning" | "suggestion") || data["stopsTurn"] == true;
-                notice.level = (!level.is_empty()).then(|| level.to_owned());
+                notice.level = (!level.is_empty()).then(String::new);
                 NoticeCode::EngineNotice
             }
             EventKind::Diagnostic => {
@@ -1089,6 +1118,7 @@ impl<C: Cards> Reducer<'_, C> {
         if notice_detail(event, notice.code).is_some() {
             notice.detail = Some(String::new());
         }
+        source_notice_fields(&mut notice, event);
         notice
     }
 }

@@ -50,7 +50,7 @@
     "events": [],
     "entries": [],
     "largeEntries": [
-      { "id": "message:1:é", "position": 1, "revision": 2, "source": 2, "kind": "agentMessage", "text": "" }
+      { "snapshot": { "id": "message:1:é", "runId": "00000000-0000-4000-8000-000000000001", "position": 1, "revision": 2, "source": 2, "turn": 1, "attempt": 0, "createdAt": 1, "updatedAt": 2, "content": { "kind": "agentMessage", "itemId": "é", "text": "", "state": "done" } } }
     ],
     "history": "v2:00000000-0000-4000-8000-000000000001:1",
     "oldest": 1,

@@ -108,24 +108,19 @@ impl Fixture {
     }
 
     async fn large_card(&self, preview: &Value) -> Value {
-        let id = preview["id"].as_str().unwrap();
+        let snapshot = &preview["snapshot"];
         let mut offset = 0_u64;
         let mut checksum = String::new();
         let mut content = String::new();
         loop {
-            let mut query = vec![("entryId", id.to_owned()), ("offset", offset.to_string())];
-            if !checksum.is_empty() {
-                query.push(("sha256", checksum.clone()));
-            }
-            let mut url = reqwest::Url::parse(&format!(
-                "{}/api/runs/{}/timeline-content",
-                self.url, self.run
-            ))
-            .unwrap();
-            url.query_pairs_mut().extend_pairs(&query);
+            let body = json!({"snapshot": snapshot, "offset": offset, "sha256": if checksum.is_empty() { None } else { Some(&checksum) }});
             let response = reqwest::Client::new()
-                .get(url)
+                .post(format!(
+                    "{}/api/runs/{}/timeline-content",
+                    self.url, self.run
+                ))
                 .header("x-test-relay-token", &self.token)
+                .json(&body)
                 .send()
                 .await
                 .unwrap();
@@ -142,7 +137,7 @@ impl Fixture {
             offset = next;
         }
         let card: Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(card["id"], preview["id"]);
+        assert_eq!(card["id"], snapshot["id"]);
         card
     }
 
@@ -285,7 +280,7 @@ async fn older_history_pages_bound_hydrated_cards_without_losing_positions() {
 }
 
 #[tokio::test]
-async fn oversized_card_chunks_reject_a_change_between_reads() {
+async fn oversized_card_chunks_remain_stable_when_the_reply_changes() {
     let f = Fixture::new().await;
     let payload =
         json!({"item": {"id": "large", "type": "agent_message", "text": "🦊".repeat(100_000)}});
@@ -305,15 +300,13 @@ async fn oversized_card_chunks_reject_a_change_between_reads() {
             break preview.clone();
         }
     };
-    assert_eq!(preview["kind"], "agentMessage");
-    let mut url =
-        reqwest::Url::parse(&format!("{}/api/runs/{}/timeline-content", f.url, f.run)).unwrap();
-    url.query_pairs_mut()
-        .append_pair("entryId", preview["id"].as_str().unwrap());
+    assert_eq!(preview["snapshot"]["content"]["kind"], "agentMessage");
+    let url = format!("{}/api/runs/{}/timeline-content", f.url, f.run);
     let client = reqwest::Client::new();
     let first = client
-        .get(url.clone())
+        .post(&url)
         .header("x-test-relay-token", &f.token)
+        .json(&json!({"snapshot": preview["snapshot"], "offset": 0}))
         .send()
         .await
         .unwrap();
@@ -331,16 +324,55 @@ async fn oversized_card_chunks_reject_a_change_between_reads() {
         )
         .await
         .unwrap();
-    url.query_pairs_mut()
-        .append_pair("offset", &next.to_string())
-        .append_pair("sha256", sha);
     let second = client
-        .get(url)
+        .post(url)
         .header("x-test-relay-token", &f.token)
+        .json(&json!({"snapshot": preview["snapshot"], "offset": next, "sha256": sha}))
         .send()
         .await
         .unwrap();
-    assert_eq!(second.status(), StatusCode::CONFLICT);
+    assert_eq!(second.status(), StatusCode::OK);
+    let second: Value = second.json().await.unwrap();
+    assert_eq!(second["sha256"], sha);
+    let original = f.large_card(&preview).await;
+    assert_eq!(original["content"]["text"], "🦊".repeat(100_000));
+}
+
+#[tokio::test]
+async fn oversized_notice_arguments_are_recovered_from_their_source() {
+    let f = Fixture::new().await;
+    let task = "long task ".repeat(30_000);
+    f.service
+        .store
+        .event(
+            &f.run,
+            &EventKind::TurnWaiting,
+            "Waiting",
+            Some(json!({"tasks": [{"description": task}]})),
+        )
+        .await
+        .unwrap();
+    let mut stream = f.open(0).await;
+    let reference = loop {
+        let (_, batch) = stream.batch().await;
+        assert!(serde_json::to_vec(&batch).unwrap().len() < 256 * 1024);
+        if let Some(reference) = batch["largeEntries"]
+            .as_array()
+            .and_then(|entries| entries.first())
+        {
+            break reference.clone();
+        }
+    };
+    assert_eq!(
+        reference["snapshot"]["content"]["notice"]["code"],
+        "backgroundTasks"
+    );
+    let card = f.large_card(&reference).await;
+    let task = "long task ".repeat(30_000);
+    assert_eq!(
+        card["content"]["notice"]["tasks"][0].as_str(),
+        Some(task.trim())
+    );
 }
 
 async fn serve(service: Arc<Service>) -> (String, tokio::task::JoinHandle<()>) {

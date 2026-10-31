@@ -12,13 +12,8 @@ fn a_reference_invalidates_the_streamed_reply_baseline() {
     };
     let mut replies = Replies::default();
     replies.encode(vec![card(1, "before")], false);
-    replies.forget(&[TimelinePreview {
-        id: "message:1:a".into(),
-        position: 1,
-        revision: 2,
-        source: 2,
-        kind: "agentMessage".into(),
-        text: String::new(),
+    replies.forget(&[LargeTimelineReference {
+        snapshot: card(2, ""),
     }]);
     assert!(matches!(
         replies

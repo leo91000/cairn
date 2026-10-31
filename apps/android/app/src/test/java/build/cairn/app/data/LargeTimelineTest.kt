@@ -1,8 +1,9 @@
 package build.cairn.app.data
 
+import build.cairn.contracts.LargeTimelineReference
+import build.cairn.contracts.ReadLargeTimelineInput
 import build.cairn.contracts.RunContentOutput
 import build.cairn.contracts.TimelineContent
-import build.cairn.contracts.TimelinePreview
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.encodeToString
 import okhttp3.mockwebserver.MockResponse
@@ -69,13 +70,24 @@ class LargeTimelineTest {
             server.enqueue(MockResponse().setBody(response(0, first, next)))
             server.enqueue(MockResponse().setBody(response(next, second, null)))
             val api = CairnApi(server.url("/"), MemoryVault())
-            val preview = TimelinePreview("message:1:é", "agentMessage", 1, 2, 2, "")
+            val shell =
+                wireJson.decodeFromString<TimelineCard>(
+                    json.replace("🦊 résultat", "").replace("\"itemId\":\"é\"", "\"itemId\":\"\"")
+                )
+            val preview = LargeTimelineReference(shell)
             val card = api.readLargeTimeline("/runs/run/stream", listOf(preview)).single()
             assertEquals("🦊 résultat", (card.content as TimelineContent.B).text)
-            assertEquals("0", server.takeRequest().requestUrl!!.queryParameter("offset"))
-            val secondRequest = server.takeRequest().requestUrl!!
-            assertEquals(next.toString(), secondRequest.queryParameter("offset"))
-            assertEquals(digest, secondRequest.queryParameter("sha256"))
+            val firstRequest =
+                wireJson.decodeFromString<ReadLargeTimelineInput>(
+                    server.takeRequest().body.readUtf8()
+                )
+            assertEquals(0L, firstRequest.offset)
+            val secondRequest =
+                wireJson.decodeFromString<ReadLargeTimelineInput>(
+                    server.takeRequest().body.readUtf8()
+                )
+            assertEquals(next, secondRequest.offset)
+            assertEquals(digest, secondRequest.sha256)
         }
     }
 }

@@ -1041,6 +1041,22 @@ class DirectTransportTest {
     }
 
     @Test
+    fun `immutable timeline snapshot reads replay on relay after direct loss`() = runTest {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("{}"))
+            server.start()
+            val api = CairnApi(server.url("/"), MemoryVault(), installationId = "test")
+            api.transport.attach(
+                DirectChannel({ _, _, _ -> throw IOException("acknowledgement lost") }, {})
+            )
+            val payload = body("offset" to "0")
+            assertEquals("{}", api.request("POST", "/runs/run/timeline-content", payload))
+            assertEquals(payload.toString(), server.takeRequest().body.readUtf8())
+            assertEquals("relay", api.transport.route.value)
+        }
+    }
+
+    @Test
     fun `binary resources remain on relay while direct is attached`() = runTest {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setBody("image"))

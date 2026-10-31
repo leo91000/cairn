@@ -391,7 +391,10 @@ async fn upgrade_builds_the_timeline_from_retained_events_and_changes_nothing_el
         .filter(|card| matches!(card.content, TimelineContent::AgentMessage { .. }))
         .map(|card| (card.id.as_str(), card.turn))
         .collect::<Vec<_>>();
-    assert_eq!(replies, [("message:1:msg_1", 1), ("message:2:msg_1", 2)]);
+    assert_eq!(
+        replies,
+        [("message:0:1:msg_1", 1), ("message:0:2:msg_1", 2)]
+    );
     // Stderr that looks like protocol stays process output.
     let diagnostic = codex.last().unwrap();
     assert_eq!(notice(diagnostic).code, NoticeCode::Diagnostic);
@@ -762,6 +765,48 @@ fn replay(events: &[(EventKind, &str, Value)]) -> Vec<TimelineEntry> {
 }
 
 #[test]
+fn reused_item_ids_remain_distinct_across_attempts_without_a_turn_marker() {
+    let cards = replay(&[
+        (
+            EventKind::Status,
+            "Preparing workspace",
+            serde_json::json!({"attempt": true}),
+        ),
+        (
+            EventKind::ItemUpdated,
+            "",
+            serde_json::json!({"item": {"id": "same", "type": "agent_message", "text": "first"}}),
+        ),
+        (
+            EventKind::Status,
+            "Preparing workspace",
+            serde_json::json!({"attempt": true}),
+        ),
+        (
+            EventKind::ItemUpdated,
+            "",
+            serde_json::json!({"item": {"id": "same", "type": "agent_message", "text": "second"}}),
+        ),
+    ]);
+    let replies: Vec<_> = cards
+        .iter()
+        .filter_map(|card| match &card.content {
+            TimelineContent::AgentMessage { text, state, .. } => {
+                Some((card.attempt, text.as_str(), *state))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        replies,
+        [
+            (1, "first", TimelineState::Done),
+            (2, "second", TimelineState::Running)
+        ]
+    );
+}
+
+#[test]
 fn usage_limits_and_replies_repeating_a_failure_stay_in_the_run_log() {
     use serde_json::json;
     let reply = |text: &str| {
@@ -788,7 +833,10 @@ fn usage_limits_and_replies_repeating_a_failure_stay_in_the_run_log() {
         (EventKind::Status, "failed", Value::Null),
     ]);
     assert_eq!(shown(&cards), ["user: Go"]);
-    let reply = cards.iter().find(|card| card.id == "message:1:r").unwrap();
+    let reply = cards
+        .iter()
+        .find(|card| card.id == "message:0:1:r")
+        .unwrap();
     assert!(matches!(
         reply.content,
         TimelineContent::AgentMessage { echo: true, .. }

@@ -1036,7 +1036,15 @@ pub(crate) fn read_run_content(
     } else {
         serde_json::to_string(&required(db.run_view(id)?, "Run not found")?)?
     };
-    let digest = crate::auth::hex_digest(&data);
+    chunk_run_content(&data, args)
+}
+
+pub(crate) fn chunk_run_content(
+    data: &str,
+    args: &cairn_contracts::ReadRunContentInput,
+) -> Result<Value> {
+    let run_id = args.run_id.to_string();
+    let digest = crate::auth::hex_digest(data);
     let offset = usize::try_from(args.offset).map_err(|_| Error::bad("Invalid content offset."))?;
     if (offset > 0 || args.sha256.is_some()) && args.sha256.as_deref() != Some(&digest) {
         return Err(Error::conflict(

@@ -47,6 +47,28 @@ pub struct TimelineEntry {
     pub content: TimelineContent,
 }
 
+/// Metadata for an oversized card. Its source-backed fields are fetched from
+/// the immutable source event before the client applies this snapshot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct LargeTimelineReference {
+    pub snapshot: TimelineEntry,
+}
+
+/// Reads the original source-backed content for a referenced card snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReadLargeTimelineInput {
+    pub snapshot: TimelineEntry,
+    #[ts(type = "number")]
+    #[serde(default, deserialize_with = "crate::wire_integer")]
+    #[schemars(range(min = 0_i64, max = 9007199254740991_i64))]
+    pub offset: i64,
+    #[serde(default)]
+    #[schemars(pattern("^[0-9a-f]{64}$"))]
+    pub sha256: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(
     tag = "kind",

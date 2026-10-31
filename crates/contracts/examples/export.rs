@@ -500,6 +500,8 @@ fn main() {
     export::<ReadRunHistoryInput>(root, &mut generator, Contract::Deserialize);
     export::<HistoryPage>(root, &mut generator, Contract::Deserialize);
     export::<TimelineEntry>(root, &mut generator, Contract::Serialize);
+    export::<LargeTimelineReference>(root, &mut generator, Contract::Serialize);
+    export::<ReadLargeTimelineInput>(root, &mut generator, Contract::Deserialize);
     export::<TimelineChange>(root, &mut generator, Contract::Serialize);
     export::<ReadRunTimelineInput>(root, &mut generator, Contract::Deserialize);
     export::<RunTimelineOutput>(root, &mut generator, Contract::Serialize);

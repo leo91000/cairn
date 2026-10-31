@@ -900,8 +900,10 @@ its event cursor until all card batches have been sent, so reconnecting replays 
 unaccepted batches. Backwards pages retain whole event-position groups and advance
 their boundary only after including them. Oversized individual cards are referenced
 in `largeEntries` instead of being partially rendered: both apps fetch their complete
-JSON through the conversation or run's `timeline-content` endpoint in UTF-8 chunks,
-using the returned checksum to detect changes, before accepting the page or cursor.
+JSON through the conversation or run's read-only `timeline-content` operation in
+UTF-8 chunks, before accepting the page or cursor. A reference carries a small
+card snapshot whose source-backed fields are reconstructed from the immutable
+source event; later streaming updates therefore cannot invalidate those chunks.
 An event-position group remains together even if its combined references exceed the
 page budget. A single database read still hydrates a complete card to create a
 reference or verify a chunk; client transfer is bounded, not peak per-card memory.
