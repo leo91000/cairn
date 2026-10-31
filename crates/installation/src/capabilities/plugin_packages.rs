@@ -230,6 +230,16 @@ impl PluginPackageOperation {
         context: ResumeContext,
     ) -> Result<Value> {
         let owner = matches!(context, ResumeContext::Human(_));
+        let human_account = match &context {
+            ResumeContext::Human(account) => Some(account.clone()),
+            _ => None,
+        };
+        // Resource handlers use instance capabilities after this request ends;
+        // read scope must retain the human's revocable account/access identity.
+        let reads_resources = matches!(
+            self.name,
+            "list_plugin_resources" | "resolve_plugin_resource" | "get_plugin_resource_operation"
+        );
         let public_resource_read = match &context {
             ResumeContext::Public(scopes, _) => Some(scopes.iter().any(|scope| scope == "read")),
             _ => None,
@@ -250,12 +260,6 @@ impl PluginPackageOperation {
                     self.name,
                     "install_plugin_package" | "activate_plugin_package" | "delete_plugin_package"
                 );
-                let reads_resources = matches!(
-                    self.name,
-                    "list_plugin_resources"
-                        | "resolve_plugin_resource"
-                        | "get_plugin_resource_operation"
-                );
                 if (writes_packages || reads_resources) && credential.is_none() {
                     return Err(Error::unauthorized(
                         "A current public MCP authorization is required.",
@@ -268,11 +272,12 @@ impl PluginPackageOperation {
                 }
             }
             ResumeContext::Human(account) => {
-                if self.scope == "manage"
-                    && !matches!(
-                        self.name,
-                        "get_plugin_operation" | "cancel_plugin_operation"
-                    )
+                if reads_resources
+                    || (self.scope == "manage"
+                        && !matches!(
+                            self.name,
+                            "get_plugin_operation" | "cancel_plugin_operation"
+                        ))
                 {
                     Authority::human(s, &account).await?
                 } else {
@@ -442,6 +447,12 @@ impl PluginPackageOperation {
                     &input.operation_id,
                     self.name == "get_plugin_resource_operation",
                 )?;
+                if resource_result.is_some()
+                    && authority.owner.is_none()
+                    && let Some(account) = &human_account
+                {
+                    authority = Authority::human(s, account).await?;
+                }
                 if resource_result.is_some()
                     && let Some(can_read) = public_resource_read
                 {

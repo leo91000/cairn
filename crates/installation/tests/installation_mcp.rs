@@ -6237,6 +6237,177 @@ async fn resource_reads_match_http_public_mcp_and_installation_with_live_grants(
 }
 
 #[tokio::test]
+async fn http_resource_handlers_retain_the_originating_owner_authority() {
+    use axum::{Json, Router, http::HeaderMap, routing::get};
+    use cairn_protocol::{TaskAuthorGrant, TaskAuthorPolicy};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use tokio::sync::Notify;
+
+    for resolve in [false, true] {
+        for replace_access in [false, true] {
+            let root = TempDir::new().unwrap();
+            let s = service(&root).await;
+            s.plugins
+                .use_worker(std::path::PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
+            let installed = common::package_install(&s, &json!({
+                "manifest": {
+                    "id":"resource-owner",
+                    "name":"Owner resources",
+                    "version":"1",
+                    "apiVersion":2,
+                    "capabilities":["http"],
+                    "hosts":["api.example.test"],
+                    "agentAccess":{},
+                    "resources":[{"name":"repository","description":"Repository"}]
+                },
+                "source": r#"return {resources = function(input)
+                    pcall(function() cairn.http.request({url = "https://api.example.test/hold"}) end)
+                    pcall(function() cairn.http.request({url = "https://api.example.test/second"}) end)
+                    local item = {resourceType = "repository", id = "repo", name = "Repository"}
+                    if input.op == "list" then return {items = cairn.array({item})} end
+                    return item
+                end}"#,
+            })).await.unwrap();
+            common::package_approve(&s, "resource-owner", "1", text(&installed, "digest"))
+                .await
+                .unwrap();
+            let saved = common::save_plugin(
+                &s,
+                "resource-owner",
+                &json!({"name":"Private","enabled":true}),
+                None,
+            )
+            .await
+            .unwrap();
+            let entered = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            let replaced = Arc::new(AtomicBool::new(false));
+            let second_calls = Arc::new(AtomicUsize::new(0));
+            let gateway = Router::new()
+                .route(
+                    "/api/relay/00000000-0000-4000-8000-000000000055/task-authors",
+                    get({
+                        let replaced = replaced.clone();
+                        move |headers: HeaderMap| {
+                            let replaced = replaced.clone();
+                            async move {
+                                if headers.get("authorization").and_then(|v| v.to_str().ok())
+                                    != Some("Bearer fixture-only")
+                                {
+                                    return Err(StatusCode::UNAUTHORIZED);
+                                }
+                                Ok(Json(TaskAuthorPolicy {
+                                    owner: TaskAuthorGrant {
+                                        account_id: "fixture-owner".into(),
+                                        access_id: if replaced.load(Ordering::SeqCst) {
+                                            "replacement-access"
+                                        } else {
+                                            "fixture-owner"
+                                        }
+                                        .into(),
+                                    },
+                                    members: Vec::new(),
+                                }))
+                            }
+                        }
+                    }),
+                )
+                .route(
+                    "/hold",
+                    get({
+                        let entered = entered.clone();
+                        let release = release.clone();
+                        move || {
+                            let entered = entered.clone();
+                            let release = release.clone();
+                            async move {
+                                entered.notify_one();
+                                release.notified().await;
+                                Json(json!({}))
+                            }
+                        }
+                    }),
+                )
+                .route(
+                    "/second",
+                    get({
+                        let second_calls = second_calls.clone();
+                        move || {
+                            second_calls.fetch_add(1, Ordering::SeqCst);
+                            async { Json(json!({})) }
+                        }
+                    }),
+                );
+            let (origin, server) = common::serve_locally(gateway).await;
+            s.plugins.route_http_to(Some(origin.clone()));
+            let identity_path = s.config.data_dir.join("installation-relay/identity.json");
+            let mut identity: Value =
+                serde_json::from_slice(&std::fs::read(&identity_path).unwrap()).unwrap();
+            identity["origin"] = origin.into();
+            std::fs::write(&identity_path, serde_json::to_vec(&identity).unwrap()).unwrap();
+            let app = cairn_installation::http::router(s.clone()).await.unwrap();
+            let instance = text(&saved, "id");
+            let suffix = if resolve {
+                "resources/ancestors?resourceType=repository&id=repo"
+            } else {
+                "resources?resourceType=repository"
+            };
+            let response = common::send(
+                &app,
+                common::request(
+                    "GET",
+                    &format!("/api/plugins/resource-owner/connections/{instance}/{suffix}"),
+                )
+                .extension(cairn_installation::auth::InstallationIdentity::trusted(
+                    cairn_installation::auth::InstallationRole::Owner,
+                    "fixture-owner",
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let started = common::read_json(response).await;
+            tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+                .await
+                .unwrap();
+            if replace_access {
+                replaced.store(true, Ordering::SeqCst);
+            } else {
+                identity["token"] = "revoked-fixture-identity".into();
+                std::fs::write(&identity_path, serde_json::to_vec(&identity).unwrap()).unwrap();
+            }
+            release.notify_one();
+            let state = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    // Inspect the worker's terminal state directly so a new HTTP
+                    // request cannot mask missing authority in the handler itself.
+                    let state = s
+                        .plugins
+                        .operations
+                        .get(text(&started, "operation"))
+                        .unwrap();
+                    if matches!(text(&state, "state"), "completed" | "failed" | "cancelled") {
+                        break state;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                second_calls.load(Ordering::SeqCst),
+                0,
+                "resolve={resolve} replace_access={replace_access}: {state}"
+            );
+            assert_eq!(state["state"], "failed", "{state}");
+            server.abort();
+            s.shutdown.cancel();
+        }
+    }
+}
+
+#[tokio::test]
 async fn resource_handlers_stop_service_effects_when_the_initiating_authority_is_revoked() {
     use axum::{Json, Router, routing::get};
     use std::sync::atomic::{AtomicUsize, Ordering};
