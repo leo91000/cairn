@@ -201,6 +201,56 @@ async fn json_cost_rows_isolate_both_current_span_and_span_list() {
 }
 
 #[test]
+fn per_layer_filters_cannot_restore_private_json_context() {
+    let capture = Capture::default();
+    let output = tracing_subscriber::fmt::layer()
+        .json()
+        .with_current_span(true)
+        .with_span_list(true)
+        .without_time()
+        .with_writer(capture.clone())
+        .with_filter(tracing_subscriber::filter::filter_fn(|metadata| {
+            metadata.name() != "database_metrics"
+        }));
+    let other = tracing_subscriber::layer::Identity::new().with_filter(
+        tracing_subscriber::filter::filter_fn(|metadata| metadata.name() == "database_metrics"),
+    );
+    let subscriber = tracing_subscriber::registry().with(output).with(other);
+    tracing::subscriber::with_default(subscriber, || {
+        let private_span = tracing::info_span!(
+            "synthetic_private_layered_span",
+            private = "synthetic-private-layered-never-log"
+        );
+        let _entered = private_span.enter();
+        let root =
+            tracing::info_span!(target: "cairn_performance", parent: None, "database_metrics");
+        assert!(!root.is_disabled());
+        let connection = Connection::open_in_memory().unwrap();
+        let mut metrics = Metrics::new("write", 0, &connection);
+        metrics.since = Instant::now() - Duration::from_secs(31);
+        metrics.record(
+            &Completed {
+                caller: "fixed_layered_filter_caller",
+                queue: Duration::ZERO,
+                execution: Duration::ZERO,
+                cpu: None,
+                failed: false,
+                abandoned_reply: false,
+            },
+            &connection,
+        );
+    });
+    let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+    assert!(output.contains("database_actor"));
+    assert!(output.contains("database_caller"));
+    assert!(
+        !output.contains("synthetic-private-layered-never-log"),
+        "Per-layer filters must not restore a private current span"
+    );
+    assert!(!output.contains("synthetic_private_layered_span"));
+}
+
+#[test]
 fn disabled_diagnostic_span_suppresses_event_without_inheriting_private_context() {
     let capture = Capture::default();
     let layer = tracing_subscriber::fmt::layer()

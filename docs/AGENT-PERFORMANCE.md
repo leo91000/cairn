@@ -103,10 +103,13 @@ report formatting and other process threads, and are not process CPU utilization
 Times are rounded down to microseconds per job. Compare cumulative CPU and wall
 time before distinguishing repeated computation from disk or other waits.
 
-These records use a field-free root diagnostic span while emitting. Both text
-and JSON current-span lists exclude the caller's private context. A filter that
-disables that root span suppresses the report rather than falling back to a
-private current span. SQL, captured values and error contents remain excluded.
+These records use a short-lived scoped thread with the existing subscriber and
+an empty span stack, plus a field-free root diagnostic span. Both text and JSON
+current-span lists exclude the caller's private context, including with multiple
+layers that disagree about the root span. A filter that disables that root span
+suppresses the report; thread startup or logging failure has no fallback to the
+caller context. Disabled diagnostics do not start a thread. SQL, captured values
+and error contents remain excluded.
 No query, checkpoint, database setting, durability or scheduling policy changes.
 
 Measure per-job collection overhead separately from application latency on Linux:
@@ -131,6 +134,20 @@ one pair favored enabled diagnostics. Host load was approximately 9.71 / 18.10 /
 15.30. These overlapping local observations describe collection overhead on a
 no-op workload, not production query latency, application throughput or a release
 performance gain.
+
+Measure the existing report boundary separately, including span isolation:
+
+```sh
+CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 pnpm test:backend -p cairn-installation --lib store::performance::measurement::measure_isolated_report_overhead -- --ignored --nocapture --test-threads=1
+```
+
+On the same host/profile, four alternating pairs of 100 forced report boundaries
+after warmup produced medians of 85.795 microseconds wall / 88.970 microseconds
+process CPU per enabled report, versus 0.265 / 0.275 disabled. The enabled path
+includes cache/WAL inspection, one tracked caller, formatting into a sink and
+scoped-thread startup/join. It measures the complete local boundary, not just
+thread startup, real log I/O or the maximum 17 caller rows. Production boundaries
+remain at least 30 seconds apart per actor and require a completed job.
 
 The same record samples the connection's pager cache at the interval boundary.
 `cache_hits`, `cache_misses` and `cache_writes` are interval deltas of counters

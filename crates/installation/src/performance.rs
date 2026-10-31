@@ -2,10 +2,12 @@
 use std::time::{Duration, Instant};
 
 mod activity;
+mod isolated;
 pub(crate) mod native;
 pub(crate) mod publication;
 
 pub use activity::{Activity, heartbeat};
+pub(crate) use isolated::without_span_context;
 
 /// Aggregate stream waits without emitting a log for every archive chunk.
 #[derive(Default)]

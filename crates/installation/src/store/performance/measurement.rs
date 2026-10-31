@@ -96,3 +96,67 @@ async fn measure_writer_cost_sampling_overhead() {
         }
     }
 }
+
+fn sample_report(enabled: bool, reports: usize) -> (u128, u128) {
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(if enabled {
+            tracing::level_filters::LevelFilter::INFO
+        } else {
+            tracing::level_filters::LevelFilter::OFF
+        })
+        .with_writer(std::io::sink)
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        let connection = Connection::open_in_memory().unwrap();
+        let mut metrics = Metrics::new("write", 0, &connection);
+        let completed = super::Completed {
+            caller: "fixed_report_measurement_caller",
+            queue: std::time::Duration::ZERO,
+            execution: std::time::Duration::ZERO,
+            cpu: None,
+            failed: false,
+            abandoned_reply: false,
+        };
+        let cpu = process_cpu_micros();
+        let started = Instant::now();
+        for _ in 0..reports {
+            metrics.since = Instant::now() - std::time::Duration::from_secs(31);
+            metrics.record(&completed, &connection);
+        }
+        (started.elapsed().as_micros(), process_cpu_micros() - cpu)
+    })
+}
+
+#[test]
+#[ignore = "explicit isolated report boundary overhead measurement; run alone"]
+fn measure_isolated_report_overhead() {
+    const REPORTS: usize = 100;
+    for enabled in [false, true] {
+        sample_report(enabled, 10);
+    }
+    for pair in 0..4 {
+        let order = if pair % 2 == 0 {
+            [false, true]
+        } else {
+            [true, false]
+        };
+        for enabled in order {
+            let (elapsed, cpu) = sample_report(enabled, REPORTS);
+            println!(
+                "{}",
+                serde_json::json!({
+                    "benchmark": "isolated_database_report_overhead",
+                    "pair": pair,
+                    "enabled": enabled,
+                    "reports": REPORTS,
+                    "elapsedMicros": elapsed,
+                    "processCpuMicros": cpu,
+                    "sqlite": rusqlite::version(),
+                    "workload": "forced actual Metrics boundary, one caller, in-memory SQLite",
+                    "timing": "initialization excluded; sampling, formatting and isolation included",
+                    "limits": "local observation with sink writer; not production logging or query latency",
+                })
+            );
+        }
+    }
+}
