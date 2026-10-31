@@ -107,10 +107,11 @@ at most 320 tracked names and 85 caller rows across five report windows. Reader
 work can overlap; cumulative wall time is not elapsed process time or CPU time.
 
 These records use a short-lived scoped thread with the existing subscriber and
-an empty span stack, plus a field-free root diagnostic span. Both text and JSON
-current-span lists exclude the caller's private context, including with multiple
-layers that disagree about the root span. A filter that disables that root span
-suppresses the report; thread startup or logging failure has no fallback to the
+an empty span stack, emitting parentless events without creating or closing any
+diagnostic span. Both text and JSON current-span lists exclude the caller's
+private context, including with multiple layers or event-only filters. Avoiding
+span cleanup also prevents a second logging panic during unwinding with span
+close events enabled. Thread startup or logging failure has no fallback to the
 caller context. Disabled diagnostics do not start a thread. SQL, captured values
 and error contents remain excluded.
 The shared enabled precheck catches unwinding filter callbacks and treats that
@@ -157,8 +158,8 @@ CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_IN
 ```
 
 On the same host/profile, four alternating pairs of 100 forced report boundaries
-after warmup produced medians of 85.795 microseconds wall / 88.970 microseconds
-process CPU per enabled report, versus 0.265 / 0.275 disabled. The enabled path
+after warmup produced medians of 74.185 microseconds wall / 77.400 microseconds
+process CPU per enabled report, versus 0.750 / 0.760 disabled. The enabled path
 includes cache/WAL inspection, one tracked caller, formatting into a sink and
 scoped-thread startup/join. It measures the complete local boundary, not just
 thread startup, real log I/O or the maximum 17 caller rows. Production boundaries

@@ -122,68 +122,58 @@ impl Metrics {
         let wal_values = wal.unwrap_or_default();
         let interval_ms = elapsed.as_millis().min(u128::from(u64::MAX)) as u64;
         crate::performance::without_span_context(|| {
-            let diagnostic = tracing::info_span!(
+            tracing::info!(
                 target: "cairn_performance",
                 parent: None,
-                "database_metrics"
+                operation = "database_actor",
+                lane = self.lane,
+                actor = self.index,
+                interval_ms,
+                window = self.window,
+                completed = self.completed,
+                errors = self.errors,
+                abandoned_replies = self.abandoned_replies,
+                queue_us = self.queue_us,
+                execution_us = self.execution_us,
+                max_queue_us = self.max_queue_us,
+                max_execution_us = self.max_execution_us,
+                max_queue_caller = self.max_queue_caller,
+                max_execution_caller = self.max_execution_caller,
+                cache_available,
+                cache_hits = cache_values.hits,
+                cache_misses = cache_values.misses,
+                cache_writes = cache_values.writes,
+                cache_bytes = cache_values.bytes,
+                wal_available,
+                wal_frames = wal_values.frames,
+                wal_checkpointed_frames = wal_values.checkpointed_frames,
+                wal_pending_frames = wal_values.pending_frames,
+                wal_autocheckpoint_frames = wal_values.autocheckpoint_frames,
+                sqlite_synchronous = wal_values.synchronous,
+                cpu_us = self.cpu_us,
+                cpu_sampled_jobs = self.cpu_sampled_jobs,
+                cpu_available = self.cpu_sampled_jobs == self.completed,
+                caller_recorded_jobs = self.callers.recorded_jobs,
+                caller_untracked_jobs = self.callers.untracked_jobs,
+                tracked_callers = self.callers.len(),
+                caller_coverage_complete = self.callers.recorded_jobs == self.completed
+                    && self.callers.untracked_jobs == 0,
             );
-            // JSON formatters can include the current span list independently of
-            // the event parent. A root span also isolates that current context.
-            if !diagnostic.is_disabled() {
-                let _entered = diagnostic.enter();
-                tracing::info!(
-                    target: "cairn_performance",
-                    parent: &diagnostic,
-                    operation = "database_actor",
-                    lane = self.lane,
-                    actor = self.index,
-                    interval_ms,
-                    window = self.window,
-                    completed = self.completed,
-                    errors = self.errors,
-                    abandoned_replies = self.abandoned_replies,
-                    queue_us = self.queue_us,
-                    execution_us = self.execution_us,
-                    max_queue_us = self.max_queue_us,
-                    max_execution_us = self.max_execution_us,
-                    max_queue_caller = self.max_queue_caller,
-                    max_execution_caller = self.max_execution_caller,
-                    cache_available,
-                    cache_hits = cache_values.hits,
-                    cache_misses = cache_values.misses,
-                    cache_writes = cache_values.writes,
-                    cache_bytes = cache_values.bytes,
-                    wal_available,
-                    wal_frames = wal_values.frames,
-                    wal_checkpointed_frames = wal_values.checkpointed_frames,
-                    wal_pending_frames = wal_values.pending_frames,
-                    wal_autocheckpoint_frames = wal_values.autocheckpoint_frames,
-                    sqlite_synchronous = wal_values.synchronous,
-                    cpu_us = self.cpu_us,
-                    cpu_sampled_jobs = self.cpu_sampled_jobs,
-                    cpu_available = self.cpu_sampled_jobs == self.completed,
-                    caller_recorded_jobs = self.callers.recorded_jobs,
-                    caller_untracked_jobs = self.callers.untracked_jobs,
-                    tracked_callers = self.callers.len(),
-                    caller_coverage_complete = self.callers.recorded_jobs == self.completed
-                        && self.callers.untracked_jobs == 0,
-                );
-                self.callers.emit(
-                    self.lane,
-                    self.index,
-                    self.window,
-                    interval_ms,
-                    Totals {
-                        completed: self.completed,
-                        errors: self.errors,
-                        abandoned_replies: self.abandoned_replies,
-                        queue_us: self.queue_us,
-                        execution_us: self.execution_us,
-                        cpu_us: self.cpu_us,
-                        cpu_sampled_jobs: self.cpu_sampled_jobs,
-                    },
-                );
-            }
+            self.callers.emit(
+                self.lane,
+                self.index,
+                self.window,
+                interval_ms,
+                Totals {
+                    completed: self.completed,
+                    errors: self.errors,
+                    abandoned_replies: self.abandoned_replies,
+                    queue_us: self.queue_us,
+                    execution_us: self.execution_us,
+                    cpu_us: self.cpu_us,
+                    cpu_sampled_jobs: self.cpu_sampled_jobs,
+                },
+            );
         });
         *self = Self::window(self.lane, self.index, cache, self.window.saturating_add(1));
     }

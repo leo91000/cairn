@@ -62,6 +62,78 @@ async fn failed_cost_probe(store: &Store, private: String) -> crate::error::Resu
         .await
 }
 
+#[test]
+fn failing_close_writer_cannot_abort_sqlite_jobs() {
+    crate::test_process::run_ignored("store::performance::tests::failing_close_writer_child");
+}
+
+struct FailingWriter;
+
+impl std::io::Write for FailingWriter {
+    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        panic!("synthetic SQLite diagnostic writer failure");
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+#[ignore = "isolated abort-capable diagnostic writer fixture, run by parent test"]
+async fn failing_close_writer_child() {
+    #[cfg(unix)]
+    {
+        let limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: this child owns its core-dump limits and supplies a valid limit.
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_CORE, &limit) }, 0);
+    }
+    let subscriber = tracing_subscriber::fmt()
+        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
+        .with_writer(|| FailingWriter)
+        .finish();
+    let dispatcher = tracing::Dispatch::new(subscriber);
+    let (sender, mut receiver) = mpsc::channel::<crate::store::Job>(4);
+    let actor = std::thread::spawn(move || {
+        tracing::dispatcher::with_default(&dispatcher, || {
+            let mut connection = Connection::open_in_memory().unwrap();
+            let mut metrics = Metrics::new("write", 0, &connection);
+            for _ in 0..2 {
+                let completed = receiver.blocking_recv().unwrap()(&mut connection);
+                metrics.since = Instant::now() - Duration::from_secs(31);
+                metrics.record(&completed, &connection);
+            }
+            assert_eq!(metrics.window, 2);
+        });
+    });
+    let store = Store(Arc::new(Pool {
+        writer: sender.clone(),
+        readers: sender,
+        changes: watch::channel(0).0,
+        discarded_changes: Arc::new(AtomicU64::new(0)),
+    }));
+    let written = store.write(|db| {
+        db.0.execute_batch("CREATE TABLE protected_writer(value INTEGER); INSERT INTO protected_writer VALUES (17)")?;
+        Ok(17)
+    }).await.unwrap();
+    assert_eq!(written, 17);
+    let read = store
+        .read(|db| {
+            Ok(db
+                .0
+                .query_row("SELECT value + 6 FROM protected_writer", [], |row| {
+                    row.get::<_, i64>(0)
+                })?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(read, 23);
+    actor.join().unwrap();
+}
+
 #[tokio::test]
 async fn failing_diagnostic_filter_cannot_interrupt_real_sqlite_jobs() {
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -258,10 +330,10 @@ async fn json_cost_rows_isolate_both_current_span_and_span_list() {
         .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
         .collect::<Vec<_>>();
     assert_eq!(rows.len(), 2);
-    assert!(rows.iter().all(|row| {
-        row["span"]["name"] == "database_metrics"
-            && row["spans"] == serde_json::json!([{ "name": "database_metrics" }])
-    }));
+    assert!(
+        rows.iter()
+            .all(|row| row.get("span").is_none() && row.get("spans").is_none())
+    );
 }
 
 #[test]
@@ -315,7 +387,7 @@ fn per_layer_filters_cannot_restore_private_json_context() {
 }
 
 #[test]
-fn disabled_diagnostic_span_suppresses_event_without_inheriting_private_context() {
+fn event_only_filter_reports_without_inheriting_private_context() {
     let capture = Capture::default();
     let layer = tracing_subscriber::fmt::layer()
         .json()
@@ -357,7 +429,18 @@ fn disabled_diagnostic_span_suppresses_event_without_inheriting_private_context(
         assert_eq!(metrics.completed, 0);
         assert_eq!(metrics.window, 1);
     });
-    assert!(capture.0.lock().unwrap().is_empty());
+    let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+    assert!(!output.contains("synthetic-private-filter-never-log"));
+    assert!(!output.contains("synthetic_private_filter_span"));
+    let rows = output
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 2);
+    assert!(
+        rows.iter()
+            .all(|row| row.get("span").is_none() && row.get("spans").is_none())
+    );
 }
 
 #[tokio::test]
