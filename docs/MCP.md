@@ -243,7 +243,7 @@ reused item IDs; it must identify an agent message in this conversation's run. I
 working on a reply. Codex and OpenCode conversations never take one. Supply
 a UUID in `question.id`; identical retries are safe. The answer, or why there is
 none, appears in `list_chat_side_questions`. `cancel_chat_side_question` withdraws
-one that is still pending. Neither steers the reply or changes the queue.
+one that is still pending. Neither steers the reply or changes the queue. Claude denies attempted tools, but an operator’s managed-policy hooks may run before denial and can have side effects; withdrawal cannot undo effects already performed.
 
 `delete_chat` uses the apps' deletion lifecycle. Busy chats require `confirm: true`
 to stop execution and cancel messages/questions. Existing cleanup rules may

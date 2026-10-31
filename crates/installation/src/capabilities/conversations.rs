@@ -43,12 +43,12 @@ pub(crate) const CHAT_OPERATIONS: &[ChatOperation] = &[
     ChatOperation {
         name: "ask_chat_side_question",
         scope: "run",
-        description: "Ask the running reply's coding agent a question about the conversation, optionally about a quoted passage of one of its replies. It answers from its current context with every tool denied, beside the turn: the question never steers the reply, joins the queue or enters the conversation history. Only Claude Code replies support this; Codex and OpenCode report it unavailable. Supply a fresh UUID id; retrying with the same content returns the same question. Read the answer with list_chat_side_questions.",
+        description: "Ask a question beside the running reply, optionally about a quoted passage. Claude denies requested native tools, but an operator's managed-policy PreToolUse hooks may run first and can write or have other effects. Withdrawing cannot undo effects already performed. Cairn does not steer or queue the question as a normal message or add it to conversation history. Only the qualified Claude Code release supports this; Codex and OpenCode report it unavailable. Supply a fresh UUID id; retrying with the same content returns the same question. Read the answer with list_chat_side_questions.",
     },
     ChatOperation {
         name: "cancel_chat_side_question",
         scope: "run",
-        description: "Withdraw a pending side question. The agent stops answering it and nothing is reported.",
+        description: "Withdraw a pending side question. Cairn suppresses the answer and requests cancellation on a best-effort basis; effects already performed cannot be undone.",
     },
     ChatOperation {
         name: "get_conversation_retention",

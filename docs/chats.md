@@ -114,19 +114,19 @@ questions it has. A card above the composer reports a pending or unread answer.
 
 A side question never joins the queue, steers the turn, pauses or resumes it, or
 enters the conversation's history or native session. It is answered beside the
-running turn, from what the engine already knows, without tools or file access:
+running turn, from what the engine already knows, with tool calls denied. An operator’s managed-policy hooks may still run and have side effects before a denial:
 explain a decision, a term or a step, not "check this file". Answers that would need
 tools say so and suggest asking in the conversation. Pending questions can be
-withdrawn; withdrawal does not affect the reply. Up to five can wait at once.
+withdrawn; cancellation is best effort and cannot undo effects already performed. Up to five can wait at once.
 
 | Coding agent | Side questions |
 | --- | --- |
-| Claude Code | The streaming CLI's `side_question` control request (the same one as `/btw`), withdrawn with `control_cancel_request`. Claude Code denies every tool before it could run, answers in one response from the live conversation (an unfinished tool call is marked as still in progress) and skips its transcript. It still runs `PreToolUse` hooks before that denial; Cairn configures none and ignores user and project settings, so only an operator's managed-policy hooks could run. |
+| Claude Code | The streaming CLI's `side_question` control request (the same one as `/btw`), with best-effort withdrawal using `control_cancel_request`. Claude Code denies every tool before it could run, answers in one response from the live conversation (an unfinished tool call is marked as still in progress) and skips its transcript. It still runs `PreToolUse` hooks before that denial; Cairn configures none and ignores user and project settings, so only an operator's managed-policy hooks could run. |
 | Codex | Unavailable. Its side conversations (`thread/fork`) keep tools Cairn cannot remove before the model runs, such as code-mode shell commands and subagents, and stopping a fork once a tool starts does not undo its effect ([ADR-0078](adr/0078-native-side-questions.md)). |
 | OpenCode | Unavailable: it has no side mechanism. |
 
 Codex and OpenCode conversations never offer the action, nor does a Claude reply
-that is starting, stopping or compacting, one run by a Claude Code release before
+that is starting, stopping or compacting, one run by a Claude Code release other than
 2.1.308, or a conversation between replies. The
 side-question panel, when its earlier questions open it, and the API and tools
 (`sideQuestionReason`) say why. No second coding agent with write access is started,

@@ -18,6 +18,21 @@ test.beforeAll(async ({ workspace }) => {
     await connectClaude(workspace, 'Side questions', 'fixture-code:side-questions@example.test')
 })
 
+test('asks before the first assistant reply appears', async ({ page, workspace }) => {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'fixture:side-before-reply', provider: 'claude' })
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  await expect(page.locator('.activity-message')).toHaveCount(0)
+  await page.getByRole('button', { name: 'Ask a side question' }).click()
+  const panel = page.getByRole('dialog', { name: 'Side questions' })
+  await expect(panel.getByText(/managed-policy hooks can run/)).toBeVisible()
+  await panel.getByRole('textbox', { name: 'Your question', exact: true }).fill('What are you doing?')
+  await panel.getByRole('button', { name: 'Ask', exact: true }).click()
+  await expect(panel.getByText(/Side answer: What are you doing/)).toBeVisible()
+  await workspace.api(`/api/chats/${chat.id}/stop`, 'POST', {})
+})
+
 test('asks side questions about a running reply without steering, queuing or recording them', async ({ page, workspace }) => {
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Review the layout. fixture:chat-hang', provider: 'claude' })
@@ -30,7 +45,7 @@ test('asks side questions about a running reply without steering, queuing or rec
   // The whole reply: its header action opens the side panel.
   await message.getByRole('button', { name: 'Ask about this reply' }).click()
   const panel = page.getByRole('dialog', { name: 'Side questions' })
-  await expect(panel.getByText('Claude Code answers from the conversation so far, without tools')).toBeVisible()
+  await expect(panel.getByText('Claude Code answers from the conversation so far and denies requested tools')).toBeVisible()
   await expect(panel.getByRole('textbox', { name: 'Your question about this reply' })).toBeFocused()
   await panel.getByRole('textbox', { name: 'Your question about this reply' }).fill('Why trace the boundaries first?')
   await page.screenshot({ path: test.info().outputPath('side-question-desktop-light.png'), animations: 'disabled' })

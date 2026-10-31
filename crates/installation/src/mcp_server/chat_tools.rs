@@ -463,15 +463,11 @@ pub(crate) async fn invoke(
             .await;
     }
     if name == "cancel_chat_side_question" {
-        let native = crate::native::policy::chat_authorization(text(&args, "chatId"));
         return s
             .side_question_cancel_authorized(
                 text(&args, "chatId"),
                 text(&args, "sideQuestionId"),
-                move |db| {
-                    commit_authority(db)?;
-                    native(db)
-                },
+                authorize,
             )
             .await;
     }

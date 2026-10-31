@@ -230,7 +230,7 @@ abstract class SideQuestionCases {
                 unavailable = "claude-release"
                 compose
                     .onNodeWithText(
-                        "Cette version de Claude Code ne peut pas répondre aux questions à côté dans Cairn : la version 2.1.308 ou plus récente est nécessaire. Posez-la dans la conversation."
+                        "Cette version de Claude Code ne peut pas répondre aux questions à côté dans Cairn : seule la version 2.1.308 a été qualifiée. Posez-la dans la conversation."
                     )
                     .assertExists()
                 // A reply that has not offered them yet says so too.
@@ -317,6 +317,19 @@ abstract class SideQuestionCases {
         compose.onNodeWithText("Question à côté · Sans réponse").assertExists()
         questions = listOf(failed, answered)
         compose.onNodeWithText("Question à côté · Réponse prête").assertExists()
+    }
+
+    @Test
+    fun theCardOffersAGeneralQuestionBeforeAnyReplyOrQuestion() {
+        val side = SideQuestionState()
+        compose.setContent {
+            CairnTheme {
+                SideQuestionCard(chat(canAsk = true).copy(sideQuestions = emptyList()), side)
+            }
+        }
+        compose.onNodeWithText("Poser une question à côté").performClick()
+        assertTrue(side.open)
+        assertEquals("", side.itemId)
     }
 
     @Test

@@ -27,28 +27,10 @@ const STOPPED: &str = "Claude execution stopped.";
 const MAX_LINE: usize = 32_000_000;
 const MAX_IMAGE: usize = 10_000_000;
 
-/// Whether this Claude Code release was qualified to answer side questions with every tool
-/// denied before it runs (ADR-0078). Earlier or unknown releases never receive them.
+/// Only the release tested against the native side-question protocol is enabled.
+/// Other releases must be qualified before extending this gate (ADR-0078).
 fn answers_side_questions(version: &str) -> bool {
-    // Build metadata does not change a release; a pre-release precedes it, so only one of a
-    // later release qualifies.
-    let release = version.split('+').next().unwrap_or_default();
-    let (core, pre_release) = match release.split_once('-') {
-        Some((core, _)) => (core, true),
-        None => (release, false),
-    };
-    let core = core
-        .split('.')
-        .map(|part| part.parse::<u64>().ok())
-        .collect::<Option<Vec<_>>>();
-    let qualified = vec![2, 1, 308];
-    core.is_some_and(|core| {
-        if pre_release {
-            core > qualified
-        } else {
-            core >= qualified
-        }
-    })
+    version == "2.1.308"
 }
 
 /// Prefix of the context usage requests this adapter sends Claude Code.
@@ -1865,21 +1847,18 @@ mod side_question_release_tests {
     use super::answers_side_questions;
 
     #[test]
-    fn only_releases_from_the_qualified_one_answer_side_questions() {
-        for release in [
-            "2.1.308",
-            "2.1.310",
-            "2.2.0",
-            "2.1.310-beta.1",
-            "3.0.0+build",
-        ] {
-            assert!(answers_side_questions(release), "{release}");
-        }
+    fn only_the_qualified_release_answers_side_questions() {
+        assert!(answers_side_questions("2.1.308"));
         for release in [
             "2.1.280",
             "2.1.307",
             "2.1.307-rc",
             "2.1.308-rc.1",
+            "2.1.308+build",
+            "2.1.310",
+            "2.1.310-beta.1",
+            "2.2.0",
+            "3.0.0+build",
             "2.1",
             "",
             "next",

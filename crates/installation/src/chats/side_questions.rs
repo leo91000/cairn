@@ -10,7 +10,7 @@
 //! tool-less before the model runs (ADR-0078), so their adapters never announce it.
 //! Adapters that do not announce it never receive side questions in their inbox and
 //! cannot mistake one for steering.
-use super::{authorize_conversation, chat_for_run, conversation, is_compaction, require_live};
+use super::{chat_for_run, conversation, is_compaction, require_live};
 use crate::{
     config::now,
     error::{Error, Result, required},
@@ -287,7 +287,7 @@ pub(crate) fn reason(unavailable: SideQuestionUnavailable) -> &'static str {
             "The conversation is compacting its context. Try again once it finishes."
         }
         SideQuestionUnavailable::ClaudeRelease => {
-            "This Claude Code release cannot answer side questions in Cairn: version 2.1.308 or later is needed. Ask in the conversation instead."
+            "This Claude Code release cannot answer side questions in Cairn: only version 2.1.308 has been qualified. Ask in the conversation instead."
         }
         SideQuestionUnavailable::NotOffered => {
             "The agent has not offered side questions for this reply yet. Try again in a moment; if it never does, its runtime may need an update."
@@ -345,14 +345,11 @@ fn ask(
     input: SideQuestionInput,
     origin: &crate::native::policy::Origin,
 ) -> Result<ChatSideQuestion> {
-    let mut chat = conversation(db, chat_id)?;
-    let before = serde_json::to_value(&chat)?;
-    // The agent answers with the conversation's native grant, as for a message.
-    authorize_conversation(db, &mut chat, origin)?;
+    let chat = conversation(db, chat_id)?;
+    // Check the caller and the running environment without retaining this
+    // non-directing interaction as authority for future turns.
+    crate::native::policy::chat_grant(db, &serde_json::to_value(&chat)?, origin)?;
     require_live(&chat)?;
-    if serde_json::to_value(&chat)? != before {
-        db.save_conversation(&chat)?;
-    }
 
     // Retried submissions are idempotent; a reused identifier with other content is not.
     if let Some(existing) = find(db, chat_id, &input.id)? {
@@ -728,11 +725,17 @@ impl Service {
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        let origin = crate::native::policy::origin();
+        if origin.known() {
+            crate::native::policy::refresh_chat(self, chat_id).await?;
+        }
         let (chat_id, id) = (chat_id.to_owned(), id.to_owned());
         let question = self
             .store
             .transaction(move |db| {
                 authorize(db)?;
+                let chat = conversation(db, &chat_id)?;
+                crate::native::policy::chat_grant(db, &serde_json::to_value(&chat)?, &origin)?;
                 cancel(db, &chat_id, &id)
             })
             .await?;

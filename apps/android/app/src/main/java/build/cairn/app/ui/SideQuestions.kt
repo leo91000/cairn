@@ -171,10 +171,10 @@ private fun engine(provider: String?) =
 internal fun SideQuestionCard(chat: Chat, side: SideQuestionState) {
     val pending = chat.sideQuestions.filter { it.status == "pending" }
     val unread = side.unread(chat.sideQuestions)
-    val shown =
-        pending.firstOrNull() ?: unread.firstOrNull() ?: chat.sideQuestions.lastOrNull() ?: return
+    val shown = pending.firstOrNull() ?: unread.firstOrNull() ?: chat.sideQuestions.lastOrNull()
+    if (shown == null && !chat.canAskSideQuestion) return
     Surface(
-        onClick = { side.show() },
+        onClick = { if (shown == null) side.ask("", "") else side.show() },
         modifier =
             Modifier.fillMaxWidth()
                 .padding(horizontal = 12.dp, vertical = 4.dp)
@@ -196,6 +196,7 @@ internal fun SideQuestionCard(chat: Chat, side: SideQuestionState) {
             Column(Modifier.weight(1f)) {
                 Text(
                     when {
+                        shown == null -> "Poser une question à côté"
                         pending.isNotEmpty() -> "Question à côté · ${engine(chat.provider)} répond"
                         unread.any { it.status == "answered" } -> "Question à côté · Réponse prête"
                         unread.isNotEmpty() -> "Question à côté · Sans réponse"
@@ -206,12 +207,13 @@ internal fun SideQuestionCard(chat: Chat, side: SideQuestionState) {
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.primary,
                 )
-                Text(
-                    shown.text,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    style = MaterialTheme.typography.bodyMedium,
-                )
+                if (shown != null)
+                    Text(
+                        shown.text,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
             }
         }
     }
@@ -243,10 +245,16 @@ internal fun ColumnScope.SideQuestionPanel(
     val focusManager = LocalFocusManager.current
     run {
         Text(
-            "${engine(chat.provider)} répond à partir de la conversation, sans outils, pendant qu’il continue son travail. Une question à côté ne modifie ni la réponse en cours ni l’historique.",
+            "${engine(chat.provider)} répond à partir de la conversation en refusant les outils demandés, pendant qu’il continue son travail. Une question à côté ne modifie ni la réponse en cours ni l’historique.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        if (chat.provider == "claude")
+            Text(
+                "Claude refuse les outils demandés, mais les hooks de politique gérée par l’opérateur peuvent s’exécuter avant ce refus et produire des effets. Retirer une question ne peut pas annuler les effets déjà produits.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         if (chat.canAskSideQuestion) {
             if (side.quote.isNotEmpty())
                 Surface(
@@ -324,7 +332,7 @@ internal fun ColumnScope.SideQuestionPanel(
                     "compacting" ->
                         "La conversation compacte son contexte. Réessayez une fois la compaction terminée."
                     "claude-release" ->
-                        "Cette version de Claude Code ne peut pas répondre aux questions à côté dans Cairn : la version 2.1.308 ou plus récente est nécessaire. Posez-la dans la conversation."
+                        "Cette version de Claude Code ne peut pas répondre aux questions à côté dans Cairn : seule la version 2.1.308 a été qualifiée. Posez-la dans la conversation."
                     "not-offered" ->
                         "Claude Code n’a pas encore proposé de questions à côté pour cette réponse. Réessayez dans un instant ; s’il ne le fait jamais, son runtime doit peut-être être mis à jour."
                     // A reason this version does not know yet: the server's own words.

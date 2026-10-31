@@ -315,6 +315,11 @@ else {
       return
     }
 
+    if (prompt.includes('fixture:side-before-reply')) {
+      working = value.uuid
+      return
+    }
+
     if (prompt.includes('fixture:chat-hang') && !prompt.startsWith('Continue the interrupted')) {
       // Like a reply still running tools: its first message streams, and no result follows.
       working = value.uuid

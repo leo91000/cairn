@@ -203,14 +203,14 @@ defineExpose({ ask, show, unreachable })
   <p class="sr-only" role="status">
     {{ pending.length || unread.length ? `Side ${pending.length + unread.length > 1 ? 'questions' : 'question'} · ${status}` : '' }}
   </p>
-  <div v-if="questions.length" class="mb-3 flex items-center gap-3 rounded-xl border border-line bg-surface px-3 py-2.5">
+  <div v-if="questions.length || canAsk" class="mb-3 flex items-center gap-3 rounded-xl border border-line bg-surface px-3 py-2.5">
     <span class="grid size-8 shrink-0 place-items-center rounded-lg bg-accent/10 text-accent"><Icon :name="MessageSquareQuote" :size="16" /></span>
-    <button class="min-w-0 flex-1 text-left" @click="show()">
-      <span class="mb-0.5 block text-[10px] font-semibold text-accent">Side {{ questions.length > 1 ? 'questions' : 'question' }} · {{ status }}</span>
-      <span class="block truncate text-xs font-medium">{{ (pending[0] ?? unread[0] ?? questions.at(-1))!.text }}</span>
+    <button class="min-w-0 flex-1 text-left" @click="questions.length ? show() : ask({ itemId: '', replyEventId: null, quote: '' })">
+      <span class="mb-0.5 block text-[10px] font-semibold text-accent">{{ questions.length ? `Side ${questions.length > 1 ? 'questions' : 'question'} · ${status}` : 'Ask a side question' }}</span>
+      <span v-if="questions.length" class="block truncate text-xs font-medium">{{ (pending[0] ?? unread[0] ?? questions.at(-1))!.text }}</span>
     </button>
-    <UiButton size="small" @click="show()">
-      Open
+    <UiButton size="small" @click="questions.length ? show() : ask({ itemId: '', replyEventId: null, quote: '' })">
+      {{ questions.length ? 'Open' : 'Ask' }}
     </UiButton>
   </div>
   <Modal
@@ -221,7 +221,10 @@ defineExpose({ ask, show, unreachable })
   >
     <div class="space-y-5 p-6 phone:p-4">
       <p class="text-xs leading-relaxed text-muted">
-        {{ engine }} answers from the conversation so far, without tools, while it keeps working. Side questions never steer the reply and are not added to the conversation.
+        {{ engine }} answers from the conversation so far and denies requested tools while it keeps working. Side questions never steer the reply and are not added to the conversation.
+      </p>
+      <p v-if="provider === 'claude'" class="text-xs leading-relaxed text-muted">
+        Claude denies attempted tools, but an operator’s managed-policy hooks can run before the denial and may have side effects. Withdrawing cannot undo effects already performed.
       </p>
       <form v-if="canAsk" class="space-y-3" @submit.prevent="send">
         <blockquote v-if="quote" class="relative rounded-lg border-l-3 border-accent/50 bg-variant/60 py-2 pr-9 pl-3 text-xs leading-relaxed whitespace-pre-wrap break-words text-muted">

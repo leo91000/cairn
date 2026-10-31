@@ -2,7 +2,7 @@
 
 Users want to ask "why did you do that?" while an agent works, without steering it,
 queuing a turn or polluting the conversation. The answer must come from the engine's
-own context, without tools or writes. Three designs were measured against the engines
+own context. Claude denies requested tools, with the managed-hook limitation below. Three designs were measured against the engines
 Cairn ships (Codex 0.164.0 then 0.166.0, Claude Code 2.1.280 then 2.1.308) with
 synthetic model servers and no account:
 
@@ -15,8 +15,7 @@ synthetic model servers and no account:
    copy of the agent rather than an explanation.
 3. The engine's native side mechanism inside the running process.
 
-We chose 3 where the engine itself makes the side answer tool-less before the model
-runs, and nowhere else.
+We chose 3 for the tested Claude release, where the engine denies requested tools; operator-managed hooks can still run before denial as described below.
 
 Claude Code's stream-json control protocol accepts `side_question`, the path of `/btw`.
 Its implementation runs one forked turn from the live messages with a `canUseTool` that
@@ -27,9 +26,9 @@ withdraws it. A probe with Cairn's launch flags confirmed it: a side reply calli
 finished. The same held with `--dangerously-skip-permissions`. Claude Code still runs
 `PreToolUse` hooks before that denial. Cairn launches it with no setting sources and
 no hooks, and the probe saw no user or project hook run; only an operator's
-managed-policy hooks could. The adapter announces side questions only to releases from
+managed-policy hooks could. The adapter announces side questions only to the exact release
 2.1.308, the one probed (as reported by its `system/init` `claude_code_version`);
-earlier supported releases never receive them. A question about a whole reply carries
+other releases require qualification before they can receive them. A question about a whole reply carries
 the reply's first 2,000 characters, so the forked turn knows which reply it concerns.
 
 Codex's app-server forks the running thread with `thread/fork` (`ephemeral`), which is
@@ -66,5 +65,5 @@ the rest of its output before they are stored. Side questions are additive key-v
 records (`chat-side-question:{chatId}:{id}`), with a small
 `chat-side-question-open:{chatId}:{id}` marker while the reply may still receive the
 question or its withdrawal, so the chat tick and conversation lists never read past
-answers. Both are removed with their conversation; earlier releases ignore them, so the
-installation database version is unchanged.
+answers. Both are removed with their conversation; earlier releases ignore them. Database version 22 adds a partial index for history turn
+boundaries; older binaries reject the upgraded database.

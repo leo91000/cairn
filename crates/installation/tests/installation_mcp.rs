@@ -5396,7 +5396,9 @@ async fn side_questions_are_asked_withdrawn_and_answered_beside_the_running_repl
     s.side_questions_available(&run_id, false).await.unwrap();
     let old_release = call(&s, &configuration, "ask_chat_side_question", ask("Why?")).await;
     assert!(
-        old_release.to_string().contains("2.1.308 or later"),
+        old_release
+            .to_string()
+            .contains("only version 2.1.308 has been qualified"),
         "{old_release}"
     );
     let listed = call(

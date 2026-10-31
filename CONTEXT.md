@@ -157,7 +157,7 @@ Un ensemble d’une ou plusieurs questions d’un agent auxquelles une personne,
 Le texte libre qu’une personne ajoute aux choix retenus pour une question d’un agent, afin de préciser sa réponse.
 
 **Question à côté** :
-Une question d’explication posée pendant qu’un agent travaille sur une réponse, sur l’une de ses réponses ou un passage choisi. Claude Code y répond depuis le contexte de la conversation, sans outils ni écriture ; Codex et OpenCode ne le proposent pas, faute de pouvoir retirer leurs outils avant la réponse ; la réponse s’affiche à part, reliée à la réponse concernée. Elle ne dirige pas le travail en cours, n’entre pas dans la file d’attente et ne modifie pas l’historique de la conversation.
+Une question d’explication posée pendant qu’un agent travaille sur une réponse, sur l’une de ses réponses ou un passage choisi. Claude Code y répond depuis le contexte de la conversation en refusant les outils demandés ; les hooks de politique gérée par l’opérateur peuvent toutefois s’exécuter avant ce refus et produire des effets ; Codex et OpenCode ne le proposent pas, faute de pouvoir retirer leurs outils avant la réponse ; la réponse s’affiche à part, reliée à la réponse concernée. Elle ne dirige pas le travail en cours, n’entre pas dans la file d’attente et ne modifie pas l’historique de la conversation.
 _Avoid_ : steering, message, fork de conversation
 
 **Demandeur d’une mission** :
