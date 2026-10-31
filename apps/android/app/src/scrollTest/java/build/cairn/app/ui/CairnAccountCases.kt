@@ -132,6 +132,7 @@ abstract class CairnAccountCases {
                         val response =
                             when (path) {
                                 "/api/account/session" -> session
+                                "/api/account/methods" -> """{"methods":[]}"""
                                 "/api/installations" -> accessibleInstallations.get()
                                 else -> {
                                     val installation = path.split('/').getOrNull(3)
