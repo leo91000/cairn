@@ -36,6 +36,15 @@ analyse les mesures par version et appareil via la base Beacon, avec ses accès
 d’exploitation existants. Aucun accès global aux diagnostics n’est donné aux
 comptes de l’application.
 
+La consultation ajoute à chaque rapport `receivedAt`, la date serveur de sa
+dernière révision acceptée, en millisecondes Unix. Elle provient du `updated_at`
+déjà conservé par Beacon, jamais de l’horloge du client. Un doublon ou une
+ancienne révision ne la rafraîchit pas. Ce champ est une métadonnée de lecture ;
+il ne fait pas partie des schémas fermés envoyés par les clients et ne change ni
+la cadence ni la conservation. Les mesures restent cumulées dans leur fenêtre :
+une réception récente ne rend pas récents ses anciens maxima. Comparer les
+révisions d’une même fenêtre pour mesurer un intervalle.
+
 Extension du 2026-10-30 : le navigateur suit la même règle d’envoi par défaut,
 désactivable dans les paramètres du compte, même sans installation. Le réglage web
 est partagé entre les sous-domaines de Beacon ; le réglage Android reste propre au
