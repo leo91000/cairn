@@ -79,6 +79,8 @@ async fn real_previous_database_preserves_versions_links_sources_and_unrelated_d
         )
         .unwrap();
     }
+    db.execute("INSERT INTO kv VALUES(NULL,'{\"nullKey\":true}',NULL)", [])
+        .unwrap();
     let before = snapshot(&db);
     let documents = documents(&db);
     let store = Store::open(root.path()).unwrap();
@@ -199,6 +201,12 @@ async fn real_previous_database_preserves_versions_links_sources_and_unrelated_d
             "{\"unrelated\":true}"
         );
     }
+    assert_eq!(
+        db.query_row("SELECT data FROM kv WHERE key IS NULL", [], |row| row
+            .get::<_, String>(0))
+            .unwrap(),
+        "{\"nullKey\":true}"
+    );
     drop(store);
     let reopened = Store::open(root.path()).unwrap();
     assert_eq!(reopened.artifacts(Some(RUN)).await.unwrap().len(), 3);

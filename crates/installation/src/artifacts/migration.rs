@@ -98,7 +98,7 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
         .strip_suffix(')')
         .ok_or_else(invalid)?;
     tx.execute_batch(&format!("CREATE TABLE kv_a16{definition},CONSTRAINT no_a16 CHECK(key NOT GLOB 'artifact:*' AND key NOT GLOB 'artifact-share:*' AND key NOT GLOB 'skill-source:*'));"))?;
-    tx.execute_batch("INSERT INTO kv_a16 SELECT * FROM kv WHERE key NOT GLOB 'artifact:*' AND key NOT GLOB 'artifact-share:*' AND key NOT GLOB 'skill-source:*'; DROP TABLE kv; ALTER TABLE kv_a16 RENAME TO kv;")?;
+    tx.execute_batch("INSERT INTO kv_a16 SELECT * FROM kv WHERE key IS NULL OR (key NOT GLOB 'artifact:*' AND key NOT GLOB 'artifact-share:*' AND key NOT GLOB 'skill-source:*'); DROP TABLE kv; ALTER TABLE kv_a16 RENAME TO kv;")?;
     if tx.prepare("PRAGMA foreign_key_check")?.exists([])? {
         return Err(invalid());
     }
