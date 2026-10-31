@@ -264,9 +264,11 @@ TMPDIR=/var/tmp CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
 ```
 
 The reference SQL is frozen from `23dee7bbce3379dc0a9358b06a89ab06d6023d23`.
-Both variants execute in the same binary and fixture; candidate Rust inputs match
-crate tree `9633411a99a706f72cf1bbd7d31d5bf6e2c60446`. The sealed executable SHA-256
-is `e9083c344d97c462879af472acf64ed8a9f9dc40008cb293db78c77bcf777213`.
+Both variants execute in the same binary and fixture. The current measurement
+uses clean committed source `0d22eff79a495fb2f3b577f0850dea36c4e22611`, including
+the runner and concurrent-startup repairs from main, and Rust crate tree
+`65eacca5ad9dbf68ab6d1c8cd039fad4b57a0afc`. The sealed executable SHA-256 is
+`ffd1c7d3936f30807e6b685985fa90bece590059594dcaecc3d3a82d706a4452`.
 Rust 1.97.1 uses the development profile with the installation package optimized
 at level 2, development dependency defaults, no debug information and no
 incremental compilation. This is not a release-profile or production measurement.
@@ -279,20 +281,28 @@ decoder, equality assertions and identical result ordering. Four alternating-ord
 pairs per connection condition each execute eight reads per variant. CPU cells
 are medians of the four process-CPU batches. Wall cells are the median of each
 batch's elapsed time divided by eight, rather than individual-call percentiles.
-Task-owned compilation finished before execution; this remains a shared workstation.
+Task-owned compilation and tests finished before execution. No Rust compiler
+process was observed immediately before invocation; this remains a shared workstation.
 
 | Connection | CPU / eight reads, reference → candidate (ms) | Wall / read, reference → candidate (ms) | CPU reduction |
 | --- | ---: | ---: | ---: |
-| Reused | 266.842 → 117.633 | 33.436 → 14.740 | 55.9% |
-| New | 296.460 → 150.541 | 37.165 → 18.884 | 49.2% |
+| Reused | 271.544 → 116.046 | 34.033 → 14.542 | 57.3% |
+| New | 285.945 → 136.670 | 35.871 → 17.127 | 52.2% |
 
 New-connection timings include opening, read-only/foreign-key setup and closing.
 The OS cache stays warm in both conditions; no host cache was evicted. Both
 variants share the unchanged fixture write path: its 64-row construction and
-transaction took 178.449 ms wall / 156.614 ms CPU, before timed reads. This control
+transaction took 214.224 ms wall / 153.897 ms CPU, before timed reads. This control
 includes fixture preparation and is not a separate before/after write comparison.
 The read-only query connection leaves WAL size unchanged in every case. Database,
 snapshot and output formats do not change.
+
+An earlier run of the same query/fixture source, before those main integrations,
+used Rust crate tree `9633411a99a706f72cf1bbd7d31d5bf6e2c60446` and sealed binary
+`e9083c344d97c462879af472acf64ed8a9f9dc40008cb293db78c77bcf777213`.
+It reported 55.9% lower reused-connection CPU and 49.2% lower new-connection CPU;
+its shared fixture write control was 178.449 ms wall / 156.614 ms CPU. Those
+observations remain prior-source evidence, separate from the current table.
 
 An additional exploratory check on a private offline production snapshot used
 Node SQLite 3.53.4, a 0.5-CPU/256-MiB network-isolated container and warm OS cache.
