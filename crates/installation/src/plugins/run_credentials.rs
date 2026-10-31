@@ -222,7 +222,7 @@ async fn instances(s: &Service) -> Result<Vec<(Package, Vec<Connection>)>> {
 /// Run credentials only from the explicitly retained supplying instance, plus
 /// the host's fetch credentials for each authorized project.
 pub async fn for_run(s: &Service, agent_id: &str, projects: &[Value]) -> Result<RunCredentials> {
-    for_run_with(s, agent_id, projects, None).await
+    for_run_with(s, agent_id, projects, None, None).await
 }
 
 /// Prepare credentials under the current run's revocable execution authority.
@@ -232,6 +232,23 @@ pub async fn for_execution(s: &Service, run: &Value, projects: &[Value]) -> Resu
         text(&run["snapshot"]["agent"], "id"),
         projects,
         Some(run),
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn for_execution_authorized(
+    s: &Service,
+    run: &Value,
+    projects: &[Value],
+    authority: crate::capabilities::plugin_packages::Authority,
+) -> Result<RunCredentials> {
+    for_run_with(
+        s,
+        text(&run["snapshot"]["agent"], "id"),
+        projects,
+        Some(run),
+        Some(authority),
     )
     .await
 }
@@ -241,6 +258,7 @@ async fn for_run_with(
     agent_id: &str,
     projects: &[Value],
     run: Option<&Value>,
+    caller: Option<crate::capabilities::plugin_packages::Authority>,
 ) -> Result<RunCredentials> {
     let mut credentials = RunCredentials::default();
     let mut fetch_order = Vec::new();
@@ -248,7 +266,8 @@ async fn for_run_with(
         let profile = required(s.store.agent(agent_id).await?, "Agent not found")?;
         let (agent, revision) = (agent_id.to_owned(), profile.revision);
         let expected_revision = revision.clone();
-        let authority = crate::capabilities::plugin_packages::Authority::for_execution(run)
+        let authority = caller
+            .unwrap_or_else(|| crate::capabilities::plugin_packages::Authority::for_execution(run))
             .with_guard(move |db| {
                 if required(db.agent(&agent)?, "Agent not found")?.revision != expected_revision {
                     return Err(Error::forbidden(
@@ -316,6 +335,11 @@ async fn for_run_with(
                 connection.clone(),
                 snapshot,
                 Some(invocation),
+            )
+            .with_preparation(
+                fetch_authority
+                    .as_ref()
+                    .map(|(authority, _)| authority.clone()),
             );
             let rendered = render_instance(s, &package, connection, Some(&authority)).await?;
             authority.recheck(s).await?;

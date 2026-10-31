@@ -78,6 +78,19 @@ pub async fn project_seed(
     Ok(serde_json::to_value(entry)?)
 }
 
+pub(crate) async fn project_seed_authorized(
+    run: &Value,
+    project: &Value,
+    config: &Config,
+    root: &Path,
+    credentials: &RunCredentials,
+    authorization: &crate::project_git::Authorization,
+) -> Result<Value> {
+    let entry =
+        workspace::seed_authorized(run, project, config, root, credentials, authorization).await?;
+    Ok(serde_json::to_value(entry)?)
+}
+
 pub async fn prepare(
     run: &Value,
     config: &Config,

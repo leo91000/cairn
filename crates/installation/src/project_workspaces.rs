@@ -120,22 +120,43 @@ impl Projects {
         s.store
             .event(run_id, &EventKind::Status, &status, None)
             .await?;
-        let agent_id = text(&run["snapshot"]["agent"], "id");
-        let access = crate::plugins::run_credentials::fetch(
+        let token = bearer.to_owned();
+        let expected = current.clone();
+        let authority = crate::capabilities::plugin_packages::Authority::for_execution(&run)
+            .with_guard(move |db| {
+                authorize_in(db, &token)?;
+                let current = db
+                    .project(&expected.id.to_string())?
+                    .ok_or_else(|| Error::not_found("Project no longer exists."))?;
+                if current.revision != expected.revision {
+                    return Err(Error::conflict(
+                        "Project configuration changed during preparation.",
+                    ));
+                }
+                Ok(())
+            });
+        let authority = crate::delegation::authorize_async_with(s, &run, authority).await?;
+        let credentials = crate::plugins::run_credentials::for_execution_authorized(
             s,
-            Some(agent_id),
-            &serde_json::to_value(&current)?,
+            &run,
+            &[serde_json::to_value(&current)?],
+            authority.clone(),
         )
         .await?;
-        let credentials = crate::plugins::run_credentials::RunCredentials {
-            fetch: [(project_id.to_owned(), access)].into(),
-            ..Default::default()
-        };
-        let entry =
-            crate::execution::project_seed(&run, &project, &s.config, root, &credentials).await?;
+        let authorization = crate::project_git::Authorization::new(s, authority, &credentials);
+        let entry = crate::execution::project_seed_authorized(
+            &run,
+            &project,
+            &s.config,
+            root,
+            &credentials,
+            &authorization,
+        )
+        .await?;
         // Recheck the grant after a potentially slow clone and before transferring anything.
         authorize(s, bearer).await?;
         let imported = import(s, &run, attempt, project_id, &entry).await?;
+        authorization.recheck().await?;
         record_workspace(s, run_id, entry.clone()).await?;
         Ok(json!({
             "projectId": project_id,

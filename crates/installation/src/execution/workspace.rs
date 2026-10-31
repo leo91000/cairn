@@ -121,6 +121,21 @@ async fn add_worktree(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+struct ProjectContext<'a> {
+    config: &'a Config,
+    authorization: Option<&'a crate::project_git::Authorization>,
+}
+
+impl ProjectContext<'_> {
+    async fn recheck(self) -> Result<()> {
+        if let Some(authorization) = self.authorization {
+            authorization.recheck().await?;
+        }
+        Ok(())
+    }
+}
+
 /// Checks out one project for a run, in place or as a private copy under `root`.
 pub(super) async fn prepare_project(
     run: &Value,
@@ -131,6 +146,32 @@ pub(super) async fn prepare_project(
     generation: Option<&str>,
     credentials: &RunCredentials,
 ) -> Result<Workspace> {
+    prepare_project_with(
+        run,
+        project,
+        ProjectContext {
+            config,
+            authorization: None,
+        },
+        root,
+        single,
+        generation,
+        credentials,
+    )
+    .await
+}
+
+async fn prepare_project_with(
+    run: &Value,
+    project: &Value,
+    context: ProjectContext<'_>,
+    root: &Path,
+    single: bool,
+    generation: Option<&str>,
+    credentials: &RunCredentials,
+) -> Result<Workspace> {
+    context.recheck().await?;
+    let config = context.config;
     let microvm = uses_vm(run, config);
     let is_isolated = microvm || isolated(&run["snapshot"]["agent"]);
     let source = workspace(Path::new(text(project, "path")), &config.workspace_roots).await?;
@@ -155,24 +196,44 @@ pub(super) async fn prepare_project(
         root.join(&project_id)
     };
     let kind = if !source.join(".git").exists() {
+        context.recheck().await?;
         copy_tree(&source, &target, false).await?;
         WorkspaceKind::Copy
     } else if is_isolated || project["sourceMode"] != "local" {
         let access = credentials.fetch_for(project);
-        let cached = is_isolated
-            && crate::project_archives::checkout(&source, &target, project, config, access).await?;
+        let cached = if !is_isolated {
+            false
+        } else if let Some(authorization) = context.authorization {
+            crate::project_archives::checkout_authorized(
+                &source,
+                &target,
+                project,
+                config,
+                access,
+                Some(authorization),
+            )
+            .await?
+        } else {
+            crate::project_archives::checkout(&source, &target, project, config, access).await?
+        };
+        context.recheck().await?;
         if !cached {
-            crate::project_git::clone(&source, &target, project, config, access).await?;
+            crate::project_git::clone_authorized(&source, &target, project, config, access, || {
+                context.recheck()
+            })
+            .await?;
         }
         WorkspaceKind::Clone
     } else {
         if target == root {
             tokio::fs::remove_dir(&root).await?;
         }
+        context.recheck().await?;
         add_worktree(run, project, &source, &target, generation).await?;
         WorkspaceKind::Worktree
     };
     let revision = if kind.has_git() {
+        context.recheck().await?;
         head(&target).await.ok()
     } else {
         None
@@ -213,6 +274,48 @@ pub(super) async fn seed(
     root: &Path,
     credentials: &RunCredentials,
 ) -> Result<Workspace> {
+    seed_with(
+        run,
+        project,
+        ProjectContext {
+            config,
+            authorization: None,
+        },
+        root,
+        credentials,
+    )
+    .await
+}
+
+pub(super) async fn seed_authorized(
+    run: &Value,
+    project: &Value,
+    config: &Config,
+    root: &Path,
+    credentials: &RunCredentials,
+    authorization: &crate::project_git::Authorization,
+) -> Result<Workspace> {
+    seed_with(
+        run,
+        project,
+        ProjectContext {
+            config,
+            authorization: Some(authorization),
+        },
+        root,
+        credentials,
+    )
+    .await
+}
+
+async fn seed_with(
+    run: &Value,
+    project: &Value,
+    context: ProjectContext<'_>,
+    root: &Path,
+    credentials: &RunCredentials,
+) -> Result<Workspace> {
+    context.recheck().await?;
     let destination = root.join(text(project, "id"));
     let kind = if Path::new(text(project, "path")).join(".git").exists() {
         WorkspaceKind::Clone
@@ -227,6 +330,7 @@ pub(super) async fn seed(
     };
     if destination.exists() {
         if destination.join(".git").exists() {
+            context.recheck().await?;
             entry.revision = Some(head(&destination).await?);
         }
         return Ok(entry);
@@ -237,9 +341,11 @@ pub(super) async fn seed(
     }
     private_dir(&staging).await?;
     let prepared =
-        prepare_project(run, project, config, &staging, false, None, credentials).await?;
+        prepare_project_with(run, project, context, &staging, false, None, credentials).await?;
+    context.recheck().await?;
     strip_private_state(&prepared.path).await?;
     entry.revision = prepared.revision;
+    context.recheck().await?;
     tokio::fs::rename(&prepared.path, &destination).await?;
     tokio::fs::remove_dir(&staging).await?;
     Ok(entry)

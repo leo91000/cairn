@@ -86,11 +86,35 @@ pub(crate) async fn checkout(
     config: &Config,
     credentials: &[GitAccess],
 ) -> Result<bool> {
+    checkout_authorized(source, target, project, config, credentials, None).await
+}
+
+pub(crate) async fn checkout_authorized(
+    source: &Path,
+    target: &Path,
+    project: &Value,
+    config: &Config,
+    credentials: &[GitAccess],
+    authorization: Option<&crate::project_git::Authorization>,
+) -> Result<bool> {
+    let recheck = || async {
+        if let Some(authorization) = authorization {
+            authorization.recheck().await?;
+        }
+        Ok(())
+    };
+    recheck().await?;
     if project["sourceMode"] == "local" {
         return Ok(false);
     }
-    let Some((revision, origin)) =
-        crate::project_git::remote_revision(source, project, config, credentials).await?
+    let Some((revision, origin)) = crate::project_git::remote_revision_authorized(
+        source,
+        project,
+        config,
+        credentials,
+        recheck,
+    )
+    .await?
     else {
         return Ok(false);
     };
@@ -111,8 +135,12 @@ pub(crate) async fn checkout(
     }
     .await;
     if let Ok(Some((descriptor, file))) = hit {
+        recheck().await?;
         match extract_verified(file, &descriptor, target, LOGICAL_BYTES).await {
-            Ok(_) => return Ok(true),
+            Ok(_) => {
+                recheck().await?;
+                return Ok(true);
+            }
             Err(error) => {
                 tracing::warn!(
                     status = error.status,
@@ -132,14 +160,18 @@ pub(crate) async fn checkout(
             }
         }
     }
-    crate::project_git::clone(source, target, project, config, credentials).await?;
+    crate::project_git::clone_authorized(source, target, project, config, credentials, recheck)
+        .await?;
+    recheck().await?;
     let actual = crate::project_git::revision(target, config).await?;
+    recheck().await?;
     if let Err(error) = build(config, project, target, &actual).await {
         tracing::warn!(
             status = error.status,
             "Project archive cache unavailable; using the fresh checkout"
         );
     }
+    recheck().await?;
     Ok(true)
 }
 
