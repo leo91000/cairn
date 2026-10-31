@@ -2277,6 +2277,68 @@ async fn implementation_approval_is_atomic_with_concurrent_requests_and_retries(
 }
 
 #[tokio::test]
+async fn proposal_replay_cannot_renew_an_invalidated_request_boundary() {
+    let app = App::new().await;
+    for request in [json!("request-a"), Value::Null] {
+        let chat = app.create_chat().await;
+        let chat_id = text(&chat, "id").to_owned();
+        let run = id();
+        app.add_finished_run(
+            &run,
+            RunStatus::Succeeded,
+            json!({ "snapshot": { "agent": { "provider": "codex" } } }),
+            "Plan request",
+        )
+        .await;
+        let (c, r) = (chat_id.clone(), run.clone());
+        let replayed = app.service.store.transaction(move |db| {
+            let mut chat = db.conversation_boundary(&c)?.unwrap();
+            chat["runId"] = r.clone().into();
+            db.save_conversation_boundary(&chat)?;
+            db.event(&r, &EventKind::ChatUser, "Initial request", Some(&json!({ "messageId": "request-a" })))?;
+            let proposal = json!({ "item": { "id": "proposal", "type": "proposed_plan", "text": "Original approach", "request_id": request } });
+            db.event(&r, &EventKind::ItemCompleted, "Original approach", Some(&proposal))?;
+            db.event(&r, &EventKind::ChatUser, "Clarification", Some(&json!({ "messageId": "request-b" })))?;
+            // Recovery restores the same artifact, not a new approach to the clarification.
+            db.event(&r, &EventKind::ItemCompleted, "Original approach", Some(&proposal))?;
+            Ok(db.0.query_row("SELECT MAX(id) FROM events WHERE run_id=?", [r], |row| row.get::<_, i64>(0))?)
+        }).await.unwrap();
+        let path = chat_path(&chat);
+        let (_, current) = app.get(&path).await;
+        let (status, body) = app.request("POST", &format!("{path}/messages"), json!({
+            "id": id(), "text": "Implement the plan you proposed.",
+            "planApproval": { "sourceId": format!("{run}:{replayed}"), "revision": current["revision"] }
+        })).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(
+            app.get(&path).await.1["messages"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let r = run.clone();
+        let completed = app.service.store.transaction(move |db| {
+            db.event(&r, &EventKind::ItemCompleted, "Clarified approach", Some(&json!({
+                "item": { "id": "revised", "type": "proposed_plan", "text": "Clarified approach", "request_id": "request-b" }
+            })))?;
+            Ok(db.0.query_row("SELECT MAX(id) FROM events WHERE run_id=?", [r], |row| row.get::<_, i64>(0))?)
+        }).await.unwrap();
+        let (_, current) = app.get(&path).await;
+        let request = json!({ "id": id(), "text": "Implement the plan you proposed.",
+            "planApproval": { "sourceId": format!("{run}:{completed}"), "revision": current["revision"] } });
+        let (status, accepted) = app
+            .request("POST", &format!("{path}/messages"), request.clone())
+            .await;
+        assert_eq!(status, StatusCode::OK, "{accepted}");
+        let (status, retry) = app
+            .request("POST", &format!("{path}/messages"), request)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{retry}");
+        assert_eq!(accepted["id"], retry["id"]);
+    }
+}
+
+#[tokio::test]
 async fn implementation_rejects_newer_unfinished_root_lifecycles() {
     let app = App::new().await;
     for status in [RunStatus::Failed, RunStatus::Cancelled] {

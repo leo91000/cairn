@@ -909,6 +909,50 @@ for (const [status, content] of [['failed', 'Review is still incomplete'], ['can
   })
 }
 
+test('a replayed proposal retains its authored request boundary after clarification', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  if (!(await workspace.api('/api/accounts')).accounts.some((a: { provider: string }) => a.provider === 'claude'))
+    expect((await connectClaude(workspace)).state).toBe('complete')
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  const initial = crypto.randomUUID()
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
+    id: initial,
+    text: 'fixture:plan-turn Review the design',
+    provider: 'claude',
+    plan: true,
+  })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 30000 }).toBe('succeeded')
+  const run = (await workspace.api(`/api/chats/${chat.id}`)).run
+  const original = workspace.service.store.events(run.id)
+    .filter(event => event.type === 'item.completed')
+    .map(event => event.payload?.item as Record<string, unknown> | undefined)
+    .find(item => item?.type === 'proposed_plan' && !item.parent_id)!
+  expect(original.request_id).toBe(initial)
+  const clarification = crypto.randomUUID()
+  workspace.service.store.event(run.id, 'chat.user', 'Include the tests', { messageId: clarification, text: 'Include the tests' })
+  // The recovery event has a new manager ID, but no newly authored approach.
+  workspace.service.store.event(run.id, 'item.completed', '', { item: original })
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  await expect(page.getByTestId('proposed-plan')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Implement', exact: true })).toHaveCount(0)
+  workspace.service.store.event(run.id, 'item.completed', '', {
+    item: {
+      ...original,
+      id: 'revised',
+      text: 'New approach including tests',
+      request_id: clarification,
+    },
+  })
+  await page.reload()
+  const proposal = page.getByTestId('proposed-plan').filter({ hasText: 'New approach including tests' })
+  await expect(proposal.getByRole('button', { name: 'Implement', exact: true })).toBeEnabled()
+  const request = page.waitForRequest(request => request.url().endsWith(`/chats/${chat.id}/messages`) && request.method() === 'POST')
+  await proposal.getByRole('button', { name: 'Implement', exact: true }).click()
+  const sent = (await request).postDataJSON()
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).messages.some((message: { id: string }) => message.id === sent.id)).toBe(true)
+})
+
 test('a proposal completed after steering remains implementable across history folding', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
   if (!(await workspace.api('/api/accounts')).accounts.some((a: { provider: string }) => a.provider === 'claude'))

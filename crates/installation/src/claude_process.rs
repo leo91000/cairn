@@ -414,7 +414,14 @@ impl Receipt {
             emit(events, delivered(id)).await?;
         }
         atomic_write(Path::new(text(plan, "output")), self.text.as_bytes()).await?;
-        for item in self.proposals {
+        // Old single-request receipts have an unambiguous boundary. With several
+        // delivered requests, an old receipt cannot establish when each plan was authored.
+        let legacy_request = (self.delivered.len() == 1 && self.delivered[0] == self.message_id)
+            .then_some(self.message_id.as_str());
+        for mut item in self.proposals {
+            if item.get("request_id").is_none() {
+                item["request_id"] = json!(legacy_request);
+            }
             emit(events, json!({ "type": "item.completed", "item": item })).await?;
         }
         let item = json!({ "id": self.item_id, "type": "agent_message", "text": self.text });
@@ -497,6 +504,10 @@ struct Turn<'a> {
     submitted: HashSet<String>,
     operational_notices: HashSet<String>,
     delivered: HashSet<String>,
+    /// Receipt acknowledgements must retain delivery order when manager history was lost.
+    delivery_order: Vec<String>,
+    /// Last acknowledged human request at the point an approach is completed.
+    proposal_request: Option<String>,
     /// Submitted messages whose turn has not produced a result yet.
     pending: HashSet<String>,
     /// Submitted messages Claude Code has echoed back.
@@ -582,6 +593,8 @@ impl Turn<'_> {
             return Ok(());
         }
         if self.delivered.insert(id.to_owned()) {
+            self.delivery_order.push(id.to_owned());
+            self.proposal_request = Some(id.to_owned());
             self.emit(delivered(id)).await?;
         }
         Ok(())
@@ -968,6 +981,7 @@ impl Turn<'_> {
             if item["type"] == "proposed_plan" {
                 // Cairn declines to leave plan mode; the plan itself is complete.
                 item["status"] = "completed".into();
+                item["request_id"] = json!(self.proposal_request);
                 self.proposals.push(item.clone());
                 self.emit(json!({ "type": "item.completed", "item": item }))
                     .await?;
@@ -1521,7 +1535,7 @@ impl Turn<'_> {
         if !compacting(self.plan) {
             let receipt = Receipt {
                 message_id: self.initial_id.into(),
-                delivered: self.delivered.iter().cloned().collect(),
+                delivered: self.delivery_order.clone(),
                 text: self.last.clone(),
                 item_id: self.last_id.clone(),
                 proposals: self.proposals.clone(),
@@ -1700,6 +1714,8 @@ pub async fn run(
         submitted: HashSet::from([initial_id.to_owned()]),
         operational_notices: HashSet::new(),
         delivered: HashSet::new(),
+        delivery_order: Vec::new(),
+        proposal_request: None,
         pending: HashSet::from([initial_id.to_owned()]),
         consumed: HashSet::new(),
         tools: HashMap::new(),

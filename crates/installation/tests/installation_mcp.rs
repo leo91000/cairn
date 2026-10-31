@@ -6002,7 +6002,11 @@ async fn both_mcp_endpoints_bind_approval_to_the_latest_root_lifecycle() {
             }
         };
         for proposal in ["original", "replacement"] {
-            for phase in [EventKind::ItemStarted, EventKind::ItemUpdated] {
+            for phase in [
+                EventKind::ItemStarted,
+                EventKind::ItemUpdated,
+                EventKind::ItemCompleted,
+            ] {
                 let created = invoke("create_chat", json!({})).await;
                 let chat = result(&created).clone();
                 let chat_id = text(&chat, "id").to_owned();
@@ -6021,10 +6025,16 @@ async fn both_mcp_endpoints_bind_approval_to_the_latest_root_lifecycle() {
                         "item": { "id": "original", "type": "proposed_plan", "text": "Reviewed plan" }
                     })))?;
                     let original: i64 = db.0.query_row("SELECT MAX(id) FROM events WHERE run_id=?", [&r], |row| row.get(0))?;
+                    db.event(&r, &EventKind::ChatUser, "Clarification", Some(&json!({ "messageId": "request-b" })))?;
+                    let replaying = matches!(phase, EventKind::ItemCompleted);
                     db.event(&r, &phase, "", Some(&json!({
-                        "item": { "id": proposal, "type": "proposed_plan", "text": "" }
+                        "item": { "id": proposal, "type": "proposed_plan", "text": if replaying { "Reviewed plan" } else { "" }, "request_id": "request-a" }
                     })))?;
-                    Ok(original)
+                    if replaying {
+                        Ok(db.0.query_row("SELECT MAX(id) FROM events WHERE run_id=?", [&r], |row| row.get::<_, i64>(0))?)
+                    } else {
+                        Ok(original)
+                    }
                 }).await.unwrap();
                 let current = s.chat_detail(&chat_id).await.unwrap();
                 let refused = invoke("send_chat_message", json!({
@@ -6048,9 +6058,9 @@ async fn both_mcp_endpoints_bind_approval_to_the_latest_root_lifecycle() {
                 let completed = s
                     .store
                     .transaction(move |db| {
-                        db.event(&r, &EventKind::ChatUser, "Clarification", None)?;
+                        db.event(&r, &EventKind::ChatUser, "Clarification", Some(&json!({ "messageId": "request-b" })))?;
                         db.event(&r, &EventKind::ItemCompleted, "Final plan", Some(&json!({
-                        "item": { "id": proposal, "type": "proposed_plan", "text": "Final plan" }
+                        "item": { "id": proposal, "type": "proposed_plan", "text": "Final plan", "request_id": "request-b" }
                     })))?;
                         Ok(db.0.query_row(
                             "SELECT MAX(id) FROM events WHERE run_id=?",

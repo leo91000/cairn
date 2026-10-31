@@ -116,6 +116,12 @@ class PlanTurnJourneyTest {
                                     put("id", "exit-plan-tool")
                                     put("type", "proposed_plan")
                                     put("text", "1. Lire le composeur\n2. Ajouter le bouton Plan")
+                                    if (kind == "item.completed")
+                                        put(
+                                            "request_id",
+                                            if (steeringBeforeCompletion) "clarification"
+                                            else "plan-request",
+                                        )
                                     if (kind == "item.completed") put("status", "completed")
                                 },
                             )
@@ -132,6 +138,7 @@ class PlanTurnJourneyTest {
                         payload =
                             buildJsonObject {
                                 put("text", "Planifie le nouveau composeur")
+                                put("messageId", "plan-request")
                                 put("plan", true)
                             },
                     ),
@@ -147,6 +154,7 @@ class PlanTurnJourneyTest {
                             payload =
                                 buildJsonObject {
                                     put("text", "Clarifie aussi les tests")
+                                    put("messageId", "clarification")
                                     put("plan", true)
                                 },
                         )
@@ -362,6 +370,67 @@ class PlanTurnJourneyTest {
     @Test
     fun `unfinished Plan turn cannot approve a later proposal`() {
         pendingRevisionCannotImplement(null, "running")
+    }
+
+    @Test
+    fun `completed receipt replay cannot revive an approach invalidated by clarification`() {
+        MockWebServer().use { server ->
+            val calls = CopyOnWriteArrayList<String>()
+            val chat =
+                Chat(
+                    id = CHAT,
+                    title = "Reprise du plan",
+                    agentId = MAIN_AGENT_ID,
+                    run = Run(id = "run", taskId = CHAT, status = "succeeded", trigger = "chat"),
+                )
+            fun proposal(id: Long) =
+                RunEvent(
+                    id = id,
+                    runId = "run",
+                    createdAt = id,
+                    type = "item.completed",
+                    text = "",
+                    payload =
+                        buildJsonObject {
+                            put(
+                                "item",
+                                buildJsonObject {
+                                    put("id", "approach-a")
+                                    put("type", "proposed_plan")
+                                    put("text", "Proposition avant clarification")
+                                    put("request_id", "request-a")
+                                },
+                            )
+                        },
+                )
+            val clarification =
+                RunEvent(
+                    id = 2,
+                    runId = "run",
+                    createdAt = 2,
+                    type = "chat.user",
+                    text = "Clarifie le plan",
+                    payload =
+                        buildJsonObject {
+                            put("messageId", "request-b")
+                            put("text", "Clarifie le plan")
+                        },
+                )
+            val vm =
+                mountPlanChat(server, chat, listOf(proposal(1), clarification, proposal(3)), calls)
+            try {
+                compose.waitUntil(20000) {
+                    compose.onAllNodesWithTag("proposed-plan").fetchSemanticsNodes().isNotEmpty()
+                }
+                // Markdown renders through its native wrapper, not a Compose Text node.
+                compose.onNodeWithTag("proposed-plan").assertExists()
+                compose.onNodeWithText("Plan proposé").assertExists()
+                compose.onAllNodesWithTag("implement-plan").assertCountEquals(0)
+                assertTrue(calls.isEmpty())
+            } finally {
+                vm.api.closeStreams()
+            }
+        }
     }
 
     private fun pendingRevisionCannotImplement(status: String?, runStatus: String = "succeeded") {

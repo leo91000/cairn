@@ -241,6 +241,8 @@ struct Chat<'a> {
     compacted: bool,
     /// A Cairn plan turn: only its plans are proposals nothing has acted on.
     planning: bool,
+    /// Human request preceding the current native proposal, retained through history replay.
+    proposal_request: Option<String>,
 }
 
 impl Chat<'_> {
@@ -277,6 +279,7 @@ impl Chat<'_> {
 
     async fn acknowledge(&mut self, id: &str) -> Result<()> {
         if self.seen.insert(id.to_owned()) && !id.starts_with(OPERATIONAL_ID) {
+            self.proposal_request = Some(id.to_owned());
             self.emit(json!({ "type": "chat.delivered", "messageId": id }))
                 .await?;
         }
@@ -297,6 +300,11 @@ impl Chat<'_> {
         }
         if item["type"] == "userMessage" {
             if let Some(id) = item["clientId"].as_str() {
+                // Replay acknowledgements may already have been seen. Their native
+                // position still determines the causal boundary of following items.
+                if !id.starts_with(OPERATIONAL_ID) {
+                    self.proposal_request = Some(id.to_owned());
+                }
                 self.acknowledge(id).await?;
             }
             return Ok(());
@@ -308,6 +316,9 @@ impl Chat<'_> {
             self.last_message = text(&item, "text").to_owned();
         }
         let mut item = chat_item(item, self.planning);
+        if item["type"] == "proposed_plan" && kind == "item.completed" {
+            item["request_id"] = json!(self.proposal_request);
+        }
         if item["type"] == "context_compaction" {
             // Codex reports only the lifecycle; the visible transcript is never rewritten.
             let completed = kind == "item.completed";
@@ -885,7 +896,11 @@ impl Chat<'_> {
             return self.compact(plan).await;
         }
         let (turns, paginated) = self.history(&result, resume).await?;
-        for turn in &turns {
+        let mut chronological: Vec<_> = turns.iter().collect();
+        if paginated {
+            chronological.reverse();
+        }
+        for turn in chronological {
             for item in turn["items"].as_array().into_iter().flatten() {
                 if item["type"] == "userMessage"
                     && let Some(id) = item["clientId"].as_str()
@@ -913,6 +928,16 @@ impl Chat<'_> {
             self.acknowledge(text(&plan["execution"], "messageId"))
                 .await?;
             if previous["status"] == "completed" {
+                // Native history can place the initial request block after its first
+                // output. Subsequent user blocks change only the items that follow them.
+                self.proposal_request = previous["items"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|item| item["type"] == "userMessage")
+                    .filter_map(|item| item["clientId"].as_str())
+                    .find(|id| !id.starts_with(OPERATIONAL_ID))
+                    .map(str::to_owned);
                 for item in previous["items"].as_array().into_iter().flatten() {
                     self.item(item.clone(), "item.completed").await?;
                 }
@@ -1281,6 +1306,7 @@ async fn run_session(
         context: None,
         compacted: false,
         planning: false,
+        proposal_request: None,
     };
     let mut result = chat.execute(&plan).await;
     if let Err(error) = &result

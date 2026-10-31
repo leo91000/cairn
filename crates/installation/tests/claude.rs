@@ -1255,6 +1255,15 @@ async fn completed_plan_receipt_replays_the_proposal_without_starting_another_tu
     // durable proposal event or output file, only the adapter's completion receipt.
     std::fs::remove_file(root.path().join("result.md")).unwrap();
     c.claude_bin = "/nonexistent-claude-for-receipt".into();
+    // A later clarification was delivered after the proposal, before the receipt was saved.
+    let receipt_path = root.path().join("result.claude-receipt.json");
+    let mut receipt: Value =
+        serde_json::from_slice(&std::fs::read(&receipt_path).unwrap()).unwrap();
+    receipt["delivered"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("later-clarification"));
+    std::fs::write(&receipt_path, receipt.to_string()).unwrap();
     let (result, replayed) = run_to_end(&c, p).await;
     result.unwrap();
     assert!(completes(&replayed));
@@ -1266,57 +1275,74 @@ async fn completed_plan_receipt_replays_the_proposal_without_starting_another_tu
         .map(|event| event["item"].clone())
         .collect();
     assert_eq!(proposals, completed);
+    assert_eq!(proposals[0]["request_id"], "original");
+    assert!(
+        replayed
+            .iter()
+            .any(|event| event["type"] == "chat.delivered"
+                && event["messageId"] == "later-clarification")
+    );
     let invocations = std::fs::read_to_string(c.home.join(".claude/invocations.jsonl")).unwrap();
     assert_eq!(invocations.lines().count(), 1);
 }
 
 #[tokio::test]
 async fn completed_plan_receipt_preserves_proposal_ids_and_subagent_parentage() {
-    let root = TempDir::new().unwrap();
-    let mut c = setup(&root);
-    c.claude_bin = "/nonexistent-claude-for-receipt".into();
-    let proposals = json!([
-        {
-            "id": "root-proposal",
-            "type": "proposed_plan",
-            "text": "The root approach",
-            "status": "completed",
-        },
-        {
-            "id": "child-proposal",
-            "parent_id": "delegated-actor",
-            "type": "proposed_plan",
-            "text": "The child approach stays with its actor",
-            "status": "completed",
-        },
-    ]);
-    let receipt = json!({
-        "messageId": "original",
-        "delivered": ["original"],
-        "text": "Waiting for approval",
-        "itemId": "final-reply",
-        "proposals": proposals,
-    });
-    std::fs::write(
-        root.path().join("result.claude-receipt.json"),
-        receipt.to_string(),
-    )
-    .unwrap();
+    for ambiguous in [false, true] {
+        let root = TempDir::new().unwrap();
+        let mut c = setup(&root);
+        c.claude_bin = "/nonexistent-claude-for-receipt".into();
+        let proposals = json!([
+            {
+                "id": "root-proposal",
+                "type": "proposed_plan",
+                "text": "The root approach",
+                "status": "completed",
+            },
+            {
+                "id": "child-proposal",
+                "parent_id": "delegated-actor",
+                "type": "proposed_plan",
+                "text": "The child approach stays with its actor",
+                "status": "completed",
+            },
+        ]);
+        let receipt = json!({
+            "messageId": "original",
+            "delivered": if ambiguous { json!(["original", "later-clarification"]) } else { json!(["original"]) },
+            "text": "Waiting for approval",
+            "itemId": "final-reply",
+            "proposals": proposals,
+        });
+        std::fs::write(
+            root.path().join("result.claude-receipt.json"),
+            receipt.to_string(),
+        )
+        .unwrap();
 
-    let (result, replayed) = run_to_end(&c, plan_turn(&root)).await;
-    result.unwrap();
-    assert!(completes(&replayed));
-    let actual: Vec<_> = replayed
-        .iter()
-        .filter(|event| event["item"]["type"] == "proposed_plan")
-        .map(|event| event["item"].clone())
-        .collect();
-    assert_eq!(json!(actual), proposals);
-    assert!(!c.home.join(".claude/invocations.jsonl").exists());
-    assert_eq!(
-        std::fs::read_to_string(root.path().join("result.md")).unwrap(),
-        "Waiting for approval"
-    );
+        let (result, replayed) = run_to_end(&c, plan_turn(&root)).await;
+        result.unwrap();
+        assert!(completes(&replayed));
+        let actual: Vec<_> = replayed
+            .iter()
+            .filter(|event| event["item"]["type"] == "proposed_plan")
+            .map(|event| event["item"].clone())
+            .collect();
+        let mut expected = proposals;
+        for item in expected.as_array_mut().unwrap() {
+            item["request_id"] = if ambiguous {
+                Value::Null
+            } else {
+                json!("original")
+            };
+        }
+        assert_eq!(json!(actual), expected);
+        assert!(!c.home.join(".claude/invocations.jsonl").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("result.md")).unwrap(),
+            "Waiting for approval"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1388,6 +1414,11 @@ async fn steering_waits_for_both_responses_and_acknowledges_each_message() {
     .unwrap();
     task.await.unwrap().unwrap();
     assert_eq!(delivered, vec![json!("original"), json!("steering")]);
+    let receipt: Value = serde_json::from_slice(
+        &std::fs::read(root.path().join("result.claude-receipt.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(receipt["delivered"], json!(["original", "steering"]));
 }
 
 #[tokio::test]

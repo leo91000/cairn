@@ -613,9 +613,10 @@ internal fun RunEvent.isMessage(): Boolean =
 /** Approval identity is distinct from the row anchored for reading. */
 internal fun proposedPlanApproval(events: List<RunEvent>): String? {
     var latest: RunEvent? = null
-    var lastRequest = Long.MIN_VALUE
+    var lastRequest: RunEvent? = null
     for (event in events) {
-        if (event.type == "chat.user") lastRequest = maxOf(lastRequest, event.id)
+        if (event.type == "chat.user" && event.id > (lastRequest?.id ?: Long.MIN_VALUE))
+            lastRequest = event
         if (event.type !in listOf("item.started", "item.updated", "item.completed")) continue
         val item = event.item()
         if (
@@ -628,8 +629,16 @@ internal fun proposedPlanApproval(events: List<RunEvent>): String? {
     val proposal = latest ?: return null
     if (
         proposal.type != "item.completed" ||
-            proposal.id <= lastRequest ||
+            proposal.id <= (lastRequest?.id ?: Long.MIN_VALUE) ||
             proposal.item().string("text").isBlank()
+    )
+        return null
+    val item = proposal.item()
+    val authoredRequest = item.string("request_id")
+    if (
+        item?.containsKey("request_id") == true &&
+            (authoredRequest.isBlank() ||
+                lastRequest != null && authoredRequest != lastRequest.payload?.string("messageId"))
     )
         return null
     return "${proposal.runId}:${proposal.id}"

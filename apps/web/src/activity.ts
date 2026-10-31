@@ -245,10 +245,10 @@ const collaborationTitles: Record<string, string> = {
 /** Approval identity is distinct from the row anchored for reading. */
 export function proposedPlanApproval(events: RunEvent[]): string | undefined {
   let latest: RunEvent | undefined
-  let lastRequest = -1
+  let lastRequest: RunEvent | undefined
   for (const event of events) {
-    if (event.type === 'chat.user')
-      lastRequest = Math.max(lastRequest, event.id)
+    if (event.type === 'chat.user' && (!lastRequest || event.id > lastRequest.id))
+      lastRequest = event
     if (!['item.started', 'item.updated', 'item.completed'].includes(event.type))
       continue
     const item = record(record(event.payload).item)
@@ -256,7 +256,12 @@ export function proposedPlanApproval(events: RunEvent[]): string | undefined {
       latest = event
   }
 
-  if (!latest || latest.type !== 'item.completed' || latest.id <= lastRequest || !text(record(record(latest.payload).item).text).trim())
+  if (!latest || latest.type !== 'item.completed' || latest.id <= (lastRequest?.id ?? -1))
+    return undefined
+  const item = record(record(latest.payload).item)
+  if (!text(item.text).trim())
+    return undefined
+  if ('request_id' in item && (!text(item.request_id) || (lastRequest && text(item.request_id) !== text(record(lastRequest.payload).messageId))))
     return undefined
   return `${latest.runId}:${latest.id}`
 }

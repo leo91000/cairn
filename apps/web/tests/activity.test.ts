@@ -361,6 +361,40 @@ describe('conversation activity', () => {
       expect(proposedPlanApproval([completed, empty, finished])).toBe('run:12')
     }
   })
+  it('does not renew an authored request boundary when a proposal is replayed', () => {
+    const user = (id: number, messageId: string): RunEvent => ({
+      id,
+      runId: 'run',
+      createdAt: id,
+      type: 'chat.user',
+      text: '',
+      payload: { messageId },
+    })
+    const proposal = (id: number, requestId: string | null): RunEvent => ({
+      id,
+      runId: 'run',
+      createdAt: id,
+      type: 'item.completed',
+      text: '',
+      payload: {
+        item: {
+          id: 'plan',
+          type: 'proposed_plan',
+          text: 'Approach',
+          request_id: requestId,
+        },
+      },
+    })
+    const initial = user(1, 'request-a')
+    const completed = proposal(2, 'request-a')
+    const clarification = user(3, 'request-b')
+    expect(proposedPlanApproval([initial, completed])).toBe('run:2')
+    expect(proposedPlanApproval([initial, completed, clarification, proposal(4, 'request-a')])).toBeUndefined()
+    expect(proposedPlanApproval([clarification, proposal(4, 'request-a')])).toBeUndefined()
+    expect(proposedPlanApproval([proposal(4, null)])).toBeUndefined()
+    expect(proposedPlanApproval([clarification, proposal(5, 'request-b')])).toBe('run:5')
+    expect(proposedPlanApproval([proposal(5, 'request-b')])).toBe('run:5')
+  })
   it('approves completion after steering independently of display anchoring and page loading', () => {
     const started: RunEvent = {
       id: 10,

@@ -144,6 +144,16 @@ fait partie ; un message reçu après l’invalide. Web, Android et la transacti
 commune HTTP/MCP appliquent cet ordre, y compris après chargement d’une ancienne
 page. Les clés visuelles restent ancrées pour conserver la position de lecture.
 
+Chaque proposition terminée conserve aussi l'identifiant de la dernière demande
+humaine connue lors de sa complétion (`request_id`). Le reçu Claude le garde avec
+l'objet ; le rejeu Codex le reconstruit dans l'ordre des éléments natifs, avant les
+clarifications ultérieures. Un nouvel identifiant d'événement lors de la reprise
+ne renouvelle pas cette frontière : clients et transaction d'approbation refusent
+une demande plus récente. Les anciens reçus à une seule demande ont une frontière
+non ambiguë ; ceux à plusieurs demandes sans cette information restaurent le
+contenu mais exigent une nouvelle proposition avant l'approbation. Cela ne relance
+pas un tour natif achevé et ne modifie pas les messages ordinaires.
+
 ## Limites
 
 - `readOnlyHint` est déclaré par le serveur MCP. Un serveur qui le donne à tort à un

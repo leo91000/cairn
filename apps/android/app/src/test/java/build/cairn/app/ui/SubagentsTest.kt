@@ -120,6 +120,28 @@ class SubagentsTest {
     }
 
     @Test
+    fun `proposal replay preserves its authored request boundary`() {
+        val initial = user("request-a")
+        fun proposal(request: String?) =
+            item("item.completed") {
+                put("id", "plan")
+                put("type", "proposed_plan")
+                put("text", "Approach")
+                put("request_id", request?.let(::JsonPrimitive) ?: JsonNull)
+            }
+        val completed = proposal("request-a")
+        assertEquals("run:${completed.id}", proposedPlanApproval(listOf(initial, completed)))
+        val clarification = user("request-b")
+        val replay = proposal("request-a")
+        assertNull(proposedPlanApproval(listOf(initial, completed, clarification, replay)))
+        assertNull(proposedPlanApproval(listOf(clarification, replay)))
+        assertNull(proposedPlanApproval(listOf(proposal(null))))
+        val revised = proposal("request-b")
+        assertEquals("run:${revised.id}", proposedPlanApproval(listOf(clarification, revised)))
+        assertEquals("run:${revised.id}", proposedPlanApproval(listOf(revised)))
+    }
+
+    @Test
     fun `proposal approval follows completed event order across steering and older pages`() {
         val started =
             item("item.started") {
