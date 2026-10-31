@@ -95,3 +95,15 @@ it('unknown formatter and partial errors cannot become a healthy zero', () => {
   expect(result.data.errors).toBe(3)
   expect(result.data.panics).toBe(1)
 })
+
+it('pending anchor verification is temporary backlog, not evidence of lost history', () => {
+  const result = applyLogCoverage(null, response({
+    complete: false,
+    caughtUp: false,
+    continuity: 'anchor_pending',
+    continuityUnknown: true,
+  }), { since, until, at: 10 })
+  expect(result.data.gap).toBe(false)
+  expect(result.data.complete).toBe(false)
+  expect(result.data.state.backlog).toBe(true)
+})

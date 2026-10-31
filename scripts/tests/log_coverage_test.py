@@ -173,6 +173,34 @@ except BrokenPipeError:pass
                                   lambda *_: IDENTITY, reader, now_ns=END + 3 * coverage.NANO)
         self.assertTrue(second["caughtUp"])
 
+    def test_reduction_at_the_minimum_always_returns_valid_persisted_state(self):
+        def reader(*args):
+            return {"ok": False, "counts": coverage.empty_counts(), "workBytes": 0, "eof": False,
+                    "exitCode": None, "reason": "time_budget", "anchorFound": True, "anchor": None}
+        prior = {"identity": IDENTITY, "pageSpanNs": "1068115"}
+        first = coverage.collect(request(previous=prior), lambda *_: IDENTITY, reader, now_ns=END + 3 * coverage.NANO)
+        self.assertEqual(first["pageSpanNs"], "1000000")
+        coverage.collect(request(previous={"identity": IDENTITY, "pageSpanNs": first["pageSpanNs"]}),
+                         lambda *_: IDENTITY, reader, now_ns=END + 3 * coverage.NANO)
+
+    def test_future_overlap_anchor_is_preserved_until_a_completed_page_can_include_it(self):
+        proof_at = START + 4 * coverage.NANO
+        prior = {"identity": IDENTITY, "anchor": {"at": str(proof_at), "key": coverage.iso(proof_at) + ":stdout"}, "pageSpanNs": str(coverage.NANO)}
+        def reader(command, kind, lower, upper, anchor, deadline, allowance):
+            read_since = min(lower, int(anchor["at"])) if anchor else lower
+            data = b"".join((coverage.iso(at) + " 2026-10-31T10:24:19Z INFO fixture: retained\n").encode()
+                            for at in range(START, START + 7 * coverage.NANO, coverage.NANO) if read_since <= at <= upper)
+            return pipe_page(data, lower=lower, upper=upper, anchor=anchor)
+        first = coverage.collect(request(until=coverage.iso(START + 7 * coverage.NANO), previous=prior, maxAttempts=3),
+                                 lambda *_: IDENTITY, reader, now_ns=END + 3 * coverage.NANO)
+        self.assertEqual(first["continuity"], "anchor_pending")
+        self.assertEqual(first["anchor"], prior["anchor"])
+        second = coverage.collect(request(since=first["coveredThrough"], until=coverage.iso(START + 7 * coverage.NANO),
+                                          previous={"identity": IDENTITY, "anchor": first["anchor"], "pageSpanNs": first["pageSpanNs"]}),
+                                  lambda *_: IDENTITY, reader, now_ns=END + 3 * coverage.NANO)
+        self.assertEqual(second["continuity"], "anchor_confirmed")
+        self.assertTrue(second["complete"])
+
     def test_source_clock_bootstrap_and_missing_anchor_are_explicit(self):
         def reader(*_):
             return {"ok": True, "counts": coverage.empty_counts(), "workBytes": 0, "eof": True,

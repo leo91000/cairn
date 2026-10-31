@@ -201,6 +201,7 @@ def collect(request, get_metadata=metadata, reader=read_page, now_ns=None):
     began = time.monotonic()
     budget = min(10_000, max(100, request.get("timeBudgetMs", 10_000)))
     deadline = began + budget / 1000
+    read_deadline = deadline - (2.4 if request["kind"] == "docker" else 0.2)
     work_limit = min(2 * 1024 * 1024, max(1024, request.get("workBytes", 2 * 1024 * 1024)))
     page_limit = min(512000, work_limit)
     max_attempts = min(8, max(1, request.get("maxAttempts", 8)))
@@ -215,7 +216,7 @@ def collect(request, get_metadata=metadata, reader=read_page, now_ns=None):
     anchor = prior.get("anchor") if not changed else None
     if anchor and (not isinstance(anchor.get("key"), str) or len(anchor["key"]) > 300 or not str(anchor.get("at", "")).isdigit()):
         raise ValueError("anchor")
-    continuity = "source_changed" if changed else "unproven_bootstrap" if anchor is None else "anchor_confirmed"
+    continuity = "source_changed" if changed else "unproven_bootstrap" if anchor is None else "anchor_pending"
     counts, partial = empty_counts(), empty_counts()
     through, work, pages, attempts = lower, 0, 0, 0
     reasons = set()
@@ -224,12 +225,14 @@ def collect(request, get_metadata=metadata, reader=read_page, now_ns=None):
         raise ValueError("page_span")
     span = int(previous_span)
     last = None
-    while through < upper and attempts < max_attempts and work < work_limit and time.monotonic() < deadline - 0.5:
+    while through < upper and attempts < max_attempts and work < work_limit and time.monotonic() < read_deadline:
         end = min(through + span, upper)
-        read_since = min(through, int(anchor["at"])) if anchor else through
+        anchor_due = anchor is not None and int(anchor["at"]) < end
+        check_anchor = anchor if anchor_due else None
+        read_since = min(through, int(anchor["at"])) if anchor_due else through
         allowance = min(work_limit - work, page_limit)
         last = reader(command_for(request, identity, read_since, end), request["kind"], through, end,
-                      anchor, deadline - 0.5, allowance)
+                      check_anchor, read_deadline, allowance)
         attempts += 1
         work += last["workBytes"]
         if not last["ok"]:
@@ -241,12 +244,18 @@ def collect(request, get_metadata=metadata, reader=read_page, now_ns=None):
                 # A shortened final allowance says nothing about page density.
                 # Preserve the learned width for the next fresh work budget.
                 break
-            span //= 2
+            span = max(1_000_000, span // 2)
             continue
-        if anchor and not last["anchorFound"]:
-            continuity = "anchor_missing"
+        if anchor_due:
+            if not last["anchorFound"]:
+                continuity = "anchor_missing"
+            elif continuity == "anchor_pending":
+                continuity = "anchor_confirmed"
         merge_counts(counts, last["counts"])
-        anchor = last["anchor"] or anchor
+        # Keep an existing future anchor across narrow overlap pages/ticks.
+        # It can only be checked once a completed page includes its timestamp.
+        if anchor is None or anchor_due:
+            anchor = last["anchor"] or anchor
         through, pages = end, pages + 1
     if through == requested_upper and work < work_limit // 2 and attempts < 4:
         span = min(70 * NANO, span * 2)
@@ -259,7 +268,7 @@ def collect(request, get_metadata=metadata, reader=read_page, now_ns=None):
     return {"version": 1, "identity": identity, "window": {"since": iso(lower), "until": iso(requested_upper), "sourceUntil": iso(upper)},
             "coveredThrough": iso(through), "anchor": anchor, "pageSpanNs": str(span), "continuity": continuity,
             "continuityUnknown": continuity != "anchor_confirmed", "sourceChanged": continuity == "source_changed",
-            "complete": caught_up and available and continuity != "source_changed" and bool(last and last["ok"]), "caughtUp": caught_up,
+            "complete": caught_up and available and continuity not in ("source_changed", "anchor_pending") and bool(last and last["ok"]), "caughtUp": caught_up,
             "pages": pages, "attempts": attempts, "counts": counts, "partialCounts": partial,
             "workBytes": work, "limits": sorted(reasons), "lastExitCode": last["exitCode"] if last else None,
             "eof": bool(last and last["ok"]), "elapsedMs": round((time.monotonic() - began) * 1000)}

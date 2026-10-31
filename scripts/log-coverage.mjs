@@ -1,7 +1,7 @@
 // Validate the small counters-only wire contract before trusting any watermark.
 const counters = ['records', 'bytes', 'errors', 'panics', 'leasesExpired', 'fencing', 'journalOpen', 'kernelIO', 'hungTask', 'unclassified', 'stdout', 'stderr', 'trace', 'debug', 'info', 'warnings']
 const fields = new Set(['version', 'identity', 'window', 'coveredThrough', 'anchor', 'pageSpanNs', 'continuity', 'continuityUnknown', 'sourceChanged', 'complete', 'caughtUp', 'pages', 'attempts', 'counts', 'partialCounts', 'workBytes', 'limits', 'lastExitCode', 'eof', 'elapsedMs'])
-const continuityKinds = new Set(['anchor_confirmed', 'anchor_missing', 'source_changed', 'unproven_bootstrap'])
+const continuityKinds = new Set(['anchor_confirmed', 'anchor_pending', 'anchor_missing', 'source_changed', 'unproven_bootstrap'])
 
 export function validateLogCoverage(response, since, until) {
   const data = response?.data
@@ -49,7 +49,7 @@ export function applyLogCoverage(previous, response, {
     return validated
 
   const data = validated.data
-  const historicalGap = data.continuity !== 'anchor_confirmed'
+  const historicalGap = ['anchor_missing', 'source_changed', 'unproven_bootstrap'].includes(data.continuity)
   const gapKey = historicalGap ? JSON.stringify([data.continuity, data.identity, previous?.anchor?.key || null]) : previous?.gapKey
   const newGap = historicalGap && gapKey !== previous?.gapKey
   const gapSince = newGap ? at : previous?.gapSince || null
@@ -60,7 +60,7 @@ export function applyLogCoverage(previous, response, {
     identity: data.identity,
     anchor: data.anchor,
     pageSpanNs: data.pageSpanNs,
-    backlog: !data.caughtUp,
+    backlog: !data.caughtUp || data.continuity === 'anchor_pending',
     gapSince: gap ? gapSince : null,
     gapReason: gap ? newGap ? data.continuity : previous?.gapReason : null,
     gapKey: gap ? gapKey : null,
