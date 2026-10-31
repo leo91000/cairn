@@ -14,6 +14,7 @@ data class ChatSideQuestion(
     val itemId: String = "",
     val provider: String? = null,
     val quote: String = "",
+    val replyEventId: String = "",
     val runId: String,
     val settledAt: Long?,
     val status: String,

@@ -144,7 +144,10 @@ the turn, and secrets masked in the conversation are masked in it too. A convers
 keeps its 30 latest side questions, at most 5 waiting at once, with answers of up to
 20,000 characters. A reply holds at most 10 open side questions at once: those waiting
 and those withdrawn while it runs. A question about a whole reply reaches the agent with
-the first 2,000 characters of that reply.
+the first 2,000 characters of that reply. Clients identify a reply by its stored
+event as well as its native item ID, so an ID reused in a later turn does not select
+the later reply. Earlier clients can omit the event and use the item-ID lookup;
+if that ID appears in multiple turns, the request is refused until it identifies an event.
 
 ## Notifications
 

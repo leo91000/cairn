@@ -53,7 +53,7 @@ export class LiveEvents {
       this.cursor = event.id
       if (index !== undefined) {
         // Preserve when and where the message first appeared, as ActivityFeed does.
-        target[index] = { ...event, createdAt: target[index].createdAt }
+        target[index] = { ...event, createdAt: target[index].createdAt, displayId: target[index].displayId ?? target[index].id }
         continue
       }
 

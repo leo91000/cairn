@@ -127,8 +127,8 @@ abstract class SideQuestionCases {
                 CairnTheme {
                     if (state.installation != null && side.open)
                         Column(Modifier.verticalScroll(rememberScrollState())) {
-                            SideQuestionPanel(vm, state, chat(canAsk = true), side) {
-                                revealed += it
+                            SideQuestionPanel(vm, state, chat(canAsk = true), side) { item, _ ->
+                                revealed += item
                             }
                         }
                 }
@@ -205,7 +205,8 @@ abstract class SideQuestionCases {
                                 state,
                                 chat(canAsk = false, provider, unavailable),
                                 side,
-                            ) {}
+                            ) { _, _ ->
+                            }
                         }
                 }
             }
@@ -274,12 +275,24 @@ abstract class SideQuestionCases {
         side.show("reply-2")
         assertEquals("reply-2", side.itemId)
         assertEquals("reply-2", side.focus)
+        side.text = "Une autre question"
+        side.submitted()
+        assertEquals("reply-2", side.itemId)
+        assertEquals("reply-2", side.focus)
         // Opened from the card, a draft keeps the reply it is about.
         side.show()
         assertEquals("reply-2", side.itemId)
         side.ask("reply-1", "autre passage")
         side.show("reply-2")
         assertEquals(listOf("reply-2", ""), listOf(side.itemId, side.quote))
+        side.ask("reused", "passage", 11)
+        side.show("reused", 12)
+        assertEquals(12L, side.replyEventId)
+        assertEquals("", side.quote)
+        assertTrue(side.shows(answered.copy(itemId = "reused", replyEventId = "12")))
+        assertFalse(side.shows(answered.copy(itemId = "reused", replyEventId = "11")))
+        side.submitted()
+        assertEquals(12L, side.replyEventId)
     }
 
     @Test
@@ -338,9 +351,9 @@ abstract class SideQuestionCases {
                     LocalSideQuestions provides
                         SideQuestionActions(
                             canAsk,
-                            mapOf("reply-1" to 2),
-                            { item, quote -> asked += item to quote },
-                            { shown += it },
+                            mapOf("item:reply-1" to 2),
+                            { item, quote, _ -> asked += item to quote },
+                            { item, _, _ -> shown += item },
                         )
                 ) {
                     EventRow(vm, event, "Agent")

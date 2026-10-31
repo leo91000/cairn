@@ -20,7 +20,9 @@ it('preserves messages and tool order across batches, duplicates, reconnect and 
   reducer.append(actual, input.slice(4))
   expect(reducer.cursor).toBe(7)
   expect(actual).toHaveLength(4)
-  expect(activityEntries(actual)).toEqual(activityEntries(input))
+  const entries = activityEntries(actual)
+  expect(entries).toEqual(activityEntries(input))
+  expect(entries.filter(entry => entry.kind === 'message').map(entry => entry.kind === 'message' && entry.replyEventIds)).toEqual([[2, 4], [6, 7]])
 })
 
 it('bounds a long streaming message to one current snapshot', () => {

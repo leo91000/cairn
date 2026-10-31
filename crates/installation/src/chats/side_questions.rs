@@ -159,19 +159,51 @@ fn save(db: &Db<'_>, question: &ChatSideQuestion) -> Result<()> {
 
 /// The start of the agent reply `item_id`, so the agent knows which reply a question is
 /// about when it quotes no passage.
-fn reply_start(db: &Db<'_>, run_id: &str, item_id: &str) -> Result<String> {
+fn reply_start(db: &Db<'_>, run_id: &str, item_id: &str, event_id: Option<i64>) -> Result<String> {
     if item_id.is_empty() {
         return Ok(String::new());
     }
-    let reply: Option<String> = db
+    if event_id.is_none() {
+        let turns: i64 = db.0.query_row(
+            "SELECT COUNT(DISTINCT COALESCE((SELECT MAX(t.id) FROM events t WHERE t.run_id=e.run_id AND t.type='turn.started' AND t.id<e.id),0))
+             FROM events e WHERE e.run_id=?1 AND json_extract(e.payload,'$.item.type')='agent_message' AND json_extract(e.payload,'$.item.id')=?2",
+            rusqlite::params![run_id, item_id],
+            |row| row.get(0),
+        )?;
+        if turns > 1 {
+            return Err(Error::conflict(
+                "This reply ID is ambiguous. Include replyEventId to identify the reply.",
+            ));
+        }
+    }
+    let reply: Option<String> = if let Some(event_id) = event_id {
+        db.0.prepare_cached(
+            "SELECT COALESCE(json_extract(e.payload,'$.item.text'),e.text) FROM events e
+             WHERE e.run_id=?1 AND e.id>=?2
+               AND e.id<COALESCE((SELECT MIN(t.id) FROM events t WHERE t.run_id=?1 AND t.type='turn.started' AND t.id>?2),9223372036854775807)
+               AND json_extract(e.payload,'$.item.type')='agent_message' AND json_extract(e.payload,'$.item.id')=?3
+               AND COALESCE(json_extract(e.payload,'$.item.text'),e.text)!=''
+               AND EXISTS (SELECT 1 FROM events a WHERE a.run_id=?1 AND a.id=?2 AND json_extract(a.payload,'$.item.type')='agent_message' AND json_extract(a.payload,'$.item.id')=?3)
+             ORDER BY e.id DESC LIMIT 1",
+        )?
+        .query_row(rusqlite::params![run_id, event_id, item_id], |row| row.get(0))
+        .optional()?
+        .flatten()
+    } else {
+        db
         .0
         .prepare_cached(
             "SELECT json_extract(payload,'$.item.text') FROM events WHERE run_id=?1 AND json_extract(payload,'$.item.type')='agent_message' AND json_extract(payload,'$.item.id')=?2 ORDER BY id DESC LIMIT 1",
         )?
         .query_row(rusqlite::params![run_id, item_id], |row| row.get(0))
         .optional()?
-        .flatten();
-    let reply = reply.unwrap_or_default();
+        .flatten()
+    };
+    let reply = if event_id.is_some() {
+        reply.ok_or_else(|| Error::bad("Reply event not found in this conversation."))?
+    } else {
+        reply.unwrap_or_default()
+    };
     let reply = reply.trim();
     if reply.chars().count() <= MAX_ABOUT {
         return Ok(reply.to_owned());
@@ -261,6 +293,7 @@ fn same_question(existing: &ChatSideQuestion, input: &SideQuestionInput) -> bool
     existing.text == input.text
         && existing.quote == input.quote
         && existing.item_id == input.item_id
+        && existing.reply_event_id == input.reply_event_id
 }
 
 /// Forgets the oldest settled side questions beyond what a conversation keeps.
@@ -348,6 +381,7 @@ fn ask(
         text: input.text,
         quote: input.quote,
         item_id: input.item_id,
+        reply_event_id: input.reply_event_id,
         provider,
         status: SideQuestionStatus::Pending,
         answer: None,
@@ -355,8 +389,14 @@ fn ask(
         created_at: now(),
         settled_at: None,
     };
+    let reply = reply_start(
+        db,
+        &question.run_id,
+        &question.item_id,
+        question.reply_event_id.parse().ok(),
+    )?;
     let about = if question.quote.is_empty() {
-        reply_start(db, &question.run_id, &question.item_id)?
+        reply
     } else {
         String::new()
     };
@@ -602,10 +642,25 @@ pub(crate) async fn publish_inbox(
     // Without side questions, nothing can be restored: no lock or run read.
     let _inbox = if entries.iter().any(is_side) {
         let inbox = INBOX.lock().await;
-        let run = store.run(run_id).await?;
-        if run["sideQuestions"] != true || turn(&run) != side_turn {
-            entries.retain(|entry| !is_side(entry));
-        }
+        let id = run_id.to_owned();
+        let expected_turn = side_turn.to_owned();
+        let current = store
+            .read(move |db| {
+                let Some(run) = db.run(&id)? else {
+                    return Ok(Vec::new());
+                };
+                if run["sideQuestions"] != true || turn(&run) != expected_turn {
+                    return Ok(Vec::new());
+                }
+                let Some(chat) = chat_for_run(db, &id)? else {
+                    return Ok(Vec::new());
+                };
+                deliveries(db, text(&chat, "id"), &run)
+            })
+            .await?;
+        // A replacement adapter may have announced on the same turn after retiring
+        // the old attempt. Never restore entries selected before that retirement.
+        entries.retain(|entry| !is_side(entry) || current.contains(entry));
         Some(inbox)
     } else {
         None
@@ -717,6 +772,7 @@ mod tests {
             text: "Why this order?".into(),
             quote: quote.into(),
             item_id: String::new(),
+            reply_event_id: String::new(),
             provider: None,
             status: SideQuestionStatus::Pending,
             answer: None,
@@ -738,6 +794,27 @@ mod tests {
             wire_text(&question(""), "I traced it.\nThen I fixed it."),
             "About this reply of yours:\n> I traced it.\n> Then I fixed it.\n\nWhy this order?"
         );
+    }
+
+    #[tokio::test]
+    async fn reply_event_distinguishes_reused_native_item_ids() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store.transaction(|db| {
+            db.add_run_fixture(&json!({ "id": "r", "taskId": "r", "createdAt": 0, "status": "running" }), None)?;
+            for (id, text) in [(11, "First draft"), (12, "First reply"), (14, "Later reply")] {
+                db.0.execute(
+                    "INSERT INTO events(id,run_id,created_at,type,text,payload) VALUES(?1,'r',0,'item.completed','',?2)",
+                    rusqlite::params![id, json!({ "item": { "type": "agent_message", "id": "reused", "text": text } }).to_string()],
+                )?;
+            }
+            db.0.execute("INSERT INTO events(id,run_id,created_at,type,text) VALUES(13,'r',0,'turn.started','')", [])?;
+            assert_eq!(reply_start(db, "r", "reused", Some(11))?, "First reply");
+            assert_eq!(reply_start(db, "r", "reused", Some(14))?, "Later reply");
+            assert!(reply_start(db, "r", "another", Some(11)).is_err());
+            assert!(reply_start(db, "r", "reused", None).is_err());
+            Ok(())
+        }).await.unwrap();
     }
 
     #[test]
@@ -851,10 +928,18 @@ mod tests {
             .unwrap();
         let inbox = root.path().join("chat-input");
         std::fs::create_dir(&inbox).unwrap();
+        let selected_chat = chat_for_assertions.clone();
+        let old_delivery = store
+            .read(move |db| deliveries(db, &selected_chat, &db.run("r")?.unwrap()))
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry["sideQuestion"]["id"] == "pending")
+            .unwrap();
         std::fs::write(
             inbox.join("messages.json"),
             json!([
-                { "id": "side-question:pending", "sideQuestion": { "id": "pending" } },
+                old_delivery,
                 { "id": "steer", "text": "continue" },
             ])
             .to_string(),
@@ -866,15 +951,27 @@ mod tests {
         let run = store.run("r").await.unwrap();
         assert!(run["sideQuestions"].is_null());
         assert!(unavailable(Some(&run)).is_some());
-        let inbox: Value =
+        let cleaned: Value =
             serde_json::from_slice(&std::fs::read(inbox.join("messages.json")).unwrap()).unwrap();
-        assert_eq!(inbox, json!([{ "id": "steer", "text": "continue" }]));
+        assert_eq!(cleaned, json!([{ "id": "steer", "text": "continue" }]));
         // A later adapter can announce again on the same run and turn, but cannot
         // receive or settle a question belonging to the exhausted attempt.
         store
             .update_run_boundary("r", json!({ "sideQuestions": true }))
             .await
             .unwrap();
+        publish_inbox(
+            &store,
+            "r",
+            "same-turn",
+            &inbox,
+            vec![old_delivery, json!({ "id": "steer", "text": "continue" })],
+        )
+        .await
+        .unwrap();
+        let inbox_after: Value =
+            serde_json::from_slice(&std::fs::read(inbox.join("messages.json")).unwrap()).unwrap();
+        assert_eq!(inbox_after, json!([{ "id": "steer", "text": "continue" }]));
         store
             .read(move |db| {
                 let failed = find(db, &chat_for_assertions, "pending")?.unwrap();
@@ -954,6 +1051,7 @@ mod tests {
             text: "Why does the migration have to run before the new handler?".into(),
             quote: "Run the migration first, then deploy the handler.".repeat(4),
             item_id: format!("item-{index}"),
+            reply_event_id: String::new(),
             provider: Some(serde_json::from_value(json!("claude")).unwrap()),
             status: SideQuestionStatus::Answered,
             answer: Some("Because the handler reads the new column. ".repeat(24)),

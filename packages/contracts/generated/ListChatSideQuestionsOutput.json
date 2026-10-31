@@ -47,6 +47,12 @@
           "description": "The passage of a reply the question is about.",
           "type": "string"
         },
+        "replyEventId": {
+          "default": "",
+          "description": "The stored event identifying the specific reply when native item IDs repeat.",
+          "maxLength": 16,
+          "type": "string"
+        },
         "runId": {
           "type": "string"
         },

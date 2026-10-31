@@ -44,6 +44,10 @@ pub struct ChatSideQuestion {
     /// The agent message the question refers to.
     #[serde(default)]
     pub item_id: String,
+    /// The stored event identifying the specific reply when native item IDs repeat.
+    #[serde(default)]
+    #[schemars(length(max = 16))]
+    pub reply_event_id: String,
     #[serde(default)]
     #[ts(optional = nullable)]
     #[schemars(with = "Option<String>", pattern("^(codex|claude|opencode)$"))]
@@ -79,6 +83,10 @@ pub struct SideQuestionInput {
     #[serde(default)]
     #[schemars(length(max = 200))]
     pub item_id: String,
+    /// The event of the reply to distinguish repeated native item IDs.
+    #[serde(default)]
+    #[schemars(length(max = 16))]
+    pub reply_event_id: String,
 }
 
 impl SideQuestionInput {
@@ -90,9 +98,17 @@ impl SideQuestionInput {
         if self.text.is_empty() {
             return Err("Write a question.".into());
         }
+        if !self.reply_event_id.is_empty() && self.item_id.is_empty() {
+            return Err("A reply event requires an item identity.".into());
+        }
         if self.text.chars().count() > 4000
             || self.quote.chars().count() > 4000
             || self.item_id.chars().count() > 200
+            || (!self.reply_event_id.is_empty()
+                && !self
+                    .reply_event_id
+                    .parse::<i64>()
+                    .is_ok_and(|id| (1..=9007199254740991).contains(&id)))
         {
             return Err("This side question is too long.".into());
         }

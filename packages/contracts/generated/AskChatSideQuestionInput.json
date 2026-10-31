@@ -20,6 +20,12 @@
           "maxLength": 4000,
           "type": "string"
         },
+        "replyEventId": {
+          "default": "",
+          "description": "The event of the reply to distinguish repeated native item IDs.",
+          "maxLength": 16,
+          "type": "string"
+        },
         "text": {
           "maxLength": 4000,
           "minLength": 1,

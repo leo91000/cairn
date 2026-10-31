@@ -9,6 +9,7 @@ data class SideQuestionInput(
     val id: String,
     val itemId: String = "",
     val quote: String = "",
+    val replyEventId: String = "",
     val text: String,
 ) {
     init {

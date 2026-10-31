@@ -2035,6 +2035,12 @@
           "description": "The passage of a reply the question is about.",
           "type": "string"
         },
+        "replyEventId": {
+          "default": "",
+          "description": "The stored event identifying the specific reply when native item IDs repeat.",
+          "maxLength": 16,
+          "type": "string"
+        },
         "runId": {
           "type": "string"
         },
@@ -2063,6 +2069,7 @@
         "text",
         "quote",
         "itemId",
+        "replyEventId",
         "provider",
         "status",
         "answer",
@@ -11719,6 +11726,12 @@
           "maxLength": 4000,
           "type": "string"
         },
+        "replyEventId": {
+          "default": "",
+          "description": "The event of the reply to distinguish repeated native item IDs.",
+          "maxLength": 16,
+          "type": "string"
+        },
         "text": {
           "maxLength": 4000,
           "minLength": 1,
@@ -11729,7 +11742,8 @@
         "id",
         "text",
         "quote",
-        "itemId"
+        "itemId",
+        "replyEventId"
       ],
       "type": "object"
     },

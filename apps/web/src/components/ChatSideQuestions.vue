@@ -29,15 +29,17 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{
   /** Follow a side question back to the reply it is about. */
-  reveal: [itemId: string]
+  reveal: [reply: { itemId: string, replyEventId: number | null }]
 }>()
 
 const open = ref(false)
 const text = ref('')
 const quote = ref('')
 const itemId = ref('')
+const replyEventId = ref<number | null>(null)
 /** Shows only the side questions about one reply. */
 const focus = ref('')
+const focusEvents = ref<number[]>([])
 const busy = ref(false)
 const error = ref('')
 /** The dialog focuses the question field when it opens to ask. */
@@ -55,7 +57,9 @@ watch(() => [props.chatId, props.questions] as const, ([chatId, questions]) => {
     text.value = ''
     quote.value = ''
     itemId.value = ''
+    replyEventId.value = null
     focus.value = ''
+    focusEvents.value = []
     error.value = ''
     submission = undefined
   }
@@ -70,7 +74,17 @@ function markSeen() {
 
 const pending = computed(() => props.questions.filter(question => question.status === 'pending'))
 const unread = computed(() => props.questions.filter(question => question.status !== 'pending' && question.status !== 'cancelled' && !seen.value.has(question.id)))
-const shown = computed(() => props.questions.filter(question => !focus.value || question.itemId === focus.value).toReversed())
+const shown = computed(() => props.questions.filter((question) => {
+  if (!focus.value)
+    return true
+  if (question.itemId !== focus.value)
+    return false
+  if (!question.replyEventId)
+    return true
+  const id = Number(question.replyEventId)
+  const [start, end] = focusEvents.value
+  return start !== undefined && end !== undefined && id >= start && id <= end
+}).toReversed())
 const engine = computed(() => props.provider ? providers[props.provider].label : 'The agent')
 const status = computed(() => {
   if (pending.value.length)
@@ -78,8 +92,9 @@ const status = computed(() => {
   return unread.value.some(question => question.status === 'answered') ? 'Answer ready' : 'Not answered'
 })
 
-function ask(about: { itemId: string, quote: string }) {
+function ask(about: { itemId: string, replyEventId: number | null, quote: string }) {
   itemId.value = about.itemId
+  replyEventId.value = about.replyEventId
   quote.value = about.quote
   error.value = ''
   open.value = true
@@ -89,14 +104,19 @@ function ask(about: { itemId: string, quote: string }) {
 }
 
 /** Opens the panel, on the side questions about one reply when `item` is given. */
-function show(item = '') {
+function show(reply?: { itemId: string, replyEventId: number | null, replyEventIds: number[] }) {
+  const item = reply?.itemId ?? ''
   // Questions asked from a reply's panel are about that reply.
-  if (item && item !== itemId.value) {
+  if (item && (item !== itemId.value || reply?.replyEventId !== replyEventId.value)) {
     itemId.value = item
     quote.value = ''
   }
 
+  if (reply)
+    replyEventId.value = reply.replyEventId
+
   focus.value = item
+  focusEvents.value = reply?.replyEventIds ?? []
   open.value = true
   asking.value = false
   markSeen()
@@ -129,7 +149,12 @@ async function send() {
   busy.value = true
   error.value = ''
   try {
-    const body = { text: question, quote: quote.value, itemId: itemId.value }
+    const body = {
+      text: question,
+      quote: quote.value,
+      itemId: itemId.value,
+      replyEventId: replyEventId.value?.toString() ?? '',
+    }
     const serialized = JSON.stringify({ chatId: props.chatId, ...body })
     if (submission?.serialized !== serialized)
       submission = { id: crypto.randomUUID(), serialized }
@@ -139,7 +164,9 @@ async function send() {
     if (text.value.trim() === question)
       text.value = ''
     quote.value = ''
-    itemId.value = ''
+    itemId.value = focus.value
+    if (!focus.value)
+      replyEventId.value = null
   }
   catch (e) { error.value = (e as Error).message }
   finally { busy.value = false }
@@ -154,8 +181,8 @@ async function withdraw(question: ChatSideQuestion) {
 }
 
 /** Reopens the panel when the reply a question is about is not loaded. */
-function unreachable(item: string) {
-  show(item)
+function unreachable(reply: { itemId: string, replyEventId: number | null }) {
+  show({ ...reply, replyEventIds: reply.replyEventId ? [reply.replyEventId, reply.replyEventId] : [] })
   error.value = 'This reply is not in the loaded conversation. Scroll up to load earlier messages, then try again.'
 }
 
@@ -163,7 +190,7 @@ function reveal(question: ChatSideQuestion) {
   if (!question.itemId)
     return
   open.value = false
-  emit('reveal', question.itemId)
+  emit('reveal', { itemId: question.itemId, replyEventId: Number(question.replyEventId) || null })
 }
 
 defineExpose({ ask, show, unreachable })

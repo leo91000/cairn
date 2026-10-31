@@ -489,7 +489,10 @@ internal fun ChatPage(
                 ?.sideQuestions
                 .orEmpty()
                 .filter { it.itemId.isNotEmpty() }
-                .groupingBy { it.itemId }
+                .groupingBy {
+                    if (it.replyEventId.isNotEmpty()) "event:${it.itemId}:${it.replyEventId}"
+                    else "item:${it.itemId}"
+                }
                 .eachCount()
         }
     val sideActions =
@@ -1825,16 +1828,21 @@ internal fun ChatPage(
                     QuestionDialog(vm, state, current, questions, { asking = it }) { asking = null }
             }
             if (side.open && chat != null)
-                SideQuestionSheet(vm, state, chat, side) { itemId ->
+                SideQuestionSheet(vm, state, chat, side) { itemId, replyEventId ->
                     // Follow a side question back to its reply in the history.
                     val index = timeline.indexOfFirst { entry ->
-                        entry.message && entry.events.single().item().string("id") == itemId
+                        entry.message &&
+                            entry.events.single().let { event ->
+                                event.item().string("id") == itemId &&
+                                    (replyEventId == null ||
+                                        replyEventId in (event.displayId ?: event.id)..event.id)
+                            }
                     }
                     if (index >= 0)
                         sideScope.launch {
                             listState.animateScrollToItem(index + if (id == null) 1 else 0)
                         }
-                    else side.unreachable(itemId)
+                    else side.unreachable(itemId, replyEventId)
                 }
             if (newSession && chat != null)
                 Confirm(

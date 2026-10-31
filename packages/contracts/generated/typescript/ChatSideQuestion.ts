@@ -15,6 +15,10 @@ export interface ChatSideQuestion {
    * The agent message the question refers to.
    */
   itemId: string
+  /**
+   * The stored event identifying the specific reply when native item IDs repeat.
+   */
+  replyEventId: string
   provider?: AgentProvider | null
   status: SideQuestionStatus
   answer?: string | null

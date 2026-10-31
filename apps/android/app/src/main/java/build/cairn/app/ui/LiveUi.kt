@@ -1389,6 +1389,7 @@ fun EventRow(vm: CairnViewModel, event: RunEvent, agent: String = "Cairn") {
                         ) {
                             val side = if (user) null else LocalSideQuestions.current
                             val itemId = if (event.type == "chat.user") "" else item.string("id")
+                            val firstEvent = event.displayId ?: event.id
                             if (!user)
                                 Row(
                                     Modifier.fillMaxWidth(),
@@ -1401,7 +1402,17 @@ fun EventRow(vm: CairnViewModel, event: RunEvent, agent: String = "Cairn") {
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
-                                    val asked = side?.counts?.get(itemId) ?: 0
+                                    val prefix = "event:$itemId:"
+                                    val asked =
+                                        (side?.counts?.get("item:$itemId") ?: 0) +
+                                            side?.counts.orEmpty().entries.sumOf { (key, count) ->
+                                                val id =
+                                                    key.removePrefix(prefix)
+                                                        .takeIf { key.startsWith(prefix) }
+                                                        ?.toLongOrNull()
+                                                if (id != null && id in firstEvent..event.id) count
+                                                else 0
+                                            }
                                     // These actions come and go with the reply's state; they
                                     // never change the line's height, so the history does not move.
                                     if (side != null && itemId.isNotEmpty() && asked > 0)
@@ -1412,7 +1423,9 @@ fun EventRow(vm: CairnViewModel, event: RunEvent, agent: String = "Cairn") {
                                                 else
                                                     "Voir $asked questions à côté sur cette réponse"
                                             TextButton(
-                                                onClick = { side.show(itemId) },
+                                                onClick = {
+                                                    side.show(itemId, firstEvent, event.id)
+                                                },
                                                 modifier =
                                                     Modifier.semantics {
                                                         contentDescription = label
@@ -1437,7 +1450,7 @@ fun EventRow(vm: CairnViewModel, event: RunEvent, agent: String = "Cairn") {
                                                 "Poser une question à côté",
                                                 CairnIcons.SideQuestion,
                                             ) {
-                                                side.ask(itemId, "")
+                                                side.ask(itemId, "", firstEvent)
                                             }
                                         }
                                     Text(
@@ -1463,7 +1476,7 @@ fun EventRow(vm: CairnViewModel, event: RunEvent, agent: String = "Cairn") {
                                         side
                                             ?.takeIf { it.canAsk && itemId.isNotEmpty() }
                                             ?.let { actions ->
-                                                { quote -> actions.ask(itemId, quote) }
+                                                { quote -> actions.ask(itemId, quote, firstEvent) }
                                             }
                                 ) {
                                     Markdown(content)

@@ -86,6 +86,8 @@ export type ActivityEntry
     via?: string
     /** The agent message's own ID, which side questions refer to. */
     itemId?: string
+    /** Stored events folded into this reply, used to distinguish repeated item IDs. */
+    replyEventIds?: number[]
     attachments?: import('../../../packages/contracts/chats').ChatAttachment[]
   }
   | { kind: 'group', id: string, artifacts: ActivityArtifact[] }
@@ -719,6 +721,7 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       if (existing) {
         existing.text = content
         existing.sourceId = `${event.runId}:${event.id}`
+        existing.replyEventIds = [existing.replyEventIds?.[0] ?? event.displayId ?? event.id, event.id]
       }
       else {
         const message = {
@@ -727,6 +730,7 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
           time: event.createdAt,
           text: content,
           sourceId: `${event.runId}:${event.id}`,
+          replyEventIds: [event.displayId ?? event.id, event.id],
           ...(via ? { via } : {}),
           ...(itemId ? { itemId } : {}),
         }

@@ -96,6 +96,63 @@ test('asks side questions about a running reply without steering, queuing or rec
   await page.screenshot({ path: test.info().outputPath('side-question-mobile-dark.png'), animations: 'disabled' })
 })
 
+test('keeps a reply filter when asking more than once', async ({ page, workspace }) => {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Review. fixture:chat-hang', provider: 'claude' })
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  const message = page.locator('.activity-message').filter({ hasText: reply })
+  await message.getByRole('button', { name: 'Ask about this reply' }).click()
+  const panel = page.getByRole('dialog', { name: 'Side questions' })
+  await panel.getByRole('textbox', { name: 'Your question about this reply' }).fill('First question')
+  await panel.getByRole('button', { name: 'Ask', exact: true }).click()
+  await expect(panel.getByText('First question', { exact: true })).toBeVisible()
+  await panel.getByRole('button', { name: 'Close dialog' }).click()
+  await message.getByRole('button', { name: 'Show 1 side question about this reply' }).click()
+  await panel.getByRole('textbox', { name: 'Your question about this reply' }).fill('Second question')
+  await panel.getByRole('button', { name: 'Ask', exact: true }).click()
+  await expect(panel.getByText('Second question', { exact: true })).toBeVisible()
+  await panel.getByRole('textbox', { name: 'Your question about this reply' }).fill('Third question')
+  await panel.getByRole('button', { name: 'Ask', exact: true }).click()
+  await expect(panel.getByText('Third question', { exact: true })).toBeVisible()
+  const detail = await workspace.api(`/api/chats/${chat.id}`)
+  expect(new Set(detail.sideQuestions.map((question: { itemId: string }) => question.itemId)).size).toBe(1)
+  expect(detail.sideQuestions[0].itemId).not.toBe('')
+  await workspace.api(`/api/chats/${chat.id}/stop`, 'POST', {})
+})
+
+test('links reused native item IDs to the selected reply', async ({ page, workspace }) => {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Review. fixture:chat-hang', provider: 'claude' })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).canAskSideQuestion).toBe(true)
+  const detail = await workspace.api(`/api/chats/${chat.id}`)
+  const run = detail.run.id
+  workspace.service.store.event(run, 'turn.started', '')
+  workspace.service.store.event(run, 'item.completed', '', { item: { id: 'reused-reply', type: 'agent_message', text: 'First distinct reply' } })
+  workspace.service.store.event(run, 'turn.started', '')
+  workspace.service.store.event(run, 'item.completed', '', { item: { id: 'reused-reply', type: 'agent_message', text: 'Second distinct reply' } })
+  await expect(workspace.api(`/api/chats/${chat.id}/side-questions`, 'POST', {
+    id: randomUUID(),
+    text: 'Which reply?',
+    itemId: 'reused-reply',
+  })).rejects.toThrow(/ambiguous/)
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  const first = page.locator('.activity-message').filter({ hasText: 'First distinct reply' })
+  const second = page.locator('.activity-message').filter({ hasText: 'Second distinct reply' })
+  await expect(first).toBeVisible()
+  await expect(second).toBeVisible()
+  await first.getByRole('button', { name: 'Ask about this reply' }).click()
+  const panel = page.getByRole('dialog', { name: 'Side questions' })
+  await panel.getByRole('textbox', { name: 'Your question about this reply' }).fill('Why the first reply?')
+  await panel.getByRole('button', { name: 'Ask', exact: true }).click()
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).sideQuestions[0]?.answer).toContain('First distinct reply')
+  await panel.getByRole('button', { name: 'Show reply' }).click()
+  await expect(first.getByRole('button', { name: 'Show 1 side question about this reply' })).toBeVisible()
+  await expect(second.getByRole('button', { name: /Show .* side question/ })).toHaveCount(0)
+  await workspace.api(`/api/chats/${chat.id}/stop`, 'POST')
+})
+
 test('a pending side question can be withdrawn while the reply continues', async ({ page, workspace }) => {
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Review the layout. fixture:chat-hang', provider: 'claude' })

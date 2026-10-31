@@ -191,8 +191,10 @@ const sideQuestions = ref<InstanceType<typeof ChatSideQuestions>>()
 const sideQuestionCounts = computed(() => {
   const counts: Record<string, number> = {}
   for (const question of detail.value?.sideQuestions ?? []) {
-    if (question.itemId)
-      counts[question.itemId] = (counts[question.itemId] ?? 0) + 1
+    if (question.itemId) {
+      const key = question.replyEventId ? `event:${question.itemId}:${question.replyEventId}` : `item:${question.itemId}`
+      counts[key] = (counts[key] ?? 0) + 1
+    }
   }
 
   return counts

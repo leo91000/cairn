@@ -36,8 +36,8 @@ import java.util.UUID
 internal class SideQuestionActions(
     val canAsk: Boolean,
     val counts: Map<String, Int>,
-    val ask: (itemId: String, quote: String) -> Unit,
-    val show: (itemId: String) -> Unit,
+    val ask: (itemId: String, quote: String, replyEventId: Long?) -> Unit,
+    val show: (itemId: String, replyEventId: Long?, lastEventId: Long?) -> Unit,
 )
 
 internal val LocalSideQuestions = compositionLocalOf<SideQuestionActions?> { null }
@@ -63,39 +63,48 @@ internal fun String.takeCodePoints(count: Int): String =
 internal class SideQuestionState {
     var open by mutableStateOf(false)
     var itemId by mutableStateOf("")
+    var replyEventId by mutableStateOf<Long?>(null)
     var quote by mutableStateOf("")
     var text by mutableStateOf("")
     /** Shows only the side questions about one reply. */
     var focus by mutableStateOf("")
+    var focusEventId by mutableStateOf<Long?>(null)
+    var focusLastEventId by mutableStateOf<Long?>(null)
     /** Why « Voir la réponse » could not show the reply. */
     var notice by mutableStateOf("")
     private var seen by mutableStateOf<Set<String>?>(null)
     private var submission = ""
     private var submissionKey = ""
 
-    fun ask(itemId: String, quote: String) {
+    fun ask(itemId: String, quote: String, replyEventId: Long? = null) {
         this.itemId = itemId
+        this.replyEventId = replyEventId
         this.quote = quote.trim().takeCodePoints(4000)
         focus = ""
+        focusEventId = null
+        focusLastEventId = null
         notice = ""
         open = true
     }
 
     /** Opens the sheet, on the side questions about one reply when [itemId] is given. */
-    fun show(itemId: String = "") {
+    fun show(itemId: String = "", replyEventId: Long? = null, lastEventId: Long? = replyEventId) {
         // Questions asked from a reply's sheet are about that reply.
-        if (itemId.isNotEmpty() && itemId != this.itemId) {
+        if (itemId.isNotEmpty() && (itemId != this.itemId || replyEventId != this.replyEventId)) {
             this.itemId = itemId
             quote = ""
         }
+        if (itemId.isNotEmpty()) this.replyEventId = replyEventId
         focus = itemId
+        focusEventId = replyEventId
+        focusLastEventId = lastEventId
         notice = ""
         open = true
     }
 
     /** Reopens the sheet when the reply a question is about is not loaded. */
-    fun unreachable(itemId: String) {
-        show(itemId)
+    fun unreachable(itemId: String, replyEventId: Long?) {
+        show(itemId, replyEventId)
         notice =
             "Cette réponse n’est pas dans la conversation chargée. Remontez pour charger les messages précédents, puis réessayez."
     }
@@ -125,12 +134,23 @@ internal class SideQuestionState {
         return submission
     }
 
-    /** Asked: the same question asked again later is a new one, about no reply yet. */
+    /** Asked: the next question remains about the focused reply, if any. */
     fun submitted() {
         submissionKey = ""
         text = ""
         quote = ""
-        itemId = ""
+        itemId = focus
+        if (focus.isEmpty()) replyEventId = null
+    }
+
+    fun shows(question: ChatSideQuestion): Boolean {
+        if (focus.isEmpty()) return true
+        if (question.itemId != focus) return false
+        if (question.replyEventId.isEmpty()) return true
+        val id = question.replyEventId.toLongOrNull()
+        val first = focusEventId
+        val last = focusLastEventId
+        return id != null && first != null && last != null && id in first..last
     }
 }
 
@@ -197,7 +217,7 @@ internal fun SideQuestionSheet(
     state: Workspace,
     chat: Chat,
     side: SideQuestionState,
-    reveal: (String) -> Unit,
+    reveal: (String, Long?) -> Unit,
 ) {
     DetailSheet("Questions à côté", { side.open = false }) {
         SideQuestionPanel(vm, state, chat, side, reveal)
@@ -211,10 +231,9 @@ internal fun ColumnScope.SideQuestionPanel(
     state: Workspace,
     chat: Chat,
     side: SideQuestionState,
-    reveal: (String) -> Unit,
+    reveal: (String, Long?) -> Unit,
 ) {
-    val shown =
-        chat.sideQuestions.filter { side.focus.isEmpty() || it.itemId == side.focus }.asReversed()
+    val shown = chat.sideQuestions.filter(side::shows).asReversed()
     val focusManager = LocalFocusManager.current
     run {
         Text(
@@ -255,7 +274,8 @@ internal fun ColumnScope.SideQuestionPanel(
                 onClick = {
                     val question = side.text.trim()
                     val content =
-                        listOf(chat.id, question, side.quote, side.itemId).joinToString("\u0000")
+                        listOf(chat.id, question, side.quote, side.itemId, side.replyEventId)
+                            .joinToString("\u0000")
                     val id = side.submissionId(content)
                     // Close the keyboard so the answer appears in view.
                     focusManager.clearFocus()
@@ -269,6 +289,7 @@ internal fun ColumnScope.SideQuestionPanel(
                                         text = question,
                                         quote = side.quote,
                                         itemId = side.itemId,
+                                        replyEventId = side.replyEventId?.toString().orEmpty(),
                                     ),
                             )
                         )
@@ -329,7 +350,7 @@ internal fun ColumnScope.SideQuestionPanel(
         shown.forEach { question ->
             SideQuestionRow(vm, state, question) {
                 side.open = false
-                reveal(question.itemId)
+                reveal(question.itemId, question.replyEventId.toLongOrNull())
             }
         }
     }
