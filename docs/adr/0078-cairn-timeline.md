@@ -35,3 +35,6 @@ recul borné ; elle n'accepte pas une conversation sans ses réponses comme sync
 Les métadonnées de cycle de vie restent applicables pendant cette attente. Un changement
 de run ou de rétention invalide le cache et son curseur ; une conversation supprimée garde
 sa présentation native de corbeille ou de purge, sans réafficher son ancien travail.
+Le Fil global ne contient pas de cartes : son seul instantané compatible `v1::0` reste
+cachable quand il porte une liste, aucun run ni conversation, et aucun curseur, contenu
+ou historique paginé. Cette exception n'accepte jamais un historique de conversation `v1`.
