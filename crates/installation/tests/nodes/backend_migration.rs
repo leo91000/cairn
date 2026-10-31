@@ -141,6 +141,10 @@ async fn assert_files(owner: &Owner, node: &str, run: &str, native: bool) {
 async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_source_on_failure() {
     let (listener, address) = common::bind().await;
     let owner = Owner::at(address.to_string()).await;
+    // Migration stages disks on the manager, so configure its fixture reserve too.
+    owner
+        .put_node_fixture(json!({ "id": LOCAL_NODE_ID, "storage": small_reserve() }))
+        .await;
     let (run, agent, chat, vm_node, native_node) = (id(), id(), id(), id(), id());
     let original_agent = json!({ "id": agent, "revision": id(), "access": { "backend": "firecracker", "nodes": [vm_node] } });
     owner.put("agents", original_agent.clone()).await;
