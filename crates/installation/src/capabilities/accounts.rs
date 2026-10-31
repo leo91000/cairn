@@ -198,6 +198,7 @@ impl AccountOperation {
             })?);
         }
         s.accounts.initialize(s).await?;
+        authorize.recheck().await?;
         let result = match self.name {
             "list_models" => {
                 let input: ListModelsInput = decode(input)?;
@@ -444,6 +445,7 @@ impl AccountOperation {
                 serde_json::to_value(AccountMutationOutput::Completed { done: true })?
             }
         };
+        authorize.recheck().await?;
         s.store
             .read(move |db| {
                 authorize.authorize(db)?;

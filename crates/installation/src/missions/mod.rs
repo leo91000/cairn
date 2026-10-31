@@ -347,28 +347,12 @@ impl Missions {
         s.queue_run(run, dedupe, None).await
     }
 
-    pub(crate) async fn merge_agents<F>(
-        &self,
-        s: &Service,
-        input: MergeAgentsInput,
-        authorize: F,
-    ) -> Result<MergeAgentsOutput>
-    where
-        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
-    {
-        self.merge_agents_live(
-            s,
-            input,
-            crate::authorization::Authorization::once(authorize),
-        )
-        .await
-    }
-
     pub(crate) async fn merge_agents_live(
         &self,
         s: &Service,
         input: MergeAgentsInput,
         authorize: crate::authorization::Authorization,
+        resource_authority: Option<crate::capabilities::plugin_packages::Authority>,
     ) -> Result<MergeAgentsOutput> {
         authorize.recheck().await?;
         let _authors = self.authors.lock().await;
@@ -379,11 +363,31 @@ impl Missions {
         // An active worker can still be settling a terminal run. Keep the same
         // worker/admission ordering as the profile merge while commitments are held.
         let active = s.worker.active.lock().await;
+        authorize.recheck().await?;
+        let coverage = crate::plugins::grants::check_coverage_authorized(
+            s,
+            &input.target_id.to_string(),
+            &input.source_id.to_string(),
+            resource_authority.clone(),
+        )
+        .await
+        .map_err(|error| {
+            if error.status == 403 {
+                Error::conflict(error.message)
+            } else {
+                error
+            }
+        })?;
+        authorize.recheck().await?;
         let executing = active.keys().cloned().collect::<Vec<_>>();
         let result = s
             .store
             .transaction(move |db| {
                 authorize.authorize(db)?;
+                coverage.authorize(db)?;
+                if let Some(authority) = &resource_authority {
+                    authority.authorize(db)?;
+                }
                 crate::agent_merge::merge(db, &input, &executing)
             })
             .await?;

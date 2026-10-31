@@ -201,6 +201,7 @@ pub(crate) async fn options_live(
 ) -> Result<Value> {
     authorize.recheck().await?;
     let id = id.to_owned();
+    let proof = authorize.clone();
     let (run, pending, eligible) = s
         .store
         .read(move |db| {
@@ -226,6 +227,7 @@ pub(crate) async fn options_live(
             })
         })
         .collect::<Vec<_>>();
+    proof.recheck().await?;
     Ok(json!({
         "runId": run["id"],
         "turnId": run["chatExecution"]["messageId"],
@@ -266,6 +268,7 @@ impl Service {
             .await?;
         let available = choices(self, &agent).await?;
         let active = self.worker.active.lock().await;
+        authorize.recheck().await?;
         let saved = input.clone();
         let result = self
             .store

@@ -142,6 +142,7 @@ impl McpOperation {
                     })
                     .await?;
                 let mcps = s.mcps.list(s).await?;
+                authorize.recheck().await?;
                 s.store.read(move |db| authorize.authorize(db)).await?;
                 Ok(json!({"mcps":mcps}))
             }

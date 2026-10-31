@@ -552,6 +552,19 @@ impl Service {
         dedupe: Option<String>,
         bearer: Option<String>,
     ) -> Result<Value> {
+        let authorize =
+            crate::installation_mcp::management_authorization(self, bearer.as_deref()).await?;
+        self.queue_run_live(run, dedupe, bearer, authorize).await
+    }
+
+    pub(crate) async fn queue_run_live(
+        &self,
+        run: Value,
+        dedupe: Option<String>,
+        bearer: Option<String>,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<Value> {
+        authorize.recheck().await?;
         let mut run = run;
         let origin = if run["trigger"] == "schedule" {
             crate::native::policy::Origin::Stored(run["snapshot"]["task"].clone())
@@ -559,9 +572,11 @@ impl Service {
             crate::native::policy::origin()
         };
         crate::native::policy::refresh_for(self, &run["snapshot"]["agent"]).await?;
+        authorize.recheck().await?;
         let result = self
             .store
             .transaction(move |db| {
+                authorize.authorize(db)?;
                 required(
                     db.agent_snapshot(text(&run["snapshot"]["agent"], "id"))?,
                     "Agent no longer exists",

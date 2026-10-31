@@ -129,6 +129,7 @@ pub(crate) async fn set_live(
     } else {
         String::new()
     };
+    authorize.recheck().await?;
     s.store
         .transaction(move |db| {
             authorize.authorize(db)?;

@@ -521,6 +521,7 @@ pub(crate) async fn native_callers_live(
 ) -> Result<Value> {
     authorize.recheck().await?;
     crate::native::policy::refresh(s).await?;
+    authorize.recheck().await?;
     s.store
         .read(move |db| {
             authorize.authorize(db)?;
@@ -572,12 +573,14 @@ pub(crate) async fn configure_storage_live(
         ));
     }
     crate::object_storage::Storage::configured(s)?
-        .validate()
+        .validate_live(&authorize)
         .await?;
+    let secret = runner_secret(s).await?;
+    authorize.recheck().await?;
     let response = s
         .http
         .post(format!("{}/storage-policy/probe", controller_url(s, node)))
-        .bearer_auth(runner_secret(s).await?)
+        .bearer_auth(secret)
         .json(&policy)
         .timeout(std::time::Duration::from_secs(30))
         .send()
@@ -586,6 +589,7 @@ pub(crate) async fn configure_storage_live(
     if !response.status().is_success() {
         return Err(Error::conflict("Node did not pass its storage probe."));
     }
+    authorize.recheck().await?;
     let node = node.to_owned();
     let (value, configuration) = s
         .store
@@ -699,6 +703,7 @@ pub(crate) async fn configure_node_live(
         ));
     }
     let node = node.to_owned();
+    authorize.recheck().await?;
     s.store
         .transaction(move |db| {
             authorize.authorize(db)?;
@@ -801,6 +806,7 @@ pub(crate) async fn invite_live(
         node_id: NodeId(uuid::Uuid::parse_str(&node_id).map_err(Error::internal)?),
     };
     let key = format!("node-enrollment:{}", digest(&code));
+    authorize.recheck().await?;
     s.store
         .transaction(move |db| {
             authorize.authorize(db)?;

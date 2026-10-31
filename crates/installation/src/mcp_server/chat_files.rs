@@ -39,6 +39,7 @@ pub(super) async fn invoke(
     let input = args.clone();
     let check = authorize_chat.clone();
     let data_dir = s.config.data_dir.clone();
+    authorize_chat.recheck().await?;
     let (record, attachment_path) = s
         .store
         .read(move |db| {
@@ -109,6 +110,7 @@ pub(super) async fn invoke(
         })
         .await?;
     if listing {
+        authorize_chat.recheck().await?;
         return Ok(record);
     }
     if name == "set_chat_artifact_visibility" {
@@ -153,9 +155,11 @@ pub(super) async fn invoke(
     }
     file.seek(std::io::SeekFrom::Start(offset)).await?;
     let mut bytes = Vec::new();
+    authorize_chat.recheck().await?;
     file.take(CHUNK_BYTES).read_to_end(&mut bytes).await?;
     let next = offset + bytes.len() as u64;
     // A transfer cannot return data after the execution grant or chat was revoked.
+    authorize_chat.recheck().await?;
     s.store.read(move |db| authorize_chat.authorize(db)).await?;
     Ok(json!({
         "file": record,

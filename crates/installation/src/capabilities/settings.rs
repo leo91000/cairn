@@ -144,7 +144,7 @@ impl SettingsOperation {
                 let _: CheckStorageInput = decode(input)?;
                 // Network I/O never runs inside a database transaction.
                 let storage = crate::object_storage::Storage::configured(s)?;
-                Box::pin(storage.probe()).await?;
+                Box::pin(storage.probe_live(authorize)).await?;
                 Ok(serde_json::to_value(StorageCheck { ok: true })?)
             }
             name => {

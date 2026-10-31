@@ -122,6 +122,7 @@ impl AgentAvatars {
                 "Connect an active Codex account in Connections to generate portraits. You can also upload an image.",
             ));
         }
+        authorize.recheck().await?;
         let agent_id = agent_id.to_owned();
         let revision = id();
         let job = revision.clone();

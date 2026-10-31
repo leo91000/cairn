@@ -18,22 +18,24 @@ use std::{
 
 impl Worker {
     pub async fn cancel(&self, s: &Service, id: &str) -> Result<()> {
-        self.cancel_with_grant(s, id, None).await
+        self.cancel_live(s, id, crate::authorization::Authorization::default())
+            .await
     }
 
-    pub(crate) async fn cancel_from_run(&self, s: &Service, id: &str, bearer: &str) -> Result<()> {
-        self.cancel_with_grant(s, id, Some(bearer.to_owned())).await
-    }
-
-    async fn cancel_with_grant(&self, s: &Service, id: &str, bearer: Option<String>) -> Result<()> {
+    pub(crate) async fn cancel_live(
+        &self,
+        s: &Service,
+        id: &str,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<()> {
+        authorize.recheck().await?;
         let active = self.active.lock().await;
+        authorize.recheck().await?;
         let is_active = active.contains_key(id);
         let run_id = id.to_owned();
         s.store
             .transaction(move |db| {
-                if let Some(bearer) = bearer {
-                    crate::installation_mcp::authorize_in(db, &bearer)?;
-                }
+                authorize.authorize(db)?;
                 request_cancel(db, &run_id, is_active)
             })
             .await?;
@@ -66,6 +68,7 @@ impl Worker {
     ) -> Result<Value> {
         authorize.recheck().await?;
         let active = self.active.lock().await;
+        authorize.recheck().await?;
         let executing: std::collections::HashSet<_> = active.keys().cloned().collect();
         let id = id.to_owned();
         let chat = s
@@ -117,6 +120,7 @@ impl Worker {
     ) -> Result<Value> {
         authorize.recheck().await?;
         let active = self.active.lock().await;
+        authorize.recheck().await?;
         if active.contains_key(id) {
             return Err(Error::conflict(
                 "Wait for this run to finish stopping before resuming.",
@@ -159,6 +163,7 @@ impl Worker {
     ) -> Result<Value> {
         authorize.recheck().await?;
         let active = self.active.lock().await;
+        authorize.recheck().await?;
         let proof = authorize.clone();
         let run_id = id.to_owned();
         let run = s
@@ -201,9 +206,11 @@ impl Worker {
         for workspace in &managed {
             ensure_clean(workspace, &root, &env).await?;
         }
+        authorize.recheck().await?;
         let proof = authorize.clone();
         s.store.read(move |db| proof.authorize(db)).await?;
         for workspace in &managed {
+            authorize.recheck().await?;
             remove_workspace(&run, workspace, &env).await?;
         }
         let patch = crate::runs::RunChanges {
@@ -213,6 +220,7 @@ impl Worker {
             ..Default::default()
         };
         let id = id.to_owned();
+        authorize.recheck().await?;
         s.store
             .transaction(move |db| {
                 authorize.authorize(db)?;
@@ -393,11 +401,38 @@ fn managed_workspaces(run: &Value) -> Vec<Value> {
 async fn ensure_clean(workspace: &Value, root: &PathBuf, env: &Environment) -> Result<()> {
     let target = Path::new(text(workspace, "path"));
     if !target.starts_with(root)
-        || crate::skills::workspace(target, std::slice::from_ref(root)).await? != target
+        || target.components().any(|part| {
+            matches!(
+                part,
+                std::path::Component::ParentDir | std::path::Component::CurDir
+            )
+        })
     {
         return Err(Error::conflict(
             "Workspace is outside this run’s managed directory.",
         ));
+    }
+    // A revocation can interrupt a cleanup between workspaces. A retry may
+    // acknowledge an already absent directory, but may never follow an alias.
+    let mut ancestor = target;
+    loop {
+        match tokio::fs::symlink_metadata(ancestor).await {
+            Ok(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && ancestor != root => {
+                ancestor = ancestor
+                    .parent()
+                    .ok_or_else(|| Error::conflict("Managed directory is missing."))?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    if crate::skills::workspace(ancestor, std::slice::from_ref(root)).await? != ancestor {
+        return Err(Error::conflict(
+            "Workspace is outside this run’s managed directory.",
+        ));
+    }
+    if ancestor != target {
+        return Ok(());
     }
     let target = target.to_string_lossy().into_owned();
     let output = git(&["-C", &target, "status", "--porcelain", "--ignored"], env).await?;
@@ -411,6 +446,11 @@ async fn ensure_clean(workspace: &Value, root: &PathBuf, env: &Environment) -> R
 
 async fn remove_workspace(run: &Value, workspace: &Value, env: &Environment) -> Result<()> {
     let path = text(workspace, "path");
+    match tokio::fs::symlink_metadata(path).await {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+        Ok(_) => {}
+    }
     if workspace["kind"] == "clone" {
         tokio::fs::remove_dir_all(path).await?;
         return Ok(());
@@ -490,6 +530,96 @@ use crate::run_fixture::DbRunFixture;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cleanup_can_retry_after_revocation_between_managed_directories() {
+        let f = crate::plugin_grant_fixture::Fixture::new().await;
+        let root =
+            f.s.config
+                .data_dir
+                .join("runs")
+                .join(&f.run)
+                .join("workspace");
+        let first = root.join("first");
+        let second = root.join("second");
+        let env = std::env::vars().collect();
+        for path in [&first, &second] {
+            tokio::fs::create_dir_all(path).await.unwrap();
+            assert!(
+                git(&["-C", path.to_str().unwrap(), "init"], &env)
+                    .await
+                    .unwrap()
+                    .success
+            );
+        }
+        let mut snapshot = f.s.store.run(&f.run).await.unwrap()["snapshot"].clone();
+        snapshot["task"]["worktree"] = true.into();
+        f.s.store
+            .change_run(
+                &f.run,
+                crate::runs::RunChanges {
+                    status: Some(RunStatus::Cancelled),
+                    snapshot: Some(serde_json::from_value(snapshot).unwrap()),
+                    workspace: Some(Some(root.to_string_lossy().into_owned())),
+                    boundary: Some(json!({
+                        "isolated": false,
+                        "workspaces": [
+                            { "path": first, "kind": "clone" },
+                            { "path": second, "kind": "clone" },
+                        ],
+                    })),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let watched = first.clone();
+        let authorize = crate::authorization::Authorization::new(&f.s, move |_| {
+            if !watched.exists() {
+                return Err(Error::forbidden("Revoked during cleanup."));
+            }
+            Ok(())
+        });
+        let error =
+            f.s.worker
+                .cleanup_live(&f.s, &f.run, authorize)
+                .await
+                .unwrap_err();
+        assert_eq!(error.status, 403);
+        assert!(!first.exists());
+        assert!(second.exists());
+        let retry = f.s.worker.cleanup(&f.s, &f.run).await.unwrap();
+        assert_eq!(retry["cleaned"], true);
+        assert!(!second.exists());
+        assert!(f.s.store.run(&f.run).await.unwrap()["workspace"].is_null());
+        f.s.shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn absent_cleanup_paths_must_still_resolve_under_the_managed_root() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let link = root.path().join("alias");
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+        let env = std::env::vars().collect();
+        let missing = root.path().join("already-removed");
+        ensure_clean(
+            &json!({ "path": missing }),
+            &root.path().to_path_buf(),
+            &env,
+        )
+        .await
+        .unwrap();
+        assert!(
+            ensure_clean(
+                &json!({ "path": link.join("missing") }),
+                &root.path().to_path_buf(),
+                &env
+            )
+            .await
+            .is_err()
+        );
+    }
 
     #[tokio::test]
     async fn manual_mission_resume_changes_completed_turn_identity_but_keeps_interrupted_turns() {

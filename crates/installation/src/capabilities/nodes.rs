@@ -138,6 +138,7 @@ impl NodeOperation {
                 let _: ListNodesInput = decode(input)?;
                 let _ = nodes::refresh_local(s).await;
                 let result = nodes::typed_inventory(s).await?;
+                authorize.recheck().await?;
                 s.store
                     .read(move |db| {
                         authorize.authorize(db)?;

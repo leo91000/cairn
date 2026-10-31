@@ -343,6 +343,7 @@ pub(crate) async fn preview_live(
     // Both native sources and destinations need fresh human authority.
     let chat = s.conversation_boundary(chat_id).await?;
     refresh_authority(s, &chat).await?;
+    authorize.recheck().await?;
     let (chat_id, origin) = (chat_id.to_owned(), origin());
     s.store.read(move |db| {
         authorize.authorize(db)?;
@@ -401,6 +402,7 @@ impl Service {
         self.store.read(move |db| check.authorize(db)).await?;
         let chat = self.conversation_boundary(&chat_id).await?;
         refresh_authority(self, &chat).await?;
+        authorize.recheck().await?;
         let operation = id();
         let (args, who, migration) = (input.clone(), source.clone(), operation.clone());
         let request_authorization = authorize.clone();

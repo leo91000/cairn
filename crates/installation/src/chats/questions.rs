@@ -485,6 +485,7 @@ impl Service {
             .map_err(|_| Error::bad("Provide an answer message id and answers."))?;
         input.validate().map_err(Error::bad)?;
         let (chat_id, id) = (chat_id.to_owned(), id.to_owned());
+        authorize.recheck().await?;
         let question = self
             .store
             .transaction(move |db| {

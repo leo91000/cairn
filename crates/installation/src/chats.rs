@@ -1391,6 +1391,7 @@ impl Service {
         }
 
         let active = self.worker.active.lock().await;
+        authorize.recheck().await?;
         if active.contains_key(run_id) {
             return Err(Error::conflict(
                 "Wait for this run to finish stopping before continuing in chat.",
@@ -1481,6 +1482,7 @@ impl Service {
         // A succeeded run's worker may still be saving its checkpoint: the compaction resets
         // it, so it waits for that worker to release the run, like resuming does.
         let active = self.worker.active.lock().await;
+        authorize.recheck().await?;
         let run_id = self
             .store
             .read({
@@ -1493,6 +1495,7 @@ impl Service {
                 "Wait for the current turn to finish before compacting.",
             ));
         }
+        authorize.recheck().await?;
         let result = self
             .store
             .transaction(move |db| {

@@ -138,22 +138,20 @@ impl RunOperation {
                     &input.task_id.to_string(),
                     if human { "manual" } else { "mcp" },
                     bearer,
+                    authorize,
                 )
                 .await
             }
             "retry_run" => {
                 let input: RunInput = decode(input)?;
                 let run = s.store.run_state(&input.run_id.to_string()).await?;
-                self.enqueue(s, &run.task_id, "retry", bearer).await
+                self.enqueue(s, &run.task_id, "retry", bearer, authorize)
+                    .await
             }
             "cancel_run" => {
                 let input: RunInput = decode(input)?;
                 let id = input.run_id.to_string();
-                if let Some(bearer) = bearer {
-                    s.worker.cancel_from_run(s, &id, &bearer).await?;
-                } else {
-                    s.worker.cancel(s, &id).await?;
-                }
+                s.worker.cancel_live(s, &id, authorize).await?;
                 Ok(serde_json::to_value(CancelRunOutput { cancelled: true })?)
             }
             "cleanup_run" => {
@@ -294,9 +292,12 @@ impl RunOperation {
         task: &str,
         trigger: &str,
         bearer: Option<String>,
+        authorize: crate::authorization::Authorization,
     ) -> Result<Value> {
         let run = s.prepare_run(task, trigger).await?;
-        let run: Run = serde_json::from_value(s.queue_run(run, None, bearer).await?)?;
+        authorize.recheck().await?;
+        let run: Run =
+            serde_json::from_value(s.queue_run_live(run, None, bearer, authorize).await?)?;
         Ok(serde_json::to_value(run)?)
     }
 }
