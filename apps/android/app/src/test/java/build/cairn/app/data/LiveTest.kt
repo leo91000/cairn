@@ -464,6 +464,21 @@ class LiveTest {
     }
 
     @Test
+    fun `repeated appends and stale upserts do not regress the stream baseline`() {
+        val accumulator = LiveAccumulator()
+        val baseline = reply(1, "Hello")
+        val delta = appended(2, " world")
+        accumulator.append(emptyList(), listOf(baseline, delta), 2)
+        accumulator.append(emptyList(), listOf(delta, baseline), 2)
+        accumulator.append(emptyList(), listOf(appended(3, "!")), 3)
+        assertEquals(3L, accumulator.entries.single().revision)
+        assertEquals(
+            "Hello world!",
+            (accumulator.entries.single().content as build.cairn.contracts.TimelineContent.B).text,
+        )
+    }
+
+    @Test
     fun `a new turn's reply with a reused item identifier is a separate card`() {
         val accumulator = LiveAccumulator()
         accumulator.append(emptyList(), listOf(reply(1, "Bonjour")), 1)

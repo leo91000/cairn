@@ -74,6 +74,8 @@ class LiveAccumulator {
         for (change in changes) {
             when (change) {
                 is build.cairn.contracts.TimelineChange.A -> {
+                    val previous = stream[change.entry.id]
+                    if (previous != null && previous.revision >= change.entry.revision) continue
                     stream[change.entry.id] = change.entry
                     upsert(updated, change.entry)
                 }
@@ -81,6 +83,7 @@ class LiveAccumulator {
                     val card = stream[change.id]
                     val reply = card?.content as? build.cairn.contracts.TimelineContent.B
                     require(card != null && reply != null) { "Texte de référence manquant." }
+                    if (change.revision <= card.revision) continue
                     val next =
                         card.copy(
                             revision = change.revision,

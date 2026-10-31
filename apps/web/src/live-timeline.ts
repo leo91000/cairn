@@ -39,6 +39,9 @@ export class LiveTimeline {
 
     for (const change of changes) {
       if (change.kind === 'upsert') {
+        const previous = this.streamCards.get(change.entry.id)
+        if (previous && previous.revision >= change.entry.revision)
+          continue
         this.streamCards.set(change.entry.id, change.entry)
         this.upsert(change.entry)
         continue
@@ -47,6 +50,8 @@ export class LiveTimeline {
       const card = this.streamCards.get(change.id)
       if (card?.content.kind !== 'agentMessage')
         throw new Error('Missing streamed message baseline')
+      if (change.revision <= card.revision)
+        continue
       const updated = {
         ...card,
         revision: change.revision,

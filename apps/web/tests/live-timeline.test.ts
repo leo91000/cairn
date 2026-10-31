@@ -77,6 +77,29 @@ it('refuses appended text without the baseline this stream delivered', () => {
   }])).toThrow('Missing streamed message baseline')
 })
 
+it('ignores repeated appends and stale upserts without regressing the stream baseline', () => {
+  const live = new LiveTimeline()
+  const baseline = { kind: 'upsert' as const, entry: reply(1, 1, 'Hello') }
+  const append = {
+    kind: 'append' as const,
+    id: 'message:1:1',
+    revision: 2,
+    source: 2,
+    updatedAt: 2,
+    text: ' world',
+  }
+  live.apply([], [baseline, append], 2)
+  live.apply([], [append, baseline], 2)
+  live.apply([], [{
+    ...append,
+    revision: 3,
+    source: 3,
+    updatedAt: 3,
+    text: '!',
+  }], 3)
+  expect(live.entries()).toMatchObject([{ revision: 3, content: { text: 'Hello world!' } }])
+})
+
 it('keeps the stream baseline separate from a newer overlapping history page', () => {
   const live = new LiveTimeline()
   live.apply([], [{ kind: 'upsert', entry: reply(3, 3, 'A') }], 3)
