@@ -2,6 +2,7 @@ pub mod bundle;
 pub mod diff;
 pub(crate) mod lifecycle;
 pub mod sources;
+pub mod sql;
 mod usage;
 pub mod zip;
 

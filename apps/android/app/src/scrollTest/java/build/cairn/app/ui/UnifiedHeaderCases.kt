@@ -86,7 +86,12 @@ abstract class UnifiedHeaderCases {
                                     chat = chat,
                                     artifacts =
                                         (1..4).map {
-                                            Deliverable("a$it", "run", key = "a$it", name = "a$it")
+                                            Deliverable(
+                                                id = "a$it",
+                                                runId = "run",
+                                                key = "a$it",
+                                                name = "a$it",
+                                            )
                                         },
                                 )
                             )

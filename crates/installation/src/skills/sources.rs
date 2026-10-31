@@ -18,7 +18,6 @@ use crate::{
 };
 use cairn_contracts::{SkillSource, SkillSourceChange, SkillSourceStatus, SkillSourceVersion};
 use futures_util::{StreamExt, TryStreamExt};
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, path::Path, time::Duration};
 
@@ -28,10 +27,6 @@ const DIFF_FILES: usize = 60;
 const DIFF_BYTES: u64 = 1_000_000;
 const DIFF_RESULT_BYTES: usize = 128 * 1024;
 const MAX_FILES: usize = 2000;
-
-pub(crate) fn key(scope: &str, skill: &str) -> String {
-    format!("skill-source:{scope}/{skill}")
-}
 
 fn folder(value: &str) -> Result<&str> {
     let value = value.trim().trim_matches('/');
@@ -307,22 +302,7 @@ async fn download(s: &Service, origin: &Origin, files: Vec<File>) -> Result<Vec<
     .await
 }
 
-// Same persisted KV document as before B3. Only the plugin-defined location is
-// extensible; lifecycle decisions use named fields and the bundle revision.
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SourceRecord {
-    plugin_id: String,
-    source: String,
-    instance: String,
-    location: BTreeMap<String, Value>,
-    folder: String,
-    version: String,
-    label: String,
-    url: Option<String>,
-    imported_at: i64,
-    revision: String,
-}
+use super::sql::SourceRecord;
 
 /// The source as clients see it, with `modified` against the current files.
 fn public(record: &SourceRecord, revision: &str) -> SkillSource {
@@ -342,7 +322,7 @@ fn public(record: &SourceRecord, revision: &str) -> SkillSource {
 
 async fn record(s: &Service, scope: &str, skill: &str) -> Result<SourceRecord> {
     s.store
-        .kv_as::<SourceRecord>(&key(scope, skill))
+        .skill_source(scope, skill)
         .await?
         .ok_or_else(|| Error::not_found("This skill has no source."))
 }
@@ -441,14 +421,15 @@ pub(crate) async fn import(
     };
     let _mutation = s.skills.mutations.lock().await;
     origin.authority.recheck(s).await?;
-    let source_key = key(scope, &skill);
+    let source_scope = scope.to_owned();
+    let source_name = skill.clone();
     let auth = origin.authority.clone();
     let mut publication_record = record.clone();
     let mut publication = origin.authority.publication(s);
     publication.authorize = Box::new(move |db, saved| {
         auth.authorize(db)?;
         publication_record.revision = saved.revision.clone();
-        db.set_as(&source_key, &publication_record, None)
+        db.save_skill_source(&source_scope, &source_name, &publication_record)
     });
     let saved = s
         .skills
@@ -468,14 +449,12 @@ pub(crate) async fn import(
 
 /// Adds `source` to listed skills.
 pub async fn attach(s: &Service, skills: &mut [Value]) -> Result<()> {
-    let records = s
-        .store
-        .keys_as::<SourceRecord>("skill-source:")
-        .await?
-        .into_iter()
-        .collect::<BTreeMap<_, _>>();
+    let records = s.store.read(|db| db.skill_sources()).await?;
     for skill in skills {
-        let record = records.get(&key(text(skill, "scope"), text(skill, "name")));
+        let record = records.get(&(
+            text(skill, "scope").to_owned(),
+            text(skill, "name").to_owned(),
+        ));
         skill["source"] = match record {
             Some(record) => {
                 let directory = Path::new(text(skill, "path"))
@@ -493,7 +472,7 @@ pub async fn attach(s: &Service, skills: &mut [Value]) -> Result<()> {
 }
 
 pub async fn source(s: &Service, scope: &str, skill: &str, bundle: &mut Value) -> Result<()> {
-    if let Some(record) = s.store.kv_as::<SourceRecord>(&key(scope, skill)).await? {
+    if let Some(record) = s.store.skill_source(scope, skill).await? {
         bundle["source"] = serde_json::to_value(public(&record, text(bundle, "revision")))?;
     }
     Ok(())
@@ -508,11 +487,12 @@ pub(crate) async fn forget(
     super::name(skill)?;
     let _mutation = s.skills.mutations.lock().await;
     authority.recheck(s).await?;
-    let key = key(scope, skill);
+    let scope = scope.to_owned();
+    let skill = skill.to_owned();
     s.store
         .transaction(move |db| {
             authority.authorize(db)?;
-            db.delete(&key)
+            db.forget_skill_source(&scope, &skill)
         })
         .await
 }
@@ -663,17 +643,13 @@ pub(crate) async fn update(
     }
     let changes = download(s, &origin, files).await?;
     let _mutation = s.skills.mutations.lock().await;
-    if s.store
-        .kv_as::<SourceRecord>(&key(scope, skill))
-        .await?
-        .as_ref()
-        != Some(&record)
-    {
+    if s.store.skill_source(scope, skill).await?.as_ref() != Some(&record) {
         return Err(Error::conflict(
             "The skill source changed during this update. Reload the skill and try again.",
         ));
     }
-    let source_key = key(scope, skill);
+    let source_scope = scope.to_owned();
+    let source_name = skill.to_owned();
     let expected = record.clone();
     record.version = version;
     record.instance = origin.connection.id.clone();
@@ -684,13 +660,13 @@ pub(crate) async fn update(
     let mut publication = origin.authority.publication(s);
     publication.authorize = Box::new(move |db, saved| {
         auth.authorize(db)?;
-        if db.kv_as::<SourceRecord>(&source_key)?.as_ref() != Some(&expected) {
+        if db.skill_source(&source_scope, &source_name)?.as_ref() != Some(&expected) {
             return Err(Error::conflict(
                 "The skill source changed during this update. Reload the skill and try again.",
             ));
         }
         publication_record.revision = saved.revision.clone();
-        db.set_as(&source_key, &publication_record, None)
+        db.save_skill_source(&source_scope, &source_name, &publication_record)
     });
     let saved = super::bundle::save_authorized(
         &root,

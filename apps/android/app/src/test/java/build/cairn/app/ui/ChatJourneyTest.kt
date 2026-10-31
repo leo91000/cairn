@@ -76,8 +76,8 @@ class ChatJourneyTest {
                 )
             val artifact =
                 Deliverable(
-                    "report-v2",
-                    "run",
+                    id = "report-v2",
+                    runId = "run",
                     key = "report",
                     version = 2,
                     title = "Compte rendu",
@@ -91,8 +91,8 @@ class ChatJourneyTest {
                 )
             val picture =
                 Deliverable(
-                    "image",
-                    "run",
+                    id = "image",
+                    runId = "run",
                     key = "image",
                     version = 1,
                     title = "Aperçu du projet",

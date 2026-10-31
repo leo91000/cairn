@@ -56,7 +56,7 @@ async function deliverableRun(workspace: Workspace) {
       item.excerpt = new TextDecoder().decode(bytes).slice(0, 400)
     files.push(item)
     await writeFile(path.join(directory, item.id), bytes)
-    workspace.service.store.set(`artifact:${runId}:${item.id}`, item)
+    workspace.service.store.insertArtifact(item)
     workspace.service.store.event(runId, 'artifact', title, { ...item })
     return item
   }
