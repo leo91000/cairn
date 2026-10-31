@@ -423,12 +423,5 @@ internal fun currentSubagents(timeline: List<TimelineEntry>): List<Subagent> {
 }
 
 /** The bar replaces the explicit background wait only if it represents every awaited task. */
-internal fun waitingForSubagents(events: List<RunEvent>, agents: List<Subagent>): Boolean {
-    val announcement = events.lastOrNull { it.type == "turn.waiting" } ?: return false
-    val tasks = announcement.activityData()?.get("tasks").asArray().orEmpty()
-    return tasks.isNotEmpty() &&
-        tasks.all { task ->
-            val id = task.asObject().string("id")
-            id.isNotEmpty() && agents.any { it.taskId == id }
-        }
-}
+internal fun waitingForSubagents(taskIds: List<String>, agents: List<Subagent>): Boolean =
+    taskIds.isNotEmpty() && taskIds.all { id -> id.isNotEmpty() && agents.any { it.taskId == id } }

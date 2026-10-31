@@ -58,10 +58,11 @@ internal fun presentNotice(notice: TimelineNotice, source: RunEvent? = null): Ac
                     notice.usage
                         ?.let { "${it.inputTokens} entrée · ${it.outputTokens} sortie" }
                         .orEmpty()
-            "backgroundTasks" ->
-                (if (notice.tasks.isNullOrEmpty()) "Tâches en arrière-plan terminées"
-                else "En attente de tâches en arrière-plan") to
-                    notice.tasks.orEmpty().joinToString(" · ")
+            "backgroundTasks" -> {
+                val tasks = notice.tasks.orEmpty().filter { it.isNotEmpty() }
+                (if (tasks.isEmpty()) "Tâches en arrière-plan terminées"
+                else "En attente de tâches en arrière-plan") to tasks.joinToString(" · ")
+            }
             "runStatus" ->
                 notice.status.orEmpty().let { status ->
                     (STATUS_TITLES[status.lowercase()]

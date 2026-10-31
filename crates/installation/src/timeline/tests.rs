@@ -1070,3 +1070,154 @@ fn version_18_upgrades_through_both_projections() {
             > 0
     );
 }
+
+#[tokio::test]
+async fn background_wait_tracks_changes_resumption_and_restart() {
+    let root = tempfile::tempdir().unwrap();
+    previous(root.path());
+    let store = Store::open(root.path()).unwrap();
+    let wait = |tasks: serde_json::Value| serde_json::json!({"tasks": tasks});
+    store
+        .event(
+            CODEX,
+            &EventKind::TurnWaiting,
+            "",
+            Some(wait(serde_json::json!([
+                {"id":"one", "description":"Build"}, {"id":"two", "description":" "}
+            ]))),
+        )
+        .await
+        .unwrap();
+    let first = cards(&store, CODEX)
+        .await
+        .into_iter()
+        .filter_map(|entry| match entry.content {
+            TimelineContent::Notice { notice }
+                if notice.code == NoticeCode::BackgroundTasks && notice.waiting_since.is_some() =>
+            {
+                Some((entry.id, notice))
+            }
+            _ => None,
+        })
+        .next_back()
+        .unwrap();
+    let since = first.1.waiting_since.unwrap();
+    assert_eq!(first.1.tasks, vec!["Build", ""]);
+    assert_eq!(first.1.task_ids, vec!["one", "two"]);
+    store
+        .event(
+            CODEX,
+            &EventKind::ItemUpdated,
+            "",
+            Some(serde_json::json!({"item":{"type":"subagent","id":"child"}})),
+        )
+        .await
+        .unwrap();
+    store
+        .event(
+            CODEX,
+            &EventKind::TurnWaiting,
+            "",
+            Some(wait(
+                serde_json::json!([{"id":"two", "description":"Watch"}]),
+            )),
+        )
+        .await
+        .unwrap();
+    let active = cards(&store, CODEX)
+        .await
+        .into_iter()
+        .filter_map(|entry| match entry.content {
+            TimelineContent::Notice { notice }
+                if notice.code == NoticeCode::BackgroundTasks && notice.waiting_since.is_some() =>
+            {
+                Some(notice)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].waiting_since, Some(since));
+    assert_eq!(active[0].tasks, vec!["Watch"]);
+    drop(store);
+    let store = Store::open(root.path()).unwrap();
+    store
+        .event(
+            CODEX,
+            &EventKind::ItemStarted,
+            "",
+            Some(serde_json::json!({"item":{"type":"command_execution","id":"cmd"}})),
+        )
+        .await
+        .unwrap();
+    assert!(cards(&store, CODEX).await.into_iter().all(|entry| !matches!(entry.content,
+        TimelineContent::Notice { notice } if notice.code == NoticeCode::BackgroundTasks && notice.waiting_since.is_some()
+    )));
+    store
+        .event(
+            CODEX,
+            &EventKind::TurnWaiting,
+            "",
+            Some(wait(serde_json::json!([]))),
+        )
+        .await
+        .unwrap();
+    assert!(cards(&store, CODEX).await.into_iter().all(|entry| !matches!(entry.content,
+        TimelineContent::Notice { notice } if notice.code == NoticeCode::BackgroundTasks && notice.waiting_since.is_some()
+    )));
+}
+
+#[tokio::test]
+async fn empty_wait_ends_the_interval_and_a_new_wait_gets_a_new_start() {
+    let root = tempfile::tempdir().unwrap();
+    previous(root.path());
+    let store = Store::open(root.path()).unwrap();
+    store
+        .transaction(|db| {
+            for (at, tasks) in [
+                (1000, serde_json::json!([{"description":"first"}])),
+                (2000, serde_json::json!([])),
+                (3000, serde_json::json!([{"description":"second"}])),
+            ] {
+                db.event_at(
+                    CODEX,
+                    &EventKind::TurnWaiting,
+                    "",
+                    Some(&serde_json::json!({"tasks":tasks})),
+                    at,
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let active = cards(&store, CODEX)
+        .await
+        .into_iter()
+        .filter_map(|entry| match entry.content {
+            TimelineContent::Notice { notice }
+                if notice.code == NoticeCode::BackgroundTasks && notice.waiting_since.is_some() =>
+            {
+                Some(notice)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].waiting_since, Some(3000));
+    assert_eq!(active[0].tasks, vec!["second"]);
+    store
+        .event(
+            CODEX,
+            &EventKind::ItemUpdated,
+            "",
+            Some(
+                serde_json::json!({"item":{"type":"agent_message","id":"reply","text":"resumed"}}),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(cards(&store, CODEX).await.into_iter().all(|entry| !matches!(entry.content,
+        TimelineContent::Notice { notice } if notice.code == NoticeCode::BackgroundTasks && notice.waiting_since.is_some()
+    )));
+}

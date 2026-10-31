@@ -195,9 +195,22 @@ pub(crate) struct State {
     echoes: Echoes,
     /// The current usage-limit failure, until the turn or execution moves on.
     quota: Option<CurrentQuota>,
+    /// Current background-wait card and the start of its uninterrupted wait.
+    active_wait: Option<ActiveWait>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct ActiveWait {
+    card: String,
+    since: i64,
 }
 
 impl State {
+    pub(crate) fn active_wait_card(&self) -> Option<&str> {
+        self.active_wait.as_ref().map(|wait| wait.card.as_str())
+    }
+
     pub(crate) fn reason_sources(&self) -> Vec<i64> {
         self.failure
             .iter()
@@ -407,7 +420,12 @@ pub(crate) fn source_notice_fields(notice: &mut TimelineNotice, event: &Event<'_
             .into_iter()
             .flatten()
             .map(|task| text(task, "description").trim().to_owned())
-            .filter(|task| !task.is_empty())
+            .collect();
+        notice.task_ids = data["tasks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|task| text(task, "id").to_owned())
             .collect();
     }
     if let Some(account) = &mut notice.account
@@ -597,6 +615,27 @@ impl<C: Cards> Reducer<'_, C> {
         let item = event.item();
         let item_type = text(item, "type");
 
+        // Background activity does not resume the parent. Any parent item, new
+        // user input or turn boundary does; diagnostics do not.
+        let subagent = item_type == "subagent" || item["parent_id"].is_string();
+        let resumed = *kind == EventKind::ChatUser
+            || *kind == EventKind::ThreadStarted
+            || (kind.as_str().starts_with("turn.") && *kind != EventKind::TurnWaiting)
+            || (kind.as_str().starts_with("item.") && !subagent);
+        if (resumed || *kind == EventKind::TurnWaiting)
+            && let Some(previous) = self.state.active_wait.take()
+        {
+            self.update(&previous.card, |notice| notice.waiting_since = None)?;
+            // Consecutive non-empty announcements belong to the same wait.
+            if *kind == EventKind::TurnWaiting
+                && data["tasks"]
+                    .as_array()
+                    .is_some_and(|tasks| !tasks.is_empty())
+            {
+                self.state.active_wait = Some(previous);
+            }
+        }
+
         if matches!(kind, EventKind::TurnCompleted | EventKind::ChatUser) {
             self.state.retried = None;
         }
@@ -743,6 +782,22 @@ impl<C: Cards> Reducer<'_, C> {
 
         let mut notice = self.notice(&event, connection);
         let id = format!("notice:{}", event.id);
+        if *kind == EventKind::TurnWaiting
+            && data["tasks"]
+                .as_array()
+                .is_some_and(|tasks| !tasks.is_empty())
+        {
+            let since = self
+                .state
+                .active_wait
+                .as_ref()
+                .map_or(event.created_at, |wait| wait.since);
+            notice.waiting_since = Some(since);
+            self.state.active_wait = Some(ActiveWait {
+                card: id.clone(),
+                since,
+            });
+        }
 
         // The run log keeps every lifecycle event; a conversation shows one card per failure.
         if let Some(message) = &failure_message {

@@ -169,6 +169,28 @@
         "kind": "notice",
         "notice": { "code": "accountSelected", "state": "done", "prominent": false, "account": { "agent": "Codex", "name": "Studio" }, "speed": "standard", "status": "Using Codex account: Studio", "level": "warning" }
       }
+    },
+    {
+      "id": "notice:30",
+      "runId": "00000000-0000-4000-8000-000000000001",
+      "position": 30,
+      "revision": 31,
+      "source": 30,
+      "turn": 3,
+      "attempt": 1,
+      "createdAt": 1700000000030,
+      "updatedAt": 1700000000031,
+      "content": {
+        "kind": "notice",
+        "notice": {
+          "code": "backgroundTasks",
+          "state": "info",
+          "prominent": false,
+          "tasks": ["Build", ""],
+          "taskIds": ["task-a", ""],
+          "waitingSince": 1700000000025
+        }
+      }
     }
   ],
   "changes": [

@@ -32,11 +32,15 @@ data class TimelineNotice(
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val status: String? = null,
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val taskIds: List<String>? = null,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val tasks: List<String>? = null,
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val usage: TokenUsage? = null,
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val usageLimit: UsageLimit? = null,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val waitingSince: Long? = null,
 ) {
     init {
         require(
@@ -49,5 +53,6 @@ data class TimelineNotice(
         retried?.let { require(it >= 0L) }
         speed?.let { require(Regex("^(standard|confirmed|unconfirmed)\$").containsMatchIn(it)) }
         require(Regex("^(running|done|info|error|stopped)\$").containsMatchIn(state))
+        waitingSince?.let { require(it in 0L..9007199254740991L) }
     }
 }

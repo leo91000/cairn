@@ -128,9 +128,9 @@ const plan = computed(() => currentPlan(activity.value))
 // Only the latest plan is still being followed.
 const livePlan = computed(() => props.active && !props.suspended ? activity.value.findLast(entry => entry.kind === 'plan')?.id : undefined)
 const working = computed(() => {
-  const wait = backgroundWait(props.events, props.timeline)
+  const wait = backgroundWait(props.timeline)
   if (wait)
-    return { ...waitingStep(wait), subagents: waitingForSubagents(props.events, subagents.value) }
+    return { ...waitingStep(wait), subagents: waitingForSubagents(wait.taskIds, subagents.value) }
   return workingStep(activity.value, props.agent, props.events[0]?.createdAt ?? null)
 })
 const visibleOutcome = computed(() => !props.active && !props.sending?.length && !props.loading ? props.outcome : null)

@@ -503,8 +503,8 @@ internal fun ChatPage(
     val active = chat?.run?.active == true
     val running = chat?.run?.status == "running" && quota == null
     val waitingTasks =
-        remember(live.events, live.entries, running) {
-            if (running) backgroundWait(live.events, live.entries) else null
+        remember(live.entries, running) {
+            if (running) backgroundWait(live.entries) else null
         }
     // A subagent's full activity opens in a sheet. The current request's subagents stay in sight
     // above the composer while one of them works.
@@ -543,7 +543,7 @@ internal fun ChatPage(
             else
                 waitingTasks?.let {
                     waitingStep(it)
-                        .copy(subagents = waitingForSubagents(live.events, currentSubagents))
+                        .copy(subagents = waitingForSubagents(it.taskIds, currentSubagents))
                 } ?: workingStep(live.events, chat?.agentName.orEmpty(), chat?.run?.startedAt)
         }
     val conversationError = conversationError(chat)

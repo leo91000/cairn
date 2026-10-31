@@ -13011,6 +13011,13 @@
             "null"
           ]
         },
+        "taskIds": {
+          "description": "Source task IDs aligned with `tasks`; an empty ID denotes an unspecified ID.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "tasks": {
           "description": "Background tasks a turn waits for.",
           "items": {
@@ -13036,6 +13043,16 @@
             {
               "type": "null"
             }
+          ]
+        },
+        "waitingSince": {
+          "description": "Start of the current uninterrupted background wait, or absent after work resumes.",
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
           ]
         }
       },

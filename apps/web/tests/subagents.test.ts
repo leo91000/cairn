@@ -1,7 +1,7 @@
 import type { ChatView } from '../../../packages/contracts/chats'
 import type { RunEvent } from '../../../packages/contracts/contracts'
 import { describe, expect, it } from 'vitest'
-import { backgroundWait, workingStep } from '../src/signal'
+import { workingStep } from '../src/signal'
 import {
   currentSubagents,
   subagentState,
@@ -297,23 +297,6 @@ describe('subagents', () => {
     expect(workingStep(fixtureEntries(acting, true), 'Claude', null).title).not.toContain('subagent')
   })
 
-  it('keeps waiting for background work while a background subagent reports progress', () => {
-    const waiting = event('turn.waiting', { type: 'turn.waiting', tasks: [{ id: 'task', description: 'List files' }] })
-    const events = [user('List'), subagent('item.completed', 'List files', { background: true }), waiting]
-    expect(backgroundWait([
-      ...events,
-      item('item.completed', {
-        id: 'ls',
-        type: 'command_execution',
-        command: 'ls',
-        exit_code: 0,
-        parent_id: 'List files',
-      }),
-      subagent('item.updated', 'List files', { background: true, activity: 'Running ls' }),
-    ])).toMatchObject({ tasks: ['List files'] })
-    expect(backgroundWait([...events, item('item.started', { id: 'msg', type: 'agent_message', text: '' })])).toBeNull()
-  })
-
   it('finds the subagents of the current request and what each one does', () => {
     const entries = fixtureEntries([
       user('First'),
@@ -355,15 +338,9 @@ describe('subagents', () => {
       event('turn.waiting', { type: 'turn.waiting', tasks: [{ id: 'worker-task', description: 'Worker' }] }),
     ]
     const agents = currentSubagents(fixtureEntries(events, true))
-    expect(waitingForSubagents(events, agents)).toBe(true)
-    const mixed = [...events, event('turn.waiting', {
-      tasks: [
-        { id: 'worker-task', description: 'Worker' },
-        { id: 'build-task', description: 'Build' },
-      ],
-    })]
-    expect(waitingForSubagents(mixed, agents)).toBe(false)
-    expect(waitingForSubagents([event('turn.waiting', { tasks: [] })], agents)).toBe(false)
+    expect(waitingForSubagents(['worker-task'], agents)).toBe(true)
+    expect(waitingForSubagents(['worker-task', 'build-task'], agents)).toBe(false)
+    expect(waitingForSubagents([], agents)).toBe(false)
   })
 })
 

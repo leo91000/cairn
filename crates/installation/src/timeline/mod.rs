@@ -163,6 +163,7 @@ fn stored_content(content: &TimelineContent) -> Result<String> {
         TimelineContent::Notice { notice } => {
             let mut stored = notice.clone();
             stored.tasks.clear();
+            stored.task_ids.clear();
             if let Some(account) = &mut stored.account {
                 account.agent.clear();
                 account.name.clear();
@@ -506,6 +507,15 @@ pub fn changed_chunk(
         false,
         true,
     )
+}
+
+/// The current wait may precede an opening window after many background events.
+pub(crate) fn active_wait(db: &Db<'_>, run: &str) -> Result<Option<TimelineEntry>> {
+    let current = state(db, run)?;
+    match current.active_wait_card() {
+        Some(id) => entry(db, run, id),
+        None => Ok(None),
+    }
 }
 
 /// Read one interpreted card, including its hydrated content.

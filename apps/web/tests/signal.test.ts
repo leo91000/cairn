@@ -432,55 +432,34 @@ describe('the working indicator', () => {
     expect(workingStep([], 'Cairn', 3000)).toEqual({ title: 'Cairn is working', detail: '', since: 3000 })
   })
 
-  it('shows an idle agent waiting for its background tasks, timed from when it began waiting', () => {
-    const events = [user(1, 1000), command(2, 2000, 'pnpm test > log 2>&1'), waiting(3, 9000, ['Rebuild and run regression test'])]
-    const wait = backgroundWait(events)
-    expect(wait).toEqual({ tasks: ['Rebuild and run regression test'], since: 9000 })
-    expect(waitingStep(wait!)).toEqual({
-      title: 'Waiting for a background task',
-      detail: 'Rebuild and run regression test',
-      since: 9000,
-      waiting: ['Rebuild and run regression test'],
-    })
-    expect(waitingStep({ tasks: ['Build', ''], since: 1 }).title).toBe('Waiting for 2 background tasks')
-    expect(backgroundWait([waiting(1, 1, [' ', 'Watch CI'])])?.tasks).toEqual(['Background task', 'Watch CI'])
-  })
-
-  it('keeps the original wait duration when tasks change and resets after the agent resumes', () => {
-    const events = [waiting(1, 1000, ['Build', 'Watch CI']), waiting(2, 2000, ['Watch CI'])]
-    expect(backgroundWait(events)).toEqual({ tasks: ['Watch CI'], since: 1000 })
-    expect(backgroundWait([...events, command(3, 3000, 'cat log', true), waiting(4, 4000, ['Watch CI'])])).toEqual({ tasks: ['Watch CI'], since: 4000 })
-    expect(backgroundWait([...events, waiting(3, 3000, []), waiting(4, 4000, ['Build'])])).toEqual({ tasks: ['Build'], since: 4000 })
-  })
-
-  it('stops waiting once the tasks finish, the agent acts again or the user writes', () => {
-    const announced = [user(1, 1000), waiting(2, 2000, ['Build'])]
-    expect(backgroundWait([])).toBeNull()
-    expect(backgroundWait([...announced, waiting(3, 3000, [])])).toBeNull()
-    expect(backgroundWait([...announced, command(3, 3000, 'cat log', true)])).toBeNull()
-    expect(backgroundWait([...announced, user(3, 3000)])).toBeNull()
-    expect(backgroundWait([...announced, { ...user(3, 3000), type: 'diagnostic' }])).not.toBeNull()
-    const reply = {
-      id: 'reply',
+  it('presents the server’s current background wait and local fallback labels', () => {
+    const card = {
+      id: 'notice:3',
       runId: 'run',
-      position: 1,
+      position: 3,
       revision: 3,
       source: 3,
       turn: 1,
       attempt: 0,
-      createdAt: 1000,
-      updatedAt: 3000,
+      createdAt: 9000,
+      updatedAt: 9000,
       content: {
-        kind: 'agentMessage' as const,
-        itemId: 'reply',
-        state: 'running' as const,
-        text: 'Resuming',
+        kind: 'notice' as const,
+        notice: {
+          code: 'backgroundTasks' as const,
+          state: 'info' as const,
+          prominent: false,
+          tasks: ['Build', ' '],
+          taskIds: ['one', 'two'],
+          waitingSince: 1000,
+        },
       },
     }
-    expect(backgroundWait(announced, [reply])).toBeNull()
-    expect(backgroundWait(announced, [{ ...reply, source: 1, revision: 1 }])).not.toBeNull()
-    expect(backgroundWait([...announced, waiting(4, 4000, ['Build'])], [reply]))
-      .toEqual({ tasks: ['Build'], since: 4000 })
+    const wait = backgroundWait([card])
+    expect(wait).toEqual({ tasks: ['Build', 'Background task'], taskIds: ['one', 'two'], since: 1000 })
+    expect(waitingStep(wait!).title).toBe('Waiting for 2 background tasks')
+    expect(backgroundWait([{ ...card, content: { ...card.content, notice: { ...card.content.notice, waitingSince: undefined } } }])).toBeNull()
+    expect(backgroundWait([])).toBeNull()
   })
 
   it('labels background waits in the activity log', () => {

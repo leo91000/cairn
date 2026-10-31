@@ -81,8 +81,16 @@ export function withTimeline(input: RunEvent[]): { events: RunEvent[], cards: Ti
       }))
     }
     else if (event.type === 'turn.waiting') {
-      const tasks = Array.isArray(payload.tasks) ? payload.tasks.map(task => String((task as Record<string, unknown>).description ?? '')).filter(Boolean) : []
-      notice(event, { code: 'backgroundTasks', state: 'info', tasks })
+      const source = Array.isArray(payload.tasks) ? payload.tasks : []
+      const tasks = source.map(task => String((task as Record<string, unknown>).description ?? '').trim())
+      const taskIds = source.map(task => String((task as Record<string, unknown>).id ?? ''))
+      notice(event, {
+        code: 'backgroundTasks',
+        state: 'info',
+        tasks,
+        taskIds,
+        ...(tasks.length ? { waitingSince: event.createdAt } : {}),
+      })
     }
     else if (['turn.failed', 'runner.failed', 'error'].includes(event.type) || (event.type === 'status' && event.text === 'failed')) {
       const error = (payload.error ?? {}) as Record<string, unknown>

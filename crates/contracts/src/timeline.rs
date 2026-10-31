@@ -194,6 +194,15 @@ pub struct TimelineNotice {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[ts(as = "Option<Vec<String>>", optional)]
     pub tasks: Vec<String>,
+    /// Source task IDs aligned with `tasks`; an empty ID denotes an unspecified ID.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(as = "Option<Vec<String>>", optional)]
+    pub task_ids: Vec<String>,
+    /// Start of the current uninterrupted background wait, or absent after work resumes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    #[schemars(range(min = 0_i64, max = 9007199254740991_i64))]
+    pub waiting_since: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]

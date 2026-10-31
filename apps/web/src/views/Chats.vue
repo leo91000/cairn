@@ -415,7 +415,7 @@ const liveWait = computed<LiveWait | undefined>(() => detail.value
       busy: busy.value,
     }
   : undefined)
-const backgroundTasks = computed(() => detail.value?.run?.status === 'running' ? backgroundWait(events.value, timeline.value)?.tasks.length ?? 0 : 0)
+const backgroundTasks = computed(() => detail.value?.run?.status === 'running' ? backgroundWait(timeline.value)?.tasks.length ?? 0 : 0)
 const chatStatus = computed(() => {
   if (quota.value && !detail.value?.paused)
     return 'Waiting for quota'

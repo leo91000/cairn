@@ -1,6 +1,5 @@
 import type { ComputedRef, InjectionKey } from 'vue'
 import type { ChatView } from '../../../packages/contracts/chats'
-import type { RunEvent } from '../../../packages/contracts/contracts'
 import type { ActivityArtifact, ActivityEntry, ActivitySubagent } from './activity'
 import { teamEntries } from './activity'
 import { identityColor, liveElapsed } from './signal'
@@ -148,11 +147,6 @@ export function currentSubagents(entries: { kind: string }[]): ActivityArtifact[
 }
 
 /** The bar replaces the explicit background wait only if it represents every awaited task. */
-export function waitingForSubagents(events: RunEvent[], agents: ActivityArtifact[]) {
-  const announcement = events.findLast(event => event.type === 'turn.waiting')
-  const tasks = Array.isArray(announcement?.payload?.tasks) ? announcement.payload.tasks : []
-  return tasks.length > 0 && tasks.every((task) => {
-    const id = task && typeof task === 'object' ? (task as Record<string, unknown>).id : undefined
-    return typeof id === 'string' && agents.some(agent => agent.subagent?.taskId === id)
-  })
+export function waitingForSubagents(taskIds: string[], agents: ActivityArtifact[]) {
+  return taskIds.length > 0 && taskIds.every(id => id.length > 0 && agents.some(agent => agent.subagent?.taskId === id))
 }

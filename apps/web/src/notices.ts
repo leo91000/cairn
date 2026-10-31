@@ -53,8 +53,11 @@ function presentation(notice: TimelineNotice): Pick<ActivityArtifact, 'title' | 
         title: 'Finished this turn',
         subtitle: notice.usage ? `${notice.usage.inputTokens.toLocaleString()} input · ${notice.usage.outputTokens.toLocaleString()} output tokens` : '',
       }
-    case 'backgroundTasks':
-      return { title: notice.tasks?.length ? 'Waiting for background tasks' : 'Background tasks finished', subtitle: notice.tasks?.join(' · ') ?? '' }
+    case 'backgroundTasks': {
+      const tasks = (notice.tasks ?? []).filter(Boolean)
+      return { title: tasks.length ? 'Waiting for background tasks' : 'Background tasks finished', subtitle: tasks.join(' · ') }
+    }
+
     case 'runStatus': {
       const status = notice.status ?? ''
       return { title: statusTitles[status] ?? (status.includes(' ') ? status : readable(status)), subtitle: '' }

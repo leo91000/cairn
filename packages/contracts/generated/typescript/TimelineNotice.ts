@@ -62,4 +62,12 @@ export interface TimelineNotice {
    * Background tasks a turn waits for.
    */
   tasks?: Array<string>
+  /**
+   * Source task IDs aligned with `tasks`; an empty ID denotes an unspecified ID.
+   */
+  taskIds?: Array<string>
+  /**
+   * Start of the current uninterrupted background wait, or absent after work resumes.
+   */
+  waitingSince?: number
 }

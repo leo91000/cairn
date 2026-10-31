@@ -874,7 +874,7 @@ turn, attempt, timestamps and a `kind` union of `userMessage`, `agentMessage` an
 `notice`), `TimelineNotice` (a semantic code with its state, `prominent` flag and
 typed arguments: failure origin, Cairn retry, retries before a repeated failure,
 recovery, engine retry, usage limit, quota failure, speed, account, token usage and
-background tasks), `TimelineChange` (`upsert` or `append`) and the tool page
+background tasks, their task IDs and the start of an active uninterrupted wait), `TimelineChange` (`upsert` or `append`) and the tool page
 `RunTimelineOutput`. Both apps delete their message, failure, retry, reconnect,
 engine-retry, usage-limit and quota folding and consume the generated models; their
 titles stay native (English on web, French on Android). `detail` only carries words
@@ -884,7 +884,8 @@ reported by the work. See [ADR-0077](adr/0077-cairn-timeline.md).
 `Db::event` applies each event in a savepoint with its insert, so a caller that
 catches a failure never keeps half of an event. Fresh installs create the schema;
 version 19 upgrades through [migration 0020](migrations/0020-timeline-projection.md).
-Message text, notice details and quota messages are read from the source event:
+An opening window includes an older active background wait once, so diagnostics or subagent progress cannot hide it.
+Message text, notice details, background task descriptions and IDs, and quota messages are read from the source event:
 the projection stores no copy of them. Pruned events take their cards along.
 
 Live batches carry `entries`: the window's snapshot (cards that appeared in it or

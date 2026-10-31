@@ -42,7 +42,6 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.RunEvent
 import kotlinx.coroutines.delay
-import kotlinx.serialization.json.JsonPrimitive
 
 /**
  * What the working indicator says: the step in progress, or the last one reached. [waiting] lists
@@ -58,61 +57,22 @@ internal data class WorkingStep(
 )
 
 /** The background tasks an idle agent waits for, and when it announced them. */
-internal data class BackgroundWait(val tasks: List<String>, val since: Long)
+internal data class BackgroundWait(
+    val tasks: List<String>,
+    val since: Long,
+    val taskIds: List<String> = emptyList(),
+)
 
-/**
- * Events that show the agent active again after it announced a background wait. Its subagents
- * working in the background are what it waits for.
- */
-private fun RunEvent.resumesWork(): Boolean {
-    val item = item()
-    val subagent = item.string("type") == "subagent" || item?.get("parent_id") is JsonPrimitive
-    return type == "chat.user" ||
-        type == "thread.started" ||
-        type.startsWith("turn.") ||
-        (type.startsWith("item.") && !subagent)
-}
-
-/**
- * The background tasks the agent waits for, when its latest announcement still holds: the agent
- * finished responding and its run stays open until those tasks notify it.
- */
-internal fun backgroundWait(
-    events: List<RunEvent>,
-    cards: List<build.cairn.app.data.TimelineCard> = emptyList(),
-): BackgroundWait? {
-    val index = events.indexOfLast { it.type == "turn.waiting" }
-    if (index < 0 || (index + 1 until events.size).any { events[it].resumesWork() }) return null
-
-    val announcement = events[index]
-    // A reply streaming after the announcement shows the agent at work again.
-    if (
-        cards.any {
-            it.content is build.cairn.contracts.TimelineContent.B && it.source > announcement.id
-        }
-    )
-        return null
-    val tasks =
-        announcement.activityData()?.get("tasks").asArray().orEmpty().map {
-            it.asObject()?.get("description").plain().trim().ifEmpty { "Tâche en arrière-plan" }
-        }
-    if (tasks.isEmpty()) return null
-
-    var since = announcement.createdAt
-    val latestReply =
-        cards
-            .filter { it.content is build.cairn.contracts.TimelineContent.B }
-            .maxOfOrNull { it.source } ?: 0L
-    for (previous in index - 1 downTo 0) {
-        val event = events[previous]
-        if (event.id < latestReply) break
-        val stillWaiting =
-            event.type == "turn.waiting" &&
-                event.activityData()?.get("tasks").asArray()?.isNotEmpty() == true
-        if (stillWaiting) since = event.createdAt else if (event.resumesWork()) break
-    }
-
-    return BackgroundWait(tasks, since)
+/** The server's current background wait, presented with local fallback labels. */
+internal fun backgroundWait(cards: List<build.cairn.app.data.TimelineCard>): BackgroundWait? {
+    val notice =
+        cards.asReversed().firstNotNullOfOrNull { card ->
+            val content = card.content as? build.cairn.contracts.TimelineContent.C
+            content?.notice?.takeIf { it.code == "backgroundTasks" && it.waitingSince != null }
+        } ?: return null
+    val tasks = notice.tasks.orEmpty().map { it.trim().ifEmpty { "Tâche en arrière-plan" } }
+    return if (tasks.isEmpty()) null
+    else BackgroundWait(tasks, checkNotNull(notice.waitingSince), notice.taskIds.orEmpty())
 }
 
 /** The indicator for an agent that only waits for its background tasks. */

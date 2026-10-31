@@ -101,8 +101,14 @@ internal fun withTimeline(input: List<RunEvent>): Pair<List<RunEvent>, List<Time
                         prominent = false,
                         state = "info",
                         tasks =
-                            payload?.get("tasks")?.jsonArray?.mapNotNull {
-                                it.jsonObject.string("description").ifBlank { null }
+                            payload?.get("tasks")?.jsonArray?.map {
+                                it.jsonObject.string("description").trim()
+                            },
+                        taskIds =
+                            payload?.get("tasks")?.jsonArray?.map { it.jsonObject.string("id") },
+                        waitingSince =
+                            event.createdAt.takeIf {
+                                payload?.get("tasks")?.jsonArray?.isNotEmpty() == true
                             },
                     ),
                 )

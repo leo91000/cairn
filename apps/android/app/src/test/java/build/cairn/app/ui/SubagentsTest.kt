@@ -5,7 +5,6 @@ import build.cairn.app.data.RunEvent
 import kotlinx.serialization.json.*
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -399,71 +398,23 @@ class SubagentsTest {
     }
 
     @Test
-    fun `keeps waiting for background work while a background subagent reports progress`() {
-        val waiting =
-            event(
-                "turn.waiting",
-                buildJsonObject {
-                    put("type", "turn.waiting")
-                    putJsonArray("tasks") {
-                        addJsonObject {
-                            put("id", "task")
-                            put("description", "List files")
-                        }
-                    }
-                },
-            )
-        val events =
-            listOf(
-                user("List"),
-                subagent("item.completed", "List files") { put("background", true) },
-                waiting,
-            )
-        val progress =
-            events +
-                command("ls", "ls", parent = "List files") +
-                subagent("item.updated", "List files") {
-                    put("background", true)
-                    put("activity", "Running ls")
-                }
-        assertEquals(listOf("List files"), backgroundWait(progress)?.tasks)
-        assertNull(backgroundWait(events + message("msg", "")))
-    }
-
-    @Test
     fun `replaces an explicit wait only when every awaited task is represented in the bar`() {
-        fun waiting(vararg tasks: Pair<String, String>) =
-            event(
-                "turn.waiting",
-                buildJsonObject {
-                    put("type", "turn.waiting")
-                    putJsonArray("tasks") {
-                        tasks.forEach { (id, description) ->
-                            addJsonObject {
-                                put("id", id)
-                                put("description", description)
-                            }
-                        }
-                    }
-                },
-            )
         val events =
             listOf(
                 subagent("item.completed", "Worker") {
                     put("background", true)
                     put("task_id", "worker-task")
-                },
-                waiting("worker-task" to "Worker"),
+                }
             )
         val agents = currentSubagents(fixtureEntries(events, chat = true))
-        assertTrue(waitingForSubagents(events, agents))
+        assertTrue(waitingForSubagents(listOf("worker-task"), agents))
         assertFalse(
             waitingForSubagents(
-                events + waiting("worker-task" to "Worker", "build-task" to "Build"),
+                listOf("worker-task", "build-task"),
                 agents,
             )
         )
-        assertFalse(waitingForSubagents(listOf(waiting()), agents))
+        assertFalse(waitingForSubagents(emptyList(), agents))
     }
 
     @Test

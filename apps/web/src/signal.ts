@@ -1,6 +1,6 @@
 import type { Provider } from '../../../packages/contracts/accounts'
 import type { ChatView } from '../../../packages/contracts/chats'
-import type { RunEvent, RunListItem, Task } from '../../../packages/contracts/contracts'
+import type { RunListItem, Task } from '../../../packages/contracts/contracts'
 import type { TimelineEntry } from '../../../packages/contracts/live'
 import type { ActivityEntry } from './activity'
 import { isQuotaWait } from './chat-quota'
@@ -311,47 +311,16 @@ export interface WorkingStep {
   subagents?: boolean
 }
 
-/**
- * Events that show the agent active again after it announced a background wait. Its subagents
- * working in the background are what it waits for.
- */
-function resumesWork(event: RunEvent) {
-  const item = event.payload?.item && typeof event.payload.item === 'object' ? event.payload.item as Record<string, unknown> : {}
-  const subagent = item.type === 'subagent' || typeof item.parent_id === 'string'
-  return event.type === 'chat.user' || event.type === 'thread.started' || event.type.startsWith('turn.') || (event.type.startsWith('item.') && !subagent)
-}
-
-/**
- * The background tasks the agent waits for, when its latest announcement still holds: the agent
- * finished responding and its run stays open until those tasks notify it.
- */
-export function backgroundWait(events: RunEvent[], cards: TimelineEntry[] = []): { tasks: string[], since: number } | null {
-  const index = events.findLastIndex(event => event.type === 'turn.waiting')
-  if (index < 0 || events.slice(index + 1).some(resumesWork))
+/** The server's current background wait, presented with local fallback labels. */
+export function backgroundWait(cards: TimelineEntry[]): { tasks: string[], taskIds: string[], since: number } | null {
+  const card = cards.findLast(entry => entry.content.kind === 'notice'
+    && entry.content.notice.code === 'backgroundTasks'
+    && entry.content.notice.waitingSince !== undefined)
+  if (!card || card.content.kind !== 'notice')
     return null
-  const announcement = events[index]!
-  // A reply streaming after the announcement shows the agent at work again.
-  if (cards.some(card => card.content.kind === 'agentMessage' && card.source > announcement.id))
-    return null
-  const tasks = Array.isArray(announcement.payload?.tasks) ? announcement.payload.tasks : []
-  const descriptions = tasks.map((task) => {
-    const description = task && typeof task === 'object' ? (task as Record<string, unknown>).description : ''
-    return typeof description === 'string' && description.trim() ? description.trim() : 'Background task'
-  })
-
-  let since = announcement.createdAt
-  const latestReply = cards.reduce((latest, card) => card.content.kind === 'agentMessage' ? Math.max(latest, card.source) : latest, 0)
-  for (let previous = index - 1; previous >= 0; previous--) {
-    const event = events[previous]!
-    if (event.id < latestReply)
-      break
-    if (event.type === 'turn.waiting' && Array.isArray(event.payload?.tasks) && event.payload.tasks.length)
-      since = event.createdAt
-    else if (resumesWork(event))
-      break
-  }
-
-  return descriptions.length ? { tasks: descriptions, since } : null
+  const notice = card.content.notice
+  const tasks = (notice.tasks ?? []).map(task => task.trim() || 'Background task')
+  return tasks.length ? { tasks, taskIds: notice.taskIds ?? [], since: notice.waitingSince! } : null
 }
 
 /** The indicator for an agent that only waits for its background tasks. */

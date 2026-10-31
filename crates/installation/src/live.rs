@@ -244,12 +244,22 @@ struct CardRange {
     upto: i64,
     window: bool,
     earlier: bool,
+    active_wait_pending: bool,
     position: i64,
     id: String,
 }
 
 impl CardRange {
     fn read(&mut self, db: &Db<'_>) -> Result<(Vec<TimelineEntry>, bool)> {
+        if std::mem::take(&mut self.active_wait_pending)
+            && let Some(card) = crate::timeline::active_wait(db, &self.run)?
+            && card.position < self.from
+            && card.revision < self.from
+            && card.revision <= self.upto
+        {
+            // The normal window does not include an unchanged, older wait.
+            return Ok((vec![card], true));
+        }
         loop {
             let (entries, more) = if self.window {
                 crate::timeline::window_chunk(
@@ -447,6 +457,7 @@ fn read_page(
         upto: cursor,
         window: tail,
         earlier: tail,
+        active_wait_pending: tail,
         position: 0,
         id: String::new(),
     };
@@ -943,6 +954,7 @@ pub(crate) fn large_reference(mut entry: TimelineEntry) -> LargeTimelineReferenc
                 account.name.clear();
             }
             notice.tasks.clear();
+            notice.task_ids.clear();
         }
     }
     LargeTimelineReference { snapshot: entry }

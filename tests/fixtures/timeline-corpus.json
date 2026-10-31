@@ -1027,6 +1027,9 @@
               "code": "backgroundTasks",
               "prominent": false,
               "state": "info",
+              "taskIds": [
+                ""
+              ],
               "tasks": [
                 "npm test"
               ]
@@ -1035,7 +1038,7 @@
           "createdAt": 1793314623559,
           "id": "notice:39",
           "position": 39,
-          "revision": 39,
+          "revision": 40,
           "runId": "00000000-0000-4000-8000-0000000000a2",
           "source": 39,
           "turn": 1,
