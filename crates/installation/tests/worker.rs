@@ -47,36 +47,20 @@ struct Fixture {
     process: Option<Child>,
     url: String,
     clock: Option<FixtureClock>,
+    observation_busy: Option<PathBuf>,
 }
 
 struct FixtureClock {
-    library: PathBuf,
     value: PathBuf,
     millis: i64,
 }
 
 impl FixtureClock {
     fn new(root: &Path) -> Self {
-        let library = root.join("fixture-clock.so");
-        let source = common::fixture("worker-clock.c");
-        let output = std::process::Command::new("cc")
-            .args(["-shared", "-fPIC", &source, "-o"])
-            .arg(&library)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
         let value = root.join("fixture-clock.txt");
         let millis = now();
         std::fs::write(&value, millis.to_string()).unwrap();
-        Self {
-            library,
-            value,
-            millis,
-        }
+        Self { value, millis }
     }
 
     fn advance(&mut self, millis: i64) {
@@ -85,32 +69,6 @@ impl FixtureClock {
         std::fs::write(&next, self.millis.to_string()).unwrap();
         std::fs::rename(next, &self.value).unwrap();
     }
-}
-
-#[test]
-fn fixture_clock_controls_wall_time_without_stopping_monotonic_time() {
-    let root = TempDir::new().unwrap();
-    let mut clock = FixtureClock::new(root.path());
-    let observe = |clock: &FixtureClock| {
-        let output = std::process::Command::new("node")
-            .args(["-e", "console.log(JSON.stringify([Date.now(), Number(process.hrtime.bigint() / 1000000n)]))"])
-            .env("LD_PRELOAD", &clock.library)
-            .env("CAIRN_FIXTURE_CLOCK_FILE", &clock.value)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        serde_json::from_slice::<Vec<i64>>(&output.stdout).unwrap()
-    };
-    let first = observe(&clock);
-    assert_eq!(first[0], clock.millis);
-    clock.advance(1250);
-    let second = observe(&clock);
-    assert_eq!(second[0], clock.millis);
-    assert!(second[1] > first[1], "monotonic time must keep advancing");
 }
 
 impl Fixture {
@@ -140,6 +98,7 @@ impl Fixture {
             process: None,
             url: String::new(),
             clock: None,
+            observation_busy: None,
         };
         fixture.start().await;
         fixture
@@ -156,9 +115,13 @@ impl Fixture {
             .join("examples/worker_fixture");
         let mut command = Command::new(binary);
         command.arg("serve");
+        command.env_remove("CAIRN_FIXTURE_CLOCK_FILE");
+        command.env_remove("CAIRN_FIXTURE_OBSERVATION_BUSY");
         if let Some(clock) = &self.clock {
-            command.env("LD_PRELOAD", &clock.library);
             command.env("CAIRN_FIXTURE_CLOCK_FILE", &clock.value);
+        }
+        if let Some(marker) = &self.observation_busy {
+            command.env("CAIRN_FIXTURE_OBSERVATION_BUSY", marker);
         }
         let usage = self.root.path().join("usage.json");
         if usage.exists() {
@@ -3365,6 +3328,8 @@ async fn active_observation_expiring_during_result_persistence_fails_without_rep
     let mut fixture = Fixture::new().await;
     fixture.stop(false).await;
     fixture.clock = Some(FixtureClock::new(fixture.root.path()));
+    let busy = fixture.root.path().join("observation-busy");
+    fixture.observation_busy = Some(busy.clone());
     let controller = Arc::new(Controller {
         data: fixture.service.config.data_dir.clone(),
         plans: tokio::sync::Mutex::new(Vec::new()),
@@ -3452,10 +3417,19 @@ async fn active_observation_expiring_during_result_persistence_fails_without_rep
             .unwrap();
     });
     entered_rx.await.unwrap();
+    assert!(
+        !busy.exists(),
+        "only result persistence can signal contention"
+    );
     response_gate.add_permits(1);
-    // Keep the writer blocked for the original budget while the controller
-    // response reaches persistence, then expire the fixture clock.
-    tokio::time::sleep(Duration::from_millis(remaining + 250)).await;
+    // The feature-gated fixture marks the exact result transaction only after
+    // SQLite reports that the held writer lock prevented its BEGIN.
+    eventually(
+        Duration::from_secs(5),
+        Duration::from_millis(10),
+        async || busy.exists().then_some(()),
+    )
+    .await;
     fixture
         .clock
         .as_mut()
@@ -4317,6 +4291,8 @@ async fn active_observation_expiring_during_result_persistence_fails_without_rep
     let mut fixture = Fixture::new().await;
     fixture.stop(false).await;
     fixture.clock = Some(FixtureClock::new(fixture.root.path()));
+    let busy = fixture.root.path().join("observation-busy");
+    fixture.observation_busy = Some(busy.clone());
     let controller = Arc::new(Controller {
         data: fixture.service.config.data_dir.clone(),
         plans: tokio::sync::Mutex::new(Vec::new()),
@@ -4404,10 +4380,19 @@ async fn active_observation_expiring_during_result_persistence_fails_without_rep
             .unwrap();
     });
     entered_rx.await.unwrap();
+    assert!(
+        !busy.exists(),
+        "only result persistence can signal contention"
+    );
     response_gate.add_permits(1);
-    // Keep the writer blocked for the original budget while the controller
-    // response reaches persistence, then expire the fixture clock.
-    tokio::time::sleep(Duration::from_millis(remaining + 250)).await;
+    // The feature-gated fixture marks the exact result transaction only after
+    // SQLite reports that the held writer lock prevented its BEGIN.
+    eventually(
+        Duration::from_secs(5),
+        Duration::from_millis(10),
+        async || busy.exists().then_some(()),
+    )
+    .await;
     fixture
         .clock
         .as_mut()
@@ -4918,6 +4903,16 @@ async fn quiet_chat_protocol_keeps_a_finite_checkpoint_deadline() {
         },
     )
     .await;
+    // Real time and the fixture's monotonic timers continue while its wall
+    // clock is frozen; the resumed budget must still be intact.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let still_running = s.store.run(id).await.unwrap();
+    assert_eq!(
+        still_running["status"],
+        RunStatus::Running,
+        "{still_running}"
+    );
+    assert_eq!(fixture.checkpoint(id).await["remainingMs"], 1000);
     fixture.clock.as_mut().unwrap().advance(1250);
     let failed = tokio::time::timeout(
         Duration::from_secs(8),

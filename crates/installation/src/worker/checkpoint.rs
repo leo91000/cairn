@@ -622,36 +622,53 @@ impl Checkpoint {
         &self,
         decision: impl FnOnce(&mut RunCheckpoint, &mut Db<'_>) -> Result<T> + Send + 'static,
     ) -> Result<T> {
+        self.decide_inner(decision, false).await
+    }
+
+    pub(super) async fn decide_observation<T: Send + 'static>(
+        &self,
+        decision: impl FnOnce(&mut RunCheckpoint, &mut Db<'_>) -> Result<T> + Send + 'static,
+        observation: bool,
+    ) -> Result<T> {
+        self.decide_inner(decision, observation).await
+    }
+
+    async fn decide_inner<T: Send + 'static>(
+        &self,
+        decision: impl FnOnce(&mut RunCheckpoint, &mut Db<'_>) -> Result<T> + Send + 'static,
+        probe_observation: bool,
+    ) -> Result<T> {
         let mut state = self.state.lock().await;
         let expected = state.clone();
         let fallback = expected.clone();
         let id = self.id.clone();
         let (deadline, observation) = self.budget_snapshot();
-        let (saved, value) = self
-            .store
-            .transaction(move |db| {
-                let current = RunCheckpoint::load_in(db, &id)?;
-                if current.is_none()
-                    && (expected.runner_id().is_some() || expected.process().is_some())
-                {
-                    return Err(crate::error::Error::conflict(
-                        "Execution checkpoint disappeared during settlement.",
-                    ));
-                }
-                let mut saved = current.unwrap_or(fallback);
-                if !crate::recovery::same_execution(Some(&saved), Some(&expected)) {
-                    return Err(crate::error::Error::conflict(
-                        "Execution attempt changed during settlement.",
-                    ));
-                }
-                saved.remaining_ms =
-                    Some(deadline.map(|deadline| deadline.saturating_sub(now()).max(0)));
-                saved.administrative_pause_observation = Some(observation);
-                let value = decision(&mut saved, db)?;
-                saved.store_in(db, &id)?;
-                Ok((saved, value))
-            })
-            .await?;
+        let apply = move |db: &mut Db<'_>| {
+            let current = RunCheckpoint::load_in(db, &id)?;
+            if current.is_none() && (expected.runner_id().is_some() || expected.process().is_some())
+            {
+                return Err(crate::error::Error::conflict(
+                    "Execution checkpoint disappeared during settlement.",
+                ));
+            }
+            let mut saved = current.unwrap_or(fallback);
+            if !crate::recovery::same_execution(Some(&saved), Some(&expected)) {
+                return Err(crate::error::Error::conflict(
+                    "Execution attempt changed during settlement.",
+                ));
+            }
+            saved.remaining_ms =
+                Some(deadline.map(|deadline| deadline.saturating_sub(now()).max(0)));
+            saved.administrative_pause_observation = Some(observation);
+            let value = decision(&mut saved, db)?;
+            saved.store_in(db, &id)?;
+            Ok((saved, value))
+        };
+        let (saved, value) = if probe_observation {
+            self.store.transaction_for_observation(apply).await?
+        } else {
+            self.store.transaction(apply).await?
+        };
         *state = saved;
         Ok(value)
     }
