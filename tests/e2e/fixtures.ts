@@ -310,7 +310,9 @@ export const test = base.extend<object, { workspace: Workspace }>({
           cron: '0 9 * * 1',
         })
         const run = await service.enqueue(task.id)
-        await expect.poll(() => service.store.run(run.id)?.status, { timeout: 10000 }).toBe('succeeded')
+        // The activity fixture persists many events before it can finish; allow
+        // for slower storage while still requiring the completed run.
+        await expect.poll(() => service.store.run(run.id)?.status, { timeout: 30000 }).toBe('succeeded')
         service.task({ ...task, prompt: 'fixture:hang' }, task.id)
         const cancelled = await service.enqueue(task.id)
         await api(`/api/runs/${cancelled.id}/cancel`, 'POST')
