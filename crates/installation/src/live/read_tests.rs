@@ -517,3 +517,47 @@ async fn oversized_wait_reference_rehydrates_task_ids_from_the_source() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn oversized_plan_user_reference_restores_provenance_from_source() {
+    use cairn_contracts::EventKind;
+    use serde_json::json;
+    let root = tempfile::tempdir().unwrap();
+    let store = crate::store::Store::open(root.path()).unwrap();
+    store
+        .transaction(|db| {
+            let run = serde_json::from_value(
+                json!({"id":"large-plan", "taskId":"task", "status":"running"}),
+            )?;
+            db.admit_run(&run, None, &json!({}), None)?;
+            db.event(
+                "large-plan",
+                &EventKind::ChatUser,
+                "",
+                Some(&json!({
+                    "messageId":"request", "text":"x".repeat(300_000), "plan":true
+                })),
+            )?;
+            let card = crate::timeline::between_bounded(db, "large-plan", 0, i64::MAX)?
+                .0
+                .pop()
+                .unwrap();
+            let reference = large_reference(card);
+            assert!(matches!(
+                &reference.snapshot.content,
+                TimelineContent::UserMessage { plan: false, .. }
+            ));
+            let restored =
+                crate::timeline::snapshot_from_source(db, "large-plan", reference.snapshot)?;
+            match restored.content {
+                TimelineContent::UserMessage { plan, text, .. } => {
+                    assert!(plan);
+                    assert_eq!(text.len(), 300_000);
+                }
+                _ => panic!("expected user message"),
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+}

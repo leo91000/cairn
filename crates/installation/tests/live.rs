@@ -2041,3 +2041,109 @@ async fn conversation_streams_mask_queued_and_sending_private_answers() {
         }
     }
 }
+
+#[tokio::test]
+async fn large_plan_proposals_use_bounded_stream_and_history_references() {
+    let f = Fixture::new().await;
+    // This accepted native-sized proposal exceeded Android's old 16 MiB SSE
+    // limit because both envelope text and item text contain the approach.
+    let text = format!("{}🦊 final decision", "x".repeat(9 * 1024 * 1024));
+    let payload = json!({
+        "parent_tool_use_id": "child-plan", "request_id": "reviewed-request",
+        "item": {"id": "proposal", "type": "proposed_plan", "text": text}
+    });
+    f.service
+        .store
+        .event(&f.run, &EventKind::ItemCompleted, &text, Some(payload))
+        .await
+        .unwrap();
+    let event_id = *ids(&f).await.last().unwrap();
+    let mut stream = f.open(0).await;
+    let (history, preview) = loop {
+        let (_, batch) = stream.batch().await;
+        assert!(serde_json::to_vec(&batch).unwrap().len() < 256 * 1024);
+        if let Some(preview) = batch["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == event_id)
+        {
+            break (
+                batch["history"].as_str().unwrap().to_owned(),
+                preview.clone(),
+            );
+        }
+    };
+    assert_eq!(preview["text"], "");
+    assert_eq!(preview["payload"], json!({"_cairnEventContent": true}));
+    let page: Value = f
+        .history(&format!("before={}&history={history}", event_id + 1))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(serde_json::to_vec(&page).unwrap().len() < 256 * 1024);
+    assert_eq!(
+        page["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == event_id)
+            .unwrap(),
+        &preview
+    );
+
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/runs/{}/event-content", f.url, f.run);
+    let mut restored = String::new();
+    let mut offset = 0;
+    let mut sha = Value::Null;
+    loop {
+        let response = client
+            .post(&url)
+            .header("x-test-relay-token", &f.token)
+            .json(&json!({"runId": f.run, "eventId": event_id, "offset": offset, "sha256": sha}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.bytes().await.unwrap();
+        assert!(bytes.len() < 256 * 1024);
+        let part: Value = serde_json::from_slice(&bytes).unwrap();
+        if !sha.is_null() {
+            assert_eq!(part["sha256"], sha);
+        }
+        sha = part["sha256"].clone();
+        assert_eq!(part["eventId"], event_id);
+        assert_eq!(part["offset"], offset);
+        restored.push_str(part["data"].as_str().unwrap());
+        if part["nextOffset"].is_null() {
+            break;
+        }
+        let next = part["nextOffset"].as_u64().unwrap();
+        assert!(next > offset);
+        offset = next;
+    }
+    let restored: Value = serde_json::from_str(&restored).unwrap();
+    assert_eq!(restored["id"], event_id);
+    assert_eq!(restored["text"], text);
+    assert_eq!(restored["payload"]["item"]["text"], text);
+    assert_eq!(restored["payload"]["parent_tool_use_id"], "child-plan");
+    assert_eq!(restored["payload"]["request_id"], "reviewed-request");
+    let wrong_run = client
+        .post(&url)
+        .header("x-test-relay-token", &f.token)
+        .json(&json!({"runId": id(), "eventId": event_id, "offset": 0}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong_run.status(), StatusCode::CONFLICT);
+    let wrong_digest = client
+        .post(&url)
+        .header("x-test-relay-token", &f.token)
+        .json(&json!({"runId": f.run, "eventId": event_id, "offset": 1, "sha256": "0".repeat(64)}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong_digest.status(), StatusCode::CONFLICT);
+}

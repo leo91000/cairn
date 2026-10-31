@@ -209,8 +209,13 @@ fun rememberLive(
                                 )
 
                         val large = api.readLargeTimeline(path, page.largeEntries.orEmpty())
+                        val events = api.readLargeEvents(path, page.events)
                         val applied =
-                            pages.apply(page.copy(entries = page.entries + large), value, requested)
+                            pages.apply(
+                                page.copy(entries = page.entries + large, events = events),
+                                value,
+                                requested,
+                            )
                         if (applied != null) {
                             value = applied
                             // Release paging in the same UI turn as insertion. Disk persistence

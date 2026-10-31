@@ -286,6 +286,63 @@ class LiveSession {
     }
 }
 
+/** Resolve source events before committing a stream/page cursor. */
+suspend fun CairnApi.readLargeEvents(path: String, events: List<RunEvent>): List<RunEvent> {
+    return events.map { preview ->
+        if (preview.payload?.get("_cairnEventContent")?.jsonPrimitive?.booleanOrNull != true) {
+            return@map preview
+        }
+        val text = StringBuilder()
+        var offset = 0L
+        var checksum: String? = null
+        var total: Long? = null
+        while (true) {
+            val part =
+                send<build.cairn.contracts.RunContentOutput>(
+                    "POST",
+                    path.removeSuffix("/stream") + "/event-content",
+                    buildJsonObject {
+                        put("runId", preview.runId)
+                        put("eventId", preview.id)
+                        put("offset", offset)
+                        put("sha256", checksum?.let(::JsonPrimitive) ?: JsonNull)
+                    },
+                )
+            require(
+                part.eventId == preview.id &&
+                    part.runId == preview.runId &&
+                    part.offset == offset &&
+                    part.totalBytes in 0L..(256L * 1024 * 1024) &&
+                    (checksum == null || part.sha256 == checksum) &&
+                    (total == null || part.totalBytes == total)
+            ) {
+                "Contenu de l’événement modifié."
+            }
+            checksum = part.sha256
+            total = part.totalBytes
+            text.append(part.data)
+            val end = offset + part.data.toByteArray(Charsets.UTF_8).size
+            require(end <= part.totalBytes && (part.nextOffset ?: part.totalBytes) == end) {
+                "Longueur de l’événement invalide."
+            }
+            val next = part.nextOffset ?: break
+            require(next > offset) { "Curseur d’événement invalide." }
+            offset = next
+        }
+        val event = wireJson.decodeFromString<RunEvent>(text.toString())
+        require(
+            event.id == preview.id &&
+                event.runId == preview.runId &&
+                event.type == preview.type &&
+                event.createdAt == preview.createdAt &&
+                event.payload?.get("_cairnEventContent")?.jsonPrimitive?.booleanOrNull != true
+        ) {
+            "Identité de l’événement modifiée."
+        }
+        event
+    }
+}
+
 suspend fun CairnApi.readLargeTimeline(
     path: String,
     previews: List<build.cairn.contracts.LargeTimelineReference>,
@@ -373,6 +430,7 @@ fun CairnApi.live(path: String, session: LiveSession = LiveSession()): Flow<Live
                     frame ->
                     val batch = frame.batch
                     val large = readLargeTimeline(path, batch.largeEntries)
+                    val events = readLargeEvents(path, batch.events)
                     require(snapshot.history == null || batch.history != null) {
                         "Révision indisponible"
                     }
@@ -387,7 +445,7 @@ fun CairnApi.live(path: String, session: LiveSession = LiveSession()): Flow<Live
                             (reset || snapshot.oldest == 0L || batch.oldest <= snapshot.oldest)
                     Performance.measure(PerfOperation.LIVE_REDUCE) {
                         accumulator.append(
-                            batch.events,
+                            events,
                             batch.entries +
                                 large.map { build.cairn.contracts.TimelineChange.A(it) },
                             frame.cursor,

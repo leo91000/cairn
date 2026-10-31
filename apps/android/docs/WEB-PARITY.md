@@ -470,3 +470,5 @@ retain their HTTP status, including revision conflicts. Tools receive an operati
 id and use `get_plugin_operation`/`cancel_plugin_operation`. No layout change.
 
 Plan requests retain their badge for attachment-only messages on both clients. Native Plan, approval, stale rejection and attachment-only journeys share cases between Robolectric and instrumentation; device qualification executes `PlanTurnDeviceTest`.
+
+Large Plan proposals: both clients resolve bounded event references with checksum-bound content chunks before applying stream/history cursors. Full proposal text, reviewed identity and root/child attribution remain available; no shortened notice is used as an approvable plan.

@@ -633,7 +633,7 @@ abstract class PlanTurnCases {
         val vm =
             CairnViewModel(
                 ApplicationProvider.getApplicationContext<Application>(),
-                MemoryVault().apply {
+                PlanVault().apply {
                     write(
                         server.url("/").toString(),
                         "cairn_session=fixture; Path=/; Max-Age=3600",
@@ -673,4 +673,14 @@ abstract class PlanTurnCases {
     }
 
     protected open fun capture(name: String) {}
+}
+
+private class PlanVault : SessionVault {
+    private val values = mutableMapOf<String, String>()
+
+    override fun read(origin: String) = values[origin]
+
+    override fun write(origin: String, cookie: String?) {
+        if (cookie == null) values.remove(origin) else values[origin] = cookie
+    }
 }

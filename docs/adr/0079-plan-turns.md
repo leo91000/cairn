@@ -73,7 +73,7 @@ Pendant un tour de plan, Cairn applique lui-même la frontière :
   déclare `readOnlyHint`, appliqués par la passerelle (connexions HTTP) et par la
   liste d’outils du moteur (connexions par commande) ; pour `cairn_installation`, les
   opérations de portée `read` ; pour `cairn_workspace`, `open_project`, `list_nodes`,
-  `exclusive_status`, `pending_questions` et la lecture des tâches déléguées
+  `exclusive_status`, `ask_questions`, `pending_questions`, `withdraw_question` et la lecture des tâches déléguées
   (`task_status`). Les outils et commandes des plugins sont refusés, comme
   `delegate_task`, `task_cancel`, `wait_for`, `publish_artifact` ou `report_outcome`. Ces restrictions
   suivent l’autorisation du tour (`chatExecution.plan`), que le tour suivant remplace.

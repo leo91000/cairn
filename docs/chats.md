@@ -70,7 +70,7 @@ turn the engine's sandbox is read-only with no shell network access, whatever th
 agent's access; MCP connections only offer tools they declare read-only
 (`readOnlyHint`); `cairn_installation` only offers `read` operations; and
 `cairn_workspace` only offers `open_project`, `list_nodes`, `exclusive_status`,
-`pending_questions` and, for an agent that delegates, `task_status`. Delegating or
+`ask_questions`, `pending_questions`, `withdraw_question` and, for an agent that delegates, `task_status`. Delegating or
 cancelling a task, plugin tools and plugin commands are unavailable. Builds and tests that
 write files fail. Claude Code runs in its plan permission mode; Codex receives the
 `plan` collaboration preset it lists. Subagents of either engine stay inside the
@@ -170,3 +170,5 @@ question owned by the current execution and conversation; it never supplies an
 answer or authorizes implementation. Questions answered in ordinary chat or made
 unnecessary by exploration should be withdrawn. Delegation and tools with external
 effects remain unavailable.
+
+Oversized proposed-plan events are sent as bounded source references on app streams and history pages. Web and Android hydrate the complete redacted event through checksum-bound `event-content` chunks before presenting it or committing the cursor; public MCP and `cairn_installation` use the same `read_run_content` implementation. Content, completion identity, authored request and parent attribution remain intact.
