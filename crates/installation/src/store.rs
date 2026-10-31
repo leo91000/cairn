@@ -201,6 +201,7 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
     async fn call<T: Send + 'static>(
         &self,
         tx: &mpsc::Sender<Job>,
+        caller: &'static str,
         f: impl FnOnce(&mut Db<'_>) -> Result<T> + Send + 'static,
     ) -> Result<T> {
         let queued_at = std::time::Instant::now();
@@ -212,6 +213,7 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
             let failed = result.is_err();
             let abandoned_reply = reply.send(result).is_err();
             performance::Completed {
+                caller,
                 queue: started.duration_since(queued_at),
                 execution,
                 failed,
@@ -228,7 +230,7 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
         &self,
         f: impl FnOnce(&mut Db<'_>) -> Result<T> + Send + 'static,
     ) -> Result<T> {
-        self.call(&self.0.readers, f).await
+        self.call(&self.0.readers, performance::caller(&f), f).await
     }
 
     pub async fn write<T: Send + 'static>(
@@ -238,7 +240,8 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
         let changes = self.0.changes.clone();
         let discarded = self.0.discarded_changes.clone();
         let preparation = crate::plugins::operations::publication_cancellation();
-        self.call(&self.0.writer, move |db| {
+        let caller = performance::caller(&f);
+        self.call(&self.0.writer, caller, move |db| {
             if preparation.is_some_and(|token| token.is_cancelled()) {
                 return Err(Error::conflict("Preparation was cancelled."));
             }
@@ -275,7 +278,8 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
         let changes = self.0.changes.clone();
         let discarded = self.0.discarded_changes.clone();
         let preparation = crate::plugins::operations::publication_cancellation();
-        self.call(&self.0.writer, move |db| {
+        let caller = performance::caller(&f);
+        self.call(&self.0.writer, caller, move |db| {
             if preparation.is_some_and(|token| token.is_cancelled()) {
                 return Err(Error::conflict("Preparation was cancelled."));
             }

@@ -1,4 +1,4 @@
-//! Per-actor wall timings without SQL, parameters, identifiers or per-job logs.
+//! Per-actor wall timings and bounded compile-time origins, without SQL or values.
 use rusqlite::Connection;
 use std::time::{Duration, Instant};
 
@@ -6,7 +6,11 @@ mod cache;
 
 use cache::Cache;
 
+#[cfg(test)]
+mod tests;
+
 pub(super) struct Completed {
+    pub caller: &'static str,
     pub queue: Duration,
     pub execution: Duration,
     pub failed: bool,
@@ -24,6 +28,8 @@ pub(super) struct Metrics {
     execution_us: u64,
     max_queue_us: u64,
     max_execution_us: u64,
+    max_queue_caller: &'static str,
+    max_execution_caller: &'static str,
     cache: Option<Cache>,
 }
 
@@ -44,6 +50,8 @@ impl Metrics {
             execution_us: 0,
             max_queue_us: 0,
             max_execution_us: 0,
+            max_queue_caller: "none",
+            max_execution_caller: "none",
             cache,
         }
     }
@@ -52,6 +60,12 @@ impl Metrics {
         let micros = |duration: Duration| duration.as_micros().min(u128::from(u64::MAX)) as u64;
         let queue_us = micros(job.queue);
         let execution_us = micros(job.execution);
+        if self.completed == 0 || queue_us > self.max_queue_us {
+            self.max_queue_caller = job.caller;
+        }
+        if self.completed == 0 || execution_us > self.max_execution_us {
+            self.max_execution_caller = job.caller;
+        }
         self.completed = self.completed.saturating_add(1);
         self.errors = self.errors.saturating_add(u64::from(job.failed));
         self.abandoned_replies = self
@@ -85,6 +99,8 @@ impl Metrics {
             execution_us = self.execution_us,
             max_queue_us = self.max_queue_us,
             max_execution_us = self.max_execution_us,
+            max_queue_caller = self.max_queue_caller,
+            max_execution_caller = self.max_execution_caller,
             cache_available,
             cache_hits = cache_values.hits,
             cache_misses = cache_values.misses,
@@ -93,4 +109,16 @@ impl Metrics {
         );
         *self = Self::window(self.lane, self.index, cache);
     }
+}
+
+/// A closure's Rust type names its source function, never its captured values.
+/// Keep the outer caller before write/transaction wrap it in their own closure.
+/// This is a diagnostic hint within one build, not a stable operation identifier.
+pub(super) fn caller<T>(value: &T) -> &'static str {
+    let name = std::any::type_name_of_val(value);
+    let mut end = name.len().min(256);
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    &name[..end]
 }
