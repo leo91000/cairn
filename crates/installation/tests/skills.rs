@@ -1198,9 +1198,11 @@ async fn snapshots_describe_the_manifest_version_that_was_frozen() {
     let listing = tokio::select! {
         opened = &mut opened => opened,
         finished = &mut snapshot => {
+            close_failed_gate(&gate, &snapshot);
             panic!("The snapshot finished before listing the project: {finished:?}");
         }
         () = tokio::time::sleep(std::time::Duration::from_secs(60)) => {
+            close_failed_gate(&gate, &snapshot);
             panic!("The snapshot never reached the project listing");
         }
     };
@@ -1235,6 +1237,51 @@ async fn snapshots_describe_the_manifest_version_that_was_frozen() {
         "writer must commit between listing and freezing"
     );
     assert_eq!(selected["description"], "Use the latest branch conventions");
+}
+
+/// Release an in-flight FIFO read and prevent a queued open from blocking later.
+fn close_failed_gate<T>(gate: &Path, snapshot: &tokio::task::JoinHandle<T>) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let guard = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(gate)
+        .expect("Unable to release listing gate");
+    std::fs::remove_file(gate).expect("Unable to remove listing gate");
+    snapshot.abort();
+    drop(guard);
+}
+
+#[tokio::test]
+async fn failed_listing_gate_releases_started_and_queued_readers() {
+    for reader_started in [false, true] {
+        let root = TempDir::new().unwrap();
+        let gate = root.path().join("gate");
+        let path = std::ffi::CString::new(gate.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        let reader = if reader_started {
+            let path = gate.clone();
+            Some(tokio::task::spawn_blocking(move || std::fs::read(path)))
+        } else {
+            None
+        };
+        if reader_started {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let snapshot = tokio::spawn(std::future::pending::<()>());
+        close_failed_gate(&gate, &snapshot);
+        let reader = reader.unwrap_or_else(|| {
+            let path = gate.clone();
+            tokio::task::spawn_blocking(move || std::fs::read(path))
+        });
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), reader)
+            .await
+            .expect("FIFO reader remained blocked")
+            .unwrap()
+            .ok();
+    }
 }
 
 /// A local GitHub serving `fixture/skills` through the bundled package and one instance.
