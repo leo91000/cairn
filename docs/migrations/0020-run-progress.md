@@ -12,8 +12,13 @@ consumer updates it in the same transaction as the corresponding event. Lease
 renewals, checkpoint writes, diagnostics, retries and unchanged item snapshots
 cannot advance its timestamp. Provider completion/failure enters a sticky
 finalizing phase; neither a late item nor completed=false clears that phase.
-Only a newly launched execution replaces it. A terminal run and controller result
-are separate settlement evidence for the monitor.
+Only a newly launched execution replaces it. Terminal status, process absence,
+released reservations and even code zero do not certify settlement. Current
+controllers persist an optional `PhysicalFinalized` marker only after their
+workload and physical cleanup complete. The typed client forwards that proof
+without interleaving provider output; the writer records its attempt-bound
+`finalizedAt`. A confirmed nonzero/SIGTERM result can resolve no-progress, while
+failed flushes remain unhealthy and missing certificates remain unknown.
 
 Digests cover the supported semantic item fields, excluding duration and transport
 metadata. They remain private to the installation. At 128 distinct items the
@@ -36,7 +41,12 @@ whose progress writer contract it cannot maintain. As with other installation
 migrations, stop the old manager and retain a consistent database/WAL backup
 before upgrading. Use a forward fix or an explicitly compatible recovery image;
 rolling back the manager binary after version 20 is unsupported. Nodes and guests
-do not open this database; the existing canonical adapter protocol is unchanged.
+do not open this database. Current nodes emit an optional completion certificate;
+older clients ignore the extra JSON field and older nodes retain their existing
+behavior. A new manager cannot certify old-node finalization from a legacy exit
+marker, including code zero. Local shared-process development has no controller
+certificate and conservatively retains unknown terminal finalization. Guests do
+not change. Upgrade matching manager/node versions to obtain the new evidence.
 A collector on a version-19 manager remains compatible via the helper's missing
 `run_progress` fallback and reports unknown. This PR does not deploy software or
 apply a migration to any running installation.
@@ -57,7 +67,7 @@ Node 24.22.1 / SQLite 3.53.4, i9-14900K, filesystem WAL with synchronous=FULL,
 warm OS cache: baseline identity/latest-event reads averaged 0.067 ms versus
 0.080 ms with the progress projection; a reopened connection read took 0.306 ms
 with warm OS cache. All candidate plans use primary-key seeks, independent of
-the diagnostics tail. The worst-case progress row was 23,123 encoded bytes,
+the diagnostics tail. The worst-case progress row was 23,142 encoded bytes,
 versus 262,207 bytes for the checkpoint fixture. At equal update counts the small
 row averaged 0.017 ms/write versus 0.264 ms/write for the large checkpoint;
 CPU totals for 60 writes were 1.05 ms and 15.75 ms respectively.

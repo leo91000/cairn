@@ -90,7 +90,7 @@ const NOTICE_LIMIT: usize = 4_000;
 /// Event types that are always recorded. Clients use turn markers to scope reused message IDs,
 /// show the latest context usage, and show the engine's retries and usage limits in the
 /// conversation.
-const CONVERSATION_EVENTS: [&str; 10] = [
+const CONVERSATION_EVENTS: [&str; 11] = [
     "thread.started",
     "context.usage",
     "turn.started",
@@ -99,6 +99,7 @@ const CONVERSATION_EVENTS: [&str; 10] = [
     "turn.waiting",
     "error",
     "runner.failed",
+    "runner.finalized",
     "engine.retry",
     "provider.limit",
 ];

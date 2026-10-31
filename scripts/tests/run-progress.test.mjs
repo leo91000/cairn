@@ -132,6 +132,8 @@ describe('writer progress → safe SQLite projection → policy', () => {
     expect(observeRunProgress(read(), now).status).toBe('bad')
     db.prepare('UPDATE runs SET status=\'succeeded\',finished_at=?').run(now)
     write({ process: null })
+    expect(observeRunProgress(read(), now).status).toBe('bad')
+    write({}, { finalizedAt: now })
     expect(observeRunProgress(read(), now)).toMatchObject({ status: 'good', phase: 'terminal' })
     db.close()
   })
@@ -171,8 +173,28 @@ it('accepts only future canonical waits for the current resumable owner and turn
 it('keeps a settled mission wait advisory while overdue wakeups retain their own signal', () => {
   const { db, read, write } = fixture()
   db.prepare('UPDATE runs SET status=\'waiting\',boundary=?').run(JSON.stringify({ missionTurnId: 'mission' }))
-  write({ process: null, terminalCode: 0 }, { turnId: 'mission', phase: 'finalizing' })
+  write({ process: null, terminalCode: 0 }, { turnId: 'mission', phase: 'finalizing', finalizedAt: now })
   expect(observeRunProgress({ ...read(), validFutureWait: 1 }, now)).toMatchObject({ status: 'expected', phase: 'waiting' })
   expect(observeRunProgress({ ...read(), validFutureWait: 0 }, now)).toMatchObject({ status: 'unknown', phase: 'waiting' })
+  db.close()
+})
+
+it('requires an attempt-bound physical certificate for failed and code-zero outcomes', () => {
+  const { db, read, write } = fixture()
+  db.exec('UPDATE runs SET status=\'failed\'')
+  write({ process: null, terminalCode: null, completed: true }, { phase: 'finalizing' })
+  for (const code of [null, 0, 17, 70, 143]) {
+    write({ terminalCode: code })
+    expect(observeRunProgress({ ...read(), released: 1 }, now).status).toBe('bad')
+  }
+
+  write({ terminalCode: 17 }, { finalizedAt: now })
+  expect(observeRunProgress(read(), now).status).toBe('good')
+  write({ finalizationFailureAttempt: 'attempt' })
+  expect(observeRunProgress(read(), now).status).toBe('bad')
+  write({ finalizationFailureAttempt: null, terminalCode: 143 })
+  expect(observeRunProgress(read(), now).status).toBe('good')
+  write({ runnerId: 'replacement' })
+  expect(observeRunProgress(read(), now).status).toBe('unknown')
   db.close()
 })

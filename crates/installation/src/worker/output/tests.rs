@@ -1390,10 +1390,36 @@ async fn durable_progress_is_atomic_bound_and_survives_restart_without_a_fresh_c
         .unwrap();
     record(&fixture.service, &Output::new(false, json!({"type":"item.updated","item":{"id":"late","type":"agent_message","text":"late snapshot"}}).to_string()), &restarted, false, &[], &mut fixture.log_total, &mut fixture.activity).await.unwrap();
     restarted.persist().await.unwrap();
+    record(
+        &fixture.service,
+        &Output::new(
+            false,
+            json!({"type":"runner.finalized","attemptId":"wrong-attempt","physicalFinalized":true})
+                .to_string(),
+        ),
+        &restarted,
+        false,
+        &[],
+        &mut fixture.log_total,
+        &mut fixture.activity,
+    )
+    .await
+    .unwrap();
+    assert!(
+        restarted
+            .snapshot()
+            .await
+            .progress
+            .unwrap()
+            .finalized_at
+            .is_none()
+    );
+    record(&fixture.service, &Output::new(false, json!({"type":"runner.finalized","attemptId":"progress-attempt","physicalFinalized":true}).to_string()), &restarted, false, &[], &mut fixture.log_total, &mut fixture.activity).await.unwrap();
     let mut saved = RunCheckpoint::load(&fixture.service.store, &fixture.id)
         .await
         .unwrap()
         .unwrap();
+    assert!(saved.progress.as_ref().unwrap().finalized_at.is_some());
     assert_eq!(saved.progress.as_ref().unwrap().phase, Phase::Finalizing);
     assert_eq!(saved.progress.as_ref().unwrap().phase_at, phase_at);
     saved.runner_id = Some(Some("replacement".into()));

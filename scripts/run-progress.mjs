@@ -8,11 +8,12 @@ export const progressProjection = `json_object(
   'turnId',json_extract(p.state,'$.turnId'),
   'startedAt',json_extract(p.state,'$.startedAt'),
   'advancedAt',json_extract(p.state,'$.advancedAt'),
+  'finalizedAt',json_extract(p.state,'$.finalizedAt'),
   'phase',json_extract(p.state,'$.phase'),
   'phaseAt',json_extract(p.state,'$.phaseAt'),
   'complete',json_extract(p.state,'$.complete'))`
 
-export const runProgressSql = `SELECT r.id,r.status,r.finished_at AS finishedAt,
+export const runProgressSql = `SELECT r.id,r.status,r.finished_at AS finishedAt,r.recovery_pending AS recoveryPending,
   json_extract(r.boundary,'$.chatExecution.messageId') AS activeMessageId,
   json_extract(r.boundary,'$.missionTurnId') AS missionTurnId,
   json_extract(k.state,'$.runnerId') AS attemptId,
@@ -21,6 +22,7 @@ export const runProgressSql = `SELECT r.id,r.status,r.finished_at AS finishedAt,
   json_extract(k.state,'$.completed') AS providerCompleted,
   json_extract(k.state,'$.providerFailed') AS providerFailed,
   json_extract(k.state,'$.terminalCode') AS terminalCode,
+  json_extract(k.state,'$.finalizationFailureAttempt') AS finalizationFailureAttempt,
   json_extract(k.state,'$.settled.status') AS settledStatus,
   ${progressProjection} AS progressJson
   FROM runs r LEFT JOIN run_checkpoints k ON k.run_id=r.id
@@ -71,14 +73,6 @@ export function observeRunProgress(run, now, quietMs = 20 * 60000) {
 
   const terminal = ['succeeded', 'failed', 'interrupted', 'cancelled'].includes(run.status)
   const turn = run.activeMessageId || run.missionTurnId
-  if (terminal && identity(turn) && identity(run.attemptId) && timestamp(run.finishedAt, now)
-    && Number.isSafeInteger(run.terminalCode) && run.process === null) {
-    return { status: 'good', phase: 'terminal', at: run.finishedAt }
-  }
-
-  if (run.status === 'waiting' && Number.isSafeInteger(run.terminalCode) && run.process === null)
-    return { status: run.validFutureWait === 1 || run.validFutureWait === true ? 'expected' : 'unknown', phase: 'waiting' }
-
   const p = run.progress
   const bound = p?.version === 1 && identity(p.executionId) && identity(turn) && p.turnId === turn
     && ((identity(run.attemptId) && p.runnerId === run.attemptId) || (!run.attemptId && sameProcess(p.process, run.process)))
@@ -96,10 +90,16 @@ export function observeRunProgress(run, now, quietMs = 20 * 60000) {
   if (p.advancedAt !== null && (!timestamp(p.advancedAt, now) || p.advancedAt < p.startedAt))
     return unknown
 
-  // Run status is applied only after fencing/settlement. A provider completion
-  // flag or settled *intent* on a still-running run is never terminal settlement.
-  if (terminal && run.terminalCode !== null && run.terminalCode !== undefined)
-    return { status: 'good', phase: 'terminal', at: p.phaseAt }
+  // Terminal status, an exit code, released bookkeeping and absent inventory
+  // do not prove physical settlement. Only a current controller's durable
+  // post-cleanup certificate may establish healthy finalization.
+  const finalized = timestamp(p.finalizedAt, now) && p.finalizedAt >= p.startedAt
+    && run.finalizationFailureAttempt !== run.attemptId
+    && Number.isSafeInteger(run.terminalCode) && run.process === null && !run.recoveryPending
+  if (terminal && finalized)
+    return { status: 'good', phase: 'terminal', at: p.finalizedAt }
+  if (run.status === 'waiting' && finalized)
+    return { status: run.validFutureWait === 1 || run.validFutureWait === true ? 'expected' : 'unknown', phase: 'waiting' }
 
   const finalizing = p.phase === 'finalizing' || run.providerCompleted === 1 || run.providerCompleted === true
     || run.providerFailed === 1 || run.providerFailed === true || (run.terminalCode !== null && run.terminalCode !== undefined)

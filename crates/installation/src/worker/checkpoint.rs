@@ -385,6 +385,12 @@ impl RunCheckpoint {
             ));
         }
         self.terminal_code = Some(result.map(|result| result.code));
+        if result.is_some_and(|result| result.physical_finalized && !result.finalization_failed)
+            && let Some(progress) = &mut self.progress
+            && progress.runner_id.as_deref() == Some(attempt)
+        {
+            progress.confirm_finalized(now());
+        }
         if result.is_some_and(|result| result.finalization_failed)
             && self.finalization_failure_attempt.as_deref() != Some(attempt)
         {
@@ -694,6 +700,7 @@ impl Checkpoint {
                 state.progress.as_ref().is_none_or(|old| {
                     next.phase != old.phase
                         || next.complete != old.complete
+                        || next.finalized_at != old.finalized_at
                         || now().saturating_sub(old.persisted_at) >= 1000
                 })
             });
@@ -1200,6 +1207,7 @@ mod tests {
                     Some(crate::runner::ControllerResult {
                         code: 70,
                         finalization_failed: true,
+                        physical_finalized: false,
                     }),
                 )?;
                 Ok(())

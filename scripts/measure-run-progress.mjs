@@ -38,6 +38,7 @@ try {
     turnId: 'turn',
     startedAt: 1,
     advancedAt: 2,
+    finalizedAt: null,
     phase: 'provider',
     phaseAt: 1,
     complete: true,

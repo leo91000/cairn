@@ -36,6 +36,7 @@ pub struct Progress {
     pub turn_id: Option<String>,
     pub started_at: i64,
     pub advanced_at: Option<i64>,
+    pub finalized_at: Option<i64>,
     pub phase: Phase,
     pub phase_at: i64,
     pub complete: bool,
@@ -72,7 +73,7 @@ impl Progress {
                 AND json_extract(k.state,'$.process.start') IS ?
                 AND json_extract(k.state,'$.process.boot') IS ?))")?
             .query_row(params![run_id, self.turn_id, self.runner_id, self.runner_id, self.runner_id,
-                self.process.as_ref().map(|p| p.pid), self.process.as_ref().map(|p| &p.start), self.process.as_ref().map(|p| &p.boot)], |_| Ok(true))
+                self.process.as_ref().and_then(|p| i64::try_from(p.pid).ok()), self.process.as_ref().map(|p| &p.start), self.process.as_ref().map(|p| &p.boot)], |_| Ok(true))
             .optional()?.unwrap_or(false))
     }
 
@@ -97,6 +98,7 @@ impl Progress {
             turn_id,
             started_at: at,
             advanced_at: None,
+            finalized_at: None,
             phase: Phase::Preparing,
             phase_at: at,
             complete: true,
@@ -106,10 +108,32 @@ impl Progress {
         }
     }
 
+    pub fn confirm_finalized(&mut self, at: i64) {
+        self.finalized_at.get_or_insert(at);
+        if self.phase != Phase::Finalizing {
+            self.phase = Phase::Finalizing;
+            self.phase_at = at;
+        }
+    }
+
     /// Only canonical adapter frames from this worker's execution enter here.
     /// Unknown frames and replayed/unchanged snapshots cannot refresh the clock.
     pub fn observe(&mut self, event: &Value, at: i64) -> bool {
         let kind = event["type"].as_str().unwrap_or("");
+        if kind == "runner.finalized" {
+            if event["physicalFinalized"] == true
+                && event["finalizationFailed"] != true
+                && self
+                    .runner_id
+                    .as_deref()
+                    .is_some_and(|id| event["attemptId"].as_str() == Some(id))
+                && self.finalized_at.is_none()
+            {
+                self.confirm_finalized(at);
+                return true;
+            }
+            return false;
+        }
         if matches!(kind, "turn.completed" | "turn.failed" | "runner.failed") {
             if self.phase == Phase::Finalizing {
                 return false;
@@ -326,5 +350,72 @@ mod migration_tests {
                 .unwrap(),
             19
         );
+    }
+}
+
+#[cfg(test)]
+mod compatibility_tests {
+    use super::*;
+
+    #[test]
+    fn actual_full_schemas_seventeen_nineteen_and_twenty_use_the_safe_collector() {
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("manager.db");
+        let mut connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .execute_batch(include_str!("../../tests/fixtures/personal-state-v17.sql"))
+            .unwrap();
+        connection.execute("INSERT INTO runs(id,task_id,status,created_at,recovery_pending,resume_available,resume_count,boundary) VALUES('progress-compat','progress-task','running',1,0,1,0,?)", [json!({"missionTurnId":"turn"}).to_string()]).unwrap();
+        connection
+            .execute(
+                "INSERT INTO run_checkpoints(run_id,state) VALUES('progress-compat',?)",
+                [json!({"runnerId":"attempt","completed":false}).to_string()],
+            )
+            .unwrap();
+        let helper = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/run-progress.mjs")
+            .canonicalize()
+            .unwrap();
+        let script = format!(
+            "import {{DatabaseSync}} from 'node:sqlite';const m=await import({});const db=new DatabaseSync(process.argv[1],{{readOnly:true}});const row=m.decodeRunProgress(m.prepareRunProgress(db).get('progress-compat'));if(m.observeRunProgress(row,3).status!==process.argv[2])process.exit(1);db.close();",
+            serde_json::to_string(&helper.to_string_lossy()).unwrap()
+        );
+        let check = |expected: &str| {
+            let result = std::process::Command::new("node")
+                .args(["--input-type=module", "-e", &script])
+                .arg(&database)
+                .arg(expected)
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        };
+        check("unknown");
+        crate::reads::migration::upgrade(&mut connection).unwrap();
+        crate::runs::projections::upgrade(&mut connection).unwrap();
+        assert_eq!(
+            connection
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .unwrap(),
+            19
+        );
+        check("unknown");
+        upgrade(&mut connection).unwrap();
+        check("unknown");
+        let mut progress = Progress::launched(
+            "execution".into(),
+            Some("attempt".into()),
+            None,
+            Some("turn".into()),
+            1,
+        );
+        progress.observe(&json!({"type":"turn.started"}), 2);
+        progress
+            .store_in(&Db(&connection), "progress-compat")
+            .unwrap();
+        check("good");
     }
 }

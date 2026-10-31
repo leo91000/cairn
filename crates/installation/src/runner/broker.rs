@@ -411,6 +411,7 @@ impl Execution {
         if let Err(error) = &result {
             log_failure(broker, id, &error.message).await;
         }
+        let physically_finalized = result.is_ok();
         let finalization_failed = matches!(result, Ok(crate::runner::FINALIZATION_FAILED_SENTINEL));
         let code = if finalization_failed {
             CONTROLLER_FAILED
@@ -420,7 +421,8 @@ impl Execution {
         let outcome = if finalization_failed {
             serde_json::json!({ "StatusCode": code, "FinalizationFailed": true }).to_string()
         } else {
-            code.to_string()
+            serde_json::json!({ "StatusCode": code, "PhysicalFinalized": physically_finalized })
+                .to_string()
         };
         let mut retry_delay = Duration::from_secs(1);
         loop {
