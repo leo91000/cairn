@@ -9,7 +9,7 @@ const LEGACY_COLUMNS: &str = include_str!("../../../tests/fixtures/run-projectio
 /// The run layout must also represent the historical version they advertise.
 pub(crate) fn restore_legacy_columns(connection: &Connection) {
     connection
-        .execute_batch("DROP TABLE IF EXISTS run_progress; DROP TABLE IF EXISTS plugin_hook_receipts; DROP TABLE IF EXISTS plugin_hook_events;")
+        .execute_batch("DROP TABLE IF EXISTS run_progress;")
         .unwrap();
     let current: bool = connection
         .query_row(
