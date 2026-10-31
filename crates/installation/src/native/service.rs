@@ -4,7 +4,7 @@ mod exclusive;
 mod exclusive_tests;
 mod health;
 
-use super::{atomic_write, block, disk, mode, systemd, workspace};
+use super::{atomic_write, block, bootstrap, disk, mode, systemd, workspace};
 use crate::runner::exclusive::{Ledger, Reservations};
 use crate::{
     error::{Error, Result},
@@ -22,6 +22,7 @@ use axum::{
     routing::any,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
+use bootstrap::Phase;
 use bytes::Bytes;
 use serde_json::{Value, json};
 use std::{
@@ -198,6 +199,7 @@ struct Controller {
     changed: Arc<Notify>,
     log_lock: Arc<Mutex<()>>,
     telemetry: health::Telemetry,
+    bootstrap: bootstrap::Registry,
     stop: CancellationToken,
     identity: Arc<systemd::Identity>,
     backend_namespace: storage::ublk::BackendNamespace,
@@ -403,9 +405,26 @@ impl Controller {
     }
 
     async fn start(&self, id: &str) -> Result<()> {
+        uuid(id)?;
+        let waiting = self.bootstrap.begin(id);
         let _admission = self.admission.lock().await;
+        // Drop this scope before releasing admission, including on cancellation.
+        // A queued duplicate may then observe the preceding rejected invocation.
+        let mut observation = waiting;
+        if observation.disabled() {
+            observation = self.bootstrap.begin(id);
+        }
+        let result = self.start_observed(id, &mut observation).await;
+        if result.is_err() {
+            observation.rejected();
+        }
+        result
+    }
+
+    async fn start_observed(&self, id: &str, observation: &mut bootstrap::Scope) -> Result<()> {
         self.allow_exclusive_admission(id).await?;
         if self.active.lock().await.contains_key(id) {
+            observation.already_running();
             return Ok(());
         }
         if self.file(id, "exit").exists() || self.file(id, "stopped").exists() {
@@ -421,7 +440,10 @@ impl Controller {
         {
             return Err(Error::unavailable("The native execution slot is occupied."));
         }
+        let trace = observation.trace();
+        trace.phase(Phase::Plan);
         let plan = self.plan(id).await?;
+        observation.context(text(&plan, "runId"), plan["runtimeId"].as_str());
         mode::check_plan(&*self.mode.lock().await, &plan)?;
         let resources: crate::nodes::Resources = serde_json::from_value(plan["resources"].clone())?;
         resources.validate().map_err(Error::bad)?;
@@ -435,9 +457,12 @@ impl Controller {
                 "Native plan exceeds the node owner's configured resource budget.",
             ));
         }
+        trace.phase(Phase::StorageAdmission);
         let _disk = self.start_storage(id, &plan).await?;
+        trace.phase(Phase::PoolAccounting);
         self.check_preparation_space(&plan).await?;
         let root = workspace::directory(&self.state, text(&plan, "runId"))?;
+        trace.phase(Phase::WorkspaceOwnership);
         let owner = workspace::execution_ownership(&self.state, text(&plan, "runId")).await?;
         let stop = self.stop.child_token();
         atomic_write(&self.file(id, "run"), text(&plan, "runId").as_bytes()).await?;
@@ -460,13 +485,22 @@ impl Controller {
             resources.disk_mi_b.saturating_mul(disk::MIB),
         );
         let (controller, id) = (self.clone(), id.to_owned());
+        let observation = std::mem::take(observation);
         let (lease_controller, lease_id, lease_stop) =
             (controller.clone(), id.clone(), stop.clone());
         tokio::spawn(async move {
             lease_controller.watch_lease(&lease_id, lease_stop).await;
         });
         tokio::spawn(async move {
-            let result = controller.execute(&id, &plan, stop.clone()).await;
+            let result = controller
+                .execute(&id, &plan, stop.clone(), &observation)
+                .await;
+            if result.is_err() {
+                observation.rejected();
+            }
+            // The observation ends at submission, or at an interrupted bootstrap;
+            // it never waits for fencing, filesystem close, or a telemetry sink.
+            drop(observation);
             // Reject in-flight file mutations before flushing/unmounting. Any
             // already admitted copy retains the global mutation lock.
             stop.cancel();
@@ -686,12 +720,25 @@ impl Controller {
     /// while a capture finishes. Wait within this attempt rather than consuming
     /// controller recovery attempts. Never hold the node-wide storage lock while
     /// sleeping: the previous owner may need it to complete shutdown.
+    #[cfg(test)]
     async fn mount_after_release(
         &self,
         id: &str,
         plan: &Value,
         stop: &CancellationToken,
         wait: Duration,
+    ) -> Result<(disk::StorageGuard, bool, block::Mounted)> {
+        self.mount_after_release_observed(id, plan, stop, wait, &bootstrap::Trace::default())
+            .await
+    }
+
+    async fn mount_after_release_observed(
+        &self,
+        id: &str,
+        plan: &Value,
+        stop: &CancellationToken,
+        wait: Duration,
+        trace: &bootstrap::Trace,
     ) -> Result<(disk::StorageGuard, bool, block::Mounted)> {
         let (deadline, time_limited) = disk_admission_deadline(plan, wait);
         let mut reported = false;
@@ -706,6 +753,7 @@ impl Controller {
                 return Err(self.disk_admission_timeout(id, true).await);
             }
             // Cancel only lock acquisition, never an in-flight mount or clone.
+            trace.phase(Phase::StorageAdmission);
             let owner = tokio::select! {
                 biased;
                 () = stop.cancelled() => {
@@ -731,8 +779,11 @@ impl Controller {
                 return Err(self.disk_admission_timeout(id, true).await);
             }
             let result: Result<(bool, block::Mounted)> = async {
+                trace.phase(Phase::PoolAccounting);
                 self.check_preparation_space(plan).await?;
+                trace.phase(Phase::FilesystemInitialize);
                 let from_base = self.bases().initialize(plan, stop).await?;
+                trace.phase(Phase::Mount);
                 let mounted = block::mount(
                     &self.state,
                     text(plan, "runId"),
@@ -748,6 +799,7 @@ impl Controller {
                 Ok((from_base, mounted)) => return Ok((owner, from_base, mounted)),
                 Err(error) if error.is_conflict() && error.message == block::DISK_BUSY => {
                     drop(owner);
+                    trace.phase(Phase::WorkspaceOwnership);
                     if !reported {
                         tracing::info!(
                             attempt = id,
@@ -851,7 +903,14 @@ impl Controller {
         let _ = self.append(id, true, message.as_bytes()).await;
     }
 
-    async fn execute(&self, id: &str, plan: &Value, stop: CancellationToken) -> Result<i32> {
+    async fn execute(
+        &self,
+        id: &str,
+        plan: &Value,
+        stop: CancellationToken,
+        observation: &bootstrap::Scope,
+    ) -> Result<i32> {
+        let trace = observation.trace();
         let root = workspace::directory(&self.state, text(plan, "runId"))?;
         atomic_write(&root.join("attempt"), id.as_bytes()).await?;
         atomic_write(
@@ -865,7 +924,7 @@ impl Controller {
             .ok_or_else(|| Error::bad("Missing pinned native runtime."))?;
         super::systemd::tools(runtime)?;
         let (disk_owner, from_base, mounted) = self
-            .mount_after_release(id, plan, &stop, DISK_RELEASE_WAIT)
+            .mount_after_release_observed(id, plan, &stop, DISK_RELEASE_WAIT, &trace)
             .await?;
         self.mounted.lock().await.insert(
             text(plan, "runId").to_owned(),
@@ -875,10 +934,12 @@ impl Controller {
             return Ok(143);
         }
         let administrator = plan["nativeMode"]["mode"] == "administrator";
+        trace.phase(Phase::IdentityProvision);
         let mut identity = super::identity::provision(&self.state, text(plan, "runId")).await?;
         if administrator {
             identity.host_engine = Some((self.identity.uid, self.identity.gid));
         }
+        trace.phase(Phase::FilesystemInitialize);
         block::initialize(
             &self.state,
             text(plan, "runId"),
@@ -896,6 +957,7 @@ impl Controller {
                 .trim(super::bases::cache_limit(self.disk_limit().await?), 0, None)
                 .await?;
         }
+        trace.phase(Phase::TemporaryPrepare);
         let temporary = root.join("tmp");
         if temporary.exists() {
             tokio::fs::remove_dir_all(&temporary).await?;
@@ -904,7 +966,8 @@ impl Controller {
         workspace::own_tree(&temporary, identity.uid(), identity.gid()).await?;
         let stage = self.data.join("runs").join(text(plan, "runId"));
         let bindings =
-            super::home::prepare_for_identity(&stage.join("home"), &data, &identity).await?;
+            super::home::prepare_for_identity(&stage.join("home"), &data, &identity, &trace)
+                .await?;
         // Keep the existing prepared-base admission marker. The authoritative
         // ownership mapping now travels inside the published filesystem.
         atomic_write(
@@ -912,6 +975,7 @@ impl Controller {
             &serde_json::to_vec(&identity)?,
         )
         .await?;
+        trace.phase(Phase::RuntimePrepare);
         let docker_data = data.join("docker");
         // Only namespace root may access raw daemon metadata. Engine access is
         // exclusively through the mandatory authorization plugin.
@@ -931,11 +995,13 @@ impl Controller {
             private_dir(&path).await?;
             std::os::unix::fs::lchown(&path, Some(identity.root_uid), Some(identity.root_gid))?;
         }
+        trace.phase(Phase::PoolAccounting);
         if disk::used(&self.data, &self.state).await? > self.disk_limit().await? {
             return Err(Error::conflict(
                 "Native preparation exceeds the shared node disk budget; local work is retained.",
             ));
         }
+        trace.phase(Phase::RuntimePrepare);
         let container = self.state.join("roots").join(id);
         tokio::fs::create_dir_all(&container).await?;
         tokio::fs::set_permissions(&container, std::fs::Permissions::from_mode(0o755)).await?;
@@ -1061,8 +1127,12 @@ impl Controller {
         if let Some(attempt) = self.active.lock().await.get_mut(id) {
             attempt.started = true;
         }
+        trace.phase(Phase::WorkloadLaunch);
         systemd::start_guardian(id, &self.file(id, "lease")).await?;
         let mut child = systemd::spawn(&launch)?;
+        // This only proves submission to systemd-run, not unit readiness or a
+        // coding-engine turn. Those retain their existing protocol evidence.
+        observation.submitted();
         let storage_stop = stop.child_token();
         let _storage_guard = storage_stop.clone().drop_guard();
         let mounted = self
@@ -1766,6 +1836,15 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             controller.start(id).await?;
             json!({})
         }
+        ("GET", ["runs", id, "bootstrap"]) => {
+            uuid(id)?;
+            let report = controller.bootstrap.get(id).ok_or_else(|| {
+                Error::not_found(
+                    "Bootstrap observation is unavailable; inspect retained technical logs.",
+                )
+            })?;
+            json!({ "source": "memory", "bootstrap": report })
+        }
         ("DELETE", ["runs", id]) => {
             controller.stop_attempt(id).await?;
             json!({})
@@ -2061,6 +2140,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                 }
             }
             if *action == "delete" {
+                controller.bootstrap.forget(run);
                 let stage = controller.data.join("runs").join(run);
                 if stage.exists() {
                     tokio::fs::remove_dir_all(stage).await?;
@@ -2354,6 +2434,14 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
         atomic_write(&state.join(mode::FILE), &serde_json::to_vec(&mode)?).await?;
     }
     let controller = Controller {
+        bootstrap: bootstrap::Registry::new(
+            crate::nodes::component_runtime(),
+            crate::recovery::process_identity(std::process::id())
+                .await
+                .ok()
+                .flatten()
+                .map(|identity| identity.boot),
+        ),
         storage_policy: crate::storage::policy::Control::default(),
         data,
         state,
@@ -2752,6 +2840,10 @@ mod tests {
         .await
         .unwrap();
         let controller = Controller {
+            bootstrap: bootstrap::Registry::new(
+                "fixture-runtime".into(),
+                Some(crate::config::id()),
+            ),
             storage_policy: crate::storage::policy::Control::default(),
             data,
             state,
@@ -2780,6 +2872,183 @@ mod tests {
             }),
         };
         (root, controller)
+    }
+
+    #[tokio::test]
+    async fn bootstrap_phase_is_visible_while_real_admission_waits() {
+        let (_root, controller) = fixture().await;
+        let id = crate::config::id();
+        let admission = controller.admission.lock().await;
+        let (starting, attempt) = (controller.clone(), id.clone());
+        let start = tokio::spawn(async move { starting.start(&attempt).await });
+        tokio::task::yield_now().await;
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(1),
+            handler(
+                State(controller.clone()),
+                Request::builder()
+                    .uri(format!("/runs/{id}/bootstrap"))
+                    .header("authorization", "Bearer synthetic-private-controller-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("bootstrap observation cannot wait for admission")
+        .unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 32_768)
+            .await
+            .unwrap();
+        let health = tokio::time::timeout(Duration::from_secs(1), controller.health())
+            .await
+            .expect("observation cannot make health wait for admission");
+        start.abort();
+        let _ = start.await;
+        drop(admission);
+
+        assert_eq!(status, 200, "missing bootstrap observation: {body:?}");
+        let report: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(report["bootstrap"]["attemptId"], id);
+        assert_eq!(report["bootstrap"]["status"], "preparing");
+        assert_eq!(report["bootstrap"]["phase"], "admission_wait");
+        assert_eq!(health["activeRuns"], 0);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_lookup_requires_authentication_and_reports_retention_loss() {
+        let (_root, controller) = fixture().await;
+        let id = crate::config::id();
+        let observation = controller.bootstrap.begin(&id);
+        observation.context(&crate::config::id(), Some("fixture-runtime"));
+        observation.submitted();
+        let unauthorized = route(
+            controller.clone(),
+            Request::builder()
+                .uri(format!("/runs/{id}/bootstrap"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(unauthorized.status, 401);
+        let unknown = route(
+            controller.clone(),
+            Request::builder()
+                .uri(format!("/runs/{}/bootstrap", crate::config::id()))
+                .header("authorization", "Bearer synthetic-private-controller-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(unknown.status, 404);
+        assert!(controller.bootstrap.get(&id).is_some());
+    }
+
+    #[tokio::test]
+    async fn actual_home_reconciliation_exposes_its_held_phase_without_blocking_controls() {
+        let module = module_path!().split_once("::").unwrap().1;
+        let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--exact",
+                &format!("{module}::held_home_reconciliation_child"),
+                "--ignored",
+            ])
+            .kill_on_drop(true);
+        let output = tokio::time::timeout(Duration::from_secs(15), child.output())
+            .await
+            .expect("isolated blocked-I/O regression must finish")
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed;"));
+    }
+
+    #[tokio::test]
+    #[ignore = "isolated FIFO regression, executed by its parent"]
+    async fn held_home_reconciliation_child() {
+        use std::io::Write;
+        use std::os::unix::fs::MetadataExt;
+
+        let (root, controller) = fixture().await;
+        let data = root.path().join("durable");
+        let source = root.path().join("staging");
+        private_dir(&data).await.unwrap();
+        private_dir(&source).await.unwrap();
+        let metadata = std::fs::metadata(&data).unwrap();
+        let identity = super::super::identity::Identity {
+            user: "fixture".into(),
+            root_uid: metadata.uid().saturating_add(131072),
+            root_gid: metadata.gid().saturating_add(131072),
+            subuid: 100000,
+            subgid: 200000,
+            host_engine: Some((metadata.uid(), metadata.gid())),
+        };
+        std::fs::write(
+            data.join(".cairn-identity.json"),
+            serde_json::to_vec(&identity).unwrap(),
+        )
+        .unwrap();
+        let path = data.join(".cairn-identity.transition.json");
+        let fifo = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        let transition = serde_json::to_vec(&json!({
+            "previous": &identity,
+            "target": &identity,
+        }))
+        .unwrap();
+        let (opened, opening) = std::sync::mpsc::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+            opened.send(()).unwrap();
+            blocked.recv_timeout(Duration::from_secs(5)).unwrap();
+            file.write_all(&transition).unwrap();
+        });
+        let id = crate::config::id();
+        let scope = controller.bootstrap.begin(&id);
+        let trace = scope.trace();
+        let preparing = tokio::spawn(async move {
+            super::super::home::prepare_for_identity(&source, &data, &identity, &trace).await
+        });
+        let arrived =
+            tokio::task::spawn_blocking(move || opening.recv_timeout(Duration::from_secs(3)))
+                .await
+                .unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(1), controller.health()).await;
+        let phase = controller.bootstrap.get(&id).unwrap();
+        let lease = tokio::time::timeout(
+            Duration::from_secs(1),
+            handler(
+                State(controller.clone()),
+                request(
+                    &format!("/runs/{id}/lease"),
+                    &json!({ "remainingMs": 60_000 }),
+                ),
+            ),
+        )
+        .await;
+        release.send(()).unwrap();
+        writer.join().unwrap();
+        preparing.await.unwrap().unwrap();
+        arrived.expect("the real reconciler must reach the held metadata read");
+        response.expect("health must remain responsive during actual reconciliation");
+        lease
+            .expect("lease renewal must remain responsive")
+            .unwrap();
+        assert!(controller.leased(&id).await);
+        let phase = serde_json::to_value(phase).unwrap();
+        assert_eq!(phase["phase"], "identity_reconcile");
+        assert_eq!(phase["status"], "preparing");
+        assert_eq!(controller.health().await["activeRuns"], 0);
+        drop(scope);
     }
 
     async fn busy_disk_fixture(controller: &Controller) -> (String, String, Value) {

@@ -22,9 +22,13 @@ pub(super) async fn prepare_for_identity(
     source: &Path,
     data: &Path,
     identity: &super::identity::Identity,
+    observation: &super::bootstrap::Trace,
 ) -> Result<Vec<Binding>> {
-    super::identity::reconcile(data, identity).await?;
+    observation.phase(super::bootstrap::Phase::IdentityReconcile);
+    super::identity::reconcile(data, identity, observation).await?;
+    observation.phase(super::bootstrap::Phase::HomeRefresh);
     let bindings = prepare(source, &data.join("home"), identity.uid(), identity.gid()).await?;
+    observation.phase(super::bootstrap::Phase::StagingOwnership);
     super::workspace::own_tree(source, identity.uid(), identity.gid()).await?;
     Ok(bindings)
 }
