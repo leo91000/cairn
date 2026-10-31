@@ -1,8 +1,8 @@
-# Installation database 19 → 20
+# Installation database 21 → 22
 
-`Store::open` upgrades the version-19 placement state before starting its actors or
-serving requests. Versions 11–18 first use their existing sequential startup conversions to reach
-version 19. Stop the old manager
+`Store::open` upgrades the version-21 placement state before starting its actors or
+serving requests. Versions 11–20 first use their existing sequential startup conversions to reach
+version 21. Stop the old manager
 before opening its database with the new binary; retain a consistent database/WAL
 backup and all installation/node identities, credentials and durable files.
 
@@ -45,10 +45,10 @@ checks its references without scanning unrelated runs.
 The transaction copies the old attempt and exclusive-request records, preserves
 ordered members and paused runs, migrates run placement and counters, rebuilds the
 read-side run projection view and records constraint, then validates foreign keys before setting
-version 20. Unrelated records, events, checkpoints, secrets, counters and snapshots
+version 22. Unrelated records, events, checkpoints, secrets, counters and snapshots
 remain intact. Invalid input or a constraint failure rolls back the entire upgrade,
-leaving the version-19 input unchanged. Errors never contain source
-records or secrets. Reopening version 20 does no additional work. No downgrade is
+leaving the version-21 input unchanged. Errors never contain source
+records or secrets. Reopening version 22 does no additional work. No downgrade is
 provided; old managers reject the new schema.
 
 Qualification includes the frozen historical run DDL, populated placement/attempt/
@@ -61,7 +61,7 @@ synthetic database produced by the real previous manager Store/domain writers at
 `ff73512030c0e9109eec96be51269617a99b5534`. It contains the prior conversation and
 account fixture upgraded by that manager, plus placements, attempts, ordered
 reservation membership and high-water counters. The actual version-15 → 16 questionnaire and version-16 → 17 attachment and version-17 → 18 personal read state
-and version-18 → 19 read-side run projection
+and version-18 → 19 read-side run projection, version-19 → 20 plugin hooks and version-20 → 21 writer-owned progress
 migrations from main are applied first,
 then a `VACUUM INTO` copy of that previous-version database is upgraded;
 all previous run values and attempt/reservation fields are compared, along with

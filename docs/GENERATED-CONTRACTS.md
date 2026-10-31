@@ -958,7 +958,7 @@ backend selection do not change. The shared placement corpus qualifies defaults,
 all exclusive lifecycle states and command bounds in Rust, JSON Schema/TypeScript
 and Kotlin; server validation remains authoritative.
 
-The [automatic migration](migrations/0020-typed-placement.md) replaces attempt and
+The [automatic migration](migrations/0022-typed-placement.md) replaces attempt and
 reservation records with constrained placement/attempt/reservation tables, ordered
 relations and named run placement columns. It preserves controller fencing and
 sequence high-water marks. Node inventory and run public views are projections,
