@@ -180,7 +180,7 @@ pub async fn prepare(s: Service, mut artifact: Deliverable) -> Result<()> {
     }
     let directory = s.config.data_dir.join("artifacts");
     let path = directory.join(&artifact.id);
-    let target = directory.join(format!("{}.jpg", &artifact.id));
+    let target = directory.join(format!("{}.jpg", artifact.id));
     let kind = artifact.kind.clone();
     let job = async {
         if kind != "pdf" {
