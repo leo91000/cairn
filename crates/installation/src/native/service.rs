@@ -130,6 +130,28 @@ struct Attempt {
     suspension: Arc<super::suspension::Suspension>,
 }
 
+#[derive(Default)]
+pub(super) struct StorageClose {
+    mutations_drained: bool,
+}
+
+impl StorageClose {
+    pub(super) async fn finish(
+        &mut self,
+        state: &Path,
+        closing: impl std::future::Future<Output = Result<block::Completion>>,
+    ) -> Result<block::Completion> {
+        if !self.mutations_drained {
+            // Cancellation is already published and the workload is fenced.
+            // Drain admitted mutations once; later ones observe cancellation.
+            drop(disk::lock(state).await?);
+            self.mutations_drained = true;
+        }
+        // The clean backend namespace removes host mount-inventory coupling.
+        closing.await
+    }
+}
+
 fn completion_status(previous: i32, completion: block::Completion) -> (i32, bool) {
     (
         completion.exit_code(previous),
@@ -176,6 +198,7 @@ struct Controller {
     telemetry: health::Telemetry,
     stop: CancellationToken,
     identity: Arc<systemd::Identity>,
+    backend_namespace: storage::ublk::BackendNamespace,
 }
 
 impl Controller {
@@ -499,12 +522,13 @@ impl Controller {
                 };
                 let had_mount = mounted.is_some();
                 if let Some(mounted) = mounted {
+                    let mut storage_close = StorageClose::default();
                     loop {
-                        let result = async {
-                            let _disk = disk::lock(&controller.state).await?;
-                            mounted.mount.lock().await.close().await
-                        }
-                        .await;
+                        let result = storage_close
+                            .finish(&controller.state, async {
+                                mounted.mount.lock().await.close().await
+                            })
+                            .await;
                         match result {
                             Ok(completion) => {
                                 (code, finalization_failed) = completion_status(code, completion);
@@ -707,7 +731,14 @@ impl Controller {
             let result: Result<(bool, block::Mounted)> = async {
                 self.check_preparation_space(plan).await?;
                 let from_base = self.bases().initialize(plan, stop).await?;
-                let mounted = block::mount(&self.state, text(plan, "runId"), plan, stop).await?;
+                let mounted = block::mount(
+                    &self.state,
+                    text(plan, "runId"),
+                    plan,
+                    stop,
+                    &self.backend_namespace,
+                )
+                .await?;
                 Ok((from_base, mounted))
             }
             .await;
@@ -2306,6 +2337,7 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
         tokio::fs::remove_file(marker).await?;
     }
     recover_preparations(&data, &state).await?;
+    let backend_namespace = storage::ublk::BackendNamespace::create(&state)?;
     let budget_path = state.join(crate::microvm::budget::FILE);
     let checked = load_budget(&budget_path).await?;
     let budget = serde_json::to_value(&checked)?;
@@ -2337,6 +2369,7 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
         telemetry: health::Telemetry::default(),
         stop: stop.clone(),
         identity,
+        backend_namespace,
     };
     controller.recover_exclusive().await?;
     let exclusive_monitor = tokio::spawn(controller.clone().monitor_exclusive());
@@ -2737,6 +2770,7 @@ mod tests {
             log_lock: Arc::default(),
             telemetry: health::Telemetry::default(),
             stop: CancellationToken::new(),
+            backend_namespace: storage::ublk::BackendNamespace::unavailable_for_test(),
             identity: Arc::new(systemd::Identity {
                 user: "synthetic-workload".into(),
                 uid: 65534,
@@ -3381,6 +3415,92 @@ mod tests {
             .header("authorization", "Bearer synthetic-private-controller-token")
             .body(Body::from(body.to_string()))
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn close_drains_admitted_mutations_then_allows_policy_changes_and_refuses_late_mutations()
+    {
+        let (_fixture, controller) = fixture().await;
+        let (run, id, _) = busy_disk_fixture(&controller).await;
+        let stop = CancellationToken::new();
+        stop.cancel();
+        controller.active.lock().await.insert(
+            id.clone(),
+            Attempt {
+                run: run.clone(),
+                expires: None,
+                stop,
+                started: true,
+                protection: None,
+                suspension: Arc::new(super::super::suspension::Suspension::new(
+                    &controller.state,
+                    &id,
+                )),
+            },
+        );
+        let admitted = disk::lock(&controller.state).await.unwrap();
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let closing = tokio::spawn({
+            let controller = controller.clone();
+            let entered = entered.clone();
+            let release = release.clone();
+            async move {
+                StorageClose::default()
+                    .finish(&controller.state, async {
+                        entered.notify_one();
+                        release.notified().await;
+                        Ok(block::Completion::Flushed)
+                    })
+                    .await
+            }
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), entered.notified())
+                .await
+                .is_err()
+        );
+        assert!(!closing.is_finished());
+        drop(admitted);
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .unwrap();
+        let result = async {
+            let policy = storage::policy::Configuration {
+                generation: 1,
+                policy: storage::policy::Policy {
+                    reserve_mi_b: 64,
+                    reserve_percent: 1,
+                    memory_cache_mi_b: 128,
+                    ..storage::policy::Policy::default()
+                },
+            };
+            route(
+                controller.clone(),
+                request("/storage-policy", &json!(policy)),
+            )
+            .await?;
+            let mut budget = controller.budget.lock().await.clone();
+            budget["slots"] = 2.into();
+            route(controller.clone(), request("/node-budget", &budget)).await?;
+            for path in [
+                format!("/runs/{id}/artifact"),
+                format!("/runs/{id}/projects/{}", crate::config::id()),
+            ] {
+                let error = route(controller.clone(), request(&path, &json!({"runId":run})))
+                    .await
+                    .unwrap_err();
+                assert_eq!(error.status, 403);
+            }
+            assert!(controller.active.lock().await.contains_key(&id));
+            assert!(controller.leases.lock().await.contains_key(&id));
+            assert!(!controller.file(&id, "exit").exists());
+            Ok::<_, Error>(())
+        };
+        let result = tokio::time::timeout(Duration::from_secs(2), result).await;
+        release.notify_one();
+        assert_eq!(closing.await.unwrap().unwrap(), block::Completion::Flushed);
+        result.unwrap().unwrap();
     }
 
     #[tokio::test]
