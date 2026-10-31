@@ -9,6 +9,8 @@ pub mod connections;
 pub mod device_flow;
 pub mod files;
 pub mod forms;
+pub mod grant_authorization;
+pub mod grants;
 pub mod hooks;
 mod idempotency;
 pub mod instances;

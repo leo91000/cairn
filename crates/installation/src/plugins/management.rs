@@ -16,6 +16,9 @@ pub struct Authority {
     pub(crate) preparation: Option<crate::capabilities::plugin_packages::Authority>,
     instance: Option<Box<connections::Connection>>,
     shared: Option<Box<connections::Connection>>,
+    snapshot: Option<super::grant_authorization::Snapshot>,
+    invocation: Option<Arc<super::grant_authorization::Invocation>>,
+    partial: bool,
 }
 
 impl Authority {
@@ -28,20 +31,36 @@ impl Authority {
             preparation: Some(preparation),
             instance: Some(Box::new(instance)),
             shared: None,
+            snapshot: None,
+            invocation: None,
+            partial: true,
         }
     }
 
     pub(crate) fn authorize(&self, db: &crate::store::Db<'_>) -> Result<()> {
-        let Some(bearer) = &self.bearer else {
-            return Ok(());
+        if let Some(snapshot) = &self.snapshot {
+            snapshot.authorize(db)?;
+        }
+        let run = self
+            .bearer
+            .as_ref()
+            .map(|bearer| crate::installation_mcp::authorize_in(db, bearer))
+            .transpose()?;
+        let agent = match (&self.snapshot, &run) {
+            (Some(snapshot), _) => snapshot.agent.as_str(),
+            (_, Some(run)) => text(&run["snapshot"]["agent"], "id"),
+            _ => return Ok(()),
         };
-        let run = crate::installation_mcp::authorize_in(db, bearer)?;
-        let agent = text(&run["snapshot"]["agent"], "id");
         for expected in [&self.instance, &self.shared].into_iter().flatten() {
             let current = db
                 .plugin_instance(&expected.id)?
                 .ok_or_else(|| Error::forbidden("This plugin instance was removed."))?;
-            if current.revision != expected.revision || !current.grants(agent) {
+            let granted = if self.partial {
+                current.enabled && db.has_plugin_grant(agent, &current.id)?
+            } else {
+                current.grants(agent)
+            };
+            if current.revision != expected.revision || !granted {
                 return Err(Error::forbidden(
                     "Installation management does not grant access to this plugin account. Ask the owner to grant it on the agent's page.",
                 ));
@@ -50,7 +69,26 @@ impl Authority {
         Ok(())
     }
 
+    pub(crate) fn agent_action(
+        instance: connections::Connection,
+        snapshot: super::grant_authorization::Snapshot,
+        invocation: Option<Arc<super::grant_authorization::Invocation>>,
+    ) -> Self {
+        Self {
+            bearer: None,
+            preparation: None,
+            instance: Some(Box::new(instance)),
+            shared: None,
+            snapshot: Some(snapshot),
+            invocation,
+            partial: true,
+        }
+    }
+
     pub(crate) async fn recheck(&self, s: &Service) -> Result<()> {
+        if let Some(invocation) = &self.invocation {
+            Box::pin(invocation.recheck(s)).await?;
+        }
         if let Some(preparation) = &self.preparation {
             preparation.recheck(s).await?;
         }
@@ -171,6 +209,9 @@ pub(crate) async fn invoke(
         preparation,
         instance: saved_instance,
         shared: shared_instance,
+        snapshot: None,
+        invocation: None,
+        partial: false,
     });
     if let Some(preparation) = authority
         .as_ref()

@@ -97,6 +97,32 @@ pub(crate) struct Authority {
 }
 
 impl Authority {
+    pub(crate) async fn for_grants(
+        s: &Service,
+        context: ResumeContext,
+        scope: &'static str,
+    ) -> Result<Self> {
+        let authority = match context {
+            ResumeContext::Installation(bearer) => Self::installation(bearer),
+            ResumeContext::Human(account) => Self::human(s, &account).await?,
+            ResumeContext::Public(scopes, credential) => {
+                if !scopes.iter().any(|held| held == scope) {
+                    return Err(Error::forbidden(format!("The {scope} scope is required.")));
+                }
+                let credential = credential.ok_or_else(|| {
+                    Error::unauthorized("A current public MCP authorization is required.")
+                })?;
+                Self {
+                    public_credential: Some(credential),
+                    public_scope: Some(scope),
+                    ..Default::default()
+                }
+            }
+        };
+        authority.recheck(s).await?;
+        Ok(authority)
+    }
+
     pub(crate) fn installation(bearer: String) -> Self {
         Self {
             bearer: Some(bearer),

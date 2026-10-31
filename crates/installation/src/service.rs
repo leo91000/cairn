@@ -281,7 +281,6 @@ impl Service {
     async fn instances_accepting_agents(&self, agent: &Value) -> Result<Vec<String>> {
         let requested = crate::agent_grants::plugins(agent);
         let mut accepting = Vec::new();
-        let mut run_credentials = Vec::new();
         for instance in self.store.plugin_instances().await? {
             let id = instance.id.as_str();
             if !requested.iter().any(|requested| requested == id) {
@@ -293,15 +292,6 @@ impl Service {
             };
             if package.manifest.agent_access.is_none() {
                 continue;
-            }
-            if crate::plugins::run_credentials::one_per_package(&package.manifest) {
-                if run_credentials.contains(&plugin.to_owned()) {
-                    return Err(Error::bad(format!(
-                        "Grant one {} instance per agent: its runs use that instance's credentials.",
-                        package.manifest.name
-                    )));
-                }
-                run_credentials.push(plugin.to_owned());
             }
             accepting.push(id.to_owned());
         }

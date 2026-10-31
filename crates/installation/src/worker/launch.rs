@@ -317,6 +317,10 @@ impl Execution<'_> {
                 "Agent access was reduced after this run was queued. Run the task again with the current policy.",
             ));
         }
+        let caller = self.run.clone();
+        s.store
+            .read(move |db| crate::delegation::authorize_run(db, &caller))
+            .await?;
         let current_policy = policy(&current);
         self.run["snapshot"]["agent"]["access"]["nodes"] = current_policy["nodes"].clone();
         let snapshot = serde_json::from_value(self.run["snapshot"].clone())?;

@@ -108,7 +108,12 @@ async fn instance(
         .map(|authority| management::Authority::resource_read(authority, connection.clone()));
 
     let scope = if let Some(agent) = agent {
-        if !connection.grants(agent) {
+        let (agent_id, instance_id) = (agent.to_owned(), connection.id.clone());
+        let permitted = s
+            .store
+            .read(move |db| db.has_plugin_grant(&agent_id, &instance_id))
+            .await?;
+        if !permitted {
             return Err(Error::forbidden(
                 "This agent is not granted that plugin instance.",
             ));
@@ -195,6 +200,18 @@ pub(crate) async fn prepare_resolve(
 }
 
 impl Read {
+    pub(crate) fn with_snapshot(
+        mut self,
+        snapshot: super::grant_authorization::Snapshot,
+        instance: connections::Connection,
+    ) -> Self {
+        self.scope = Scope::Managed(
+            Box::new(self.scope),
+            management::Authority::agent_action(instance, snapshot, None),
+        );
+        self
+    }
+
     pub(crate) async fn list(
         &self,
         s: &Service,

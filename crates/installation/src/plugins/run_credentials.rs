@@ -166,13 +166,39 @@ async fn instances(s: &Service) -> Result<Vec<(Package, Vec<Connection>)>> {
     Ok(output)
 }
 
-/// Run credentials for `agent_id`: one granted instance per package (the first by
-/// name), and the host's fetch credentials for each of `projects`.
+/// Run credentials only from the explicitly retained supplying instance, plus
+/// the host's fetch credentials for each authorized project.
 pub async fn for_run(s: &Service, agent_id: &str, projects: &[Value]) -> Result<RunCredentials> {
     let mut credentials = RunCredentials::default();
     let mut fetch_order = Vec::new();
     for (package, owned) in instances(s).await? {
-        let granted = owned.iter().find(|connection| connection.grants(agent_id));
+        let (agent, plugin) = (agent_id.to_owned(), package.manifest.id.clone());
+        let supplier = s
+            .store
+            .read(move |db| db.plugin_credential_supplier(&agent, &plugin))
+            .await?;
+        let granted = owned
+            .iter()
+            .find(|connection| supplier.as_deref() == Some(&connection.id));
+        let granted = if let Some(connection) = granted {
+            let (agent, instance) = (agent_id.to_owned(), connection.id.clone());
+            let allowed = s
+                .store
+                .read(move |db| {
+                    Ok(db
+                        .plugin_contribution(
+                            &agent,
+                            &instance,
+                            cairn_contracts::PluginContributionKind::RunCredentials,
+                            "",
+                        )?
+                        .is_some())
+                })
+                .await?;
+            if allowed { Some(connection) } else { None }
+        } else {
+            None
+        };
         if let Some(connection) = granted {
             let rendered = render_instance(s, &package, connection).await?;
             // Packages never overwrite each other's files: the first one keeps a path.

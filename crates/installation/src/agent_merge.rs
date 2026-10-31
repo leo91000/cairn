@@ -78,6 +78,11 @@ pub(crate) fn merge(
         }
     }
 
+    if !crate::plugins::grants::covers_in(db, target_id, source_id)? {
+        return Err(Error::conflict(
+            "The destination must cover all source plugin contributions and resource restrictions.",
+        ));
+    }
     for instance in db.plugin_instances()? {
         if instance.agent_id == source_id {
             return Err(Error::conflict(

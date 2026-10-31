@@ -218,14 +218,12 @@ fn target_agent(db: &Db<'_>, run: &Value, input: &DelegateTaskInput) -> Result<V
                 crate::service::allowed(&current_access["nodes"], node.as_str().unwrap_or(""))
             })
         });
-    let plugins = crate::agent_grants::plugins(&current);
     let exclusive_nodes = crate::agent_grants::exclusive_nodes(&current);
-    let live_grants = crate::agent_grants::plugins(&agent)
-        .iter()
-        .all(|instance| plugins.contains(instance))
-        && crate::agent_grants::exclusive_nodes(&agent)
-            .iter()
-            .all(|node| exclusive_nodes.contains(node));
+    let live_grants =
+        crate::plugins::grants::covers_in(db, text(&current, "id"), text(&agent, "id"))?
+            && crate::agent_grants::exclusive_nodes(&agent)
+                .iter()
+                .all(|node| exclusive_nodes.contains(node));
     // Wildcard node grants do not include an administrator review. A narrower
     // reviewed target must not give an unreviewed requester host privileges.
     let administrator_reviews = !crate::native::policy::supports(&agent, "native")
@@ -607,4 +605,38 @@ pub(crate) fn wait_result(db: &Db<'_>, chat_id: &str) -> Result<Option<WaitObser
         run.as_ref(),
         task_error(db, &chat, run.as_ref())?,
     )))
+}
+
+/// Every delegated action keeps the requester's live ceiling, including plugin
+/// contributions and resource restrictions. A deleted requester confers no authority.
+pub(crate) fn authorize_run(db: &Db<'_>, run: &Value) -> Result<()> {
+    let Some(chat) = db.conversation_for_run(text(run, "id"))? else {
+        return Ok(());
+    };
+    let Some(requester) = chat.requested_by else {
+        return Ok(());
+    };
+    let Some(parent) = db
+        .conversation(&requester.chat_id)?
+        .filter(|chat| chat.lifecycle == cairn_contracts::ConversationLifecycle::Active)
+    else {
+        return Ok(());
+    };
+    let parent_agent = required(
+        db.agent_snapshot(&parent.agent_id)?,
+        "Requesting agent not found",
+    )?;
+    let current = required(
+        db.agent_snapshot(text(&run["snapshot"]["agent"], "id"))?,
+        "Agent not found",
+    )?;
+    if policy(&parent_agent)["delegation"] != true
+        || !covers(&parent_agent, &current)
+        || !crate::plugins::grants::covers_in(db, &parent.agent_id, text(&current, "id"))?
+    {
+        return Err(Error::forbidden(
+            "The requesting agent no longer covers this delegated task's contributions and resources.",
+        ));
+    }
+    Ok(())
 }

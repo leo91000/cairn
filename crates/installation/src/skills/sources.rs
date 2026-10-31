@@ -111,7 +111,7 @@ async fn origin(
             })?
         }
     };
-    let authority = authority.instance(s, &connection, &package).await?;
+    let authority = authority.instance(s, &connection, &package, cairn_contracts::PluginContributionKind::SkillSource, source).await?;
     Ok(Origin {
         package,
         source: source.to_owned(),
@@ -123,6 +123,7 @@ async fn origin(
 async fn call(s: &Service, origin: &Origin, payload: Value) -> Result<Value> {
     origin.authority.check_local(s).await?;
     let scope = Scope::Instance(Box::new(origin.connection.clone()));
+    let scope = match origin.authority.management() {Some(management)=>Scope::Managed(Box::new(scope),management),None=>scope};
     let mut payload = payload;
     payload["source"] = origin.source.clone().into();
     payload["instance"] = scope.instances()[0].clone();
