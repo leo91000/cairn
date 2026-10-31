@@ -526,6 +526,7 @@ pub(crate) async fn replace(
             ));
         }
     }
+    authority.recheck(s).await?;
     s.store
         .transaction(move |db| {
             authority.authorize(db)?;
@@ -892,6 +893,114 @@ async fn check_coverage_inner(
 mod migration_tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn revoked_public_authority_cannot_widen_grants_after_the_publication_lock() {
+        use axum::{Json, Router, routing::post};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let root = tempfile::tempdir().unwrap();
+        let config = serde_json::from_value(json!({
+            "dataDir": root.path().join("data"), "home": root.path().join("home"),
+            "workspaceRoots": [root.path()], "publicUrl": "http://localhost:4310",
+            "host": "127.0.0.1", "port": 0, "codexBin": "unused", "concurrency": 1,
+            "logger": false, "workerEnabled": false, "runnerUrl": "",
+        }))
+        .unwrap();
+        let s = crate::service::Service::new(config).await.unwrap();
+        let live = Arc::new(AtomicBool::new(true));
+        let checked = Arc::new(tokio::sync::Notify::new());
+        let (valid, completed) = (live.clone(), checked.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/api/relay/00000000-0000-4000-8000-000000000055/plugin-mcp-authorization",
+            post(move || {
+                let (valid, completed) = (valid.clone(), completed.clone());
+                async move {
+                    // Capture the successful answer before announcing the check.
+                    let allowed = valid.load(Ordering::SeqCst);
+                    completed.notify_one();
+                    Json(allowed)
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let identity = s.config.data_dir.join("installation-relay");
+        tokio::fs::create_dir_all(&identity).await.unwrap();
+        tokio::fs::write(
+            identity.join("identity.json"),
+            serde_json::to_vec(&json!({
+                "origin": format!("http://{address}"),
+                "installationId": "00000000-0000-4000-8000-000000000055",
+                "token": "fixture-only",
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let package = super::super::registry::active(&s, "github").await.unwrap();
+        let instance = crate::config::id();
+        let id = instance.clone();
+        s.store
+            .transaction(move |db| {
+                db.save_plugin_version("github", &package.manifest.version, &package.digest)?;
+                let mut instance =
+                    super::super::connections::Connection::draft(&id, "github", json!({}), vec![]);
+                instance.name = "Fixture".into();
+                instance.enabled = true;
+                instance.revision = "r1".into();
+                db.save_plugin_instance(&instance)
+            })
+            .await
+            .unwrap();
+        let agent = crate::config::MAIN_AGENT_ID;
+        let before = s
+            .store
+            .read(move |db| db.agent_plugin_grants(agent))
+            .await
+            .unwrap();
+        let input = serde_json::from_value(json!({
+            "agentId": agent, "revision": before.revision,
+            "grants": [{ "instanceId": instance, "access": { "type": "full" } }],
+            "runCredentialInstances": [instance],
+        }))
+        .unwrap();
+        let publication = s.plugins.package_publication.lock().await;
+        let service = s.clone();
+        let change = tokio::spawn(async move {
+            replace(
+                &service,
+                input,
+                crate::capabilities::plugin_packages::Authority::public_scoped(
+                    Some("fixture-digest".into()),
+                    "manage",
+                ),
+                false,
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), checked.notified())
+            .await
+            .unwrap();
+        live.store(false, Ordering::SeqCst);
+        drop(publication);
+        let error = change.await.unwrap().unwrap_err();
+        assert_eq!(error.status, 403);
+        let after = s
+            .store
+            .read(move |db| db.agent_plugin_grants(agent))
+            .await
+            .unwrap();
+        assert_eq!(
+            after, before,
+            "revoked client published a full grant or supplier"
+        );
+        server.abort();
+        s.shutdown.cancel();
+    }
 
     #[tokio::test]
     async fn migration_retains_the_previously_enabled_name_ordered_supplier() {
