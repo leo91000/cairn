@@ -26,7 +26,7 @@ pub async fn should_yield(s: &Service) -> Result<bool> {
             Ok(db.kv("deployment-lease")?.is_some()
                 || db.0.query_row(
                     "SELECT EXISTS(SELECT 1 FROM runs WHERE status='queued'
-             AND json_extract(data,'$.snapshot.agent.provider')='codex')",
+             AND provider='codex')",
                     [],
                     |row| row.get::<_, bool>(0),
                 )?)
