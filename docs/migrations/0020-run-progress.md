@@ -44,7 +44,10 @@ rolling back the manager binary after version 20 is unsupported. Nodes and guest
 do not open this database. Current nodes emit an optional completion certificate;
 older clients ignore the extra JSON field and older nodes retain their existing
 behavior. A new manager cannot certify old-node finalization from a legacy exit
-marker, including code zero. Local shared-process development has no controller
+marker, including code zero. A bound progress row on a new manager does not
+change this: terminal or registered-wait outcomes without physical proof remain
+unknown, preserving existing incidents; explicit failed flushes remain unhealthy.
+Local shared-process development has no controller
 certificate and conservatively retains unknown terminal finalization. Guests do
 not change. Upgrade matching manager/node versions to obtain the new evidence.
 A collector on a version-19 manager remains compatible via the helper's missing

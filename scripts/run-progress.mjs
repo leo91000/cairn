@@ -101,7 +101,11 @@ export function observeRunProgress(run, now, quietMs = 20 * 60000) {
   if (run.status === 'waiting' && finalized)
     return { status: run.validFutureWait === 1 || run.validFutureWait === true ? 'expected' : 'unknown', phase: 'waiting' }
 
-  const finalizing = p.phase === 'finalizing' || run.providerCompleted === 1 || run.providerCompleted === true
+  const failedFlush = identity(run.attemptId) && run.finalizationFailureAttempt === run.attemptId
+  if ((terminal || run.status === 'waiting') && !finalized && !failedFlush)
+    return { status: 'unknown', phase: 'finalizing', at: p.phaseAt }
+
+  const finalizing = failedFlush || p.phase === 'finalizing' || run.providerCompleted === 1 || run.providerCompleted === true
     || run.providerFailed === 1 || run.providerFailed === true || (run.terminalCode !== null && run.terminalCode !== undefined)
     || run.settledStatus != null
   if (finalizing) {
@@ -109,6 +113,8 @@ export function observeRunProgress(run, now, quietMs = 20 * 60000) {
     return { status: now - p.phaseAt > quietMs ? 'bad' : 'unknown', phase: 'finalizing', at: p.phaseAt }
   }
 
+  if (run.status !== 'running')
+    return { status: 'unknown', phase: p.phase }
   if (p.complete !== 1 && p.complete !== true)
     return { ...unknown, phase: p.phase }
   if (p.advancedAt === null)
