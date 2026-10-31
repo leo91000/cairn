@@ -36,7 +36,7 @@ struct Pool {
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-pub(crate) const DATABASE_VERSION: i64 = 22;
+pub(crate) const DATABASE_VERSION: i64 = 23;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -187,6 +187,10 @@ impl Store {
         }
         if !fresh && version == 21 {
             crate::timeline::migration::upgrade(&mut writer)?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        }
+        if !fresh && version == 22 {
+            crate::chats::migration::plan_requests(&mut writer)?;
         }
         if fresh {
             let tx = writer.transaction()?;
@@ -1539,7 +1543,7 @@ mod schema_tests {
 
     #[test]
     fn existing_other_versions_fail_without_changing_the_database() {
-        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 23, 99] {
+        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 24, 99] {
             let root = tempfile::tempdir().unwrap();
             let db = Connection::open(root.path().join("manager.db")).unwrap();
             db.pragma_update(None, "user_version", version).unwrap();

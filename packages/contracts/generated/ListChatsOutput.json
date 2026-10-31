@@ -661,6 +661,10 @@
     },
     "ChatExecution": {
       "properties": {
+        "afterPlan": {
+          "description": "The previous turn of this run was a plan turn, whose engine mode may persist.",
+          "type": "boolean"
+        },
         "attachments": {
           "default": [],
           "items": {
@@ -683,6 +687,10 @@
             "string",
             "null"
           ]
+        },
+        "plan": {
+          "description": "A plan turn: the agent explores and proposes without changing anything.",
+          "type": "boolean"
         },
         "previous": {
           "anyOf": [
@@ -739,6 +747,10 @@
         "model": {
           "default": "",
           "type": "string"
+        },
+        "plan": {
+          "description": "A plan turn request. Absent on messages saved before plan turns, which never were.",
+          "type": "boolean"
         },
         "provider": {
           "default": "",

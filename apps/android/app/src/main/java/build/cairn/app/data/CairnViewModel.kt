@@ -903,5 +903,7 @@ data class ChatDraft(
     val submissionKey: String = "",
     val provider: String = "",
     val rejected: List<RejectedAttachment> = emptyList(),
+    /** The next messages are plan turns until the user turns it off or implements a plan. */
+    val plan: Boolean = false,
     val speed: String = "",
 )

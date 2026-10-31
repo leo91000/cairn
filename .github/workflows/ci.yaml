@@ -10,6 +10,10 @@ on:
         description: Run backend tests and doctests without release resolution or image jobs
         type: boolean
         default: false
+      plan-storage-reference:
+        description: Optional full base SHA for typed Plan storage measurements and the old-version fence
+        type: string
+        default: ''
       browser-workers:
         description: Workers per browser group for performance comparisons
         type: choice
@@ -175,7 +179,7 @@ jobs:
     needs: resolve
     if: always() && !cancelled() && (inputs.backend-only == true || (needs.resolve.result == 'success' && (needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main')))
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     env:
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_INCREMENTAL: '0'
@@ -279,6 +283,29 @@ jobs:
             qualify "$served" "$resolved"
             qualify "$resolved" "$served"
           fi
+      - name: Qualify plan turns of the resolved Claude Code and Codex releases
+        # Backend-only runs resolve no engine release; full runs qualify the ones they ship.
+        if: inputs.backend-only != true
+        env:
+          CLAUDE_VERSION: ${{ needs.resolve.outputs.claude }}
+          CODEX_VERSION: ${{ needs.resolve.outputs.codex }}
+        run: |
+          # Each engine's own sandbox enforces a plan turn's boundary. The releases this build
+          # ships run one through Cairn's adapters against a local model that asks for writes,
+          # network access, escalation and subagents; none may take effect, and the turn after
+          # the plan must write again. See docs/adr/0079-plan-turns.md#qualification.
+          sudo apt-get install -y --no-install-recommends bubblewrap socat
+          # Ubuntu restricts the unprivileged user namespaces both sandboxes create.
+          if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          claude="$RUNNER_TEMP/claude-$CLAUDE_VERSION/bin/claude"
+          test "$("$claude" --version)" = "$CLAUDE_VERSION (Claude Code)"
+          npm install --global --prefix "$RUNNER_TEMP/codex-$CODEX_VERSION" "@openai/codex@$CODEX_VERSION"
+          codex="$RUNNER_TEMP/codex-$CODEX_VERSION/bin/codex"
+          test "$("$codex" --version)" = "codex-cli $CODEX_VERSION"
+          CLAUDE_NATIVE_BIN="$claude" CODEX_NATIVE_BIN="$codex" \
+            node scripts/test-backend.mjs -p cairn-installation --test native_plan_turns -- --ignored --test-threads 1
   node-checks:
     services:
       postgres:
@@ -1210,3 +1237,30 @@ jobs:
           CAIRN_RELEASE_SSH_KEY: ${{ secrets.CAIRN_RELEASE_SSH_KEY }}
           DEPLOY_INSTALLATION_IMAGE: ghcr.io/${{ github.repository_owner }}/cairn@${{ needs.resolve.outputs.digest || needs.image.outputs.digest }}
         run: node scripts/production-release.mjs verify
+
+  plan-storage:
+    name: Plan storage layout and version fence
+    if: github.event_name == 'workflow_dispatch' && inputs.plan-storage-reference != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-pnpm
+        with:
+          install: false
+      - run: rustup toolchain install 1.97.1 --profile minimal && rustup default 1.97.1
+      - name: Install compilation dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age e2fsprogs fakeroot
+      - name: Qualify two actual source revisions on synthetic databases
+        env:
+          PLAN_STORAGE_OUTPUT: ${{ runner.temp }}/plan-storage-evidence
+          PLAN_STORAGE_REFERENCE: ${{ inputs.plan-storage-reference }}
+        run: node scripts/qualify-plan-storage.mjs "$PLAN_STORAGE_REFERENCE"
+      - uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: plan-storage-qualification
+          path: ${{ runner.temp }}/plan-storage-evidence/
+          if-no-files-found: error

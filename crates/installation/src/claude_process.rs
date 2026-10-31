@@ -37,6 +37,14 @@ const CONTEXT_REPORT_WAIT: Duration = Duration::from_secs(5);
 const DENIED: &str =
     "This tool is outside the agent's access policy. Ask the user in your response.";
 
+const PLAN_DENIED: &str = "This is a plan turn: Cairn allows reading, searching and the plan file only. Include this step in your plan; the user starts implementation explicitly.";
+
+const PLAN_RECORDED: &str = "The plan was shown to the user. Stop here and summarize it briefly: the user starts implementation explicitly in a later turn.";
+
+const PLAN_MISSING: &str = "No plan reached the user: write your plan to the plan file named in the plan-mode instructions, then call ExitPlanMode again. The user starts implementation explicitly in a later turn.";
+
+const SANDBOX_UNAVAILABLE: &str = "Plan turns need Claude Code's sandbox, which is unavailable on this node (it requires bubblewrap and socat). Nothing was changed.";
+
 const SHELL_ENVIRONMENT_ERROR: &str = "Claude Code's session environment contains NUL bytes, so shell commands cannot start. Repair the affected .sh file in the Claude session-env directory, then resume this conversation to start a fresh process. The conversation and workspace have been preserved.";
 
 async fn validate_session_environment(directory: &Path, session: &str) -> Result<()> {
@@ -183,7 +191,8 @@ fn strings(value: &Value) -> impl Iterator<Item = &str> {
 
 fn settings(plan: &Value) -> Value {
     let mut settings = json!({ "attribution": { "commit": "" } });
-    if plan["sandbox"] == "yolo" {
+    let planning = plan["planning"] == true;
+    if plan["sandbox"] == "yolo" && !planning {
         return settings;
     }
     let deny_write = if plan["sandbox"] == "read-only" {
@@ -191,14 +200,26 @@ fn settings(plan: &Value) -> Value {
     } else {
         json!([])
     };
+    // A plan turn's shell reaches no network: commands such as `git push` or `gh`
+    // would otherwise act on external services.
+    let domains = if planning { json!([]) } else { json!(["*"]) };
     settings["sandbox"] = json!({
         "enabled": true,
         "failIfUnavailable": true,
         "autoAllowBashIfSandboxed": true,
         "allowUnsandboxedCommands": false,
-        "network": { "allowedDomains": ["*"] },
+        "network": { "allowedDomains": domains },
         "filesystem": { "allowWrite": plan["writableRoots"], "denyWrite": deny_write },
     });
+    if planning {
+        // Claude Code 2.1.308 otherwise lets its auto-mode classifier approve plan-mode
+        // tool calls instead of asking Cairn, including a command's own `allowed_domains`,
+        // which then reach the network. Cairn's callback decides, and no command can widen
+        // the empty allowlist.
+        settings["useAutoModeDuringPlan"] = false.into();
+        settings["permissions"] = json!({ "disableAutoMode": "disable" });
+        settings["sandbox"]["network"]["strictAllowlist"] = true.into();
+    }
     settings
 }
 
@@ -237,7 +258,10 @@ pub fn args(plan: &Value, instructions: &Path) -> Vec<String> {
     if let Some(session) = plan["sessionId"].as_str() {
         args.extend(["--resume".into(), session.into()]);
     }
-    if plan["sandbox"] == "yolo" {
+    let planning = plan["planning"] == true;
+    if planning {
+        args.extend(["--permission-mode".into(), "plan".into()]);
+    } else if plan["sandbox"] == "yolo" {
         args.push("--dangerously-skip-permissions".into());
     } else {
         args.extend(["--permission-mode".into(), "default".into()]);
@@ -250,7 +274,12 @@ pub fn args(plan: &Value, instructions: &Path) -> Vec<String> {
         .map(str::to_owned)
         .collect::<Vec<_>>();
     denied.push("AskUserQuestion".into());
-    if plan["sandbox"] == "read-only" {
+    if planning {
+        // Claude Code writes its plan file under its own state directory, so the edit
+        // tools stay available; these rules deny every workspace root before any
+        // permission mode or callback applies. The callback denies other paths.
+        denied.extend(strings(&plan["writableRoots"]).map(|root| format!("Edit(/{root}/**)")));
+    } else if plan["sandbox"] == "read-only" {
         denied.extend(["Write", "Edit", "NotebookEdit"].map(str::to_owned));
     }
     if !denied.is_empty() {
@@ -259,8 +288,9 @@ pub fn args(plan: &Value, instructions: &Path) -> Vec<String> {
     args
 }
 
-/// The chat item a Claude content block shows as.
-pub fn item(block: &Value, message: &str, index: usize) -> Option<Value> {
+/// The chat item a Claude content block shows as. `planning` is a Cairn plan turn, whose
+/// boundary Cairn enforces.
+pub fn item(block: &Value, message: &str, index: usize, planning: bool) -> Option<Value> {
     let id = if block["type"] == "tool_use" {
         text(block, "id").to_owned()
     } else {
@@ -271,6 +301,22 @@ pub fn item(block: &Value, message: &str, index: usize) -> Option<Value> {
         "thinking" => json!({ "id": id, "type": "reasoning", "text": block["thinking"] }),
         "tool_use" if matches!(text(block, "name"), "Agent" | "Task") => {
             subagent(&id, &block["input"])
+        }
+        // Claude Code fills `plan` from the plan file the model wrote; without one there is
+        // no proposal to show. Only a Cairn plan turn proposes a plan nothing has acted on:
+        // in an ordinary turn Claude's own plan mode may implement right after, so the
+        // call shows as an ordinary tool call.
+        "tool_use"
+            if planning
+                && block["name"] == "ExitPlanMode"
+                && !proposed_plan(&block["input"]).is_empty() =>
+        {
+            json!({
+                "id": id,
+                "type": "proposed_plan",
+                "text": block["input"]["plan"],
+                "status": "in_progress",
+            })
         }
         "tool_use" if block["name"] == "TodoWrite" => {
             let mut plan = crate::agent_plan::todos(&id, &block["input"]);
@@ -293,6 +339,12 @@ pub fn item(block: &Value, message: &str, index: usize) -> Option<Value> {
         }),
         _ => return None,
     })
+}
+
+/// The plan an `ExitPlanMode` call proposes: Claude Code reads it from the plan file the
+/// model wrote and adds it to the call, with `planFilePath`.
+fn proposed_plan(input: &Value) -> &str {
+    text(input, "plan").trim()
 }
 
 /// A subagent the agent delegates work to, followed until it reports back.
@@ -343,6 +395,8 @@ struct Receipt {
     delivered: Vec<String>,
     text: String,
     item_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    proposals: Vec<Value>,
 }
 
 impl Receipt {
@@ -360,6 +414,16 @@ impl Receipt {
             emit(events, delivered(id)).await?;
         }
         atomic_write(Path::new(text(plan, "output")), self.text.as_bytes()).await?;
+        // Old single-request receipts have an unambiguous boundary. With several
+        // delivered requests, an old receipt cannot establish when each plan was authored.
+        let legacy_request = (self.delivered.len() == 1 && self.delivered[0] == self.message_id)
+            .then_some(self.message_id.as_str());
+        for mut item in self.proposals {
+            if item.get("request_id").is_none() {
+                item["request_id"] = json!(legacy_request);
+            }
+            emit(events, json!({ "type": "item.completed", "item": item })).await?;
+        }
         let item = json!({ "id": self.item_id, "type": "agent_message", "text": self.text });
         emit(events, json!({ "type": "item.completed", "item": item })).await?;
         emit(events, json!({ "type": "turn.completed" })).await
@@ -431,6 +495,8 @@ struct Turn<'a> {
     stdin: ChildStdin,
     inbox: &'a Path,
     receipt: PathBuf,
+    /// Where Claude Code keeps plan files, the only writable path of a plan turn.
+    plans: PathBuf,
     /// The durable chat ID of the request.
     initial_id: &'a str,
     /// The ID Claude Code knows the request by.
@@ -438,6 +504,10 @@ struct Turn<'a> {
     submitted: HashSet<String>,
     operational_notices: HashSet<String>,
     delivered: HashSet<String>,
+    /// Receipt acknowledgements must retain delivery order when manager history was lost.
+    delivery_order: Vec<String>,
+    /// Last acknowledged human request at the point an approach is completed.
+    proposal_request: Option<String>,
     /// Submitted messages whose turn has not produced a result yet.
     pending: HashSet<String>,
     /// Submitted messages Claude Code has echoed back.
@@ -471,6 +541,8 @@ struct Turn<'a> {
     stream_message: String,
     last: String,
     last_id: String,
+    /// Completed plan artifacts, including their actor scope, replayed after a restart.
+    proposals: Vec<Value>,
     /// Background tasks that keep the run open, with their descriptions.
     background: BTreeMap<String, String>,
     awaiting_background: HashSet<String>,
@@ -521,6 +593,8 @@ impl Turn<'_> {
             return Ok(());
         }
         if self.delivered.insert(id.to_owned()) {
+            self.delivery_order.push(id.to_owned());
+            self.proposal_request = Some(id.to_owned());
             self.emit(delivered(id)).await?;
         }
         Ok(())
@@ -690,7 +764,7 @@ impl Turn<'_> {
             if message["operationalNotice"] == true {
                 self.operational_notices.insert(id.to_owned());
             }
-            if self.submitted.contains(id) {
+            if self.submitted.contains(id) || !crate::chat_inbox::joins_turn(&message, self.plan) {
                 continue;
             }
             if message["questionCancelled"] == true {
@@ -904,6 +978,15 @@ impl Turn<'_> {
                 self.subagent_result(item, block, outcome).await?;
                 continue;
             }
+            if item["type"] == "proposed_plan" {
+                // Cairn declines to leave plan mode; the plan itself is complete.
+                item["status"] = "completed".into();
+                item["request_id"] = json!(self.proposal_request);
+                self.proposals.push(item.clone());
+                self.emit(json!({ "type": "item.completed", "item": item }))
+                    .await?;
+                continue;
+            }
             let environment_failed = shell_environment_failed(&item, block);
             let status = if block["is_error"] == true {
                 "failed"
@@ -995,7 +1078,8 @@ impl Turn<'_> {
             let next = self.blocks.entry(message.clone()).or_insert(0);
             let index = *next;
             *next += 1;
-            let Some(mut item) = item(block, &message, index) else {
+            let planning = self.plan["planning"] == true;
+            let Some(mut item) = item(block, &message, index, planning) else {
                 continue;
             };
             if let Some(parent) = &parent {
@@ -1274,7 +1358,12 @@ impl Turn<'_> {
                 self.streams.clear();
             }
             "content_block_start" => {
-                let Some(item) = item(&event["content_block"], &self.stream_message, index) else {
+                let Some(item) = item(
+                    &event["content_block"],
+                    &self.stream_message,
+                    index,
+                    self.plan["planning"] == true,
+                ) else {
                     return Ok(());
                 };
                 if !["agent_message", "reasoning"].contains(&text(&item, "type")) {
@@ -1321,10 +1410,26 @@ impl Turn<'_> {
             )
             .await;
         }
-        let allowed =
-            can_use_tool && allowed_tool(self.plan, text(request, "tool_name"), &request["input"]);
+        let name = text(request, "tool_name");
+        let planning = self.plan["planning"] == true;
+        let allowed = can_use_tool
+            && if planning {
+                plan_tool(self.plan, &self.plans, name, &request["input"])
+            } else {
+                allowed_tool(self.plan, name, &request["input"])
+            };
         let response = if allowed {
             json!({ "behavior": "allow", "updatedInput": request["input"] })
+        } else if planning && name == "ExitPlanMode" {
+            // Approving would let Claude Code implement in this same turn.
+            let message = if proposed_plan(&request["input"]).is_empty() {
+                PLAN_MISSING
+            } else {
+                PLAN_RECORDED
+            };
+            json!({ "behavior": "deny", "message": message })
+        } else if planning {
+            json!({ "behavior": "deny", "message": PLAN_DENIED })
         } else {
             json!({ "behavior": "deny", "message": DENIED })
         };
@@ -1430,9 +1535,10 @@ impl Turn<'_> {
         if !compacting(self.plan) {
             let receipt = Receipt {
                 message_id: self.initial_id.into(),
-                delivered: self.delivered.iter().cloned().collect(),
+                delivered: self.delivery_order.clone(),
                 text: self.last.clone(),
                 item_id: self.last_id.clone(),
+                proposals: self.proposals.clone(),
             };
             // Save the receipt before completion so restart cannot repeat a finished request.
             atomic_write(&self.receipt, &serde_json::to_vec(&receipt)?).await?;
@@ -1579,8 +1685,22 @@ pub async fn run(
     let stdin = child.stdin.take().unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
     let mut stderr = child.stderr.take().unwrap();
-    let drain = tokio::spawn(async move {
-        let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
+    // Only a fixed sandbox failure is recognized; diagnostics are never reported.
+    let mut drain = tokio::spawn(async move {
+        const NEEDLE: &[u8] = b"sandbox required but unavailable";
+        let mut chunk = [0; 8192];
+        let mut window = Vec::new();
+        let mut sandbox_unavailable = false;
+        while let Ok(count) = stderr.read(&mut chunk).await
+            && count > 0
+        {
+            window.extend_from_slice(&chunk[..count]);
+            sandbox_unavailable |= window.windows(NEEDLE.len()).any(|bytes| bytes == NEEDLE);
+            // Keep only enough bytes to match a phrase split across reads.
+            let keep = window.len().saturating_sub(NEEDLE.len());
+            window.drain(..keep);
+        }
+        sandbox_unavailable
     });
     let mut turn = Turn {
         plan: &plan,
@@ -1588,11 +1708,14 @@ pub async fn run(
         stdin,
         inbox,
         receipt,
+        plans: directory.join("plans"),
         initial_id,
         wire_id,
         submitted: HashSet::from([initial_id.to_owned()]),
         operational_notices: HashSet::new(),
         delivered: HashSet::new(),
+        delivery_order: Vec::new(),
+        proposal_request: None,
         pending: HashSet::from([initial_id.to_owned()]),
         consumed: HashSet::new(),
         tools: HashMap::new(),
@@ -1610,6 +1733,7 @@ pub async fn run(
         stream_message: String::new(),
         last: String::new(),
         last_id: format!("{initial_id}-result"),
+        proposals: Vec::new(),
         background: BTreeMap::new(),
         awaiting_background: HashSet::new(),
         background_replayed: false,
@@ -1629,8 +1753,16 @@ pub async fn run(
     // Closes Claude Code's stdin.
     drop(turn);
     stop(&mut child, pid).await;
-    drain.abort();
-    let _ = drain.await;
+    let sandbox_unavailable = match tokio::time::timeout(Duration::from_secs(1), &mut drain).await {
+        Ok(result) => result.unwrap_or(false),
+        Err(_) => {
+            drain.abort();
+            false
+        }
+    };
+    if operation.is_err() && sandbox_unavailable {
+        return Err(Error::unavailable(SANDBOX_UNAVAILABLE));
+    }
     operation
 }
 
@@ -1674,6 +1806,34 @@ fn allowed_tool(plan: &Value, name: &str, input: &Value) -> bool {
         return false;
     };
     strings(&plan["writableRoots"]).any(|root| path.starts_with(root))
+}
+
+/// The callback of a plan turn: reading, searching, the sandboxed shell, MCP tools
+/// already restricted to read-only ones, and Claude Code's own plan file.
+fn plan_tool(plan: &Value, plans: &Path, name: &str, input: &Value) -> bool {
+    match name {
+        "Read" | "Glob" | "Grep" | "WebSearch" | "WebFetch" | "TodoWrite" => true,
+        // The shell runs in the read-only sandbox without network, never outside it, and
+        // a command cannot widen the network allowlist for itself.
+        "Bash" => {
+            input["dangerouslyDisableSandbox"] != true && input.get("allowed_domains").is_none()
+        }
+        "Write" | "Edit" | "NotebookEdit" => {
+            let key = if name == "NotebookEdit" {
+                "notebook_path"
+            } else {
+                "file_path"
+            };
+            let plans = std::fs::canonicalize(plans).unwrap_or_else(|_| plans.to_owned());
+            resolved(Path::new(text(input, key))).is_some_and(|path| path.starts_with(plans))
+        }
+        _ if name.starts_with("mcp__") => strings(&plan["claudePlanTools"]).any(|allowed| {
+            allowed
+                .strip_suffix('*')
+                .map_or(allowed == name, |prefix| name.starts_with(prefix))
+        }),
+        _ => false,
+    }
 }
 
 /// `path` with its symlinks resolved, or its parent's when the file does not exist yet.

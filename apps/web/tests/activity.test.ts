@@ -5,6 +5,7 @@ import corpus from '../../../tests/fixtures/timeline-corpus.json'
 import {
   activityEntries,
   ActivityGroups,
+  proposedPlanApproval,
   teamEntries,
 } from '../src/activity'
 
@@ -25,6 +26,52 @@ function shown(run: CorpusRun) {
 }
 
 describe('conversation activity', () => {
+  it('binds proposal approval to the server card when delivery events are only markers', () => {
+    const user = codex.entries.find(card => card.content.kind === 'userMessage')!
+    if (user.content.kind !== 'userMessage')
+      throw new Error('Missing fixture user card')
+    const card: TimelineEntry = {
+      ...user,
+      source: 10,
+      position: 10,
+      revision: 10,
+      content: { ...user.content, messageId: 'clarified', plan: true },
+    }
+    const proposal: RunEvent = {
+      id: 11,
+      runId: 'chat',
+      createdAt: 11,
+      type: 'item.completed',
+      text: '',
+      payload: {
+        item: {
+          id: 'plan',
+          type: 'proposed_plan',
+          text: 'Approach',
+          request_id: 'original',
+        },
+      },
+    }
+    const marker: RunEvent = {
+      id: 10,
+      runId: 'chat',
+      createdAt: 10,
+      type: 'chat.user',
+      text: '',
+      timeline: true,
+    }
+    expect(proposedPlanApproval([marker, proposal], [card])).toBeUndefined()
+    proposal.payload = {
+      item: {
+        id: 'plan',
+        type: 'proposed_plan',
+        text: 'Revised approach',
+        request_id: 'clarified',
+      },
+    }
+    expect(proposedPlanApproval([marker, proposal], [card])).toBe('chat:11')
+  })
+
   it('presents the server’s messages and failure cards in place among the tools', () => {
     expect(shown(codex)).toEqual([
       'user: Fix the build',
@@ -64,6 +111,207 @@ describe('conversation activity', () => {
     expect(diagnostic.raw).toBe(diagnostic.blocks[0]!.code)
     // Covered events never render twice: no lifecycle event shows as a tool step.
     expect(feed(codex, false).flatMap(entry => entry.kind === 'group' ? entry.artifacts : []).filter(item => item.kind !== 'notice')).toHaveLength(1)
+  })
+  it('marks plan requests and shows each proposed plan once, apart from replies', () => {
+    let id = 0
+    const event = (type: string, payload: Record<string, unknown>): RunEvent => ({
+      id: ++id,
+      runId: 'chat',
+      createdAt: id,
+      type,
+      text: '',
+      payload,
+    })
+    const proposal = (type: string, text: string) => event(type, {
+      item: {
+        id: 'exit-plan-tool',
+        type: 'proposed_plan',
+        text,
+        status: type === 'item.started' ? 'in_progress' : 'completed',
+      },
+    })
+    const planEvents = [
+      event('chat.user', { messageId: 'plan', text: 'Plan the composer change', plan: true }),
+      proposal('item.started', '1. Read'),
+      proposal('item.completed', '1. Read\n2. Change'),
+      event('item.completed', { item: { id: 'reply', type: 'agent_message', text: 'Plan ready for review' } }),
+      event('chat.user', { messageId: 'implement', text: 'Implement the plan you proposed.' }),
+    ]
+    const cards: TimelineEntry[] = planEvents.flatMap((event) => {
+      const item = event.payload?.item as Record<string, unknown> | undefined
+      if (event.type !== 'chat.user' && item?.type !== 'agent_message')
+        return []
+      const user = event.type === 'chat.user'
+      return [{
+        id: user ? `user:${event.id}` : `reply:${event.id}`,
+        runId: event.runId,
+        position: event.id,
+        revision: event.id,
+        source: event.id,
+        turn: 0,
+        attempt: 0,
+        createdAt: event.createdAt,
+        updatedAt: event.createdAt,
+        content: user
+          ? {
+              kind: 'userMessage' as const,
+              text: String(event.payload?.text ?? ''),
+              sentAt: event.createdAt,
+              attachments: [],
+              ...(event.payload?.plan === true ? { plan: true } : {}),
+            }
+          : {
+              kind: 'agentMessage' as const,
+              itemId: String(item?.id),
+              text: String(item?.text),
+              state: 'done' as const,
+            },
+      }]
+    })
+    const entries = activityEntries(planEvents.map(event => event.type === 'chat.user' || (event.payload?.item as Record<string, unknown> | undefined)?.type === 'agent_message'
+      ? {
+          ...event,
+          timeline: true,
+          text: '',
+          payload: undefined,
+        }
+      : event), true, undefined, undefined, cards)
+    expect(entries.map(entry => entry.kind)).toEqual(['message', 'proposal', 'message', 'message'])
+    expect(entries[0]).toMatchObject({ role: 'user', plan: true })
+    expect(entries[1]).toMatchObject({ kind: 'proposal', text: '1. Read\n2. Change' })
+    // Older events and ordinary requests carry no plan marker.
+    expect(entries[3]).not.toHaveProperty('plan')
+  })
+  it('keeps proposal approval identity exclusive to its completed lifecycle event', () => {
+    const event = (id: number, type: string, text: string): RunEvent => ({
+      id,
+      runId: 'run',
+      createdAt: id,
+      type,
+      text: '',
+      payload: { item: { id: 'proposal', type: 'proposed_plan', text } },
+    })
+    const started = event(1, 'item.started', 'Partial design')
+    expect(activityEntries([started], true)[0]).toMatchObject({ kind: 'proposal', text: 'Partial design' })
+    expect(activityEntries([started], true)[0]).not.toHaveProperty('sourceId', 'run:1')
+    const completed = event(2, 'item.completed', 'Reviewed complete design')
+    expect(activityEntries([started, completed], true)[0]).toMatchObject({ kind: 'proposal', sourceId: 'run:2', text: 'Reviewed complete design' })
+    const reopened = event(3, 'item.started', 'Revising design')
+    expect(activityEntries([started, completed, reopened], true)[0]).not.toHaveProperty('sourceId', 'run:2')
+  })
+  it('invalidates approval on an empty root lifecycle and restores it only on completion', () => {
+    const proposal = (id: number, type: string, name: string, content: string): RunEvent => ({
+      id,
+      runId: 'run',
+      createdAt: id,
+      type,
+      text: '',
+      payload: { item: { id: name, type: 'proposed_plan', text: content } },
+    })
+    const completed = proposal(10, 'item.completed', 'old', 'Reviewed')
+    for (const name of ['old', 'new']) {
+      const empty = proposal(11, 'item.started', name, '')
+      expect(proposedPlanApproval([completed, empty])).toBeUndefined()
+      const finished = proposal(12, 'item.completed', name, 'Updated approach')
+      expect(proposedPlanApproval([completed, empty, finished])).toBe('run:12')
+    }
+  })
+  it('does not renew an authored request boundary when a proposal is replayed', () => {
+    const user = (id: number, messageId: string): RunEvent => ({
+      id,
+      runId: 'run',
+      createdAt: id,
+      type: 'chat.user',
+      text: '',
+      payload: { messageId },
+    })
+    const proposal = (id: number, requestId: string | null): RunEvent => ({
+      id,
+      runId: 'run',
+      createdAt: id,
+      type: 'item.completed',
+      text: '',
+      payload: {
+        item: {
+          id: 'plan',
+          type: 'proposed_plan',
+          text: 'Approach',
+          request_id: requestId,
+        },
+      },
+    })
+    const initial = user(1, 'request-a')
+    const completed = proposal(2, 'request-a')
+    const clarification = user(3, 'request-b')
+    expect(proposedPlanApproval([initial, completed])).toBe('run:2')
+    expect(proposedPlanApproval([initial, completed, clarification, proposal(4, 'request-a')])).toBeUndefined()
+    expect(proposedPlanApproval([clarification, proposal(4, 'request-a')])).toBeUndefined()
+    expect(proposedPlanApproval([proposal(4, null)])).toBeUndefined()
+    expect(proposedPlanApproval([clarification, proposal(5, 'request-b')])).toBe('run:5')
+    expect(proposedPlanApproval([proposal(5, 'request-b')])).toBe('run:5')
+  })
+  it('approves completion after steering independently of display anchoring and page loading', () => {
+    const started: RunEvent = {
+      id: 10,
+      runId: 'run',
+      createdAt: 10,
+      type: 'item.started',
+      text: '',
+      payload: { item: { id: 'plan', type: 'proposed_plan', text: 'Draft' } },
+    }
+    const steering: RunEvent = {
+      id: 11,
+      runId: 'run',
+      createdAt: 11,
+      type: 'chat.user',
+      text: 'Clarification',
+    }
+    const completed: RunEvent = {
+      ...started,
+      id: 12,
+      createdAt: 12,
+      type: 'item.completed',
+      payload: { item: { id: 'plan', type: 'proposed_plan', text: 'Clarified plan' } },
+    }
+    expect(proposedPlanApproval([steering, completed])).toBe('run:12')
+    expect(proposedPlanApproval([started, steering, completed])).toBe('run:12')
+    expect(proposedPlanApproval([started, steering, completed, { ...steering, id: 13 }])).toBeUndefined()
+  })
+  it.each([false, true])('keeps subagent proposals attributed when they follow the parent proposal=%s', (childLast) => {
+    const event = (id: number, item: Record<string, unknown>): RunEvent => ({
+      id,
+      runId: 'chat',
+      createdAt: id,
+      type: 'item.completed',
+      text: '',
+      payload: { item },
+    })
+    const parent = { id: 'plan', type: 'proposed_plan', text: 'Parent approach' }
+    const child = {
+      id: 'plan',
+      type: 'proposed_plan',
+      parent_id: 'child',
+      text: 'Partial child approach',
+    }
+    const entries = activityEntries([
+      event(1, {
+        id: 'child',
+        type: 'subagent',
+        name: 'Research',
+        status: 'completed',
+      }),
+      event(2, childLast ? parent : child),
+      event(3, childLast ? child : parent),
+    ], true)
+    expect(entries.filter(entry => entry.kind === 'proposal')).toMatchObject([{ text: 'Parent approach' }])
+    const team = entries.find(entry => entry.kind === 'team')
+    expect(team?.kind === 'team' && team.agents[0]?.subagent?.steps).toMatchObject([
+      { title: 'Subagent proposed plan', blocks: [{ code: 'Partial child approach' }] },
+    ])
+    // A paginated window may omit the spawning event; it still must not grant approval.
+    const orphan = activityEntries([event(4, child)], true)
+    expect(orphan.some(entry => entry.kind === 'proposal')).toBe(false)
+    expect(JSON.stringify(orphan)).toContain('Partial child approach')
   })
 
   it('shows a message at the time the person sent it', () => {

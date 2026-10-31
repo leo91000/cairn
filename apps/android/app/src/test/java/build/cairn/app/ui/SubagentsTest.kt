@@ -5,6 +5,7 @@ import build.cairn.app.data.RunEvent
 import kotlinx.serialization.json.*
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -81,6 +82,141 @@ class SubagentsTest {
 
     private fun Subagent.commands() = steps.map {
         (it as SubagentStep.Action).activity.command to it.activity.state
+    }
+
+    @Test
+    fun `proposal approval keeps the completed source separate from its presentation key`() {
+        fun proposed(kind: String, text: String, parent: String? = null) =
+            item(kind) {
+                put("id", "plan")
+                put("type", "proposed_plan")
+                put("text", text)
+                if (parent != null) put("parent_id", parent)
+            }
+        val started = proposed("item.started", "Draft approach")
+        val completed = proposed("item.completed", "Reviewed approach")
+        val replay = completed.copy(id = ++serial)
+        val child = proposed("item.completed", "Child approach", "Research")
+        val initial = timelineEntries(listOf(started), chat = true).single { it.proposal }
+        assertNull(initial.proposalSourceId)
+        val paired = timelineEntries(listOf(started, completed), chat = true).single { it.proposal }
+        assertEquals(initial.key, paired.key)
+        assertEquals(started.id, paired.events.single().id)
+        assertEquals("run:${completed.id}", paired.proposalSourceId)
+        assertEquals(listOf(started.id, completed.id), paired.sourceIds.getValue(started.id))
+        // Reopened history may start at the completion; a receipt can replay it later.
+        val reopened = timelineEntries(listOf(completed), chat = true).single { it.proposal }
+        assertEquals(paired.proposalSourceId, reopened.proposalSourceId)
+        val replayed =
+            timelineEntries(listOf(started, completed, replay, child), chat = true).single {
+                it.proposal
+            }
+        assertEquals(initial.key, replayed.key)
+        assertEquals("run:${replay.id}", replayed.proposalSourceId)
+        assertEquals(
+            listOf(started.id, completed.id, replay.id),
+            replayed.sourceIds.getValue(started.id),
+        )
+    }
+
+    @Test
+    fun `proposal replay preserves its authored request boundary`() {
+        val initial = user("request-a")
+        fun proposal(request: String?) =
+            item("item.completed") {
+                put("id", "plan")
+                put("type", "proposed_plan")
+                put("text", "Approach")
+                put("request_id", request?.let(::JsonPrimitive) ?: JsonNull)
+            }
+        val completed = proposal("request-a")
+        assertEquals("run:${completed.id}", proposedPlanApproval(listOf(initial, completed)))
+        val clarification = user("request-b")
+        val replay = proposal("request-a")
+        assertNull(proposedPlanApproval(listOf(initial, completed, clarification, replay)))
+        assertNull(proposedPlanApproval(listOf(clarification, replay)))
+        assertNull(proposedPlanApproval(listOf(proposal(null))))
+        val revised = proposal("request-b")
+        assertEquals("run:${revised.id}", proposedPlanApproval(listOf(clarification, revised)))
+        assertEquals("run:${revised.id}", proposedPlanApproval(listOf(revised)))
+    }
+
+    @Test
+    fun `proposal approval follows completed event order across steering and older pages`() {
+        val started =
+            item("item.started") {
+                put("id", "plan")
+                put("type", "proposed_plan")
+                put("text", "Draft")
+            }
+        val steering = user("Clarify the approach")
+        val completed =
+            item("item.completed") {
+                put("id", "plan")
+                put("type", "proposed_plan")
+                put("text", "Clarified approach")
+            }
+        assertEquals("run:${completed.id}", proposedPlanApproval(listOf(steering, completed)))
+        assertEquals(
+            "run:${completed.id}",
+            proposedPlanApproval(listOf(started, steering, completed)),
+        )
+        assertEquals(
+            started.id,
+            timelineEntries(listOf(started, steering, completed), chat = true)
+                .first { it.proposal }
+                .events
+                .single()
+                .id,
+        )
+        val empty =
+            item("item.started") {
+                put("id", "new-plan")
+                put("type", "proposed_plan")
+                put("text", "")
+            }
+        assertNull(proposedPlanApproval(listOf(started, steering, completed, empty)))
+        assertNull(
+            proposedPlanApproval(listOf(started, steering, completed, user("Later request")))
+        )
+    }
+
+    @Test
+    fun `child proposals remain activity rather than conversation approval`() {
+        fun proposal(parent: String?) =
+            item("item.completed") {
+                put("id", "plan")
+                put("type", "proposed_plan")
+                put("text", if (parent == null) "Parent approach" else "Partial child approach")
+                if (parent != null) put("parent_id", parent)
+            }
+        for (childLast in listOf(false, true)) {
+            val own = proposal(null)
+            val child = proposal("Research")
+            val timeline =
+                timelineEntries(
+                    listOf(
+                        subagent("item.started", "Research"),
+                        if (childLast) own else child,
+                        if (childLast) child else own,
+                    ),
+                    chat = true,
+                )
+            assertEquals(listOf(own), timeline.filter { it.proposal }.flatMap { it.events })
+            val step = timeline.flatMap { it.agents }.single().steps.single() as SubagentStep.Action
+            assertEquals("Partial child approach", step.activity.output)
+            // Pagination may omit the spawning event, but cannot promote a child.
+            val orphan = timelineEntries(listOf(child), chat = true)
+            assertFalse(orphan.any { it.proposal })
+            assertEquals("Partial child approach", presentActivity(child).output)
+            val paginated =
+                timelineEntries(
+                    if (childLast) listOf(own, child) else listOf(child, own),
+                    chat = true,
+                )
+            assertEquals(listOf(own), paginated.filter { it.proposal }.flatMap { it.events })
+            assertEquals(listOf(child), paginated.filterNot { it.proposal }.flatMap { it.events })
+        }
     }
 
     @Test

@@ -1,3 +1,4 @@
+import { Buffer } from 'node:buffer'
 import { readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { connectClaude, limits, seedCodexAccount } from './accounts'
@@ -46,8 +47,18 @@ test.afterEach(async ({ workspace }) => {
   }
 
   for (const run of workspace.service.store.runs()) {
-    if (!existingRunIds.has(run.id) && ['queued', 'running', 'waiting'].includes(run.status))
-      await workspace.api(`/api/runs/${run.id}/cancel`, 'POST')
+    if (!existingRunIds.has(run.id) && ['queued', 'running', 'waiting'].includes(run.status)) {
+      try {
+        await workspace.api(`/api/runs/${run.id}/cancel`, 'POST')
+      }
+      catch (error) {
+        // A background request can finish between the snapshot and cancellation.
+        // Accept only that explicit refusal, with a durably terminal run.
+        if (!(error instanceof Error) || !error.message.includes('This run has already finished.'))
+          throw error
+        expect(['succeeded', 'failed', 'cancelled', 'interrupted']).toContain(workspace.service.store.run(run.id)?.status)
+      }
+    }
   }
 
   await expect.poll(async () => {
@@ -617,6 +628,218 @@ test('Claude default names follow available metadata without pinning the model',
   expect(saved).toMatchObject({ provider: 'claude', model: '', reasoning: '' })
 })
 
+test('plan drafts keep their mode across conversation switches and reloads', async ({ page, workspace }) => {
+  test.setTimeout(120000)
+  await connectClaude(workspace, 'Draft restoration', 'fixture-code:plan-drafts@example.test')
+  const first = await workspace.api('/api/chats', 'POST', {})
+  const second = await workspace.api('/api/chats', 'POST', {})
+  for (const [chat, text] of [[first, 'Plan draft conversation'], [second, 'Ordinary draft conversation']] as const) {
+    await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: crypto.randomUUID(), text, provider: 'claude' })
+    await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 30000 }).toBe('succeeded')
+    await workspace.api(`/api/chats/${chat.id}/pause`, 'POST', { paused: true })
+  }
+
+  await page.goto(workspacePath(`/chats/${first.slug}`))
+  await authenticateWorkspace(page)
+  const message = page.getByRole('textbox', { name: 'Message' })
+  const toggle = page.getByRole('button', { name: 'Plan first' })
+  const fil = page.getByRole('complementary', { name: 'Fil' })
+  await expect(page.getByRole('button', { name: /^Agent, model, reasoning and speed/ })).toHaveAccessibleName('Agent, model, reasoning and speed: Claude Code · Opus Fixture (1M context) · Medium reasoning')
+  await toggle.click()
+  await expect(toggle).toHaveAttribute('aria-pressed', 'true')
+  await message.fill('Inspect the saved Plan draft')
+  await fil.locator(`[data-fil-key="chat:${second.id}"]`).click()
+  await expect(message).toHaveValue('')
+  await expect(toggle).toHaveAttribute('aria-pressed', 'false')
+  await message.fill('Implement the separate ordinary draft')
+  await fil.locator(`[data-fil-key="chat:${first.id}"]`).click()
+  await expect(message).toHaveValue('Inspect the saved Plan draft')
+  await expect(toggle).toHaveAttribute('aria-pressed', 'true')
+  await page.reload()
+  await expect(message).toHaveValue('Inspect the saved Plan draft')
+  await expect(toggle).toHaveAttribute('aria-pressed', 'true')
+  await page.getByRole('button', { name: 'Queue', exact: true }).click()
+  await expect.poll(async () => (await workspace.api(`/api/chats/${first.id}`)).messages.find((m: { text: string }) => m.text === 'Inspect the saved Plan draft')?.plan).toBe(true)
+  await fil.locator(`[data-fil-key="chat:${second.id}"]`).click()
+  await expect(message).toHaveValue('Implement the separate ordinary draft')
+  await expect(toggle).toHaveAttribute('aria-pressed', 'false')
+  await page.reload()
+  await expect(message).toHaveValue('Implement the separate ordinary draft')
+  await expect(toggle).toHaveAttribute('aria-pressed', 'false')
+  await page.getByRole('button', { name: 'Queue', exact: true }).click()
+  await expect.poll(async () => (await workspace.api(`/api/chats/${second.id}`)).messages.find((m: { text: string }) => m.text === 'Implement the separate ordinary draft')).toMatchObject({ text: 'Implement the separate ordinary draft' })
+  const ordinary = (await workspace.api(`/api/chats/${second.id}`)).messages.find((m: { text: string }) => m.text === 'Implement the separate ordinary draft')
+  expect(ordinary.plan).not.toBe(true)
+})
+
+test('a Plan draft never becomes ordinary when its engine resolves to OpenCode', async ({ page, workspace }) => {
+  test.setTimeout(120000)
+  await workspace.api('/api/accounts', 'POST', {
+    provider: 'opencode',
+    name: 'Plan intent control',
+    modelProvider: 'opencode',
+    apiKey: 'synthetic-plan-intent-key',
+  })
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  const initial = crypto.randomUUID()
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
+    id: initial,
+    text: 'Ordinary OpenCode control',
+    provider: 'opencode',
+    model: 'opencode/ling-3.1-flash-free',
+  })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 30000 }).toBe('succeeded')
+  await workspace.api(`/api/chats/${chat.id}/pause`, 'POST', { paused: true })
+  await useRelayForHttpMocks(page)
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  const picker = page.getByRole('button', { name: /^Agent, model, reasoning and speed:/ })
+  const choose = async (provider: string) => {
+    await picker.click()
+    const menu = page.getByRole('dialog', { name: 'Agent & model' })
+    await menu.getByRole('radio', { name: provider, exact: true }).click()
+    await menu.getByRole('button', { name: 'Close', exact: true }).click()
+  }
+
+  await expect(picker).toHaveAccessibleName(/OpenCode/)
+  await choose('Codex')
+  const toggle = page.getByRole('button', { name: 'Plan first' })
+  const message = page.getByRole('textbox', { name: 'Message' })
+  await toggle.click()
+  await message.fill('Keep this request read-only')
+  await page.reload()
+  await expect(picker).toHaveAccessibleName(/OpenCode/)
+  await expect(message).toHaveValue('Keep this request read-only')
+  const attempt = page.waitForRequest(request => request.method() === 'POST' && request.url().endsWith(`/chats/${chat.id}/messages`), { timeout: 1000 }).catch(() => null)
+  await message.press('Control+Enter')
+  const submitted = await attempt
+  expect(submitted?.postDataJSON() ?? null).toBeNull()
+  await expect(toggle).toHaveAttribute('aria-pressed', 'true')
+  await expect(page.getByTestId('plan-unavailable')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Queue', exact: true })).toBeDisabled()
+  expect((await workspace.api(`/api/chats/${chat.id}`)).run.chatExecution.messageId).toBe(initial)
+  await choose('Codex')
+  await expect(toggle).toHaveAttribute('aria-pressed', 'true')
+  await page.getByRole('button', { name: 'Queue', exact: true }).click()
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).messages.find((m: { text: string }) => m.text === 'Keep this request read-only')?.plan).toBe(true)
+  await message.fill('Only run ordinarily after I turn Plan off')
+  await choose('OpenCode')
+  await expect(toggle).toHaveAttribute('aria-pressed', 'true')
+  await expect(page.getByRole('button', { name: 'Queue', exact: true })).toBeDisabled()
+  await toggle.click()
+  await expect(toggle).toHaveAttribute('aria-pressed', 'false')
+  await page.getByRole('button', { name: 'Queue', exact: true }).click()
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).messages.find((m: { text: string }) => m.text === 'Only run ordinarily after I turn Plan off')).toMatchObject({ provider: 'opencode' })
+  const ordinary = (await workspace.api(`/api/chats/${chat.id}`)).messages.find((m: { text: string }) => m.text === 'Only run ordinarily after I turn Plan off')
+  expect(ordinary.plan).not.toBe(true)
+})
+
+test('a plan turn proposes without changes and Implement continues the same chat', async ({ page, workspace }, testInfo) => {
+  test.setTimeout(120000)
+  // This scenario orders competing requests at the HTTP acceptance boundary.
+  await useRelayForHttpMocks(page)
+  if (!(await workspace.api('/api/accounts')).accounts.some((a: { provider: string }) => a.provider === 'claude'))
+    expect((await connectClaude(workspace)).state).toBe('complete')
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: crypto.randomUUID(), text: 'Inspect this workspace', provider: 'claude' })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 30000 }).toBe('succeeded')
+  const conversation = (await workspace.api(`/api/chats/${chat.id}`)).run.id
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+
+  const toggle = page.getByRole('button', { name: 'Plan first' })
+  await toggle.click()
+  await expect(toggle).toHaveAttribute('aria-pressed', 'true')
+  await page.getByRole('textbox', { name: 'Message' }).fill('fixture:plan-turn Plan the composer change')
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  const proposal = page.getByTestId('proposed-plan')
+  await expect(proposal).toContainText('Change main.rs', { timeout: 30000 })
+  await expect(page.locator('.user-bubble').filter({ hasText: 'fixture:plan-turn' }).getByText('Plan', { exact: true })).toBeVisible()
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 30000 }).toBe('succeeded')
+  expect((await workspace.api(`/api/chats/${chat.id}`)).run.chatExecution.plan).toBe(true)
+  // A later native child proposal is activity, never a second approval target.
+  workspace.service.store.event(conversation, 'item.completed', '', {
+    item: {
+      id: 'plan-child',
+      type: 'subagent',
+      name: 'Research',
+      status: 'completed',
+    },
+  })
+  workspace.service.store.event(conversation, 'item.completed', '', {
+    item: {
+      id: 'child-plan',
+      parent_id: 'plan-child',
+      type: 'proposed_plan',
+      text: 'Partial child approach',
+    },
+  })
+  await page.reload()
+  await page.getByTestId('subagent-team').getByRole('button', { name: /1 subagent/ }).click()
+  await expect(page.getByTestId('subagent-team')).toContainText('Research')
+  await expect(proposal).toHaveCount(1)
+  await expect(proposal).toContainText('Change main.rs')
+  await expect(proposal).not.toContainText('Partial child approach')
+  await page.screenshot({ path: testInfo.outputPath('plan-turn-web.png'), animations: 'disabled' })
+
+  // A queued revision must be reviewed before an ordinary implementation can follow it.
+  await workspace.api(`/api/chats/${chat.id}/pause`, 'POST', { paused: true })
+  const revision = crypto.randomUUID()
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
+    id: revision,
+    text: 'fixture:plan-turn Revise the approach before implementation',
+    provider: 'claude',
+    plan: true,
+  })
+  await page.reload()
+  await expect(proposal.getByRole('button', { name: 'Implement' })).toBeDisabled()
+  await workspace.api(`/api/chats/${chat.id}/messages/${revision}`, 'DELETE')
+  await workspace.api(`/api/chats/${chat.id}/pause`, 'POST', { paused: false })
+  await page.reload()
+  await expect(proposal.getByRole('button', { name: 'Implement' })).toBeEnabled()
+
+  // B reaches the manager after A captured its card, but before A's approval POST.
+  await expect(page.getByRole('status', { name: 'Connection route' })).toHaveAttribute('data-transport-route', 'relay')
+  // A client refetch cannot close this interleaving: the manager must reject it.
+  await workspace.api(`/api/chats/${chat.id}/pause`, 'POST', { paused: true })
+  await page.reload()
+  await expect(proposal.getByRole('button', { name: 'Implement' })).toBeEnabled()
+  const concurrentRevision = crypto.randomUUID()
+  let interceptedApproval: { sourceId: string, revision: string } | undefined
+  const routePattern = `**/chats/${chat.id}/messages`
+  await page.route(routePattern, async (route) => {
+    const input = route.request().postDataJSON()
+    interceptedApproval = input.planApproval
+    await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
+      id: concurrentRevision,
+      text: 'Revise before approval',
+      provider: 'claude',
+      plan: true,
+    })
+    await route.continue()
+  }, { times: 1 })
+  await proposal.getByRole('button', { name: 'Implement' }).click()
+  await expect(page.getByText('The proposed plan changed.', { exact: false })).toBeVisible()
+  expect(interceptedApproval?.sourceId).toMatch(new RegExp(`^${conversation}:\\d+$`))
+  expect(interceptedApproval?.revision).toBeTruthy()
+  const afterStale = await workspace.api(`/api/chats/${chat.id}`)
+  expect(afterStale.messages.filter((m: { text: string }) => m.text === 'Implement the plan you proposed.')).toHaveLength(0)
+  await workspace.api(`/api/chats/${chat.id}/messages/${concurrentRevision}`, 'DELETE')
+  await workspace.api(`/api/chats/${chat.id}/pause`, 'POST', { paused: false })
+  await page.reload()
+  await expect(proposal.getByRole('button', { name: 'Implement' })).toBeEnabled()
+
+  // Leaving plan mode is an ordinary message in the same chat, with the agent's usual access.
+  await proposal.getByRole('button', { name: 'Implement' }).click()
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.chatExecution?.text, { timeout: 30000 }).toBe('Implement the plan you proposed.')
+  const implementation = (await workspace.api(`/api/chats/${chat.id}`)).run
+  expect(implementation.id).toBe(conversation)
+  expect(implementation.chatExecution.plan).toBeUndefined()
+  expect(implementation.chatExecution.afterPlan).toBe(true)
+  await expect(toggle).toHaveAttribute('aria-pressed', 'false')
+  await expect(proposal.getByRole('button', { name: 'Implement' })).toHaveCount(0)
+})
+
 test('the quota card switches to OpenCode with an available model and preserves the sandbox', async ({ page, workspace }) => {
   test.setTimeout(120000)
   await connectClaude(workspace, 'OpenCode handoff', 'fixture-code:switch-opencode@example.test')
@@ -645,4 +868,154 @@ test('the quota card switches to OpenCode with an available model and preserves 
   expect(after.chatExecution.messageId).toBe(messageId)
   expect(after.workspace).toBe(before.workspace)
   await expect(card).toHaveCount(0)
+})
+
+for (const [status, content] of [['failed', 'Review is still incomplete'], ['cancelled', 'Review is still incomplete'], ['failed', ''], ['cancelled', '']] as const) {
+  test(`an interrupted proposal cannot approve or alter Plan after ${status}, empty=${!content}`, async ({ page, workspace }) => {
+    if (!(await workspace.api('/api/accounts')).accounts.some((a: { provider: string }) => a.provider === 'claude'))
+      expect((await connectClaude(workspace)).state).toBe('complete')
+    const chat = await workspace.api('/api/chats', 'POST', {})
+    await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
+      id: crypto.randomUUID(),
+      text: 'fixture:plan-turn Inspect the design',
+      provider: 'claude',
+      plan: true,
+    })
+    await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 30000 }).toBe('succeeded')
+    const run = (await workspace.api(`/api/chats/${chat.id}`)).run
+    // A newer unfinished root proposal must also suppress the older completed card.
+    workspace.service.store.event(run.id, 'item.started', '', {
+      item: {
+        id: 'interrupted-proposal',
+        type: 'proposed_plan',
+        text: content,
+        status: 'in_progress',
+      },
+    })
+    workspace.service.store.updateRun(run.id, { status })
+    workspace.service.store.event(run.id, 'status', status)
+    await page.goto(workspacePath(`/chats/${chat.id}`))
+    await authenticateWorkspace(page)
+    if (content)
+      await expect(page.getByTestId('proposed-plan').filter({ hasText: content })).toBeVisible()
+    else
+      await expect(page.getByTestId('proposed-plan').first()).toBeVisible()
+    const toggle = page.getByRole('button', { name: 'Plan first' })
+    if (await toggle.getAttribute('aria-pressed') !== 'true')
+      await toggle.click()
+    await expect(toggle).toHaveAttribute('aria-pressed', 'true')
+    await expect(page.getByRole('button', { name: 'Implement', exact: true })).toHaveCount(0)
+    await expect(toggle).toHaveAttribute('aria-pressed', 'true')
+    const detail = await workspace.api(`/api/chats/${chat.id}`)
+    expect(detail.messages.some((m: { text: string }) => m.text === 'Implement the plan you proposed.')).toBe(false)
+  })
+}
+
+test('a replayed proposal retains its authored request boundary after clarification', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  if (!(await workspace.api('/api/accounts')).accounts.some((a: { provider: string }) => a.provider === 'claude'))
+    expect((await connectClaude(workspace)).state).toBe('complete')
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  const initial = crypto.randomUUID()
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
+    id: initial,
+    text: 'fixture:plan-turn Review the design',
+    provider: 'claude',
+    plan: true,
+  })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 30000 }).toBe('succeeded')
+  const run = (await workspace.api(`/api/chats/${chat.id}`)).run
+  const original = workspace.service.store.events(run.id)
+    .filter(event => event.type === 'item.completed')
+    .map(event => event.payload?.item as Record<string, unknown> | undefined)
+    .find(item => item?.type === 'proposed_plan' && !item.parent_id)!
+  expect(original.request_id).toBe(initial)
+  const clarification = crypto.randomUUID()
+  workspace.service.store.event(run.id, 'chat.user', 'Include the tests', { messageId: clarification, text: 'Include the tests' })
+  // The recovery event has a new manager ID, but no newly authored approach.
+  workspace.service.store.event(run.id, 'item.completed', '', { item: original })
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  await expect(page.getByTestId('proposed-plan')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Implement', exact: true })).toHaveCount(0)
+  workspace.service.store.event(run.id, 'item.completed', '', {
+    item: {
+      ...original,
+      id: 'revised',
+      text: 'New approach including tests',
+      request_id: clarification,
+    },
+  })
+  await page.reload()
+  const proposal = page.getByTestId('proposed-plan').filter({ hasText: 'New approach including tests' })
+  await expect(proposal.getByRole('button', { name: 'Implement', exact: true })).toBeEnabled()
+  const request = page.waitForRequest(request => request.url().endsWith(`/chats/${chat.id}/messages`) && request.method() === 'POST')
+  await proposal.getByRole('button', { name: 'Implement', exact: true }).click()
+  const sent = (await request).postDataJSON()
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).messages.some((message: { id: string }) => message.id === sent.id)).toBe(true)
+})
+
+test('a proposal completed after steering remains implementable across history folding', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  if (!(await workspace.api('/api/accounts')).accounts.some((a: { provider: string }) => a.provider === 'claude'))
+    expect((await connectClaude(workspace)).state).toBe('complete')
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
+    id: crypto.randomUUID(),
+    text: 'fixture:plan-turn Review the design',
+    provider: 'claude',
+    plan: true,
+  })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 30000 }).toBe('succeeded')
+  const run = (await workspace.api(`/api/chats/${chat.id}`)).run
+  workspace.service.store.event(run.id, 'item.started', '', {
+    item: { id: 'clarified-plan', type: 'proposed_plan', text: 'Initial revision' },
+  })
+  workspace.service.store.event(run.id, 'chat.user', 'Include the tests', {
+    messageId: crypto.randomUUID(),
+    text: 'Include the tests',
+    plan: true,
+  })
+  workspace.service.store.event(run.id, 'item.completed', '', {
+    item: { id: 'clarified-plan', type: 'proposed_plan', text: 'Clarified plan including tests' },
+  })
+  const completion = Math.max(...workspace.service.store.events(run.id).filter(event => event.type === 'item.completed').map(event => event.id))
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  const proposal = page.getByTestId('proposed-plan').filter({ hasText: 'Clarified plan including tests' })
+  await expect(proposal.getByRole('button', { name: 'Implement', exact: true })).toBeEnabled()
+  await page.reload()
+  await expect(proposal.getByRole('button', { name: 'Implement', exact: true })).toBeEnabled()
+  const request = page.waitForRequest(request => request.url().endsWith(`/chats/${chat.id}/messages`) && request.method() === 'POST')
+  await proposal.getByRole('button', { name: 'Implement', exact: true }).click()
+  const sent = (await request).postDataJSON()
+  expect(sent.planApproval.sourceId).toBe(`${run.id}:${completion}`)
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).messages.some((message: { id: string }) => message.id === sent.id)).toBe(true)
+})
+
+test('an attachment-only Plan request keeps its badge after server history reload', async ({ page, workspace }) => {
+  test.setTimeout(120000)
+  if (!(await workspace.api('/api/accounts')).accounts.some((account: { provider: string }) => account.provider === 'claude'))
+    await connectClaude(workspace)
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: crypto.randomUUID(), text: 'Prepare the conversation', provider: 'claude' })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 30000 }).toBe('succeeded')
+  await page.goto(workspacePath(`/chats/${chat.slug}`))
+  await authenticateWorkspace(page)
+  await expect(page.getByRole('button', { name: /^Agent, model, reasoning and speed/ })).toHaveAccessibleName(/Claude Code.*Opus Fixture/)
+  await page.getByRole('button', { name: 'Plan first', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Plan first', exact: true })).toHaveAttribute('aria-pressed', 'true')
+  await page.getByLabel('Attach files', { exact: true }).setInputFiles([{
+    name: 'design-plan.txt',
+    mimeType: 'text/plain',
+    buffer: Buffer.from('Explore the design before implementing it.'),
+  }])
+  await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveValue('')
+  const request = page.waitForRequest(request => request.method() === 'POST' && request.url().endsWith(`/chats/${chat.id}/messages`))
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  expect((await request).postDataJSON()).toMatchObject({ text: '', plan: true })
+  const message = page.locator('.activity-message').filter({ has: page.locator('span.sr-only', { hasText: 'You' }) }).filter({ hasText: 'design-plan.txt' })
+  await expect(message.getByText('Plan', { exact: true })).toBeVisible()
+  await page.reload()
+  await expect(message.getByText('Plan', { exact: true })).toBeVisible()
 })

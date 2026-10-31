@@ -147,6 +147,13 @@ Le nombre maximal d’exécutions simultanées sur un compte. Le réduire laisse
 **Réinitialisation en réserve** :
 Une remise à zéro de fenêtre d’usage offerte par Codex, utilisée automatiquement quand la capacité restante d’un compte actif tombe à 2 %. Elle n’existe pas pour Claude Code.
 
+**Tour de plan** :
+Un tour de conversation où l’agent explore et propose une approche sans rien modifier :
+Cairn y borne lui-même les fichiers, le réseau du shell et les outils à effets, quels
+que soient les droits de l’agent. L’implémentation commence par un message ordinaire
+dans le même fil, avec les droits habituels de l’agent.
+_À éviter_ : plan de travail (la liste de progression d’un agent qui travaille).
+
 **Vitesse** :
 Le niveau de service Codex demandé pour un tour (Standard, Fast, Ultrafast…), choisi indépendamment du modèle et du raisonnement pour le prochain message ou par défaut sur un agent. Seuls les niveaux que le catalogue Codex d’un compte annonce pour le modèle sont proposés ; une vitesse plus rapide consomme plus vite l’usage du compte. Claude Code et OpenCode n’en proposent pas.
 _À éviter_ : tier, mode rapide (sauf pour nommer le niveau Fast de Codex).

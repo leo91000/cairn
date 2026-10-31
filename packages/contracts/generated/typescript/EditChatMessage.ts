@@ -8,5 +8,9 @@ export interface EditChatMessage {
   provider: string
   model: string
   reasoning: string
+  /**
+   * Plan turn request; an edit without it keeps the stored one.
+   */
+  plan?: boolean
   speed?: string
 }

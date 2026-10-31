@@ -77,6 +77,7 @@ Version 18 upgrades to 19 through the [run projections migration](migrations/001
 Version 19 upgrades to 20 by adding plugin hook tables.
 Version 20 upgrades to 21 through the [writer-owned progress migration](migrations/0021-run-progress.md).
 Version 21 upgrades to 22 through the [timeline projection migration](migrations/0022-timeline-projection.md), replaying retained events.
+Version 22 upgrades to 23 through the [plan request migration](migrations/0023-plan-requests.md).
 
 Stop the old manager and retain a consistent database/WAL backup first. Keep the
 installation identity, configuration, data roots, node state and object storage.

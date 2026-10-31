@@ -55,6 +55,33 @@ The speed is independent of the model and the reasoning level: changing either k
 
 Codex accepts the tier in `turn/start` and keeps it for the thread, even across `thread/resume`. Cairn therefore sends a tier with every turn: the chosen one, or `default` for Standard and for turns without a speed, so a turn never silently keeps an earlier turn's faster tier. Codex 0.164.0 silently omits a Fast or Ultrafast tier its catalog does not advertise for the model (it passes `flex` through). Routing prefers accounts whose cached catalog confirms the tier: usage polls refresh each account's catalog before it expires, and for speeds a catalog stays authoritative for 30 minutes, since polls skip a busy account. The decision belongs to the turn: just before `turn/start`, each attempt asks the Codex process that will run it for its `model/list`, the catalog Codex itself applies. When that list names the model without the tier, the turn asks for Standard and the conversation shows **This turn runs at Standard speed**. When the list cannot be read, or does not name the model exactly (a custom alias, or a dated version Codex may match to a listed model), the turn still asks for the tier and the conversation shows **Speed not confirmed for this turn**: it may run at Standard. A turn without a chosen model is checked against the model Codex reports for the thread, which its configuration may set; routing only uses the catalog default to order accounts. Codex answers `model/list` with its built-in list, which offers Fast for its main models, when it cannot fetch the account's, and says nothing about it; Cairn's cached account catalogs come from the same call. So a list that names the model without the tier is the account's own and decides: when the process's list or the account's recent cached catalog does so, the turn asks for Standard with the notice above. When both name the tier, the conversation shows **Selected speed requested for this turn**: a request, since the account's plan decides whether it applies, and Cairn does not measure speed. When the account's catalog is unknown or older than 30 minutes, the turn shows **Speed not confirmed for this turn** instead. Notices are recorded only for an attempt Codex accepted. A retried or resumed attempt, possibly on another account, checks again, and the conversation only shows a change of outcome, such as the selected speed after an earlier attempt ran at Standard. A speed must be a `serviceTiers` id from the catalog or `standard`; Codex's list does not name another id, such as its own `fast` alias, so Cairn asks for Standard for it and the notice says so. The picker marks a speed *limited* when some account able to run the model lacks or does not confirm it; the picker label then says the speed is *requested*, as it does when the model's speeds are unknown. Queued messages and the Android agent overview always call a faster speed *requested*, adding *not listed for this model* when the model's catalog lacks it, since each turn reports how it runs. A run without a connected account uses the local Codex catalog the same way, and the speed Cairn sends replaces a `service_tier` set in the host's `~/.codex/config.toml`, which such runs otherwise copy: choose the speed in Cairn instead.
 
+## Plan turns
+
+**Plan** in the composer makes the next messages plan turns: the agent explores and
+proposes an approach without changing anything. Each such message shows a **Plan**
+badge. The proposal appears as a **Proposed plan** card; **Implement** on the latest
+one queues an ordinary message in the same conversation, which runs with the agent's
+usual permissions. Turning **Plan** off and writing a message does the same.
+
+A selected or saved Plan choice is never silently converted to an ordinary request. If the current engine cannot run Plan (OpenCode), sending is blocked until you choose Codex or Claude Code, or explicitly turn Plan off. The same rule applies after restoring a draft or switching engines.
+
+Cairn enforces the boundary rather than asking the model to respect it. During a plan
+turn the engine's sandbox is read-only with no shell network access, whatever the
+agent's access; MCP connections only offer tools they declare read-only
+(`readOnlyHint`); `cairn_installation` only offers `read` operations; and
+`cairn_workspace` only offers `open_project`, `list_nodes`, `exclusive_status`,
+`pending_questions` and, for an agent that delegates, `task_status`. Delegating or
+cancelling a task, plugin tools and plugin commands are unavailable. Builds and tests that
+write files fail. Claude Code runs in its plan permission mode; Codex receives the
+`plan` collaboration preset it lists. Subagents of either engine stay inside the
+same boundary, including Codex subagents an earlier turn started: the resident Codex
+process is replaced for a plan turn and the turn after it. Claude Code's auto-mode
+classifier never decides in place of Cairn. OpenCode cannot run plan turns. A plan request cannot steer a running turn
+that may change files: queue it. One sent to steer while no turn runs waits for its
+own plan turn rather than joining a later turn. See
+[the plan-turn decision](adr/0079-plan-turns.md), which also records the native
+qualification of each engine release.
+
 ## Invoking skills with `$`
 
 Type `$` in the composer to list the skills this chat can use: global skills and those of the chat's project that the agent is allowed to access (all accessible projects when the chat has no project). The list filters as you type, matching the name first, then word starts, substrings, letters in order and the description. Each suggestion shows the name, description and Global/project scope. On the web, ↑/↓ move, Enter or Tab inserts and Escape dismisses; clicking works too. On Android, tap a suggestion; Back dismisses the list. The chosen skill is inserted as `$name ` and highlighted in the draft and in sent messages.
@@ -136,3 +163,10 @@ selected mission stays in the URL across reloads.
 offers **Result**, **Files** and **Mission brief**. The conversation reads like a chat: the
 agent's actions between messages collapse into one sentence, expand into a timeline and
 open each step's command, output and details in a sheet.
+
+During Plan, `ask_questions`, `pending_questions` and `withdraw_question` keep the
+common questionnaire lifecycle available. Withdrawal only retires a pending
+question owned by the current execution and conversation; it never supplies an
+answer or authorizes implementation. Questions answered in ordinary chat or made
+unnecessary by exploration should be withdrawn. Delegation and tools with external
+effects remain unavailable.

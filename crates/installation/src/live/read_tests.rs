@@ -307,7 +307,7 @@ async fn a_blocked_conversation_read_does_not_block_another_tabs_events() {
         .execute_batch(
             "ALTER TABLE chat_messages RENAME TO retained_messages;
 CREATE VIEW chat_messages AS SELECT rowid AS rowid,id,chat_id,revision,
-    body_probe(text) AS text,provider,model,reasoning,speed,mode,status,created_at,question_id
+    body_probe(text) AS text,provider,model,reasoning,speed,mode,status,created_at,question_id,plan
     FROM retained_messages;",
         )
         .unwrap();

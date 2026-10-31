@@ -121,11 +121,18 @@ pub(crate) async fn rpc(
     }
 }
 
+/// A plan turn only reads the installation: operations that change it wait for
+/// the user to start implementation.
+fn allowed_in_turn(run: &Value, operation: &Value) -> bool {
+    !crate::chats::planning(run) || operation["annotations"]["readOnlyHint"] == true
+}
+
 pub(crate) async fn operations(s: &Service, bearer: &str) -> Result<Vec<Value>> {
     let run = authorize(s, bearer).await?;
     let agent_id = &run["snapshot"]["agent"]["id"];
     let tools = crate::mcp_server::operations()
         .into_iter()
+        .filter(|tool| allowed_in_turn(&run, tool))
         .map(|mut tool| {
             tool.as_object_mut().unwrap().remove("_meta");
             if tool["name"] == "create_task" {
@@ -155,11 +162,14 @@ pub(crate) async fn operation(
     mut args: Value,
 ) -> Result<Value> {
     let run = authorize(s, bearer).await?;
-    let known = crate::mcp_server::operations()
-        .iter()
-        .any(|tool| text(tool, "name") == name);
-    if !known {
+    let operations = crate::mcp_server::operations();
+    let Some(operation) = operations.iter().find(|tool| text(tool, "name") == name) else {
         return Err(Error::not_found("Unknown operation"));
+    };
+    if !allowed_in_turn(&run, operation) {
+        return Err(Error::forbidden(
+            "This operation changes the installation, which a plan turn cannot do. Include it in your plan; the user starts implementation explicitly.",
+        ));
     }
     if let Some(operation) = crate::capabilities::plugin_package_operation(name) {
         return operation

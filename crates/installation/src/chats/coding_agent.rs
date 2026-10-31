@@ -215,8 +215,11 @@ where
     } else {
         Vec::new()
     };
+    // A plan turn only moves to a coding agent that can keep its boundary.
+    let planning = super::planning(&run);
     let available = available
         .into_iter()
+        .filter(|choice| !planning || choice.provider.adapter().plan_turns())
         .map(|choice| {
             json!({
                 "provider": choice.provider.as_str(),
@@ -308,6 +311,9 @@ impl Service {
                 }
                 if Provider::of_run(&run)? == target {
                     return Err(Error::bad("Choose a different coding agent."));
+                }
+                if super::planning(&run) {
+                    super::require_plan_turns(target)?;
                 }
                 let replacement = selection(&run["snapshot"]["agent"], target, &choice.model);
                 target.adapter().validate_agent(&replacement)?;
@@ -470,6 +476,9 @@ async fn advance(
                 attachments: serde_json::from_value(run["chatExecution"]["attachments"].clone())?,
                 recovery: true,
                 context: Some(handoff_context(db, run_id)?),
+                // The switched turn keeps its plan boundary, or the restore after one.
+                plan: super::planning(&run),
+                after_plan: run["chatExecution"]["afterPlan"] == true,
                 operation: None,
                 previous: None,
             };

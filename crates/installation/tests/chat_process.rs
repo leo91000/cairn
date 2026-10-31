@@ -244,6 +244,55 @@ async fn cold_chats_refresh_and_remove_thread_mcp_configuration() {
 }
 
 #[tokio::test]
+async fn resident_starts_a_new_native_process_for_a_plan_turn_and_the_turn_after_it() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let service = Resident::start(config(&root), home.clone(), &root).await;
+    let turns = [None, Some("planning"), Some("afterPlan"), None];
+    for (index, mark) in turns.into_iter().enumerate() {
+        let mut plan = plan(&root, &format!("message {index}"));
+        plan["execution"]["messageId"] = format!("message-{index}").into();
+        plan["codexConfig"] = json!({ "mcp_servers": {} });
+        if index > 0 {
+            plan["sessionId"] = "fixture-chat".into();
+        }
+        if let Some(mark) = mark {
+            plan[mark] = true.into();
+        }
+        if mark == Some("planning") {
+            plan["sandbox"] = "read-only".into();
+        }
+        service.run(plan).await;
+    }
+    service.stop().await;
+
+    // Codex keeps a loaded sub-agent's sandbox: an earlier turn's writable sub-agent must
+    // not be loaded in the process that runs a plan turn, nor a read-only one after it.
+    let starts = lifecycle(&home)
+        .into_iter()
+        .filter(|entry| entry["method"] == "turn/start")
+        .map(|entry| entry["pid"].as_i64().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(starts.len(), 4);
+    assert_ne!(
+        starts[1], starts[0],
+        "the plan turn reused a native process"
+    );
+    assert_ne!(starts[2], starts[1], "the turn after the plan reused it");
+    assert_eq!(
+        starts[3], starts[2],
+        "ordinary turns keep the resident process"
+    );
+    for pid in &starts[..2] {
+        assert_eq!(
+            unsafe { libc::kill(*pid as i32, 0) },
+            -1,
+            "a replaced native process must be reaped"
+        );
+    }
+}
+
+#[tokio::test]
 async fn resident_reuses_native_process_and_reloads_each_attempts_permissions() {
     let root = TempDir::new().unwrap();
     let home = prepare(&root);
@@ -564,6 +613,120 @@ async fn model_and_reasoning_reach_codex_and_model_changes_resolve_the_new_defau
         assert_eq!(thread["turns"][index]["model"], model);
         assert_eq!(thread["turns"][index]["effort"], expected);
     }
+}
+
+#[tokio::test]
+async fn only_a_cairn_plan_turn_shows_a_codex_plan_as_a_proposed_plan() {
+    for planning in [false, true] {
+        let root = TempDir::new().unwrap();
+        let home = prepare(&root);
+        let config = config(&root);
+        let mut turn = plan(&root, "fixture:plan-item Propose an approach");
+        if planning {
+            turn["planning"] = true.into();
+            turn["sandbox"] = "read-only".into();
+        }
+        let (tx, mut rx) = mpsc::channel::<Value>(64);
+        let events = tokio::spawn(async move {
+            let mut events = Vec::new();
+            while let Some(event) = rx.recv().await {
+                events.push(event);
+            }
+            events
+        });
+        chat_process::run(&config, &home, turn, tx, CancellationToken::new())
+            .await
+            .unwrap();
+        let events = events.await.unwrap();
+        let shown = |kind: &str| {
+            events.iter().any(|event| {
+                event["item"]["type"] == kind
+                    && event["item"]["text"] == "1. Read the composer.\n2. Add the toggle."
+            })
+        };
+        // Outside a Cairn plan turn nothing guarantees the plan was not acted on.
+        assert_eq!(shown("proposed_plan"), planning, "planning {planning}");
+        assert_eq!(shown("reasoning"), !planning, "planning {planning}");
+    }
+}
+
+#[tokio::test]
+async fn plan_turns_override_the_thread_sandbox_and_the_next_turn_restores_it() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let config = config(&root);
+    let roots = json!([root.path()]);
+
+    // Codex keeps a thread's first sandbox when a later resume asks for another one.
+    let mut first = plan(&root, "Start the work");
+    first["sandbox"] = "workspace-write".into();
+    first["writableRoots"] = roots.clone();
+    first["execution"]["messageId"] = "message-0".into();
+    run_quietly(&config, &home, first).await;
+
+    let mut planning = plan(&root, "Propose an approach");
+    planning["planning"] = true.into();
+    planning["sandbox"] = "read-only".into();
+    planning["writableRoots"] = roots.clone();
+    planning["sessionId"] = "fixture-chat".into();
+    planning["execution"]["messageId"] = "message-1".into();
+    let (tx, mut rx) = mpsc::channel(64);
+    let events = tokio::spawn(async move {
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+        events
+    });
+    chat_process::run(&config, &home, planning, tx, CancellationToken::new())
+        .await
+        .unwrap();
+    let events = events.await.unwrap();
+    let proposed = events
+        .iter()
+        .find(|event| event["item"]["type"] == "proposed_plan")
+        .expect("the proposed plan is shown");
+    assert_eq!(
+        proposed["item"]["text"],
+        "1. Read the composer.\n2. Add the toggle."
+    );
+
+    let mut next = plan(&root, "Implement the plan");
+    next["afterPlan"] = true.into();
+    next["sandbox"] = "workspace-write".into();
+    next["writableRoots"] = roots.clone();
+    next["sessionId"] = "fixture-chat".into();
+    next["execution"]["messageId"] = "message-2".into();
+    run_quietly(&config, &home, next).await;
+
+    let thread = conversation(&home);
+    let turns = thread["turns"].as_array().unwrap();
+    assert!(turns[0]["sandboxPolicy"].is_null());
+    assert!(turns[0]["collaborationMode"].is_null());
+
+    assert_eq!(
+        turns[1]["sandboxPolicy"],
+        json!({ "type": "readOnly", "networkAccess": false })
+    );
+    assert_eq!(
+        turns[1]["collaborationMode"],
+        json!({
+            "mode": "plan",
+            "settings": {
+                "model": "fixture-fast",
+                "reasoning_effort": "medium",
+                "developer_instructions": null,
+            },
+        })
+    );
+    assert_eq!(turns[1]["threadConfig"]["features.multi_agent"], false);
+
+    assert_eq!(
+        turns[2]["sandboxPolicy"],
+        json!({ "type": "workspaceWrite", "writableRoots": roots, "networkAccess": true })
+    );
+    assert_eq!(turns[2]["collaborationMode"]["mode"], "default");
+    assert!(turns[2]["threadConfig"]["features.multi_agent"].is_null());
 }
 
 #[tokio::test]
@@ -1194,6 +1357,180 @@ async fn replay_of_completed_turn_does_not_submit_the_instruction_again() {
         run_quietly(&config, &home, plan.clone()).await;
     }
     assert_eq!(conversation(&home)["turns"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn plan_presets_keep_the_model_codex_runs_the_thread_with() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let config = config(&root);
+    // No model chosen: Codex runs its configured model, not the catalog's default.
+    std::fs::write(home.join("fixture-config-model"), "fixture-deep").unwrap();
+    let mut first = plan(&root, "Start the work");
+    first["execution"]["messageId"] = "message-0".into();
+    run_quietly(&config, &home, first).await;
+    for (index, mark) in [(1, "planning"), (2, "afterPlan")] {
+        let mut turn = plan(&root, "Continue");
+        turn[mark] = true.into();
+        turn["sessionId"] = "fixture-chat".into();
+        turn["execution"]["messageId"] = format!("message-{index}").into();
+        run_quietly(&config, &home, turn).await;
+    }
+    let turns = conversation(&home)["turns"].clone();
+    assert_eq!(turns[1]["collaborationMode"]["mode"], "plan");
+    assert_eq!(turns[2]["collaborationMode"]["mode"], "default");
+    for index in [1, 2] {
+        assert_eq!(
+            turns[index]["collaborationMode"]["settings"]["model"], "fixture-deep",
+            "turn {index}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn recovery_replays_a_completed_plan_only_turn_without_starting_another() {
+    for steering in [false, true] {
+        let root = TempDir::new().unwrap();
+        let home = prepare(&root);
+        let config = config(&root);
+        let mut planning = plan(&root, "Propose an approach");
+        planning["planning"] = true.into();
+        planning["sandbox"] = "read-only".into();
+        run_quietly(&config, &home, planning.clone()).await;
+
+        // Codex answers a plan turn with its plan alone: the history holds the request and
+        // the plan, without an agent message.
+        let file = home.join("fixture-conversation.json");
+        let mut thread = conversation(&home);
+        let items = thread["turns"][0]["items"].as_array_mut().unwrap();
+        items.retain(|item| item["type"] == "userMessage" || item["type"] == "plan");
+        assert_eq!(items.len(), 2);
+        if steering {
+            items.push(json!({ "id": "clarification", "type": "userMessage", "clientId": "later-clarification", "content": [{ "type": "inputText", "text": "Clarify the approach" }] }));
+        }
+        if steering {
+            thread["turns"].as_array_mut().unwrap().insert(0, json!({ "id": "older-turn", "status": "completed", "items": [
+                { "id": "older-user", "type": "userMessage", "clientId": "older-request", "content": [] }
+            ] }));
+        }
+        std::fs::write(&file, thread.to_string()).unwrap();
+
+        planning["sessionId"] = "fixture-chat".into();
+        planning["execution"]["recovery"] = true.into();
+        planning["output"] = root
+            .path()
+            .join("recovered.md")
+            .to_string_lossy()
+            .into_owned()
+            .into();
+        let (tx, mut rx) = mpsc::channel::<Value>(64);
+        let events = tokio::spawn(async move {
+            let mut events = Vec::new();
+            while let Some(event) = rx.recv().await {
+                events.push(event);
+            }
+            events
+        });
+        chat_process::run(&config, &home, planning, tx, CancellationToken::new())
+            .await
+            .unwrap();
+        let events = events.await.unwrap();
+
+        let proposal = "1. Read the composer.\n2. Add the toggle.";
+        assert!(
+            events
+                .iter()
+                .any(|event| event["item"]["type"] == "proposed_plan"
+                    && event["item"]["text"] == proposal),
+            "{events:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("recovered.md")).unwrap(),
+            proposal
+        );
+        let recovered = events
+            .iter()
+            .find(|event| event["item"]["type"] == "proposed_plan")
+            .unwrap();
+        assert_eq!(
+            recovered["item"]["request_id"], "original-message",
+            "{events:?}"
+        );
+        if steering {
+            assert!(events.iter().any(|event| event["type"] == "chat.delivered"
+                && event["messageId"] == "later-clarification"));
+        }
+        let deliveries: Vec<_> = events
+            .iter()
+            .filter(|event| event["type"] == "chat.delivered")
+            .map(|event| event["messageId"].clone())
+            .collect();
+        assert_eq!(
+            deliveries,
+            if steering {
+                vec![
+                    json!("older-request"),
+                    json!("original-message"),
+                    json!("later-clarification"),
+                ]
+            } else {
+                vec![json!("original-message")]
+            }
+        );
+        assert_eq!(
+            conversation(&home)["turns"].as_array().unwrap().len(),
+            if steering { 2 } else { 1 }
+        );
+    }
+}
+
+#[tokio::test]
+async fn plan_requests_only_steer_a_plan_turn() {
+    for planning in [false, true] {
+        let root = TempDir::new().unwrap();
+        let home = prepare(&root);
+        let config = config(&root);
+        // Left in the inbox for an earlier turn, or claimed before the turn changed.
+        deliver(
+            &root,
+            &json!([
+                { "id": "plan-request", "text": "Plan it, then finish now", "plan": true },
+                { "id": "ordinary", "text": "Keep going and finish now" },
+            ]),
+        )
+        .await;
+        let mut plan = plan(&root, "fixture:chat-hang");
+        if planning {
+            plan["planning"] = true.into();
+            plan["sandbox"] = "read-only".into();
+        }
+        let (tx, mut rx) = mpsc::channel::<Value>(64);
+        let events = tokio::spawn(async move {
+            let mut delivered = Vec::new();
+            while let Some(event) = rx.recv().await {
+                if event["type"] == "chat.delivered" {
+                    delivered.push(event["messageId"].clone());
+                }
+            }
+            delivered
+        });
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            chat_process::run(&config, &home, plan, tx, CancellationToken::new()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let delivered = events.await.unwrap();
+        let steered = conversation(&home)["turns"][0]["items"].to_string();
+        // A turn that can change files never receives the plan request.
+        assert_eq!(
+            delivered.contains(&json!("plan-request")),
+            planning,
+            "{delivered:?}"
+        );
+        assert_eq!(steered.contains("Plan it"), planning, "{steered}");
+    }
 }
 
 #[tokio::test]

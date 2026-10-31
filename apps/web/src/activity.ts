@@ -80,6 +80,17 @@ export type ActivityEntry
     /** The model provider that wrote this reply, when the engine chose among several. */
     via?: string
     attachments?: import('../../../packages/contracts/chats').ChatAttachment[]
+    /** A user request for a plan turn, which explores without changing anything. */
+    plan?: boolean
+  }
+  /** The approach a plan turn proposed; the user decides whether to implement it. */
+  | {
+    kind: 'proposal'
+    id: string
+    time: number
+    text: string
+    /** Only a completed proposal can be approved. */
+    sourceId?: string
   }
   | { kind: 'group', id: string, artifacts: ActivityArtifact[] }
   | { kind: 'team', id: string, agents: ActivityArtifact[] }
@@ -178,6 +189,35 @@ const collaborationTitles: Record<string, string> = {
   closeAgent: 'Closed a subagent',
 }
 
+/** Approval identity is distinct from the row anchored for reading. */
+export function proposedPlanApproval(events: RunEvent[], cards: TimelineEntry[] = []): string | undefined {
+  let latest: RunEvent | undefined
+  let lastRequest: RunEvent | undefined
+  for (const event of events) {
+    if (event.type === 'chat.user' && (!lastRequest || event.id > lastRequest.id))
+      lastRequest = event
+    if (!['item.started', 'item.updated', 'item.completed'].includes(event.type))
+      continue
+    const item = record(record(event.payload).item)
+    if (item.type === 'proposed_plan' && !text(item.parent_id) && (!latest || event.id > latest.id))
+      latest = event
+  }
+
+  const requestCard = cards.filter(card => card.content.kind === 'userMessage').sort((a, b) => b.source - a.source)[0]
+  const requestSource = Math.max(lastRequest?.id ?? -1, requestCard?.source ?? -1)
+  const requestId = requestCard?.source === requestSource && requestCard.content.kind === 'userMessage'
+    ? requestCard.content.messageId
+    : record(lastRequest?.payload).messageId
+  if (!latest || latest.type !== 'item.completed' || latest.id <= requestSource)
+    return undefined
+  const item = record(record(latest.payload).item)
+  if (!text(item.text).trim())
+    return undefined
+  if ('request_id' in item && (!text(item.request_id) || (requestSource >= 0 && text(item.request_id) !== requestId)))
+    return undefined
+  return `${latest.runId}:${latest.id}`
+}
+
 /**
  * Keep tool updates in their original position and fold actions between messages. Timeline
  * cards (messages, the run cycle, errors and retries) arrive interpreted by the server; they
@@ -186,6 +226,7 @@ const collaborationTitles: Record<string, string> = {
 export function activityEntries(events: RunEvent[], chat = false, groups = new ActivityGroups(), pendingWakeup?: ChatWakeup | null, cards: TimelineEntry[] = []): ActivityEntry[] {
   const entries: ActivityEntry[] = []
   const artifacts = new Map<string, ActivityArtifact>()
+  const proposals = new Map<string, Extract<ActivityEntry, { kind: 'proposal' }>>()
   // By the agent's own item ID: a subagent's steps can arrive after the turn that started it.
   const subagents = new Map<string, ActivityArtifact>()
   const aliases = new Map<string, string>()
@@ -226,6 +267,7 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
           time: content.sentAt,
           text: questionAnswerText(content.text, content.questionId),
           attachments: content.attachments,
+          ...(content.plan === true ? { plan: true } : {}),
           ...(content.messageId ? { messageId: content.messageId } : {}),
         })
         continue
@@ -561,6 +603,29 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       continue
     }
 
+    if (type === 'proposed_plan' && !text(item.parent_id)) {
+      const content = text(item.text)
+      const sourceId = event.type === 'item.completed' ? `${event.runId}:${event.id}` : undefined
+      const existing = proposals.get(id)
+      if (existing) {
+        existing.text = content || existing.text
+        existing.sourceId = sourceId
+      }
+      else if (content) {
+        const proposal = {
+          kind: 'proposal' as const,
+          id,
+          time: event.createdAt,
+          text: content,
+          sourceId,
+        }
+        entries.push(proposal)
+        proposals.set(id, proposal)
+      }
+
+      continue
+    }
+
     const status = text(item.status)
     const failed = status === 'failed' || event.type.includes('failed') || (typeof item.exit_code === 'number' && item.exit_code !== 0)
     const running = !failed && (status === 'in_progress' || event.type.endsWith('.started')) && event.type.startsWith('item.')
@@ -674,6 +739,12 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       artifact.title = collaborationTitles[text(item.tool)] ?? 'Worked with a subagent'
       artifact.subtitle = text(item.prompt).split('\n')[0] ?? ''
       block('Prompt', item.prompt)
+    }
+    else if (type === 'proposed_plan') {
+      // A child proposal is its activity, never the conversation's approval target.
+      artifact.kind = 'tool'
+      artifact.title = 'Subagent proposed plan'
+      block('Plan', item.text, 'markdown')
     }
     else if (type === 'subagent_message') {
       // Its subagent is outside the loaded history.

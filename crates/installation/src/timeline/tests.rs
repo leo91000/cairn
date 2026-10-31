@@ -46,7 +46,25 @@ fn tables(db: &Connection) -> BTreeMap<String, Vec<String>> {
     names
         .into_iter()
         .map(|name| {
-            let mut statement = db.prepare(&format!("SELECT * FROM \"{name}\"")).unwrap();
+            // Plan23 adds only these false-default flags; existing timeline payloads stay unchanged.
+            let projection = if matches!(name.as_str(), "chat_messages" | "chat_questions") {
+                db.prepare(&format!("PRAGMA table_info({name})"))
+                    .unwrap()
+                    .query_map([], |row| row.get::<_, String>(1))
+                    .unwrap()
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .unwrap()
+                    .into_iter()
+                    .filter(|column| column != "plan")
+                    .map(|column| format!("\"{column}\""))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            } else {
+                "*".to_owned()
+            };
+            let mut statement = db
+                .prepare(&format!("SELECT {projection} FROM \"{name}\""))
+                .unwrap();
             let columns = statement.column_count();
             let mut rows = statement
                 .query_map([], |row| {
@@ -272,7 +290,7 @@ async fn long_engine_item_ids_survive_migration_and_live_updates() {
     }
     let before = tables(&db);
     let store = Store::open(root.path()).unwrap();
-    assert_eq!(version(&db), 22);
+    assert_eq!(version(&db), crate::store::DATABASE_VERSION);
     assert_eq!(tables(&db), before);
     let old = cards(&store, CODEX).await;
     let first_card = old.iter().find(|card| matches!(&card.content, TimelineContent::AgentMessage { item_id, .. } if item_id == &first)).unwrap();
@@ -408,7 +426,7 @@ async fn upgrade_builds_the_timeline_from_retained_events_and_changes_nothing_el
     assert!(before["events"].len() >= 48);
 
     let store = Store::open(root.path()).unwrap();
-    assert_eq!(version(&db), 22);
+    assert_eq!(version(&db), crate::store::DATABASE_VERSION);
     assert_eq!(tables(&db), before);
     assert_eq!(
         db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
@@ -1070,7 +1088,7 @@ fn version_18_upgrades_through_both_projections() {
         .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
         .unwrap();
     Store::open(root.path()).unwrap();
-    assert_eq!(version(&db), 22);
+    assert_eq!(version(&db), crate::store::DATABASE_VERSION);
     assert_eq!(
         db.query_row("SELECT COUNT(*) FROM events", [], |row| row
             .get::<_, i64>(0))
@@ -1234,4 +1252,43 @@ async fn empty_wait_ends_the_interval_and_a_new_wait_gets_a_new_start() {
     assert!(cards(&store, CODEX).await.into_iter().all(|entry| !matches!(entry.content,
         TimelineContent::Notice { notice } if notice.code == NoticeCode::BackgroundTasks && notice.waiting_since.is_some()
     )));
+}
+
+#[tokio::test]
+async fn plan_delivery_flag_is_hydrated_without_changing_the_stored_card_or_private_answer() {
+    let root = tempfile::tempdir().unwrap();
+    drop(previous(root.path()));
+    let store = Store::open(root.path()).unwrap();
+    store
+        .event(
+            CODEX,
+            &EventKind::ChatUser,
+            "",
+            Some(serde_json::json!({
+                "messageId": "protected-attachment", "text": "", "plan": true,
+                "attachments": [{ "id": "attachment", "name": "design.txt", "kind": "file" }]
+            })),
+        )
+        .await
+        .unwrap();
+    let shown = cards(&store, CODEX).await;
+    let entry = shown.iter().find(|entry| matches!(&entry.content, TimelineContent::UserMessage { message_id, .. } if message_id.as_deref() == Some("protected-attachment"))).unwrap();
+    assert!(
+        matches!(&entry.content, TimelineContent::UserMessage { plan: true, text, attachments, .. } if text.is_empty() && attachments.len() == 1)
+    );
+    let source = entry.source;
+    assert_eq!(
+        store
+            .read(move |db| Ok(db.0.query_row(
+                "SELECT content FROM timeline_entries WHERE run_id=? AND source=?",
+                rusqlite::params![CODEX, source],
+                |row| row.get::<_, String>(0)
+            )?))
+            .await
+            .unwrap(),
+        "{}"
+    );
+    drop(store);
+    let reopened = Store::open(root.path()).unwrap();
+    assert!(cards(&reopened, CODEX).await.iter().any(|entry| matches!(&entry.content, TimelineContent::UserMessage { plan: true, message_id, .. } if message_id.as_deref() == Some("protected-attachment"))));
 }

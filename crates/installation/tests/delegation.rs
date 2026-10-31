@@ -596,6 +596,73 @@ async fn deleted_tasks_are_finished_in_status_and_waits() {
 }
 
 #[tokio::test]
+async fn a_plan_turn_reads_delegated_tasks_without_delegating_or_cancelling() {
+    let f = Fixture::new(true).await;
+    let turn = f.conversation(MAIN_AGENT_ID).await;
+    let delegated = f
+        .delegate(&turn, json!({ "task": "Review the branch" }))
+        .await
+        .unwrap();
+    let child = text(&delegated, "chatId").to_owned();
+    f.finish(&turn).await;
+
+    f.s.chat_send(
+        &turn.chat,
+        json!({ "id": id(), "text": "Plan the follow-up", "plan": true }),
+    )
+    .await
+    .unwrap();
+    let planning = f.running(&turn.chat).await;
+    let run = f.s.store.run(&planning.run).await.unwrap();
+    assert_eq!(run["chatExecution"]["plan"], true);
+
+    let tools = f.tools(&planning).await;
+    assert!(tools.contains(&"task_status".to_owned()));
+    for tool in ["delegate_task", "task_cancel", "wait_for"] {
+        assert!(!tools.contains(&tool.to_owned()), "{tool} is offered");
+    }
+
+    let call = |name: &'static str, arguments: Value| {
+        let (s, token) = (f.s.clone(), planning.token.clone());
+        async move {
+            project_workspaces::rpc(
+                &s,
+                &token,
+                "tools/call",
+                &json!({ "name": name, "arguments": arguments }),
+            )
+            .await
+            .unwrap()
+        }
+    };
+    for (name, arguments) in [
+        (
+            "delegate_task",
+            json!({ "task": "Implement the follow-up" }),
+        ),
+        ("task_cancel", json!({ "chatId": child })),
+    ] {
+        let refused = call(name, arguments).await;
+        assert_eq!(refused["isError"], true, "{name}: {refused}");
+        assert!(
+            refused.to_string().contains("plan turn"),
+            "{name}: {refused}"
+        );
+    }
+    let status = call("task_status", json!({})).await;
+    assert_ne!(status["isError"], true, "{status}");
+    assert!(status.to_string().contains(&child), "{status}");
+
+    // Nothing was delegated or stopped.
+    let listed = delegation::status(&f.s, &planning.token, &json!({}))
+        .await
+        .unwrap();
+    assert_eq!(listed["tasks"].as_array().unwrap().len(), 1);
+    let task = f.s.chat_detail(&child).await.unwrap();
+    assert_ne!(task["paused"], true);
+}
+
+#[tokio::test]
 async fn the_requester_waits_for_its_task_and_reads_the_report() {
     let f = Fixture::new(true).await;
     let turn = f.conversation(MAIN_AGENT_ID).await;

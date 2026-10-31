@@ -95,6 +95,10 @@
       "default": "",
       "type": "string"
     },
+    "plan": {
+      "description": "A plan turn request. Absent on messages saved before plan turns, which never were.",
+      "type": "boolean"
+    },
     "provider": {
       "default": "",
       "pattern": "^(|codex|claude|opencode)$",

@@ -115,6 +115,27 @@ ALTER TABLE kv_v15 RENAME TO kv;")?;
     Ok(())
 }
 
+/// Version 22 → 23: queued plan requests and plan-turn questions keep their plan flag.
+pub(crate) fn plan_requests(connection: &mut Connection) -> Result<()> {
+    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if version == 23 {
+        return Ok(());
+    }
+    if version != 22 {
+        return Err(Error::bad(
+            "Unexpected installation database version during plan request upgrade.",
+        ));
+    }
+    tx.execute_batch(
+        "ALTER TABLE chat_messages ADD COLUMN plan INTEGER NOT NULL DEFAULT 0 CHECK(plan IN (0,1));
+ALTER TABLE chat_questions ADD COLUMN plan INTEGER NOT NULL DEFAULT 0 CHECK(plan IN (0,1));",
+    )?;
+    tx.pragma_update(None, "user_version", 23)?;
+    tx.commit()?;
+    Ok(())
+}
+
 use rusqlite::OptionalExtension;
 
 fn invalid() -> Error {
