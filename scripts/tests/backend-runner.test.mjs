@@ -61,9 +61,14 @@ else process.exit(Number(process.env.CAIRN_FIXTURE_STATUS));
       },
       encoding: 'utf8',
     })
-    const recorded = readFileSync(calls, 'utf8').trim().split('\n').map(line => JSON.parse(line))
+    const recorded = existsSync(calls) ? readFileSync(calls, 'utf8').trim().split('\n').map(line => JSON.parse(line)) : []
     const fixtures = recorded.find(call => call.fixtures)?.fixtures
-    return { status: result.status, calls: recorded, fixtureRemoved: fixtures ? fixtures.every(item => !existsSync(item.binary)) : undefined }
+    return {
+      status: result.status,
+      stderr: result.stderr,
+      calls: recorded,
+      fixtureRemoved: fixtures ? fixtures.every(item => !existsSync(item.binary)) : undefined,
+    }
   }
   finally {
     rmSync(directory, { recursive: true, force: true })
@@ -188,9 +193,21 @@ describe('backend test launcher', () => {
     ]))
   })
 
-  it('marks explicit Nextest reuse for the single-target remap fallback', () => {
-    const result = invoke(['--nextest', '--archive-file', '/fixture/archive'])
-    expect(result.calls.at(-1).reused).toBe('1')
+  it('rejects reused binaries when the selected tests need a current fixture', () => {
+    for (const option of ['--archive-file', '--binaries-metadata', '--cargo-metadata']) {
+      for (const args of [[option, '/fixture/archive'], [`${option}=/fixture/archive`]]) {
+        const result = invoke(['--nextest', ...args])
+        expect(result.status).toBe(2)
+        expect(result.stderr).toContain('cannot be paired safely with fixtures')
+        expect(result.calls).toEqual([])
+      }
+    }
+
+    const unrelated = invoke(['--nextest', '-p', 'cairn-contracts', '--archive-file', '/fixture/archive'])
+    expect(unrelated.status).toBe(0)
+    expect(unrelated.calls.at(-1).reused).toBe('1')
+    const remapped = invoke(['--nextest', '--workspace-remap', '/fixture/source'])
+    expect(remapped.calls.at(-1).reused).toBe('1')
     const ordinary = invoke(['--nextest'])
     expect(ordinary.calls.at(-1).reused).toBeUndefined()
   })
