@@ -4,6 +4,7 @@ pub(crate) mod bases;
 mod bases_tests;
 mod bases_warmer;
 pub(crate) mod block;
+mod bootstrap;
 mod capacity;
 pub(crate) mod disk;
 pub mod docker;

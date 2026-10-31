@@ -31,6 +31,13 @@ acknowledgement measurements. Host and guest run the same application build.
 
 ## Timings
 
+The native controller also exposes [bootstrap phases and bounded costs](NATIVE-BOOTSTRAP-OBSERVATION.md)
+before systemd receives a workload. Its memory lookup does not inspect the
+conversation's volume. Optional native journal export honors `cairn_performance`
+at startup, but uses a separate non-blocking transport rather than the agent's
+stderr stream. These are technical preparation observations, never proof of a
+coding-engine turn or a successful execution.
+
 | Operation | What it distinguishes |
 | --- | --- |
 | `agent_prepare` | Marking running, access validation, workspace setup, session lookup |
