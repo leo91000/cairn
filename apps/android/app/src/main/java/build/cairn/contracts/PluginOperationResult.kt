@@ -67,4 +67,18 @@ sealed interface PluginOperationResult {
     ) : PluginOperationResult {
         init {}
     }
+
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @Serializable
+    @SerialName("resourcePage")
+    data class I(val page: ListPluginResourcesOutput) : PluginOperationResult {
+        init {}
+    }
+
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @Serializable
+    @SerialName("resourceAncestry")
+    data class J(val resolution: ResolvePluginResourceOutput) : PluginOperationResult {
+        init {}
+    }
 }

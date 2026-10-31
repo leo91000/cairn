@@ -292,6 +292,7 @@ pub async fn deliver(
         management: None,
         connection: connection.clone(),
         manifest: session.manifest().clone(),
+        package_digest: Some(session.digest().to_owned()),
         event: json!({ "name": "socket", "revision": connection.revision }),
         link: Some(link.clone()),
         draft: None,

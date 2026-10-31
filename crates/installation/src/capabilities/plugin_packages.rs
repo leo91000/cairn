@@ -1,7 +1,7 @@
 //! Package and program capabilities shared by authenticated transports. Installation
 //! management is not the owner's approval of new executable code.
 use super::{ResumeContext, decode};
-use crate::plugins::{management, operations, program_installation, registry};
+use crate::plugins::{management, operations, program_installation, registry, resources};
 use crate::{
     error::{Error, Result},
     service::Service,
@@ -22,6 +22,21 @@ pub(crate) const PLUGIN_PACKAGE_OPERATIONS: &[PluginPackageOperation] = &[
         name: "list_plugins",
         scope: "read",
         description: "List plugin packages, exact versions, approvals, contributions and redacted instances.",
+    },
+    PluginPackageOperation {
+        name: "list_plugin_resources",
+        scope: "read",
+        description: "List a plugin instance\'s resources by declared type, page and query. Returns an operation id; poll get_plugin_resource_operation. Installation agents also need a grant on the instance.",
+    },
+    PluginPackageOperation {
+        name: "resolve_plugin_resource",
+        scope: "read",
+        description: "Resolve an instance resource and each ancestor through its plugin. Returns an operation id; poll get_plugin_resource_operation. Installation agents also need a grant on the instance.",
+    },
+    PluginPackageOperation {
+        name: "get_plugin_resource_operation",
+        scope: "read",
+        description: "Poll a resource read started by list_plugin_resources or resolve_plugin_resource. Current instance grants and initiating authority are rechecked; management preparations are not readable here.",
     },
     PluginPackageOperation {
         name: "install_plugin_package",
@@ -56,7 +71,7 @@ pub(crate) const PLUGIN_PACKAGE_OPERATIONS: &[PluginPackageOperation] = &[
     PluginPackageOperation {
         name: "get_plugin_operation",
         scope: "manage",
-        description: "Read a plugin preparation result. Agent callers cannot read owner instance preparations.",
+        description: "Read a plugin preparation result. Resource results also require read access. Agent callers cannot read owner instance preparations.",
     },
     PluginPackageOperation {
         name: "cancel_plugin_operation",
@@ -77,6 +92,8 @@ pub(crate) struct Authority {
     pub bearer: Option<String>,
     owner: Option<cairn_protocol::TaskAuthorGrant>,
     public_credential: Option<String>,
+    public_scope: Option<&'static str>,
+    additional_public_scope: Option<&'static str>,
 }
 
 impl Authority {
@@ -107,12 +124,20 @@ impl Authority {
             bearer: None,
             owner: Some(policy.owner),
             public_credential: None,
+            public_scope: None,
+            additional_public_scope: None,
         })
     }
 
     pub(crate) async fn recheck(&self, s: &Service) -> Result<()> {
         if let Some(credential) = &self.public_credential {
-            crate::relay::authorize_plugin_mcp(s, credential).await?;
+            let required_scope = self.public_scope.unwrap_or("manage");
+            crate::relay::authorize_plugin_mcp_scope(s, credential, required_scope).await?;
+            if let Some(additional) = self.additional_public_scope
+                && additional != required_scope
+            {
+                crate::relay::authorize_plugin_mcp_scope(s, credential, additional).await?;
+            }
         }
         if let Some(expected) = &self.owner {
             let policy = crate::relay::task_author_policy(s).await?.ok_or_else(|| {
@@ -142,6 +167,12 @@ impl PluginPackageOperation {
     pub(crate) fn descriptor(&self) -> Value {
         let input = match self.name {
             "list_plugins" => schema_for::<ListPluginPackagesInput>(Contract::Deserialize),
+            "list_plugin_resources" => {
+                schema_for::<ListPluginResourcesInput>(Contract::Deserialize)
+            }
+            "resolve_plugin_resource" => {
+                schema_for::<ResolvePluginResourceInput>(Contract::Deserialize)
+            }
             "install_plugin_package" => {
                 schema_for::<InstallPluginPackageInput>(Contract::Deserialize)
             }
@@ -153,17 +184,22 @@ impl PluginPackageOperation {
             }
             "list_plugin_programs" => schema_for::<ListPluginProgramsInput>(Contract::Deserialize),
             "prepare_plugin_program" => schema_for::<PluginProgramInput>(Contract::Deserialize),
-            "get_plugin_operation" | "cancel_plugin_operation" => {
+            "get_plugin_operation"
+            | "get_plugin_resource_operation"
+            | "cancel_plugin_operation" => {
                 schema_for::<PluginOperationInput>(Contract::Deserialize)
             }
             _ => schema_for::<PluginPackageInput>(Contract::Deserialize),
         };
         let output = match self.name {
             "list_plugins" => schema_for::<PluginCatalog>(Contract::Serialize),
-            "list_plugin_programs" => schema_for::<ListPluginProgramsOutput>(Contract::Serialize),
-            "get_plugin_operation" | "cancel_plugin_operation" => {
-                schema_for::<PluginOperation>(Contract::Serialize)
+            "list_plugin_resources" | "resolve_plugin_resource" => {
+                schema_for::<PluginOperationStarted>(Contract::Serialize)
             }
+            "list_plugin_programs" => schema_for::<ListPluginProgramsOutput>(Contract::Serialize),
+            "get_plugin_operation"
+            | "get_plugin_resource_operation"
+            | "cancel_plugin_operation" => schema_for::<PluginOperation>(Contract::Serialize),
             "delete_plugin_package" => schema_for::<DeletePluginPackageOutput>(Contract::Serialize),
             "install_plugin_package" => schema_for::<PackageVersion>(Contract::Serialize),
             _ => schema_for::<PluginOperationStarted>(Contract::Serialize),
@@ -182,8 +218,33 @@ impl PluginPackageOperation {
         input: Value,
         context: ResumeContext,
     ) -> Result<Value> {
+        // Resource handlers add sizeable futures to this shared dispatcher. Keep
+        // that state off its HTTP/MCP callers' stacks, including nested preparation.
+        Box::pin(self.invoke_inner(s, input, context)).await
+    }
+
+    async fn invoke_inner(
+        &self,
+        s: &Arc<Service>,
+        input: Value,
+        context: ResumeContext,
+    ) -> Result<Value> {
         let owner = matches!(context, ResumeContext::Human(_));
-        let authority = match context {
+        let human_account = match &context {
+            ResumeContext::Human(account) => Some(account.clone()),
+            _ => None,
+        };
+        // Resource handlers use instance capabilities after this request ends;
+        // read scope must retain the human's revocable account/access identity.
+        let reads_resources = matches!(
+            self.name,
+            "list_plugin_resources" | "resolve_plugin_resource" | "get_plugin_resource_operation"
+        );
+        let public_resource_read = match &context {
+            ResumeContext::Public(scopes, _) => Some(scopes.iter().any(|scope| scope == "read")),
+            _ => None,
+        };
+        let mut authority = match context {
             ResumeContext::Installation(bearer) => Authority {
                 bearer: Some(bearer),
                 ..Default::default()
@@ -199,22 +260,24 @@ impl PluginPackageOperation {
                     self.name,
                     "install_plugin_package" | "activate_plugin_package" | "delete_plugin_package"
                 );
-                if writes_packages && credential.is_none() {
+                if (writes_packages || reads_resources) && credential.is_none() {
                     return Err(Error::unauthorized(
                         "A current public MCP authorization is required.",
                     ));
                 }
                 Authority {
                     public_credential: credential,
+                    public_scope: Some(self.scope),
                     ..Default::default()
                 }
             }
             ResumeContext::Human(account) => {
-                if self.scope == "manage"
-                    && !matches!(
-                        self.name,
-                        "get_plugin_operation" | "cancel_plugin_operation"
-                    )
+                if reads_resources
+                    || (self.scope == "manage"
+                        && !matches!(
+                            self.name,
+                            "get_plugin_operation" | "cancel_plugin_operation"
+                        ))
                 {
                     Authority::human(s, &account).await?
                 } else {
@@ -224,10 +287,58 @@ impl PluginPackageOperation {
         };
         let check = authority.clone();
         s.store.read(move |db| check.authorize(db)).await?;
+        let mut resource_result = None;
         let result = match self.name {
             "list_plugins" => {
                 let _: ListPluginPackagesInput = decode(input)?;
                 serde_json::to_value(management::catalog(s).await?)?
+            }
+            "list_plugin_resources" | "resolve_plugin_resource" => {
+                authority.recheck(s).await?;
+                let caller = match &authority.bearer {
+                    Some(bearer) => Some(crate::installation_mcp::authorize(s, bearer).await?),
+                    None => None,
+                };
+                let agent = caller
+                    .as_ref()
+                    .map(|run| crate::validation::text(&run["snapshot"]["agent"], "id"));
+                let audience =
+                    operations::Audience::from_bearer(authority.bearer.as_deref(), owner);
+                let service = s.clone();
+                if self.name == "list_plugin_resources" {
+                    let input: ListPluginResourcesInput = decode(input)?;
+                    let read = Arc::new(
+                        resources::prepare_list(s, &input, agent, Some(authority.clone())).await?,
+                    );
+                    let work = read.clone();
+                    s.plugins.operations.start_resource_read(
+                        s.clone(),
+                        audience,
+                        read,
+                        async move {
+                            Ok(PluginOperationResult::ResourcePage {
+                                page: Box::new(work.list(&service, input).await?),
+                            })
+                        },
+                    )?
+                } else {
+                    let input: ResolvePluginResourceInput = decode(input)?;
+                    let read = Arc::new(
+                        resources::prepare_resolve(s, &input, agent, Some(authority.clone()))
+                            .await?,
+                    );
+                    let work = read.clone();
+                    s.plugins.operations.start_resource_read(
+                        s.clone(),
+                        audience,
+                        read,
+                        async move {
+                            Ok(PluginOperationResult::ResourceAncestry {
+                                resolution: Box::new(work.resolve(&service, input).await?),
+                            })
+                        },
+                    )?
+                }
             }
             "install_plugin_package" => {
                 let input: InstallPluginPackageInput = decode(input)?;
@@ -323,13 +434,40 @@ impl PluginPackageOperation {
                         Ok(PluginOperationResult::Program { program })
                     })?
             }
-            "get_plugin_operation" | "cancel_plugin_operation" => {
+            "get_plugin_operation"
+            | "get_plugin_resource_operation"
+            | "cancel_plugin_operation" => {
                 let input: PluginOperationInput = decode(input)?;
                 s.plugins.operations.authorize(
                     &input.operation_id,
                     authority.bearer.as_deref(),
                     owner,
                 )?;
+                resource_result = s.plugins.operations.resource_read(
+                    &input.operation_id,
+                    self.name == "get_plugin_resource_operation",
+                )?;
+                if resource_result.is_some()
+                    && authority.owner.is_none()
+                    && let Some(account) = &human_account
+                {
+                    authority = Authority::human(s, account).await?;
+                }
+                if resource_result.is_some()
+                    && let Some(can_read) = public_resource_read
+                {
+                    if !can_read {
+                        return Err(Error::forbidden(
+                            "The read scope is required for resource results.",
+                        ));
+                    }
+                    if authority.public_credential.is_none() {
+                        return Err(Error::unauthorized(
+                            "A current public MCP authorization is required.",
+                        ));
+                    }
+                    authority.additional_public_scope = Some("read");
+                }
                 if self.name == "cancel_plugin_operation" {
                     s.plugins.operations.cancel(&input.operation_id)?;
                 }
@@ -337,7 +475,11 @@ impl PluginPackageOperation {
             }
             _ => return Err(Error::not_found("Unknown plugin package operation.")),
         };
-        s.store.read(move |db| authority.authorize(db)).await?;
+        let check = authority.clone();
+        s.store.read(move |db| check.authorize(db)).await?;
+        if let Some(read) = resource_result {
+            read.authorize_result(s, &authority).await?;
+        }
         Ok(result)
     }
 }

@@ -763,6 +763,10 @@ fn main() {
     export::<ProgramRelease>(root, &mut generator, Contract::Serialize);
     export::<InstalledProgram>(root, &mut generator, Contract::Serialize);
     export::<ProgramState>(root, &mut generator, Contract::Serialize);
+    export::<ListPluginResourcesInput>(root, &mut generator, Contract::Deserialize);
+    export::<ListPluginResourcesOutput>(root, &mut generator, Contract::Serialize);
+    export::<ResolvePluginResourceInput>(root, &mut generator, Contract::Deserialize);
+    export::<ResolvePluginResourceOutput>(root, &mut generator, Contract::Serialize);
     export::<ListPluginProgramsInput>(root, &mut generator, Contract::Deserialize);
     export::<ListPluginProgramsOutput>(root, &mut generator, Contract::Serialize);
     export::<InstallPluginPackageInput>(root, &mut generator, Contract::Deserialize);
@@ -869,6 +873,9 @@ fn main() {
         {"name": "installPluginPackage", "input": "InstallPluginPackageInput", "output": "PackageVersion", "method": "POST", "path": "/plugins/packages"},
         {"deferred": true, "name": "approvePluginPackage", "input": "ApprovePluginPackageInput", "output": "PackageVersion", "method": "POST", "path": "/plugins/packages/{pluginId}/approve"},
         {"deferred": true, "name": "activatePluginPackage", "input": "ActivatePluginPackageInput", "output": "PackageVersion", "method": "POST", "path": "/plugins/packages/{pluginId}/activate"},
+        {"name": "getPluginResourceOperation", "input": "PluginOperationInput", "output": "PluginOperation", "method": "GET", "path": "/plugins/resources/operations/{operationId}"},
+        {"name": "listPluginResources", "input": "ListPluginResourcesInput", "output": "ListPluginResourcesOutput", "method": "GET", "deferred": true, "path": "/plugins/{pluginId}/connections/{instanceId}/resources", "query": ["resourceType", "page", "query"]},
+        {"name": "resolvePluginResource", "input": "ResolvePluginResourceInput", "output": "ResolvePluginResourceOutput", "method": "GET", "deferred": true, "path": "/plugins/{pluginId}/connections/{instanceId}/resources/ancestors", "query": ["resourceType", "id"]},
         {"name": "listPluginPrograms", "input": "ListPluginProgramsInput", "output": "ListPluginProgramsOutput", "method": "GET", "path": "/plugins/{pluginId}/programs"},
         {"name": "getPluginOperation", "input": "PluginOperationInput", "output": "PluginOperation", "method": "GET", "path": "/plugins/packages/operations/{operationId}"},
         { "name": "preparePluginProgram", "input": "PluginProgramInput", "output": "ProgramState", "method": "POST", "path": "/plugins/programs/prepare", "deferred": true },
