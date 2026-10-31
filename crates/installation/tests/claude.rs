@@ -1346,6 +1346,42 @@ async fn completed_plan_receipt_preserves_proposal_ids_and_subagent_parentage() 
 }
 
 #[tokio::test]
+async fn completed_plan_receipt_replays_the_proposal_without_another_native_turn() {
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    let mut p = plan_turn(&root);
+    p["execution"]["text"] = "fixture:plan-turn fixture:receipt-child".into();
+    let (result, original) = run_to_end(&c, p.clone()).await;
+    result.unwrap();
+    let proposals = |events: Vec<Value>| {
+        events
+            .into_iter()
+            .filter(|event| {
+                event["type"] == "item.completed" && event["item"]["type"] == "proposed_plan"
+            })
+            .collect::<Vec<_>>()
+    };
+    let expected = proposals(original);
+    assert_eq!(expected.len(), 2);
+    assert_eq!(expected[0]["item"]["parent_id"], "child-agent");
+    assert!(expected[1]["item"]["parent_id"].is_null());
+    for event in &expected {
+        assert_eq!(event["item"]["request_id"], "original");
+    }
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("result.md")).unwrap(),
+        ""
+    );
+    // Only the receipt survives: this new receiver has no earlier proposal events.
+    let (result, recovered) = run_to_end(&c, p).await;
+    result.unwrap();
+    assert!(completes(&recovered));
+    assert_eq!(proposals(recovered), expected);
+    let calls = std::fs::read_to_string(c.home.join(".claude/invocations.jsonl")).unwrap();
+    assert_eq!(calls.lines().count(), 1);
+}
+
+#[tokio::test]
 async fn disk_notice_reaches_engine_without_user_receipts_including_replay() {
     let root = TempDir::new().unwrap();
     let c = setup(&root);

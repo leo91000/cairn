@@ -101,6 +101,7 @@ else {
   let question
   let planRequests
   let planCorrelation
+  let planReceiptChildren = false
   let serial = 0
   // Like Claude Code 2.1.280: the last response's prompt (cached or not) is the context,
   // and a local estimate stands in before the first response or after `/compact`.
@@ -247,7 +248,20 @@ else {
               }],
             },
           })
-          complete('Plan ready for review', false, planCorrelation)
+          if (planReceiptChildren) {
+            // A valid plan-only completion has no ordinary assistant summary.
+            out({
+              type: 'result',
+              subtype: 'success',
+              is_error: false,
+              result: '',
+              session_id: session,
+              ...planCorrelation,
+            })
+          }
+          else {
+            complete('Plan ready for review', false, planCorrelation)
+          }
         }
 
         return
@@ -305,6 +319,36 @@ else {
         ['exit-plan', 'ExitPlanMode', proposal],
         ['exit-without-plan', 'ExitPlanMode', {}],
       ]
+      planReceiptChildren = prompt.includes('fixture:receipt-child')
+      if (planReceiptChildren) {
+        out({
+          type: 'assistant',
+          parent_tool_use_id: 'child-agent',
+          message: {
+            id: 'child-plan-message',
+            content: [{
+              type: 'tool_use',
+              id: 'child-exit-plan-tool',
+              name: 'ExitPlanMode',
+              input: { plan: 'Child approach' },
+            }],
+          },
+        })
+        out({
+          type: 'user',
+          parent_tool_use_id: 'child-agent',
+          message: {
+            role: 'user',
+            content: [{
+              type: 'tool_result',
+              tool_use_id: 'child-exit-plan-tool',
+              content: 'Stay in plan mode',
+              is_error: true,
+            }],
+          },
+        })
+      }
+
       planRequests = new Set(requests.map(([id]) => id))
       planCorrelation = correlation
       out({
