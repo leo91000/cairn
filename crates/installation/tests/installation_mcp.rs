@@ -2919,7 +2919,7 @@ async fn chat_file_tools_read_private_artifacts_and_attachments_in_bounded_chunk
         "title": "Private report", "name": "report.bin", "size": data.len(),
         "digest": digest, "visibility": "private", "createdAt": 1,
     });
-    let artifact_record = common::deliverable(text(&target, "id"), &artifact_id, record);
+    let artifact_record = common::deliverable(text(&target, "id"), &artifact_id, &record);
     s.store
         .transaction(move |db| db.insert_artifact(&artifact_record))
         .await
@@ -7322,12 +7322,12 @@ async fn mission_deliverables_work_without_a_conversation_on_both_management_too
             use sha2::Digest;
             hex::encode(sha2::Sha256::digest(&bytes))
         };
-        let item = common::deliverable(run, &id, json!({"size":bytes.len(),"digest":digest}));
+        let item = common::deliverable(run, &id, &json!({"size":bytes.len(),"digest":digest}));
         let second_id = uuid::Uuid::new_v4().to_string();
         let second = common::deliverable(
             run,
             &second_id,
-            json!({"version":2,"size":bytes.len(),"digest":digest}),
+            &json!({"version":2,"size":bytes.len(),"digest":digest}),
         );
         s.store
             .transaction(move |db| {

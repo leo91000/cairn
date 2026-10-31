@@ -1065,7 +1065,7 @@ async fn chat_state_questions_and_artifacts_update_without_text_events() {
         stream.batch().await.1["state"]["chat"]["pendingQuestions"],
         1
     );
-    let artifact = common::deliverable(&f.run, "file", json!({"previewStatus":"pending"}));
+    let artifact = common::deliverable(&f.run, "file", &json!({"previewStatus":"pending"}));
     let stored = artifact.clone();
     f.service
         .store
