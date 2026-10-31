@@ -55,9 +55,9 @@ watch(() => state.signingOut || (state.ready && !state.authenticated), (clear) =
     void clearHistoryCache()
 }, { flush: 'sync' })
 export const installationTransport = new InstallationTransport(state)
-watch(() => [state.ready, state.authenticated, state.installationId, state.signingOut, state.installationOnline], () => {
+watch(() => [state.ready, state.authenticated, state.installationId, state.signingOut, state.redirecting, state.installationOnline], () => {
   installationTransport.availabilityChanged(state.installationOnline)
-  if (beaconEntry && state.ready && state.authenticated && !state.signingOut)
+  if (beaconEntry && state.ready && state.authenticated && !state.signingOut && !state.redirecting)
     installationTransport.start()
   else if (typeof window !== 'undefined')
     installationTransport.stop()
