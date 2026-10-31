@@ -440,16 +440,25 @@ export async function refreshSkills() {
     state.skills = skills
 }
 
+let mcpRefresh = 0
+export async function refreshMcps() {
+  const request = ++mcpRefresh
+  const scope = connectionScope()
+  const mcps = state.installationRole === 'owner' ? (await listMcps(api, {})).mcps : []
+  if (request === mcpRefresh && connectionScope() === scope && state.authenticated && !state.signingOut)
+    state.mcps = mcps
+}
+
 export async function refresh() {
   const scope = connectionScope()
-  let lists: [Agent[], Project[], Task[], Skill[], McpView[]]
+  let lists: [Agent[], Project[], Task[], Skill[], void]
   try {
     lists = await Promise.all([
       listAgents(api, {}).then(output => output.agents),
       listProjects(api, {}).then(output => output.projects),
       listMissions(api, {}).then(output => output.tasks),
       listSkills(api, {}),
-      state.installationRole === 'owner' ? listMcps(api, {}).then(result => result.mcps) : Promise.resolve([]),
+      refreshMcps(),
     ])
   }
   catch (error) {
@@ -460,13 +469,12 @@ export async function refresh() {
 
   if (connectionScope() !== scope || !state.authenticated || state.signingOut)
     return
-  const [agents, projects, tasks, skills, mcps] = lists
+  const [agents, projects, tasks, skills] = lists
   Object.assign(state, {
     agents,
     projects,
     tasks,
     skills,
-    mcps,
     workspaceLoaded: true,
   })
 }
