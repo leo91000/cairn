@@ -12,7 +12,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { NativeFixture } from './native-fixture'
 
 // Shared by journeys-beacon-relay and the network bench: real processes, fake mail only.
-export async function beaconRelayFixture(port = 4395, listen = '127.0.0.1', directory = tmpdir()) {
+export async function beaconRelayFixture(port = 4395, listen = '127.0.0.1', directory = tmpdir(), originHost = 'localhost') {
   const messages: string[] = []
   const mail = createServer(async (request, response) => {
     let body = ''
@@ -26,7 +26,7 @@ export async function beaconRelayFixture(port = 4395, listen = '127.0.0.1', dire
   const mailPort = (mail.address() as { port: number }).port
   const root = await mkdtemp(join(directory, 'cairn-beacon-relay-'))
   await Promise.all([mkdir(join(root, 'data')), mkdir(join(root, 'home'))])
-  const url = `http://localhost:${port}`
+  const url = `http://${originHost}:${port}`
   const children: ChildProcess[] = []
   const seed = new NativeFixture({
     dataDir: join(root, 'data'),
