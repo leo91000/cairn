@@ -615,6 +615,19 @@ mod ownership_tests {
         super::super::routes::handler(axum::extract::State(broker.clone()), request).await
     }
 
+    async fn cancel_startup_fixture(broker: &Broker, id: &str) {
+        let mut done = {
+            let active = broker.active.lock().await;
+            let attempt = &active[id];
+            attempt.stop.cancel();
+            attempt.done.clone()
+        };
+        tokio::time::timeout(Duration::from_secs(15), done.wait_for(|done| *done))
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn accepted_start_streams_heartbeats_before_guest_preparation_and_preserves_cursors() {
         let root = tempfile::tempdir().unwrap();
@@ -629,7 +642,7 @@ mod ownership_tests {
         let response = log_response(&broker, &id, 0).await;
         if response.is_err() {
             drop(owner);
-            broker.stop(&id).await.unwrap();
+            cancel_startup_fixture(&broker, &id).await;
             panic!("accepted attempts must expose their log before guest preparation");
         }
         let mut stream = response.unwrap().into_body().into_data_stream();
@@ -678,7 +691,7 @@ mod ownership_tests {
         // then deliver the controller's startup failure and an explicit end.
         let response = log_response(&broker, &id, offset).await.unwrap();
         drop(owner);
-        broker.stop(&id).await.unwrap();
+        cancel_startup_fixture(&broker, &id).await;
         let bytes = tokio::time::timeout(
             Duration::from_secs(3),
             axum::body::to_bytes(response.into_body(), 10000),
@@ -741,7 +754,7 @@ mod ownership_tests {
         broker.start(&id).await.unwrap();
         assert_eq!(tokio::fs::read(&path).await.unwrap(), previous);
         drop(owner);
-        broker.stop(&id).await.unwrap();
+        cancel_startup_fixture(&broker, &id).await;
     }
 
     #[tokio::test]
