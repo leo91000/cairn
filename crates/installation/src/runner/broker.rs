@@ -615,13 +615,18 @@ mod ownership_tests {
         super::super::routes::handler(axum::extract::State(broker.clone()), request).await
     }
 
-    async fn cancel_startup_fixture(broker: &Broker, id: &str) {
+    async fn cancel_startup_fixture(
+        broker: &Broker,
+        id: &str,
+        owner: crate::storage::environment::OwnerLease,
+    ) {
         let mut done = {
             let active = broker.active.lock().await;
             let attempt = &active[id];
             attempt.stop.cancel();
             attempt.done.clone()
         };
+        drop(owner);
         tokio::time::timeout(Duration::from_secs(15), done.wait_for(|done| *done))
             .await
             .unwrap()
@@ -641,8 +646,7 @@ mod ownership_tests {
         broker.start(&id).await.unwrap();
         let response = log_response(&broker, &id, 0).await;
         if response.is_err() {
-            drop(owner);
-            cancel_startup_fixture(&broker, &id).await;
+            cancel_startup_fixture(&broker, &id, owner).await;
             panic!("accepted attempts must expose their log before guest preparation");
         }
         let mut stream = response.unwrap().into_body().into_data_stream();
@@ -690,8 +694,7 @@ mod ownership_tests {
         // Reconnecting from the acknowledged boundary must omit the first event,
         // then deliver the controller's startup failure and an explicit end.
         let response = log_response(&broker, &id, offset).await.unwrap();
-        drop(owner);
-        cancel_startup_fixture(&broker, &id).await;
+        cancel_startup_fixture(&broker, &id, owner).await;
         let bytes = tokio::time::timeout(
             Duration::from_secs(3),
             axum::body::to_bytes(response.into_body(), 10000),
@@ -753,8 +756,7 @@ mod ownership_tests {
         tokio::fs::write(&path, previous).await.unwrap();
         broker.start(&id).await.unwrap();
         assert_eq!(tokio::fs::read(&path).await.unwrap(), previous);
-        drop(owner);
-        cancel_startup_fixture(&broker, &id).await;
+        cancel_startup_fixture(&broker, &id, owner).await;
     }
 
     #[tokio::test]

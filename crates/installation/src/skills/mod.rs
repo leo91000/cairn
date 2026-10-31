@@ -633,8 +633,11 @@ impl Skills {
         offset: u64,
         project: Option<&Path>,
     ) -> Result<Value> {
-        let directory = self.directory(skill, project).await?;
-        let (current, files) = bundle::read_all(&directory).await?;
+        let root = self.root(project).await?;
+        let _read = bundle::access(&root).await.read_owned().await;
+        let directory = skill_directory(&root, skill).await?;
+        let (current, files) = bundle::read_all_locked(&directory).await?;
+        drop(_read);
         if revision.is_some_and(|revision| revision != current) {
             return Err(Error::conflict(
                 "This skill changed during the download. Try again.",
