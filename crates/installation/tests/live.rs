@@ -2147,3 +2147,89 @@ async fn large_plan_proposals_use_bounded_stream_and_history_references() {
         .unwrap();
     assert_eq!(wrong_digest.status(), StatusCode::CONFLICT);
 }
+
+#[tokio::test]
+async fn member_can_hydrate_native_proposals_without_execution_authority_or_retained_agent() {
+    use common::{AgentFixture, run_fixture::RunFixture};
+    for deleted in [false, true] {
+        let f = Fixture::new().await;
+        let agent_id = if deleted {
+            id()
+        } else {
+            let agent = f.service.agent_fixture(json!({
+                "name": "Native history only", "access": { "backend": "native", "nodes": [] }
+            }), None).await.unwrap();
+            text(&agent, "id").to_owned()
+        };
+        f.service
+            .store
+            .change_run_fixture(
+                &f.run,
+                json!({
+                    "snapshot": {
+                        "task": { "agentId": agent_id },
+                        "agent": { "id": agent_id, "access": { "backend": "native" } }
+                    }
+                }),
+            )
+            .await
+            .unwrap();
+        let mut chat = f.service.chat_create(json!({})).await.unwrap();
+        let chat_id = text(&chat, "id").to_owned();
+        chat["agentId"] = agent_id.clone().into();
+        chat["runId"] = f.run.clone().into();
+        f.service
+            .store
+            .save_conversation_boundary(chat)
+            .await
+            .unwrap();
+        let approach = "reviewed design ".repeat(20000);
+        f.service
+            .store
+            .event(
+                &f.run,
+                &EventKind::ItemCompleted,
+                &approach,
+                Some(json!({
+                    "item": { "id": "large-native-plan", "type": "proposed_plan", "text": approach }
+                })),
+            )
+            .await
+            .unwrap();
+        let event_id = *ids(&f).await.last().unwrap();
+        let token = common::relay_fixture::member_context(&f.service, "history-only-member").await;
+        for (kind, target) in [("runs", &f.run), ("chats", &chat_id)] {
+            let url = format!("{}/api/{kind}/{target}/event-content", f.url);
+            let client = reqwest::Client::new();
+            let mut offset = 0;
+            let mut sha = Value::Null;
+            let mut restored = String::new();
+            loop {
+                let response = client.post(&url)
+                    .header("x-test-relay-token", text(&token, "value"))
+                    .json(&json!({ "runId": f.run, "eventId": event_id, "offset": offset, "sha256": sha }))
+                    .send().await.unwrap();
+                let status = response.status();
+                let part: Value = response.json().await.unwrap();
+                assert_eq!(status, StatusCode::OK, "deleted={deleted} {kind}: {part}");
+                restored.push_str(part["data"].as_str().unwrap());
+                sha = part["sha256"].clone();
+                if part["nextOffset"].is_null() {
+                    break;
+                }
+                offset = part["nextOffset"].as_u64().unwrap();
+            }
+            let restored: Value = serde_json::from_str(&restored).unwrap();
+            assert_eq!(restored["id"], event_id);
+            assert_eq!(restored["payload"]["item"]["text"], approach);
+            let response = client
+                .post(&url)
+                .header("x-test-relay-token", text(&token, "value"))
+                .json(&json!({ "runId": id(), "eventId": event_id, "offset": 0 }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+        }
+    }
+}
