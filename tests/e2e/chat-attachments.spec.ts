@@ -255,8 +255,12 @@ test('uploads images and files, previews them and preserves attachments while ed
   await page.getByLabel('Attach files', { exact: true }).setInputFiles([{ ...image, name: 'image-only.png' }])
   await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveValue('')
   await page.getByRole('button', { name: 'Send', exact: true }).click()
-  const single = page.locator('.activity-message').getByRole('button', { name: 'Preview image-only.png', exact: true })
+  const singleMessage = page.locator('.activity-message').filter({ has: page.getByRole('button', { name: 'Preview image-only.png', exact: true }) })
+  const single = singleMessage.getByRole('button', { name: 'Preview image-only.png', exact: true })
   await expect(single).toBeVisible()
+  // Acknowledgement replaces the optimistic row. Measure the settled image, since a
+  // detached image can remain complete while its bounding rectangle is 0 × 0.
+  await expect(singleMessage.getByRole('status')).toHaveCount(0)
   // The installation records the picture's 1440 × 1000 size, so the placeholder and the
   // picture take the same box: the conversation does not move when the preview loads.
   const box = /^width: 15rem; height: 10\.416\d*rem;$/
