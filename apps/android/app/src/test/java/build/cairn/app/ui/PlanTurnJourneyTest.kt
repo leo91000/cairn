@@ -64,7 +64,11 @@ class PlanTurnJourneyTest {
     fun `stale implementation approval reports the conflict and keeps the composer empty`() =
         approvalJourney(true)
 
-    private fun approvalJourney(staleApproval: Boolean) {
+    @Test
+    fun `completed proposal after steering uses the final source in its HTTP approval`() =
+        approvalJourney(false, steeringBeforeCompletion = true)
+
+    private fun approvalJourney(staleApproval: Boolean, steeringBeforeCompletion: Boolean = false) {
         MockWebServer().use { server ->
             val streamRequests = AtomicInteger()
             val approvalResponse = CountDownLatch(1)
@@ -117,8 +121,9 @@ class PlanTurnJourneyTest {
                             )
                         },
                 )
+            val completedSource = if (steeringBeforeCompletion) 5L else 4L
             val events =
-                listOf(
+                listOfNotNull(
                     RunEvent(
                         id = 1,
                         createdAt = 1789315189000,
@@ -132,8 +137,27 @@ class PlanTurnJourneyTest {
                     ),
                     RunEvent(id = 2, createdAt = 1789315190000, type = "turn.started", text = ""),
                     proposalEvent(3, "item.started"),
-                    proposalEvent(4, "item.completed"),
-                    RunEvent(id = 5, createdAt = 1789315193000, type = "turn.completed", text = ""),
+                    if (steeringBeforeCompletion)
+                        RunEvent(
+                            id = 4,
+                            runId = "run",
+                            createdAt = 1789315192500,
+                            type = "chat.user",
+                            text = "Clarifie aussi les tests",
+                            payload =
+                                buildJsonObject {
+                                    put("text", "Clarifie aussi les tests")
+                                    put("plan", true)
+                                },
+                        )
+                    else null,
+                    proposalEvent(completedSource, "item.completed"),
+                    RunEvent(
+                        id = completedSource + 1,
+                        createdAt = 1789315195000,
+                        type = "turn.completed",
+                        text = "",
+                    ),
                 )
             val vm =
                 mountPlanChat(
@@ -149,7 +173,9 @@ class PlanTurnJourneyTest {
                 compose.onAllNodesWithTag("proposed-plan").fetchSemanticsNodes().isNotEmpty()
             }
             compose.onNodeWithText("Plan proposé").assertExists()
-            compose.onNodeWithText("Plan · ", substring = true).assertExists()
+            compose
+                .onAllNodesWithText("Plan · ", substring = true)
+                .assertCountEquals(if (steeringBeforeCompletion) 2 else 1)
             screenshot("plan-turn")
 
             // An idle proposal can be explicitly implemented as an ordinary message.
@@ -174,7 +200,7 @@ class PlanTurnJourneyTest {
             assertEquals(false, implementing["plan"]?.jsonPrimitive?.boolean)
             val approval = implementing["planApproval"]!!.jsonObject
             assertEquals("reviewed-revision", approval["revision"]!!.jsonPrimitive.content)
-            assertEquals("run:4", approval["sourceId"]!!.jsonPrimitive.content)
+            assertEquals("run:$completedSource", approval["sourceId"]!!.jsonPrimitive.content)
             assertEquals(
                 "Implémente le plan que tu as proposé.",
                 implementing["text"]?.jsonPrimitive?.content,

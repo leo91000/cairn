@@ -482,17 +482,9 @@ internal fun ChatPage(
         }
     // Only the latest proposal, before any later request, offers to implement it.
     val implementable =
-        remember(timeline) {
-            val index = timeline.indexOfLast { it.proposal }
-            timeline
-                .getOrNull(index)
-                ?.takeIf {
-                    it.proposalSourceId != null &&
-                        timeline.drop(index + 1).none { entry ->
-                            entry.events.any { event -> event.type == "chat.user" }
-                        }
-                }
-                ?.key
+        remember(timeline, live.events) {
+            val sourceId = proposedPlanApproval(live.events)
+            timeline.lastOrNull { sourceId != null && it.proposalSourceId == sourceId }?.key
         }
     var asking by remember { mutableStateOf<ChatQuestion?>(null) }
     var stopping by remember { mutableStateOf(false) }

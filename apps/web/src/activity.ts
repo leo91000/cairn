@@ -242,6 +242,25 @@ const collaborationTitles: Record<string, string> = {
 }
 
 /** Keep tool updates in their original position and fold actions between messages. */
+/** Approval identity is distinct from the row anchored for reading. */
+export function proposedPlanApproval(events: RunEvent[]): string | undefined {
+  let latest: RunEvent | undefined
+  let lastRequest = -1
+  for (const event of events) {
+    if (event.type === 'chat.user')
+      lastRequest = Math.max(lastRequest, event.id)
+    if (!['item.started', 'item.updated', 'item.completed'].includes(event.type))
+      continue
+    const item = record(record(event.payload).item)
+    if (item.type === 'proposed_plan' && !text(item.parent_id) && (!latest || event.id > latest.id))
+      latest = event
+  }
+
+  if (!latest || latest.type !== 'item.completed' || latest.id <= lastRequest || !text(record(record(latest.payload).item).text).trim())
+    return undefined
+  return `${latest.runId}:${latest.id}`
+}
+
 export function activityEntries(events: RunEvent[], chat = false, groups = new ActivityGroups(), pendingWakeup?: ChatWakeup | null): ActivityEntry[] {
   const entries: ActivityEntry[] = []
   const artifacts = new Map<string, ActivityArtifact>()

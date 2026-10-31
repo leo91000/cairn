@@ -136,6 +136,14 @@ qui ne résout aucune version. Résultats du 2026-10-27 :
   refusées, puis a écrit au tour d’implémentation ; tous les tours gardent le modèle configuré ; le tour
   précédent et le tour qui suit le plan écrivent normalement.
 
+La fraîcheur suit les événements persistés, pas la position de leur carte repliée.
+Une nouvelle proposition principale, même vide ou portant le même identifiant,
+invalide la précédente dès son début ou sa mise à jour. Seul son événement final
+avec du contenu peut être approuvé. Une clarification reçue avant cette fin en
+fait partie ; un message reçu après l’invalide. Web, Android et la transaction
+commune HTTP/MCP appliquent cet ordre, y compris après chargement d’une ancienne
+page. Les clés visuelles restent ancrées pour conserver la position de lecture.
+
 ## Limites
 
 - `readOnlyHint` est déclaré par le serveur MCP. Un serveur qui le donne à tort à un

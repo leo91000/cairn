@@ -20,7 +20,7 @@ import {
   watch,
 } from 'vue'
 import { latestArtifacts } from '../../../../packages/contracts/artifacts'
-import { activityEntries, ActivityGroups } from '../activity'
+import { activityEntries, ActivityGroups, proposedPlanApproval } from '../activity'
 import { currentPlan } from '../agent-plan'
 import { quotaEntries } from '../chat-quota'
 import { deliveryEntries } from '../deliverables'
@@ -144,12 +144,8 @@ const working = computed(() => {
 })
 // Only the latest proposal, before any later request, offers to implement it.
 const implementable = computed(() => {
-  const items = activity.value
-  const index = items.findLastIndex(entry => entry.kind === 'proposal')
-  if (index < 0 || items.slice(index + 1).some(entry => entry.kind === 'message' && entry.role === 'user'))
-    return null
-  const proposal = items[index]!
-  return proposal.kind === 'proposal' && proposal.sourceId ? proposal.id : null
+  const sourceId = proposedPlanApproval(props.events)
+  return sourceId ? activity.value.findLast(entry => entry.kind === 'proposal' && entry.sourceId === sourceId)?.id : null
 })
 const visibleOutcome = computed(() => !props.active && !props.sending?.length && !props.loading ? props.outcome : null)
 const outcomeEntryId = computed(() => {

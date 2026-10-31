@@ -5982,3 +5982,97 @@ async fn slow_resource_imports_complete_through_both_tools_without_extending_cod
     }
     tokio::join!(scenario(false), scenario(true));
 }
+
+#[tokio::test]
+async fn both_mcp_endpoints_bind_approval_to_the_latest_root_lifecycle() {
+    for internal in [false, true] {
+        let root = TempDir::new().unwrap();
+        let s = service(&root).await;
+        let main = enabled_main(&s).await;
+        let (_, configuration) = active_run(&s, &main).await;
+        let invoke = |name, args| {
+            let s = s.clone();
+            let configuration = configuration.clone();
+            async move {
+                if internal {
+                    call(&s, &configuration, name, args).await
+                } else {
+                    public_call(&s, &["read", "manage", "run"], name, args).await
+                }
+            }
+        };
+        for proposal in ["original", "replacement"] {
+            for phase in [EventKind::ItemStarted, EventKind::ItemUpdated] {
+                let created = invoke("create_chat", json!({})).await;
+                let chat = result(&created).clone();
+                let chat_id = text(&chat, "id").to_owned();
+                let run = uuid::Uuid::new_v4().to_string();
+                let (c, r) = (chat_id.clone(), run.clone());
+                let original = s.store.transaction(move |db| {
+                    db.add_run_fixture(&json!({
+                        "id": r, "taskId": r, "createdAt": 0, "status": "cancelled",
+                        "nativeProvenanceUnknown": true, "nativePrincipals": [], "nativeAuthorityNodes": [],
+                        "snapshot": { "agent": { "provider": "codex" } }
+                    }), None)?;
+                    let mut chat = db.conversation_boundary(&c)?.unwrap();
+                    chat["runId"] = r.clone().into();
+                    db.save_conversation_boundary(&chat)?;
+                    db.event(&r, &EventKind::ItemCompleted, "Reviewed plan", Some(&json!({
+                        "item": { "id": "original", "type": "proposed_plan", "text": "Reviewed plan" }
+                    })))?;
+                    let original: i64 = db.0.query_row("SELECT MAX(id) FROM events WHERE run_id=?", [&r], |row| row.get(0))?;
+                    db.event(&r, &phase, "", Some(&json!({
+                        "item": { "id": proposal, "type": "proposed_plan", "text": "" }
+                    })))?;
+                    Ok(original)
+                }).await.unwrap();
+                let current = s.chat_detail(&chat_id).await.unwrap();
+                let refused = invoke("send_chat_message", json!({
+                    "chatId": chat_id,
+                    "message": {
+                        "id": uuid::Uuid::new_v4(), "text": "Implement the plan you proposed.",
+                        "planApproval": { "sourceId": format!("{run}:{original}"), "revision": current["revision"] }
+                    }
+                })).await;
+                assert_eq!(
+                    refused["result"]["isError"], true,
+                    "internal={internal}: {refused}"
+                );
+                assert!(
+                    s.chat_detail(&chat_id).await.unwrap()["messages"]
+                        .as_array()
+                        .unwrap()
+                        .is_empty()
+                );
+                let r = run.clone();
+                let completed = s
+                    .store
+                    .transaction(move |db| {
+                        db.event(&r, &EventKind::ChatUser, "Clarification", None)?;
+                        db.event(&r, &EventKind::ItemCompleted, "Final plan", Some(&json!({
+                        "item": { "id": proposal, "type": "proposed_plan", "text": "Final plan" }
+                    })))?;
+                        Ok(db.0.query_row(
+                            "SELECT MAX(id) FROM events WHERE run_id=?",
+                            [r],
+                            |row| row.get::<_, i64>(0),
+                        )?)
+                    })
+                    .await
+                    .unwrap();
+                let current = s.chat_detail(&chat_id).await.unwrap();
+                let request = json!({
+                    "chatId": chat_id,
+                    "message": {
+                        "id": uuid::Uuid::new_v4(), "text": "Implement the plan you proposed.",
+                        "planApproval": { "sourceId": format!("{run}:{completed}"), "revision": current["revision"] }
+                    }
+                });
+                let accepted = invoke("send_chat_message", request.clone()).await;
+                assert_ne!(accepted["result"]["isError"], true, "{accepted}");
+                let retry = invoke("send_chat_message", request).await;
+                assert_eq!(result(&accepted)["id"], result(&retry)["id"]);
+            }
+        }
+    }
+}

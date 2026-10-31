@@ -610,6 +610,31 @@ internal fun JsonObject?.string(key: String) =
 internal fun RunEvent.isMessage(): Boolean =
     type == "chat.user" || item().string("type") == "agent_message"
 
+/** Approval identity is distinct from the row anchored for reading. */
+internal fun proposedPlanApproval(events: List<RunEvent>): String? {
+    var latest: RunEvent? = null
+    var lastRequest = Long.MIN_VALUE
+    for (event in events) {
+        if (event.type == "chat.user") lastRequest = maxOf(lastRequest, event.id)
+        if (event.type !in listOf("item.started", "item.updated", "item.completed")) continue
+        val item = event.item()
+        if (
+            item.string("type") == "proposed_plan" &&
+                item.string("parent_id").isBlank() &&
+                event.id > (latest?.id ?: Long.MIN_VALUE)
+        )
+            latest = event
+    }
+    val proposal = latest ?: return null
+    if (
+        proposal.type != "item.completed" ||
+            proposal.id <= lastRequest ||
+            proposal.item().string("text").isBlank()
+    )
+        return null
+    return "${proposal.runId}:${proposal.id}"
+}
+
 internal data class TimelineEntry(
     val key: String,
     val events: List<RunEvent>,

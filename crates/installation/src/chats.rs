@@ -735,18 +735,24 @@ fn require_current_proposal(
     if run_is_active(&run) || run["recoveryPending"] == true {
         return Err(stale());
     }
-    let event: Option<i64> =
+    let event: Option<(i64, String, bool)> =
         db.0.query_row(
-            "SELECT id FROM events WHERE run_id=? AND type='item.completed'
+            "SELECT id,type,CASE WHEN json_type(payload,'$.item.text')='text'
+         THEN length(trim(json_extract(payload,'$.item.text'),char(9)||char(10)||char(13)||' '))>0
+         ELSE 0 END FROM events WHERE run_id=?
+         AND type IN ('item.started','item.updated','item.completed')
          AND json_extract(payload,'$.item.type')='proposed_plan'
          AND COALESCE(json_extract(payload,'$.item.parent_id'),'')=''
          ORDER BY id DESC LIMIT 1",
             [run_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
-    let event_id = event.ok_or_else(stale)?;
-    if approval.source_id != format!("{run_id}:{event_id}") {
+    let (event_id, kind, has_content) = event.ok_or_else(stale)?;
+    if kind != "item.completed"
+        || !has_content
+        || approval.source_id != format!("{run_id}:{event_id}")
+    {
         return Err(stale());
     }
     let later_request: bool = db.0.query_row(

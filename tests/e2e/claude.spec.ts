@@ -868,8 +868,8 @@ test('the quota card switches to OpenCode with an available model and preserves 
   await expect(card).toHaveCount(0)
 })
 
-for (const status of ['failed', 'cancelled']) {
-  test(`an interrupted proposal cannot approve or alter Plan after ${status}`, async ({ page, workspace }) => {
+for (const [status, content] of [['failed', 'Review is still incomplete'], ['cancelled', 'Review is still incomplete'], ['failed', ''], ['cancelled', '']] as const) {
+  test(`an interrupted proposal cannot approve or alter Plan after ${status}, empty=${!content}`, async ({ page, workspace }) => {
     if (!(await workspace.api('/api/accounts')).accounts.some((a: { provider: string }) => a.provider === 'claude'))
       expect((await connectClaude(workspace)).state).toBe('complete')
     const chat = await workspace.api('/api/chats', 'POST', {})
@@ -886,7 +886,7 @@ for (const status of ['failed', 'cancelled']) {
       item: {
         id: 'interrupted-proposal',
         type: 'proposed_plan',
-        text: 'Review is still incomplete',
+        text: content,
         status: 'in_progress',
       },
     })
@@ -894,7 +894,10 @@ for (const status of ['failed', 'cancelled']) {
     workspace.service.store.event(run.id, 'status', status)
     await page.goto(workspacePath(`/chats/${chat.id}`))
     await authenticateWorkspace(page)
-    await expect(page.getByTestId('proposed-plan').filter({ hasText: 'Review is still incomplete' })).toBeVisible()
+    if (content)
+      await expect(page.getByTestId('proposed-plan').filter({ hasText: content })).toBeVisible()
+    else
+      await expect(page.getByTestId('proposed-plan').first()).toBeVisible()
     const toggle = page.getByRole('button', { name: 'Plan first' })
     if (await toggle.getAttribute('aria-pressed') !== 'true')
       await toggle.click()
@@ -905,3 +908,41 @@ for (const status of ['failed', 'cancelled']) {
     expect(detail.messages.some((m: { text: string }) => m.text === 'Implement the plan you proposed.')).toBe(false)
   })
 }
+
+test('a proposal completed after steering remains implementable across history folding', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  if (!(await workspace.api('/api/accounts')).accounts.some((a: { provider: string }) => a.provider === 'claude'))
+    expect((await connectClaude(workspace)).state).toBe('complete')
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
+    id: crypto.randomUUID(),
+    text: 'fixture:plan-turn Review the design',
+    provider: 'claude',
+    plan: true,
+  })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 30000 }).toBe('succeeded')
+  const run = (await workspace.api(`/api/chats/${chat.id}`)).run
+  workspace.service.store.event(run.id, 'item.started', '', {
+    item: { id: 'clarified-plan', type: 'proposed_plan', text: 'Initial revision' },
+  })
+  workspace.service.store.event(run.id, 'chat.user', 'Include the tests', {
+    messageId: crypto.randomUUID(),
+    text: 'Include the tests',
+    plan: true,
+  })
+  workspace.service.store.event(run.id, 'item.completed', '', {
+    item: { id: 'clarified-plan', type: 'proposed_plan', text: 'Clarified plan including tests' },
+  })
+  const completion = Math.max(...workspace.service.store.events(run.id).filter(event => event.type === 'item.completed').map(event => event.id))
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  const proposal = page.getByTestId('proposed-plan').filter({ hasText: 'Clarified plan including tests' })
+  await expect(proposal.getByRole('button', { name: 'Implement', exact: true })).toBeEnabled()
+  await page.reload()
+  await expect(proposal.getByRole('button', { name: 'Implement', exact: true })).toBeEnabled()
+  const request = page.waitForRequest(request => request.url().endsWith(`/chats/${chat.id}/messages`) && request.method() === 'POST')
+  await proposal.getByRole('button', { name: 'Implement', exact: true }).click()
+  const sent = (await request).postDataJSON()
+  expect(sent.planApproval.sourceId).toBe(`${run.id}:${completion}`)
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).messages.some((message: { id: string }) => message.id === sent.id)).toBe(true)
+})

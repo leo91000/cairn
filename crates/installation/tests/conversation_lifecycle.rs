@@ -2275,3 +2275,109 @@ async fn implementation_approval_is_atomic_with_concurrent_requests_and_retries(
         StatusCode::OK
     );
 }
+
+#[tokio::test]
+async fn implementation_rejects_newer_unfinished_root_lifecycles() {
+    let app = App::new().await;
+    for status in [RunStatus::Failed, RunStatus::Cancelled] {
+        for proposal in ["proposal", "replacement"] {
+            for phase in [
+                EventKind::ItemStarted,
+                EventKind::ItemUpdated,
+                EventKind::ItemCompleted,
+            ] {
+                let chat = app.create_chat().await;
+                let chat_id = text(&chat, "id").to_owned();
+                let run = id();
+                app.add_finished_run(
+                    &run,
+                    status,
+                    json!({
+                        "snapshot": { "agent": { "provider": "codex" } }
+                    }),
+                    "Plan request",
+                )
+                .await;
+                let (c, r) = (chat_id.clone(), run.clone());
+                let old_event = app.service.store.transaction(move |db| {
+                    let mut chat = db.conversation_boundary(&c)?.unwrap();
+                    chat["runId"] = r.clone().into();
+                    db.save_conversation_boundary(&chat)?;
+                    db.event(&r, &EventKind::ItemCompleted, "Reviewed plan", Some(&json!({
+                        "item": { "id": "proposal", "type": "proposed_plan", "text": "Reviewed plan" }
+                    })))?;
+                    let old: i64 = db.0.query_row("SELECT MAX(id) FROM events WHERE run_id=?", [&r], |row| row.get(0))?;
+                    db.event(&r, &phase, "", Some(&json!({
+                        "item": { "id": proposal, "type": "proposed_plan", "text": "" }
+                    })))?;
+                    Ok(old)
+                }).await.unwrap();
+                let path = chat_path(&chat);
+                let (_, snapshot) = app.get(&path).await;
+                let message = json!({
+                    "id": id(), "text": "Implement the plan you proposed.",
+                    "planApproval": { "sourceId": format!("{run}:{old_event}"), "revision": snapshot["revision"] }
+                });
+                let (response, body) = app
+                    .request("POST", &format!("{path}/messages"), message)
+                    .await;
+                assert_eq!(
+                    response,
+                    StatusCode::CONFLICT,
+                    "{status:?} {proposal}: {body}"
+                );
+                assert!(
+                    app.get(&path).await.1["messages"]
+                        .as_array()
+                        .unwrap()
+                        .is_empty()
+                );
+
+                // An empty completion is a lifecycle marker, not a reviewable approach.
+                let r = run.clone();
+                let marker = app
+                    .service
+                    .store
+                    .read(move |db| {
+                        Ok(db.0.query_row(
+                            "SELECT MAX(id) FROM events WHERE run_id=?",
+                            [r],
+                            |row| row.get::<_, i64>(0),
+                        )?)
+                    })
+                    .await
+                    .unwrap();
+                let (_, current) = app.get(&path).await;
+                let (response, body) = app.request("POST", &format!("{path}/messages"), json!({
+                    "id": id(), "text": "Implement the plan you proposed.",
+                    "planApproval": { "sourceId": format!("{run}:{marker}"), "revision": current["revision"] }
+                })).await;
+                assert_eq!(response, StatusCode::CONFLICT, "{body}");
+
+                // Steering before the final completion belongs to the reviewed approach.
+                let r = run.clone();
+                let completed = app.service.store.transaction(move |db| {
+                    db.event(&r, &EventKind::ChatUser, "Clarify the design", None)?;
+                    db.event(&r, &EventKind::ItemCompleted, "Clarified plan", Some(&json!({
+                        "item": { "id": proposal, "type": "proposed_plan", "text": "Clarified plan" }
+                    })))?;
+                    Ok(db.0.query_row("SELECT MAX(id) FROM events WHERE run_id=?", [r], |row| row.get::<_, i64>(0))?)
+                }).await.unwrap();
+                let (_, snapshot) = app.get(&path).await;
+                let message = json!({
+                    "id": id(), "text": "Implement the plan you proposed.",
+                    "planApproval": { "sourceId": format!("{run}:{completed}"), "revision": snapshot["revision"] }
+                });
+                let (response, accepted) = app
+                    .request("POST", &format!("{path}/messages"), message.clone())
+                    .await;
+                assert_eq!(response, StatusCode::OK, "{accepted}");
+                let (response, retry) = app
+                    .request("POST", &format!("{path}/messages"), message)
+                    .await;
+                assert_eq!(response, StatusCode::OK, "{retry}");
+                assert_eq!(accepted["id"], retry["id"]);
+            }
+        }
+    }
+}

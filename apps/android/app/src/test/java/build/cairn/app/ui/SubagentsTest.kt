@@ -120,6 +120,46 @@ class SubagentsTest {
     }
 
     @Test
+    fun `proposal approval follows completed event order across steering and older pages`() {
+        val started =
+            item("item.started") {
+                put("id", "plan")
+                put("type", "proposed_plan")
+                put("text", "Draft")
+            }
+        val steering = user("Clarify the approach")
+        val completed =
+            item("item.completed") {
+                put("id", "plan")
+                put("type", "proposed_plan")
+                put("text", "Clarified approach")
+            }
+        assertEquals("run:${completed.id}", proposedPlanApproval(listOf(steering, completed)))
+        assertEquals(
+            "run:${completed.id}",
+            proposedPlanApproval(listOf(started, steering, completed)),
+        )
+        assertEquals(
+            started.id,
+            timelineEntries(listOf(started, steering, completed), chat = true)
+                .first { it.proposal }
+                .events
+                .single()
+                .id,
+        )
+        val empty =
+            item("item.started") {
+                put("id", "new-plan")
+                put("type", "proposed_plan")
+                put("text", "")
+            }
+        assertNull(proposedPlanApproval(listOf(started, steering, completed, empty)))
+        assertNull(
+            proposedPlanApproval(listOf(started, steering, completed, user("Later request")))
+        )
+    }
+
+    @Test
     fun `child proposals remain activity rather than conversation approval`() {
         fun proposal(parent: String?) =
             item("item.completed") {

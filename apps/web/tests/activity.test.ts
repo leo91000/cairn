@@ -4,6 +4,7 @@ import sample from '../../../tests/fixtures/activity-events.json'
 import {
   activityEntries,
   ActivityGroups,
+  proposedPlanApproval,
   sameReason,
   stopEcho,
   teamEntries,
@@ -342,6 +343,50 @@ describe('conversation activity', () => {
     expect(activityEntries([started, completed], true)[0]).toMatchObject({ kind: 'proposal', sourceId: 'run:2', text: 'Reviewed complete design' })
     const reopened = event(3, 'item.started', 'Revising design')
     expect(activityEntries([started, completed, reopened], true)[0]).not.toHaveProperty('sourceId', 'run:2')
+  })
+  it('invalidates approval on an empty root lifecycle and restores it only on completion', () => {
+    const proposal = (id: number, type: string, name: string, content: string): RunEvent => ({
+      id,
+      runId: 'run',
+      createdAt: id,
+      type,
+      text: '',
+      payload: { item: { id: name, type: 'proposed_plan', text: content } },
+    })
+    const completed = proposal(10, 'item.completed', 'old', 'Reviewed')
+    for (const name of ['old', 'new']) {
+      const empty = proposal(11, 'item.started', name, '')
+      expect(proposedPlanApproval([completed, empty])).toBeUndefined()
+      const finished = proposal(12, 'item.completed', name, 'Updated approach')
+      expect(proposedPlanApproval([completed, empty, finished])).toBe('run:12')
+    }
+  })
+  it('approves completion after steering independently of display anchoring and page loading', () => {
+    const started: RunEvent = {
+      id: 10,
+      runId: 'run',
+      createdAt: 10,
+      type: 'item.started',
+      text: '',
+      payload: { item: { id: 'plan', type: 'proposed_plan', text: 'Draft' } },
+    }
+    const steering: RunEvent = {
+      id: 11,
+      runId: 'run',
+      createdAt: 11,
+      type: 'chat.user',
+      text: 'Clarification',
+    }
+    const completed: RunEvent = {
+      ...started,
+      id: 12,
+      createdAt: 12,
+      type: 'item.completed',
+      payload: { item: { id: 'plan', type: 'proposed_plan', text: 'Clarified plan' } },
+    }
+    expect(proposedPlanApproval([steering, completed])).toBe('run:12')
+    expect(proposedPlanApproval([started, steering, completed])).toBe('run:12')
+    expect(proposedPlanApproval([started, steering, completed, { ...steering, id: 13 }])).toBeUndefined()
   })
   it.each([false, true])('keeps subagent proposals attributed when they follow the parent proposal=%s', (childLast) => {
     const event = (id: number, item: Record<string, unknown>): RunEvent => ({
