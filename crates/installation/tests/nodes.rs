@@ -48,7 +48,7 @@ use std::{
 use tempfile::TempDir;
 use tokio::{
     io::{AsyncWriteExt, BufReader},
-    net::{UnixListener, UnixStream},
+    net::UnixListener,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -2604,18 +2604,6 @@ async fn owner_placement_obeys_agent_grants_and_preserves_last_good_selection() 
     assert_eq!(value["preferredNodeId"], LOCAL_NODE_ID);
 }
 
-/// Sends a refresh request through the relayed authentication socket.
-async fn refresh_through(socket: &Path) -> Option<Value> {
-    let mut stream = BufReader::new(UnixStream::connect(socket).await.unwrap());
-    wire::write(stream.get_mut(), &json!({ "method": "refresh" }))
-        .await
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(2), wire::read(&mut stream))
-        .await
-        .unwrap()
-        .unwrap()
-}
-
 /// Answers two refresh requests on the run's native authentication socket.
 fn serve_native_refreshes(provider: UnixListener) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -2683,6 +2671,13 @@ async fn native_auth_relays_refresh_all_providers_and_stop_after_grant_revocatio
             serve_native_refreshes(UnixListener::bind(home.join("cairn-auth.sock")).unwrap());
         let server = owner.serve(listener);
         let stop = CancellationToken::new();
+        #[cfg(target_os = "linux")]
+        let socket = {
+            let directory = owner.root().join("long-node-".repeat(12));
+            std::fs::create_dir_all(&directory).unwrap();
+            directory.join("remote.sock")
+        };
+        #[cfg(not(target_os = "linux"))]
         let socket = owner.root().join("remote.sock");
         let relay = tokio::spawn(workspace::auth_listener(
             socket.clone(),
@@ -2705,7 +2700,15 @@ async fn native_auth_relays_refresh_all_providers_and_stop_after_grant_revocatio
         }
         native.await.unwrap();
         owner.grant_nodes(MAIN_AGENT_ID, json!([])).await;
-        assert!(refresh_through(&socket).await.is_none());
+        assert!(
+            cairn_installation::accounts::broker::request(
+                &socket,
+                &json!({ "method": "refresh" }),
+                Duration::from_secs(2),
+            )
+            .await
+            .is_err()
+        );
         stop.cancel();
         relay.await.unwrap().unwrap();
         server.abort();
