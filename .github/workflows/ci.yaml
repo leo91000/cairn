@@ -1,104 +1,62 @@
-name: Quality and container
+name: Disposable direct-network qualification
 on:
-  push:
-    tags: ['v*']
-  schedule:
-    - cron: '17 2 * * *'
   workflow_dispatch:
-    inputs:
-      backend-only:
-        description: Run backend tests and doctests without release resolution or image jobs
-        type: boolean
-        default: false
-      browser-workers:
-        description: Workers per browser group for performance comparisons
-        type: choice
-        options: ['1', '2']
-        default: '2'
-      exclusive-android:
-        description: Qualify live nested Android continuity on a compatible host
-        type: boolean
-        default: false
 permissions:
   contents: read
 concurrency:
-  group: ci-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || 'push' }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/main' }}
+  group: disposable-network-${{ github.run_id }}
+  cancel-in-progress: false
 jobs:
-  resolve:
-    if: inputs.backend-only != true
-    runs-on: ubuntu-latest
-    timeout-minutes: 42
-    permissions:
-      contents: read
-      actions: read
-    outputs:
-      reuse: ${{ steps.resolve.outputs.reuse }}
-      digest: ${{ steps.resolve.outputs.digest }}
-      beacon-digest: ${{ steps.resolve.outputs.beacon-digest }}
-      commit: ${{ steps.resolve.outputs.commit }}
-      tree: ${{ steps.resolve.outputs.tree }}
-      artifact: ${{ steps.resolve.outputs.artifact }}
-      codex: ${{ steps.tools.outputs.codex }}
-      gh: ${{ steps.tools.outputs.gh }}
-      claude: ${{ steps.tools.outputs.claude }}
-      opencode: ${{ steps.tools.outputs.opencode }}
-      served-found: ${{ steps.served.outputs.found }}
-      served-claude: ${{ steps.served.outputs.claude }}
-      served-opencode: ${{ steps.served.outputs.opencode }}
-    steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: ./.github/actions/setup-pnpm
-        with:
-          install: false
-      - name: Resolve current stable agent tools
-        id: tools
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: node scripts/cli-updates.mjs build-versions
-      - name: Find the agent tools of the served release
-        id: served
-        env:
-          CAIRN_BEACON_ORIGIN: ${{ vars.CAIRN_BEACON_ORIGIN }}
-        run: node scripts/served-tools.mjs
-      - id: resolve
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CODEX_VERSION: ${{ steps.tools.outputs.codex }}
-          GH_VERSION: ${{ steps.tools.outputs.gh }}
-          CLAUDE_VERSION: ${{ steps.tools.outputs.claude }}
-          OPENCODE_VERSION: ${{ steps.tools.outputs.opencode }}
-          SERVED_FOUND: ${{ steps.served.outputs.found }}
-          SERVED_CLAUDE: ${{ steps.served.outputs.claude }}
-          SERVED_OPENCODE: ${{ steps.served.outputs.opencode }}
-        run: GIT_TREE="$(git rev-parse 'HEAD^{tree}')" node scripts/resolve-release.mjs
   build:
     # Browser tests need only these binaries and the frontend, not the whole quality job.
-    needs: resolve
-    if: needs.resolve.outputs.reuse != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
+      RUNNER_TEMP: ${{ github.workspace }}/.qualification/tmp
+      RUNNER_TOOL_CACHE: ${{ github.workspace }}/.qualification/tool-cache
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_INCREMENTAL: '0'
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          ref: 2a470c3a67828e13b7afa69eab283db86a239e62
+      - name: Verify source and configure workspace paths
+        run: |
+          test "$(git rev-parse HEAD)" = 2a470c3a67828e13b7afa69eab283db86a239e62
+          test -z "$(git status --porcelain)"
+          git show -s --format='%H %T'
+          mkdir -p .qualification/{tmp,tool-cache,cargo,rustup,cache,npm,pnpm,gradle,android,android-home,playwright,apt/partial}
+          echo "TMPDIR=$PWD/.qualification/tmp" >> "$GITHUB_ENV"
+          echo "CARGO_HOME=$PWD/.qualification/cargo" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=$PWD/target" >> "$GITHUB_ENV"
+          echo "RUSTUP_HOME=$PWD/.qualification/rustup" >> "$GITHUB_ENV"
+          echo "XDG_CACHE_HOME=$PWD/.qualification/cache" >> "$GITHUB_ENV"
+          echo "npm_config_cache=$PWD/.qualification/npm" >> "$GITHUB_ENV"
+          echo "PNPM_HOME=$PWD/.qualification/pnpm" >> "$GITHUB_ENV"
+          echo "npm_config_store_dir=$PWD/.qualification/pnpm/store" >> "$GITHUB_ENV"
+          echo "GRADLE_USER_HOME=$PWD/.qualification/gradle" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$PWD/.qualification/android" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$PWD/.qualification/android" >> "$GITHUB_ENV"
+          echo "ANDROID_USER_HOME=$PWD/.qualification/android-home" >> "$GITHUB_ENV"
+          echo "ANDROID_AVD_HOME=$PWD/.qualification/android-home/avd" >> "$GITHUB_ENV"
+          echo "PLAYWRIGHT_BROWSERS_PATH=$PWD/.qualification/playwright" >> "$GITHUB_ENV"
       - uses: ./.github/actions/setup-pnpm
         with:
-          cache: true
+          cache: false
       - run: rustup toolchain install 1.97.1 --profile minimal && rustup default 1.97.1
       - name: Install bindings toolchain for the required ublk transport
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev
-      - uses: ./.github/actions/cache-rust
+        run: sudo apt-get -o Dir::Cache::archives="$PWD/.qualification/apt" update -qq && sudo apt-get -o Dir::Cache::archives="$PWD/.qualification/apt" install -y --no-install-recommends libclang-dev
       - name: Build the browser-test backend and frontend
         run: |
           cargo build --locked --bin cairn --example worker_fixture --example browser_fixture --example network_direct_client --example network_qualification --example native_storage_qualifier
           cargo build --locked -p cairn-beacon --bin cairn-beacon --example network_stun_server
           pnpm exec vite build --config apps/web/vite.config.ts
+      - run: (cd target/debug && sha256sum cairn cairn-beacon examples/native_storage_qualifier examples/worker_fixture examples/browser_fixture examples/network_direct_client examples/network_qualification examples/network_stun_server > qualification-sha256)
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: browser-backend
           path: |
+            target/debug/qualification-sha256
             target/debug/cairn
             target/debug/cairn-beacon
             target/debug/examples/native_storage_qualifier
@@ -108,472 +66,18 @@ jobs:
             target/debug/examples/network_qualification
             target/debug/examples/network_stun_server
           retention-days: 1
+      - run: (cd dist && find . -type f -print0 | sort -z | xargs -0 sha256sum > ../.qualification/browser-sha256)
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: browser-build
-          path: dist/
-          retention-days: 1
-  quality:
-    needs: resolve
-    if: needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: ./.github/actions/setup-pnpm
-        with:
-          cache: true
-      - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt && rustup default 1.97.1
-      - name: Check formatting, lint, tests and frontend build
-        run: pnpm validate:pr quality
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: '21'
-      - uses: gradle/actions/setup-gradle@v5
-      - name: Validate shared contracts and generated schemas
-        run: pnpm validate:pr contracts
-      - name: Check the C3 candidate-selection snapshot model
-        run: python3 -m unittest discover -s scripts/tests -p test_chat_candidates_study.py -v
-      - name: Check native reference selection for all workflow events
-        run: python3 -m unittest discover -s scripts/tests -p test_native_reference.py -v
-      - name: Check native qualification RPC diagnostics
-        run: python3 -m unittest discover -s scripts/tests -p test_native_chat_fixture.py -v
-      - name: Check native Compose service readiness
-        run: python3 -m unittest discover -s scripts/tests -p test_native_docker_workload.py -v
-  rust-check:
-    needs: resolve
-    if: needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      CARGO_PROFILE_DEV_DEBUG: '0'
-      CARGO_INCREMENTAL: '0'
-    steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: ./.github/actions/setup-pnpm
-        with:
-          cache: true
-      - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy && rustup default 1.97.1
-      - name: Install native test dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age e2fsprogs fakeroot
-      - uses: ./.github/actions/cache-rust
-      - name: Check all Rust targets, including the required ublk transport
-        run: pnpm validate:pr rust
-  backend:
-    services:
-      postgres:
-        image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
-        env:
-          POSTGRES_USER: cairn
-          POSTGRES_PASSWORD: test-only
-          POSTGRES_DB: cairn_beacon_test
-        ports: ['5432:5432']
-        options: >-
-          --health-cmd "pg_isready -U cairn -d cairn_beacon_test"
-          --health-interval 5s --health-timeout 5s --health-retries 10
-    needs: resolve
-    if: always() && !cancelled() && (inputs.backend-only == true || (needs.resolve.result == 'success' && (needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main')))
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      CARGO_PROFILE_DEV_DEBUG: '0'
-      CARGO_INCREMENTAL: '0'
-      CAIRN_BEACON_TEST_DATABASE_URL: postgres://cairn:test-only@localhost:5432/cairn_beacon_test
-    steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: ./.github/actions/setup-pnpm
-        with:
-          cache: true
-      - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy && rustup default 1.97.1
-      - name: Install native test dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age e2fsprogs fakeroot
-      - uses: ./.github/actions/cache-rust
-        with:
-          save: true
-      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
-        with:
-          tool: cargo-nextest@0.9.149
-      - name: Run backend tests across binaries with isolated credentials
-        run: |
-          set -o pipefail
-          node scripts/test-backend.mjs --nextest --test-threads 8 --no-fail-fast --color never --status-level pass 2>&1 | tee backend-tests.log
-      - name: Check Rust documentation examples
-        run: node scripts/test-backend.mjs --doc
-      - name: Qualify the resolved OpenCode release against its native adapter
-        if: inputs.backend-only != true
-        env:
-          OPENCODE_VERSION: ${{ needs.resolve.outputs.opencode }}
-          SERVED_OPENCODE: ${{ needs.resolve.outputs.served-opencode }}
-        run: |
-          # The resolved release lists its catalog and runs a turn, then resumes sessions an
-          # installation can hold: from the oldest supported release, and both ways with the
-          # served release, as after an update or a rollback.
-          minimum=$(node --input-type=module -e "import { engines } from './scripts/cli-updates.mjs'; console.log(engines.opencode.minimum)")
-          served=$(node scripts/served-tools.mjs rollback-target opencode "$SERVED_OPENCODE" "$OPENCODE_VERSION")
-          # Command substitutions do not inherit errexit, so installation failures return explicitly.
-          install() {
-            npm install --global --prefix "$RUNNER_TEMP/opencode-$1" --allow-scripts=opencode-ai "opencode-ai@$1" >&2 || return 1
-            test "$("$RUNNER_TEMP/opencode-$1/bin/opencode" --version)" = "$1" || return 1
-            echo "$RUNNER_TEMP/opencode-$1/bin/opencode"
-          }
-          native() {
-            node scripts/test-backend.mjs -p cairn-installation --test opencode -- --ignored --exact "$1"
-          }
-          qualify() {
-            OPENCODE_NATIVE_BIN="$1" OPENCODE_NATIVE_RESUME_BIN="$2" native pinned_native_cli_executes_and_resumes_without_global_plugins
-          }
-          resolved=$(install "$OPENCODE_VERSION")
-          OPENCODE_NATIVE_BIN="$resolved" native native_cli_lists_providers_and_models
-          qualify "$resolved" "$resolved"
-          if test "$minimum" != "$OPENCODE_VERSION" && test "$minimum" != "$served"; then
-            oldest=$(install "$minimum")
-            qualify "$oldest" "$resolved"
-          fi
-          if test -n "$served"; then
-            served=$(install "$served")
-            qualify "$served" "$resolved"
-            qualify "$resolved" "$served"
-          fi
-      - name: Qualify the resolved Claude Code release against its native adapter
-        if: inputs.backend-only != true
-        env:
-          CLAUDE_VERSION: ${{ needs.resolve.outputs.claude }}
-          SERVED_CLAUDE: ${{ needs.resolve.outputs.served-claude }}
-        run: |
-          # The resolved release answers model discovery, usage and authentication status,
-          # runs a turn against a local Messages API and resumes it. Sessions created by the
-          # legacy release resume on it, and sessions move both ways with the served release,
-          # as after an update or a rollback.
-          # The oldest release this adapter runs: its minimum, if any, else the legacy release.
-          legacy=$(node --input-type=module -e "import { engines } from './scripts/cli-updates.mjs'; console.log(engines.claude.minimum ?? engines.claude.legacy)")
-          served=$(node scripts/served-tools.mjs rollback-target claude "$SERVED_CLAUDE" "$CLAUDE_VERSION")
-          # Command substitutions do not inherit errexit, so installation failures return explicitly.
-          install() {
-            npm install --global --prefix "$RUNNER_TEMP/claude-$1" --allow-scripts=@anthropic-ai/claude-code "@anthropic-ai/claude-code@$1" >&2 || return 1
-            test "$("$RUNNER_TEMP/claude-$1/bin/claude" --version)" = "$1 (Claude Code)" || return 1
-            echo "$RUNNER_TEMP/claude-$1/bin/claude"
-          }
-          native() {
-            node scripts/test-backend.mjs -p cairn-installation --test claude -- --ignored --exact "$1"
-          }
-          qualify() {
-            CLAUDE_NATIVE_BIN="$1" CLAUDE_NATIVE_RESUME_BIN="$2" native native_cli_executes_and_resumes_a_session_against_a_local_model
-          }
-          resolved=$(install "$CLAUDE_VERSION")
-          CLAUDE_NATIVE_BIN="$resolved" native native_cli_lists_its_model_catalog_without_inference
-          qualify "$resolved" "$resolved"
-          if test "$legacy" != "$CLAUDE_VERSION" && test "$legacy" != "$served"; then
-            oldest=$(install "$legacy")
-            qualify "$oldest" "$resolved"
-          fi
-          if test -n "$served"; then
-            served=$(install "$served")
-            qualify "$served" "$resolved"
-            qualify "$resolved" "$served"
-          fi
-  node-checks:
-    services:
-      postgres:
-        image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
-        env:
-          POSTGRES_USER: cairn
-          POSTGRES_PASSWORD: test-only
-          POSTGRES_DB: cairn_beacon_test
-        ports: ['5432:5432']
-        options: >-
-          --health-cmd "pg_isready -U cairn -d cairn_beacon_test"
-          --health-interval 5s --health-timeout 5s --health-retries 10
-    needs: resolve
-    if: needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    # Hosted Ubuntu package downloads can consume over 20 minutes before fixtures run.
-    timeout-minutes: 45
-    env:
-      CARGO_PROFILE_DEV_DEBUG: '0'
-      CARGO_INCREMENTAL: '0'
-      CAIRN_BEACON_TEST_DATABASE_URL: postgres://cairn:test-only@localhost:5432/cairn_beacon_test
-    steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: ./.github/actions/setup-pnpm
-        with:
-          cache: true
-      - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy && rustup default 1.97.1
-      - name: Install native test dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age e2fsprogs fakeroot
-      - uses: ./.github/actions/cache-rust
-      - name: Prepare the installation host's required ublk driver
-        run: |
-          if ! sudo modprobe ublk_drv; then
-            sudo apt-get update -qq
-            sudo apt-get install -y "linux-modules-extra-$(uname -r)"
-            sudo modprobe ublk_drv
-          fi
-          test -c /dev/ublk-control
-      - name: Build the frontend used by installer and update fixtures
-        run: pnpm exec vite build --config apps/web/vite.config.ts
-      - name: Validate node supervisor and S3 recovery
-        run: |
-          python3 scripts/tests/guest_trim_test.py
-          python3 scripts/tests/guest_projects_test.py
-          python3 scripts/tests/node_supervisor_test.py
-          python3 deploy/nodes/test_native_host.py
-          bash -n deploy/nodes/native-install.sh
-          python3 scripts/tests/installation_installer_test.py
-          python3 scripts/tests/compressed_swap_test.py
-          python3 scripts/tests/installation_updates_test.py
-          python3 scripts/tests/production_release_test.py
-          bash tests/installation-installer-container.sh
-          python3 tests/installation_update_containers.py
-          python3 -m venv .node-s3-test
-          .node-s3-test/bin/pip install 'moto[server]==5.2.3' awscli blake3==1.0.8
-          .node-s3-test/bin/python scripts/tests/storage_observer_test.py
-          .node-s3-test/bin/python scripts/tests/storage_sample_test.py
-          PATH="$PWD/.node-s3-test/bin:$PATH" .node-s3-test/bin/python scripts/tests/node_s3_test.py
-  native-runtime:
-    name: Native Linux ublk storage and process ownership (CPU workload)
-    needs: [resolve, build]
-    if: needs.resolve.outputs.reuse != 'true'
-    runs-on: ubuntu-latest
-    # Allow slow kernel-module installation and the complete native qualification.
-    timeout-minutes: 90
-    permissions:
-      contents: read
-      actions: read
-    steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: actions/download-artifact@v8.0.1
-        with:
-          name: browser-backend
-          path: target/debug/
-      - name: Prepare disposable host block storage and synthetic S3
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends e2fsprogs python3-venv sudo uidmap iproute2 iptables libcap2-bin
-          sudo modprobe tun
-          sudo modprobe ip_tables
-          sudo modprobe iptable_nat
-          sudo modprobe ip6_tables
-          sudo modprobe ip6table_nat
-          if ! sudo modprobe ublk_drv; then
-            sudo apt-get install -y --no-install-recommends "linux-modules-extra-$(uname -r)"
-            sudo modprobe ublk_drv
-          fi
-          test -c /dev/ublk-control
-          python3 -m venv .native-s3-test
-          .native-s3-test/bin/pip install 'moto[server]==5.2.3' awscli
-          .native-s3-test/bin/python -m unittest discover -s scripts/tests -p test_native_s3_memory.py -v
-      - run: rustup toolchain install 1.97.1 --profile minimal
-      - name: Identify the exact reference build
-        id: native-reference-key
-        env:
-          EVENT_REFERENCE_SHA: ${{ github.event.pull_request.base.sha || (github.ref == 'refs/heads/main' && github.event.before) || '' }}
-        run: |
-          native_reference_sha="$(python3 scripts/native_reference.py)"
-          echo "sha=$native_reference_sha" >> "$GITHUB_OUTPUT"
-          echo "key=native-reference-v2-$native_reference_sha-$ImageOS-$ImageVersion-rust1.97.1-dev0-default" >> "$GITHUB_OUTPUT"
-          echo "artifact=native-reference-v2-$native_reference_sha-$ImageOS-$ImageVersion-rust1.97.1-dev0-default" >> "$GITHUB_OUTPUT"
-      - name: Find the exact reference from an earlier attempt of this run
-        id: native-reference-artifact
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          NATIVE_REFERENCE_ARTIFACT: ${{ steps.native-reference-key.outputs.artifact }}
-        run: |
-          native_reference_found="$(python3 scripts/native_reference.py artifact-available)"
-          echo "found=$native_reference_found" >> "$GITHUB_OUTPUT"
-      - uses: actions/download-artifact@v8.0.1
-        if: steps.native-reference-artifact.outputs.found == 'true'
-        with:
-          name: ${{ steps.native-reference-key.outputs.artifact }}
-          path: reference-native/
-          github-token: ${{ github.token }}
-          run-id: ${{ github.run_id }}
-      - uses: actions/cache/restore@v6.1.0
-        if: steps.native-reference-artifact.outputs.found != 'true'
-        id: native-reference-cache
-        with:
-          path: reference-native/
-          key: ${{ steps.native-reference-key.outputs.key }}
-      - name: Build the exact base reference
-        if: steps.native-reference-artifact.outputs.found != 'true' && steps.native-reference-cache.outputs.cache-hit != 'true'
-        env:
-          REFERENCE_SHA: ${{ steps.native-reference-key.outputs.sha }}
-          CARGO_PROFILE_DEV_DEBUG: '0'
-          CARGO_INCREMENTAL: '0'
-        run: |
-          sudo apt-get install -y --no-install-recommends libclang-dev
-          git fetch --no-tags origin "$REFERENCE_SHA"
-          git worktree add --detach /tmp/cairn-native-reference "$REFERENCE_SHA"
-          CARGO_TARGET_DIR="$PWD/reference-target" cargo +1.97.1 build --locked --manifest-path /tmp/cairn-native-reference/Cargo.toml --bin cairn --example native_storage_qualifier
-          mkdir -p reference-native/examples
-          cp reference-target/debug/cairn reference-native/cairn
-          cp reference-target/debug/examples/native_storage_qualifier reference-native/examples/native_storage_qualifier
-          python3 - <<'PYREF'
-          import hashlib, json, os
-          from pathlib import Path
-          binaries = ['cairn', 'examples/native_storage_qualifier']
-          checksums = {name: hashlib.sha256((Path('reference-native') / name).read_bytes()).hexdigest() for name in binaries}
-          Path('reference-native/revision.json').write_text(json.dumps(dict(headSha=os.environ['REFERENCE_SHA'], profile='development, debug=0, incremental=0', features='default (ublk required)', rust='1.97.1', image=os.environ['ImageVersion'], buildRun=os.environ['GITHUB_RUN_ID'], sha256=checksums), indent=2))
-          PYREF
-      - uses: actions/cache/save@v6.1.0
-        if: steps.native-reference-artifact.outputs.found != 'true' && steps.native-reference-cache.outputs.cache-hit != 'true'
-        with:
-          path: reference-native/
-          key: ${{ steps.native-reference-key.outputs.key }}
-      - name: Verify the exact reference binaries
-        env:
-          REFERENCE_SHA: ${{ steps.native-reference-key.outputs.sha }}
-        run: |
-          python3 - <<'PYREF'
-          import hashlib, json, os
-          from pathlib import Path
-          metadata = json.loads(Path('reference-native/revision.json').read_text())
-          assert metadata['headSha'] == os.environ['REFERENCE_SHA']
-          assert metadata['image'] == os.environ['ImageVersion']
-          assert metadata['rust'] == '1.97.1' and metadata['features'] == 'default (ublk required)'
-          assert metadata['profile'] == 'development, debug=0, incremental=0'
-          assert set(metadata['sha256']) == {'cairn', 'examples/native_storage_qualifier'}
-          for name, checksum in metadata['sha256'].items():
-              assert hashlib.sha256((Path('reference-native') / name).read_bytes()).hexdigest() == checksum
-          Path('native-storage-evidence/reference').mkdir(parents=True)
-          Path('native-storage-evidence/reference/revision.json').write_text(json.dumps(metadata, indent=2))
-          PYREF
-      - uses: actions/upload-artifact@v7.0.1
-        if: steps.native-reference-artifact.outputs.found != 'true'
-        with:
-          name: ${{ steps.native-reference-key.outputs.artifact }}
-          path: reference-native/
-          retention-days: 14
-          if-no-files-found: error
-      - name: Qualify the exact reference on the current disposable host
-        env:
-          REFERENCE_SHA: ${{ steps.native-reference-key.outputs.sha }}
-        run: |
-          # Keep the reference's private protocol fixtures paired with its binaries.
-          # The current S3 launcher still provides identical host/emulator conditions.
-          git fetch --no-tags origin "$REFERENCE_SHA"
-          reference_fixture="$RUNNER_TEMP/cairn-native-reference-fixture"
-          mkdir -p "$reference_fixture"
-          git archive "$REFERENCE_SHA" scripts/tests deploy/nodes/native-host.py | tar -x -C "$reference_fixture"
-          chmod +x reference-native/cairn reference-native/examples/native_storage_qualifier
-          sudo env PATH="$PWD/.native-s3-test/bin:$PATH" CAIRN_NATIVE_DISPOSABLE_HOST=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence/reference" .native-s3-test/bin/python scripts/tests/node_s3_test.py --repo "$reference_fixture" --native-runtime reference-native/cairn --qualifier reference-native/examples/native_storage_qualifier
-      - name: Qualify real ublk, S3, eviction, systemd ownership and crash recovery
-        run: |
-          chmod +x target/debug/cairn target/debug/examples/native_storage_qualifier
-          mkdir -p native-storage-evidence
-          sudo env PATH="$PWD/.native-s3-test/bin:$PATH" CAIRN_NATIVE_DISPOSABLE_HOST=1 CAIRN_NATIVE_DOCKER_QUALIFY=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence" .native-s3-test/bin/python scripts/tests/node_s3_test.py --native-runtime target/debug/cairn --qualifier target/debug/examples/native_storage_qualifier
-      - uses: actions/upload-artifact@v7.0.1
-        if: always()
-        with:
-          name: native-storage-evidence
-          path: native-storage-evidence/
-          retention-days: 14
-  browser:
-    services:
-      postgres:
-        image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
-        env:
-          POSTGRES_USER: cairn
-          POSTGRES_PASSWORD: test-only
-          POSTGRES_DB: cairn_beacon_test
-        options: >-
-          --health-cmd "pg_isready -U cairn -d cairn_beacon_test"
-          --health-interval 5s --health-timeout 5s --health-retries 10
-    env:
-      CAIRN_BEACON_TEST_DATABASE_URL: postgres://cairn:test-only@postgres:5432/cairn_beacon_test
-    name: browser (${{ matrix.group }})
-    needs: [resolve, build]
-    if: needs.resolve.outputs.reuse != 'true'
-    runs-on: ubuntu-latest
-    # Preparation and evidence upload must not consume the shard's test budget.
-    timeout-minutes: 25
-    container:
-      # Match @playwright/test; browsers and system libraries are already installed.
-      image: mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27
-      options: --init --ipc=host
-    defaults:
-      run:
-        shell: bash
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - group: journeys-1
-            projects: journeys*
-            shard: 1/4
-          - group: journeys-2
-            projects: journeys*
-            shard: 2/4
-          - group: journeys-3
-            projects: journeys*
-            shard: 3/4
-          - group: journeys-4
-            projects: journeys*
-            shard: 4/4
-          - group: chromium-1
-            projects: layout-chromium-*
-          - group: webkit-1
-            projects: layout-webkit-*
-            shard: 1/4
-          - group: webkit-2
-            projects: layout-webkit-*
-            shard: 2/4
-          - group: webkit-3
-            projects: layout-webkit-*
-            shard: 3/4
-          - group: webkit-4
-            projects: layout-webkit-*
-            shard: 4/4
-    steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: ./.github/actions/setup-pnpm
-        with:
-          cache: true
-      - name: Check browser image version
-        run: |
-          node --input-type=module <<'JS'
-          import { readFileSync } from 'node:fs'
-          const installed = JSON.parse(readFileSync('node_modules/@playwright/test/package.json', 'utf8')).version
-          const preinstalled = JSON.parse(readFileSync('/ms-playwright/.docker-info', 'utf8')).driverVersion
-          if (installed !== preinstalled)
-            throw new Error(`Update the pinned browser image: Playwright package ${installed}, image ${preinstalled}`)
-          JS
-      - uses: actions/download-artifact@v8.0.1
-        with:
-          name: browser-build
-          path: dist/
-      - uses: actions/download-artifact@v8.0.1
-        with:
-          name: browser-backend
-          path: target/debug/
-      - run: chmod +x target/debug/examples/browser_fixture target/debug/cairn target/debug/cairn-beacon target/debug/examples/network_direct_client target/debug/examples/worker_fixture
-      - name: Install Postgres client for beacon account fixtures
-        run: apt-get update -qq && apt-get install -y --no-install-recommends postgresql-client
-      - name: Run browser shard
-        timeout-minutes: 10
-        run: |
-          args=(--project="$BROWSER_PROJECTS" --workers="$BROWSER_WORKERS" --fail-on-flaky-tests)
-          if [[ -n "$BROWSER_SHARD" ]]; then
-            args+=(--shard="$BROWSER_SHARD")
-          fi
-          pnpm test:e2e "${args[@]}"
-        env:
-          BROWSER_PROJECTS: ${{ matrix.projects }}
-          BROWSER_WORKERS: ${{ inputs.browser-workers || '2' }}
-          BROWSER_SHARD: ${{ matrix.shard || '' }}
-      - uses: actions/upload-artifact@v7.0.1
-        if: always()
-        with:
-          name: browser-evidence-${{ matrix.group }}
           path: |
-            playwright-report/
-            test-results/
-            docs/screenshots/
-          retention-days: 14
+            dist/
+            .qualification/browser-sha256
+          include-hidden-files: true
+          retention-days: 1
   network-bench:
     name: direct-relay network bench (${{ matrix.group }})
-    needs: [resolve, build]
-    if: needs.resolve.outputs.reuse != 'true'
+    needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -602,25 +106,51 @@ jobs:
           --health-cmd "pg_isready -U cairn -d cairn_beacon_test"
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
+      RUNNER_TEMP: ${{ github.workspace }}/.qualification/tmp
+      RUNNER_TOOL_CACHE: ${{ github.workspace }}/.qualification/tool-cache
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_BUILD_JOBS: '4'
       CAIRN_BEACON_TEST_DATABASE_URL: postgres://cairn:test-only@127.0.0.1:5432/cairn_beacon_test
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          ref: 2a470c3a67828e13b7afa69eab283db86a239e62
+      - name: Verify source and configure workspace paths
+        run: |
+          test "$(git rev-parse HEAD)" = 2a470c3a67828e13b7afa69eab283db86a239e62
+          test -z "$(git status --porcelain)"
+          git show -s --format='%H %T'
+          mkdir -p .qualification/{tmp,tool-cache,cargo,rustup,cache,npm,pnpm,gradle,android,android-home,playwright,apt/partial}
+          echo "TMPDIR=$PWD/.qualification/tmp" >> "$GITHUB_ENV"
+          echo "CARGO_HOME=$PWD/.qualification/cargo" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=$PWD/target" >> "$GITHUB_ENV"
+          echo "RUSTUP_HOME=$PWD/.qualification/rustup" >> "$GITHUB_ENV"
+          echo "XDG_CACHE_HOME=$PWD/.qualification/cache" >> "$GITHUB_ENV"
+          echo "npm_config_cache=$PWD/.qualification/npm" >> "$GITHUB_ENV"
+          echo "PNPM_HOME=$PWD/.qualification/pnpm" >> "$GITHUB_ENV"
+          echo "npm_config_store_dir=$PWD/.qualification/pnpm/store" >> "$GITHUB_ENV"
+          echo "GRADLE_USER_HOME=$PWD/.qualification/gradle" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$PWD/.qualification/android" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$PWD/.qualification/android" >> "$GITHUB_ENV"
+          echo "ANDROID_USER_HOME=$PWD/.qualification/android-home" >> "$GITHUB_ENV"
+          echo "ANDROID_AVD_HOME=$PWD/.qualification/android-home/avd" >> "$GITHUB_ENV"
+          echo "PLAYWRIGHT_BROWSERS_PATH=$PWD/.qualification/playwright" >> "$GITHUB_ENV"
       - uses: ./.github/actions/setup-pnpm
         with:
-          cache: true
+          cache: false
       - run: rustup toolchain install 1.97.1 --profile minimal && rustup default 1.97.1
-      - run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends iproute2 iptables conntrack util-linux
+      - run: sudo apt-get -o Dir::Cache::archives="$PWD/.qualification/apt" update -qq && sudo apt-get -o Dir::Cache::archives="$PWD/.qualification/apt" install -y --no-install-recommends iproute2 iptables conntrack util-linux
       - run: pnpm exec playwright install --with-deps chromium
       - uses: actions/download-artifact@v8.0.1
         with:
           name: browser-build
-          path: dist/
+          path: .
+      - run: (cd dist && sha256sum -c ../.qualification/browser-sha256)
       - uses: actions/download-artifact@v8.0.1
         with:
           name: browser-backend
           path: target/debug/
+      - run: (cd target/debug && sha256sum -c qualification-sha256)
       - run: chmod +x target/debug/examples/browser_fixture target/debug/cairn target/debug/cairn-beacon target/debug/examples/network_direct_client target/debug/examples/network_stun_server
       - run: chmod +x target/debug/examples/network_qualification
       - run: pnpm exec vite build --config tests/network-qualification.vite.ts
@@ -641,12 +171,35 @@ jobs:
           path: test-results/network/
           retention-days: 14
   android-direct-build:
-    needs: resolve
-    if: needs.resolve.outputs.reuse != 'true'
     runs-on: ubuntu-latest
+    env:
+      RUNNER_TEMP: ${{ github.workspace }}/.qualification/tmp
+      RUNNER_TOOL_CACHE: ${{ github.workspace }}/.qualification/tool-cache
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          ref: 2a470c3a67828e13b7afa69eab283db86a239e62
+      - name: Verify source and configure workspace paths
+        run: |
+          test "$(git rev-parse HEAD)" = 2a470c3a67828e13b7afa69eab283db86a239e62
+          test -z "$(git status --porcelain)"
+          git show -s --format='%H %T'
+          mkdir -p .qualification/{tmp,tool-cache,cargo,rustup,cache,npm,pnpm,gradle,android,android-home,playwright,apt/partial}
+          echo "TMPDIR=$PWD/.qualification/tmp" >> "$GITHUB_ENV"
+          echo "CARGO_HOME=$PWD/.qualification/cargo" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=$PWD/target" >> "$GITHUB_ENV"
+          echo "RUSTUP_HOME=$PWD/.qualification/rustup" >> "$GITHUB_ENV"
+          echo "XDG_CACHE_HOME=$PWD/.qualification/cache" >> "$GITHUB_ENV"
+          echo "npm_config_cache=$PWD/.qualification/npm" >> "$GITHUB_ENV"
+          echo "PNPM_HOME=$PWD/.qualification/pnpm" >> "$GITHUB_ENV"
+          echo "npm_config_store_dir=$PWD/.qualification/pnpm/store" >> "$GITHUB_ENV"
+          echo "GRADLE_USER_HOME=$PWD/.qualification/gradle" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$PWD/.qualification/android" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$PWD/.qualification/android" >> "$GITHUB_ENV"
+          echo "ANDROID_USER_HOME=$PWD/.qualification/android-home" >> "$GITHUB_ENV"
+          echo "ANDROID_AVD_HOME=$PWD/.qualification/android-home/avd" >> "$GITHUB_ENV"
+          echo "PLAYWRIGHT_BROWSERS_PATH=$PWD/.qualification/playwright" >> "$GITHUB_ENV"
       - uses: ./.github/actions/setup-pnpm
         with:
           install: false
@@ -657,23 +210,23 @@ jobs:
       - uses: android-actions/setup-android@v3
         with:
           packages: platform-tools
-      - uses: gradle/actions/setup-gradle@v5
       - run: sdkmanager 'platforms;android-37.0' 'build-tools;36.0.0'
       - name: Build the native client and instrumented tests
         working-directory: apps/android
         run: ./gradlew assembleDebug assembleDebugAndroidTest --no-daemon --stacktrace
+      - run: (cd apps/android/app/build/outputs/apk && sha256sum debug/app-debug.apk androidTest/debug/app-debug-androidTest.apk > qualification-sha256)
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: android-direct-apks
           path: |
+            apps/android/app/build/outputs/apk/qualification-sha256
             apps/android/app/build/outputs/apk/debug/app-debug.apk
             apps/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
           if-no-files-found: error
           retention-days: 1
   android-direct:
     name: Android direct-relay device bench (${{ matrix.scenario }})
-    needs: [resolve, build, android-direct-build]
-    if: needs.resolve.outputs.reuse != 'true'
+    needs: [build, android-direct-build]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -692,29 +245,56 @@ jobs:
           --health-cmd "pg_isready -U cairn -d cairn_beacon_test"
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
+      RUNNER_TEMP: ${{ github.workspace }}/.qualification/tmp
+      RUNNER_TOOL_CACHE: ${{ github.workspace }}/.qualification/tool-cache
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_BUILD_JOBS: '4'
       CAIRN_BEACON_TEST_DATABASE_URL: postgres://cairn:test-only@127.0.0.1:5432/cairn_beacon_test
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          ref: 2a470c3a67828e13b7afa69eab283db86a239e62
+      - name: Verify source and configure workspace paths
+        run: |
+          test "$(git rev-parse HEAD)" = 2a470c3a67828e13b7afa69eab283db86a239e62
+          test -z "$(git status --porcelain)"
+          git show -s --format='%H %T'
+          mkdir -p .qualification/{tmp,tool-cache,cargo,rustup,cache,npm,pnpm,gradle,android,android-home,playwright,apt/partial}
+          echo "TMPDIR=$PWD/.qualification/tmp" >> "$GITHUB_ENV"
+          echo "CARGO_HOME=$PWD/.qualification/cargo" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=$PWD/target" >> "$GITHUB_ENV"
+          echo "RUSTUP_HOME=$PWD/.qualification/rustup" >> "$GITHUB_ENV"
+          echo "XDG_CACHE_HOME=$PWD/.qualification/cache" >> "$GITHUB_ENV"
+          echo "npm_config_cache=$PWD/.qualification/npm" >> "$GITHUB_ENV"
+          echo "PNPM_HOME=$PWD/.qualification/pnpm" >> "$GITHUB_ENV"
+          echo "npm_config_store_dir=$PWD/.qualification/pnpm/store" >> "$GITHUB_ENV"
+          echo "GRADLE_USER_HOME=$PWD/.qualification/gradle" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$PWD/.qualification/android" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$PWD/.qualification/android" >> "$GITHUB_ENV"
+          echo "ANDROID_USER_HOME=$PWD/.qualification/android-home" >> "$GITHUB_ENV"
+          echo "ANDROID_AVD_HOME=$PWD/.qualification/android-home/avd" >> "$GITHUB_ENV"
+          echo "PLAYWRIGHT_BROWSERS_PATH=$PWD/.qualification/playwright" >> "$GITHUB_ENV"
       - uses: ./.github/actions/setup-pnpm
         with:
-          cache: true
+          cache: false
       - run: rustup toolchain install 1.97.1 --profile minimal && rustup default 1.97.1
-      - run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends iproute2 iptables util-linux
+      - run: sudo apt-get -o Dir::Cache::archives="$PWD/.qualification/apt" update -qq && sudo apt-get -o Dir::Cache::archives="$PWD/.qualification/apt" install -y --no-install-recommends iproute2 iptables util-linux
       - uses: actions/download-artifact@v8.0.1
         with:
           name: browser-build
-          path: dist/
+          path: .
+      - run: (cd dist && sha256sum -c ../.qualification/browser-sha256)
       - uses: actions/download-artifact@v8.0.1
         with:
           name: browser-backend
           path: target/debug/
+      - run: (cd target/debug && sha256sum -c qualification-sha256)
       - run: chmod +x target/debug/examples/browser_fixture target/debug/cairn target/debug/cairn-beacon target/debug/examples/network_direct_client target/debug/examples/network_stun_server
       - uses: actions/download-artifact@v8.0.1
         with:
           name: android-direct-apks
           path: apps/android/app/build/outputs/apk/
+      - run: (cd apps/android/app/build/outputs/apk && sha256sum -c qualification-sha256)
       - uses: android-actions/setup-android@v3
         with:
           packages: platform-tools
@@ -744,462 +324,3 @@ jobs:
           name: android-direct-device-evidence-${{ matrix.scenario }}
           path: test-results/android-direct/
           retention-days: 14
-  image:
-    # Compile the release image immediately; wait for fixtures only before smoke tests.
-    needs: resolve
-    if: needs.resolve.outputs.reuse != 'true'
-    outputs:
-      digest: ${{ steps.build.outputs.digest }}
-      published: ${{ env.PUBLISH }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    permissions:
-      contents: read
-      packages: write
-      actions: read
-    env:
-      # A pull request from this repository can become the release, so its image
-      # is published like main's. Fork images stay local.
-      PUBLISH: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-    steps:
-      - uses: actions/checkout@v7.0.1
-      - name: Prepare KVM build host
-        run: |
-          test -e /dev/kvm
-          if ! sudo modprobe ublk_drv; then
-            sudo apt-get update -qq
-            sudo apt-get install -y "linux-modules-extra-$(uname -r)"
-            sudo modprobe ublk_drv
-          fi
-          test -c /dev/ublk-control
-          test "$(cat /proc/sys/kernel/io_uring_disabled)" = 0
-          # A working L0 device alone does not guarantee nested KVM for our guest.
-          if grep -qw vmx /proc/cpuinfo; then
-            grep -Eq '^(Y|1)$' /sys/module/kvm_intel/parameters/nested
-          else
-            grep -qw svm /proc/cpuinfo
-            grep -Eq '^(Y|1)$' /sys/module/kvm_amd/parameters/nested
-          fi
-          df -h /
-          # Hosted runners currently have ~87 GB free. Deleting unused SDKs takes up
-          # to minutes, so do it only if a smaller disk ever needs the space.
-          if (( $(df --output=avail -BG / | tail -1 | tr -dc 0-9) < 40 )); then
-            sudo rm -rf /usr/share/dotnet /usr/local/lib/android
-          fi
-      - name: Use Docker's containerd image store
-        if: github.event_name == 'pull_request'
-        run: |
-          if test -f /etc/docker/daemon.json; then
-            sudo jq '.features = (.features // {}) | .features["containerd-snapshotter"] = true' /etc/docker/daemon.json | sudo tee /etc/docker/daemon.json.new > /dev/null
-          else
-            printf '%s\n' '{"features":{"containerd-snapshotter":true}}' | sudo tee /etc/docker/daemon.json.new > /dev/null
-          fi
-          sudo mv /etc/docker/daemon.json.new /etc/docker/daemon.json
-          sudo systemctl restart docker
-          docker info -f '{{ .DriverStatus }}' | grep -q 'io.containerd.snapshotter.v1'
-          docker buildx inspect default
-      - uses: docker/setup-buildx-action@v4.3.0
-        if: github.event_name != 'pull_request'
-      - uses: docker/login-action@v4.6.0
-        if: env.PUBLISH == 'true'
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Read package version
-        id: package
-        run: node -e 'require("node:fs").appendFileSync(process.env.GITHUB_OUTPUT, `version=${require("./package.json").version}\n`)'
-      - uses: docker/metadata-action@v6.2.0
-        id: meta
-        with:
-          images: ghcr.io/${{ github.repository_owner }}/cairn
-          labels: org.opencontainers.image.version=${{ steps.package.outputs.version }}
-      - name: Choose the image destination
-        id: target
-        run: |
-          image="ghcr.io/${GITHUB_REPOSITORY_OWNER}/cairn"
-          if [[ "$GITHUB_EVENT_NAME" != pull_request ]]; then
-            # Publish only an untagged digest. Release/latest tags wait for all checks.
-            echo "destination=type=image,name=$image,push-by-digest=true,name-canonical=true,push=true" >> "$GITHUB_OUTPUT"
-          elif [[ "$PUBLISH" == true ]]; then
-            # Pull requests build into the local containerd store, so smoke tests never
-            # pull. That driver cannot push by digest: one candidate tag moves with each
-            # run, and only digests are ever promoted.
-            echo "destination=type=image,name=$image:pull-request,push=true" >> "$GITHUB_OUTPUT"
-            echo "local=$image:pull-request" >> "$GITHUB_OUTPUT"
-          else
-            echo "destination=type=docker,name=cairn:test" >> "$GITHUB_OUTPUT"
-            echo "local=cairn:test" >> "$GITHUB_OUTPUT"
-          fi
-      - uses: docker/build-push-action@v7.3.0
-        id: build
-        with:
-          builder: ${{ github.event_name == 'pull_request' && 'default' || '' }}
-          context: .
-          outputs: ${{ steps.target.outputs.destination }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            VCS_REF=${{ github.sha }}
-            CODEX_VERSION=${{ needs.resolve.outputs.codex }}
-            GH_VERSION=${{ needs.resolve.outputs.gh }}
-            CLAUDE_VERSION=${{ needs.resolve.outputs.claude }}
-            OPENCODE_VERSION=${{ needs.resolve.outputs.opencode }}
-          # Main and version tags preserve compiler layers for later qualifications.
-          # Pull request refs restore this cache without uploading to it.
-          cache-from: |
-            type=registry,ref=ghcr.io/${{ github.repository_owner }}/cairn:buildcache
-            type=gha
-          cache-to: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && format('type=registry,ref=ghcr.io/{0}/cairn:buildcache,mode=max,compression=zstd,compression-level=3,ignore-error=true', github.repository_owner) || '' }}
-          secrets: github_token=${{ github.token }}
-          provenance: ${{ env.PUBLISH == 'true' && 'mode=max' || 'false' }}
-          sbom: ${{ env.PUBLISH == 'true' }}
-      - name: Select the image under test
-        env:
-          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
-          LOCAL_IMAGE: ${{ steps.target.outputs.local }}
-        run: |
-          if [[ -z "$LOCAL_IMAGE" ]]; then
-            echo "SMOKE_IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER}/cairn@${IMAGE_DIGEST}" >> "$GITHUB_ENV"
-            exit 0
-          fi
-          if [[ "$PUBLISH" == true ]]; then
-            # The local candidate must be exactly the digest a later release may promote.
-            id=$(docker image inspect -f '{{.Id}}' "$LOCAL_IMAGE")
-            repo_digests=$(docker image inspect -f '{{json .RepoDigests}}' "$LOCAL_IMAGE")
-            echo "Local $LOCAL_IMAGE: $id $repo_digests; published $IMAGE_DIGEST"
-            [[ "$id" == "$IMAGE_DIGEST" || "$repo_digests" == *"@$IMAGE_DIGEST"* ]]
-          fi
-          echo "SMOKE_IMAGE=$LOCAL_IMAGE" >> "$GITHUB_ENV"
-      - name: Pull the published image before runtime qualification
-        if: steps.target.outputs.local == ''
-        timeout-minutes: 10
-        # A cold digest pull can exceed docker run's three-minute startup budget.
-        # Keep registry transfer separate without relaxing any runtime checks.
-        run: docker --context default pull "$SMOKE_IMAGE"
-      - uses: ./.github/actions/setup-pnpm
-        with:
-          cache: true
-      - name: Wait for the concurrent fixture build
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          node --input-type=module <<'JS'
-          import { execFileSync } from 'node:child_process'
-          import { waitForArtifact } from './scripts/android-device-tests.mjs'
-          const gh = args => execFileSync('gh', args, { encoding: 'utf8' })
-          for (const artifact of ['browser-backend', 'browser-build']) {
-            await waitForArtifact({
-              repository: process.env.GITHUB_REPOSITORY,
-              runId: process.env.GITHUB_RUN_ID,
-              attempt: process.env.GITHUB_RUN_ATTEMPT,
-              artifact,
-              job: 'build',
-            }, { gh })
-          }
-          JS
-      - uses: actions/download-artifact@v8.0.1
-        with:
-          name: browser-backend
-          path: beacon-smoke-bin/
-      - uses: actions/download-artifact@v8.0.1
-        with:
-          name: browser-build
-          path: dist/
-      - run: chmod +x beacon-smoke-bin/cairn-beacon
-      - name: Start the disposable beacon database
-        # The PR job changes Docker's image store above. Start this database
-        # afterwards so restarting Docker cannot discard a service container.
-        # TCP health waits for the final server, beyond socket-only initialization.
-        run: |
-          docker run --detach --name cairn-beacon-smoke-db \
-            --network host \
-            --env POSTGRES_USER=cairn --env POSTGRES_PASSWORD=test-only \
-            --env POSTGRES_DB=cairn_beacon_test \
-            --health-cmd "pg_isready -h 127.0.0.1 -U cairn -d cairn_beacon_test" \
-            --health-interval 1s --health-timeout 5s --health-retries 30 \
-            postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24 postgres -c listen_addresses=127.0.0.1
-          for attempt in $(seq 1 30); do
-            if test "$(docker inspect --format '{{.State.Health.Status}}' cairn-beacon-smoke-db)" = healthy; then
-              break
-            fi
-            sleep 1
-          done
-          test "$(docker inspect --format '{{.State.Health.Status}}' cairn-beacon-smoke-db)" = healthy
-      - name: Smoke-test the exact image
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          CODEX_VERSION: ${{ needs.resolve.outputs.codex }}
-          GH_VERSION: ${{ needs.resolve.outputs.gh }}
-          CLAUDE_VERSION: ${{ needs.resolve.outputs.claude }}
-          OPENCODE_VERSION: ${{ needs.resolve.outputs.opencode }}
-          CAIRN_BEACON_TEST_DATABASE_URL: postgres://cairn:test-only@127.0.0.1:5432/cairn_beacon_test
-          CAIRN_SMOKE_BEACON_BINARY: beacon-smoke-bin/cairn-beacon
-        run: |
-          node tests/container-smoke.mjs "$SMOKE_IMAGE"
-          node tests/runner-smoke.mjs "$SMOKE_IMAGE"
-      - name: Qualify exclusive pause, private memory paging and live nested KVM
-        env:
-          CAIRN_EXCLUSIVE_REQUIRE_RECLAIM: 'true'
-          # Hosted AMD nested Android remains unqualified.
-          # Keep the same-emulator mode available for explicit qualification.
-          CAIRN_EXCLUSIVE_ANDROID: ${{ inputs.exclusive-android && 'true' || 'false' }}
-        run: |
-          if [[ "$CAIRN_EXCLUSIVE_ANDROID" != true ]]; then
-            echo 'Nested Android continuity skipped: the hosted AMD platform is unqualified.'
-          fi
-          # This runner is disposable. Never page conversation credentials to
-          # the hosted image's default plaintext swap.
-          if sudo modprobe zram num_devices=1; then
-            sudo swapoff -a
-            echo zstd | sudo tee /sys/block/zram0/comp_algorithm > /dev/null
-            echo 4G | sudo tee /sys/block/zram0/disksize > /dev/null
-            sudo mkswap /dev/zram0
-            sudo swapon --priority 100 /dev/zram0
-          else
-            export CAIRN_EXCLUSIVE_REQUIRE_RECLAIM=false
-            echo 'Positive RAM reclamation skipped: zram is unavailable. Unqualified-memory refusal and rollback, live CPU/KVM continuity and admission fencing are still tested.'
-          fi
-          node tests/runner-exclusive-smoke.mjs "$SMOKE_IMAGE"
-      - name: Remove the disposable beacon database
-        if: always()
-        run: docker rm --force cairn-beacon-smoke-db
-      - name: Verify retained conversation memory, crash recovery and active admission
-        env:
-          CAIRN_RETENTION_MEMORY_GIB: 4
-          CAIRN_RETENTION_TURNS: 4
-          CAIRN_RETENTION_CRASH_AFTER: 2
-          CAIRN_RETENTION_ADMISSION: 'true'
-          CAIRN_RETENTION_PUBLISH: 'true'
-          CAIRN_RETENTION_ASYNC_PUBLISH: 'true'
-        run: node tests/runner-retention-smoke.mjs "$SMOKE_IMAGE"
-      - name: Report remaining disk space
-        if: always()
-        run: df -h /
-  beacon-image:
-    needs: resolve
-    if: needs.resolve.outputs.reuse != 'true'
-    outputs:
-      digest: ${{ steps.build.outputs.digest }}
-      published: ${{ env.PUBLISH }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-      packages: write
-    env:
-      PUBLISH: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-    steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: docker/setup-buildx-action@v4.3.0
-      - uses: docker/login-action@v4.6.0
-        if: env.PUBLISH == 'true'
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Read package version
-        id: package
-        run: node -e 'require("node:fs").appendFileSync(process.env.GITHUB_OUTPUT, `version=${require("./package.json").version}\n`)'
-      - uses: docker/metadata-action@v6.2.0
-        id: meta
-        with:
-          images: ghcr.io/${{ github.repository_owner }}/cairn-beacon
-          labels: org.opencontainers.image.version=${{ steps.package.outputs.version }}
-      - name: Choose the beacon image destination
-        id: target
-        run: |
-          if [[ "$PUBLISH" == true ]]; then
-            echo "destination=type=image,name=ghcr.io/${GITHUB_REPOSITORY_OWNER}/cairn-beacon,push-by-digest=true,name-canonical=true,push=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "destination=type=docker,name=cairn-beacon:test" >> "$GITHUB_OUTPUT"
-          fi
-      - uses: docker/build-push-action@v7.3.0
-        id: build
-        with:
-          context: .
-          target: beacon
-          outputs: ${{ steps.target.outputs.destination }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: VCS_REF=${{ github.sha }}
-          cache-from: |
-            type=registry,ref=ghcr.io/${{ github.repository_owner }}/cairn-beacon:buildcache
-            type=gha,scope=beacon
-          cache-to: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && format('type=registry,ref=ghcr.io/{0}/cairn-beacon:buildcache,mode=max,compression=zstd,compression-level=3,ignore-error=true', github.repository_owner) || '' }}
-          provenance: ${{ env.PUBLISH == 'true' && 'mode=max' || 'false' }}
-          sbom: ${{ env.PUBLISH == 'true' }}
-      - uses: ./.github/actions/setup-pnpm
-        with:
-          install: false
-      - name: Smoke-test the exact beacon image with disposable Postgres
-        env:
-          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
-        run: |
-          if [[ "$PUBLISH" == true ]]; then
-            image="ghcr.io/${GITHUB_REPOSITORY_OWNER}/cairn-beacon@${IMAGE_DIGEST}"
-          else
-            image=cairn-beacon:test
-          fi
-          node tests/beacon-container-smoke.mjs "$image"
-  image-cache:
-    # Main reuses a pull request image without building it; refresh the shared
-    # layer cache for later pull requests. This never gates a release.
-    needs: resolve
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.resolve.outputs.reuse == 'true'
-    continue-on-error: true
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: docker/setup-buildx-action@v4.3.0
-      - uses: docker/login-action@v4.6.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v7.3.0
-        with:
-          context: .
-          outputs: type=cacheonly
-          build-args: |
-            VCS_REF=${{ github.sha }}
-            CODEX_VERSION=${{ needs.resolve.outputs.codex }}
-            GH_VERSION=${{ needs.resolve.outputs.gh }}
-            CLAUDE_VERSION=${{ needs.resolve.outputs.claude }}
-            OPENCODE_VERSION=${{ needs.resolve.outputs.opencode }}
-          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/cairn:buildcache
-          cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/cairn:buildcache,mode=max,compression=zstd,compression-level=3,ignore-error=true
-          secrets: github_token=${{ github.token }}
-          provenance: false
-      - name: Refresh the beacon cache when main reuses validated images
-        if: always() && !cancelled()
-        uses: docker/build-push-action@v7.3.0
-        with:
-          context: .
-          target: beacon
-          outputs: type=cacheonly
-          build-args: VCS_REF=${{ github.sha }}
-          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/cairn-beacon:buildcache
-          cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/cairn-beacon:buildcache,mode=max,compression=zstd,compression-level=3,ignore-error=true
-          provenance: false
-
-  publish:
-    # The Intel nested Android test needs hardware GitHub does not provide; it runs locally
-    # before releases when Android or runner changes need it (docs/DEPLOYMENT.md) and does not gate CI.
-    needs: [resolve, build, quality, rust-check, backend, node-checks, browser, network-bench, native-runtime, android-direct-build, android-direct, image, beacon-image]
-    if: always() && !cancelled() && needs.resolve.outputs.reuse != 'true' && needs.quality.result == 'success' && needs.rust-check.result == 'success' && needs.backend.result == 'success' && needs.node-checks.result == 'success' && needs.build.result == 'success' && needs.browser.result == 'success' && needs.network-bench.result == 'success' && needs.native-runtime.result == 'success' && needs.android-direct-build.result == 'success' && needs.android-direct.result == 'success' && needs.image.result == 'success' && needs.image.outputs.published == 'true' && needs.beacon-image.result == 'success' && needs.beacon-image.outputs.published == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v7.0.1
-      # Pull request images keep only the moving candidate tag until main or a
-      # release promotes their digest.
-      - uses: ./.github/actions/promote-image
-        if: github.event_name != 'pull_request'
-        with:
-          digest: ${{ needs.image.outputs.digest }}
-          token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: ./.github/actions/promote-image
-        if: github.event_name != 'pull_request'
-        with:
-          image: ghcr.io/${{ github.repository_owner }}/cairn-beacon
-          digest: ${{ needs.beacon-image.outputs.digest }}
-          token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Record the validated image
-        if: github.ref == 'refs/heads/main' && github.event_name == 'schedule'
-        env:
-          IMAGE_DIGEST: ${{ needs.image.outputs.digest }}
-          BEACON_IMAGE_DIGEST: ${{ needs.beacon-image.outputs.digest }}
-          GIT_TREE: ${{ needs.resolve.outputs.tree }}
-          CODEX_VERSION: ${{ needs.resolve.outputs.codex }}
-          GH_VERSION: ${{ needs.resolve.outputs.gh }}
-          CLAUDE_VERSION: ${{ needs.resolve.outputs.claude }}
-          OPENCODE_VERSION: ${{ needs.resolve.outputs.opencode }}
-          SERVED_FOUND: ${{ needs.resolve.outputs.served-found }}
-          SERVED_CLAUDE: ${{ needs.resolve.outputs.served-claude }}
-          SERVED_OPENCODE: ${{ needs.resolve.outputs.served-opencode }}
-        run: |
-          mkdir -p release-evidence
-          node --input-type=module <<'JS'
-          import { writeFileSync } from 'node:fs'
-          writeFileSync('release-evidence/image.json', JSON.stringify({ schema: 3, beaconDigest: process.env.BEACON_IMAGE_DIGEST, repository: process.env.GITHUB_REPOSITORY.toLowerCase(), tree: process.env.GIT_TREE, commit: process.env.GITHUB_SHA, digest: process.env.IMAGE_DIGEST, runId: Number(process.env.GITHUB_RUN_ID), tools: { codex: process.env.CODEX_VERSION, gh: process.env.GH_VERSION, claude: process.env.CLAUDE_VERSION, opencode: process.env.OPENCODE_VERSION }, served: process.env.SERVED_FOUND === 'true' ? { claude: process.env.SERVED_CLAUDE, opencode: process.env.SERVED_OPENCODE } : null }))
-          JS
-      - uses: actions/upload-artifact@v7.0.1
-        if: github.ref == 'refs/heads/main' && github.event_name == 'schedule'
-        with:
-          name: ${{ needs.resolve.outputs.artifact }}
-          path: release-evidence/image.json
-          retention-days: 90
-          overwrite: true
-  promote:
-    needs: resolve
-    if: needs.resolve.outputs.reuse == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: ./.github/actions/promote-image
-        with:
-          digest: ${{ needs.resolve.outputs.digest }}
-          token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: ./.github/actions/promote-image
-        with:
-          image: ghcr.io/${{ github.repository_owner }}/cairn-beacon
-          digest: ${{ needs.resolve.outputs.beacon-digest }}
-          token: ${{ secrets.GITHUB_TOKEN }}
-  deploy:
-    if: always() && !cancelled() && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && (needs.publish.result == 'success' || needs.promote.result == 'success')
-    needs: [resolve, image, beacon-image, publish, promote]
-    permissions:
-      contents: read
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    environment:
-      name: production
-      url: ${{ vars.CAIRN_BEACON_ORIGIN }}
-    concurrency:
-      group: coolify-production
-      cancel-in-progress: false
-    steps:
-      - uses: actions/checkout@v7.0.1
-        with:
-          fetch-depth: 0
-      - uses: ./.github/actions/setup-pnpm
-        with:
-          cache: true
-      - name: Require rollback checks against the release served now
-        env:
-          CAIRN_BEACON_ORIGIN: ${{ vars.CAIRN_BEACON_ORIGIN }}
-          SERVED_FOUND: ${{ needs.resolve.outputs.served-found }}
-          SERVED_CLAUDE: ${{ needs.resolve.outputs.served-claude }}
-          SERVED_OPENCODE: ${{ needs.resolve.outputs.served-opencode }}
-          CLAUDE_VERSION: ${{ needs.resolve.outputs.claude }}
-          OPENCODE_VERSION: ${{ needs.resolve.outputs.opencode }}
-        run: node scripts/served-tools.mjs verify-served
-      - name: Deploy the published image and verify the running commit
-        env:
-          COOLIFY_URL: ${{ vars.COOLIFY_URL }}
-          COOLIFY_SERVICE_UUID: ${{ vars.COOLIFY_SERVICE_UUID }}
-          COOLIFY_TOKEN: ${{ secrets.CAIRN_RELEASE_COOLIFY_TOKEN }}
-          CAIRN_BEACON_ORIGIN: ${{ vars.CAIRN_BEACON_ORIGIN }}
-          DEPLOY_IMAGE: ghcr.io/${{ github.repository_owner }}/cairn-beacon@${{ needs.resolve.outputs.beacon-digest || needs.beacon-image.outputs.digest }}
-          DEPLOY_INSTALLATION_IMAGE: ghcr.io/${{ github.repository_owner }}/cairn@${{ needs.resolve.outputs.digest || needs.image.outputs.digest }}
-          # A reused image reports the commit it was validated at, with this tag's tree.
-          DEPLOY_COMMIT: ${{ needs.resolve.outputs.commit }}
-        run: node scripts/deploy-coolify.mjs
-      - name: Verify installation update and execution readiness
-        env:
-          CAIRN_RELEASE_SSH_HOST: ${{ vars.CAIRN_RELEASE_SSH_HOST }}
-          CAIRN_RELEASE_SSH_USER: ${{ vars.CAIRN_RELEASE_SSH_USER }}
-          CAIRN_RELEASE_SSH_KNOWN_HOSTS: ${{ vars.CAIRN_RELEASE_SSH_KNOWN_HOSTS }}
-          CAIRN_RELEASE_SSH_KEY: ${{ secrets.CAIRN_RELEASE_SSH_KEY }}
-          DEPLOY_INSTALLATION_IMAGE: ghcr.io/${{ github.repository_owner }}/cairn@${{ needs.resolve.outputs.digest || needs.image.outputs.digest }}
-        run: node scripts/production-release.mjs verify
