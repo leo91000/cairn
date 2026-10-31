@@ -81,7 +81,7 @@ impl ResumeRun {
         let commit_id = id.clone();
         let authorize = crate::installation_mcp::management_authorization(s, bearer.as_deref())
             .await?
-            .with_guard(move |db| policy::authorize_run_in(db, &commit_id, &origin));
+            .with_publication(move |db| policy::authorize_run_in(db, &commit_id, &origin));
         s.worker.resume_live(s, &id, authorize).await?;
         Ok(ResumeRunOutput {
             run_id: input.run_id,

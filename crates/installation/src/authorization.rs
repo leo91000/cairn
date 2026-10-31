@@ -14,6 +14,7 @@ type LocalGuard = dyn Fn(&Db<'_>) -> Result<()> + Send + Sync;
 #[derive(Clone)]
 pub(crate) struct Authorization {
     local: Arc<LocalGuard>,
+    publication: Option<Arc<LocalGuard>>,
     service: Option<Arc<Service>>,
     live: Option<Authority>,
 }
@@ -32,6 +33,7 @@ impl Authorization {
         let authorize = Mutex::new(authorize);
         Self {
             local: Arc::new(move |db| (authorize.lock().unwrap())(db)),
+            publication: None,
             service: None,
             live: None,
         }
@@ -69,6 +71,7 @@ impl Authorization {
         let local = authority.clone();
         Self {
             local: Arc::new(move |db| local.authorize(db)),
+            publication: None,
             service: Some(Arc::new(s.clone())),
             live: Some(authority),
         }
@@ -85,13 +88,35 @@ impl Authorization {
                 local(db)?;
                 (guard.lock().unwrap())(db)
             }),
+            publication: self.publication,
             service: self.service,
             live: self.live,
         }
     }
 
+    /// Provenance recording belongs to the final write transaction. Unlike
+    /// read-only guards, it must not run during asynchronous proof checks.
+    pub(crate) fn with_publication<F>(mut self, publish: F) -> Self
+    where
+        F: Fn(&Db<'_>) -> Result<()> + Send + 'static,
+    {
+        let previous = self.publication.take();
+        let publish = Mutex::new(publish);
+        self.publication = Some(Arc::new(move |db| {
+            if let Some(previous) = &previous {
+                previous(db)?;
+            }
+            (publish.lock().unwrap())(db)
+        }));
+        self
+    }
+
     pub(crate) fn authorize(&self, db: &Db<'_>) -> Result<()> {
-        (self.local)(db)
+        (self.local)(db)?;
+        if let Some(publish) = &self.publication {
+            publish(db)?;
+        }
+        Ok(())
     }
 
     /// Call after preparation/lock waits and before each new effect/publication.

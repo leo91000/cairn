@@ -280,7 +280,7 @@ pub(crate) async fn invoke(
         let source = origin.clone();
         authorize
             .clone()
-            .with_guard(move |db: &Db<'_>| -> Result<()> {
+            .with_publication(move |db: &Db<'_>| -> Result<()> {
                 if let Some(id) = &commit_id {
                     crate::native::policy::authorize_chat_in(db, id, &source)?;
                 }
@@ -393,7 +393,7 @@ pub(crate) async fn invoke(
             .question_cancel_live(
                 text(&args, "chatId"),
                 text(&args, "questionId"),
-                commit_authority.with_guard(native),
+                commit_authority.with_publication(native),
             )
             .await;
     }
