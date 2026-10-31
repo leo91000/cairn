@@ -207,6 +207,7 @@ if 'ps' in args:
     sys.exit(0)
 if 'exec' in args:
     args[-1] = args[-1].replace('127.0.0.1:4310', '127.0.0.1:' + os.environ['FIXTURE_MANAGER_PORT'])
+    args[-1] = args[-1].replace('127.0.0.1:4311', '127.0.0.1:' + os.environ['FIXTURE_RUNNER_PORT'])
 sys.exit(docker(*args).returncode)
 ''')
             (root / 'bin/docker').chmod(0o755)
@@ -223,6 +224,8 @@ sys.exit(docker(*args).returncode)
                         'RUNNER_URL': f'http://127.0.0.1:{runner_port}', 'CAIRN_BEACON_ORIGIN': origin,
                         'CAIRN_NODE_IMAGE': previous},
                     'volumes': [f'{root}/data:/data', f'{root}/home:/home/node', f'{root}/workspaces:/workspaces'],
+                    'healthcheck': {**healthcheck, 'test': ['CMD', 'node', '-e',
+                        "fetch('http://127.0.0.1:" + str(manager_port) + "/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]},
                 },
                 'runner': {
                     'image': previous, 'network_mode': 'host', 'user': f'{os.getuid()}:{os.getgid()}',
@@ -234,7 +237,7 @@ sys.exit(docker(*args).returncode)
             (root / 'installation.json').write_text(json.dumps({'origin': origin, 'image': previous}))
             env = {'PATH': str(root / 'bin') + ':' + os.environ['PATH'],
                    'CAIRN_INSTALLATION_ROOT': str(root), 'FIXTURE_DOCKER': DOCKER,
-                   'FIXTURE_MANAGER_PORT': str(manager_port)}
+                   'FIXTURE_MANAGER_PORT': str(manager_port), 'FIXTURE_RUNNER_PORT': str(runner_port)}
 
             def service(image):
                 return subprocess.Popen([str(REPO / 'target/debug/cairn-beacon')],
@@ -268,6 +271,22 @@ sys.exit(docker(*args).returncode)
             del config['services']['manager']['environment']['CAIRN_INSTALLATION_CLAIM_CODE']
             (root / 'compose.json').write_text(json.dumps(config))
 
+            def acquire(owner):
+                lease_script = """
+const fs = require('fs');
+fetch('http://127.0.0.1:%d/internal/deployment-lease', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + fs.readFileSync('/data/maintenance-token', 'utf8').trim() },
+    body: JSON.stringify({ owner: %s }),
+}).then(async r => process.exit(r.ok && (await r.json()).paused === true ? 0 : 1)).catch(() => process.exit(1));
+""" % (manager_port, json.dumps(owner))
+                command(docker + ['exec', '-T', 'manager', 'node', '-e', lease_script])
+
+            def container_starts():
+                identifiers = command(docker + ['ps', '-q', 'manager', 'runner']).decode().split()
+                rows = json.loads(command([DOCKER, 'inspect', *identifiers]))
+                return sorted((row['Id'], row['State']['StartedAt']) for row in rows)
+
             for image, interrupted in ((approved, False), (failed, False), (failed_http, True)):
                 if image in (failed, failed_http):
                     beacon.terminate()
@@ -280,15 +299,7 @@ sys.exit(docker(*args).returncode)
                 repaired.unlink(missing_ok=True)
                 if interrupted:
                     owner = str(uuid.uuid4())
-                    lease_script = """
-const fs = require('fs');
-fetch('http://127.0.0.1:%d/internal/deployment-lease', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + fs.readFileSync('/data/maintenance-token', 'utf8').trim() },
-    body: JSON.stringify({ owner: %s }),
-}).then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1));
-""" % (manager_port, json.dumps(owner))
-                    command(docker + ['exec', '-T', 'manager', 'node', '-e', lease_script])
+                    acquire(owner)
                     journal = json.loads((root / 'installation.json').read_text())
                     # Simulate an interrupted replacement with a durable lease acknowledgement.
                     journal.update(pendingImage=image, leaseOwner=owner, leaseAcquired=True)
@@ -328,7 +339,24 @@ fetch('http://127.0.0.1:%d/internal/deployment-lease', {
                 assert (root / 'runner-state/kept').read_text() == 'retained runner state'
                 health = json.load(urllib.request.urlopen(f'http://127.0.0.1:{manager_port}/health'))
                 assert health['runtimeId'] == runtime_ids[image] and not health['maintenance']
-            print('Real containers: approved replacement and exited/HTTP-dead-candidate retry preserve conversations, identity, workspace, credentials and runner state')
+                if image == approved:
+                    owner = str(uuid.uuid4())
+                    acquire(owner)
+                    # The launch completed, but its durable commit was interrupted.
+                    journal = {'image': previous, 'origin': origin, 'pendingImage': approved,
+                               'leaseOwner': owner, 'leaseAcquired': True}
+                    (root / 'installation.json').write_text(json.dumps(journal))
+                    starts = container_starts()
+                    assert len(starts) == 2
+                    deployment = (root / 'compose.json').read_bytes()
+                    command(update, env=env, timeout=30)
+                    assert container_starts() == starts, 'A ready candidate must settle without replacing or restarting containers'
+                    assert (root / 'compose.json').read_bytes() == deployment
+                    journal = json.loads((root / 'installation.json').read_text())
+                    assert journal == {'image': approved, 'origin': origin}
+                    health = json.load(urllib.request.urlopen(f'http://127.0.0.1:{manager_port}/health'))
+                    assert not health['maintenance'], 'Adoption must release the same-owner lease'
+            print('Real containers: approved replacement, healthy-candidate adoption without restart and exited/HTTP-dead-candidate retry preserve conversations, identity, workspace, credentials and runner state')
         finally:
             if compose_file.exists():
                 subprocess.run(docker + ['down', '--timeout', '10'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)

@@ -1,4 +1,6 @@
 //! Host-mounted ext4 over the same journal, remote source and clean cache as VMs.
+mod closing;
+
 use super::{atomic_write, workspace};
 use crate::{
     error::{Error, Result},
@@ -268,17 +270,11 @@ pub struct Mounted {
     pub volume: Arc<Volume>,
     filesystem: Arc<AtomicU64>,
     quota_directory: PathBuf,
-    retained_usage: Option<u64>,
     target: PathBuf,
     jail: PathBuf,
-    mounted: bool,
-    completed: bool,
-    aborted: bool,
-    flush_failed: bool,
+    closing: closing::State,
 
     device: Arc<std::sync::Mutex<storage::ublk::MountedDisk>>,
-    _owner: Option<environment::OwnerLease>,
-    _physical: Option<crate::file_lock::Guard>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -302,6 +298,7 @@ pub async fn mount(
     run: &str,
     plan: &Value,
     stop: &CancellationToken,
+    namespace: &storage::ublk::BackendNamespace,
 ) -> Result<Mounted> {
     {
         let owner = environment::ownership(state, run, DISK_BUSY).await?;
@@ -352,19 +349,16 @@ pub async fn mount(
         retire_attachment(&jail).await?;
         let (backend_volume, backend_state, backend_jail) =
             (volume.clone(), state.to_owned(), jail.clone());
-        // The controller's global disk lock keeps this inventory stable until
-        // the backend has cloned its namespace. Verify all inherited native
-        // filesystems before handing their paths to the storage transport.
-        let inherited = host_mounts(
-            state,
-            &std::fs::read_to_string("/proc/thread-self/mountinfo")?,
-        )?;
-        for mounted in &inherited {
-            verify_host_mount(state, mounted)?;
-        }
-        let inherited = inherited.into_iter().map(|mounted| mounted.path).collect();
+        let namespace = namespace.clone();
+        let backend_directory = directory.to_owned();
         let device = tokio::task::spawn_blocking(move || {
-            storage::ublk::mount_host_disk(backend_volume, &backend_state, &backend_jail, inherited)
+            storage::ublk::mount_host_disk(
+                backend_volume,
+                &backend_state,
+                &backend_jail,
+                &namespace,
+                &backend_directory,
+            )
         })
         .await
         .map_err(Error::internal)??;
@@ -415,16 +409,10 @@ pub async fn mount(
             volume,
             target,
             jail,
-            mounted: true,
             filesystem: Arc::new(AtomicU64::new(0)),
             quota_directory: directory.join("lazy"),
-            retained_usage: None,
-            completed: false,
-            aborted,
-            flush_failed: false,
             device,
-            _owner: Some(owner),
-            _physical: Some(physical),
+            closing: closing::State::new(owner, physical, aborted),
         };
         // The durable journal size is also the resize intent. A crash after
         // growing the journal/device, or a restored older filesystem image,
@@ -455,7 +443,7 @@ impl Mounted {
     /// Journal -> kernel geometry -> ext4. A crash after either geometry change
     /// leaves the journal geometry as intent for the next owned mount.
     pub(crate) async fn grow(&mut self, bytes: u64) -> Result<bool> {
-        if self.aborted || !self.mounted || !storage::ublk::supports_growth() {
+        if self.closing.aborted || !self.closing.mounted || !storage::ublk::supports_growth() {
             return Err(Error::unavailable(
                 "Online native disk growth is unavailable.",
             ));
@@ -540,7 +528,7 @@ impl Mounted {
         // Abort after cancellation during preparation, a failed systemd fence,
         // or a fenced filesystem's terminal read-only flush failure. A later
         // non-lazy unmount remains mandatory. The journal is a crash prefix.
-        self.aborted = true;
+        self.closing.aborted = true;
         self.volume.stop.cancel();
 
         {
@@ -558,68 +546,81 @@ impl Mounted {
     }
 
     pub async fn close(&mut self) -> Result<Completion> {
-        if self.mounted {
-            if !self.aborted {
-                match sync_io(&self.target).await {
-                    Ok(()) => self.retained_usage = used_bytes(&self.target).ok(),
-                    Err(error) if matches!(error.raw_os_error(), Some(libc::EROFS | libc::EIO)) => {
-                        tracing::error!(%error, "Native filesystem flush failed; retaining a crash prefix after fencing");
-                        self.flush_failed = true;
-                        self.abort_io().await?;
-                    }
-                    Err(error) => return Err(error.into()),
-                }
-            }
-            unmount(&self.target).await?;
-            self.mounted = false;
-        }
-        if let Some(used) = self.retained_usage.take() {
-            // This optional admission credit must never prevent writer release.
-            // A missing observation falls back to conservative admission/eviction.
-            let recorded = async {
-                let attempt =
-                    tokio::fs::read_to_string(self.target.parent().unwrap().join("attempt"))
-                        .await?;
-                super::capacity::record_retained(&self.quota_directory, &attempt, used).await
-            }
-            .await;
-            if let Err(error) = recorded {
-                tracing::warn!(%error, "Native retained capacity credit unavailable");
-            }
-        }
-        if !self.completed
-            && self
-                .target
-                .parent()
-                .unwrap()
-                .join("block-initialized")
-                .exists()
-        {
-            self.volume.seal_completed().await?;
-            self.completed = true;
-        }
+        let operations = CloseOperations {
+            target: &self.target,
+            quota_directory: &self.quota_directory,
+            jail: &self.jail,
+            volume: &self.volume,
+            device: &self.device,
+        };
+        self.closing.close(&operations).await
+    }
+}
 
-        {
-            self.volume.stop.cancel();
-            let device = self.device.clone();
-            tokio::task::spawn_blocking(move || {
-                device
-                    .lock()
-                    .map_err(|_| std::io::Error::other("Native device lock poisoned"))?
-                    .close_in_place()
-            })
-            .await
-            .map_err(Error::internal)??;
-        }
-        // No mount or backend can still use this controller-private attachment.
-        retire_attachment(&self.jail).await?;
-        Ok(if self.flush_failed {
-            Completion::FailedFlush
-        } else if self.aborted {
-            Completion::Aborted
-        } else {
-            Completion::Flushed
+struct CloseOperations<'a> {
+    target: &'a Path,
+    quota_directory: &'a Path,
+    jail: &'a Path,
+    volume: &'a Arc<Volume>,
+    device: &'a Arc<std::sync::Mutex<storage::ublk::MountedDisk>>,
+}
+
+#[async_trait::async_trait]
+impl closing::Operations for CloseOperations<'_> {
+    async fn flush(&self) -> std::io::Result<Option<u64>> {
+        sync_io(self.target).await?;
+        Ok(used_bytes(self.target).ok())
+    }
+
+    async fn abort(&self) -> Result<()> {
+        self.volume.stop.cancel();
+        let device = self.device.clone();
+        tokio::task::spawn_blocking(move || {
+            device
+                .lock()
+                .map_err(|_| std::io::Error::other("Native device lock poisoned"))?
+                .abort_io()
         })
+        .await
+        .map_err(Error::internal)??;
+        Ok(())
+    }
+
+    async fn unmount(&self) -> Result<()> {
+        unmount(self.target).await
+    }
+
+    async fn record_usage(&self, used: u64) -> Result<()> {
+        let attempt =
+            tokio::fs::read_to_string(self.target.parent().unwrap().join("attempt")).await?;
+        super::capacity::record_retained(self.quota_directory, &attempt, used).await
+    }
+
+    fn initialized(&self) -> bool {
+        self.target
+            .parent()
+            .unwrap()
+            .join("block-initialized")
+            .exists()
+    }
+
+    async fn seal(&self) -> Result<()> {
+        self.volume.seal_completed().await?;
+        Ok(())
+    }
+
+    async fn retire(&self) -> Result<()> {
+        self.volume.stop.cancel();
+        let device = self.device.clone();
+        tokio::task::spawn_blocking(move || {
+            device
+                .lock()
+                .map_err(|_| std::io::Error::other("Native device lock poisoned"))?
+                .close_in_place()
+        })
+        .await
+        .map_err(Error::internal)??;
+        retire_attachment(self.jail).await
     }
 }
 
@@ -749,16 +750,10 @@ pub async fn initialize(state: &Path, run: &str, plan: &Value, budget: u64) -> R
 
 impl Drop for Mounted {
     fn drop(&mut self) {
-        if self.mounted {
-            // An unexpected unwind must not release an open filesystem to a
-            // second writer. Keep its leases/backend until controller restart.
+        if !self.closing.retired {
+            // Neither unmount nor sealing proves backend retirement. Preserve
+            // the journal, backend and leases through any uncertain close.
             tracing::error!(target = %self.target.display(), "Native mount abandoned; ownership retained until controller recovery");
-            if let Some(owner) = self._owner.take() {
-                std::mem::forget(owner);
-            }
-            if let Some(physical) = self._physical.take() {
-                std::mem::forget(physical);
-            }
 
             std::mem::forget(self.device.clone());
             std::mem::forget(self.volume.clone());
@@ -812,7 +807,7 @@ pub async fn capture_active(
     } else {
         None
     };
-    if mount.as_ref().is_some_and(|mount| !mount.mounted)
+    if mount.as_ref().is_some_and(|mount| !mount.closing.mounted)
         || !workspace::directory(state, run)?
             .join("block-initialized")
             .exists()
