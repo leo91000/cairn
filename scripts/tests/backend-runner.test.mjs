@@ -209,7 +209,13 @@ describe('backend test launcher', () => {
       expect(result.calls).toEqual([])
     }
 
-    const unrelated = invoke(['--nextest', '-p', 'cairn-contracts', '--archive-file', '/fixture/archive'])
+    for (const option of ['--archive-file', '--binaries-metadata']) {
+      const result = invoke(['--nextest', '-p', 'cairn-contracts', option, '/fixture/archive'])
+      expect(result.status).toBe(2)
+      expect(result.calls).toEqual([])
+    }
+
+    const unrelated = invoke(['--nextest', '-p', 'cairn-contracts', '--cargo-metadata', '/fixture/metadata'])
     expect(unrelated.status).toBe(0)
     expect(unrelated.calls.at(-1).reused).toBe('1')
     const remapped = invoke(['--nextest', '--workspace-remap', '/fixture/source'])
