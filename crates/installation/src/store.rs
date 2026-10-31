@@ -11,6 +11,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
+    time::{Duration, Instant},
 };
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -63,6 +64,41 @@ fn actors(connections: Vec<Connection>, lane: &'static str) -> mpsc::Sender<Job>
     tx
 }
 
+fn enable_wal(connection: &Connection, timeout: Duration) -> rusqlite::Result<()> {
+    let started = Instant::now();
+    let mut retries = 0;
+    let result = loop {
+        connection.busy_timeout(timeout.saturating_sub(started.elapsed()))?;
+        match connection.execute_batch("PRAGMA journal_mode=WAL;") {
+            Err(error)
+                if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy)
+                    && started.elapsed() < timeout =>
+            {
+                // Changing from a rollback journal to WAL can return BUSY
+                // without invoking SQLite's busy handler. Retry the statement
+                // after it releases its read lock, within the original budget.
+                retries += 1;
+                let remaining = timeout.saturating_sub(started.elapsed());
+                std::thread::sleep(Duration::from_millis(10).min(remaining));
+            }
+            result => break result,
+        }
+    };
+    if retries > 0 {
+        tracing::info!(
+            target: "cairn_performance",
+            operation = "store_startup",
+            phase = "wal",
+            retries,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            outcome = if result.is_ok() { "success" } else { "failed" },
+            "database startup contention"
+        );
+    }
+    result?;
+    connection.busy_timeout(timeout)
+}
+
 impl Store {
     pub fn open(directory: &Path) -> Result<Self> {
         std::fs::create_dir_all(directory)?;
@@ -75,9 +111,9 @@ impl Store {
                 "Unsupported installation database version; use a compatible release or an explicit migration.",
             ));
         }
-        writer.busy_timeout(std::time::Duration::from_secs(5))?;
         writer.set_prepared_statement_cache_capacity(128);
-        writer.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+        enable_wal(&writer, Duration::from_secs(5))?;
+        writer.execute_batch("PRAGMA foreign_keys=ON;")?;
         if !fresh && version == 11 {
             let upgraded = crate::nodes::inventory::migration::upgrade(&mut writer);
             version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -1106,6 +1142,81 @@ pub fn merge(value: &mut Value, patch: &Value) {
 mod schema_tests {
     use super::*;
     use crate::agent_fixture::StoreAgentFixture;
+
+    #[test]
+    fn wal_contention_has_one_timeout_budget_and_can_be_retried_after_release() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("manager.db");
+        let mut owner = Connection::open(&file).unwrap();
+        owner
+            .execute_batch("CREATE TABLE retained(value TEXT); INSERT INTO retained VALUES('original'); PRAGMA user_version=18;")
+            .unwrap();
+        let transaction = owner
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        let waiting = Connection::open(&file).unwrap();
+        let timeout = Duration::from_millis(50);
+        let started = Instant::now();
+        let error = enable_wal(&waiting, timeout).unwrap_err();
+        assert_eq!(
+            error.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::DatabaseBusy)
+        );
+        assert!(started.elapsed() >= timeout);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(
+            waiting
+                .pragma_query_value::<String, _>(None, "journal_mode", |row| row.get(0))
+                .unwrap(),
+            "delete"
+        );
+        assert_eq!(
+            waiting
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .unwrap(),
+            18
+        );
+        assert_eq!(
+            waiting
+                .query_row("SELECT value FROM retained", [], |row| row
+                    .get::<_, String>(0))
+                .unwrap(),
+            "original"
+        );
+        transaction.commit().unwrap();
+        enable_wal(&waiting, timeout).unwrap();
+        assert_eq!(
+            waiting
+                .pragma_query_value::<String, _>(None, "journal_mode", |row| row.get(0))
+                .unwrap(),
+            "wal"
+        );
+        assert_eq!(
+            waiting
+                .pragma_query_value::<i64, _>(None, "busy_timeout", |row| row.get(0))
+                .unwrap(),
+            50
+        );
+    }
+
+    #[test]
+    fn wal_initialization_returns_non_busy_errors_without_waiting() {
+        let root = tempfile::tempdir().unwrap();
+        let mut connection = Connection::open(root.path().join("manager.db")).unwrap();
+        connection
+            .execute_batch("CREATE TABLE retained(value TEXT);")
+            .unwrap();
+        let transaction = connection.transaction().unwrap();
+        let started = Instant::now();
+        let error = enable_wal(&transaction, Duration::from_secs(5)).unwrap_err();
+        assert_ne!(
+            error.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::DatabaseBusy)
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+        transaction.rollback().unwrap();
+        enable_wal(&connection, Duration::from_secs(5)).unwrap();
+    }
 
     #[tokio::test]
     async fn fresh_node_schema_reopens_without_a_records_mirror() {
