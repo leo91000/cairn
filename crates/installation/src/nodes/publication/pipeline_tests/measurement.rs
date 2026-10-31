@@ -45,6 +45,11 @@ impl Fixture {
         *self.object_server.blocked_object.lock().unwrap() = None;
         *self.object_server.next_byte.lock().await = None;
         *self.node_metrics.lock().unwrap() = None;
+        *self.manager_metrics.lock().unwrap() = None;
+        assert_eq!(self.effects.active.load(Ordering::SeqCst), 0);
+        self.effects.posts.store(0, Ordering::SeqCst);
+        self.effects.maximum.store(0, Ordering::SeqCst);
+        self.effects.terminal_overlap.store(false, Ordering::SeqCst);
         self.object_server.started.store(0, Ordering::SeqCst);
         self.object_server.maximum.store(0, Ordering::SeqCst);
         self.object_server.encoded_bytes.store(0, Ordering::SeqCst);
@@ -168,6 +173,8 @@ async fn direct_publication_window_comparison() {
                 assert_eq!(fixture.object_server.started.load(Ordering::SeqCst), 128);
                 assert_eq!(fixture.object_server.in_flight.load(Ordering::SeqCst), 0);
                 assert!(fixture.object_server.maximum.load(Ordering::SeqCst) <= direct::BATCH);
+                assert!(fixture.effects.maximum.load(Ordering::SeqCst) <= window);
+                assert!(!fixture.effects.terminal_overlap.load(Ordering::SeqCst));
                 let node = fixture
                     .node_metrics
                     .lock()
@@ -197,6 +204,7 @@ async fn direct_publication_window_comparison() {
                         "case": case,
                         "mode": if window == 1 { "sequential-reference" } else { "two-batch-candidate" },
                         "maximumControlBatches": window,
+                        "observedMaximumControlBatches": fixture.effects.maximum.load(Ordering::SeqCst),
                         "plaintextBufferUpperBoundBytes": window as u64 * direct::BATCH as u64 * snapshots::BLOCK,
                         "encodedBufferUpperBoundBytes": direct::BATCH as u64 * block_codec::MAX_ENCODED_BYTES,
                         "trial": trial,
