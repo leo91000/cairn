@@ -8,7 +8,7 @@ use crate::{
         jsonrpc::{Frame, METHOD_NOT_FOUND, Message},
     },
     service::Service,
-    store::{Db, Store},
+    store::Db,
     validation::text,
 };
 use reqwest::{
@@ -62,10 +62,61 @@ fn unsupported_version() -> Error {
     Error::bad_gateway("No supported MCP protocol version.")
 }
 
-type Authorization = Arc<dyn Fn(&Db<'_>) -> Result<()> + Send + Sync>;
+/// Retained local proof and optional live semantic checks for every transport
+/// effect, including OAuth preparation before the client exists.
+type LocalAuthorization = dyn Fn(&Db<'_>) -> Result<()> + Send + Sync;
+
+#[derive(Clone)]
+pub(crate) struct Authorization {
+    service: Service,
+    local: Arc<LocalAuthorization>,
+    live: Option<crate::capabilities::plugin_packages::Authority>,
+}
+
+impl Authorization {
+    pub(crate) fn new<F>(s: &Service, local: F) -> Self
+    where
+        F: Fn(&Db<'_>) -> Result<()> + Send + Sync + 'static,
+    {
+        Self {
+            service: s.clone(),
+            local: Arc::new(local),
+            live: None,
+        }
+    }
+
+    fn live(s: &Service, live: crate::capabilities::plugin_packages::Authority) -> Self {
+        let local = live.clone();
+        Self {
+            service: s.clone(),
+            local: Arc::new(move |db| local.authorize(db)),
+            live: Some(live),
+        }
+    }
+
+    pub(crate) fn authorize_in(&self, db: &Db<'_>) -> Result<()> {
+        (self.local)(db)
+    }
+
+    pub(crate) async fn recheck(&self) -> Result<()> {
+        let local = self.clone();
+        self.service
+            .store
+            .read(move |db| local.authorize_in(db))
+            .await?;
+        if let Some(live) = &self.live {
+            live.recheck(&self.service).await?;
+        }
+        let local = self.clone();
+        self.service
+            .store
+            .read(move |db| local.authorize_in(db))
+            .await
+    }
+}
 
 pub struct Client {
-    authorization: Option<(Store, Authorization)>,
+    authorization: Option<Authorization>,
     transport: Transport,
     pub capabilities: Value,
     protocol: String,
@@ -99,6 +150,22 @@ impl Client {
     where
         F: Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static,
     {
+        Self::connect_authorized(s, server, Authorization::new(s, authorize)).await
+    }
+
+    pub(crate) async fn connect_server_live(
+        s: &Service,
+        server: &McpServer,
+        authority: crate::capabilities::plugin_packages::Authority,
+    ) -> Result<Self> {
+        Self::connect_authorized(s, server, Authorization::live(s, authority)).await
+    }
+
+    async fn connect_authorized(
+        s: &Service,
+        server: &McpServer,
+        authorize: Authorization,
+    ) -> Result<Self> {
         let refreshable =
             |secrets: &McpSecrets| server.uses_oauth() && !secrets.refresh_token().is_empty();
         let mut secrets = s.mcps.server_secrets(s, &server.id).await?;
@@ -109,22 +176,12 @@ impl Client {
             crate::mcp_oauth::refresh_authorized(s, server, authorize.clone()).await?;
             secrets = s.mcps.server_secrets(s, &server.id).await?;
         }
-        s.store
-            .read({
-                let authorize = authorize.clone();
-                move |db| authorize(db)
-            })
-            .await?;
+        authorize.recheck().await?;
         let first = Self::open(s, server, &secrets, authorize.clone()).await;
         if first.as_ref().is_err_and(Error::is_unauthorized) && refreshable(&secrets) {
             crate::mcp_oauth::refresh_authorized(s, server, authorize.clone()).await?;
             let secrets = s.mcps.server_secrets(s, &server.id).await?;
-            s.store
-                .read({
-                    let authorize = authorize.clone();
-                    move |db| authorize(db)
-                })
-                .await?;
+            authorize.recheck().await?;
             return Self::open(s, server, &secrets, authorize.clone()).await;
         }
         first
@@ -150,11 +207,7 @@ impl Client {
         tools
     }
 
-    fn new(
-        transport: Transport,
-        protocol: &str,
-        authorization: Option<(Store, Authorization)>,
-    ) -> Self {
+    fn new(transport: Transport, protocol: &str, authorization: Option<Authorization>) -> Self {
         Self {
             authorization,
             transport,
@@ -168,16 +221,13 @@ impl Client {
         matches!(self.transport, Transport::Stdio(_))
     }
 
-    async fn open<F>(
+    async fn open(
         s: &Service,
         server: &McpServer,
         secrets: &McpSecrets,
-        authorize: F,
-    ) -> Result<Self>
-    where
-        F: Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static,
-    {
-        let authorization = Some((s.store.clone(), Arc::new(authorize) as Authorization));
+        authorize: Authorization,
+    ) -> Result<Self> {
+        let authorization = Some(authorize);
         let mut client = Self::new(
             Self::transport(s, server, secrets, &authorization).await?,
             MODERN,
@@ -250,7 +300,7 @@ impl Client {
         s: &Service,
         server: &McpServer,
         secrets: &McpSecrets,
-        authorization: &Option<(Store, Authorization)>,
+        authorization: &Option<Authorization>,
     ) -> Result<Transport> {
         if server.is_http() {
             let bearer = match server.auth {
@@ -275,9 +325,8 @@ impl Client {
             env.extend(secrets.clone());
         }
         let command = command(&server.command, &server.args, &env, Some(&s.config.home));
-        if let Some((store, authorize)) = authorization {
-            let authorize = authorize.clone();
-            store.read(move |db| authorize(db)).await?;
+        if let Some(authorize) = authorization {
+            authorize.recheck().await?;
         }
         Ok(Transport::Stdio(
             Session::spawn_with_protocol(command, true).await?,
@@ -307,25 +356,27 @@ impl Client {
     }
 
     pub async fn request(&mut self, method: &str, params: Value) -> Result<Value> {
-        if let Some((store, authorize)) = &self.authorization {
-            let authorize = authorize.clone();
-            store.read(move |db| authorize(db)).await?;
+        if let Some(authorize) = &self.authorization {
+            authorize.recheck().await?;
         }
         let params = self.with_meta(params);
-        match &mut self.transport {
+        let result = match &mut self.transport {
             Transport::Stdio(session) => session.request(method, params).await,
             Transport::Http(http) => {
                 self.sequence += 1;
                 http.request(self.sequence, &self.protocol, method, params)
                     .await
             }
+        };
+        if let Some(authorize) = &self.authorization {
+            authorize.recheck().await?;
         }
+        result
     }
 
     async fn notify(&mut self, method: &str, params: Value) -> Result<()> {
-        if let Some((store, authorize)) = &self.authorization {
-            let authorize = authorize.clone();
-            store.read(move |db| authorize(db)).await?;
+        if let Some(authorize) = &self.authorization {
+            authorize.recheck().await?;
         }
         match &mut self.transport {
             Transport::Stdio(session) => session.rpc.notify(method, params).await,
@@ -371,8 +422,8 @@ impl Client {
             Transport::Stdio(session) => session.close().await,
             Transport::Http(http) => {
                 if http.session.is_some()
-                    && let Some((store, authorize)) = self.authorization
-                    && store.read(move |db| authorize(db)).await.is_err()
+                    && let Some(authorize) = self.authorization
+                    && authorize.recheck().await.is_err()
                 {
                     // Revocation also fences best-effort remote session cleanup.
                     return;
@@ -629,6 +680,7 @@ createInterface({ input: process.stdin }).on('line', async line => {
                 }
             }
         };
+        let authorization = Authorization::new(&service, authorization);
         let pending = tokio::spawn(async move {
             Client::open(&service, &server, &McpSecrets::default(), authorization).await
         });

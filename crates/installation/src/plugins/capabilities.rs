@@ -109,7 +109,27 @@ pub async fn effect(s: &Service, context: &Context, method: &str, args: Value) -
         }
         "http.request" => http(s, context, &args).await,
         "files.create" | "files.append" | "files.read" | "files.delete" | "files.composeMime" => {
-            s.plugins.files.call(&context.connection, method, &args)
+            if method == "files.composeMime" {
+                for attachment in args["attachments"].as_array().into_iter().flatten() {
+                    s.plugins
+                        .files
+                        .authorize(s, context, text(attachment, "id"))
+                        .await?;
+                }
+            } else if method != "files.create" {
+                s.plugins
+                    .files
+                    .authorize(s, context, text(&args, "id"))
+                    .await?;
+            }
+            let result = s.plugins.files.call(&context.connection, method, &args)?;
+            if matches!(
+                method,
+                "files.create" | "files.composeMime" | "files.append"
+            ) {
+                s.plugins.files.bind(context, &result)?;
+            }
+            Ok(result)
         }
         "timers.after" | "timers.cancel" => timers(s, context, method, &args).await,
         "exec.run" => super::programs::run(s, context, &args).await,
@@ -377,6 +397,10 @@ async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
         if !context.manifest.permits_capability("files") {
             return Err(Error::forbidden("File transfers are not approved."));
         }
+        s.plugins
+            .files
+            .authorize(s, context, text(spec, "id"))
+            .await?;
         let bytes = s
             .plugins
             .files
@@ -480,6 +504,7 @@ async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
             .plugins
             .files
             .response(&context.connection, spec, &body, media_type)?;
+        s.plugins.files.bind(context, &file)?;
         return Ok(json!({ "status": status, "headers": headers, "file": file }));
     }
     let json = serde_json::from_slice::<Value>(&body).ok();

@@ -33,19 +33,41 @@ async fn build(
     source: &Path,
     revision: &str,
 ) -> Result<(Archive, std::fs::File)> {
+    build_authorized(config, project, source, revision, None).await
+}
+
+async fn build_authorized(
+    config: &Config,
+    project: &Value,
+    source: &Path,
+    revision: &str,
+    authorization: Option<&crate::plugins::run_credentials::Authorization>,
+) -> Result<(Archive, std::fs::File)> {
+    let recheck = || async {
+        if let Some(authorization) = authorization {
+            authorization.recheck().await?;
+        }
+        Ok::<_, Error>(())
+    };
+    recheck().await?;
     let origin_hash = crate::project_git::origin(source, config)
         .await
         .map(|origin| blake3::hash(origin.as_bytes()).to_hex().to_string());
     let _guard = lock().lock().await;
+    recheck().await?;
     if let Some(descriptor) = latest(config, project).await?
         && descriptor.revision == revision
         && descriptor.origin_hash == origin_hash
         && let Some(file) = cached(&config.data_dir, &descriptor).await?
     {
+        recheck().await?;
         return Ok((descriptor, file));
     }
+    recheck().await?;
     clean_interrupted_downloads(&config.data_dir).await?;
+    recheck().await?;
     prune(&config.data_dir, 0).await?;
+    recheck().await?;
     let root = config.data_dir.join("project-archives");
     let temp = tempfile::NamedTempFile::new_in(&root)?;
     let source = source.to_owned();
@@ -64,13 +86,17 @@ async fn build(
         logical_bytes,
     };
     descriptor.validate()?;
+    recheck().await?;
     prune(&config.data_dir, bytes).await?;
+    recheck().await?;
     tokio::fs::rename(temp.path(), descriptor.path(&config.data_dir)).await?;
+    recheck().await?;
     crate::native::atomic_write(
         &root.join(format!("{}.json", descriptor.key)),
         &serde_json::to_vec(&descriptor)?,
     )
     .await?;
+    recheck().await?;
     let file = cached(&config.data_dir, &descriptor)
         .await?
         .ok_or_else(|| Error::not_found("Project archive was not installed."))?;
@@ -86,11 +112,35 @@ pub(crate) async fn checkout(
     config: &Config,
     credentials: &[GitAccess],
 ) -> Result<bool> {
+    checkout_authorized(source, target, project, config, credentials, None).await
+}
+
+pub(crate) async fn checkout_authorized(
+    source: &Path,
+    target: &Path,
+    project: &Value,
+    config: &Config,
+    credentials: &[GitAccess],
+    authorization: Option<&crate::plugins::run_credentials::Authorization>,
+) -> Result<bool> {
+    let recheck = || async {
+        if let Some(authorization) = authorization {
+            authorization.recheck().await?;
+        }
+        Ok(())
+    };
+    recheck().await?;
     if project["sourceMode"] == "local" {
         return Ok(false);
     }
-    let Some((revision, origin)) =
-        crate::project_git::remote_revision(source, project, config, credentials).await?
+    let Some((revision, origin)) = crate::project_git::remote_revision_authorized(
+        source,
+        project,
+        config,
+        credentials,
+        recheck,
+    )
+    .await?
     else {
         return Ok(false);
     };
@@ -111,8 +161,12 @@ pub(crate) async fn checkout(
     }
     .await;
     if let Ok(Some((descriptor, file))) = hit {
+        recheck().await?;
         match extract_verified(file, &descriptor, target, LOGICAL_BYTES).await {
-            Ok(_) => return Ok(true),
+            Ok(_) => {
+                recheck().await?;
+                return Ok(true);
+            }
             Err(error) => {
                 tracing::warn!(
                     status = error.status,
@@ -132,14 +186,18 @@ pub(crate) async fn checkout(
             }
         }
     }
-    crate::project_git::clone(source, target, project, config, credentials).await?;
+    crate::project_git::clone_authorized(source, target, project, config, credentials, recheck)
+        .await?;
+    recheck().await?;
     let actual = crate::project_git::revision(target, config).await?;
-    if let Err(error) = build(config, project, target, &actual).await {
+    recheck().await?;
+    if let Err(error) = build_authorized(config, project, target, &actual, authorization).await {
         tracing::warn!(
             status = error.status,
             "Project archive cache unavailable; using the fresh checkout"
         );
     }
+    recheck().await?;
     Ok(true)
 }
 
@@ -402,6 +460,67 @@ pub(crate) async fn maintain(s: Arc<Service>) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn archive_waiting_for_publication_cannot_outlive_its_caller() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let root = tempfile::tempdir().unwrap();
+        let config: Config = serde_json::from_value(json!({
+            "dataDir": root.path().join("data"), "home": root.path().join("home"),
+            "workspaceRoots": [root.path()], "publicUrl": "http://localhost:4310",
+            "host": "127.0.0.1", "port": 0, "codexBin": "unused", "concurrency": 1,
+            "logger": false, "workerEnabled": false, "runnerUrl": "",
+        }))
+        .unwrap();
+        let service = Service::new(config).await.unwrap();
+        let live = Arc::new(AtomicBool::new(true));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let (valid, checked) = (live.clone(), entered.clone());
+        let authority =
+            crate::capabilities::plugin_packages::Authority::default().with_guard(move |_| {
+                checked.notify_one();
+                if valid.load(Ordering::SeqCst) {
+                    Ok(())
+                } else {
+                    Err(Error::forbidden("Caller revoked"))
+                }
+            });
+        let authorization = crate::plugins::run_credentials::Authorization::new(
+            &service,
+            authority,
+            &crate::plugins::run_credentials::RunCredentials::default(),
+        );
+        let source = root.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("private.txt"), "private project").unwrap();
+        let project = json!({ "id": crate::config::id(), "path": source, "sourceMode": "remote" });
+        let index = service
+            .config
+            .data_dir
+            .join("project-archives")
+            .join(format!("{}.json", key(&project)));
+        let publication = lock().lock().await;
+        let config = service.config.clone();
+        let build = tokio::spawn(async move {
+            build_authorized(
+                &config,
+                &project,
+                &source,
+                &"c".repeat(40),
+                Some(&authorization),
+            )
+            .await
+        });
+        entered.notified().await;
+        live.store(false, Ordering::SeqCst);
+        drop(publication);
+        assert_eq!(build.await.unwrap().unwrap_err().status, 403);
+        assert!(
+            !index.exists(),
+            "a revoked caller published a shared archive index"
+        );
+        service.shutdown.cancel();
+    }
 
     #[tokio::test]
     async fn projects_exceeding_the_shared_archive_capacity_keep_the_legacy_transfer() {

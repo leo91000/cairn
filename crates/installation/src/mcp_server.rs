@@ -1132,22 +1132,15 @@ async fn proxy(
     params: Value,
 ) -> Result<Value> {
     let _guard = s.mcps.lock(id).await;
-    let (server, scope) = s.mcps.grant(s, id, bearer).await?;
-    let authorize = {
-        let id = id.to_owned();
-        let bearer = bearer.to_owned();
-        move |db: &crate::store::Db<'_>| {
-            crate::mcps::grant_in(db, &id, &bearer)?;
-            Ok(())
-        }
-    };
+    let (server, scope, authority) = s.mcps.grant_authorized(s, id, bearer).await?;
+    let local = authority.clone();
+    let authorize = { move |db: &crate::store::Db<'_>| local.authorize(db) };
     if method == "tools/call" && !scope.allows(text(&params, "name")) {
         return Err(Error::forbidden("This tool is unavailable to this agent."));
     }
     let result = async {
         let mut client =
-            crate::mcp_client::Client::connect_server_authorized(s, &server, authorize.clone())
-                .await?;
+            crate::mcp_client::Client::connect_server_live(s, &server, authority.clone()).await?;
         let unsupported = match method {
             "resources/list" | "resources/templates/list" => {
                 client.capabilities.get("resources").is_none()
@@ -1176,6 +1169,13 @@ async fn proxy(
         result
     }
     .await;
+    authority.recheck(s).await?;
+    s.store
+        .read({
+            let authorize = authorize.clone();
+            move |db| authorize(db)
+        })
+        .await?;
     if let Err(error) = &result {
         // Recheck the same gateway grant before publishing a failure after network work.
         s.mcps

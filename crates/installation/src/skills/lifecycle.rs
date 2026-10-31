@@ -16,6 +16,7 @@ pub(crate) struct Authority {
     project: Option<Project>,
     instance: Option<Connection>,
     package: Option<(String, String, String)>,
+    management: Option<crate::plugins::management::Authority>,
 }
 
 impl Authority {
@@ -41,8 +42,13 @@ impl Authority {
                         "A current public MCP authorization is required.",
                     ));
                 }
-                plugin_packages::Authority::public(
-                    credential.filter(|_| required_scope == "manage"),
+                plugin_packages::Authority::public_scoped(
+                    credential,
+                    if required_scope == "read" {
+                        "read"
+                    } else {
+                        "manage"
+                    },
                 )
             }
         };
@@ -71,6 +77,8 @@ impl Authority {
         s: &Service,
         instance: &Connection,
         package: &crate::plugins::registry::Package,
+        kind: cairn_contracts::PluginContributionKind,
+        name: &str,
     ) -> Result<Self> {
         let mut authority = self.clone();
         authority.instance = Some(instance.clone());
@@ -81,12 +89,46 @@ impl Authority {
                 package.digest.clone(),
             ));
         }
+        if let Some(bearer) = &self.preparation.bearer {
+            let run = crate::installation_mcp::authorize(s, bearer).await?;
+            let agent = crate::validation::text(&run["snapshot"]["agent"], "id");
+            let snapshot = crate::plugins::grant_authorization::Snapshot::capture_installation(
+                s, agent, bearer, package,
+            )
+            .await?;
+            let invocation = crate::plugins::grant_authorization::Invocation::prepare(
+                s,
+                snapshot.clone(),
+                instance.clone(),
+                kind,
+                name,
+                &serde_json::Value::Null,
+            )
+            .await?;
+            authority.management = Some(crate::plugins::management::Authority::agent_action(
+                instance.clone(),
+                snapshot,
+                Some(invocation),
+            ));
+        } else {
+            authority.management = Some(crate::plugins::management::Authority::resource_read(
+                self.preparation.clone(),
+                instance.clone(),
+            ));
+        }
         authority.recheck(s).await?;
         Ok(authority)
     }
 
+    pub(crate) fn management(&self) -> Option<crate::plugins::management::Authority> {
+        self.management.clone()
+    }
+
     pub(crate) fn authorize(&self, db: &Db<'_>) -> Result<()> {
         self.preparation.authorize(db)?;
+        if let Some(management) = &self.management {
+            management.authorize(db)?;
+        }
         if let Some(expected) = &self.project {
             let current = db
                 .project(&expected.id.to_string())?
@@ -112,18 +154,6 @@ impl Authority {
             if !expected.enabled {
                 return Err(Error::forbidden("This plugin instance is disabled."));
             }
-            if let Some(bearer) = &self.preparation.bearer {
-                let run = crate::installation_mcp::authorize_in(db, bearer)?;
-                let agent = crate::validation::text(&run["snapshot"]["agent"], "id");
-                let current = db
-                    .plugin_instance(&expected.id)?
-                    .ok_or_else(|| Error::forbidden("The source instance was removed."))?;
-                if !current.grants(agent) {
-                    return Err(Error::forbidden(
-                        "Installation access does not grant this plugin source. Ask the owner to grant the instance on the agent's page.",
-                    ));
-                }
-            }
         }
         Ok(())
     }
@@ -135,6 +165,9 @@ impl Authority {
 
     pub(crate) async fn recheck(&self, s: &Service) -> Result<()> {
         self.preparation.recheck(s).await?;
+        if let Some(management) = &self.management {
+            management.recheck(s).await?;
+        }
         self.check_local(s).await
     }
 

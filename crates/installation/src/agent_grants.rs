@@ -597,6 +597,7 @@ impl Db<'_> {
                 statement.execute(rusqlite::params![id, value, position as i64])?;
             }
         }
+        self.sync_full_plugin_grants(&id, &agent.settings.plugins)?;
         self.0
             .prepare_cached("DELETE FROM agent_mcp_selections WHERE agent_id=?")?
             .execute([&id])?;

@@ -13,18 +13,45 @@ impl Service {
         &self,
         input: cairn_contracts::MergeAgentsInput,
     ) -> Result<cairn_contracts::MergeAgentsOutput> {
-        self.merge_agents_authorized(input, |_| Ok(())).await
+        self.merge_agents_authorized(input, |_| Ok(()), None).await
     }
 
     pub(crate) async fn merge_agents_authorized<F>(
         &self,
         input: cairn_contracts::MergeAgentsInput,
         authorize: F,
+        resource_authority: Option<crate::capabilities::plugin_packages::Authority>,
     ) -> Result<cairn_contracts::MergeAgentsOutput>
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
-        self.missions.merge_agents(self, input, authorize).await
+        let (target, source) = (input.target_id.to_string(), input.source_id.to_string());
+        let coverage = crate::plugins::grants::check_coverage_authorized(
+            self,
+            &target,
+            &source,
+            resource_authority.clone(),
+        )
+        .await;
+        let coverage = match coverage {
+            Ok(coverage) => coverage,
+            Err(error) if error.status == 403 => {
+                if let Some(authority) = &resource_authority {
+                    authority.recheck(self).await?;
+                }
+                return Err(Error::conflict(error.message));
+            }
+            Err(error) => return Err(error),
+        };
+        self.missions
+            .merge_agents(self, input, move |db| {
+                authorize(db)?;
+                if let Some(authority) = &resource_authority {
+                    authority.authorize(db)?;
+                }
+                coverage.authorize(db)
+            })
+            .await
     }
 }
 
@@ -78,6 +105,11 @@ pub(crate) fn merge(
         }
     }
 
+    if !crate::plugins::grants::contribution_ceiling_in(db, target_id, source_id)? {
+        return Err(Error::conflict(
+            "The destination must cover all source plugin contributions and resource restrictions.",
+        ));
+    }
     for instance in db.plugin_instances()? {
         if instance.agent_id == source_id {
             return Err(Error::conflict(

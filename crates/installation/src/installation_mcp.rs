@@ -13,8 +13,13 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 pub(crate) async fn authorize(s: &Service, bearer: &str) -> Result<Value> {
+    let token = bearer.to_owned();
     let bearer = bearer.to_owned();
-    s.store.read(move |db| authorize_in(db, &bearer)).await
+    let run = s.store.read(move |db| authorize_in(db, &bearer)).await?;
+    let authority = crate::capabilities::plugin_packages::Authority::for_execution(&run)
+        .with_guard(move |db| authorize_in(db, &token).map(|_| ()));
+    crate::delegation::authorize_async_with(s, &run, authority).await?;
+    Ok(run)
 }
 
 pub(crate) fn authorize_in(db: &Db<'_>, bearer: &str) -> Result<Value> {
@@ -33,6 +38,7 @@ pub(crate) fn authorize_in(db: &Db<'_>, bearer: &str) -> Result<Value> {
     if policy(agent)["installation"] != true || !agent_allowed(&current, agent) {
         return Err(Error::forbidden("Agent permissions were reduced."));
     }
+    crate::delegation::authorize_run(db, &run)?;
     Ok(run)
 }
 

@@ -68,6 +68,7 @@ impl Caches {
         self.generation.load(Ordering::Acquire)
     }
 
+    #[cfg(test)]
     pub async fn acquire(
         &self,
         identity: Identity,
@@ -75,6 +76,24 @@ impl Caches {
         reusable: bool,
         generation: u64,
     ) -> Result<Lease> {
+        self.acquire_authorized(identity, config, reusable, generation, || {
+            std::future::ready(Ok(()))
+        })
+        .await
+    }
+
+    pub async fn acquire_authorized<F, Fut>(
+        &self,
+        identity: Identity,
+        config: &ProgramCache,
+        reusable: bool,
+        generation: u64,
+        authorize: F,
+    ) -> Result<Lease>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<()>>,
+    {
         let entry = {
             let mut entries = self.entries.lock().unwrap();
             if self.shutdown.is_cancelled() {
@@ -140,9 +159,10 @@ impl Caches {
                 entry
             }
         };
-        let initialize = entry
-            .daemon
-            .get_or_try_init(|| Daemon::start(&entry.identity.executable, config));
+        let initialize = entry.daemon.get_or_try_init(|| async {
+            authorize().await?;
+            Daemon::start(&entry.identity.executable, config).await
+        });
         tokio::select! {
             () = entry.stop.cancelled() => return Err(Error::conflict("The program cache was invalidated. Retry the operation.")),
             result = initialize => { result?; }

@@ -136,8 +136,10 @@ mod projects;
 pub use projects::*;
 
 mod agents;
+mod plugin_grants;
 
 pub use agents::*;
+pub use plugin_grants::*;
 
 mod missions;
 

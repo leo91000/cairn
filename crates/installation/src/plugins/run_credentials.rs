@@ -3,10 +3,14 @@
 //! live (ADR 0051): every preparation and resumption renders them again, so a
 //! withdrawn grant blanks the files it wrote.
 use super::{
-    connections::{self, Connection, secret_values},
+    connections::{Connection, secret_values},
     registry::{self, Package},
 };
-use crate::{error::Result, service::Service, validation::text};
+use crate::{
+    error::{Error, Result, required},
+    service::Service,
+    validation::text,
+};
 use cairn_plugin_api::render;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -37,6 +41,19 @@ impl GitAccess {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CredentialGrant {
+    agent: String,
+    agent_revision: String,
+    instance: String,
+    instance_revision: String,
+    plugin: String,
+    digest: String,
+    version: String,
+    builtin: bool,
+    supplying: bool,
+}
+
 /// What one run receives from the instances its agent is granted.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RunCredentials {
@@ -49,9 +66,104 @@ pub struct RunCredentials {
     pub fetch: std::collections::BTreeMap<String, Vec<GitAccess>>,
     /// Credential and secret values of the granted instances, masked in run output.
     pub secrets: Vec<String>,
+    /// Non-secret authorization identities, retained until launch after preparation.
+    pub authorizations: Vec<CredentialGrant>,
+}
+
+/// A caller's live execution and the non-secret proofs of its fetch credentials.
+#[derive(Clone)]
+pub(crate) struct Authorization {
+    service: crate::service::Service,
+    authority: crate::capabilities::plugin_packages::Authority,
+    credentials: crate::plugins::run_credentials::RunCredentials,
+}
+
+impl Authorization {
+    pub(crate) fn new(
+        service: &crate::service::Service,
+        authority: crate::capabilities::plugin_packages::Authority,
+        credentials: &crate::plugins::run_credentials::RunCredentials,
+    ) -> Self {
+        Self {
+            service: service.clone(),
+            authority,
+            credentials: crate::plugins::run_credentials::RunCredentials {
+                authorizations: credentials.authorizations.clone(),
+                ..Default::default()
+            },
+        }
+    }
+
+    pub(crate) fn authorize_in(&self, db: &crate::store::Db<'_>) -> Result<()> {
+        self.authority.authorize(db)?;
+        self.credentials.authorize_in(db)
+    }
+
+    pub(crate) async fn recheck(&self) -> Result<()> {
+        self.authority.recheck(&self.service).await?;
+        self.credentials.authorize(&self.service).await?;
+        self.authority.recheck(&self.service).await
+    }
 }
 
 impl RunCredentials {
+    pub(crate) async fn authorize(&self, s: &Service) -> Result<()> {
+        for expected in &self.authorizations {
+            if registry::active(s, &expected.plugin).await?.digest != expected.digest {
+                return Err(Error::forbidden(
+                    "The credential package changed during preparation.",
+                ));
+            }
+        }
+        let proof = Self {
+            authorizations: self.authorizations.clone(),
+            ..Self::default()
+        };
+        s.store.read(move |db| proof.authorize_in(db)).await
+    }
+
+    pub(crate) fn authorize_in(&self, db: &crate::store::Db<'_>) -> Result<()> {
+        for expected in &self.authorizations {
+            if !expected.builtin {
+                let package = db.plugin_package(&expected.plugin)?;
+                if package.active.as_deref() != Some(&expected.version)
+                    || package.approvals.get(&expected.version) != Some(&expected.digest)
+                {
+                    return Err(Error::forbidden(
+                        "The credential package changed during preparation.",
+                    ));
+                }
+            }
+            let profile = required(db.agent(&expected.agent)?, "Agent not found")?;
+            let connection = required(
+                db.plugin_instance(&expected.instance)?,
+                "Credential supplier removed",
+            )?;
+            let still_supplies = !expected.supplying
+                || (db
+                    .plugin_credential_supplier(&expected.agent, &expected.plugin)?
+                    .as_deref()
+                    == Some(expected.instance.as_str())
+                    && db
+                        .plugin_contribution(
+                            &expected.agent,
+                            &expected.instance,
+                            cairn_contracts::PluginContributionKind::RunCredentials,
+                            "",
+                        )?
+                        .is_some());
+            let unchanged = profile.revision == expected.agent_revision
+                && connection.revision == expected.instance_revision;
+
+            if !unchanged || !connection.enabled || !still_supplies {
+                return Err(Error::forbidden(
+                    "Run credential authorization changed during preparation. Retry the run.",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub fn fetch_for(&self, project: &Value) -> &[GitAccess] {
         self.fetch
             .get(text(project, "id"))
@@ -66,8 +178,12 @@ struct Rendered {
     secrets: Vec<String>,
 }
 
-async fn values(s: &Service, connection: &Connection) -> Result<(Option<String>, Value)> {
-    let credential = connections::credential(s, connection)
+async fn values(
+    s: &Service,
+    connection: &Connection,
+    authority: Option<&super::management::Authority>,
+) -> Result<(Option<String>, Value)> {
+    let credential = super::oauth::access_token_managed(s, connection, authority)
         .await?
         .filter(|token| !token.is_empty());
     let secrets = secret_values(s, &connection.id).await?;
@@ -79,6 +195,7 @@ async fn render_instance(
     s: &Service,
     package: &Package,
     connection: &Connection,
+    authority: Option<&super::management::Authority>,
 ) -> Result<Rendered> {
     let Some(run) = &package.manifest.run_credentials else {
         return Ok(Rendered {
@@ -88,7 +205,7 @@ async fn render_instance(
             secrets: Vec::new(),
         });
     };
-    let (credential, secrets) = values(s, connection).await?;
+    let (credential, secrets) = values(s, connection, authority).await?;
     let secrets = secrets.as_object().cloned().unwrap_or_default();
     let fill = |template: &str| {
         render(
@@ -166,15 +283,141 @@ async fn instances(s: &Service) -> Result<Vec<(Package, Vec<Connection>)>> {
     Ok(output)
 }
 
-/// Run credentials for `agent_id`: one granted instance per package (the first by
-/// name), and the host's fetch credentials for each of `projects`.
+/// Run credentials only from the explicitly retained supplying instance, plus
+/// the host's fetch credentials for each authorized project.
 pub async fn for_run(s: &Service, agent_id: &str, projects: &[Value]) -> Result<RunCredentials> {
+    for_run_with(s, agent_id, projects, None, None).await
+}
+
+/// Prepare credentials under the current run's revocable execution authority.
+pub async fn for_execution(s: &Service, run: &Value, projects: &[Value]) -> Result<RunCredentials> {
+    for_run_with(
+        s,
+        text(&run["snapshot"]["agent"], "id"),
+        projects,
+        Some(run),
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn for_execution_authorized(
+    s: &Service,
+    run: &Value,
+    projects: &[Value],
+    authority: crate::capabilities::plugin_packages::Authority,
+) -> Result<RunCredentials> {
+    for_run_with(
+        s,
+        text(&run["snapshot"]["agent"], "id"),
+        projects,
+        Some(run),
+        Some(authority),
+    )
+    .await
+}
+
+async fn for_run_with(
+    s: &Service,
+    agent_id: &str,
+    projects: &[Value],
+    run: Option<&Value>,
+    caller: Option<crate::capabilities::plugin_packages::Authority>,
+) -> Result<RunCredentials> {
     let mut credentials = RunCredentials::default();
     let mut fetch_order = Vec::new();
+    let fetch_authority = if let Some(run) = run {
+        let profile = required(s.store.agent(agent_id).await?, "Agent not found")?;
+        let (agent, revision) = (agent_id.to_owned(), profile.revision);
+        let expected_revision = revision.clone();
+        let authority = caller
+            .unwrap_or_else(|| crate::capabilities::plugin_packages::Authority::for_execution(run))
+            .with_guard(move |db| {
+                if required(db.agent(&agent)?, "Agent not found")?.revision != expected_revision {
+                    return Err(Error::forbidden(
+                        "Run permissions changed during fetch preparation.",
+                    ));
+                }
+                Ok(())
+            });
+        Some((
+            crate::delegation::authorize_async_with(s, run, authority).await?,
+            revision,
+        ))
+    } else {
+        None
+    };
     for (package, owned) in instances(s).await? {
-        let granted = owned.iter().find(|connection| connection.grants(agent_id));
+        let (agent, plugin) = (agent_id.to_owned(), package.manifest.id.clone());
+        let supplier = s
+            .store
+            .read(move |db| db.plugin_credential_supplier(&agent, &plugin))
+            .await?;
+        let granted = owned
+            .iter()
+            .find(|connection| supplier.as_deref() == Some(&connection.id));
+        let granted = if let Some(connection) = granted {
+            let (agent, instance) = (agent_id.to_owned(), connection.id.clone());
+            let allowed = s
+                .store
+                .read(move |db| {
+                    Ok(db
+                        .plugin_contribution(
+                            &agent,
+                            &instance,
+                            cairn_contracts::PluginContributionKind::RunCredentials,
+                            "",
+                        )?
+                        .is_some())
+                })
+                .await?;
+            if allowed { Some(connection) } else { None }
+        } else {
+            None
+        };
         if let Some(connection) = granted {
-            let rendered = render_instance(s, &package, connection).await?;
+            let profile = required(s.store.agent(agent_id).await?, "Agent not found")?;
+            let snapshot = match run {
+                Some(run) => {
+                    super::grant_authorization::Snapshot::for_run(s, run, &package).await?
+                }
+                None => {
+                    super::grant_authorization::Snapshot::capture(s, agent_id, None, &package)
+                        .await?
+                }
+            };
+            let invocation = super::grant_authorization::Invocation::prepare(
+                s,
+                snapshot.clone(),
+                connection.clone(),
+                cairn_contracts::PluginContributionKind::RunCredentials,
+                "",
+                &Value::Null,
+            )
+            .await?;
+            let authority = super::management::Authority::agent_action(
+                connection.clone(),
+                snapshot,
+                Some(invocation),
+            )
+            .with_preparation(
+                fetch_authority
+                    .as_ref()
+                    .map(|(authority, _)| authority.clone()),
+            );
+            let rendered = render_instance(s, &package, connection, Some(&authority)).await?;
+            authority.recheck(s).await?;
+            credentials.authorizations.push(CredentialGrant {
+                agent: agent_id.into(),
+                agent_revision: profile.revision,
+                instance: connection.id.clone(),
+                instance_revision: connection.revision.clone(),
+                plugin: package.manifest.id.clone(),
+                digest: package.digest.clone(),
+                version: package.manifest.version.clone(),
+                builtin: package.builtin,
+                supplying: true,
+            });
             // Packages never overwrite each other's files: the first one keeps a path.
             for (path, content) in rendered.files {
                 if !credentials.files.iter().any(|(known, _)| *known == path) {
@@ -192,7 +435,37 @@ pub async fn for_run(s: &Service, agent_id: &str, projects: &[Value]) -> Result<
             .iter()
             .filter(|c| Some(c.id.as_str()) != granted.map(|g| g.id.as_str()))
         {
-            let rendered = render_instance(s, &package, connection).await?;
+            if projects.is_empty()
+                || package
+                    .manifest
+                    .run_credentials
+                    .as_ref()
+                    .is_none_or(|run| run.git.is_empty())
+            {
+                continue;
+            }
+            let authority = fetch_authority.as_ref().map(|(preparation, _)| {
+                super::management::Authority::host_fetch(
+                    preparation.clone(),
+                    connection.clone(),
+                    &package,
+                )
+            });
+            let rendered = render_instance(s, &package, connection, authority.as_ref()).await?;
+            if let Some(authority) = &authority {
+                authority.recheck(s).await?;
+                credentials.authorizations.push(CredentialGrant {
+                    agent: agent_id.into(),
+                    agent_revision: fetch_authority.as_ref().unwrap().1.clone(),
+                    instance: connection.id.clone(),
+                    instance_revision: connection.revision.clone(),
+                    plugin: package.manifest.id.clone(),
+                    digest: package.digest.clone(),
+                    version: package.manifest.version.clone(),
+                    builtin: package.builtin,
+                    supplying: false,
+                });
+            }
             fetch_order.push((connection.id.clone(), rendered.git));
         }
     }
@@ -204,6 +477,10 @@ pub async fn for_run(s: &Service, agent_id: &str, projects: &[Value]) -> Result<
                 .insert(text(project, "id").to_owned(), access);
         }
     }
+    if let Some((authority, _)) = &fetch_authority {
+        authority.recheck(s).await?;
+    }
+    credentials.authorize(s).await?;
     Ok(credentials)
 }
 
@@ -239,7 +516,18 @@ pub async fn for_instance(
     package: &Package,
     connection: &Connection,
 ) -> Result<Vec<GitAccess>> {
-    Ok(render_instance(s, package, connection).await?.git)
+    Ok(render_instance(s, package, connection, None).await?.git)
+}
+
+pub(crate) async fn for_instance_managed(
+    s: &Service,
+    package: &Package,
+    connection: &Connection,
+    authority: Option<&super::management::Authority>,
+) -> Result<Vec<GitAccess>> {
+    Ok(render_instance(s, package, connection, authority)
+        .await?
+        .git)
 }
 
 /// Whether the agent may hold another instance of this package: runs receive the

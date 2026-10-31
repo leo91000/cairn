@@ -1,0 +1,139 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "PluginContributionGrant": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "pattern": "^(tool|command|hook|runCredentials|instructions|condition|projectSource|skillSource)$",
+          "type": "string"
+        },
+        "name": {
+          "description": "Empty for instructions and runCredentials, which are single contributions.",
+          "maxLength": 200,
+          "type": "string"
+        },
+        "resources": {
+          "description": "Empty means unrestricted. Each listed type restricts that type and descendants.",
+          "items": {
+            "$ref": "#/definitions/PluginResourceRef"
+          },
+          "maxItems": 100,
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind",
+        "name",
+        "resources"
+      ],
+      "type": "object"
+    },
+    "PluginGrantAccess": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "full",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "contributions": {
+              "items": {
+                "$ref": "#/definitions/PluginContributionGrant"
+              },
+              "maxItems": 500,
+              "minItems": 1,
+              "type": "array"
+            },
+            "type": {
+              "const": "selected",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "contributions"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "PluginInstanceGrant": {
+      "additionalProperties": false,
+      "properties": {
+        "access": {
+          "$ref": "#/definitions/PluginGrantAccess"
+        },
+        "instanceId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "instanceId",
+        "access"
+      ],
+      "type": "object"
+    },
+    "PluginResourceRef": {
+      "additionalProperties": false,
+      "description": "A resource identity is scoped to a plugin instance and a declared type.",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "resourceType": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "resourceType",
+        "id"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "agentId": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "grants": {
+      "items": {
+        "$ref": "#/definitions/PluginInstanceGrant"
+      },
+      "maxItems": 100,
+      "type": "array"
+    },
+    "revision": {
+      "type": "string"
+    },
+    "runCredentialInstances": {
+      "items": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "maxItems": 100,
+      "type": "array"
+    }
+  },
+  "required": [
+    "agentId",
+    "revision",
+    "grants",
+    "runCredentialInstances"
+  ],
+  "title": "ReplaceAgentPluginGrantsInput",
+  "type": "object"
+}

@@ -731,6 +731,40 @@
       ],
       "type": "object"
     },
+    "AgentPluginGrants": {
+      "additionalProperties": false,
+      "properties": {
+        "agentId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "grants": {
+          "items": {
+            "$ref": "#/definitions/PluginInstanceGrant"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "description": "Shares the agent profile revision, so old profile editors cannot overwrite a change.",
+          "type": "string"
+        },
+        "runCredentialInstances": {
+          "description": "At most one supplying instance per package. A full grant alone is insufficient.",
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "agentId",
+        "revision",
+        "grants",
+        "runCredentialInstances"
+      ],
+      "type": "object"
+    },
     "AgentPreview": {
       "additionalProperties": false,
       "properties": {
@@ -7470,6 +7504,34 @@
       ],
       "type": "object"
     },
+    "PluginContributionGrant": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "pattern": "^(tool|command|hook|runCredentials|instructions|condition|projectSource|skillSource)$",
+          "type": "string"
+        },
+        "name": {
+          "description": "Empty for instructions and runCredentials, which are single contributions.",
+          "maxLength": 200,
+          "type": "string"
+        },
+        "resources": {
+          "description": "Empty means unrestricted. Each listed type restricts that type and descendants.",
+          "items": {
+            "$ref": "#/definitions/PluginResourceRef"
+          },
+          "maxItems": 100,
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind",
+        "name",
+        "resources"
+      ],
+      "type": "object"
+    },
     "PluginCredential": {
       "additionalProperties": false,
       "description": "How the host injects a connection's secret into authorized HTTP requests.\nPlugin code never receives the secret itself.",
@@ -7769,6 +7831,45 @@
       ],
       "type": "object"
     },
+    "PluginGrantAccess": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "full",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "contributions": {
+              "items": {
+                "$ref": "#/definitions/PluginContributionGrant"
+              },
+              "maxItems": 500,
+              "minItems": 1,
+              "type": "array"
+            },
+            "type": {
+              "const": "selected",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "contributions"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "PluginHook": {
       "additionalProperties": false,
       "properties": {
@@ -7791,6 +7892,23 @@
         "name",
         "description",
         "payloadSchema"
+      ],
+      "type": "object"
+    },
+    "PluginInstanceGrant": {
+      "additionalProperties": false,
+      "properties": {
+        "access": {
+          "$ref": "#/definitions/PluginGrantAccess"
+        },
+        "instanceId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "instanceId",
+        "access"
       ],
       "type": "object"
     },
@@ -9919,6 +10037,40 @@
         "revision",
         "settings",
         "review"
+      ],
+      "type": "object"
+    },
+    "ReplaceAgentPluginGrantsInput": {
+      "additionalProperties": false,
+      "properties": {
+        "agentId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "grants": {
+          "items": {
+            "$ref": "#/definitions/PluginInstanceGrant"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "runCredentialInstances": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": "array"
+        }
+      },
+      "required": [
+        "agentId",
+        "revision",
+        "grants",
+        "runCredentialInstances"
       ],
       "type": "object"
     },

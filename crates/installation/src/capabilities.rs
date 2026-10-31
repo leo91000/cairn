@@ -11,6 +11,7 @@ use serde_json::Value;
 use std::sync::Arc;
 
 /// Constructed by authenticated transport adapters, never from command JSON.
+#[derive(Clone)]
 pub(crate) enum ResumeContext {
     Human(String),
     Public(Vec<String>, Option<String>),
@@ -284,6 +285,16 @@ pub(crate) struct AgentOperation {
 
 pub(crate) const AGENT_OPERATIONS: &[AgentOperation] = &[
     AgentOperation {
+        name: "get_agent_plugin_grants",
+        scope: "read",
+        description: "Read full and selected per-instance plugin contributions, resource restrictions and explicit run credential suppliers.",
+    },
+    AgentOperation {
+        name: "replace_agent_plugin_grants",
+        scope: "manage",
+        description: "Replace plugin grants at the agent revision. Public MCP with manage may change grants and credential suppliers. Installation agents can only reduce existing grants and cannot reduce grants protected by another account's rule (all accounts outside an eligible conversation).",
+    },
+    AgentOperation {
         name: "set_agent_avatar",
         scope: "manage",
         description: "Upload a PNG, JPEG or WebP portrait as base64 (at most 5 MiB); normalization and status match the apps.",
@@ -343,6 +354,14 @@ impl AgentOperation {
     pub(crate) fn descriptor(&self) -> Value {
         use cairn_contracts::*;
         let (input, output) = match self.name {
+            "get_agent_plugin_grants" => (
+                schema_for::<AgentInput>(Contract::Deserialize),
+                schema_for::<AgentPluginGrants>(Contract::Serialize),
+            ),
+            "replace_agent_plugin_grants" => (
+                schema_for::<ReplaceAgentPluginGrantsInput>(Contract::Deserialize),
+                schema_for::<AgentPluginGrants>(Contract::Serialize),
+            ),
             "set_agent_avatar" => (
                 schema_for::<SetAgentAvatarInput>(Contract::Deserialize),
                 schema_for::<Agent>(Contract::Serialize),
@@ -400,7 +419,54 @@ impl AgentOperation {
         input: Value,
         context: ResumeContext,
     ) -> Result<Value> {
+        Box::pin(self.invoke_inner(s, input, context)).await
+    }
+
+    async fn invoke_inner(
+        &self,
+        s: &Arc<Service>,
+        input: Value,
+        context: ResumeContext,
+    ) -> Result<Value> {
         use cairn_contracts::*;
+        if matches!(
+            self.name,
+            "get_agent_plugin_grants" | "replace_agent_plugin_grants"
+        ) {
+            let reduce_only = matches!(&context, ResumeContext::Installation(_));
+            let authority =
+                crate::capabilities::plugin_packages::Authority::for_grants(s, context, self.scope)
+                    .await?;
+            if self.name == "replace_agent_plugin_grants" {
+                return Ok(serde_json::to_value(
+                    crate::plugins::grants::replace(s, decode(input)?, authority, reduce_only)
+                        .await?,
+                )?);
+            }
+            let input: AgentInput = decode(input)?;
+            authority.recheck(s).await?;
+            return s
+                .store
+                .read(move |db| {
+                    authority.authorize(db)?;
+                    Ok(serde_json::to_value(
+                        db.agent_plugin_grants(&input.agent_id.to_string())?,
+                    )?)
+                })
+                .await;
+        }
+        let merge_authority = if self.name == "merge_agents" {
+            Some(
+                crate::capabilities::plugin_packages::Authority::for_grants(
+                    s,
+                    context.clone(),
+                    "manage",
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
         let (editor, bearer) = match context {
             ResumeContext::Human(_) => (crate::service::AgentEditor::Owner, None),
             ResumeContext::Public(scopes, _) => {
@@ -447,7 +513,8 @@ impl AgentOperation {
                 s.agent_preview(decode(input)?, authorize).await?,
             )?),
             "merge_agents" => Ok(serde_json::to_value(
-                s.merge_agents_authorized(decode(input)?, authorize).await?,
+                s.merge_agents_authorized(decode(input)?, authorize, merge_authority)
+                    .await?,
             )?),
             "generate_agent_avatar" => {
                 let input: AgentInput = decode(input)?;
