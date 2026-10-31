@@ -248,6 +248,10 @@ test('uploads images and files, previews them and preserves attachments while ed
   await expectChatReady(page)
   await expect.poll(async () => (await workspace.api(`/api/chats/${chatId}`)).messages.every((m: { status: string }) => m.status === 'delivered')).toBe(true)
   await expect(page.getByLabel('Attach files', { exact: true })).toBeEnabled()
+  // Reload can restore a paused reading position. Exercise that state deliberately:
+  // an offscreen attachment is visible to Playwright but its preview stays lazy.
+  await page.locator('.activity-scroll').evaluate(element => element.scrollTop = 30)
+  await expect(page.getByRole('button', { name: 'Latest messages', exact: true })).toBeVisible()
   await page.getByLabel('Attach files', { exact: true }).setInputFiles([{ ...image, name: 'image-only.png' }])
   await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveValue('')
   await page.getByRole('button', { name: 'Send', exact: true }).click()
@@ -257,6 +261,9 @@ test('uploads images and files, previews them and preserves attachments while ed
   // picture take the same box: the conversation does not move when the preview loads.
   const box = /^width: 15rem; height: 10\.416\d*rem;$/
   await expect(single.locator('img, .animate-pulse').first()).toHaveAttribute('style', box)
+  await expect(single).not.toBeInViewport()
+  await single.scrollIntoViewIfNeeded()
+  await expect(single).toBeInViewport()
   await expect(single.locator('img')).toHaveJSProperty('complete', true)
   await expect(single.locator('img')).toHaveAttribute('style', box)
   const loaded = await single.locator('img').evaluate(img => img.getBoundingClientRect().width / img.getBoundingClientRect().height)
