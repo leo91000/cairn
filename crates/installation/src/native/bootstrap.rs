@@ -780,7 +780,7 @@ mod tests {
                 let registry = Registry::with_sink(
                     "fixture-runtime".into(),
                     None,
-                    Some(move |_| {
+                    Some(move |_: &Snapshot| {
                         if first.swap(false, Ordering::Relaxed) {
                             entered.send(()).unwrap();
                             let _ = blocked.recv_timeout(Duration::from_secs(5));
