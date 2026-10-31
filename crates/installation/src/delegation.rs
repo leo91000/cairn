@@ -727,8 +727,7 @@ pub(crate) fn authorize_async_with<'a>(
                 Some(authority.clone()),
             )
             .await?;
-            let authority = authority.with_guard(move |db| coverage.authorize(db));
-            authority
+            authority.with_guard(move |db| coverage.authorize(db))
         } else {
             authority
         };

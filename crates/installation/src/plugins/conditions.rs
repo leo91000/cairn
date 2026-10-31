@@ -776,6 +776,7 @@ mod tests {
             let mut observed_instance = None;
             for id in [first, second] {
                 let mut instance = Connection::draft(id, "fixture", json!({}), vec![]);
+                instance.name = id.into();
                 instance.revision = "r1".into();
                 instance.enabled = true;
                 db.save_plugin_instance(&instance)?;
