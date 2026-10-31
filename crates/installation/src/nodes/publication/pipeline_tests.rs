@@ -13,21 +13,57 @@ use axum::{
     http::{Method, StatusCode},
     response::IntoResponse,
 };
+use futures_util::StreamExt;
+use rand::{RngCore, SeedableRng};
 use std::{
     collections::BTreeMap,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
+    time::Instant,
 };
 use tokio::{io::AsyncWriteExt, sync::Semaphore};
 
+mod measurement;
+
+#[derive(Clone, Copy, Default)]
+struct RemoteConditions {
+    control_ms: u64,
+    put_ms: u64,
+    tail_ms: u64,
+    bytes_per_second: u64,
+}
+
+#[derive(Clone, Copy)]
+enum Contents {
+    Sparse,
+    Mixed,
+}
+
+impl Contents {
+    fn block(self, index: usize) -> Vec<u8> {
+        let mut bytes = vec![0; snapshots::BLOCK as usize];
+        if matches!(self, Self::Mixed) {
+            let random_bytes = bytes.len() * 18 / 100;
+            rand::rngs::StdRng::seed_from_u64(0x5eed ^ index as u64)
+                .fill_bytes(&mut bytes[..random_bytes]);
+        }
+        bytes[..8].copy_from_slice(&(index as u64 + 1).to_le_bytes());
+        bytes
+    }
+}
+
 struct ObjectServer {
     bodies: tokio::sync::Mutex<BTreeMap<String, Vec<u8>>>,
-    blocked_object: std::sync::Mutex<String>,
+    blocked_object: std::sync::Mutex<Option<String>>,
+    indices: std::sync::Mutex<BTreeMap<String, usize>>,
+    conditions: std::sync::Mutex<RemoteConditions>,
+    next_byte: tokio::sync::Mutex<Option<Instant>>,
     release: Semaphore,
     completed: Semaphore,
     fifth_started: Semaphore,
     started: AtomicUsize,
     in_flight: AtomicUsize,
     maximum: AtomicUsize,
+    encoded_bytes: AtomicU64,
 }
 
 impl Default for ObjectServer {
@@ -35,17 +71,49 @@ impl Default for ObjectServer {
         Self {
             bodies: tokio::sync::Mutex::default(),
             blocked_object: std::sync::Mutex::default(),
+            indices: std::sync::Mutex::default(),
+            conditions: std::sync::Mutex::default(),
+            next_byte: tokio::sync::Mutex::default(),
             release: Semaphore::new(0),
             completed: Semaphore::new(0),
             fifth_started: Semaphore::new(0),
             started: AtomicUsize::new(0),
             in_flight: AtomicUsize::new(0),
             maximum: AtomicUsize::new(0),
+            encoded_bytes: AtomicU64::new(0),
         }
     }
 }
 
 impl ObjectServer {
+    async fn body(&self, body: axum::body::Body, rate: u64) -> Vec<u8> {
+        let mut stream = body.into_data_stream();
+        let mut bytes = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.unwrap();
+            assert!(
+                chunk.len()
+                    <= (block_codec::MAX_ENCODED_BYTES as usize).saturating_sub(bytes.len())
+            );
+            if rate != 0 {
+                for piece in chunk.chunks(16_384) {
+                    let until = {
+                        let mut next = self.next_byte.lock().await;
+                        let now = Instant::now();
+                        let start = next.unwrap_or(now).max(now);
+                        let until =
+                            start + Duration::from_secs_f64(piece.len() as f64 / rate as f64);
+                        *next = Some(until);
+                        until
+                    };
+                    tokio::time::sleep_until(tokio::time::Instant::from_std(until)).await;
+                }
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        bytes
+    }
+
     async fn respond(&self, request: Request) -> axum::response::Response {
         let path = request.uri().path().to_owned();
         if request.method() == Method::GET {
@@ -62,11 +130,9 @@ impl ObjectServer {
             return StatusCode::METHOD_NOT_ALLOWED.into_response();
         }
         assert_eq!(request.headers()["if-none-match"], "*");
-        let bytes = to_bytes(request.into_body(), block_codec::MAX_ENCODED_BYTES as usize)
-            .await
-            .unwrap();
         if path.contains("/direct-probes/") {
-            self.bodies.lock().await.insert(path, bytes.to_vec());
+            let bytes = self.body(request.into_body(), 0).await;
+            self.bodies.lock().await.insert(path, bytes);
             return StatusCode::OK.into_response();
         }
         let active = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
@@ -75,11 +141,38 @@ impl ObjectServer {
         if ordinal == 5 {
             self.fifth_started.add_permits(1);
         }
-        let blocked = path.ends_with(&*self.blocked_object.lock().unwrap());
+        let conditions = *self.conditions.lock().unwrap();
+        let bytes = self
+            .body(request.into_body(), conditions.bytes_per_second)
+            .await;
+        self.encoded_bytes
+            .fetch_add(bytes.len() as u64, Ordering::SeqCst);
+        let index = self
+            .indices
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|(object, index)| path.ends_with(object).then_some(*index))
+            .unwrap();
+        let delay = conditions.put_ms
+            + if index.is_multiple_of(direct::BATCH) {
+                conditions.tail_ms
+            } else {
+                0
+            };
+        if delay != 0 {
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+        }
+        let blocked = self
+            .blocked_object
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|object| path.ends_with(object));
         if blocked {
             self.release.acquire().await.unwrap().forget();
         }
-        self.bodies.lock().await.insert(path, bytes.to_vec());
+        self.bodies.lock().await.insert(path, bytes);
         self.in_flight.fetch_sub(1, Ordering::SeqCst);
         self.completed.add_permits(1);
         StatusCode::OK.into_response()
@@ -87,7 +180,7 @@ impl ObjectServer {
 }
 
 struct Fixture {
-    _root: tempfile::TempDir,
+    root: tempfile::TempDir,
     service: Arc<Service>,
     run: Value,
     attempt: String,
@@ -98,6 +191,7 @@ struct Fixture {
     storage: Storage,
     controller: String,
     object_server: Arc<ObjectServer>,
+    node_metrics: Arc<std::sync::Mutex<Option<Arc<diagnostic::Metrics>>>>,
     servers: Vec<tokio::task::AbortHandle>,
 }
 
@@ -111,6 +205,10 @@ impl Drop for Fixture {
 
 impl Fixture {
     async fn new(blocks: usize) -> Self {
+        Self::with_contents(blocks, Contents::Sparse).await
+    }
+
+    async fn with_contents(blocks: usize, contents: Contents) -> Self {
         let root = tempfile::tempdir().unwrap();
         let service = service_with_runner(root.path(), String::new()).await;
         let snapshot_id = id();
@@ -120,8 +218,7 @@ impl Fixture {
             .await
             .unwrap();
         for index in 0..blocks {
-            let mut bytes = vec![0; snapshots::BLOCK as usize];
-            bytes[..8].copy_from_slice(&(index as u64 + 1).to_le_bytes());
+            let bytes = contents.block(index);
             file.write_all(&bytes).await.unwrap();
         }
         file.flush().await.unwrap();
@@ -189,9 +286,19 @@ impl Fixture {
             .transaction(move |db| shared_blocks::reserve(db, &point, &mut reserve_manifest))
             .await
             .unwrap();
-        *object_server.blocked_object.lock().unwrap() = objects[0].id.clone();
+        *object_server.blocked_object.lock().unwrap() = Some(objects[0].id.clone());
+        *object_server.indices.lock().unwrap() = objects
+            .iter()
+            .enumerate()
+            .map(|(index, object)| (object.id.clone(), index))
+            .collect();
+        let node_metrics = Arc::new(std::sync::Mutex::new(None));
+        let server_metrics = node_metrics.clone();
+        let remote_conditions = object_server.clone();
         let controller_app = Router::new().fallback(move |request: Request| {
             let directory = directory.clone();
+            let server_metrics = server_metrics.clone();
+            let remote_conditions = remote_conditions.clone();
             async move {
                 assert_eq!(request.headers()["authorization"], "Bearer fixture");
                 if request.uri().path().ends_with("/direct-reader") {
@@ -209,7 +316,18 @@ impl Fixture {
                 }
                 assert!(request.uri().path().ends_with("/direct-upload"));
                 let bytes = to_bytes(request.into_body(), 131_072).await.unwrap();
-                match snapshots::upload_direct(&directory, &bytes).await {
+                let plan: Value = serde_json::from_slice(&bytes).unwrap();
+                let delay = remote_conditions.conditions.lock().unwrap().control_ms;
+                if delay != 0 {
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                }
+                let result = snapshots::upload_direct(&directory, &bytes).await;
+                if let Some(attempt) = plan["diagnostics"]["attempt"].as_str()
+                    && let Some(metrics) = diagnostic::node_metrics_for_test(attempt)
+                {
+                    *server_metrics.lock().unwrap() = Some(metrics);
+                }
+                match result {
                     Ok(receipt) => Json(receipt).into_response(),
                     Err(error) => error.into_response(),
                 }
@@ -218,7 +336,7 @@ impl Fixture {
         let (controller, controller_task) = diagnostic_tests::peer(controller_app).await;
         let run = service.store.run(&run_id).await.unwrap();
         Self {
-            _root: root,
+            root,
             service,
             run,
             attempt,
@@ -229,11 +347,16 @@ impl Fixture {
             storage,
             controller,
             object_server,
+            node_metrics,
             servers: vec![object_task, controller_task],
         }
     }
 
     async fn transfer(&self) -> Result<u64> {
+        self.transfer_measured().await.map(|(bytes, _)| bytes)
+    }
+
+    async fn transfer_measured(&self) -> Result<(u64, Value)> {
         let attempt = id();
         let publication = Publication {
             s: &self.service,
@@ -258,9 +381,10 @@ impl Fixture {
         );
         let mut manifest = self.snapshot["manifest"].clone();
         manifest["blockEnvelope"] = 3.into();
-        publication
+        let bytes = publication
             .transfer_observed(&metrics, &manifest, &self.objects)
-            .await
+            .await?;
+        Ok((bytes, metrics.snapshot()))
     }
 }
 
