@@ -11,9 +11,26 @@ isolateTestCredentials()
 delete process.env.CAIRN_TEST_WORKER_FIXTURE
 const nextest = process.argv[2] === '--nextest'
 const args = process.argv.slice(nextest ? 3 : 2)
-const selectsPackage = args.some(arg => arg === '-p' || arg === '--package' || arg.startsWith('--package='))
 const delimiter = args.indexOf('--')
 const cargoArgs = delimiter < 0 ? args : args.slice(0, delimiter)
+const packages = cargoArgs.flatMap((arg, index) => {
+  if (arg === '-p' || arg === '--package')
+    return cargoArgs[index + 1] ? [cargoArgs[index + 1]] : []
+  if (arg.startsWith('--package='))
+    return [arg.slice('--package='.length)]
+  return arg.startsWith('-p') && !arg.startsWith('--') ? [arg.slice(2).replace(/^=/, '')] : []
+})
+const selectsPackage = packages.length > 0
+
+function maySelectPackage(spec, name) {
+  const fragment = spec.split('#').at(-1)
+  // A source-only spec or a version-only fragment needs Cargo's resolution;
+  // conservatively build the fixture in case it names the relevant package.
+  if (spec.includes('://') && (!spec.includes('#') || /^\d/.test(fragment)))
+    return true
+  return fragment.split('@')[0] === name
+}
+
 const valuedBuildOptions = new Set(['--target', '--target-dir', '--config', '--jobs'])
 const buildSwitches = new Set(['--release', '-r', '--offline', '--frozen'])
 const buildArgs = []
@@ -45,15 +62,16 @@ for (let i = 0; i < cargoArgs.length; i++) {
 }
 
 const installationSelected = !selectsPackage || args.includes('--workspace')
-  || args.includes('cairn-installation') || args.includes('--package=cairn-installation')
+  || packages.some(spec => maySelectPackage(spec, 'cairn-installation'))
 const testTargets = cargoArgs.flatMap((arg, index) => {
   if (arg === '--test')
     return cargoArgs[index + 1] ? [cargoArgs[index + 1]] : []
   return arg.startsWith('--test=') ? [arg.slice('--test='.length)] : []
 })
 const explicitOtherTarget = cargoArgs.some(arg => ['--lib', '--bin', '--bins', '--example', '--examples', '--doc'].includes(arg))
+const includesAllTests = cargoArgs.some(arg => ['--tests', '--all-targets'].includes(arg))
 const needsWorkerFixture = installationSelected
-  && (testTargets.length > 0 ? testTargets.includes('worker') : !explicitOtherTarget)
+  && (includesAllTests || (testTargets.length > 0 ? testTargets.includes('worker') : !explicitOtherTarget))
 if (needsWorkerFixture) {
   const build = spawnSync('cargo', [
     'build',
@@ -93,7 +111,7 @@ if (needsWorkerFixture) {
 // worker. Build it with the same profile flags before tests start, so a
 // nested Cargo invocation cannot overwrite the binary with another profile.
 const needsCodeWorker = !selectsPackage || args.includes('--workspace')
-  || args.includes('cairn-beacon') || args.includes('--package=cairn-beacon')
+  || packages.some(spec => maySelectPackage(spec, 'cairn-beacon'))
 if (needsCodeWorker) {
   const build = spawnSync('cargo', [
     'build',
@@ -121,7 +139,7 @@ if (needsCodeWorker) {
   process.env.CAIRN_TEST_CODE_WORKER = worker.executable
 }
 
-const result = spawnSync('cargo', [...(nextest ? ['nextest', 'run'] : ['test']), '--locked', ...(selectsPackage ? [] : ['--workspace']), ...args], { stdio: 'inherit' })
+const result = spawnSync('cargo', [...(nextest ? ['nextest', 'run'] : ['test']), '--locked', ...(selectsPackage || cargoArgs.includes('--workspace') || cargoArgs.includes('--all') ? [] : ['--workspace']), ...args], { stdio: 'inherit' })
 if (result.error)
   throw result.error
 process.exit(result.status ?? 1)
