@@ -227,12 +227,48 @@ struct Page {
     events: Vec<crate::store::Event>,
     /// Timeline cards: the window's snapshot, or the cards its events changed.
     entries: Vec<TimelineEntry>,
+    cards: Option<CardRange>,
+    draining_cards: bool,
     reset: bool,
     more: bool,
     history: String,
     oldest: Option<i64>,
     has_older: bool,
     list_refresh_at: Option<Instant>,
+}
+
+#[derive(Clone)]
+struct CardRange {
+    run: String,
+    from: i64,
+    upto: i64,
+    window: bool,
+    position: i64,
+    id: String,
+}
+
+impl CardRange {
+    fn read(&self, db: &Db<'_>) -> Result<(Vec<TimelineEntry>, bool)> {
+        if self.window {
+            crate::timeline::window_chunk(
+                db,
+                &self.run,
+                self.from,
+                self.upto,
+                self.position,
+                &self.id,
+            )
+        } else {
+            crate::timeline::changed_chunk(
+                db,
+                &self.run,
+                self.from,
+                self.upto,
+                self.position,
+                &self.id,
+            )
+        }
+    }
 }
 
 /// One SSE `batch` event.
@@ -372,12 +408,29 @@ fn read_page(
     let cursor = events.last().map_or(start, |e| e.id);
     // A window carries a snapshot of its cards; a continuation carries the cards its
     // events changed. The change cursor is the same event sequence as the stream's.
-    let entries = if tail {
-        let from = if has_older { oldest.unwrap_or(0) } else { 0 };
-        crate::timeline::window(db, run_id, from)?
-    } else {
-        crate::timeline::changed(db, run_id, start, cursor)?
+    let mut range = CardRange {
+        run: run_id.to_owned(),
+        from: if tail && has_older {
+            oldest.unwrap_or(0)
+        } else if tail {
+            0
+        } else {
+            start
+        },
+        upto: cursor,
+        window: tail,
+        position: 0,
+        id: String::new(),
     };
+    let (entries, more_cards) = range.read(db)?;
+    if let Some(last) = entries.last() {
+        range.position = last.position;
+        range.id.clone_from(&last.id);
+    }
+    let separate_cards = more_cards
+        || (!entries.is_empty()
+            && serde_json::to_vec(&entries)?.len() + serde_json::to_vec(&events)?.len()
+                > PAGE_BYTES);
     let state = State {
         artifacts: artifacts(db, run_id)?,
         run,
@@ -391,6 +444,8 @@ fn read_page(
         state,
         events,
         entries,
+        cards: more_cards.then_some(range),
+        draining_cards: separate_cards,
         reset,
         more: cursor < max,
         history,
@@ -547,7 +602,9 @@ impl Subscription {
                 }
             }
             // Mark observed changes before reading the next durable page.
-            self.changes.borrow_and_update();
+            if self.pending.is_none() {
+                self.changes.borrow_and_update();
+            }
             let opening = self.pending.is_some();
             if let Some((event, has_backlog)) = self.poll().await? {
                 // Coalesce live updates without delaying the opening page or
@@ -584,6 +641,53 @@ impl Subscription {
         if run_changed {
             current = self.read(0, None).await?;
         }
+        if current.draining_cards
+            && current.entries.is_empty()
+            && let Some(range) = current.cards.take()
+        {
+            let expected = current.history.clone();
+            let next = range.clone();
+            let scope = self.scope.clone();
+            let window = self.window;
+            let continuation = self
+                .s
+                .store
+                .read(move |db| {
+                    let chat = if scope.single_chat() {
+                        crate::chats::public_stream_detail(db, &scope.id, window)?
+                    } else {
+                        Value::Null
+                    };
+                    let current_run = scoped_run(db, &scope, &chat)?;
+                    if text(&current_run, "id") != next.run {
+                        return Ok(None);
+                    }
+                    let (first, _) = event_bounds(db, &next.run)?;
+                    if expected != format!("v2:{}:{first}", next.run) {
+                        return Err(Error::conflict(
+                            "History changed while reading timeline cards.",
+                        ));
+                    }
+                    Ok(Some(next.read(db)?))
+                })
+                .await?;
+            if let Some((entries, more)) = continuation {
+                current.entries = entries;
+                if more {
+                    let mut next = range;
+                    let last = current
+                        .entries
+                        .last()
+                        .expect("a bounded card page must advance");
+                    next.position = last.position;
+                    next.id.clone_from(&last.id);
+                    current.cards = Some(next);
+                }
+            } else {
+                current = self.read(0, None).await?;
+                current.reset = true;
+            }
+        }
         self.list_refresh_at = current.list_refresh_at;
         let reset = current.reset || run_changed;
         if reset {
@@ -591,6 +695,30 @@ impl Subscription {
         }
         self.history = Some(current.history.clone());
         let changed = self.previous.as_ref() != Some(&current.state);
+        if current.draining_cards && !current.entries.is_empty() {
+            let entries = std::mem::take(&mut current.entries);
+            let batch = Batch {
+                events: Vec::new(),
+                entries: self.replies.encode(entries, reset),
+                reset,
+                more: true,
+                history: current.history.clone(),
+                oldest: current.oldest,
+                has_older: current.oldest.map(|_| current.has_older),
+                state: changed.then(|| current.state.clone()),
+            };
+            current.reset = false;
+            current.oldest = None;
+            current.draining_cards = current.cards.is_some();
+            self.previous = Some(current.state.clone());
+            self.pending = Some(current);
+            let event = Event::default()
+                .event("batch")
+                .id(self.cursor.to_string())
+                .json_data(batch)
+                .map_err(Error::internal)?;
+            return Ok(Some((event, true)));
+        }
         let has_events = !current.events.is_empty() || !current.entries.is_empty();
         self.cursor = current.events.last().map_or(self.cursor, |e| e.id);
         let batch = Batch {
@@ -645,7 +773,16 @@ pub async fn history(s: &Service, kind: &str, id: &str, input: &Input) -> Result
             };
             let mut page = history_page(&db, &run, before, expected.as_deref().unwrap())?;
             let from = if page.has_older { page.oldest } else { 0 };
-            page.entries = crate::timeline::between(&db, &run, from, before)?;
+            let (entries, limited) = crate::timeline::between_bounded(&db, &run, from, before)?;
+            if limited {
+                page.oldest = entries
+                    .first()
+                    .expect("a bounded history page must advance")
+                    .position;
+                page.has_older = true;
+                page.events.retain(|event| event.id >= page.oldest);
+            }
+            page.entries = entries;
             page.events = ui_events(std::mem::take(&mut page.events));
             Ok(page)
         })

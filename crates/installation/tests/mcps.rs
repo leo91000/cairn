@@ -399,7 +399,14 @@ async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
         )
         .await;
     assert_ne!(older["result"]["isError"], true, "{older}");
-    let cards = timeline_page["entries"].as_array().unwrap().clone();
+    let mut cards = timeline_page["entries"].as_array().unwrap().clone();
+    cards.extend(
+        result(&older)["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .cloned(),
+    );
     let reply = cards
         .iter()
         .find(|card| card["kind"] == "truncated")

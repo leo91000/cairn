@@ -902,9 +902,9 @@ pub(crate) fn run_timeline(
         ));
     }
     let (cards, mut has_older) = if let Some(cursor) = changes {
-        let mut cards =
+        let (mut cards, limited) =
             crate::timeline::changes_after(db, run, cursor.revision, cursor.id.as_deref(), 101)?;
-        let more = cards.len() > 100;
+        let more = limited || cards.len() > 100;
         cards.truncate(100);
         (cards, more)
     } else {

@@ -257,7 +257,29 @@ fn entries(
     filter: &str,
     parameters: impl rusqlite::Params,
 ) -> Result<Vec<TimelineEntry>> {
-    let sql = format!("{SELECT} WHERE {filter}");
+    Ok(entries_bounded(db, run, filter, parameters, None, false, false)?.0)
+}
+
+/// Stops decoding before accumulating an unbounded page. A single oversized card
+/// is returned so the caller can replace it with a preview and advance its cursor.
+fn entries_bounded(
+    db: &Db<'_>,
+    run: &str,
+    filter: &str,
+    parameters: impl rusqlite::Params,
+    budget: Option<usize>,
+    keep_positions: bool,
+    revision_index: bool,
+) -> Result<(Vec<TimelineEntry>, bool)> {
+    let select = if revision_index {
+        SELECT.replace(
+            "FROM timeline_entries t",
+            "FROM timeline_entries t INDEXED BY timeline_entries_revision",
+        )
+    } else {
+        SELECT.to_owned()
+    };
+    let sql = format!("{select} WHERE {filter}");
     let mut stmt = db.0.prepare_cached(&sql)?;
     let rows = stmt.query_map(parameters, |row| {
         let (card, content) = card_row(row)?;
@@ -273,19 +295,37 @@ fn entries(
             row.get::<_, Option<String>>(13)?,
         ))
     })?;
-    rows.map(|row| {
+    let mut entries = Vec::new();
+    let mut bytes = 0_usize;
+    for row in rows {
         let (card, content, mut source, payload) = row?;
         let card = card_with(card, &content)?;
         // A reply reads only its item's text; process output only the event's text.
-        if let TimelineContent::AgentMessage { .. } = card.content {
-            return Ok(hydrate_reply(card, &source.text, payload.as_deref(), run));
+        let entry = if let TimelineContent::AgentMessage { .. } = card.content {
+            hydrate_reply(card, &source.text, payload.as_deref(), run)
+        } else {
+            if reads_payload(&card.content) {
+                source.payload = payload.and_then(|payload| serde_json::from_str(&payload).ok());
+            }
+            hydrate(card, &source, run)
+        };
+        if let Some(budget) = budget {
+            // Leave room for the surrounding change or page variant as well.
+            let size = serde_json::to_vec(&entry)?.len().saturating_add(32);
+            if !entries.is_empty()
+                && bytes.saturating_add(size) > budget
+                && (!keep_positions
+                    || entries
+                        .last()
+                        .is_none_or(|last: &TimelineEntry| last.position != entry.position))
+            {
+                return Ok((entries, true));
+            }
+            bytes = bytes.saturating_add(size);
         }
-        if reads_payload(&card.content) {
-            source.payload = payload.and_then(|payload| serde_json::from_str(&payload).ok());
-        }
-        Ok(hydrate(card, &source, run))
-    })
-    .collect()
+        entries.push(entry);
+    }
+    Ok((entries, false))
 }
 
 fn reads_payload(content: &TimelineContent) -> bool {
@@ -430,6 +470,27 @@ pub fn changed(db: &Db<'_>, run: &str, after: i64, upto: i64) -> Result<Vec<Time
     )
 }
 
+/// A bounded part of the changes in an event range, ordered by stable position.
+/// The continuation is exclusive and remains stable when a card's revision changes.
+pub(crate) fn changed_chunk(
+    db: &Db<'_>,
+    run: &str,
+    after: i64,
+    upto: i64,
+    position: i64,
+    id: &str,
+) -> Result<(Vec<TimelineEntry>, bool)> {
+    entries_bounded(
+        db,
+        run,
+        "t.run_id=?1 AND t.revision>?2 AND t.revision<=?3 AND (t.position>?4 OR (t.position=?4 AND t.id>?5)) ORDER BY t.position,t.id",
+        params![run, after, upto, position, id],
+        Some(256 * 1024 - 1024),
+        false,
+        true,
+    )
+}
+
 /// Read one interpreted card, including its hydrated content.
 pub(crate) fn entry(db: &Db<'_>, run: &str, id: &str) -> Result<Option<TimelineEntry>> {
     Ok(
@@ -445,12 +506,15 @@ pub(crate) fn changes_after(
     revision: i64,
     id: Option<&str>,
     limit: i64,
-) -> Result<Vec<TimelineEntry>> {
-    entries(
+) -> Result<(Vec<TimelineEntry>, bool)> {
+    entries_bounded(
         db,
         run,
         "t.run_id=?1 AND (t.revision>?2 OR (t.revision=?2 AND ?3 IS NOT NULL AND t.id>?3)) ORDER BY t.revision,t.id LIMIT ?4",
         params![run, revision, id, limit],
+        Some(256 * 1024 - 1024),
+        false,
+        true,
     )
 }
 
@@ -470,19 +534,51 @@ pub fn window(db: &Db<'_>, run: &str, oldest: i64) -> Result<Vec<TimelineEntry>>
     )
 }
 
-/// The cards that first appeared in a backwards page `[oldest, before)`.
-pub(crate) fn between(
+/// A bounded part of an opening window, ordered by stable position and ID.
+pub(crate) fn window_chunk(
+    db: &Db<'_>,
+    run: &str,
+    oldest: i64,
+    upto: i64,
+    position: i64,
+    id: &str,
+) -> Result<(Vec<TimelineEntry>, bool)> {
+    let changed_earlier = SELECT.replace(
+        "FROM timeline_entries t",
+        "FROM timeline_entries t INDEXED BY timeline_entries_revision",
+    ) + " WHERE t.run_id=?1 AND t.revision>=?2 AND t.position<?2 AND t.revision<=?3 AND (t.position>?4 OR (t.position=?4 AND t.id>?5))";
+    entries_bounded(
+        db,
+        run,
+        &format!(
+            "t.run_id=?1 AND t.position>=?2 AND t.revision<=?3 AND (t.position>?4 OR (t.position=?4 AND t.id>?5)) UNION ALL {changed_earlier} ORDER BY 2,1"
+        ),
+        params![run, oldest, upto, position, id],
+        Some(256 * 1024 - 1024),
+        false,
+        false,
+    )
+}
+
+/// Selects a bounded newest suffix of a backwards event page without splitting
+/// cards born at the same event; an individual event's cards may exceed the budget.
+pub(crate) fn between_bounded(
     db: &Db<'_>,
     run: &str,
     oldest: i64,
     before: i64,
-) -> Result<Vec<TimelineEntry>> {
-    entries(
+) -> Result<(Vec<TimelineEntry>, bool)> {
+    let (mut cards, more) = entries_bounded(
         db,
         run,
-        "t.run_id=?1 AND t.position>=?2 AND t.position<?3 ORDER BY t.position",
+        "t.run_id=?1 AND t.position>=?2 AND t.position<?3 ORDER BY t.position DESC,t.id DESC",
         params![run, oldest, before],
-    )
+        Some(256 * 1024 - 1024),
+        true,
+        false,
+    )?;
+    cards.reverse();
+    Ok((cards, more))
 }
 
 /// A tool page: the newest cards before a position, newest last.
@@ -492,13 +588,16 @@ pub(crate) fn page(
     before: i64,
     limit: i64,
 ) -> Result<(Vec<TimelineEntry>, bool)> {
-    let mut cards = entries(
+    let (mut cards, limited) = entries_bounded(
         db,
         run,
         "t.run_id=?1 AND t.position<?2 ORDER BY t.position DESC LIMIT ?3",
         params![run, before, limit + 1],
+        Some(256 * 1024 - 1024),
+        false,
+        false,
     )?;
-    let more = cards.len() > limit as usize;
+    let more = limited || cards.len() > limit as usize;
     cards.truncate(limit as usize);
     cards.reverse();
     Ok((cards, more))

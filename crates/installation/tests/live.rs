@@ -130,6 +130,121 @@ impl Drop for Fixture {
     }
 }
 
+#[tokio::test]
+async fn many_updated_cards_are_delivered_in_bounded_batches_after_reconnect() {
+    let f = Fixture::new().await;
+    let mut initial = f.open(0).await;
+    let (_, first) = initial.batch().await;
+    let history = first["history"].as_str().unwrap().to_owned();
+    drop(initial);
+
+    let run = f.run.clone();
+    f.service.store.transaction(move |db| {
+        for index in 0..40 {
+            let payload = json!({"item": {"id": format!("message-{index}"), "type": "agent_message", "text": "x".repeat(16 * 1024)}});
+            db.event(&run, &EventKind::ItemUpdated, "", Some(&payload))?;
+        }
+        Ok(())
+    }).await.unwrap();
+    let before = *ids(&f).await.last().unwrap();
+    f.service
+        .store
+        .event(&f.run, &EventKind::TurnCompleted, "Done", None)
+        .await
+        .unwrap();
+    let path = format!(
+        "/api/runs/{}/stream?after={before}&history={history}",
+        f.run
+    );
+    let mut interrupted = f.open_path(&path, None).await;
+    let (partial_cursor, partial) = interrupted.batch().await;
+    assert_eq!(partial_cursor, before);
+    assert_eq!(partial["more"], true);
+    assert!(serde_json::to_vec(&partial["entries"]).unwrap().len() <= 256 * 1024);
+    drop(interrupted);
+
+    let mut resumed = f.open_path(&path, None).await;
+    let mut ids = std::collections::BTreeSet::new();
+    let mut wrote_later = false;
+    let mut saw_later = false;
+    loop {
+        let (_, batch) = resumed.batch().await;
+        assert!(serde_json::to_vec(&batch["entries"]).unwrap().len() <= 256 * 1024);
+        for change in batch["entries"].as_array().unwrap() {
+            if let Some(id) = change["entry"]["id"].as_str()
+                && id.starts_with("message:")
+            {
+                ids.insert(id.to_owned());
+            }
+            if change["entry"]["content"]["text"] == "changed while delivering" {
+                saw_later = true;
+            }
+        }
+        if !wrote_later {
+            let payload = json!({"item": {"id": "message-39", "type": "agent_message", "text": "changed while delivering"}});
+            f.service
+                .store
+                .event(&f.run, &EventKind::ItemUpdated, "", Some(payload))
+                .await
+                .unwrap();
+            wrote_later = true;
+        }
+        if batch["more"] == false && saw_later {
+            break;
+        }
+    }
+    assert_eq!(ids.len(), 40);
+}
+
+#[tokio::test]
+async fn older_history_pages_bound_hydrated_cards_without_losing_positions() {
+    let f = Fixture::new().await;
+    let mut initial = f.open(0).await;
+    let (_, first) = initial.batch().await;
+    let history = first["history"].as_str().unwrap().to_owned();
+    drop(initial);
+    let run = f.run.clone();
+    f.service.store.transaction(move |db| {
+        for index in 0..40 {
+            let payload = json!({"item": {"id": format!("history-{index}"), "type": "agent_message", "text": "start"}});
+            db.event(&run, &EventKind::ItemUpdated, "", Some(&payload))?;
+        }
+        Ok(())
+    }).await.unwrap();
+    let mut before = *ids(&f).await.last().unwrap() + 1;
+    let run = f.run.clone();
+    f.service.store.transaction(move |db| {
+        for index in 0..40 {
+            let payload = json!({"item": {"id": format!("history-{index}"), "type": "agent_message", "text": "x".repeat(16 * 1024)}});
+            db.event(&run, &EventKind::ItemUpdated, "", Some(&payload))?;
+        }
+        Ok(())
+    }).await.unwrap();
+    let mut received = std::collections::BTreeSet::new();
+    loop {
+        let response = f
+            .history(&format!("before={before}&history={history}"))
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let page: Value = response.json().await.unwrap();
+        assert!(serde_json::to_vec(&page["entries"]).unwrap().len() <= 256 * 1024);
+        for entry in page["entries"].as_array().unwrap() {
+            if let Some(id) = entry["id"].as_str()
+                && id.starts_with("message:")
+            {
+                assert!(received.insert(id.to_owned()));
+            }
+        }
+        if page["hasOlder"] == false {
+            break;
+        }
+        let next = page["oldest"].as_i64().unwrap();
+        assert!(next < before);
+        before = next;
+    }
+    assert_eq!(received.len(), 40);
+}
+
 async fn serve(service: Arc<Service>) -> (String, tokio::task::JoinHandle<()>) {
     common::serve_locally(router(service).await.unwrap()).await
 }
@@ -1353,16 +1468,26 @@ async fn backwards_pages_skip_superseded_long_answers_but_keep_reused_ids_in_old
     assert!(reply["content"]["text"].as_str().unwrap().ends_with("-79"));
     assert!(reply["position"].as_i64().unwrap() < first["oldest"].as_i64().unwrap());
     assert_eq!(first["hasOlder"], true);
-    let before = first["oldest"].as_i64().unwrap();
+    let mut before = first["oldest"].as_i64().unwrap();
     let history = first["history"].as_str().unwrap();
-    let page: Value = f
-        .history(&format!("before={before}&history={history}"))
-        .await
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(page["hasOlder"], false);
-    let events = page["events"].as_array().unwrap();
+    let mut events = Vec::new();
+    let mut cards = Vec::new();
+    loop {
+        let page: Value = f
+            .history(&format!("before={before}&history={history}"))
+            .await
+            .json()
+            .await
+            .unwrap();
+        events.extend(page["events"].as_array().unwrap().iter().cloned());
+        cards.extend(page["entries"].as_array().unwrap().iter().cloned());
+        if page["hasOlder"] == false {
+            break;
+        }
+        let next = page["oldest"].as_i64().unwrap();
+        assert!(next < before);
+        before = next;
+    }
     assert!(events.iter().any(|e| e["text"] == "Older question"));
     assert!(
         events
@@ -1370,12 +1495,11 @@ async fn backwards_pages_skip_superseded_long_answers_but_keep_reused_ids_in_old
             .all(|e| e["payload"]["item"]["type"] != "agent_message")
     );
     // The reused item ID stays two replies, one per turn, each with its latest text.
-    let replies: Vec<_> = page["entries"]
-        .as_array()
-        .unwrap()
+    let mut replies: Vec<_> = cards
         .iter()
         .filter(|card| card["content"]["kind"] == "agentMessage")
         .collect();
+    replies.sort_by_key(|card| card["position"].as_i64().unwrap());
     assert_eq!(replies.len(), 2);
     assert_eq!(replies[0]["content"]["text"], "previous turn");
     assert_ne!(replies[0]["id"], replies[1]["id"]);

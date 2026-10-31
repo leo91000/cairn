@@ -65,6 +65,64 @@ async fn cards(store: &Store, run: &str) -> Vec<TimelineEntry> {
 }
 
 #[tokio::test]
+async fn ending_many_replies_does_not_amplify_a_small_live_batch() {
+    let root = tempfile::tempdir().unwrap();
+    previous(root.path());
+    let store = Store::open(root.path()).unwrap();
+    let text = "x".repeat(16 * 1024);
+    store
+        .transaction(move |db| {
+            for index in 0..40 {
+                db.event(CODEX, &EventKind::ItemUpdated, "", Some(&serde_json::json!({
+                "item": {"id": format!("stream-{index}"), "type": "agent_message", "text": text}
+            })))?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let db = Connection::open(root.path().join("manager.db")).unwrap();
+    let before: i64 = db
+        .query_row(
+            "SELECT max(id) FROM events WHERE run_id=?",
+            [CODEX],
+            |row| row.get(0),
+        )
+        .unwrap();
+    store
+        .event(CODEX, &EventKind::TurnCompleted, "Done", None)
+        .await
+        .unwrap();
+    let after: i64 = db
+        .query_row(
+            "SELECT max(id) FROM events WHERE run_id=?",
+            [CODEX],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut cursor = (0, String::new());
+    let mut received = std::collections::BTreeSet::new();
+    loop {
+        let (part, more) =
+            changed_chunk(&Db(&db), CODEX, before, after, cursor.0, &cursor.1).unwrap();
+        let size = serde_json::to_vec(&part).unwrap().len();
+        assert!(
+            size <= 256 * 1024,
+            "one batch produced {size} bytes of cards"
+        );
+        for card in &part {
+            assert!(received.insert(card.id.clone()));
+        }
+        if !more {
+            break;
+        }
+        let last = part.last().unwrap();
+        cursor = (last.position, last.id.clone());
+    }
+    assert!(received.len() >= 40);
+}
+
+#[tokio::test]
 async fn private_answer_marker_hides_historical_and_live_payload_text() {
     let root = tempfile::tempdir().unwrap();
     let db = previous(root.path());
