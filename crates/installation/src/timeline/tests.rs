@@ -65,6 +65,34 @@ async fn cards(store: &Store, run: &str) -> Vec<TimelineEntry> {
 }
 
 #[tokio::test]
+async fn private_answer_marker_hides_historical_and_live_payload_text() {
+    let root = tempfile::tempdir().unwrap();
+    let db = previous(root.path());
+    let marker = "Answered a private question.";
+    let secret = "private answer that must stay hidden";
+    let payload = serde_json::json!({"text": secret});
+    db.execute(
+        "INSERT INTO events(run_id,created_at,type,text,payload) VALUES(?,?,?,?,?)",
+        rusqlite::params![CODEX, 2, "chat.user", marker, payload.to_string()],
+    )
+    .unwrap();
+    let store = Store::open(root.path()).unwrap();
+    let migrated = cards(&store, CODEX).await;
+    assert!(migrated.iter().any(
+        |card| matches!(&card.content, TimelineContent::UserMessage { text, .. } if text == marker)
+    ));
+    assert!(!format!("{migrated:?}").contains(secret));
+
+    store
+        .event(CODEX, &EventKind::ChatUser, marker, Some(payload))
+        .await
+        .unwrap();
+    let live = cards(&store, CODEX).await;
+    assert_eq!(live.iter().filter(|card| matches!(&card.content, TimelineContent::UserMessage { text, .. } if text == marker)).count(), 2);
+    assert!(!format!("{live:?}").contains(secret));
+}
+
+#[tokio::test]
 async fn long_engine_item_ids_survive_migration_and_live_updates() {
     let root = tempfile::tempdir().unwrap();
     let db = previous(root.path());

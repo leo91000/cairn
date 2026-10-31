@@ -395,6 +395,9 @@ pub(crate) fn notice_detail(event: &Event<'_>, code: NoticeCode) -> Option<Strin
 /// The text a reply or message reads from its source event.
 pub(crate) fn message_text(event: &Event<'_>) -> String {
     match event.kind {
+        EventKind::ChatUser if event.text == "Answered a private question." => {
+            event.text.to_owned()
+        }
         EventKind::ChatUser => event
             .payload
             .and_then(|payload| payload["text"].as_str())
