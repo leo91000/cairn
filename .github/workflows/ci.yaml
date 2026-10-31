@@ -200,7 +200,7 @@ jobs:
       - name: Qualify native controller concurrency before building every test binary
         run: >-
           node scripts/test-backend.mjs --nextest -p cairn-installation --lib
-          -E 'test(native::service::tests::)' --no-capture
+          -E 'test(native::service::tests::) | test(nodes::files::tests::)' --no-capture
       - name: Run backend tests across binaries with isolated credentials
         run: |
           set -o pipefail
