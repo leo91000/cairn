@@ -186,7 +186,7 @@ fn startup_waits_for_a_rollback_journal_writer_and_preserves_projection() {
 
     let root = tempfile::tempdir().unwrap();
     let mut connection = previous(root.path());
-    let expected = projections(&connection, "runs");
+    let expected = crate::placement_migration_fixture::run_views(&connection);
     assert_eq!(
         connection
             .pragma_query_value::<String, _>(None, "journal_mode", |row| row.get(0))
@@ -219,7 +219,10 @@ fn startup_waits_for_a_rollback_journal_writer_and_preserves_projection() {
     };
     starter.join().unwrap();
     assert_eq!(version(&connection), crate::store::DATABASE_VERSION);
-    assert_eq!(projections(&connection, "run_views"), expected);
+    assert_eq!(
+        crate::placement_migration_fixture::run_views(&connection),
+        expected
+    );
     assert_eq!(
         connection
             .query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
