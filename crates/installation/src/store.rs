@@ -187,7 +187,7 @@ impl Store {
             let tx = writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let current: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
             if current == 21 {
-                tx.execute_batch("CREATE INDEX events_turn_boundaries ON events(run_id,id) WHERE type IN ('turn.started','turn.completed','turn.failed');")?;
+                tx.execute_batch("CREATE INDEX IF NOT EXISTS events_turn_boundaries ON events(run_id,id) WHERE type IN ('turn.started','turn.completed','turn.failed');")?;
                 tx.pragma_update(None, "user_version", 22)?;
             } else if current != DATABASE_VERSION {
                 return Err(Error::bad(
@@ -1529,7 +1529,7 @@ mod schema_tests {
 
     #[test]
     fn existing_other_versions_fail_without_changing_the_database() {
-        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 22, 99] {
+        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, DATABASE_VERSION + 1, 99] {
             let root = tempfile::tempdir().unwrap();
             let db = Connection::open(root.path().join("manager.db")).unwrap();
             db.pragma_update(None, "user_version", version).unwrap();
