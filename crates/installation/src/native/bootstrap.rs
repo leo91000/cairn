@@ -471,7 +471,7 @@ impl Registry {
     fn with_sink(
         runtime: String,
         boot: Option<String>,
-        sink: Option<impl Fn(Snapshot) -> bool + Send + 'static>,
+        sink: Option<impl Fn(&Snapshot) -> bool + Send + 'static>,
     ) -> Self {
         let runtime = if crate::nodes::valid_runtime(&runtime) {
             runtime
@@ -487,7 +487,7 @@ impl Registry {
                 .name("bootstrap-observer".into())
                 .spawn(move || {
                     while let Ok(export) = receiver.recv() {
-                        if !export.forgotten.load(Ordering::Relaxed) && !sink(export.snapshot) {
+                        if !export.forgotten.load(Ordering::Relaxed) && !sink(&export.snapshot) {
                             add(&export.dropped, 1);
                         }
                     }
@@ -670,9 +670,9 @@ fn send_journal(snapshot: &Snapshot, destination: &std::path::Path) -> bool {
     socket.set_nonblocking(true).is_ok() && socket.send_to(&bytes, destination).is_ok()
 }
 
-fn journal_sink(snapshot: Snapshot) -> bool {
+fn journal_sink(snapshot: &Snapshot) -> bool {
     send_journal(
-        &snapshot,
+        snapshot,
         std::path::Path::new("/run/systemd/journal/socket"),
     )
 }
