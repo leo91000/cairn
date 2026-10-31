@@ -320,6 +320,20 @@ abstract class SideQuestionCases {
     }
 
     @Test
+    fun aSeenGeneralQuestionStillHasAnEntryPoint() {
+        val general = answered.copy(itemId = "", text = "Question générale")
+        val side = SideQuestionState().apply { observe(listOf(general)) }
+        compose.setContent {
+            CairnTheme {
+                SideQuestionCard(chat(canAsk = true).copy(sideQuestions = listOf(general)), side)
+            }
+        }
+        compose.onNodeWithText("Questions à côté · Enregistrées").assertExists()
+        compose.onNodeWithTag("side-question-card").performClick()
+        assertTrue(side.open)
+    }
+
+    @Test
     fun aReplyOffersItsSideQuestionsOnlyWhileTheAgentCanAnswer() {
         val asked = mutableListOf<Pair<String, String>>()
         val shown = mutableListOf<String>()

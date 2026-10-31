@@ -24,7 +24,7 @@ pub struct RunEvent {
     #[schemars(with = "Option<EventPayload>")]
     #[ts(type = "Record<string, unknown>", optional)]
     pub payload: Option<Box<serde_json::value::RawValue>>,
-    /// Client cache identity; never supplied by the event writer.
+    /// Stable presentation identity for a coalesced reply; not supplied by event writers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(type = "number", optional)]
     pub display_id: Option<i64>,

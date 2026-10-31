@@ -813,6 +813,13 @@ mod tests {
             assert_eq!(reply_start(db, "r", "reused", Some(14))?, "Later reply");
             assert!(reply_start(db, "r", "another", Some(11)).is_err());
             assert!(reply_start(db, "r", "reused", None).is_err());
+            // A fresh history page keeps the first snapshot's identity even though
+            // it only returns the latest text snapshot for each turn.
+            let (history, _) = db.events_before("r", i64::MAX)?;
+            let first = history.iter().find(|event| event.id == 12).unwrap();
+            let later = history.iter().find(|event| event.id == 14).unwrap();
+            assert_eq!(first.display_id, Some(11));
+            assert_eq!(later.display_id, None);
             Ok(())
         }).await.unwrap();
     }

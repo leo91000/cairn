@@ -903,7 +903,7 @@ impl Db<'_> {
         limit: i64,
         max_bytes: usize,
     ) -> Result<Vec<Event>> {
-        let sql = "SELECT id,run_id,created_at,type,text,payload FROM events WHERE run_id=? \
+        let sql = "SELECT id,run_id,created_at,type,text,payload,NULL FROM events WHERE run_id=? \
             AND id>? ORDER BY id LIMIT ?";
         let mut stmt = self.0.prepare_cached(sql)?;
         let rows = stmt.query_map(params![run, after, limit], event_row)?;
@@ -951,7 +951,14 @@ impl Db<'_> {
         limit: i64,
         budget: EventBudget,
     ) -> Result<(Vec<Event>, bool)> {
-        let sql = "SELECT e.id,e.run_id,e.created_at,e.type,e.text,e.payload FROM events e
+        let sql = "SELECT e.id,e.run_id,e.created_at,e.type,e.text,e.payload,
+CASE WHEN json_extract(e.payload,'$.item.type')='agent_message'
+ AND COALESCE(json_extract(e.payload,'$.item.id'),'')!='' THEN (
+ SELECT MIN(a.id) FROM events a WHERE a.run_id=e.run_id AND a.id<=e.id
+  AND a.id>COALESCE((SELECT MAX(t.id) FROM events t WHERE t.run_id=e.run_id AND t.type='turn.started' AND t.id<e.id),0)
+  AND json_extract(a.payload,'$.item.type')='agent_message'
+  AND json_extract(a.payload,'$.item.id')=json_extract(e.payload,'$.item.id')
+) ELSE NULL END FROM events e
 WHERE e.run_id=? AND e.id>? AND e.id<? AND (
  json_extract(e.payload,'$.item.type') IS NOT 'agent_message'
  OR COALESCE(json_extract(e.payload,'$.item.id'),'')=''
@@ -996,7 +1003,15 @@ const HISTORY_PAGE_EVENTS: i64 = 1000;
 const HISTORY_PAGE_BYTES: usize = 256 * 1024;
 const HISTORY_PAGE_DECODED_BYTES: usize = 4 * 1024 * 1024;
 
-type EventRow = (i64, String, i64, String, String, Option<String>);
+type EventRow = (
+    i64,
+    String,
+    i64,
+    String,
+    String,
+    Option<String>,
+    Option<i64>,
+);
 
 #[derive(Clone, Copy)]
 enum EventBudget {
@@ -1012,6 +1027,7 @@ fn event_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<EventRow> {
         r.get(3)?,
         r.get(4)?,
         r.get(5)?,
+        r.get(6)?,
     ))
 }
 
@@ -1036,7 +1052,7 @@ fn within_budget(
     let mut next_bytes = max_bytes.saturating_mul(2);
     let mut compressed_bytes = None;
     for row in rows {
-        let (id, run, created, kind, text, payload) = row?;
+        let (id, run, created, kind, text, payload, display_id) = row?;
         if !compressed {
             bytes += text.len() + payload.as_ref().map_or(0, String::len) + 256;
         }
@@ -1046,7 +1062,7 @@ fn within_budget(
             created_at: created,
             kind: EventKind::from_adapter(&kind),
             text,
-            display_id: None,
+            display_id: display_id.filter(|first| *first != id),
             payload: payload
                 .map(serde_json::value::RawValue::from_string)
                 .transpose()?,

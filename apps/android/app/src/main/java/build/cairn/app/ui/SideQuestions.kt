@@ -162,12 +162,13 @@ private fun engine(provider: String?) =
         else -> "L’agent"
     }
 
-/** Above the composer while a side question is answered, or its answer is unread. */
+/** Above the composer while questions are retained, so every answer remains reachable. */
 @Composable
 internal fun SideQuestionCard(chat: Chat, side: SideQuestionState) {
     val pending = chat.sideQuestions.filter { it.status == "pending" }
     val unread = side.unread(chat.sideQuestions)
-    val shown = pending.firstOrNull() ?: unread.firstOrNull() ?: return
+    val shown =
+        pending.firstOrNull() ?: unread.firstOrNull() ?: chat.sideQuestions.lastOrNull() ?: return
     Surface(
         onClick = { side.show() },
         modifier =
@@ -193,7 +194,8 @@ internal fun SideQuestionCard(chat: Chat, side: SideQuestionState) {
                     when {
                         pending.isNotEmpty() -> "Question à côté · ${engine(chat.provider)} répond"
                         unread.any { it.status == "answered" } -> "Question à côté · Réponse prête"
-                        else -> "Question à côté · Sans réponse"
+                        unread.isNotEmpty() -> "Question à côté · Sans réponse"
+                        else -> "Questions à côté · Enregistrées"
                     },
                     // Announced when the answer arrives.
                     Modifier.semantics { liveRegion = LiveRegionMode.Polite },
