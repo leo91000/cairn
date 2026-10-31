@@ -27,6 +27,8 @@ validated before hashing or log-budget filtering. Malformed values lose coverage
 without advancing the clock. Omitted/null optional tool-start outputs are valid;
 MCP and collaboration results retain their legitimate structured JSON. Nested plan,
 file-change and web-action metadata is projected onto supported semantic fields.
+Web-result payloads have no supported element contract and make coverage unknown;
+canonical web actions remain supported.
 Digests cover the supported semantic item fields, excluding duration and transport
 metadata. They remain private to the installation. At 128 distinct items the
 record stops certifying complete coverage for that execution rather than evicting
@@ -38,7 +40,7 @@ a still-running child. Duration/token/tool-use counters and activity notices do
 not refresh it. Redaction or preview changes in semantic fields cannot manufacture
 progress. Unsupported or truncated items, missing item identities, provisional
 identity folding without replay-safe aliases, unbound background waits and reused
-child IDs without a child-run identity make coverage explicitly unknown until a
+completed tool IDs without a new execution identity make coverage explicitly unknown until a
 fresh execution. Malformed/truncated or unknown stdout JSON marks monitor coverage
 incomplete even when the ordinary log budget is exhausted; whitespace separators
 are ignored. Only an explicit trusted relay interruption retains the existing

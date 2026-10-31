@@ -216,15 +216,19 @@ impl Progress {
         } else {
             kind == "item.completed" || item["status"] == "completed" || item["status"] == "failed"
         };
-        if item_type == "subagent"
+        let tool = matches!(
+            item_type,
+            "command_execution" | "mcp_tool_call" | "web_search" | "subagent" | "collab_tool_call"
+        );
+        if tool
             && !completed
             && self
                 .items
                 .get(&key)
                 .is_some_and(|previous| previous.completed)
         {
-            // Reopening a stable child ID needs its own run identity. Until the
-            // protocol supplies one, do not invent coverage for resumed work.
+            // Reopening any completed tool needs a new execution identity. An
+            // old in-progress replay cannot certify work or hide an open tool.
             return self.mark_incomplete();
         }
         if self.items.get(&key).is_some_and(|previous| {
@@ -242,10 +246,6 @@ impl Progress {
                 .items
                 .get(&key)
                 .is_some_and(|previous| previous.completed);
-        let tool = matches!(
-            item_type,
-            "command_execution" | "mcp_tool_call" | "web_search" | "subagent" | "collab_tool_call"
-        );
         self.items.insert(
             key,
             ItemProgress {
@@ -357,7 +357,9 @@ fn valid_item(item: &Value) -> bool {
             })
         }),
         "web_search" => {
-            optional("action", valid_web_action) && optional("results", Value::is_array)
+            // Canonical adapters supply action; no result-element contract is
+            // available. Do not guess semantic fields from arbitrary JSON.
+            optional("action", valid_web_action) && item["results"].is_null()
         }
         _ => false,
     }
@@ -451,7 +453,7 @@ fn semantic_fields(kind: &str) -> Option<&'static [&'static str]> {
         "todo_list" => &["items"],
         "subagent" => &["result"],
         "file_change" => &["changes"],
-        "web_search" => &["action", "results"],
+        "web_search" => &["action"],
         _ => return None,
     })
 }
@@ -777,6 +779,46 @@ mod tests {
                     assert_eq!(progress.advanced_at, Some(2));
                 }
             }
+        }
+    }
+
+    #[test]
+    fn unsupported_web_results_and_every_reopened_tool_lose_coverage() {
+        for results in [
+            json!([{"duration_ms":1}]),
+            json!([1]),
+            json!([]),
+            json!({"text":"unbound"}),
+        ] {
+            let mut progress = progress();
+            let mut event = json!({"type":"item.updated","item":{"id":"web","type":"web_search","action":{"type":"search","query":"unchanged"}}});
+            assert!(progress.observe(&event, 2));
+            event["item"]["results"] = results;
+            assert!(!known_frame(&event));
+            assert!(progress.observe(&event, 3));
+            assert!(!progress.complete);
+            assert_eq!(progress.advanced_at, Some(2));
+        }
+        for kind in [
+            "command_execution",
+            "mcp_tool_call",
+            "collab_tool_call",
+            "web_search",
+            "subagent",
+        ] {
+            let mut progress = progress();
+            let mut event = json!({"type":"item.completed","item":{"id":"stable","type":kind,"status":"completed"}});
+            assert!(progress.observe(&event, 2));
+            event["type"] = "item.updated".into();
+            event["item"]["status"] = "in_progress".into();
+            assert!(known_frame(&event));
+            assert!(progress.observe(&event, 3), "{event}");
+            assert!(!progress.complete);
+            assert_eq!(progress.advanced_at, Some(2));
+            event["item"]["status"] = "completed".into();
+            assert!(!progress.observe(&event, 4));
+            assert!(!progress.complete);
+            assert_eq!(progress.advanced_at, Some(2));
         }
     }
 
