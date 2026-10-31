@@ -126,13 +126,42 @@ impl Card {
 /// The cards an event may change, beyond the ones it creates.
 pub(crate) trait Cards {
     fn card(&mut self, id: &str) -> Result<Option<Card>>;
+
+    fn reason(&mut self, event_id: i64) -> Result<Option<String>>;
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Reason {
+    digest: String,
+    source: i64,
+}
+
+impl Reason {
+    fn new(message: &str, source: i64) -> Self {
+        Self {
+            digest: crate::auth::hex_digest(message),
+            source,
+        }
+    }
+}
+
+fn remember_reason(reasons: &mut Vec<Reason>, reason: Reason) {
+    if let Some(existing) = reasons
+        .iter_mut()
+        .find(|existing| existing.digest == reason.digest)
+    {
+        existing.source = reason.source;
+    } else {
+        remember(reasons, reason);
+    }
 }
 
 /// A failed attempt's reasons, its card and how often Cairn retried its chain.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub(crate) struct Failure {
-    reasons: Vec<String>,
+    reasons: Vec<Reason>,
     notice: Option<String>,
     retries: Option<u32>,
     /// Its turn or run failed, beyond a reported error.
@@ -166,6 +195,16 @@ pub(crate) struct State {
     echoes: Echoes,
     /// The current usage-limit failure, until the turn or execution moves on.
     quota: Option<CurrentQuota>,
+}
+
+impl State {
+    pub(crate) fn reason_sources(&self) -> Vec<i64> {
+        self.failure
+            .iter()
+            .chain(self.retried.iter())
+            .flat_map(|failure| failure.reasons.iter().map(|reason| reason.source))
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -231,7 +270,7 @@ fn remember<T: PartialEq>(list: &mut Vec<T>, value: T) {
 #[serde(rename_all = "camelCase", default)]
 pub(crate) struct CurrentQuota {
     card: String,
-    message: String,
+    digest: String,
     resets_at: Option<i64>,
 }
 
@@ -609,9 +648,9 @@ impl<C: Cards> Reducer<'_, C> {
         // folds into it rather than reporting a reconnect.
         let repeats_failure = *kind == EventKind::Error
             && self.state.failure.as_ref().is_some_and(|failure| {
-                failure
-                    .reasons
-                    .contains(&bounded(reason.as_deref().unwrap_or_default()))
+                let digest =
+                    crate::auth::hex_digest(&bounded(reason.as_deref().unwrap_or_default()));
+                failure.reasons.iter().any(|reason| reason.digest == digest)
             });
         let connection = connection_source && !repeats_failure && connection_text(&event.raw());
         let failure_message = (!connection).then_some(reason.clone()).flatten();
@@ -649,33 +688,53 @@ impl<C: Cards> Reducer<'_, C> {
         // The run log keeps every lifecycle event; a conversation shows one card per failure.
         if let Some(message) = &failure_message {
             let message = bounded(message);
+            let digest = crate::auth::hex_digest(&message);
             let stopped = *kind != EventKind::Status && STOP_ECHOES.contains(&message.as_str());
-            let shown = self.state.failure.as_mut();
-            let repeated = shown.as_ref().is_some_and(|shown| {
+            let shown = self.state.failure.as_ref();
+            let mut repeated = shown.is_some_and(|shown| {
                 message.is_empty()
-                    || shown.reasons.contains(&message)
-                    || (*kind == EventKind::Status
-                        && shown
-                            .reasons
-                            .iter()
-                            .any(|given| same_reason(given, &message)))
+                    || shown.reasons.iter().any(|reason| reason.digest == digest)
                     || (message == INTERRUPTED && shown.ended)
             });
+            if !repeated && *kind == EventKind::Status && !message.is_empty() {
+                let sources = shown
+                    .map(|shown| {
+                        shown
+                            .reasons
+                            .iter()
+                            .map(|reason| reason.source)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                for source in sources {
+                    if self
+                        .cards
+                        .reason(source)?
+                        .is_some_and(|given| same_reason(&bounded(&given), &message))
+                    {
+                        repeated = true;
+                        break;
+                    }
+                }
+            }
             if stopped {
                 // The terminal status that follows says Cairn stopped it.
                 notice.prominent = false;
-            } else if let Some(shown) = shown.filter(|_| repeated) {
-                remember(&mut shown.reasons, message.clone());
+            } else if let Some(shown) = self.state.failure.as_mut().filter(|_| repeated) {
+                remember_reason(&mut shown.reasons, Reason::new(&message, event.id));
                 shown.ended |= *kind != EventKind::Error;
                 notice.prominent = false;
             } else {
                 let failure = self.state.failure.get_or_insert_with(Failure::default);
-                remember(&mut failure.reasons, message.clone());
+                remember_reason(&mut failure.reasons, Reason::new(&message, event.id));
                 failure.notice = Some(id.clone());
                 failure.ended |= *kind != EventKind::Error;
                 if let Some(previous) = self.state.retried.take()
                     && let Some(card) = previous.notice.clone()
-                    && previous.reasons.contains(&message)
+                    && previous
+                        .reasons
+                        .iter()
+                        .any(|reason| reason.digest == digest)
                 {
                     // The next attempt failed the same way: its card replaces the previous one.
                     self.hide(vec![card])?;
@@ -709,7 +768,7 @@ impl<C: Cards> Reducer<'_, C> {
         }
         if let Some(reason) = &reason {
             // A final status does not repeat a reason the run log already gave.
-            let reason = bounded(reason);
+            let reason = crate::auth::hex_digest(&bounded(reason));
             if *kind == EventKind::Status && self.state.reported.contains(&reason) {
                 notice.detail = None;
             }
@@ -736,7 +795,7 @@ impl<C: Cards> Reducer<'_, C> {
             let resets_at = data["error"]["resetsAt"].as_i64().or_else(|| {
                 previous
                     .as_ref()
-                    .filter(|previous| previous.message == cause)
+                    .filter(|previous| previous.digest == crate::auth::hex_digest(&cause))
                     .and_then(|previous| previous.resets_at)
             });
             if let Some(previous) = previous {
@@ -753,7 +812,7 @@ impl<C: Cards> Reducer<'_, C> {
             });
             self.state.quota = Some(CurrentQuota {
                 card: id.clone(),
-                message: cause,
+                digest: crate::auth::hex_digest(&cause),
                 resets_at,
             });
         }

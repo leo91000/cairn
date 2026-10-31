@@ -58,6 +58,29 @@ impl Cards for StoredCards<'_> {
             .map(|(card, content)| card_with(card, &content))
             .transpose()
     }
+
+    fn reason(&mut self, event_id: i64) -> Result<Option<String>> {
+        let Some(stored) = self
+            .db
+            .event_batch(self.run, event_id - 1, 1, 256 * 1024)?
+            .into_iter()
+            .find(|event| event.id == event_id)
+        else {
+            return Ok(None);
+        };
+        let payload = stored
+            .payload
+            .as_ref()
+            .map(|value| serde_json::from_str(value.get()))
+            .transpose()?;
+        Ok(reducer::failure_reason(&Event {
+            id: stored.id,
+            created_at: stored.created_at,
+            kind: &stored.kind,
+            text: &stored.text,
+            payload: payload.as_ref(),
+        }))
+    }
 }
 
 /// A card and its stored kind and content, decoded once the kind is known.
@@ -487,6 +510,7 @@ pub(crate) struct Replay {
     pub state: State,
     cards: std::collections::BTreeMap<String, Card>,
     order: Vec<String>,
+    reasons: std::collections::BTreeMap<i64, String>,
 }
 
 impl Replay {
@@ -503,12 +527,21 @@ impl Replay {
             text: &stored.text,
             payload: payload.as_ref(),
         };
-        for card in reducer::reduce(&mut self.state, event, &mut self.cards)? {
+        if let Some(reason) = reducer::failure_reason(&event) {
+            self.reasons.insert(event.id, reason);
+        }
+        let cards = ReplayCards {
+            cards: &mut self.cards,
+            reasons: &self.reasons,
+        };
+        for card in reducer::reduce(&mut self.state, event, cards)? {
             if !self.cards.contains_key(&card.id) {
                 self.order.push(card.id.clone());
             }
             self.cards.insert(card.id.clone(), card);
         }
+        let retained = self.state.reason_sources();
+        self.reasons.retain(|id, _| retained.contains(id));
         Ok(())
     }
 
@@ -523,9 +556,18 @@ impl Replay {
     }
 }
 
-impl Cards for &mut std::collections::BTreeMap<String, Card> {
+struct ReplayCards<'a> {
+    cards: &'a mut std::collections::BTreeMap<String, Card>,
+    reasons: &'a std::collections::BTreeMap<i64, String>,
+}
+
+impl Cards for ReplayCards<'_> {
     fn card(&mut self, id: &str) -> Result<Option<Card>> {
-        Ok(self.get(id).cloned())
+        Ok(self.cards.get(id).cloned())
+    }
+
+    fn reason(&mut self, event_id: i64) -> Result<Option<String>> {
+        Ok(self.reasons.get(&event_id).cloned())
     }
 }
 

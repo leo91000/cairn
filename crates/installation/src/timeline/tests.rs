@@ -95,6 +95,88 @@ async fn long_engine_item_ids_survive_migration_and_live_updates() {
         && matches!(&card.content, TimelineContent::AgentMessage { text, .. } if text == "After")));
 }
 
+#[tokio::test]
+async fn checkpoint_keeps_no_failure_text_and_still_folds_truncated_reasons() {
+    let root = tempfile::tempdir().unwrap();
+    let db = previous(root.path());
+    let store = Store::open(root.path()).unwrap();
+    let message = "private diagnostic with a long tail";
+    store
+        .event(
+            CODEX,
+            &EventKind::TurnFailed,
+            message,
+            Some(serde_json::json!({"error":{"message":message}})),
+        )
+        .await
+        .unwrap();
+    store
+        .event(
+            CODEX,
+            &EventKind::TurnFailed,
+            message,
+            Some(serde_json::json!({"error":{"message":message}})),
+        )
+        .await
+        .unwrap();
+    let latest: i64 = db
+        .query_row(
+            "SELECT max(id) FROM events WHERE run_id=?",
+            [CODEX],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let state: String = db
+        .query_row(
+            "SELECT state FROM timeline_state WHERE run_id=?",
+            [CODEX],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let state: serde_json::Value = serde_json::from_str(&state).unwrap();
+    let digest = crate::auth::hex_digest(message);
+    let reason = state["failure"]["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|reason| reason["digest"] == digest)
+        .unwrap();
+    assert_eq!(reason["source"], latest);
+    store
+        .event(
+            CODEX,
+            &EventKind::Status,
+            "failed",
+            Some(serde_json::json!({"error":{"message":"private diagnostic"}})),
+        )
+        .await
+        .unwrap();
+    let checkpoint: String = db
+        .query_row(
+            "SELECT state FROM timeline_state WHERE run_id=?",
+            [CODEX],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!checkpoint.contains("private diagnostic"));
+    let entries = cards(&store, CODEX).await;
+    let matching: Vec<_> = entries
+        .iter()
+        .filter_map(|card| match &card.content {
+            TimelineContent::Notice { notice }
+                if notice
+                    .detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.starts_with("private diagnostic")) =>
+            {
+                Some(notice)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(matching.iter().filter(|notice| notice.prominent).count(), 1);
+}
+
 fn notice(entry: &TimelineEntry) -> &TimelineNotice {
     match &entry.content {
         TimelineContent::Notice { notice } => notice,
@@ -450,6 +532,8 @@ async fn live_batches_full_replay_and_checkpoint_restart_build_the_same_timeline
                 state: serde_json::from_str(&saved_state).unwrap(),
                 cards: serde_json::from_str(&saved_cards).unwrap(),
                 order: first.order,
+                // The real writer reads these reasons from the retained source events.
+                reasons: first.reasons,
             };
             for event in &recorded[split..] {
                 resumed.apply(event).unwrap();
