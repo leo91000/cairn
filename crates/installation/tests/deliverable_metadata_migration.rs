@@ -48,7 +48,7 @@ fn snapshot(db: &Connection) -> Snapshot {
 }
 
 fn documents(db: &Connection) -> BTreeMap<String, Value> {
-    db.prepare("SELECT key,data FROM kv WHERE key LIKE 'artifact:%' OR key LIKE 'skill-source:%'")
+    db.prepare("SELECT key,data FROM kv WHERE key GLOB 'artifact:*' OR key GLOB 'skill-source:*'")
         .unwrap()
         .query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -65,6 +65,20 @@ fn documents(db: &Connection) -> BTreeMap<String, Value> {
 async fn real_previous_database_preserves_versions_links_sources_and_unrelated_data() {
     let root = tempfile::tempdir().unwrap();
     let db = previous(root.path());
+    // Domain namespaces are case-sensitive; opaque KV keys that merely resemble
+    // them must survive instead of being deleted by SQLite's case-insensitive LIKE.
+    let opaque_keys = [
+        "Artifact:opaque",
+        "Artifact-share:opaque",
+        "Skill-source:opaque",
+    ];
+    for key in opaque_keys {
+        db.execute(
+            "INSERT INTO kv VALUES(?,'{\"unrelated\":true}',NULL)",
+            [key],
+        )
+        .unwrap();
+    }
     let before = snapshot(&db);
     let documents = documents(&db);
     let store = Store::open(root.path()).unwrap();
@@ -135,7 +149,7 @@ async fn real_previous_database_preserves_versions_links_sources_and_unrelated_d
             assert_eq!(after[&table], (sql, rows), "{table}");
         }
     }
-    assert_eq!(db.query_row("SELECT count(*) FROM kv WHERE key LIKE 'artifact:%' OR key LIKE 'artifact-share:%' OR key LIKE 'skill-source:%'",[],|row| row.get::<_,i64>(0)).unwrap(),0);
+    assert_eq!(db.query_row("SELECT count(*) FROM kv WHERE key GLOB 'artifact:*' OR key GLOB 'artifact-share:*' OR key GLOB 'skill-source:*'",[],|row| row.get::<_,i64>(0)).unwrap(),0);
     for key in [
         "artifact:forbidden",
         "artifact-share:forbidden",
@@ -155,6 +169,14 @@ async fn real_previous_database_preserves_versions_links_sources_and_unrelated_d
         .unwrap(),
         "{\"unchanged\":true}"
     );
+    for key in opaque_keys {
+        assert_eq!(
+            db.query_row("SELECT data FROM kv WHERE key=?", [key], |row| row
+                .get::<_, String>(0))
+                .unwrap(),
+            "{\"unrelated\":true}"
+        );
+    }
     drop(store);
     let reopened = Store::open(root.path()).unwrap();
     assert_eq!(reopened.artifacts(Some(RUN)).await.unwrap().len(), 3);
@@ -163,13 +185,13 @@ async fn real_previous_database_preserves_versions_links_sources_and_unrelated_d
 #[test]
 fn invalid_previous_metadata_leaves_schema_and_every_row_intact() {
     for corruption in [
-        "UPDATE kv SET data='invalid' WHERE key LIKE 'artifact:%'",
-        "UPDATE kv SET expires=1 WHERE key LIKE 'skill-source:%'",
-        "DELETE FROM kv WHERE key LIKE 'artifact-share:%'",
+        "UPDATE kv SET data='invalid' WHERE key GLOB 'artifact:*'",
+        "UPDATE kv SET expires=1 WHERE key GLOB 'skill-source:*'",
+        "DELETE FROM kv WHERE key GLOB 'artifact-share:*'",
         "INSERT INTO kv VALUES('artifact-share:00000000-0000-4000-8000-000000000e02','{\"runId\":\"missing\",\"id\":\"missing\"}',NULL)",
-        "UPDATE kv SET data=json_set(data,'$.size',536870913) WHERE key LIKE 'artifact:%'",
-        "UPDATE kv SET data=json_set(data,'$.version',0) WHERE key LIKE 'artifact:%'",
-        "UPDATE kv SET data=json_set(data,'$.runId','00000000-0000-4000-8000-000000000bad') WHERE key LIKE 'artifact:%'",
+        "UPDATE kv SET data=json_set(data,'$.size',536870913) WHERE key GLOB 'artifact:*'",
+        "UPDATE kv SET data=json_set(data,'$.version',0) WHERE key GLOB 'artifact:*'",
+        "UPDATE kv SET data=json_set(data,'$.runId','00000000-0000-4000-8000-000000000bad') WHERE key GLOB 'artifact:*'",
     ] {
         let root = tempfile::tempdir().unwrap();
         let db = previous(root.path());

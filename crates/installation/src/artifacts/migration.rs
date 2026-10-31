@@ -33,7 +33,7 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
     }
     tx.execute_batch(SCHEMA)?;
     tx.execute_batch(crate::skills::sql::SCHEMA)?;
-    let rows = tx.prepare("SELECT key,data,expires FROM kv WHERE key LIKE 'artifact:%' OR key LIKE 'artifact-share:%' OR key LIKE 'skill-source:%' ORDER BY key")?
+    let rows = tx.prepare("SELECT key,data,expires FROM kv WHERE key GLOB 'artifact:*' OR key GLOB 'artifact-share:*' OR key GLOB 'skill-source:*' ORDER BY key")?
         .query_map([], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,Option<i64>>(2)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let db = Db(&tx);
@@ -97,8 +97,8 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
         .trim_end()
         .strip_suffix(')')
         .ok_or_else(invalid)?;
-    tx.execute_batch(&format!("CREATE TABLE kv_a16{definition},CONSTRAINT no_a16 CHECK(key NOT LIKE 'artifact:%' AND key NOT LIKE 'artifact-share:%' AND key NOT LIKE 'skill-source:%'));"))?;
-    tx.execute_batch("INSERT INTO kv_a16 SELECT * FROM kv WHERE key NOT LIKE 'artifact:%' AND key NOT LIKE 'artifact-share:%' AND key NOT LIKE 'skill-source:%'; DROP TABLE kv; ALTER TABLE kv_a16 RENAME TO kv;")?;
+    tx.execute_batch(&format!("CREATE TABLE kv_a16{definition},CONSTRAINT no_a16 CHECK(key NOT GLOB 'artifact:*' AND key NOT GLOB 'artifact-share:*' AND key NOT GLOB 'skill-source:*'));"))?;
+    tx.execute_batch("INSERT INTO kv_a16 SELECT * FROM kv WHERE key NOT GLOB 'artifact:*' AND key NOT GLOB 'artifact-share:*' AND key NOT GLOB 'skill-source:*'; DROP TABLE kv; ALTER TABLE kv_a16 RENAME TO kv;")?;
     if tx.prepare("PRAGMA foreign_key_check")?.exists([])? {
         return Err(invalid());
     }
