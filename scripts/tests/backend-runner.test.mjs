@@ -203,6 +203,12 @@ describe('backend test launcher', () => {
       }
     }
 
+    for (const workspace of ['--workspace', '--all']) {
+      const result = invoke(['--nextest', '-p', 'cairn-contracts', workspace, '--cargo-metadata', '/fixture/metadata'])
+      expect(result.status).toBe(2)
+      expect(result.calls).toEqual([])
+    }
+
     const unrelated = invoke(['--nextest', '-p', 'cairn-contracts', '--archive-file', '/fixture/archive'])
     expect(unrelated.status).toBe(0)
     expect(unrelated.calls.at(-1).reused).toBe('1')
