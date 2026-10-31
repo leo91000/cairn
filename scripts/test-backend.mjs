@@ -87,8 +87,10 @@ const needsWorkerFixture = installationSelected
   && (includesAllTests || (testTargets.length > 0 ? testTargets.some(target => /[*?[\]]/.test(target) ? path.matchesGlob('worker', target) : target === 'worker') : !explicitOtherTarget))
 const needsCodeWorker = !selectsPackage || selectsWorkspace
   || packages.some(spec => maySelectPackage(spec, 'cairn-beacon'))
-const reusedBinaries = new Set(['--archive-file', '--binaries-metadata', '--cargo-metadata'])
-if (nextest && (needsWorkerFixture || needsCodeWorker) && cargoArgs.some(arg => reusedBinaries.has(arg.split('=')[0]))) {
+const archivedBinaries = new Set(['--archive-file', '--binaries-metadata'])
+const usesArchive = cargoArgs.some(arg => archivedBinaries.has(arg.split('=')[0]))
+const usesCargoMetadata = cargoArgs.some(arg => arg.split('=')[0] === '--cargo-metadata')
+if (nextest && (usesArchive || (usesCargoMetadata && (needsWorkerFixture || needsCodeWorker)))) {
   console.error('Nextest archived or reused binaries cannot be paired safely with fixtures built from this checkout; run these tests from a matching fresh build.')
   process.exit(2)
 }
