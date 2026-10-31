@@ -1139,6 +1139,7 @@ async fn runs_install_the_files_frozen_when_they_were_created() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn snapshots_describe_the_manifest_version_that_was_frozen() {
     use cairn_installation::skills::bundle::{self, Base, Change};
+    use std::os::unix::fs::OpenOptionsExt;
 
     let api = Api::new().await;
     let saved = api
@@ -1177,18 +1178,29 @@ async fn snapshots_describe_the_manifest_version_that_was_frozen() {
     let service = api.service.clone();
     let mut snapshot = tokio::spawn(async move { service.snapshot(task, "manual").await.unwrap() });
     // Hold the project listing inside its read lock after the global listing.
-    // Opening the FIFO for writing blocks until the listing opens it to read.
-    let writer = gate.clone();
-    let mut opened =
-        tokio::task::spawn_blocking(move || std::fs::OpenOptions::new().write(true).open(writer));
+    // A nonblocking writer succeeds once the listing has opened the FIFO.
+    let opened = async {
+        loop {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&gate)
+            {
+                Ok(writer) => break writer,
+                Err(error) if error.raw_os_error() == Some(libc::ENXIO) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                Err(error) => panic!("Unable to open listing gate: {error}"),
+            }
+        }
+    };
+    tokio::pin!(opened);
     let listing = tokio::select! {
-        opened = &mut opened => opened.unwrap().expect("Unable to open listing gate"),
+        opened = &mut opened => opened,
         finished = &mut snapshot => {
-            release_gate(&gate);
             panic!("The snapshot finished before listing the project: {finished:?}");
         }
         () = tokio::time::sleep(std::time::Duration::from_secs(60)) => {
-            release_gate(&gate);
             panic!("The snapshot never reached the project listing");
         }
     };
@@ -1223,17 +1235,6 @@ async fn snapshots_describe_the_manifest_version_that_was_frozen() {
         "writer must commit between listing and freezing"
     );
     assert_eq!(selected["description"], "Use the latest branch conventions");
-}
-
-/// Opens a FIFO for reading so a writer blocked on opening it can return and
-/// the runtime can shut down.
-fn release_gate(gate: &Path) {
-    use std::os::unix::fs::OpenOptionsExt;
-
-    let _ = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK)
-        .open(gate);
 }
 
 /// A local GitHub serving `fixture/skills` through the bundled package and one instance.
