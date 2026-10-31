@@ -1298,3 +1298,121 @@ async fn display_redaction_cannot_change_engine_lifecycle_or_session_identity() 
             .any(|event| event["payload"]["type"] == "turn.[redacted]")
     );
 }
+
+#[tokio::test]
+async fn durable_progress_is_atomic_bound_and_survives_restart_without_a_fresh_clock() {
+    use crate::worker::progress::{Phase, Progress};
+    let mut fixture = Fixture::new().await;
+    fixture
+        .service
+        .store
+        .update_run_boundary(&fixture.id, json!({"missionTurnId":"progress-turn"}))
+        .await
+        .unwrap();
+    fixture
+        .checkpoint
+        .update(|saved| {
+            saved.runner_id = Some(Some("progress-attempt".into()));
+            saved.progress = Some(Progress::launched(
+                "progress-execution".into(),
+                Some("progress-attempt".into()),
+                None,
+                Some("progress-turn".into()),
+                1,
+            ));
+        })
+        .await
+        .unwrap();
+    fixture
+        .output(Output::new(true, "diagnostic only".into()))
+        .await;
+    let saved = RunCheckpoint::load(&fixture.service.store, &fixture.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.progress.unwrap().advanced_at, None);
+    fixture.service.store.write(|db| {
+        db.0.execute_batch("CREATE TRIGGER reject_progress_event BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT,'fixture'); END;")?;
+        Ok(())
+    }).await.unwrap();
+    let result = record(
+        &fixture.service,
+        &Output::new(false, json!({"type":"turn.started"}).to_string()),
+        &fixture.checkpoint,
+        false,
+        &[],
+        &mut fixture.log_total,
+        &mut fixture.activity,
+    )
+    .await;
+    assert!(result.is_err());
+    assert_eq!(
+        fixture
+            .checkpoint
+            .snapshot()
+            .await
+            .progress
+            .unwrap()
+            .advanced_at,
+        None
+    );
+    assert_eq!(
+        RunCheckpoint::load(&fixture.service.store, &fixture.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .progress
+            .unwrap()
+            .advanced_at,
+        None
+    );
+    fixture
+        .service
+        .store
+        .write(|db| {
+            db.0.execute_batch("DROP TRIGGER reject_progress_event;")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    fixture.event(json!({"type":"turn.started"})).await;
+    fixture.event(json!({"type":"turn.completed"})).await;
+    let saved = RunCheckpoint::load(&fixture.service.store, &fixture.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let phase_at = saved.progress.as_ref().unwrap().phase_at;
+    assert_eq!(saved.progress.as_ref().unwrap().phase, Phase::Finalizing);
+    let restarted = Checkpoint::new(fixture.service.store.clone(), fixture.id.clone(), saved);
+    restarted
+        .update(|saved| saved.completed = Some(false))
+        .await
+        .unwrap();
+    record(&fixture.service, &Output::new(false, json!({"type":"item.updated","item":{"id":"late","type":"agent_message","text":"late snapshot"}}).to_string()), &restarted, false, &[], &mut fixture.log_total, &mut fixture.activity).await.unwrap();
+    restarted.persist().await.unwrap();
+    let mut saved = RunCheckpoint::load(&fixture.service.store, &fixture.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.progress.as_ref().unwrap().phase, Phase::Finalizing);
+    assert_eq!(saved.progress.as_ref().unwrap().phase_at, phase_at);
+    saved.runner_id = Some(Some("replacement".into()));
+    saved
+        .store(&fixture.service.store, &fixture.id)
+        .await
+        .unwrap();
+    let stale = record(
+        &fixture.service,
+        &Output::new(false, json!({"type":"turn.started"}).to_string()),
+        &restarted,
+        false,
+        &[],
+        &mut fixture.log_total,
+        &mut fixture.activity,
+    )
+    .await;
+    assert!(
+        stale.is_err(),
+        "old execution output must not advance replacement progress"
+    );
+}

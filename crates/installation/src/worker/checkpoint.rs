@@ -34,6 +34,9 @@ pub(crate) struct NodeOwnership {
 pub struct RunCheckpoint {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub launched: Option<bool>,
+    /// Small durable row, loaded separately from the retained workspace.
+    #[serde(skip)]
+    pub progress: Option<super::progress::Progress>,
     /// Preserved when an engine session is replaced on the same workspace disk.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_initialized: Option<bool>,
@@ -263,9 +266,18 @@ impl RunCheckpoint {
             db.0.prepare_cached("SELECT state FROM run_checkpoints WHERE run_id=?")?
                 .query_row([run_id], |row| row.get(0))
                 .optional()?;
-        encoded
-            .map(|data| serde_json::from_str(&data).map_err(Into::into))
-            .transpose()
+        let Some(encoded) = encoded else {
+            return Ok(None);
+        };
+        let mut saved: Self = serde_json::from_str(&encoded)?;
+        let progress: Option<String> =
+            db.0.prepare_cached("SELECT state FROM run_progress WHERE run_id=?")?
+                .query_row([run_id], |row| row.get(0))
+                .optional()?;
+        saved.progress = progress
+            .map(|value| serde_json::from_str(&value))
+            .transpose()?;
+        Ok(Some(saved))
     }
 
     /// A display decision must not decode the retained workspace, tool sources,
@@ -289,6 +301,9 @@ impl RunCheckpoint {
         db.0.prepare_cached(
             "INSERT INTO run_checkpoints(run_id,state) VALUES(?,?) ON CONFLICT(run_id) DO UPDATE SET state=excluded.state"
         )?.execute(params![run_id, serde_json::to_string(self)?])?;
+        if let Some(progress) = &self.progress {
+            progress.store_in(db, run_id)?;
+        }
         Ok(())
     }
 
@@ -670,10 +685,29 @@ impl Checkpoint {
         let failure = changes.failure.filter(|(_, _, provider)| {
             state.last_error().is_empty() || (*provider && !state.provider_failed())
         });
+        let mut progress = state.progress.clone();
+        let progress_changed = progress
+            .as_mut()
+            .is_some_and(|progress| progress.observe(&payload, now()));
+        let publish_progress = progress_changed
+            && progress.as_ref().is_some_and(|next| {
+                state.progress.as_ref().is_none_or(|old| {
+                    next.phase != old.phase
+                        || next.complete != old.complete
+                        || now().saturating_sub(old.persisted_at) >= 1000
+                })
+            });
+        // Streamed snapshots retain bounded digests in memory. Publish the small
+        // progress row at most once a second (phase/coverage immediately), without
+        // cloning or serializing the prepared workspace for every token.
+        if publish_progress && let Some(progress) = &mut progress {
+            progress.persisted_at = now();
+        }
         let persist = changes.completed || failure.is_some();
         let mut last_message = changes.last_message;
         let mut saved = persist.then(|| state.clone());
         if let Some(saved) = &mut saved {
+            saved.progress = progress.clone();
             if let Some((message, cause, provider_failure)) = failure {
                 if provider_failure && cause.is_some() {
                     saved.provider_failure_attempt = saved.runner_id().map(str::to_owned);
@@ -704,9 +738,21 @@ impl Checkpoint {
             None
         };
         let id = self.id.clone();
+        let expected_progress = state.progress.clone();
+        let published_progress = publish_progress.then(|| progress.clone()).flatten();
         let saved = self
             .store
             .transaction(move |db| {
+                if let Some(expected) = &expected_progress
+                    && !expected.bound_in(db, &id)?
+                {
+                    return Err(crate::error::Error::conflict(
+                        "Execution changed while recording progress.",
+                    ));
+                }
+                if let Some(progress) = &published_progress {
+                    progress.store_in(db, &id)?;
+                }
                 if let Some(saved) = &mut saved {
                     saved.remaining_ms =
                         Some(deadline.map(|deadline| deadline.saturating_sub(now()).max(0)));
@@ -723,8 +769,11 @@ impl Checkpoint {
             .await?;
         if let Some(saved) = saved {
             *state = saved;
-        } else if let Some(message) = last_message {
-            state.last_message = Some(message);
+        } else {
+            state.progress = progress;
+            if let Some(message) = last_message {
+                state.last_message = Some(message);
+            }
         }
         Ok(())
     }

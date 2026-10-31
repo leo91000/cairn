@@ -6,6 +6,7 @@ mod control;
 mod execution;
 mod launch;
 mod output;
+pub(crate) mod progress;
 mod retry;
 mod schedule;
 

@@ -36,7 +36,7 @@ struct Pool {
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-pub(crate) const DATABASE_VERSION: i64 = 19;
+pub(crate) const DATABASE_VERSION: i64 = 20;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -163,6 +163,10 @@ impl Store {
         }
         if !fresh && version == 18 {
             crate::runs::projections::upgrade(&mut writer)?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        }
+        if !fresh && version == 19 {
+            crate::worker::progress::upgrade(&mut writer)?;
         }
         if fresh {
             let tx = writer.transaction()?;
@@ -183,6 +187,7 @@ CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT,created_at
 CREATE INDEX IF NOT EXISTS events_user_input ON events(run_id,id) WHERE type='chat.user';
 CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload,'$.item.id'),id) WHERE json_extract(payload,'$.item.type')='agent_message';")?;
             tx.execute_batch(crate::runs::SCHEMA)?;
+            tx.execute_batch(crate::worker::progress::SCHEMA)?;
             tx.execute_batch(crate::accounts::sql::SCHEMA)?;
             tx.execute_batch(crate::nodes::shared_blocks::SCHEMA)?;
             tx.execute_batch(crate::nodes::journal_acknowledgements::SCHEMA)?;
