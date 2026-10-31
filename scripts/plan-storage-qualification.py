@@ -4,6 +4,7 @@ The existing 1,000-record message/question workloads retain their readers,
 writers and timers. A private source patch selects only the typed layout and one
 repetition; three alternating trials compare the actual reference/candidate.
 """
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -144,7 +145,7 @@ def main():
         fence = work / 'owned-fence'
         fence.mkdir()
         database = fence / 'manager.db'
-        with sqlite3.connect(database) as db:
+        with closing(sqlite3.connect(database)) as db, db:
             db.executescript((sources['reference'] / 'crates/installation/tests/fixtures/questions-waits-v15.sql').read_text())
         manifest['fence'] = {}
         for role in ['reference', 'candidate']:
@@ -154,16 +155,32 @@ def main():
             value = json.loads(result.stdout)['result']
             assert value['versionAfter'] == manifest['roles'][role]['version']
             manifest['fence'][role] = value
+        # SQLite connection context managers commit but do not close. Stabilize
+        # this owned synthetic fixture before hashing its main file: otherwise a
+        # later reader's close can checkpoint committed WAL pages without making
+        # any logical database change. The old CLI must still leave every byte
+        # of the checkpointed main file unchanged.
+        with closing(sqlite3.connect(database)) as db:
+            checkpoint = db.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()
+            assert checkpoint == (0, 0, 0), f'Fixture WAL was not fully checkpointed: {checkpoint}'
+            version_before = db.execute('PRAGMA user_version').fetchone()[0]
+            assert version_before == manifest['roles']['candidate']['version']
+            assert db.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
         before = digest(database)
+        manifest['fence']['beforeOldCli'] = {'databaseSha256': before, 'version': version_before, 'checkpoint': list(checkpoint)}
+        save()
         home = work / 'old-cli-home'
         home.mkdir()
         old = manifest['roles']['reference']['binaries']['cairn']
         assert digest(old['path']) == old['sha256']
         isolated = {'PATH': env['PATH'], 'HOME': str(home), 'AGENT_HOME': str(home), 'DATA_DIR': str(fence), 'WORKSPACE_ROOTS': str(home), 'WORKER_ENABLED': 'false', 'HOST': '127.0.0.1', 'PORT': '0', 'PUBLIC_URL': 'http://localhost:4310'}
         result = subprocess.run([old['path']], cwd=home, env=isolated, text=True, capture_output=True, timeout=20)
+        after = digest(database)
+        manifest['fence'].update({'oldCliExit': result.returncode, 'oldCliDiagnostic': result.stderr, 'afterOldCliDatabaseSha256': after})
+        save()
         assert result.returncode != 0 and 'Unsupported installation database version' in result.stderr
-        assert digest(database) == before
-        with sqlite3.connect(database) as db:
+        assert after == before, 'The old CLI changed the checkpointed candidate database'
+        with closing(sqlite3.connect(database)) as db:
             assert db.execute('PRAGMA user_version').fetchone()[0] == manifest['roles']['candidate']['version']
             assert db.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
         manifest['fence'].update({'oldCliExit': result.returncode, 'oldCliDiagnostic': result.stderr, 'unchangedDatabaseSha256': before})
