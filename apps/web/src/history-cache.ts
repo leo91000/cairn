@@ -207,11 +207,19 @@ export function clearHistoryCache() {
 
 export function recentHistory(value: CachedHistory): CachedHistory {
   let size = JSON.stringify(value.state).length * 2 + 4096
+  const activeWaits = new Set(value.entries.filter(card => card.content.kind === 'notice'
+    && card.content.notice.code === 'backgroundTasks'
+    && card.content.notice.waitingSince !== undefined))
+  for (const card of activeWaits)
+    size += JSON.stringify(card).length * 2 + 2
   const groups = new Map<number, number>()
   for (const event of value.events)
     groups.set(event.id, (groups.get(event.id) ?? 0) + JSON.stringify(event).length * 2 + 2)
-  for (const card of value.entries)
-    groups.set(card.source, (groups.get(card.source) ?? 0) + JSON.stringify(card).length * 2 + 2)
+  for (const card of value.entries) {
+    if (!activeWaits.has(card))
+      groups.set(card.source, (groups.get(card.source) ?? 0) + JSON.stringify(card).length * 2 + 2)
+  }
+
   const ordered = [...groups.keys()].toSorted((a, b) => a - b)
   let start = ordered.length
   while (start > 0) {
@@ -229,7 +237,7 @@ export function recentHistory(value: CachedHistory): CachedHistory {
   return {
     ...value,
     events,
-    entries: value.entries.filter(card => card.source >= oldest),
+    entries: value.entries.filter(card => card.source >= oldest || activeWaits.has(card)),
     oldest,
     hasOlder: true,
     position: undefined,

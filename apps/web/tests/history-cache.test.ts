@@ -135,3 +135,39 @@ it('retains a bounded suffix of timeline cards together with their source events
   expect(saved).toMatchObject({ oldest: 3, hasOlder: true, cursor: 4 })
   expect(saved?.position).toBeUndefined()
 })
+
+it('retains an older active background wait when the history suffix is trimmed', async () => {
+  const events = Array.from({ length: 4 }, (_, i) => ({ ...record().events[0], id: i + 1, text: 'x'.repeat(600 * 1024) }))
+  const wait = {
+    id: 'wait:1',
+    runId: 'r',
+    position: 1,
+    source: 1,
+    revision: 1,
+    turn: 1,
+    attempt: 1,
+    createdAt: 1,
+    updatedAt: 1,
+    content: {
+      kind: 'notice' as const,
+      notice: {
+        code: 'backgroundTasks' as const,
+        state: 'info' as const,
+        prominent: false,
+        tasks: ['Build'],
+        taskIds: ['one'],
+        waitingSince: 1,
+      },
+    },
+  }
+  await writeHistory('s', 'wait', {
+    ...record(),
+    cursor: 4,
+    events,
+    entries: [wait],
+  })
+  const saved = await readHistory('s', 'wait')
+  expect(saved?.events.map(event => event.id)).toEqual([3, 4])
+  expect(saved?.entries).toEqual([wait])
+  expect(saved).toMatchObject({ oldest: 3, hasOlder: true })
+})

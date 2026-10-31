@@ -363,16 +363,28 @@ class HistoryCache(
 
 /** Keep a contiguous recent suffix. An oversized older event stays available via pagination. */
 internal fun recentHistory(value: CachedHistory): CachedHistory {
+    val activeWaits =
+        value.entries
+            .filter { card ->
+                val notice = (card.content as? build.cairn.contracts.TimelineContent.C)?.notice
+                notice?.code == "backgroundTasks" && notice.waitingSince != null
+            }
+            .toSet()
     val groups = mutableMapOf<Long, Int>()
     for (event in value.events) {
         groups[event.id] =
             (groups[event.id] ?: 0) + wireJson.encodeToString(event).toByteArray().size + 1
     }
     for (card in value.entries) {
-        groups[card.source] =
-            (groups[card.source] ?: 0) + wireJson.encodeToString(card).toByteArray().size + 1
+        if (card !in activeWaits) {
+            groups[card.source] =
+                (groups[card.source] ?: 0) + wireJson.encodeToString(card).toByteArray().size + 1
+        }
     }
-    var bytes = wireJson.encodeToString(value.state).toByteArray().size + 4096
+    var bytes =
+        wireJson.encodeToString(value.state).toByteArray().size +
+            4096 +
+            activeWaits.sumOf { wireJson.encodeToString(it).toByteArray().size + 1 }
     val ordered = groups.keys.sortedDescending()
     var kept = 0
     for (id in ordered) {
@@ -386,7 +398,7 @@ internal fun recentHistory(value: CachedHistory): CachedHistory {
     val oldest = if (kept == 0) value.cursor + 1 else ordered[kept - 1]
     return value.copy(
         events = value.events.filter { it.id >= oldest },
-        entries = value.entries.filter { it.source >= oldest },
+        entries = value.entries.filter { it.source >= oldest || it in activeWaits },
         oldest = oldest,
         hasOlder = true,
         position = null,

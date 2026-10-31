@@ -187,6 +187,48 @@ class HistoryCacheTest {
         }
 
     @Test
+    fun `an older active background wait survives suffix trimming`() = runBlocking {
+        val events =
+            (1L..4L).map {
+                RunEvent(id = it, createdAt = it, type = "output", text = "x".repeat(1200 * 1024))
+            }
+        val wait =
+            TimelineCard(
+                id = "wait:1",
+                runId = "r",
+                position = 1,
+                source = 1,
+                revision = 1,
+                turn = 1,
+                attempt = 1,
+                createdAt = 1,
+                updatedAt = 1,
+                content =
+                    build.cairn.contracts.TimelineContent.C(
+                        build.cairn.contracts.TimelineNotice(
+                            code = "backgroundTasks",
+                            state = "info",
+                            prominent = false,
+                            tasks = listOf("Build"),
+                            taskIds = listOf("one"),
+                            waitingSince = 1,
+                        )
+                    ),
+            )
+        cache()
+            .save(
+                "wait",
+                CachedHistory(4, "v2:r:1", LiveState(), events, entries = listOf(wait)),
+                true,
+            )
+        val restored = cache().read("wait")!!
+        assertEquals(listOf(3L, 4L), restored.events.map { it.id })
+        assertEquals(listOf(wait), restored.entries)
+        assertEquals(3L, restored.oldest)
+        assertTrue(restored.hasOlder)
+    }
+
+    @Test
     fun `disk restores complete snapshots and position across instances and isolates sessions`() =
         runBlocking {
             val first = cache()
