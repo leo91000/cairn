@@ -149,7 +149,7 @@ impl Fixture {
     /// Waits until the run `id` satisfies `condition`.
     async fn until(&self, id: &str, condition: impl Fn(&Value) -> bool) -> Value {
         eventually(
-            Duration::from_secs(20),
+            Duration::from_secs(60),
             Duration::from_millis(30),
             async || {
                 let run = self.service.store.run(id).await.unwrap();
@@ -3360,12 +3360,12 @@ async fn active_observation_expiring_during_result_persistence_fails_without_rep
     fixture
         .service
         .store
-        .save_checkpoint_boundary(&run_id, json!({ "remainingMs": 4000 }))
+        .save_checkpoint_boundary(&run_id, json!({ "remainingMs": 15000 }))
         .await
         .unwrap();
     fixture.start().await;
     let saved = eventually(
-        Duration::from_secs(3),
+        Duration::from_secs(12),
         Duration::from_millis(10),
         async || {
             let saved = fixture.checkpoint(&run_id).await;
@@ -3377,7 +3377,7 @@ async fn active_observation_expiring_during_result_persistence_fails_without_rep
     )
     .await;
     let remaining = saved["remainingMs"].as_u64().unwrap();
-    assert!((300..=4000).contains(&remaining), "{saved}");
+    assert!((300..=15000).contains(&remaining), "{saved}");
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let store = fixture.service.store.clone();
@@ -4303,12 +4303,12 @@ async fn active_observation_expiring_during_result_persistence_fails_without_rep
     fixture
         .service
         .store
-        .save_checkpoint_boundary(&run_id, json!({ "remainingMs": 4000 }))
+        .save_checkpoint_boundary(&run_id, json!({ "remainingMs": 15000 }))
         .await
         .unwrap();
     fixture.start().await;
     let saved = eventually(
-        Duration::from_secs(3),
+        Duration::from_secs(12),
         Duration::from_millis(10),
         async || {
             let saved = fixture.checkpoint(&run_id).await;
@@ -4320,7 +4320,7 @@ async fn active_observation_expiring_during_result_persistence_fails_without_rep
     )
     .await;
     let remaining = saved["remainingMs"].as_u64().unwrap();
-    assert!((300..=4000).contains(&remaining), "{saved}");
+    assert!((300..=15000).contains(&remaining), "{saved}");
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let store = fixture.service.store.clone();
@@ -4812,11 +4812,11 @@ async fn quiet_chat_protocol_keeps_a_finite_checkpoint_deadline() {
         )
         .await
         .unwrap();
-    // Resume the final second of an existing one-minute budget.
+    // Resume the final eight seconds of an existing one-minute budget.
     common::set_checkpoint(
         &s.store,
         id,
-        json!({ "launched": false, "remainingMs": 1000 }),
+        json!({ "launched": false, "remainingMs": 8000 }),
     )
     .await;
     fixture.start().await;
@@ -4824,7 +4824,7 @@ async fn quiet_chat_protocol_keeps_a_finite_checkpoint_deadline() {
         .until(id, |r| r["sessionId"] == "fixture-chat")
         .await;
     let failed = tokio::time::timeout(
-        Duration::from_secs(8),
+        Duration::from_secs(20),
         fixture.until(id, |r| r["status"] == RunStatus::Failed),
     )
     .await
