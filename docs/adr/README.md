@@ -85,7 +85,8 @@ for current behavior.
 | 0074 | [Un outil Cairn commun pour les questions des agents](0074-common-agent-question-tool.md) |
 | 0075 | [Hooks de plugins, règles sans code et droits restreints par ressource](0075-plugin-hooks-rules-and-scoped-grants.md) |
 | 0076 | [Transferts directs de stockage confiés aux nodes](0076-direct-node-storage-transfers.md) |
-| 0077 | [Les tours de plan sont bornés par Cairn, pas par le modèle](0077-plan-turns.md) |
+| 0077 | [Native close with independent backend namespaces](0077-native-close-with-independent-backend-namespaces.md) |
+| 0078 | [Les tours de plan sont bornés par Cairn, pas par le modèle](0078-plan-turns.md) |
 
 ## Renumbered collisions
 
@@ -104,3 +105,4 @@ Earlier links in issues and PRs can be resolved with this table.
 | `0059-owner-chosen-agents-for-bot-delegation.md` | [ADR-0068](0068-owner-chosen-agents-for-bot-delegation.md) |
 | `0059-nodes-introduced-by-beacon.md` | [ADR-0069](0069-nodes-introduced-by-beacon.md) |
 | `0060-automatic-native-disk-growth.md` | [ADR-0070](0070-automatic-native-disk-growth.md) |
+| `0077-plan-turns.md` | [ADR-0078](0078-plan-turns.md) |

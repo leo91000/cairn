@@ -79,7 +79,7 @@ process is replaced for a plan turn and the turn after it. Claude Code's auto-mo
 classifier never decides in place of Cairn. OpenCode cannot run plan turns. A plan request cannot steer a running turn
 that may change files: queue it. One sent to steer while no turn runs waits for its
 own plan turn rather than joining a later turn. See
-[the plan-turn decision](adr/0077-plan-turns.md), which also records the native
+[the plan-turn decision](adr/0078-plan-turns.md), which also records the native
 qualification of each engine release.
 
 ## Invoking skills with `$`

@@ -1,6 +1,6 @@
 # Installation database 19 → 20
 
-Plan turns ([ADR 0077](../adr/0077-plan-turns.md)) add a `plan` flag to queued and
+Plan turns ([ADR 0078](../adr/0078-plan-turns.md)) add a `plan` flag to queued and
 delivered messages, and to questions asked by a plan turn. `Store::open` upgrades
 version 19 in one immediate SQLite transaction before starting database actors or
 serving requests: it adds `chat_messages.plan` and `chat_questions.plan`, both
