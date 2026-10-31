@@ -356,6 +356,21 @@ impl Missions {
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        self.merge_agents_live(
+            s,
+            input,
+            crate::authorization::Authorization::once(authorize),
+        )
+        .await
+    }
+
+    pub(crate) async fn merge_agents_live(
+        &self,
+        s: &Service,
+        input: MergeAgentsInput,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<MergeAgentsOutput> {
+        authorize.recheck().await?;
         let _authors = self.authors.lock().await;
         if !input.confirm {
             return Err(Error::bad("Confirm the merge."));
@@ -368,7 +383,7 @@ impl Missions {
         let result = s
             .store
             .transaction(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 crate::agent_merge::merge(db, &input, &executing)
             })
             .await?;

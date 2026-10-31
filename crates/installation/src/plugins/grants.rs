@@ -301,6 +301,38 @@ pub(crate) fn rule_uses(_db: &Db<'_>, _agent: &str) -> Result<Vec<RuleGrantUse>>
     Ok(Vec::new())
 }
 
+struct ResourceReduction {
+    instance: String,
+    agent: String,
+    snapshot: super::grant_authorization::Snapshot,
+    held: PluginContributionGrant,
+    proposed: Vec<PluginResourceRef>,
+}
+
+impl ResourceReduction {
+    async fn recheck(
+        &self,
+        s: &crate::service::Service,
+        package: &super::registry::Package,
+        instance: &super::connections::Connection,
+        authority: &crate::capabilities::plugin_packages::Authority,
+    ) -> Result<()> {
+        super::grant_authorization::resource_set_covered(
+            s,
+            &super::grant_authorization::ResourceAuthorization {
+                package,
+                instance,
+                agent: &self.agent,
+                snapshot: self.snapshot.clone(),
+                preparation: Some(authority.clone()),
+            },
+            &self.held,
+            &self.proposed,
+        )
+        .await
+    }
+}
+
 pub(crate) async fn replace(
     s: &crate::service::Service,
     input: cairn_contracts::ReplaceAgentPluginGrantsInput,
@@ -435,6 +467,7 @@ pub(crate) async fn replace(
         }
     }
     let mut reduction_snapshots = Vec::new();
+    let mut resource_reductions = Vec::new();
     if reduce_only {
         if input
             .run_credential_instances
@@ -493,19 +526,15 @@ pub(crate) async fn replace(
                     .ok_or_else(|| {
                         Error::forbidden("Installation agents cannot add a contribution.")
                     })?;
-                super::grant_authorization::resource_set_covered(
-                    s,
-                    &super::grant_authorization::ResourceAuthorization {
-                        package,
-                        instance,
-                        agent: caller_agent,
-                        snapshot: snapshot.clone(),
-                        preparation: Some(authority.clone()),
-                    },
-                    held,
-                    &next.resources,
-                )
-                .await?;
+                let reduction = ResourceReduction {
+                    instance: instance.id.clone(),
+                    agent: caller_agent.to_owned(),
+                    snapshot: snapshot.clone(),
+                    held: held.clone(),
+                    proposed: next.resources.clone(),
+                };
+                reduction.recheck(s, package, instance, &authority).await?;
+                resource_reductions.push(reduction);
             }
             reduction_snapshots.push(snapshot);
         }
@@ -527,6 +556,15 @@ pub(crate) async fn replace(
         }
     }
     authority.recheck(s).await?;
+    // External ancestry may change while publication waits without changing a
+    // local revision. A reduction must still fit under the previous roots now.
+    for reduction in &resource_reductions {
+        let (instance, package) = &packages[&reduction.instance];
+        let package = package.as_ref().ok_or_else(|| {
+            Error::conflict("Activate this package before comparing resource ancestry.")
+        })?;
+        reduction.recheck(s, package, instance, &authority).await?;
+    }
     s.store
         .transaction(move |db| {
             authority.authorize(db)?;
@@ -975,6 +1013,83 @@ mod migration_tests {
         assert_eq!(
             after, before,
             "a delegated reduction escaped its requester's resource ceiling"
+        );
+        f.s.shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn descendant_reductions_cannot_widen_after_external_ancestry_moves() {
+        use crate::agent_fixture::AgentFixture;
+        use crate::capabilities::{ResumeContext, plugin_packages::Authority};
+        use crate::plugin_grant_fixture::{Fixture, contribution, support};
+        use crate::validation::text;
+        use std::sync::{Arc, atomic::Ordering};
+
+        let f = Fixture::new().await;
+        f.marker("live-parent").await;
+        f.set(json!([contribution("tool", "grant_probe_post", json!([]))]))
+            .await;
+        let target =
+            f.s.agent_fixture(json!({ "name": "Target" }), None)
+                .await
+                .unwrap();
+        let target_id = text(&target, "id").to_owned();
+        f.set_for(
+            &target_id,
+            json!([contribution("tool", "grant_probe_post", support())]),
+        )
+        .await;
+        let id = target_id.clone();
+        let before =
+            f.s.store
+                .read(move |db| db.agent_plugin_grants(&id))
+                .await
+                .unwrap();
+        let input = serde_json::from_value(json!({
+            "agentId": target_id, "revision": before.revision,
+            "grants": [{ "instanceId": f.instance, "access": { "type": "selected", "contributions": [
+                contribution("tool", "grant_probe_post", json!([{ "resourceType": "thread", "id": "support-thread" }]))
+            ] } }], "runCredentialInstances": [],
+        })).unwrap();
+        let checked = Arc::new(tokio::sync::Notify::new());
+        let completed = checked.clone();
+        let resolved = f.posts.clone();
+        f.posts.store(0, Ordering::SeqCst);
+        let authority = Authority::for_grants(
+            &f.s,
+            ResumeContext::Installation(f.bearer.clone()),
+            "manage",
+        )
+        .await
+        .unwrap()
+        .with_recheck_guard(move |_| {
+            let completed = completed.clone();
+            let resolved = resolved.clone();
+            Box::pin(async move {
+                if resolved.load(Ordering::SeqCst) > 0 {
+                    completed.notify_one();
+                }
+                Ok(())
+            })
+        });
+        let publication = f.s.plugins.package_publication.lock().await;
+        let service = f.s.clone();
+        let change = tokio::spawn(async move { replace(&service, input, authority, true).await });
+        tokio::time::timeout(std::time::Duration::from_secs(10), checked.notified())
+            .await
+            .unwrap();
+        f.moved_parent.store(true, Ordering::SeqCst);
+        drop(publication);
+        let error = change.await.unwrap().unwrap_err();
+        assert_eq!(error.status, 403);
+        let after =
+            f.s.store
+                .read(move |db| db.agent_plugin_grants(&target_id))
+                .await
+                .unwrap();
+        assert_eq!(
+            after, before,
+            "a descendant reduction became a grant outside its previous resource root"
         );
         f.s.shutdown.cancel();
     }

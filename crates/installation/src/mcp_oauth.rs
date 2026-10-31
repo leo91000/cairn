@@ -189,11 +189,11 @@ async fn discover(
     let stored = discovery.clone();
     authorize.recheck().await?;
     s.mcps
-        .update_secrets_authorized(
+        .update_secrets_live(
             s,
             &server.id,
             |secrets| secrets.discovery = Some(stored),
-            move |db| authorize.authorize_in(db),
+            authorize,
         )
         .await?;
     Ok(discovery)
@@ -334,11 +334,11 @@ async fn client(
     let registered = OAuthClient::from_registration(&client);
     authorize.recheck().await?;
     s.mcps
-        .update_secrets_authorized(
+        .update_secrets_live(
             s,
             &server.id,
             |secrets| secrets.client = Some(client),
-            move |db| authorize.authorize_in(db),
+            authorize,
         )
         .await?;
     Ok(registered)
@@ -443,14 +443,14 @@ async fn exchange(
         .map(|seconds| now() + (seconds * 1000.) as i64);
     authorize.recheck().await?;
     s.mcps
-        .update_secrets_authorized(
+        .update_secrets_live(
             s,
             &server.id,
             |secrets| {
                 secrets.tokens = Some(tokens);
                 secrets.token_expires_at = expires;
             },
-            move |db| authorize.authorize_in(db),
+            authorize,
         )
         .await
 }

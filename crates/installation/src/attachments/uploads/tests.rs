@@ -498,3 +498,64 @@ async fn cancelling_a_plugin_preparation_prevents_its_upload_publication() {
             .is_ok()
     );
 }
+
+#[tokio::test]
+async fn attachment_publication_rechecks_delegation_after_preparation() {
+    use crate::agent_fixture::AgentFixture;
+    use crate::plugin_grant_fixture::{Fixture as GrantFixture, contribution, support};
+    use crate::validation::text;
+
+    let f = GrantFixture::new().await;
+    f.marker("live-parent").await;
+    f.set(json!([contribution("tool", "grant_probe_post", support())]))
+        .await;
+    let child =
+        f.s.agent_fixture(
+            json!({ "name": "Child", "access": { "installation": true } }),
+            None,
+        )
+        .await
+        .unwrap();
+    let child_id = text(&child, "id");
+    f.set_for(
+        child_id,
+        json!([contribution(
+            "tool",
+            "grant_probe_post",
+            json!([{ "resourceType": "thread", "id": "support-thread" }])
+        )]),
+    )
+    .await;
+    let (chat, bearer) = f.delegated(crate::config::MAIN_AGENT_ID, child_id).await;
+    let authorize = crate::installation_mcp::management_authorization(&f.s, Some(&bearer))
+        .await
+        .unwrap();
+    let file = id();
+    let gate = gated(&f.s, &file);
+    let service = f.s.clone();
+    let (conversation, attachment) = (chat.clone(), file.clone());
+    let upload = tokio::spawn(async move {
+        service
+            .store_attachment_live(&conversation, &attachment, "file.txt", b"data", authorize)
+            .await
+    });
+    settle(gate.reached.notified()).await;
+    f.moved_parent.store(true, Ordering::SeqCst);
+    gate.resume.notify_one();
+    let error = settle(upload).await.unwrap().unwrap_err();
+    assert_eq!(error.status, 403);
+    f.s.store
+        .read(move |db| {
+            assert!(db.uploaded_attachment(&chat, &file)?.is_none());
+            assert_eq!(
+                db.0.query_row("SELECT COUNT(*) FROM attachment_reservations", [], |row| {
+                    row.get::<_, i64>(0)
+                })?,
+                0
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    f.s.shutdown.cancel();
+}

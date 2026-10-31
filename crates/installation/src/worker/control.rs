@@ -54,13 +54,24 @@ impl Worker {
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        self.stop_chat_live(s, id, crate::authorization::Authorization::once(authorize))
+            .await
+    }
+
+    pub(crate) async fn stop_chat_live(
+        &self,
+        s: &Service,
+        id: &str,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<Value> {
+        authorize.recheck().await?;
         let active = self.active.lock().await;
         let executing: std::collections::HashSet<_> = active.keys().cloned().collect();
         let id = id.to_owned();
         let chat = s
             .store
             .transaction(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 let chat = crate::chats::pause_in(db, &id, true)?;
                 if let Some(run_id) = chat["runId"].as_str() {
                     crate::chats::coding_agent::cancel_in(db, run_id)?;
@@ -94,6 +105,17 @@ impl Worker {
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        self.resume_live(s, id, crate::authorization::Authorization::once(authorize))
+            .await
+    }
+
+    pub(crate) async fn resume_live(
+        &self,
+        s: &Service,
+        id: &str,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<Value> {
+        authorize.recheck().await?;
         let active = self.active.lock().await;
         if active.contains_key(id) {
             return Err(Error::conflict(
@@ -104,7 +126,7 @@ impl Worker {
         let result = s
             .store
             .transaction(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 requeue(db, &id)
             })
             .await?;
@@ -125,13 +147,24 @@ impl Worker {
     where
         F: Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static,
     {
+        self.cleanup_live(s, id, crate::authorization::Authorization::local(authorize))
+            .await
+    }
+
+    pub(crate) async fn cleanup_live(
+        &self,
+        s: &Service,
+        id: &str,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<Value> {
+        authorize.recheck().await?;
         let active = self.active.lock().await;
         let proof = authorize.clone();
         let run_id = id.to_owned();
         let run = s
             .store
             .read(move |db| {
-                proof(db)?;
+                proof.authorize(db)?;
                 required(db.run_record(&run_id)?, "Run not found")
             })
             .await?;
@@ -169,7 +202,7 @@ impl Worker {
             ensure_clean(workspace, &root, &env).await?;
         }
         let proof = authorize.clone();
-        s.store.read(move |db| proof(db)).await?;
+        s.store.read(move |db| proof.authorize(db)).await?;
         for workspace in &managed {
             remove_workspace(&run, workspace, &env).await?;
         }
@@ -182,7 +215,7 @@ impl Worker {
         let id = id.to_owned();
         s.store
             .transaction(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 db.change_run(&id, patch)?;
                 db.audit("run.workspace.cleaned", &json!({ "id": id }))
             })

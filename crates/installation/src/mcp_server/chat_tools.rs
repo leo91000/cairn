@@ -265,34 +265,33 @@ pub(crate) async fn invoke(
             _ => {}
         }
     }
-    let management = management_authorization(bearer);
+    let management = management_authorization(s, bearer).await?;
     let control_id = control.then(|| text(&args, "chatId").to_owned());
     let commit_id = control_id.clone();
     let control_origin = origin.clone();
-    let authorize = move |db: &Db<'_>| -> Result<()> {
-        management(db)?;
+    let authorize = management.with_guard(move |db: &Db<'_>| -> Result<()> {
         if let Some(id) = &control_id {
             let chat = required(db.conversation_boundary(id)?, "Chat not found")?;
             crate::native::policy::chat_grant(db, &chat, &control_origin)?;
         }
         Ok(())
-    };
+    });
     let commit_authority = {
-        let check = authorize.clone();
         let source = origin.clone();
-        move |db: &Db<'_>| -> Result<()> {
-            check(db)?;
-            if let Some(id) = &commit_id {
-                crate::native::policy::authorize_chat_in(db, id, &source)?;
-            }
-            Ok(())
-        }
+        authorize
+            .clone()
+            .with_guard(move |db: &Db<'_>| -> Result<()> {
+                if let Some(id) = &commit_id {
+                    crate::native::policy::authorize_chat_in(db, id, &source)?;
+                }
+                Ok(())
+            })
     };
     if name == "get_chat_coding_agent_options" {
-        return chats::coding_agent::options(s, text(&args, "chatId"), authorize).await;
+        return chats::coding_agent::options_live(s, text(&args, "chatId"), authorize).await;
     }
     if name == "switch_chat_coding_agent" {
-        return s.switch_chat_coding_agent(args, authorize).await;
+        return s.switch_chat_coding_agent_live(args, authorize).await;
     }
     if matches!(
         name,
@@ -310,7 +309,7 @@ pub(crate) async fn invoke(
                     rusqlite::TransactionBehavior::Deferred,
                 )?;
                 let db = &Db(&transaction);
-                authorize(db)?;
+                authorize.authorize(db)?;
                 let result = match operation.as_str() {
                     "list_chats" => list(db, &args, reader.as_deref())?,
                     "get_chat" => detail(db, &args)?,
@@ -334,7 +333,7 @@ pub(crate) async fn invoke(
             .read({
                 let chat_id = chat_id.clone();
                 move |db| {
-                    check(db)?;
+                    check.authorize(db)?;
                     let chat = required(db.conversation(&chat_id)?, "Chat not found")?;
                     if chat.lifecycle != cairn_contracts::ConversationLifecycle::Active {
                         return Err(Error::conflict("This conversation has been deleted."));
@@ -355,13 +354,13 @@ pub(crate) async fn invoke(
             && let Some(run) = record.1.filter(|run| run.status.is_resumable())
         {
             s.worker
-                .resume_authorized(s, &run.id, commit_authority.clone())
+                .resume_live(s, &run.id, commit_authority.clone())
                 .await?;
         }
         let result = s
             .store
             .transaction(move |db| {
-                commit_authority(db)?;
+                commit_authority.authorize(db)?;
                 db.delete(&format!("chat-error:{chat_id}"))?;
                 chats::pause_in(db, &chat_id, paused)
             })
@@ -371,7 +370,7 @@ pub(crate) async fn invoke(
     }
     if name == "restore_chat" {
         return s
-            .chat_restore_authorized(text(&args, "chatId"), commit_authority)
+            .chat_restore_live(text(&args, "chatId"), commit_authority)
             .await;
     }
     if name == "resume_chat" {
@@ -380,33 +379,27 @@ pub(crate) async fn invoke(
         let run_id = s
             .store
             .read(move |db| {
-                check(db)?;
+                check.authorize(db)?;
                 let chat = required(db.conversation_boundary(&chat_id)?, "Chat not found")?;
                 require_active(&chat)?;
                 required(chat["runId"].as_str().map(str::to_owned), "Run not found")
             })
             .await?;
-        return s
-            .worker
-            .resume_authorized(s, &run_id, commit_authority)
-            .await;
+        return s.worker.resume_live(s, &run_id, commit_authority).await;
     }
     if name == "cancel_chat_question" {
         let native = crate::native::policy::chat_authorization(text(&args, "chatId"));
         return s
-            .question_cancel_authorized(
+            .question_cancel_live(
                 text(&args, "chatId"),
                 text(&args, "questionId"),
-                move |db| {
-                    commit_authority(db)?;
-                    native(db)
-                },
+                commit_authority.with_guard(native),
             )
             .await;
     }
     if name == "answer_chat_question" {
         return s
-            .question_answer_authorized(
+            .question_answer_live(
                 text(&args, "chatId"),
                 text(&args, "questionId"),
                 args["answer"].clone(),
@@ -416,7 +409,7 @@ pub(crate) async fn invoke(
     }
     if name == "delete_chat" {
         return s
-            .chat_trash_authorized(
+            .chat_trash_live(
                 text(&args, "chatId"),
                 args["confirm"] == true,
                 commit_authority,
@@ -426,13 +419,13 @@ pub(crate) async fn invoke(
     if name == "compact_chat" {
         // Compaction starts model work: the conversation's own grant is checked when it commits.
         return s
-            .chat_compact_authorized(text(&args, "chatId"), commit_authority)
+            .chat_compact_live(text(&args, "chatId"), commit_authority)
             .await;
     }
     if name == "stop_chat" {
         return s
             .worker
-            .stop_chat_authorized(s, text(&args, "chatId"), commit_authority)
+            .stop_chat_live(s, text(&args, "chatId"), commit_authority)
             .await;
     }
 
@@ -447,7 +440,7 @@ pub(crate) async fn invoke(
     let result = s
         .store
         .transaction(move |db| {
-            commit_authority(db)?;
+            commit_authority.authorize(db)?;
             let id = text(&args, "chatId");
             match name.as_str() {
                 "restart_chat_session" => {

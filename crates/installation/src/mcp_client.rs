@@ -16,7 +16,7 @@ use reqwest::{
     header::{HeaderMap, HeaderValue},
 };
 use serde_json::{Map, Value, json};
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::{collections::HashSet, time::Duration};
 
 pub const MODERN: &str = "2026-07-28";
 
@@ -62,58 +62,8 @@ fn unsupported_version() -> Error {
     Error::bad_gateway("No supported MCP protocol version.")
 }
 
-/// Retained local proof and optional live semantic checks for every transport
-/// effect, including OAuth preparation before the client exists.
-type LocalAuthorization = dyn Fn(&Db<'_>) -> Result<()> + Send + Sync;
-
-#[derive(Clone)]
-pub(crate) struct Authorization {
-    service: Service,
-    local: Arc<LocalAuthorization>,
-    live: Option<crate::capabilities::plugin_packages::Authority>,
-}
-
-impl Authorization {
-    pub(crate) fn new<F>(s: &Service, local: F) -> Self
-    where
-        F: Fn(&Db<'_>) -> Result<()> + Send + Sync + 'static,
-    {
-        Self {
-            service: s.clone(),
-            local: Arc::new(local),
-            live: None,
-        }
-    }
-
-    fn live(s: &Service, live: crate::capabilities::plugin_packages::Authority) -> Self {
-        let local = live.clone();
-        Self {
-            service: s.clone(),
-            local: Arc::new(move |db| local.authorize(db)),
-            live: Some(live),
-        }
-    }
-
-    pub(crate) fn authorize_in(&self, db: &Db<'_>) -> Result<()> {
-        (self.local)(db)
-    }
-
-    pub(crate) async fn recheck(&self) -> Result<()> {
-        let local = self.clone();
-        self.service
-            .store
-            .read(move |db| local.authorize_in(db))
-            .await?;
-        if let Some(live) = &self.live {
-            live.recheck(&self.service).await?;
-        }
-        let local = self.clone();
-        self.service
-            .store
-            .read(move |db| local.authorize_in(db))
-            .await
-    }
-}
+// Management and transport effects carry the same local/live proof.
+pub(crate) use crate::authorization::Authorization;
 
 pub struct Client {
     authorization: Option<Authorization>,
@@ -161,11 +111,12 @@ impl Client {
         Self::connect_authorized(s, server, Authorization::live(s, authority)).await
     }
 
-    async fn connect_authorized(
+    pub(crate) async fn connect_authorized(
         s: &Service,
         server: &McpServer,
         authorize: Authorization,
     ) -> Result<Self> {
+        let authorize = authorize.for_service(s);
         let refreshable =
             |secrets: &McpSecrets| server.uses_oauth() && !secrets.refresh_token().is_empty();
         let mut secrets = s.mcps.server_secrets(s, &server.id).await?;
@@ -200,10 +151,20 @@ impl Client {
     where
         F: Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static,
     {
-        let mut client = Self::connect_server_authorized(s, server, authorize.clone()).await?;
-        s.store.read(move |db| authorize(db)).await?;
+        Self::list_tools_live(s, server, Authorization::new(s, authorize)).await
+    }
+
+    pub(crate) async fn list_tools_live(
+        s: &Service,
+        server: &McpServer,
+        authorize: Authorization,
+    ) -> Result<Vec<Value>> {
+        let authorize = authorize.for_service(s);
+        let mut client = Self::connect_authorized(s, server, authorize.clone()).await?;
+        authorize.recheck().await?;
         let tools = client.discover().await;
         client.close().await;
+        authorize.recheck().await?;
         tools
     }
 
@@ -596,7 +557,10 @@ pub fn sse_result(bytes: &[u8], id: &Value) -> Result<Value> {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
     use tempfile::TempDir;
 
     #[tokio::test]

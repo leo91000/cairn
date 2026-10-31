@@ -324,14 +324,28 @@ pub(crate) async fn preview(
     chat_id: &str,
     authorize: impl Fn(&Db<'_>) -> Result<()> + Clone + Send + 'static,
 ) -> Result<Value> {
+    preview_live(
+        s,
+        chat_id,
+        crate::authorization::Authorization::local(authorize),
+    )
+    .await
+}
+
+pub(crate) async fn preview_live(
+    s: &Service,
+    chat_id: &str,
+    authorize: crate::authorization::Authorization,
+) -> Result<Value> {
+    authorize.recheck().await?;
     let check = authorize.clone();
-    s.store.read(move |db| check(db)).await?;
+    s.store.read(move |db| check.authorize(db)).await?;
     // Both native sources and destinations need fresh human authority.
     let chat = s.conversation_boundary(chat_id).await?;
     refresh_authority(s, &chat).await?;
     let (chat_id, origin) = (chat_id.to_owned(), origin());
     s.store.read(move |db| {
-        authorize(db)?;
+        authorize.authorize(db)?;
         let (chat, run, agent, automatic) = chat_run(db, &chat_id)?;
         let from = backend(&run["snapshot"]["agent"]);
         let to = backend(&agent);
@@ -369,19 +383,29 @@ impl Service {
     where
         F: Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static,
     {
+        self.migrate_chat_backend_live(input, crate::authorization::Authorization::local(authorize))
+            .await
+    }
+
+    pub(crate) async fn migrate_chat_backend_live(
+        &self,
+        input: Value,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<Value> {
+        authorize.recheck().await?;
         let input = parse("mcp:migrate_chat_backend", input)?;
         let chat_id = text(&input, "chatId").to_owned();
         let source = origin();
         // Check management authority before contacting Beacon or a controller.
         let check = authorize.clone();
-        self.store.read(move |db| check(db)).await?;
+        self.store.read(move |db| check.authorize(db)).await?;
         let chat = self.conversation_boundary(&chat_id).await?;
         refresh_authority(self, &chat).await?;
         let operation = id();
         let (args, who, migration) = (input.clone(), source.clone(), operation.clone());
         let request_authorization = authorize.clone();
         let expired = self.store.transaction(move |db| {
-            request_authorization(db)?;
+            request_authorization.authorize(db)?;
             let (mut chat, run, agent, _) = chat_run(db, text(&args, "chatId"))?;
             if backend(&agent) != text(&args, "backend") || backend(&agent) == backend(&run["snapshot"]["agent"]) {
                 return Err(Error::conflict("Choose the backend currently configured on this conversation's agent."));
@@ -454,7 +478,7 @@ impl Service {
         });
         tokio::spawn(async move {
             let outcome = s
-                .convert_chat(&chat_id, &operation, input, source, authorize)
+                .convert_chat_live(&chat_id, &operation, input, source, authorize)
                 .await;
             if let Err(error) = outcome {
                 let message = error.message.clone();
@@ -493,17 +517,15 @@ impl Service {
         Ok(result)
     }
 
-    async fn convert_chat<F>(
+    async fn convert_chat_live(
         &self,
         chat_id: &str,
         operation: &str,
         args: Value,
         source: Origin,
-        authorize: F,
-    ) -> Result<()>
-    where
-        F: Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static,
-    {
+        authorize: crate::authorization::Authorization,
+    ) -> Result<()> {
+        authorize.recheck().await?;
         let chat = self.conversation_boundary(chat_id).await?;
         let run_id = text(&chat, "runId").to_owned();
         let _storage_lock = crate::conversation_lifecycle::storage_lock(&self.config.data_dir)?;
@@ -639,7 +661,7 @@ impl Service {
         policy::refresh(self).await?;
         let (chat_id, operation) = (chat_id.to_owned(), operation.to_owned());
         self.store.transaction(move |db| {
-            authorize(db)?;
+            authorize.authorize(db)?;
             let (mut chat, current, agent, _) = chat_run(db, &chat_id)?;
             let migration = &current["backendMigration"];
             if migration["id"] != operation || migration["agentRevision"] != agent["revision"]

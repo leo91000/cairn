@@ -194,15 +194,17 @@ async fn choices(s: &Service, agent: &Value) -> Result<Vec<Choice>> {
     Ok(choices)
 }
 
-pub(crate) async fn options<F>(s: &Service, id: &str, authorize: F) -> Result<Value>
-where
-    F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
-{
+pub(crate) async fn options_live(
+    s: &Service,
+    id: &str,
+    authorize: crate::authorization::Authorization,
+) -> Result<Value> {
+    authorize.recheck().await?;
     let id = id.to_owned();
     let (run, pending, eligible) = s
         .store
         .read(move |db| {
-            authorize(db)?;
+            authorize.authorize(db)?;
             let chat = chat(db, &id)?;
             super::require_active(&chat)?;
             let run = db.run(text(&chat, "runId"))?.unwrap_or(Value::Null);
@@ -234,14 +236,12 @@ where
 }
 
 impl Service {
-    pub(crate) async fn switch_chat_coding_agent<F>(
+    pub(crate) async fn switch_chat_coding_agent_live(
         &self,
         input: Value,
-        authorize: F,
-    ) -> Result<Value>
-    where
-        F: Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static,
-    {
+        authorize: crate::authorization::Authorization,
+    ) -> Result<Value> {
+        authorize.recheck().await?;
         let input: cairn_contracts::SwitchChatCodingAgentInput =
             serde_json::from_value(input).map_err(|e| Error::bad(e.to_string()))?;
         if input.turn_id.is_empty() || input.turn_id.chars().count() > 200 {
@@ -258,7 +258,7 @@ impl Service {
         let agent = self
             .store
             .read(move |db| {
-                check(db)?;
+                check.authorize(db)?;
                 let chat = chat(db, &chat_id)?;
                 let run = required(db.run(text(&chat, "runId"))?, "Run not found")?;
                 Ok(run["snapshot"]["agent"].clone())
@@ -270,7 +270,7 @@ impl Service {
         let result = self
             .store
             .transaction(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 let id = text(&saved, "chatId");
                 let chat = chat(db, id)?;
                 super::require_active(&chat)?;

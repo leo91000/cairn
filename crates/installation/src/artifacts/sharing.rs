@@ -101,6 +101,24 @@ pub(crate) async fn set_authorized<F>(
 where
     F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
 {
+    set_live(
+        s,
+        run,
+        artifact,
+        value,
+        crate::authorization::Authorization::once(authorize),
+    )
+    .await
+}
+
+pub(crate) async fn set_live(
+    s: &Service,
+    run: &str,
+    artifact: &str,
+    value: &str,
+    authorize: crate::authorization::Authorization,
+) -> Result<Value> {
+    authorize.recheck().await?;
     uuid(run)?;
     uuid(artifact)?;
     let run = run.to_owned();
@@ -113,7 +131,7 @@ where
     };
     s.store
         .transaction(move |db| {
-            authorize(db)?;
+            authorize.authorize(db)?;
             required(db.run(&run)?, "Run not found")?;
             let key = format!("artifact:{run}:{artifact}");
             let mut record = required(db.kv(&key)?, "Artifact not found")?;

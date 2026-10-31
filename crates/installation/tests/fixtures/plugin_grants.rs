@@ -1,8 +1,7 @@
 //! Shared real-service grant fixture for integration and publication-boundary regressions.
 #![allow(dead_code)]
 
-#[path = "../common/mod.rs"]
-mod common;
+use crate::common;
 
 use axum::{Router, body::Body, http::StatusCode, routing::any};
 use cairn_installation::{

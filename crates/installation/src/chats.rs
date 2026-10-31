@@ -1374,6 +1374,16 @@ impl Service {
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        self.chat_from_run_live(run_id, crate::authorization::Authorization::once(authorize))
+            .await
+    }
+
+    pub(crate) async fn chat_from_run_live(
+        &self,
+        run_id: &str,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<Value> {
+        authorize.recheck().await?;
         let origin = crate::native::policy::origin();
         if origin.known() {
             let run = self.store.run(run_id).await?;
@@ -1389,7 +1399,7 @@ impl Service {
         let run_id = run_id.to_owned();
         self.store
             .transaction(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 from_run(db, &run_id, &origin)
             })
             .await
@@ -1456,10 +1466,12 @@ impl Service {
     }
 
     /// Compacts the conversation's native context while it is idle.
-    pub(crate) async fn chat_compact_authorized<F>(&self, id: &str, authorize: F) -> Result<Value>
-    where
-        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
-    {
+    pub(crate) async fn chat_compact_live(
+        &self,
+        id: &str,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<Value> {
+        authorize.recheck().await?;
         let origin = crate::native::policy::origin();
         if origin.known() {
             crate::native::policy::refresh_chat(self, id).await?;
@@ -1484,7 +1496,7 @@ impl Service {
         let result = self
             .store
             .transaction(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 compact(db, &id, &origin)
             })
             .await?;

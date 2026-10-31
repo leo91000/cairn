@@ -128,7 +128,8 @@ impl RunOperation {
                 Some(bearer)
             }
         };
-        let authorize = crate::installation_mcp::management_authorization(bearer.as_deref());
+        let authorize =
+            crate::installation_mcp::management_authorization(s, bearer.as_deref()).await?;
         match self.name {
             "run_task" => {
                 let input: RunMissionInput = decode(input)?;
@@ -158,7 +159,7 @@ impl RunOperation {
             "cleanup_run" => {
                 let input: RunInput = decode(input)?;
                 s.worker
-                    .cleanup_authorized(s, &input.run_id.to_string(), authorize)
+                    .cleanup_live(s, &input.run_id.to_string(), authorize)
                     .await
             }
             "list_runs" => {
@@ -171,7 +172,7 @@ impl RunOperation {
                             rusqlite::TransactionBehavior::Deferred,
                         )?;
                         let db = Db(&tx);
-                        authorize(&db)?;
+                        authorize.authorize(&db)?;
                         let task = input.task_id.map(|id| id.to_string());
                         let runs = db.runs(
                             input.status.map(RunStatus::as_str),
@@ -200,7 +201,7 @@ impl RunOperation {
                             rusqlite::TransactionBehavior::Deferred,
                         )?;
                         let db = Db(&tx);
-                        authorize(&db)?;
+                        authorize.authorize(&db)?;
                         crate::mcp_server::run_history(&db, &input.run_id.to_string(), input.after)
                     })
                     .await
@@ -215,7 +216,7 @@ impl RunOperation {
                             rusqlite::TransactionBehavior::Deferred,
                         )?;
                         let db = Db(&tx);
-                        authorize(&db)?;
+                        authorize.authorize(&db)?;
                         let run = input.run_id.to_string();
                         db.require_run(&run)?;
                         crate::conversation_lifecycle::require_active_run(&db, &run)?;
@@ -237,7 +238,7 @@ impl RunOperation {
                             rusqlite::TransactionBehavior::Deferred,
                         )?;
                         let db = Db(&tx);
-                        authorize(&db)?;
+                        authorize.authorize(&db)?;
                         let run = input.run_id.to_string();
                         db.require_run(&run)?;
                         crate::conversation_lifecycle::require_active_run(&db, &run)?;
@@ -275,7 +276,7 @@ impl RunOperation {
                             rusqlite::TransactionBehavior::Deferred,
                         )?;
                         let db = Db(&tx);
-                        authorize(&db)?;
+                        authorize.authorize(&db)?;
                         let run = input.run_id.to_string();
                         db.require_run(&run)?;
                         crate::conversation_lifecycle::require_active_run(&db, &run)?;

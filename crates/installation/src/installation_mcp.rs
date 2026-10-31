@@ -74,15 +74,16 @@ pub(crate) fn agent_allowed(caller: &Value, target: &Value) -> bool {
 }
 
 /// Authorization for management effects after asynchronous preparation.
-pub(crate) fn management_authorization(
+pub(crate) async fn management_authorization(
+    s: &Service,
     bearer: Option<&str>,
-) -> impl Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static {
-    let bearer = bearer.map(str::to_owned);
-    move |db| {
-        if let Some(bearer) = &bearer {
-            authorize_in(db, bearer)?;
+) -> Result<crate::authorization::Authorization> {
+    match bearer {
+        Some(bearer) => {
+            let (_, authority) = authorize_with_authority(s, bearer).await?;
+            Ok(crate::authorization::Authorization::live(s, authority))
         }
-        Ok(())
+        None => Ok(crate::authorization::Authorization::default()),
     }
 }
 

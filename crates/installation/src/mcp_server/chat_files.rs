@@ -27,15 +27,13 @@ pub(super) async fn invoke(
     args: Value,
     bearer: Option<&str>,
 ) -> Result<Value> {
-    let authorize = management_authorization(bearer);
+    let authorize = management_authorization(s, bearer).await?;
     let chat_id = text(&args, "chatId").to_owned();
-    let check = authorize.clone();
     let authorized_chat = chat_id.clone();
-    let authorize_chat = move |db: &Db<'_>| {
-        check(db)?;
+    let authorize_chat = authorize.with_guard(move |db: &Db<'_>| {
         active_chat(db, &authorized_chat)?;
         Ok(())
-    };
+    });
     let artifact = name.contains("artifact");
     let listing = name.starts_with("list_");
     let input = args.clone();
@@ -49,7 +47,7 @@ pub(super) async fn invoke(
                 rusqlite::TransactionBehavior::Deferred,
             )?;
             let db = &Db(&transaction);
-            check(db)?;
+            check.authorize(db)?;
             let chat = active_chat(db, &chat_id)?;
             let prefix = if artifact {
                 if let Some(run) = chat["runId"].as_str() {
@@ -114,7 +112,7 @@ pub(super) async fn invoke(
         return Ok(record);
     }
     if name == "set_chat_artifact_visibility" {
-        return crate::artifacts::sharing::set_authorized(
+        return crate::artifacts::sharing::set_live(
             s,
             text(&record, "runId"),
             text(&args, "artifactId"),
@@ -158,7 +156,7 @@ pub(super) async fn invoke(
     file.take(CHUNK_BYTES).read_to_end(&mut bytes).await?;
     let next = offset + bytes.len() as u64;
     // A transfer cannot return data after the execution grant or chat was revoked.
-    s.store.read(move |db| authorize_chat(db)).await?;
+    s.store.read(move |db| authorize_chat.authorize(db)).await?;
     Ok(json!({
         "file": record,
         "encoding": "base64",

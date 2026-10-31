@@ -25,6 +25,21 @@ impl Service {
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        self.merge_agents_live(
+            input,
+            crate::authorization::Authorization::once(authorize),
+            resource_authority,
+        )
+        .await
+    }
+
+    pub(crate) async fn merge_agents_live(
+        &self,
+        input: cairn_contracts::MergeAgentsInput,
+        authorize: crate::authorization::Authorization,
+        resource_authority: Option<crate::capabilities::plugin_packages::Authority>,
+    ) -> Result<cairn_contracts::MergeAgentsOutput> {
+        authorize.recheck().await?;
         let (target, source) = (input.target_id.to_string(), input.source_id.to_string());
         let coverage = crate::plugins::grants::check_coverage_authorized(
             self,
@@ -45,7 +60,7 @@ impl Service {
         };
         self.missions
             .merge_agents(self, input, move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 if let Some(authority) = &resource_authority {
                     authority.authorize(db)?;
                 }

@@ -286,9 +286,18 @@ impl Service {
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        self.conversation_retention_live(crate::authorization::Authorization::once(authorize))
+            .await
+    }
+
+    pub(crate) async fn conversation_retention_live(
+        &self,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<Value> {
+        authorize.recheck().await?;
         self.store
             .read(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 Ok(serde_json::to_value(retention(db)?)?)
             })
             .await
@@ -307,6 +316,19 @@ impl Service {
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        self.save_conversation_retention_live(
+            input,
+            crate::authorization::Authorization::once(authorize),
+        )
+        .await
+    }
+
+    pub(crate) async fn save_conversation_retention_live(
+        &self,
+        input: Value,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<Value> {
+        authorize.recheck().await?;
         let policy: Retention = serde_json::from_value(input)
             .map_err(|_| Error::bad("Choose a whole number of days from 0 to 36500."))?;
         if policy.inactivity_days > 36500 {
@@ -316,7 +338,7 @@ impl Service {
             .store
             .transaction(move |db| {
                 let value = serde_json::to_value(&policy)?;
-                authorize(db)?;
+                authorize.authorize(db)?;
                 db.save_conversation_retention(&policy)?;
                 db.audit("conversation.retention.updated", &value)?;
                 Ok(value)
@@ -358,12 +380,27 @@ impl Service {
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        self.chat_trash_live(
+            id,
+            confirmed,
+            crate::authorization::Authorization::once(authorize),
+        )
+        .await
+    }
+
+    pub(crate) async fn chat_trash_live(
+        &self,
+        id: &str,
+        confirmed: bool,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<Value> {
+        authorize.recheck().await?;
         crate::validation::uuid(id)?;
         let id = id.to_owned();
         let (result, mut cancel) = self
             .store
             .transaction(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 trash(db, &id, confirmed)
             })
             .await?;
@@ -389,6 +426,16 @@ impl Service {
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        self.chat_restore_live(id, crate::authorization::Authorization::once(authorize))
+            .await
+    }
+
+    pub(crate) async fn chat_restore_live(
+        &self,
+        id: &str,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<Value> {
+        authorize.recheck().await?;
         let _process_lock = storage_lock(&self.config.data_dir)?;
         crate::validation::uuid(id)?;
         let _guard = self
@@ -398,7 +445,7 @@ impl Service {
         let id = id.to_owned();
         self.store
             .transaction(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 restore(db, &id)
             })
             .await
@@ -621,6 +668,21 @@ impl Service {
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        self.chat_new_session_live(
+            id,
+            confirmed,
+            crate::authorization::Authorization::once(authorize),
+        )
+        .await
+    }
+
+    pub(crate) async fn chat_new_session_live(
+        &self,
+        id: &str,
+        confirmed: bool,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<Value> {
+        authorize.recheck().await?;
         if !confirmed {
             return Err(Error::conflict(
                 "Confirm starting a fresh agent session using the preserved history and files.",
@@ -629,7 +691,7 @@ impl Service {
         let id = id.to_owned();
         self.store
             .transaction(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 request_new_session(db, &id)
             })
             .await

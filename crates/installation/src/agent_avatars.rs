@@ -96,6 +96,21 @@ impl AgentAvatars {
     where
         F: FnOnce(&crate::store::Db<'_>) -> Result<()> + Send + 'static,
     {
+        self.generate_live(
+            s,
+            agent_id,
+            crate::authorization::Authorization::once(authorize),
+        )
+        .await
+    }
+
+    pub(crate) async fn generate_live(
+        &self,
+        s: &Arc<Service>,
+        agent_id: &str,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<Agent> {
+        authorize.recheck().await?;
         uuid(agent_id)?;
         // Serialize registration with close: no job may escape the shutdown drain.
         let tasks = self.tasks.lock().await;
@@ -113,7 +128,7 @@ impl AgentAvatars {
         let agent = s
             .store
             .transaction(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 let mut agent = required(db.agent(&agent_id)?, "Agent not found")?;
                 if agent
                     .avatar
@@ -144,16 +159,14 @@ impl AgentAvatars {
         Ok(agent)
     }
 
-    pub(crate) async fn upload<F>(
+    pub(crate) async fn upload_live(
         &self,
         s: &Service,
         agent_id: &str,
         data: &str,
-        authorize: F,
-    ) -> Result<Agent>
-    where
-        F: FnOnce(&crate::store::Db<'_>) -> Result<()> + Send + 'static,
-    {
+        authorize: crate::authorization::Authorization,
+    ) -> Result<Agent> {
+        authorize.recheck().await?;
         if data.len() > MAX_UPLOAD.div_ceil(3) * 4 {
             return Err(Error::too_large("Choose an image smaller than 5 MB."));
         }
@@ -165,9 +178,10 @@ impl AgentAvatars {
         }
         let bytes = portrait(bytes).await?;
         let agent_id = agent_id.to_owned();
+        authorize.recheck().await?;
         s.store
             .transaction(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 let mut agent = required(db.agent(&agent_id)?, "Agent not found")?;
                 save_portrait(db, &mut agent, &bytes, &id())?;
                 db.save_agent(&agent)

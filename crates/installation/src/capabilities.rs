@@ -79,14 +79,10 @@ impl ResumeRun {
             policy::refresh_for(s, &run["snapshot"]["agent"]).await?;
         }
         let commit_id = id.clone();
-        s.worker
-            .resume_authorized(s, &id, move |db: &Db<'_>| {
-                if let Some(bearer) = &bearer {
-                    crate::installation_mcp::authorize_in(db, bearer)?;
-                }
-                policy::authorize_run_in(db, &commit_id, &origin)
-            })
-            .await?;
+        let authorize = crate::installation_mcp::management_authorization(s, bearer.as_deref())
+            .await?
+            .with_guard(move |db| policy::authorize_run_in(db, &commit_id, &origin));
+        s.worker.resume_live(s, &id, authorize).await?;
         Ok(ResumeRunOutput {
             run_id: input.run_id,
         })
@@ -223,17 +219,19 @@ impl ProjectOperation {
                 Some(bearer)
             }
         };
-        let authorize = crate::installation_mcp::management_authorization(bearer.as_deref());
+        let authorize =
+            crate::installation_mcp::management_authorization(s, bearer.as_deref()).await?;
         match self.name {
             "save_project" => Ok(serde_json::to_value(
-                s.create_project(decode(input)?, None, authorize).await?,
+                s.create_project_live(decode(input)?, None, authorize)
+                    .await?,
             )?),
             "replace_project" => Ok(serde_json::to_value(
-                s.replace_project(decode(input)?, authorize).await?,
+                s.replace_project_live(decode(input)?, authorize).await?,
             )?),
             "delete_project" => {
                 let input: ProjectInput = decode(input)?;
-                s.delete_project(input.project_id, authorize).await?;
+                s.delete_project_live(input.project_id, authorize).await?;
                 Ok(serde_json::to_value(DeleteProjectOutput { deleted: true })?)
             }
             "list_projects" => {
@@ -245,7 +243,7 @@ impl ProjectOperation {
                             rusqlite::TransactionBehavior::Deferred,
                         )?;
                         let db = Db(&tx);
-                        authorize(&db)?;
+                        authorize.authorize(&db)?;
                         let output = ListProjectsOutput {
                             projects: db.projects()?,
                         };
@@ -263,7 +261,7 @@ impl ProjectOperation {
                             rusqlite::TransactionBehavior::Deferred,
                         )?;
                         let db = Db(&tx);
-                        authorize(&db)?;
+                        authorize.authorize(&db)?;
                         let project = crate::error::required(
                             db.project(&input.project_id.to_string())?,
                             "Project not found",
@@ -483,18 +481,19 @@ impl AgentOperation {
                 (crate::service::AgentEditor::Installation, Some(bearer))
             }
         };
-        let authorize = crate::installation_mcp::management_authorization(bearer.as_deref());
+        let authorize =
+            crate::installation_mcp::management_authorization(s, bearer.as_deref()).await?;
         match self.name {
             "set_agent_avatar" => {
                 let input: SetAgentAvatarInput = decode(input)?;
                 Ok(serde_json::to_value(
                     s.avatars
-                        .upload(s, &input.agent_id.to_string(), &input.data, authorize)
+                        .upload_live(s, &input.agent_id.to_string(), &input.data, authorize)
                         .await?,
                 )?)
             }
             "save_agent" => Ok(serde_json::to_value(
-                s.save_profile(
+                s.save_profile_live(
                     crate::agents::SaveProfile::Create(decode(input)?),
                     editor,
                     authorize,
@@ -502,7 +501,7 @@ impl AgentOperation {
                 .await?,
             )?),
             "replace_agent" => Ok(serde_json::to_value(
-                s.save_profile(
+                s.save_profile_live(
                     crate::agents::SaveProfile::Replace(decode(input)?),
                     editor,
                     authorize,
@@ -510,17 +509,17 @@ impl AgentOperation {
                 .await?,
             )?),
             "preview_agent" => Ok(serde_json::to_value(
-                s.agent_preview(decode(input)?, authorize).await?,
+                s.agent_preview_live(decode(input)?, authorize).await?,
             )?),
             "merge_agents" => Ok(serde_json::to_value(
-                s.merge_agents_authorized(decode(input)?, authorize, merge_authority)
+                s.merge_agents_live(decode(input)?, authorize, merge_authority)
                     .await?,
             )?),
             "generate_agent_avatar" => {
                 let input: AgentInput = decode(input)?;
                 Ok(serde_json::to_value(
                     s.avatars
-                        .generate_authorized(s, &input.agent_id.to_string(), authorize)
+                        .generate_live(s, &input.agent_id.to_string(), authorize)
                         .await?,
                 )?)
             }
@@ -529,7 +528,7 @@ impl AgentOperation {
                 let id = input.agent_id.to_string();
                 s.store
                     .transaction(move |db| {
-                        authorize(db)?;
+                        authorize.authorize(db)?;
                         crate::error::required(db.agent(&id)?, "Agent not found")?;
                         crate::service::ensure_removable(db, "agents", &id)?;
                         crate::service::forget_agent(db, &id)?;
@@ -558,7 +557,7 @@ impl AgentOperation {
                             rusqlite::TransactionBehavior::Deferred,
                         )?;
                         let db = Db(&tx);
-                        authorize(&db)?;
+                        authorize.authorize(&db)?;
                         let result = if let Some(id) = agent_id {
                             serde_json::to_value(crate::error::required(
                                 db.agent(&id.to_string())?,
