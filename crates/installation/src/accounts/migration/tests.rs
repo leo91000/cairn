@@ -148,7 +148,7 @@ async fn real_version13_database_preserves_accounts_usage_secrets_and_references
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        19
+        crate::store::DATABASE_VERSION
     );
     assert_eq!(
         db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
@@ -287,7 +287,7 @@ async fn empty_version13_pool_upgrades_and_unrelated_foreign_key_failure_rolls_b
 }
 
 #[tokio::test]
-async fn real_version12_database_completes_both_atomic_upgrades() {
+async fn real_version12_database_completes_all_atomic_upgrades() {
     let root = tempfile::tempdir().unwrap();
     let db = Connection::open(root.path().join("manager.db")).unwrap();
     db.execute_batch(include_str!("../../../tests/fixtures/account-pool-v12.sql"))
@@ -297,7 +297,7 @@ async fn real_version12_database_completes_both_atomic_upgrades() {
     assert_eq!(
         db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        19
+        crate::store::DATABASE_VERSION
     );
     assert_eq!(direct_metadata(&db), vec![Vec::<String>::new(); 7]);
 }

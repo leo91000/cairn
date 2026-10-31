@@ -4,6 +4,8 @@ import {
   it,
   vi,
 } from 'vitest'
+import { listPluginResources } from '../../../packages/contracts/generated/listPluginResources'
+import { resolvePluginResource } from '../../../packages/contracts/generated/resolvePluginResource'
 import { api } from '../src/api'
 import { pluginRequest } from '../src/plugin-operations'
 
@@ -41,4 +43,35 @@ it('preserves a preparation revision conflict for the resource editor', async ()
     errorStatus: 409,
   })
   await expect(pluginRequest('/resource', { method: 'POST' })).rejects.toMatchObject({ status: 409, message: 'Reload the skill' })
+})
+
+it.each(['list', 'resolve'])('awaits a generated resource %s read through the polling transport', async (operation) => {
+  const item = {
+    resourceType: 'repository',
+    id: 'repo',
+    name: 'Repository',
+    parent: null,
+  }
+  const value = operation === 'list' ? { items: [item], nextPage: null } : { resource: item, ancestors: [] }
+  const result = operation === 'list' ? { kind: 'resourcePage', page: value } : { kind: 'resourceAncestry', resolution: value }
+  vi.mocked(api).mockResolvedValueOnce({ operation: 'job' }).mockResolvedValueOnce({
+    id: 'job',
+    state: 'completed',
+    result,
+    error: null,
+  })
+  const input = {
+    pluginId: 'forge',
+    instanceId: 'instance',
+    resourceType: 'repository',
+    page: 1,
+    query: '',
+    id: 'repo',
+  }
+  const output = operation === 'list'
+    ? await listPluginResources(pluginRequest, input)
+    : await resolvePluginResource(pluginRequest, input)
+  expect(output).toEqual(value)
+  expect(vi.mocked(api).mock.calls[0]![1]).toEqual({ method: 'GET' })
+  expect(vi.mocked(api).mock.calls[1]![0]).toBe('/plugins/packages/operations/job')
 })
