@@ -724,14 +724,42 @@ pub(crate) fn contribution_ceiling_in(db: &Db<'_>, requester: &str, target: &str
         .all(|id| current.run_credential_instances.contains(id)))
 }
 
-/// Resolve selected resource roots afresh rather than trusting stored labels or
-/// ancestry. Return revisions so a mutation can recheck the same profiles locally.
+/// The local identities behind a resolved semantic ceiling. Retain this proof
+/// through every suspension and recheck it in the effect/publication transaction.
+#[derive(Clone)]
+pub(crate) struct Coverage {
+    profiles: [(String, String); 2],
+    resolved: Vec<(
+        super::connections::Connection,
+        super::grant_authorization::Snapshot,
+    )>,
+}
+
+impl Coverage {
+    pub(crate) fn authorize(&self, db: &Db<'_>) -> Result<()> {
+        for (agent, revision) in &self.profiles {
+            if required(db.agent(agent)?, "Agent not found")?.revision != *revision {
+                return Err(Error::conflict(
+                    "Plugin grants changed during coverage resolution.",
+                ));
+            }
+        }
+        for (instance, snapshot) in &self.resolved {
+            super::connections::check_revision(db, instance)?;
+            snapshot.authorize(db)?;
+        }
+        Ok(())
+    }
+}
+
+/// Resolve selected resource roots afresh, retaining the profile, instance and
+/// package identities that make that ancestry authoritative.
 pub(crate) async fn check_coverage_authorized(
     s: &crate::service::Service,
     requester: &str,
     target: &str,
     authority: Option<crate::capabilities::plugin_packages::Authority>,
-) -> Result<(String, String)> {
+) -> Result<Coverage> {
     tokio::time::timeout(
         std::time::Duration::from_secs(40),
         Box::pin(check_coverage_inner(s, requester, target, authority)),
@@ -745,7 +773,7 @@ async fn check_coverage_inner(
     requester: &str,
     target: &str,
     authority: Option<crate::capabilities::plugin_packages::Authority>,
-) -> Result<(String, String)> {
+) -> Result<Coverage> {
     if let Some(authority) = &authority {
         authority.recheck(s).await?;
     }
@@ -767,7 +795,7 @@ async fn check_coverage_inner(
         .await?;
     let (left, right) = (requester.clone(), target.clone());
     let expected = (current.revision.clone(), proposed.revision.clone());
-    let authority = Some(authority.unwrap_or_default().with_guard(move |db| {
+    let mut authority = Some(authority.unwrap_or_default().with_guard(move |db| {
         if required(db.agent(&left)?, "Requesting agent not found")?.revision != expected.0
             || required(db.agent(&right)?, "Agent not found")?.revision != expected.1
         {
@@ -777,6 +805,7 @@ async fn check_coverage_inner(
         }
         Ok(())
     }));
+    let mut resolved = Vec::new();
     if requester != target {
         for next in &proposed.grants {
             let held = current
@@ -819,6 +848,12 @@ async fn check_coverage_inner(
                     .await?;
                     (requester.clone(), snapshot)
                 };
+                let expected = (instance.clone(), snapshot.clone());
+                authority = Some(authority.take().unwrap_or_default().with_guard(move |db| {
+                    super::connections::check_revision(db, &expected.0)?;
+                    expected.1.authorize(db)
+                }));
+                resolved.push((instance.clone(), snapshot.clone()));
                 for next in proposed {
                     let held = current
                         .iter()
@@ -841,24 +876,16 @@ async fn check_coverage_inner(
             }
         }
     }
-    let revisions = (current.revision.clone(), proposed.revision.clone());
-    let expected = revisions.clone();
-    s.store
-        .read(move |db| {
-            if required(db.agent(&requester)?, "Requesting agent not found")?.revision != expected.0
-                || required(db.agent(&target)?, "Agent not found")?.revision != expected.1
-            {
-                return Err(Error::conflict(
-                    "Plugin grants changed during delegation authorization.",
-                ));
-            }
-            Ok(())
-        })
-        .await?;
+    let coverage = Coverage {
+        profiles: [(requester, current.revision), (target, proposed.revision)],
+        resolved,
+    };
     if let Some(authority) = &authority {
         authority.recheck(s).await?;
     }
-    Ok(revisions)
+    let expected = coverage.clone();
+    s.store.read(move |db| expected.authorize(db)).await?;
+    Ok(coverage)
 }
 
 #[cfg(test)]

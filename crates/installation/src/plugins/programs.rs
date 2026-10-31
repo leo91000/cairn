@@ -61,8 +61,7 @@ pub async fn run(s: &Service, context: &Context, args: &Value) -> Result<Value> 
     let authority = context
         .management
         .as_ref()
-        .and_then(|authority| authority.preparation.as_ref())
-        .cloned()
+        .map(super::management::Authority::effect_authority)
         .unwrap_or_default();
     let path = super::program_installation::executable_authorized(s, manifest, program, &authority)
         .await?;

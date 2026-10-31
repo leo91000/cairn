@@ -613,9 +613,10 @@ git = [ { url = "https://example.com", username = "x-access-token", password = "
 gitIdentity = { name = "{{settings.name}}", email = "{{settings.email}}" }
 ```
 
-For each agent holding an enabled instance (one per package: Cairn refuses a second
-grant), the host renders these templates when a run is prepared and each time it
-resumes. Placeholders are `{{credential}}`, `{{secrets.KEY}}` and `{{settings.KEY}}`;
+For each agent's explicitly chosen, enabled supplying instance (at most one per
+package), the host renders these templates when a run is prepared and each time it
+resumes. Other granted instances do not supply these credentials; removing the
+supplier leaves none until another is explicitly chosen. Placeholders are `{{credential}}`, `{{secrets.KEY}}` and `{{settings.KEY}}`;
 a value with control characters, or a missing one, leaves its item out.
 
 - Files land in the run's home, private (0600 in 0700 directories), under a tool's

@@ -8,6 +8,7 @@ use crate::{
     store::Db,
 };
 use cairn_contracts::*;
+use futures_util::future::BoxFuture;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -95,9 +96,12 @@ pub(crate) struct Authority {
     public_scope: Option<&'static str>,
     additional_public_scope: Option<&'static str>,
     guard: Option<Arc<LocalGuard>>,
+    recheck_guard: Option<Arc<RecheckGuard>>,
 }
 
 type LocalGuard = dyn Fn(&Db<'_>) -> Result<()> + Send + Sync;
+
+type RecheckGuard = dyn for<'a> Fn(&'a Service) -> BoxFuture<'a, Result<()>> + Send + Sync;
 
 struct ExecutionPlugin {
     id: String,
@@ -172,7 +176,12 @@ impl Authority {
             }
             Ok(())
         });
-        crate::delegation::authorize_async_with(s, run, authority).await
+        let authority = crate::delegation::authorize_async_with(s, run, authority).await?;
+        let run = run.clone();
+        Ok(authority.with_recheck_guard(move |s| {
+            let run = run.clone();
+            Box::pin(async move { crate::delegation::authorize_async(s, &run).await })
+        }))
     }
 
     pub(crate) fn for_execution(run: &Value) -> Self {
@@ -208,6 +217,24 @@ impl Authority {
                 previous(db)?;
             }
             guard(db)
+        }));
+        self
+    }
+
+    pub(crate) fn with_recheck_guard(
+        mut self,
+        guard: impl for<'a> Fn(&'a Service) -> BoxFuture<'a, Result<()>> + Send + Sync + 'static,
+    ) -> Self {
+        let previous = self.recheck_guard.take();
+        let guard: Arc<RecheckGuard> = Arc::new(guard);
+        self.recheck_guard = Some(Arc::new(move |s| {
+            let (previous, guard) = (previous.clone(), guard.clone());
+            Box::pin(async move {
+                if let Some(previous) = previous {
+                    previous(s).await?;
+                }
+                guard(s).await
+            })
         }));
         self
     }
@@ -269,6 +296,7 @@ impl Authority {
             public_scope: None,
             additional_public_scope: None,
             guard: None,
+            recheck_guard: None,
         })
     }
 
@@ -293,6 +321,11 @@ impl Authority {
                     "The installation owner's access changed during preparation. Retry the action.",
                 ));
             }
+        }
+        if let Some(guard) = &self.recheck_guard {
+            let authority = self.clone();
+            s.store.read(move |db| authority.authorize(db)).await?;
+            guard(s).await?;
         }
         let authority = self.clone();
         s.store.read(move |db| authority.authorize(db)).await

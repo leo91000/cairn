@@ -33,8 +33,8 @@ impl Service {
             resource_authority.clone(),
         )
         .await;
-        let revisions = match coverage {
-            Ok(revisions) => revisions,
+        let coverage = match coverage {
+            Ok(coverage) => coverage,
             Err(error) if error.status == 403 => {
                 if let Some(authority) = &resource_authority {
                     authority.recheck(self).await?;
@@ -49,16 +49,7 @@ impl Service {
                 if let Some(authority) = &resource_authority {
                     authority.authorize(db)?;
                 }
-                if required(db.agent(&target)?, "Destination agent not found")?.revision
-                    != revisions.0
-                    || required(db.agent(&source)?, "Source agent not found")?.revision
-                        != revisions.1
-                {
-                    return Err(Error::conflict(
-                        "Plugin grants changed while checking the merge. Retry.",
-                    ));
-                }
-                Ok(())
+                coverage.authorize(db)
             })
             .await
     }

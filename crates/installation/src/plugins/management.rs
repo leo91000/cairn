@@ -13,7 +13,7 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct Authority {
     bearer: Option<String>,
-    pub(crate) preparation: Option<crate::capabilities::plugin_packages::Authority>,
+    preparation: Option<crate::capabilities::plugin_packages::Authority>,
     instance: Option<Box<connections::Connection>>,
     shared: Option<Box<connections::Connection>>,
     snapshot: Option<Arc<super::grant_authorization::Snapshot>>,
@@ -158,6 +158,19 @@ impl Authority {
             invocation,
             partial: true,
         }
+    }
+
+    /// Nested host preparations retain the complete invocation, including live
+    /// resource resolution, rather than just its optional transport authority.
+    pub(crate) fn effect_authority(&self) -> crate::capabilities::plugin_packages::Authority {
+        let local = self.clone();
+        let asynchronous = self.clone();
+        crate::capabilities::plugin_packages::Authority::default()
+            .with_guard(move |db| local.authorize(db))
+            .with_recheck_guard(move |s| {
+                let authority = asynchronous.clone();
+                Box::pin(async move { authority.recheck(s).await })
+            })
     }
 
     pub(crate) async fn recheck(&self, s: &Service) -> Result<()> {

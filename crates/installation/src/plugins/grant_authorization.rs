@@ -130,17 +130,28 @@ impl Snapshot {
     pub(crate) async fn recheck(&self, s: &Service) -> Result<()> {
         let expected = self.clone();
         s.store.read(move |db| expected.authorize(db)).await?;
-        if let Some((requester, _)) = &self.requester {
-            Box::pin(super::grants::check_coverage_authorized(
-                s,
-                requester,
-                &self.agent,
-                Some(self.authority()),
-            ))
-            .await?;
-        }
+        let coverage = if let Some((requester, _)) = &self.requester {
+            Some(
+                Box::pin(super::grants::check_coverage_authorized(
+                    s,
+                    requester,
+                    &self.agent,
+                    Some(self.authority()),
+                ))
+                .await?,
+            )
+        } else {
+            None
+        };
         let expected = self.clone();
-        s.store.read(move |db| expected.authorize(db)).await
+        s.store
+            .read(move |db| {
+                if let Some(coverage) = &coverage {
+                    coverage.authorize(db)?;
+                }
+                expected.authorize(db)
+            })
+            .await
     }
 
     pub(crate) fn authorize(&self, db: &Db<'_>) -> Result<()> {
@@ -388,15 +399,19 @@ impl Invocation {
         {
             return Err(denied());
         }
-        if let Some((requester, _)) = &self.snapshot.requester {
-            super::grants::check_coverage_authorized(
-                s,
-                requester,
-                &self.snapshot.agent,
-                Some(self.snapshot.authority()),
+        let coverage = if let Some((requester, _)) = &self.snapshot.requester {
+            Some(
+                super::grants::check_coverage_authorized(
+                    s,
+                    requester,
+                    &self.snapshot.agent,
+                    Some(self.snapshot.authority()),
+                )
+                .await?,
             )
-            .await?;
-        }
+        } else {
+            None
+        };
         let fields = fields(&package.manifest, self.kind, &self.name)?;
         for (agent, grant) in grants {
             ResourceAuthorization {
@@ -410,7 +425,14 @@ impl Invocation {
             .await?;
         }
         let snapshot = self.snapshot.clone();
-        s.store.read(move |db| snapshot.authorize(db)).await
+        s.store
+            .read(move |db| {
+                if let Some(coverage) = &coverage {
+                    coverage.authorize(db)?;
+                }
+                snapshot.authorize(db)
+            })
+            .await
     }
 }
 

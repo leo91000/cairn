@@ -165,7 +165,7 @@ return {
         end
         local parent = nil
         if input.resourceType == "channel" then parent={ resourceType="server",id="guild" } end
-        if input.resourceType == "thread" then parent={ resourceType="channel",id=if input.id == "support-thread" then "support" else "general" } end
+        if input.resourceType == "thread" then parent={ resourceType="channel",id=if input.id == "support-thread" and input.instance.settings.marker ~= "different-parent" then "support" else "general" } end
         return { resourceType=input.resourceType,id=input.id,name=input.id,parent=parent }
     end,
     tool = function(input)
@@ -1494,4 +1494,78 @@ async fn deleting_an_idle_requester_pauses_its_unstarted_delegated_work() {
         .unwrap();
     assert!(f.s.chat_detail(child_id).await.unwrap()["run"].is_null());
     assert_eq!(f.s.store.run(&f.run).await.unwrap()["status"], "running");
+}
+
+#[tokio::test]
+async fn merge_rechecks_previously_resolved_instances_before_publication() {
+    let f = Fixture::new().await;
+    let second = common::save_plugin(
+        &f.s,
+        "grant-probe",
+        &json!({ "name": "Second", "enabled": true }),
+        None,
+    )
+    .await
+    .unwrap();
+    let mut ids = [f.instance.clone(), text(&second, "id").to_owned()];
+    ids.sort();
+    let [first, last] = ids;
+    let mut held = f.s.store.plugin_instance(&last).await.unwrap().unwrap();
+    held.settings["marker"] = "resolver-effects".into();
+    held.revision = cairn_installation::config::id();
+    f.s.store
+        .transaction(move |db| db.save_plugin_instance(&held))
+        .await
+        .unwrap();
+    let source =
+        f.s.agent_fixture(json!({ "name": "Source" }), None)
+            .await
+            .unwrap();
+    let source_id = text(&source, "id").to_owned();
+    for (agent, roots) in [
+        (MAIN_AGENT_ID, support()),
+        (
+            source_id.as_str(),
+            json!([{ "resourceType": "thread", "id": "support-thread" }]),
+        ),
+    ] {
+        let before = f.api("GET", json!({ "agentId": agent })).await.unwrap();
+        let grants = [&first, &last].into_iter().map(|instance| json!({
+            "instanceId": instance, "access": { "type": "selected", "contributions": [contribution("tool", "grant_probe_post", roots.clone())] },
+        })).collect::<Vec<_>>();
+        f.api("PUT", json!({ "agentId": agent, "revision": before["revision"], "grants": grants, "runCredentialInstances": [] })).await.unwrap();
+    }
+    f.pause.store(true, Ordering::SeqCst);
+    let s = f.s.clone();
+    let merging = source_id.clone();
+    let merge = tokio::spawn(async move {
+        s.merge_agents(
+            serde_json::from_value(json!({
+                "sourceId": merging, "targetId": MAIN_AGENT_ID, "confirm": true,
+            }))
+            .unwrap(),
+        )
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), f.entered.notified())
+        .await
+        .unwrap();
+    // A's coverage completed. B's resolver is held open. Change A without
+    // changing either profile revision, then let the coverage operation finish.
+    let mut changed = f.s.store.plugin_instance(&first).await.unwrap().unwrap();
+    changed.settings["marker"] = "different-parent".into();
+    changed.revision = cairn_installation::config::id();
+    f.s.store
+        .transaction(move |db| db.save_plugin_instance(&changed))
+        .await
+        .unwrap();
+    f.release.notify_one();
+    assert!(
+        merge.await.unwrap().is_err(),
+        "merge accepted stale resource ancestry"
+    );
+    assert!(
+        f.s.store.agent(&source_id).await.unwrap().is_some(),
+        "a refused merge must preserve the source"
+    );
 }

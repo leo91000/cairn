@@ -425,7 +425,7 @@ pub async fn delegate(s: &Service, bearer: &str, input: &Value) -> Result<Value>
     let token = bearer.to_owned();
     let authority = crate::capabilities::plugin_packages::Authority::for_execution(&caller)
         .with_guard(move |db| crate::project_workspaces::authorize_in(db, &token).map(|_| ()));
-    let revisions = crate::plugins::grants::check_coverage_authorized(
+    let coverage = crate::plugins::grants::check_coverage_authorized(
         s,
         &requester_id,
         &target_id,
@@ -436,12 +436,7 @@ pub async fn delegate(s: &Service, bearer: &str, input: &Value) -> Result<Value>
     let result = s
         .store
         .transaction(move |db| {
-            if required(db.agent(&requester_id)?, "Requesting agent not found")?.revision
-                != revisions.0
-                || required(db.agent(&target_id)?, "Agent not found")?.revision != revisions.1
-            {
-                return Err(Error::conflict("Plugin grants changed during delegation."));
-            }
+            coverage.authorize(db)?;
             create(db, &bearer, &input, &engine)
         })
         .await?;
@@ -722,13 +717,14 @@ pub(crate) async fn authorize_async_with(
             }
             Ok(())
         });
-        crate::plugins::grants::check_coverage_authorized(
+        let coverage = crate::plugins::grants::check_coverage_authorized(
             s,
             &parent,
             &target,
             Some(authority.clone()),
         )
         .await?;
+        let authority = authority.with_guard(move |db| coverage.authorize(db));
         authority.recheck(s).await?;
         return Ok(authority);
     }
