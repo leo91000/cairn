@@ -21,6 +21,46 @@ function historyNoise(id: string) {
   return Array.from({ length: 128 }, (_, index) => createHash('sha256').update(`${id}:${index}`).digest('hex')).join('')
 }
 
+test('an older installation shows its update transition before the real timeline resumes', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  const run = workspace.service.store.runs().find(run => run.status === 'succeeded' && run.trigger !== 'chat')!
+  workspace.service.store.event(run.id, 'item.completed', 'Reply after installation update', {
+    item: { id: 'update-transition', type: 'agent_message', text: 'Reply after installation update' },
+  })
+  let updated = false
+  const requests: URL[] = []
+  await page.route(`**/runs/${run.id}/stream?*`, async (route) => {
+    requests.push(new URL(route.request().url()))
+    if (updated) {
+      await route.continue()
+      return
+    }
+
+    await route.fulfill({
+      contentType: 'text/event-stream',
+      body: `id: 999999\nevent: batch\ndata: ${JSON.stringify({
+        events: [],
+        reset: true,
+        more: false,
+        history: `v1:${run.id}:1`,
+      })}\n\n`,
+    })
+  })
+  await page.goto(workspacePath(`${workspace.url}/runs/${run.id}`))
+  await authenticateWorkspace(page)
+  const notice = page.getByRole('status').filter({ hasText: 'This installation must finish updating. Retrying…' })
+  await expect(notice).toBeVisible()
+  await expect(page.getByText('Reply after installation update', { exact: true })).toHaveCount(0)
+  updated = true
+  await expect(page.getByText('Reply after installation update', { exact: true })).toBeVisible()
+  await expect(notice).toHaveCount(0)
+  expect(requests.length).toBeGreaterThanOrEqual(2)
+  for (const request of requests) {
+    expect(request.searchParams.get('timeline')).toBe('1')
+    expect(request.searchParams.get('after')).toBe('0')
+  }
+})
+
 test('large timeline answers load completely through bounded content chunks', async ({ page, workspace }) => {
   const run = workspace.service.store.runs().find(run => run.status === 'succeeded' && run.trigger !== 'chat')!
   const answer = `${'bounded fragment '.repeat(18_000)}end of large answer`

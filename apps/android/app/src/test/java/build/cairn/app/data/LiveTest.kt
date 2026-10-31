@@ -68,6 +68,169 @@ class LiveTest {
         "event: batch\nid: $cursor\ndata: ${wireJson.encodeToString(batch)}\n\n"
 
     @Test
+    fun `legacy lifecycle and retention invalidate saved work before a restored timeline arrives`() =
+        runBlocking {
+            for (lifecycle in listOf("trash", "purging", "retention")) {
+                MockWebServer().use { server ->
+                    val active =
+                        LiveState(
+                            run = Run(id = "r1", status = "running", taskId = ""),
+                            chat = Chat(id = "chat"),
+                        )
+                    val inactive =
+                        if (lifecycle == "retention") null
+                        else LiveState(chat = Chat(id = "chat", lifecycle = lifecycle))
+                    val changedHistory = if (lifecycle == "retention") "v1:r1:5" else "v1::0"
+                    for ((id, batch) in
+                        listOf(
+                            0L to LiveBatch(emptyList(), inactive, true, false, changedHistory),
+                            0L to LiveBatch(emptyList(), active, true, false, "v1:r1:5"),
+                            10L to
+                                LiveBatch(
+                                    emptyList(),
+                                    active,
+                                    true,
+                                    false,
+                                    "v2:r1:5",
+                                    entries = listOf(reply(10, "Restored reply")),
+                                ),
+                        )) {
+                        server.enqueue(
+                            MockResponse()
+                                .setHeader("Content-Type", "text/event-stream")
+                                .setBody(frame(id, batch))
+                        )
+                    }
+                    server.start()
+                    val api = CairnApi(server.url("/"), MemoryVault())
+                    val path = "/chats/chat/stream"
+                    val session = LiveSession()
+                    session.restore(
+                        CachedHistory(
+                            7,
+                            "v2:r1:1",
+                            active,
+                            emptyList(),
+                            listOf(reply(7, "Saved reply").entry),
+                        ),
+                        path,
+                        api.streamGeneration.get(),
+                    )
+                    val pending = mutableListOf<LiveSnapshot>()
+                    val final =
+                        withTimeout(10000) {
+                            api.live(path, session)
+                                .onEach { if (it.timelineUnavailable) pending.add(it) }
+                                .first { it.cursor == 10L }
+                        }
+                    assertEquals(2, pending.size)
+                    assertTrue(
+                        pending.all {
+                            it.entries.isEmpty() &&
+                                it.cursor == 0L &&
+                                it.history == null &&
+                                !it.synced
+                        }
+                    )
+                    if (lifecycle != "retention") {
+                        assertEquals(lifecycle, pending.first().state?.chat?.lifecycle)
+                        assertNull(pending.first().state?.run)
+                        assertFalse(pending.first().catchingUp)
+                    }
+                    assertEquals("active", pending.last().state?.chat?.lifecycle)
+                    assertEquals("Restored reply", final.replyText())
+                    assertTrue(server.takeRequest().path!!.contains("after=7&history="))
+                    repeat(2) {
+                        assertEquals(
+                            "/api/chats/chat/stream?after=0&window=1&timeline=1",
+                            server.takeRequest().path,
+                        )
+                    }
+                    assertTrue(api.streamCalls.isEmpty())
+                }
+            }
+        }
+
+    @Test
+    fun `old installation retains the saved timeline and cursor until cards become available`() =
+        runBlocking {
+            MockWebServer().use { server ->
+                val state = LiveState(run = Run(id = "r1", status = "running", taskId = ""))
+                val path = "/runs/r1/stream"
+                server.enqueue(
+                    MockResponse()
+                        .setHeader("Content-Type", "text/event-stream")
+                        .setBody(
+                            frame(
+                                9,
+                                LiveBatch(
+                                    listOf(message(9, "Events-only reply")),
+                                    state,
+                                    true,
+                                    false,
+                                    "v1:r1:1",
+                                ),
+                            )
+                        )
+                )
+                server.enqueue(
+                    MockResponse()
+                        .setHeader("Content-Type", "text/event-stream")
+                        .setBody(
+                            frame(
+                                10,
+                                LiveBatch(
+                                    emptyList(),
+                                    state,
+                                    false,
+                                    false,
+                                    "v2:r1:1",
+                                    entries = listOf(reply(10, "Updated reply")),
+                                ),
+                            )
+                        )
+                )
+                server.start()
+                val api = CairnApi(server.url("/"), MemoryVault())
+                val session = LiveSession()
+                session.restore(
+                    CachedHistory(
+                        7,
+                        "v2:r1:1",
+                        state,
+                        emptyList(),
+                        listOf(reply(7, "Saved reply").entry),
+                    ),
+                    path,
+                    api.streamGeneration.get(),
+                )
+                var waiting: LiveSnapshot? = null
+                val final =
+                    withTimeout(10000) {
+                        api.live(path, session)
+                            .onEach { if (it.timelineUnavailable) waiting = it }
+                            .first { it.cursor == 10L }
+                    }
+                assertNotNull(waiting)
+                assertEquals(7L, waiting!!.cursor)
+                assertEquals("Saved reply", waiting!!.replyText())
+                assertTrue(waiting!!.status.contains("mise à jour"))
+                assertNull(waiting!!.httpStatus)
+                assertFalse(waiting!!.synced)
+                assertEquals("Updated reply", final.replyText())
+                assertNull(final.httpStatus)
+                assertFalse(final.timelineUnavailable)
+                repeat(2) {
+                    assertEquals(
+                        "/api/runs/r1/stream?after=7&history=v2%3Ar1%3A1&window=1&timeline=1&recent=1",
+                        server.takeRequest().path,
+                    )
+                }
+                assertTrue(api.streamCalls.isEmpty())
+            }
+        }
+
+    @Test
     fun `older pages survive an IOException reconnect while the session lock remains occupied`() =
         runBlocking {
             MockWebServer().use { server ->
@@ -631,9 +794,12 @@ class LiveTest {
                             .take(2)
                             .toList()
                     }
-                assertEquals("/api/chats/chat/stream?after=0&window=1", server.takeRequest().path)
                 assertEquals(
-                    "/api/chats/chat/stream?after=1&window=1&recent=1",
+                    "/api/chats/chat/stream?after=0&window=1&timeline=1",
+                    server.takeRequest().path,
+                )
+                assertEquals(
+                    "/api/chats/chat/stream?after=1&window=1&timeline=1&recent=1",
                     server.takeRequest().path,
                 )
                 assertEquals("r2", snapshots.last().state?.run?.id)
@@ -688,13 +854,22 @@ class LiveTest {
                         api.live("/chats/two/stream", session).first { it.entries.isNotEmpty() }
                     assertEquals("Nouvelle session", fresh.replyText())
                 }
-                assertEquals("/api/chats/one/stream?after=0&window=1", server.takeRequest().path)
                 assertEquals(
-                    "/api/chats/one/stream?after=1&window=1&recent=1",
+                    "/api/chats/one/stream?after=0&window=1&timeline=1",
                     server.takeRequest().path,
                 )
-                assertEquals("/api/chats/two/stream?after=0&window=1", server.takeRequest().path)
-                assertEquals("/api/chats/two/stream?after=0&window=1", server.takeRequest().path)
+                assertEquals(
+                    "/api/chats/one/stream?after=1&window=1&timeline=1&recent=1",
+                    server.takeRequest().path,
+                )
+                assertEquals(
+                    "/api/chats/two/stream?after=0&window=1&timeline=1",
+                    server.takeRequest().path,
+                )
+                assertEquals(
+                    "/api/chats/two/stream?after=0&window=1&timeline=1",
+                    server.takeRequest().path,
+                )
             }
         }
 

@@ -32,6 +32,68 @@ function record(): CachedHistory {
   }
 }
 
+function listRecord(): CachedHistory {
+  return {
+    version: 2,
+    cursor: 0,
+    history: 'v1::0',
+    state: {
+      run: null,
+      chat: null,
+      chats: [],
+      artifacts: [],
+    },
+    entries: [],
+    events: [],
+    savedAt: Date.now(),
+  }
+}
+
+it('retains the compatible metadata-only Fil snapshot from an installation using legacy events', async () => {
+  const value = listRecord()
+  await writeHistory('session', '/chats/stream', value)
+  expect(peekHistory('session', '/chats/stream')).toEqual(value)
+  expect(await readHistory('session', '/chats/stream')).toEqual(value)
+})
+
+const incompatibleLists: [string, (value: CachedHistory) => void][] = [
+  ['a conversation history', (value) => { value.history = 'v1:run:1' }],
+  ['a run', (value) => { Object.assign(value.state, { run: { id: 'run' } }) }],
+  ['a conversation', (value) => { Object.assign(value.state, { chat: { id: 'chat', messages: [] } }) }],
+  ['no list', (value) => { value.state.chats = undefined }],
+  ['a cursor', (value) => { value.cursor = 1 }],
+  ['events', (value) => { value.events = record().events }],
+  ['cards', (value) => {
+    value.entries = [{
+      id: 'reply',
+      runId: 'run',
+      position: 1,
+      revision: 1,
+      source: 1,
+      turn: 1,
+      attempt: 0,
+      createdAt: 1,
+      updatedAt: 1,
+      content: {
+        kind: 'agentMessage',
+        itemId: 'reply',
+        text: 'Reply',
+        state: 'running',
+      },
+    }]
+  }],
+  ['artifacts', (value) => { Object.assign(value.state, { artifacts: [{ id: 'artifact' }] }) }],
+  ['an older boundary', (value) => { value.oldest = 1 }],
+  ['older pages', (value) => { value.hasOlder = true }],
+]
+
+it.each(incompatibleLists)('rejects legacy Fil cache mixed with %s', async (_, change) => {
+  const value = listRecord()
+  change(value)
+  await writeHistory('session', '/chats/stream', value)
+  expect(await readHistory('session', '/chats/stream')).toBeUndefined()
+})
+
 afterEach(async () => {
   vi.useRealTimers()
   await clearHistoryCache()

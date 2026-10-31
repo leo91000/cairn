@@ -120,7 +120,9 @@ fun rememberLive(
                         api.live(path, session)
                             .transformWhile {
                                 emit(it)
-                                streaming || (it.catchingUp && it.httpStatus == null)
+                                streaming ||
+                                    it.timelineUnavailable ||
+                                    (it.catchingUp && it.httpStatus == null)
                             }
                             .collect {
                                 // The stream's own state replaces an outdated copy; without a
@@ -128,11 +130,18 @@ fun rememberLive(
                                 if (waiting && it === replay) return@collect
                                 vm.acceptCacheRevision(it.state?.cacheRevision)
                                 cacheGeneration = vm.historyCache.generation
-                                if (!it.catchingUp || it.httpStatus != null) {
+                                if (
+                                    !it.catchingUp ||
+                                        it.httpStatus != null ||
+                                        it.timelineUnavailable
+                                ) {
                                     if (it.history != value.history || it.epoch != value.epoch)
                                         olderError = null
                                     value = pages.display(it)
                                     waiting = false
+                                }
+                                if (it.timelineUnavailable && it.history == null) {
+                                    vm.historyCache.remove(key)
                                 }
                                 if (it.httpStatus in listOf(401, 403, 404, 409)) {
                                     vm.historyCache.remove(key)
@@ -143,7 +152,10 @@ fun rememberLive(
                                             error = it.error,
                                         )
                                 } else if (
-                                    !it.catchingUp && it.state != null && it.history != null
+                                    !it.catchingUp &&
+                                        !it.timelineUnavailable &&
+                                        it.state != null &&
+                                        it.history != null
                                 ) {
                                     cacheWriter?.offer(
                                         CachedHistory(

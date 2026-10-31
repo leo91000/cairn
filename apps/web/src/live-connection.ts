@@ -1,10 +1,10 @@
-import type { LiveBatch } from '../../../packages/contracts/live'
+import type { LiveBatch, LiveState } from '../../../packages/contracts/live'
 import { watch } from 'vue'
 import { apiUrl, installationTransport, state } from './api'
 import { ProtocolMismatch } from './direct-channel'
 import { observeTransport } from './transport-observation'
 
-export type LiveStatus = 'connecting' | 'live' | 'reconnecting' | 'offline'
+export type LiveStatus = 'connecting' | 'live' | 'reconnecting' | 'offline' | 'updating'
 
 // The cursor advances only after the consumer accepts a complete batch. Every
 // connection owns its cursor, optionally restored with a matching cached snapshot.
@@ -12,7 +12,9 @@ export type LiveStatus = 'connecting' | 'live' | 'reconnecting' | 'offline'
 // `query` adds request parameters, such as `&list=1` for a stream that carries the list.
 // A status with `opening` is sent before creating the source, so a caller can release
 // another stream that temporarily occupies this one's slot.
-export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: number, signal?: AbortSignal) => void | Promise<void>, status: (value: LiveStatus, opening?: boolean) => void, initial?: { cursor: number, history: string }, followsLatest?: () => boolean, query = '') {
+// Legacy metadata remains authoritative while cards are unavailable. Its observer
+// returns true when the saved replay cursor must be discarded.
+export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: number, signal?: AbortSignal) => void | Promise<void>, status: (value: LiveStatus, opening?: boolean) => void, initial?: { cursor: number, history: string }, followsLatest?: () => boolean, query = '', observeLegacyState?: (state: LiveState | undefined, history: string) => boolean) {
   let cursor = String(initial?.cursor ?? 0)
   let history = initial?.history
   let source: EventSource | undefined
@@ -21,6 +23,7 @@ export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: 
   let stopped = false
   let failures = 0
   let resetConsumer = false
+  let waitingForTimeline = false
   let abort: AbortController | undefined
 
   function disconnect() {
@@ -32,11 +35,12 @@ export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: 
     clearTimeout(watchdog)
   }
 
-  function retry() {
+  function retry(awaitingTimeline = false) {
+    waitingForTimeline = awaitingTimeline
     disconnect()
     if (stopped)
       return
-    status(navigator.onLine ? 'reconnecting' : 'offline')
+    status(navigator.onLine ? waitingForTimeline ? 'updating' : 'reconnecting' : 'offline')
     if (navigator.onLine)
       timer = setTimeout(connect, Math.min(15000, 500 * 2 ** Math.min(failures++, 5)))
   }
@@ -55,10 +59,10 @@ export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: 
       return
     }
 
-    status(failures ? 'reconnecting' : 'connecting', true)
+    status(waitingForTimeline ? 'updating' : failures ? 'reconnecting' : 'connecting', true)
     const windowed = path !== '/chats/stream'
     const recent = windowed && cursor !== '0' && followsLatest?.()
-    const route = `${path}?after=${cursor}${history ? `&history=${encodeURIComponent(history)}` : ''}${windowed ? '&window=1' : ''}${recent ? '&recent=1' : ''}${query}`
+    const route = `${path}?after=${cursor}${history ? `&history=${encodeURIComponent(history)}` : ''}${windowed ? '&window=1&timeline=1' : ''}${recent ? '&recent=1' : ''}${query}`
     let current: EventSource
     try {
       current = installationTransport.source(route, apiUrl(route))
@@ -92,6 +96,17 @@ export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: 
         const batch = JSON.parse(event.data) as LiveBatch
         if (!Array.isArray(batch.events) || typeof batch.reset !== 'boolean' || typeof batch.more !== 'boolean')
           throw new Error('Invalid stream batch')
+        if (windowed && batch.history?.startsWith('v1:')) {
+          if (observeLegacyState?.(batch.state, batch.history)) {
+            cursor = '0'
+            history = undefined
+            resetConsumer = true
+          }
+
+          retry(true)
+          return
+        }
+
         if (history && !batch.history) {
           cursor = '0'
           history = undefined
@@ -102,6 +117,7 @@ export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: 
           if (source !== current || stopped)
             return
           resetConsumer = false
+          waitingForTimeline = false
           const transport = (current as EventSource & { transportRoute?: 'direct' | 'relay' }).transportRoute
           if (transport)
             observeTransport(transport, path, 'STREAM', Number(event.lastEventId))

@@ -1286,7 +1286,7 @@ taskId = "",)), false, false, history = "h1", entries = listOf(build.cairn.contr
                         build.cairn.app.ui.backgroundWait(final.entries),
                     )
                     assertEquals(
-                        "/api/installations/test/api/runs/r1/stream?after=7&history=h1&window=1&recent=1",
+                        "/api/installations/test/api/runs/r1/stream?after=7&history=h1&window=1&timeline=1&recent=1",
                         server.takeRequest().path,
                     )
                     assertEquals("relay", api.transport.route.value)
