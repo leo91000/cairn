@@ -1138,7 +1138,7 @@ async fn diagnostic_two_volume_cold_read_authorization_isolation() {
         s.renewed.store(true, Ordering::SeqCst);
         StatusCode::OK
     }
-    for mode in 0..6 {
+    for mode in 0..7 {
         for iteration in 0..10 {
             let root = tempfile::tempdir().unwrap();
             let payload = vec![(iteration + mode * 10 + 1) as u8; 4096];
@@ -1183,12 +1183,51 @@ async fn diagnostic_two_volume_cold_read_authorization_isolation() {
             );
             let hash = block_digest(&payload);
             let manifest = single_block(4096, BLOCK, &hash.into());
-            let a = Arc::new(
-                LazyDisk::create(&root.path().join("disks/a/lazy"), &manifest, source_a).unwrap(),
-            );
-            let b = Arc::new(
-                LazyDisk::create(&root.path().join("disks/b/lazy"), &manifest, source_b).unwrap(),
-            );
+            let (a, b, runtime_volumes) = if mode == 6 {
+                let directory_a = root.path().join("disks/a");
+                let directory_b = root.path().join("disks/b");
+                let context_a = serde_json::json!({"master":origin,"grant":"fixture-a", "policy":{"reserveMiB":64,"reservePercent":1}});
+                let context_b = serde_json::json!({"master":origin,"grant":"fixture-b", "policy":{"reserveMiB":64,"reservePercent":1}});
+                drop(
+                    crate::storage::runtime::create(
+                        &directory_a.join("lazy"),
+                        &manifest,
+                        &context_a,
+                    )
+                    .await
+                    .unwrap(),
+                );
+                drop(
+                    crate::storage::runtime::create(
+                        &directory_b.join("lazy"),
+                        &manifest,
+                        &context_b,
+                    )
+                    .await
+                    .unwrap(),
+                );
+                let volume_a = crate::storage::runtime::load(&directory_a).await.unwrap();
+                let volume_b = crate::storage::runtime::load(&directory_b).await.unwrap();
+                let attempt = crate::storage::runtime::AttemptStop::new(CancellationToken::new());
+                attempt.bind(&volume_a).unwrap();
+                (
+                    volume_a.disk.clone(),
+                    volume_b.disk.clone(),
+                    Some((attempt, volume_a, volume_b)),
+                )
+            } else {
+                (
+                    Arc::new(
+                        LazyDisk::create(&root.path().join("disks/a/lazy"), &manifest, source_a)
+                            .unwrap(),
+                    ),
+                    Arc::new(
+                        LazyDisk::create(&root.path().join("disks/b/lazy"), &manifest, source_b)
+                            .unwrap(),
+                    ),
+                    None,
+                )
+            };
             assert!(
                 Arc::ptr_eq(&a.blocks, &b.blocks),
                 "fixture must share node cache"
@@ -1218,6 +1257,10 @@ async fn diagnostic_two_volume_cold_read_authorization_isolation() {
             if mode == 5 {
                 publication_stop.cancel();
                 assert!(!stop_a.is_cancelled());
+            } else if let Some((attempt, volume_a, volume_b)) = &runtime_volumes {
+                attempt.cancel();
+                assert!(volume_a.stop.is_cancelled());
+                assert!(!volume_b.stop.is_cancelled());
             } else {
                 stop_a.cancel();
             }
@@ -1233,7 +1276,7 @@ async fn diagnostic_two_volume_cold_read_authorization_isolation() {
                 .unwrap()
                 .unwrap();
             match mode {
-                0 | 1 | 5 => assert_eq!(result.unwrap().as_slice(), payload),
+                0 | 1 | 5 | 6 => assert_eq!(result.unwrap().as_slice(), payload),
                 2 | 3 => assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied),
                 4 => assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Interrupted),
                 _ => unreachable!(),
@@ -1244,7 +1287,7 @@ async fn diagnostic_two_volume_cold_read_authorization_isolation() {
             );
             println!(
                 "diagnostic mode={mode} iteration={iteration} A=interrupted B={} renewals={}",
-                if mode < 2 || mode == 5 {
+                if mode < 2 || mode == 5 || mode == 6 {
                     "verified"
                 } else if mode == 4 {
                     "shared-token-interrupted"
