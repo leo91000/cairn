@@ -19,7 +19,7 @@ export class LiveEvents {
     this.messages.clear()
     this.cursor = cursor
     events.forEach((event, index) => {
-      if (event.type === 'turn.started')
+      if (['turn.started', 'turn.completed', 'turn.failed'].includes(event.type))
         this.messages.clear()
       const item = event.payload?.item as { id?: string, type?: string } | undefined
       if (item?.type === 'agent_message' && item.id)
@@ -31,7 +31,7 @@ export class LiveEvents {
     for (let event of incoming) {
       if (event.id <= this.cursor)
         continue
-      if (event.type === 'turn.started')
+      if (['turn.started', 'turn.completed', 'turn.failed'].includes(event.type))
         this.messages.clear()
       const item = event.payload?.item as { id?: string, type?: string, delta?: string } | undefined
       if (item?.type !== 'agent_message' || !item.id) {
@@ -53,7 +53,7 @@ export class LiveEvents {
       this.cursor = event.id
       if (index !== undefined) {
         // Preserve when and where the message first appeared, as ActivityFeed does.
-        target[index] = { ...event, createdAt: target[index].createdAt }
+        target[index] = { ...event, createdAt: target[index].createdAt, displayId: target[index].displayId ?? target[index].id }
         continue
       }
 

@@ -42,7 +42,8 @@ class LiveAccumulator {
         rows = events.toMutableList()
         cursor = accepted
         rows.forEachIndexed { index, event ->
-            if (event.type == "turn.started") messages.clear()
+            if (event.type in setOf("turn.started", "turn.completed", "turn.failed"))
+                messages.clear()
             val item = event.payload?.get("item") as? JsonObject
             val id = item?.get("id")?.jsonPrimitive?.contentOrNull
             if (
@@ -60,7 +61,8 @@ class LiveAccumulator {
         var accepted = cursor
         for (original in incoming) {
             if (original.id <= accepted) continue
-            if (original.type == "turn.started") indices.clear()
+            if (original.type in setOf("turn.started", "turn.completed", "turn.failed"))
+                indices.clear()
             val item = original.payload?.get("item") as? JsonObject
             val id = item?.get("id")?.jsonPrimitive?.contentOrNull
             var event = original

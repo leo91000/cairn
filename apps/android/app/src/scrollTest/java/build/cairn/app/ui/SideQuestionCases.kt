@@ -1,0 +1,507 @@
+package build.cairn.app.ui
+
+import android.app.Application
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.runtime.*
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.test.*
+import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.lifecycle.ViewModelStore
+import androidx.test.core.app.ApplicationProvider
+import build.cairn.app.data.*
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.flow.first
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.*
+import okhttp3.mockwebserver.*
+import org.junit.Assert.*
+import org.junit.Rule
+import org.junit.Test
+
+private const val CHAT_ID = "a1b2c3d4-0000-4000-8000-0000000000c1"
+
+/** The same native side-question interactions run on the JVM and an Android device. */
+abstract class SideQuestionCases {
+    @get:Rule val compose = createComposeRule()
+
+    private val answered =
+        ChatSideQuestion(
+            id = "a1b2c3d4-0000-4000-8000-000000000001",
+            chatId = CHAT_ID,
+            runId = "run",
+            text = "Pourquoi cet ordre ?",
+            itemId = "reply-1",
+            provider = "claude",
+            status = "answered",
+            answer = "Parce que la migration doit précéder le code.",
+            createdAt = 1,
+            settledAt = 2,
+        )
+    private val pending =
+        ChatSideQuestion(
+            id = "a1b2c3d4-0000-4000-8000-000000000002",
+            chatId = CHAT_ID,
+            runId = "run",
+            text = "Et les tests ?",
+            itemId = "reply-2",
+            provider = "claude",
+            status = "pending",
+            createdAt = 3,
+            settledAt = null,
+        )
+
+    private fun chat(canAsk: Boolean, provider: String = "claude", unavailable: String? = null) =
+        Chat(
+            id = CHAT_ID,
+            provider = provider,
+            status = "running",
+            canAskSideQuestion = canAsk,
+            sideQuestionUnavailable = unavailable,
+            sideQuestions = listOf(answered, pending),
+        )
+
+    private fun server(writes: MutableList<Pair<String, String>>, release: CountDownLatch? = null) =
+        MockWebServer().apply {
+            dispatcher =
+                object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse {
+                        val path = request.path!!.substringBefore('?')
+                        if (request.method == "POST" && path.contains("/side-questions")) {
+                            writes += path to request.body.readUtf8()
+                            if (release != null) check(release.await(20, TimeUnit.SECONDS))
+                            val question =
+                                if (path.endsWith("/cancel"))
+                                    pending.copy(status = "cancelled", settledAt = 4)
+                                else pending
+                            return MockResponse()
+                                .setHeader("Content-Type", "application/json")
+                                .setBody(Json.encodeToString(question))
+                        }
+                        val body =
+                            when {
+                                path == "/api/account/session" -> beaconAccountFixture("fixture")
+                                path == "/api/installations" -> beaconInstallationsFixture()
+                                path.endsWith("/overview") || path.endsWith("/models") -> "{}"
+                                path.endsWith("/api/projects") -> """{"projects":[]}"""
+                                path.endsWith("/api/agents") -> """{"agents":[]}"""
+                                path.endsWith("/api/tasks") -> """{"tasks":[]}"""
+                                path.endsWith("/api/mcps") -> """{"mcps":[]}"""
+                                else -> "[]"
+                            }
+                        return MockResponse()
+                            .setHeader("Content-Type", "application/json")
+                            .setBody(body)
+                    }
+                }
+        }
+
+    private fun viewModel() =
+        CairnViewModel(
+            ApplicationProvider.getApplicationContext<Application>(),
+            object : SessionVault {
+                override fun read(origin: String): String? = null
+
+                override fun write(origin: String, cookie: String?) {}
+            },
+            beaconOrigin = "",
+        )
+
+    @Test
+    fun completingAnEarlierAskKeepsANewerDraftAndItsTarget() {
+        val writes = CopyOnWriteArrayList<Pair<String, String>>()
+        val release = CountDownLatch(1)
+        server(writes, release).use { server ->
+            val vm = viewModel()
+            val models = ViewModelStore().apply { put("fixture", vm) }
+            val side = SideQuestionState().apply { ask("reply-1", "ancien passage", 11) }
+            try {
+                compose.setContent {
+                    val state by vm.state.collectAsState()
+                    LaunchedEffect(Unit) {
+                        vm.state.first { it.ready }
+                        vm.connect(server.url("/").toString())
+                    }
+                    CairnTheme {
+                        if (state.installation != null)
+                            Column(Modifier.verticalScroll(rememberScrollState())) {
+                                SideQuestionPanel(vm, state, chat(canAsk = true), side) { _, _ -> }
+                            }
+                    }
+                }
+                compose.waitUntil(20000) {
+                    vm.state.value.installation != null && !vm.state.value.busy
+                }
+                compose
+                    .onNode(hasSetTextAction() and hasText("Votre question sur ce passage"))
+                    .performScrollTo()
+                    .performTextInput("Ancienne question")
+                compose.onNodeWithText("Demander").performScrollTo().performClick()
+                compose.waitUntil(10000) { writes.size == 1 }
+                compose.runOnIdle {
+                    side.open = false
+                    side.ask("reply-2", "nouveau passage", 22)
+                    side.text = "Nouvelle question"
+                }
+                release.countDown()
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodesWithText("nouveau passage")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty() && !vm.state.value.busy
+                }
+                compose.runOnIdle {
+                    assertEquals("Nouvelle question", side.text)
+                    assertEquals("nouveau passage", side.quote)
+                    assertEquals("reply-2", side.itemId)
+                    assertEquals(22L, side.replyEventId)
+                }
+                val body = Json.parseToJsonElement(writes.single().second).jsonObject
+                assertEquals("reply-1", body["itemId"]!!.jsonPrimitive.content)
+                assertEquals("ancien passage", body["quote"]!!.jsonPrimitive.content)
+            } finally {
+                release.countDown()
+                models.clear()
+            }
+        }
+    }
+
+    @Test
+    fun aQuotedSideQuestionIsSentWithItsReplyAndAPendingOneCanBeWithdrawn() {
+        val writes = CopyOnWriteArrayList<Pair<String, String>>()
+        server(writes).use { server ->
+            val vm = viewModel()
+            val models = ViewModelStore().apply { put("fixture", vm) }
+            val side = SideQuestionState().apply { ask("reply-1", "  la migration d’abord  ") }
+            val revealed = mutableListOf<String>()
+            // Asking clears the passage from the form.
+            fun cleared() =
+                compose.onAllNodesWithText("la migration d’abord").fetchSemanticsNodes().isEmpty()
+            compose.setContent {
+                val state by vm.state.collectAsState()
+                LaunchedEffect(Unit) {
+                    vm.state.first { it.ready }
+                    vm.connect(server.url("/").toString())
+                }
+                CairnTheme {
+                    if (state.installation != null && side.open)
+                        Column(Modifier.verticalScroll(rememberScrollState())) {
+                            SideQuestionPanel(vm, state, chat(canAsk = true), side) { item, _ ->
+                                revealed += item
+                            }
+                        }
+                }
+            }
+            try {
+                compose.waitUntil(20000) {
+                    compose
+                        .onAllNodesWithText("Votre question sur ce passage")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty() && !vm.state.value.busy
+                }
+                compose.onNodeWithText("la migration d’abord").assertExists()
+                compose
+                    .onNodeWithText("Poser une question générale")
+                    .performScrollTo()
+                    .performClick()
+                compose.onNodeWithText("Votre question").assertExists()
+                compose.onNodeWithText("la migration d’abord").assertDoesNotExist()
+                compose.runOnIdle { side.ask("reply-1", "la migration d’abord") }
+                // The answer renders as Markdown, like replies.
+                compose.onAllNodesWithTag("side-question-answer").assertCountEquals(1)
+                compose.onNodeWithText("Réponse en cours…").assertExists()
+                compose
+                    .onNode(hasSetTextAction() and hasText("Votre question sur ce passage"))
+                    .performScrollTo()
+                    .performTextInput("Pourquoi ?")
+                compose
+                    .onNodeWithText("Demander")
+                    .performScrollTo()
+                    .assertIsEnabled()
+                    .performClick()
+                // Reading the UI drains the main looper, where the request completes.
+                compose.waitUntil(10000) { cleared() && writes.size == 1 && !vm.state.value.busy }
+                assertEquals(
+                    "/api/installations/fixture/api/chats/$CHAT_ID/side-questions",
+                    writes[0].first,
+                )
+                val body = Json.parseToJsonElement(writes[0].second).jsonObject
+                assertEquals("Pourquoi ?", body["text"]!!.jsonPrimitive.content)
+                assertEquals("la migration d’abord", body["quote"]!!.jsonPrimitive.content)
+                assertEquals("reply-1", body["itemId"]!!.jsonPrimitive.content)
+                assertEquals(36, body["id"]!!.jsonPrimitive.content.length)
+                // The form clears once asked; the passage is no longer quoted.
+                compose.onNodeWithText("la migration d’abord").assertDoesNotExist()
+
+                compose.onNodeWithText("Retirer").performScrollTo().performClick()
+                compose.waitUntil(10000) { cleared() && writes.size == 2 && !vm.state.value.busy }
+                assertEquals(
+                    "/api/installations/fixture/api/chats/$CHAT_ID/side-questions/${pending.id}/cancel",
+                    writes[1].first,
+                )
+                compose.onAllNodesWithText("Voir la réponse")[1].performScrollTo().performClick()
+                compose.waitUntil(5000) { cleared() && revealed.isNotEmpty() }
+                assertEquals(listOf("reply-1"), revealed)
+            } finally {
+                models.clear()
+            }
+        }
+    }
+
+    @Test
+    fun anEngineThatCannotAnswerExplainsWhyWithoutAForm() {
+        val writes = CopyOnWriteArrayList<Pair<String, String>>()
+        server(writes).use { server ->
+            val vm = viewModel()
+            val models = ViewModelStore().apply { put("fixture", vm) }
+            val side = SideQuestionState().apply { show("reply-2") }
+            var provider by mutableStateOf("codex")
+            var unavailable by mutableStateOf<String?>("codex")
+            compose.setContent {
+                val state by vm.state.collectAsState()
+                LaunchedEffect(Unit) {
+                    vm.state.first { it.ready }
+                    vm.connect(server.url("/").toString())
+                }
+                CairnTheme {
+                    if (state.installation != null)
+                        Column(Modifier.verticalScroll(rememberScrollState())) {
+                            SideQuestionPanel(
+                                vm,
+                                state,
+                                chat(canAsk = false, provider, unavailable),
+                                side,
+                            ) { _, _ ->
+                            }
+                        }
+                }
+            }
+            try {
+                compose.waitUntil(20000) {
+                    compose.onAllNodesWithText("Tout afficher").fetchSemanticsNodes().isNotEmpty()
+                }
+                compose
+                    .onNodeWithText(
+                        "Codex ne peut pas répondre aux questions à côté dans Cairn : ses conversations à côté peuvent encore utiliser des outils. Posez-la dans la conversation."
+                    )
+                    .assertExists()
+                compose.onNodeWithText("Demander").assertDoesNotExist()
+                // Focused on one reply, only its question shows until the user asks for all.
+                compose.onNodeWithText("Et les tests ?").assertExists()
+                compose.onNodeWithText("Pourquoi cet ordre ?").assertDoesNotExist()
+                compose.onNodeWithText("Tout afficher").performClick()
+                compose.onNodeWithText("Pourquoi cet ordre ?").assertExists()
+                // A Claude Code release too old for side questions says so.
+                provider = "claude"
+                unavailable = "claude-release"
+                compose
+                    .onNodeWithText(
+                        "Cette version de Claude Code ne peut pas répondre aux questions à côté dans Cairn : seule la version 2.1.308 a été qualifiée. Posez-la dans la conversation."
+                    )
+                    .assertExists()
+                // A reply that has not offered them yet says so too.
+                unavailable = "not-offered"
+                compose
+                    .onNodeWithText(
+                        "Claude Code n’a pas encore proposé de questions à côté pour cette réponse. Réessayez dans un instant ; s’il ne le fait jamais, son runtime doit peut-être être mis à jour."
+                    )
+                    .assertExists()
+                // A reason this version does not know shows the server's own words.
+                unavailable = "future-reason"
+                compose
+                    .onNodeWithText(
+                        "Les questions à côté ne sont pas disponibles pour cette réponse."
+                    )
+                    .assertExists()
+                compose.onNodeWithText("Demander").assertDoesNotExist()
+                assertTrue(writes.isEmpty())
+            } finally {
+                models.clear()
+            }
+        }
+    }
+
+    @Test
+    fun aQuestionAskedAgainAfterItsAnswerIsANewOne() {
+        val side = SideQuestionState()
+        val first = side.submissionId("chat\u0000Pourquoi ?")
+        // A retried submission keeps its identifier until it is asked.
+        assertEquals(first, side.submissionId("chat\u0000Pourquoi ?"))
+        side.submitted(side.draft(), first)
+        assertTrue(first != side.submissionId("chat\u0000Pourquoi ?"))
+    }
+
+    @Test
+    fun changingTheFilterWhileAnAskIsPendingKeepsTheDraft() {
+        val side =
+            SideQuestionState().apply {
+                show("reply-1", 11)
+                text = "Pourquoi ?"
+            }
+        val draft = side.draft()
+        val id = side.submissionId("first")
+        side.showAll()
+        side.submitted(draft, id)
+        assertEquals("Pourquoi ?", side.text)
+        assertEquals("reply-1", side.itemId)
+        assertEquals(11L, side.replyEventId)
+    }
+
+    @Test
+    fun aQuestionIsAboutTheReplyWhoseSheetAsksIt() {
+        val side = SideQuestionState().apply { ask("reply-1", "le passage") }
+        side.text = "Pourquoi ?"
+        side.submitted(side.draft(), "")
+        assertEquals(listOf("", "", ""), listOf(side.itemId, side.quote, side.text))
+        // Opened from another reply's count, the next question is about that reply.
+        side.show("reply-2")
+        assertEquals("reply-2", side.itemId)
+        assertEquals("reply-2", side.focus)
+        side.text = "Une autre question"
+        side.submitted(side.draft(), "")
+        assertEquals("reply-2", side.itemId)
+        assertEquals("reply-2", side.focus)
+        // Opened from the card, a draft keeps the reply it is about.
+        side.show()
+        assertEquals("reply-2", side.itemId)
+        side.ask("reply-1", "autre passage")
+        side.show("reply-2")
+        assertEquals(listOf("reply-2", ""), listOf(side.itemId, side.quote))
+        side.ask("reused", "passage", 11)
+        side.show("reused", 12)
+        assertEquals(12L, side.replyEventId)
+        assertEquals("", side.quote)
+        assertTrue(side.shows(answered.copy(itemId = "reused", replyEventId = "12")))
+        assertFalse(side.shows(answered.copy(itemId = "reused", replyEventId = "11")))
+        side.submitted(side.draft(), "")
+        assertEquals(12L, side.replyEventId)
+    }
+
+    @Test
+    fun theCardSaysWhenAQuestionWasNotAnswered() {
+        val failed =
+            answered.copy(
+                id = "a1b2c3d4-0000-4000-8000-000000000009",
+                status = "failed",
+                answer = null,
+                error = "La réponse s’est terminée avant.",
+            )
+        val side = SideQuestionState().apply { observe(emptyList()) }
+        var questions by mutableStateOf(listOf(failed))
+        compose.setContent {
+            CairnTheme {
+                SideQuestionCard(
+                    chat(canAsk = true).copy(status = "idle", sideQuestions = questions),
+                    side,
+                )
+            }
+        }
+        compose.onNodeWithText("Question à côté · Sans réponse").assertExists()
+        questions = listOf(failed, answered)
+        compose.onNodeWithText("Question à côté · Réponse prête").assertExists()
+    }
+
+    @Test
+    fun theCardOffersAGeneralQuestionBeforeAnyReplyOrQuestion() {
+        val side = SideQuestionState()
+        compose.setContent {
+            CairnTheme {
+                SideQuestionCard(chat(canAsk = true).copy(sideQuestions = emptyList()), side)
+            }
+        }
+        compose.onNodeWithText("Poser une question à côté").performClick()
+        assertTrue(side.open)
+        assertEquals("", side.itemId)
+    }
+
+    @Test
+    fun aSeenGeneralQuestionStillHasAnEntryPoint() {
+        val general = answered.copy(itemId = "", text = "Question générale")
+        val side = SideQuestionState().apply { observe(listOf(general)) }
+        compose.setContent {
+            CairnTheme {
+                SideQuestionCard(chat(canAsk = true).copy(sideQuestions = listOf(general)), side)
+            }
+        }
+        compose.onNodeWithText("Questions à côté · Enregistrées").assertExists()
+        compose.onNodeWithTag("side-question-card").performClick()
+        assertTrue(side.open)
+    }
+
+    @Test
+    fun aFilteredSheetDoesNotMarkHiddenAnswersRead() {
+        val other = pending.copy(status = "answered", answer = "Autre réponse", settledAt = 5)
+        val side =
+            SideQuestionState().apply {
+                observe(emptyList())
+                show("reply-1")
+            }
+        side.observe(listOf(answered, other))
+        assertEquals(listOf(other.id), side.unread(listOf(answered, other)).map { it.id })
+        side.show()
+        side.observe(listOf(answered, other))
+        assertTrue(side.unread(listOf(answered, other)).isEmpty())
+    }
+
+    @Test
+    fun aReplyOffersItsSideQuestionsOnlyWhileTheAgentCanAnswer() {
+        val asked = mutableListOf<Pair<String, String>>()
+        val shown = mutableListOf<String>()
+        var canAsk by mutableStateOf(true)
+        val vm = viewModel()
+        val models = ViewModelStore().apply { put("fixture", vm) }
+        val event =
+            RunEvent(
+                id = 1,
+                createdAt = 0,
+                type = "item.completed",
+                text = "Réponse",
+                payload =
+                    buildJsonObject {
+                        put(
+                            "item",
+                            buildJsonObject {
+                                put("id", "reply-1")
+                                put("type", "agent_message")
+                                put("text", "Réponse de l’agent")
+                            },
+                        )
+                    },
+                runId = "run",
+            )
+        compose.setContent {
+            CairnTheme {
+                CompositionLocalProvider(
+                    LocalSideQuestions provides
+                        SideQuestionActions(
+                            canAsk,
+                            mapOf("item:reply-1" to 2),
+                            { item, quote, _ -> asked += item to quote },
+                            { item, _, _ -> shown += item },
+                        )
+                ) {
+                    EventRow(vm, event, "Agent")
+                }
+            }
+        }
+        try {
+            compose.onNodeWithContentDescription("Poser une question à côté").performClick()
+            assertEquals(listOf("reply-1" to ""), asked)
+            compose.onNodeWithText("2").performClick()
+            assertEquals(listOf("reply-1"), shown)
+            val label = compose.onNodeWithText("Agent").getBoundsInRoot()
+            canAsk = false
+            compose.waitForIdle()
+            // The action leaving does not move the reply, so the history keeps its position.
+            val after = compose.onNodeWithText("Agent").getBoundsInRoot()
+            assertEquals(label.top to label.bottom, after.top to after.bottom)
+            compose.onNodeWithContentDescription("Poser une question à côté").assertDoesNotExist()
+            compose.onNodeWithText("2").assertExists()
+        } finally {
+            models.clear()
+        }
+    }
+}

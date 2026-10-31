@@ -269,6 +269,8 @@ impl Execution<'_> {
                     .map(|account| account.account_id.clone()),
             ),
             account_name: Some(account_name.as_str().map(str::to_owned)),
+            // Each execution's adapter announces again whether it answers side questions.
+            boundary: Some(json!({ "sideQuestions": null })),
             ..Default::default()
         };
         if let Some(mut retry) = s.store.run_state(&self.id).await?.retry {
@@ -545,6 +547,16 @@ impl Execution<'_> {
         if self.checkpoint.expired() {
             return Err(Error::conflict("Run exceeded its time limit."));
         }
+        // Each attempt's adapter of a conversation, such as one resumed on another account,
+        // announces again whether it answers side questions, and receives them only then.
+        if self.run["chatExecution"].is_object() {
+            crate::chats::side_questions::withdraw_announcement(
+                &s.store,
+                &self.id,
+                &self.directory,
+            )
+            .await?;
+        }
         let output = workspace.output().to_owned();
         match tokio::fs::remove_file(&output).await {
             Ok(()) => {}
@@ -685,6 +697,16 @@ impl Execution<'_> {
         if let Some(session) = session.as_ref()
             && self.may_switch_account(&exit)
         {
+            // This adapter has exited; its side questions cannot wait for a different
+            // account, even though the run and turn remain running during the switch.
+            if self.run["chatExecution"].is_object() {
+                crate::chats::side_questions::withdraw_announcement(
+                    &s.store,
+                    &self.id,
+                    &self.directory,
+                )
+                .await?;
+            }
             if workspace.isolated() {
                 recovery::fence(s, &s.store.run(&self.id).await?).await?;
             }

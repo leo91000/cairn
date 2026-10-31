@@ -44,6 +44,33 @@ abstract class ChatSwipeCases {
     private val telemetryReports = java.util.concurrent.CopyOnWriteArrayList<String>()
 
     @Test
+    fun viewingASavedSideAnswerKeepsItsReplyInView() =
+        withChats(single = true, sideAnswer = true) {
+            open("Chat récent")
+            val tail =
+                history
+                    .fetchSemanticsNode()
+                    .config[SemanticsProperties.VerticalScrollAxisRange]
+                    .value()
+            compose.onNodeWithTag("side-question-card").performClick()
+            compose.onNodeWithText("Voir la réponse").performScrollTo().performClick()
+            compose.waitUntil(10000) {
+                history
+                    .fetchSemanticsNode()
+                    .config[SemanticsProperties.VerticalScrollAxisRange]
+                    .value() < tail / 2
+            }
+            compose.mainClock.advanceTimeBy(2000)
+            compose.waitForIdle()
+            Assert.assertTrue(
+                history
+                    .fetchSemanticsNode()
+                    .config[SemanticsProperties.VerticalScrollAxisRange]
+                    .value() < tail / 2
+            )
+        }
+
+    @Test
     fun automaticPerformanceSharingUsesBeaconWithoutConversationContent() = withChats {
         // Another UI instance may already have consumed the process-wide interval.
         Performance.uploadCadence.tryAcquire()
@@ -348,6 +375,7 @@ abstract class ChatSwipeCases {
 
     private fun withChats(
         single: Boolean = false,
+        sideAnswer: Boolean = false,
         paginated: Boolean = false,
         slowActivity: Boolean = false,
         test: () -> Unit,
@@ -452,9 +480,29 @@ abstract class ChatSwipeCases {
                                                 ),
                                         )
                                     }
+                            val detailChat =
+                                if (sideAnswer && chat != null)
+                                    chat.copy(
+                                        sideQuestions =
+                                            listOf(
+                                                ChatSideQuestion(
+                                                    id = "a1b2c3d4-0000-4000-8000-000000000001",
+                                                    chatId = chat.id,
+                                                    runId = "run",
+                                                    text = "Pourquoi ?",
+                                                    itemId = "answer-1",
+                                                    provider = "claude",
+                                                    status = "answered",
+                                                    answer = "Pour vérifier.",
+                                                    createdAt = 1,
+                                                    settledAt = 2,
+                                                )
+                                            )
+                                    )
+                                else chat
                             val state =
                                 if (chat == null) LiveState(chats = chats)
-                                else LiveState(chat = chat)
+                                else LiveState(chat = detailChat)
                             val batch =
                                 LiveBatch(
                                     events,

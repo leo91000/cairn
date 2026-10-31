@@ -9,6 +9,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.hideFromAccessibility
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
@@ -655,7 +656,7 @@ internal fun timelineEntries(
                 }
                 continue
             }
-            if (event.type == "turn.started") {
+            if (event.type in setOf("turn.started", "turn.completed", "turn.failed")) {
                 positions.clear()
             }
             val item = event.item()
@@ -1386,10 +1387,14 @@ fun EventRow(vm: CairnViewModel, event: RunEvent, agent: String = "Cairn") {
                             ),
                             verticalArrangement = Arrangement.spacedBy(6.dp),
                         ) {
+                            val side = if (user) null else LocalSideQuestions.current
+                            val itemId = if (event.type == "chat.user") "" else item.string("id")
+                            val firstEvent = event.displayId ?: event.id
                             if (!user)
                                 Row(
                                     Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically,
                                 ) {
                                     Text(
                                         agent,
@@ -1397,6 +1402,57 @@ fun EventRow(vm: CairnViewModel, event: RunEvent, agent: String = "Cairn") {
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
+                                    val prefix = "event:$itemId:"
+                                    val asked =
+                                        (side?.counts?.get("item:$itemId") ?: 0) +
+                                            side?.counts.orEmpty().entries.sumOf { (key, count) ->
+                                                val id =
+                                                    key.removePrefix(prefix)
+                                                        .takeIf { key.startsWith(prefix) }
+                                                        ?.toLongOrNull()
+                                                if (id != null && id in firstEvent..event.id) count
+                                                else 0
+                                            }
+                                    // These actions come and go with the reply's state; they
+                                    // never change the line's height, so the history does not move.
+                                    if (side != null && itemId.isNotEmpty() && asked > 0)
+                                        Box(Modifier.withoutLineHeight()) {
+                                            val label =
+                                                if (asked == 1)
+                                                    "Voir 1 question à côté sur cette réponse"
+                                                else
+                                                    "Voir $asked questions à côté sur cette réponse"
+                                            TextButton(
+                                                onClick = {
+                                                    side.show(itemId, firstEvent, event.id)
+                                                },
+                                                modifier =
+                                                    Modifier.semantics {
+                                                        contentDescription = label
+                                                    },
+                                                contentPadding = PaddingValues(horizontal = 8.dp),
+                                            ) {
+                                                Icon(
+                                                    CairnIcons.SideQuestion,
+                                                    null,
+                                                    Modifier.size(14.dp),
+                                                )
+                                                Spacer(Modifier.width(4.dp))
+                                                Text(
+                                                    "$asked",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                )
+                                            }
+                                        }
+                                    if (side?.canAsk == true && itemId.isNotEmpty())
+                                        Box(Modifier.withoutLineHeight()) {
+                                            ActionIcon(
+                                                "Poser une question à côté",
+                                                CairnIcons.SideQuestion,
+                                            ) {
+                                                side.ask(itemId, "", firstEvent)
+                                            }
+                                        }
                                     Text(
                                         time,
                                         style = MaterialTheme.typography.labelSmall,
@@ -1414,7 +1470,17 @@ fun EventRow(vm: CairnViewModel, event: RunEvent, agent: String = "Cairn") {
                                         style = MaterialTheme.typography.bodyLarge,
                                     )
                                 }
-                            else Markdown(content)
+                            else
+                                CompositionLocalProvider(
+                                    LocalSideQuestionAsk provides
+                                        side
+                                            ?.takeIf { it.canAsk && itemId.isNotEmpty() }
+                                            ?.let { actions ->
+                                                { quote -> actions.ask(itemId, quote, firstEvent) }
+                                            }
+                                ) {
+                                    Markdown(content)
+                                }
                             if (user)
                                 Text(
                                     time,

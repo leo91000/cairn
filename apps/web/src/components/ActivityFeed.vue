@@ -15,6 +15,7 @@ import {
   onBeforeMount,
   onBeforeUnmount,
   onBeforeUpdate,
+  onMounted,
   ref,
   shallowRef,
   watch,
@@ -24,7 +25,12 @@ import { activityEntries, ActivityGroups } from '../activity'
 import { currentPlan } from '../agent-plan'
 import { quotaEntries } from '../chat-quota'
 import { deliveryEntries } from '../deliverables'
-import { ArrowDown, Maximize2, Minimize2 } from '../icons'
+import {
+  ArrowDown,
+  Maximize2,
+  MessageSquareQuote,
+  Minimize2,
+} from '../icons'
 import { MessageTimes } from '../message-times'
 import { questionAnswerText } from '../question-answer'
 import { exclusiveSuspensionLabel } from '../run-status'
@@ -78,6 +84,10 @@ const props = defineProps<{
   codingAgentSwitch?: { provider: Provider, error: string | null } | null
   canManageAccounts?: boolean
   busy?: boolean
+  /** The running reply can answer a side question about an agent message. */
+  canAsk?: boolean
+  /** How many side questions were asked about each agent message. */
+  sideQuestions?: Record<string, number>
 }>()
 const emit = defineEmits<{
   load: []
@@ -85,6 +95,10 @@ const emit = defineEmits<{
   pauseWait: []
   resumeQuota: []
   codingAgentSwitched: [provider: Provider]
+  /** Ask a side question about a reply, or the passage selected in it. */
+  ask: [about: { itemId: string, replyEventId: number | null, quote: string }]
+  /** Show the side questions asked about a reply. */
+  sideQuestions: [reply: { itemId: string, replyEventId: number | null, replyEventIds: number[] }]
 }>()
 const skillNames = computed(() => new Set(props.skills ?? []))
 const messageTimes = new MessageTimes()
@@ -321,12 +335,80 @@ function schedulePaging() {
 
 watch([entries, settled, () => props.more, () => props.loading, () => props.olderError], schedulePaging, { flush: 'post' })
 
+// A passage selected in one agent reply can be asked about, beside the running reply.
+function replyCount(entry: Extract<ActivityEntry, { kind: 'message' }>) {
+  const [start, end] = entry.replyEventIds ?? []
+  const prefix = `event:${entry.itemId}:`
+  const anchored = start && end
+    ? Object.entries(props.sideQuestions ?? {}).reduce((count, [key, value]) => {
+        const id = Number(key.startsWith(prefix) ? key.slice(prefix.length) : NaN)
+        return count + (id >= start && id <= end ? value : 0)
+      }, 0)
+    : 0
+  return anchored
+    + (props.sideQuestions?.[`item:${entry.itemId}`] ?? 0)
+}
+
+const selection = ref<{
+  itemId: string
+  replyEventId: number | null
+  quote: string
+  top: number
+  left: number
+} | null>(null)
+let selectionTimer: ReturnType<typeof setTimeout> | undefined
+
+function selectedPassage() {
+  const current = document.getSelection()
+  if (!props.canAsk || !current || current.isCollapsed || !current.rangeCount)
+    return null
+  const reply = (node: Node | null) => (node instanceof Element ? node : node?.parentElement)?.closest<HTMLElement>('[data-item-id]')
+  const start = reply(current.anchorNode)
+  if (!start || start !== reply(current.focusNode) || !conversation.value?.contains(start))
+    return null
+  // Cut by code point, as the server counts, never inside an emoji.
+  const quote = Array.from(current.toString().trim()).slice(0, 4000).join('')
+  const rect = current.getRangeAt(0).getBoundingClientRect()
+  if (!quote || !rect.width)
+    return null
+  return {
+    itemId: start.dataset.itemId!,
+    replyEventId: Number(start.dataset.replyEventId) || null,
+    quote,
+    top: Math.max(8, rect.top - 44),
+    left: Math.min(window.innerWidth - 8, Math.max(8, rect.left + rect.width / 2)),
+  }
+}
+
+function selectionChanged() {
+  clearTimeout(selectionTimer)
+  // Touch selection handles fire many changes; wait until the selection settles.
+  selectionTimer = setTimeout(() => selection.value = selectedPassage(), 200)
+}
+
+function askSelection() {
+  const current = selection.value
+  if (!current)
+    return
+  selection.value = null
+  emit('ask', { itemId: current.itemId, replyEventId: current.replyEventId, quote: current.quote })
+}
+
+onMounted(() => document.addEventListener('selectionchange', selectionChanged))
+onBeforeUnmount(() => {
+  document.removeEventListener('selectionchange', selectionChanged)
+  clearTimeout(selectionTimer)
+})
+watch(() => props.canAsk, () => selectionChanged())
+
 // As on Android, scrolling up pauses following and scrolling back to the end resumes it.
 // Positions the feed sets itself, and the browser's anchoring, change neither.
 function scrolled() {
   const el = scroller.value
   if (!el)
     return
+  if (selection.value)
+    selectionChanged()
   const top = el.scrollTop
   const own = assigned !== undefined && Math.abs(top - assigned) < 1
   assigned = undefined
@@ -373,8 +455,27 @@ async function exitFullscreen() {
     fullscreenReturnFocus?.focus()
 }
 
+/** Brings a reply into view, as when following a side question back to it. */
+function reveal(reference: { itemId: string, replyEventId: number | null }) {
+  const candidates = conversation.value?.querySelectorAll<HTMLElement>(`[data-item-id="${CSS.escape(reference.itemId)}"]`)
+  const reply = Array.from(candidates ?? []).find((candidate) => {
+    if (!reference.replyEventId)
+      return true
+    const [start, end] = (candidate.dataset.replyEvents ?? '').split(' ').map(Number)
+    return start !== undefined && end !== undefined && reference.replyEventId >= start && reference.replyEventId <= end
+  })
+  if (!reply)
+    return false
+  follow.value = false
+  reply.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  reply.classList.add('side-question-target')
+  setTimeout(() => reply.classList.remove('side-question-target'), 1600)
+  return true
+}
+
 onBeforeUnmount(() => viewer.value?.close())
 defineExpose({
+  reveal,
   teams,
   subagents,
   plan,
@@ -469,10 +570,40 @@ defineExpose({
                     <time :datetime="messageTimes.format(entry.time).datetime" :title="messageTimes.format(entry.time).title">{{ messageTimes.format(entry.time).label }}</time>
                   </p>
                 </article>
-                <article v-else-if="entry.kind === 'message'" class="activity-message chat-message my-3 py-2" :class="visibleOutcome && entry.id === outcomeEntryId ? 'mb-1!' : ''">
-                  <p class="mb-1.5! flex justify-between gap-3 text-2xs text-muted">
+                <article
+                  v-else-if="entry.kind === 'message'"
+                  class="activity-message chat-message my-3 py-2 rounded-lg transition-colors duration-500"
+                  :class="visibleOutcome && entry.id === outcomeEntryId ? 'mb-1!' : ''"
+                  :data-item-id="chat ? entry.itemId : undefined"
+                  :data-reply-event-id="entry.replyEventIds?.[0]"
+                  :data-reply-events="entry.replyEventIds?.join(' ')"
+                >
+                  <!-- Its actions come and go with the reply's state: they never change the line's height, so the conversation does not move. -->
+                  <p class="mb-1.5! flex items-center justify-between gap-3 text-2xs text-muted">
                     <span class="truncate">{{ agent }}<template v-if="entry.via"> · via {{ entry.via }}</template></span>
-                    <time :datetime="messageTimes.format(entry.time).datetime" :title="messageTimes.format(entry.time).title">{{ messageTimes.format(entry.time).label }}</time>
+                    <!-- On phones, each action's 44 px touch target stays clear of the other's. -->
+                    <span class="flex shrink-0 items-center gap-1 phone:gap-6">
+                      <button
+                        v-if="chat && entry.itemId && replyCount(entry)"
+                        type="button"
+                        class="side-question-count relative -my-1 inline-flex h-5 items-center gap-1 rounded-full bg-accent/10 px-2 text-[11px] leading-none font-medium text-accent after:absolute after:-inset-2 after:content-[''] hover:bg-accent/16 phone:after:-inset-y-3"
+                        :aria-label="`Show ${replyCount(entry)} side ${replyCount(entry) === 1 ? 'question' : 'questions'} about this reply`"
+                        @click="emit('sideQuestions', { itemId: entry.itemId, replyEventId: entry.replyEventIds?.[0] ?? null, replyEventIds: entry.replyEventIds ?? [] })"
+                      >
+                        <Icon :name="MessageSquareQuote" :size="12" />{{ replyCount(entry) }}
+                      </button>
+                      <button
+                        v-if="chat && canAsk && entry.itemId"
+                        type="button"
+                        :class="twMerge(iconButton, 'relative -my-1 size-5 phone:min-h-0 phone:min-w-0 after:absolute after:-inset-2.5 after:content-[\'\'] phone:after:-inset-3')"
+                        aria-label="Ask about this reply"
+                        title="Ask about this reply without interrupting the agent"
+                        @click="emit('ask', { itemId: entry.itemId, replyEventId: entry.replyEventIds?.[0] ?? null, quote: '' })"
+                      >
+                        <Icon :name="MessageSquareQuote" :size="14" />
+                      </button>
+                      <time :datetime="messageTimes.format(entry.time).datetime" :title="messageTimes.format(entry.time).title">{{ messageTimes.format(entry.time).label }}</time>
+                    </span>
                   </p>
                   <ActivityContent :content="entry.text" />
                 </article>
@@ -557,6 +688,16 @@ defineExpose({
               <Icon :name="ArrowDown" :size="18" />
             </button>
           </Transition>
+          <button
+            v-if="selection"
+            type="button"
+            class="side-question-selection fixed z-20 inline-flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-line bg-raised px-3 py-1.5 text-xs font-medium text-ink shadow-md hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent phone:min-h-11"
+            :style="{ top: `${selection.top}px`, left: `${selection.left}px` }"
+            @pointerdown.prevent
+            @click="askSelection"
+          >
+            <Icon :name="MessageSquareQuote" :size="14" />Ask about selection
+          </button>
         </div>
       </section>
     </Teleport>

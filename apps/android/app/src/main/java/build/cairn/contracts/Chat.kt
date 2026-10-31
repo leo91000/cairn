@@ -16,6 +16,8 @@ data class Chat(
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val agentName: String = "",
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val canAskSideQuestion: Boolean = false,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val canRequestNewSession: Boolean = false,
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val codingAgentSwitch: CodingAgentSwitch? = null,
@@ -49,6 +51,8 @@ data class Chat(
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val pendingQuestions: Long = 0,
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val pendingSideQuestions: Long = 0,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val preview: String? = null,
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val projectId: String? = null,
@@ -75,6 +79,12 @@ data class Chat(
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val sessionRestartRequested: Boolean = false,
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val sideQuestionReason: String? = null,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val sideQuestionUnavailable: String? = null,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val sideQuestions: List<ChatSideQuestion> = listOf(),
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val slug: String = "",
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val status: String = "idle",
@@ -100,6 +110,7 @@ data class Chat(
         lastActivityAt?.let { require(it in 0L..9007199254740991L) }
         require(Regex("^(active|trash|purging)\$").containsMatchIn(lifecycle))
         require(pendingQuestions >= 0L)
+        require(pendingSideQuestions >= 0L)
         provider?.let { require(Regex("^(codex|claude|opencode)\$").containsMatchIn(it)) }
         purgeAt?.let { require(it in 0L..9007199254740991L) }
         restoredAt?.let { require(it in 0L..9007199254740991L) }

@@ -189,9 +189,11 @@ pub use models::*;
 
 mod conversations;
 mod questions;
+mod side_questions;
 mod skills;
 
 pub use questions::*;
+pub use side_questions::*;
 
 pub use conversations::*;
 pub use skills::*;

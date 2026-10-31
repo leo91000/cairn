@@ -14,6 +14,8 @@ typealias QuestionAnswer = build.cairn.contracts.QuestionAnswer
 
 typealias ChatQuestion = build.cairn.contracts.ChatQuestion
 
+typealias ChatSideQuestion = build.cairn.contracts.ChatSideQuestion
+
 typealias ChatWakeup = build.cairn.contracts.ChatWakeup
 
 typealias ContextUsage = build.cairn.contracts.ContextUsage

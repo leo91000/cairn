@@ -181,9 +181,9 @@ A message starts work with the target agent's permissions.
 
 | Scope | Conversation operations |
 | --- | --- |
-| `read` | `list_chats`, `get_chat`, `read_chat_content`, `list_chat_questions`, `list_chat_artifacts`, `read_chat_artifact`, `list_chat_attachments`, `read_chat_attachment` |
+| `read` | `list_chats`, `get_chat`, `read_chat_content`, `list_chat_questions`, `list_chat_side_questions`, `list_chat_artifacts`, `read_chat_artifact`, `list_chat_attachments`, `read_chat_attachment` |
 | `manage` | `create_chat`, `rename_chat`, `delete_chat`, `restore_chat`, `upload_chat_attachment`, `set_chat_artifact_visibility` |
-| `run` | `send_chat_message`, `edit_chat_message`, `delete_chat_message`, `set_chat_paused`, `stop_chat`, `resume_chat`, `restart_chat_session`, `compact_chat`, `answer_chat_question`, `cancel_chat_question` |
+| `run` | `send_chat_message`, `edit_chat_message`, `delete_chat_message`, `set_chat_paused`, `stop_chat`, `resume_chat`, `restart_chat_session`, `compact_chat`, `answer_chat_question`, `cancel_chat_question`, `ask_chat_side_question`, `cancel_chat_side_question` |
 
 `list_chats` supports agent/project filters and active/trash views. Lists and
 `get_chat` take `offset` and `limit` (default 50, maximum 100); follow `nextOffset`
@@ -230,6 +230,20 @@ the adapter delivery budget.
 The call returns immediately with `questionId`; answers arrive later as a user
 message. The private workspace grant is checked transactionally, independently
 of installation-management access. Native question tools are not used.
+
+`ask_chat_side_question` asks the running agent a [side question](chats.md#side-questions)
+about the conversation, optionally quoting a passage (`question.quote`) of one of
+its replies (`question.itemId`, the agent message's item ID). Without a quote, a
+question about a reply reaches the agent with the start of that reply. Include the
+reply's stored event ID as a decimal string in `question.replyEventId` to distinguish
+reused item IDs; it must identify an agent message in this conversation's run. If omitted, a unique item ID is resolved and its event is saved; ambiguous IDs are refused. It requires
+`canAskSideQuestion`, reported by `get_chat`, `list_chats` and
+`list_chat_side_questions` with `sideQuestionReason` (and its code,
+`sideQuestionUnavailable`) when false: Claude Code must be
+working on a reply. Codex and OpenCode conversations never take one. Supply
+a UUID in `question.id`; identical retries return the retained question. After it is pruned, reuse of its ID is refused. The answer, or why there is
+none, appears in `list_chat_side_questions`. `cancel_chat_side_question` withdraws
+one that is still pending. Neither steers the reply or changes the queue. Claude denies attempted tools, but an operator’s managed-policy hooks may run before denial and can have side effects; withdrawal cannot undo effects already performed.
 
 `delete_chat` uses the apps' deletion lifecycle. Busy chats require `confirm: true`
 to stop execution and cancel messages/questions. Existing cleanup rules may

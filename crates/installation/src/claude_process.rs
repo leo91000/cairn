@@ -27,12 +27,19 @@ const STOPPED: &str = "Claude execution stopped.";
 const MAX_LINE: usize = 32_000_000;
 const MAX_IMAGE: usize = 10_000_000;
 
+/// Only the release tested against the native side-question protocol is enabled.
+/// Other releases must be qualified before extending this gate (ADR-0078).
+fn answers_side_questions(version: &str) -> bool {
+    version == "2.1.308"
+}
+
 /// Prefix of the context usage requests this adapter sends Claude Code.
 const CONTEXT_REQUEST: &str = "cairn-context-";
 
 /// How long a finished execution waits for the context report requested at a compaction
 /// boundary. Claude Code answers it locally, after the command's result.
 const CONTEXT_REPORT_WAIT: Duration = Duration::from_secs(5);
+const SIDE_CONTROL_WAIT: Duration = Duration::from_millis(100);
 
 const DENIED: &str =
     "This tool is outside the agent's access policy. Ask the user in your response.";
@@ -500,6 +507,10 @@ struct Turn<'a> {
     compaction_attempts: usize,
     /// Identifies this launch's compaction items.
     attempt: String,
+    /// Side questions Claude Code is answering, by control request ID.
+    sides: HashMap<String, String>,
+    /// This Claude Code release announced side questions; it takes none otherwise.
+    side_available: bool,
 }
 
 impl Turn<'_> {
@@ -572,10 +583,14 @@ impl Turn<'_> {
         self.emit(event).await
     }
 
-    /// Claude Code's answer to a context usage request. Answers whether the execution is now
-    /// complete.
+    /// Claude Code's answer to a side question or a context usage request. Answers whether the
+    /// execution is now complete.
     async fn on_control_response(&mut self, value: &Value) -> Result<bool> {
         let response = &value["response"];
+        if let Some(question) = self.sides.remove(text(response, "request_id")) {
+            self.on_side_answer(&question, response).await?;
+            return Ok(false);
+        }
         let Some(number) = text(response, "request_id")
             .strip_prefix(CONTEXT_REQUEST)
             .and_then(|number| number.parse::<u64>().ok())
@@ -693,6 +708,21 @@ impl Turn<'_> {
             if self.submitted.contains(id) {
                 continue;
             }
+            let side =
+                message["sideQuestion"].is_object() || message["sideQuestionCancelled"] == true;
+            if side && !self.side_available {
+                continue;
+            }
+            if message["sideQuestionCancelled"] == true {
+                self.withdraw_side(text(&message, "sideQuestionId")).await?;
+                self.submitted.insert(id.into());
+                continue;
+            }
+            if message["sideQuestion"].is_object() {
+                self.ask_side(&message["sideQuestion"]).await?;
+                self.submitted.insert(id.into());
+                continue;
+            }
             if message["questionCancelled"] == true {
                 self.submitted.insert(id.into());
                 continue;
@@ -705,6 +735,122 @@ impl Turn<'_> {
         Ok(())
     }
 
+    /// Claude Code's native side question: answered from the live conversation,
+    /// including the running turn, with every tool denied and nothing written to
+    /// the session transcript. The main turn continues meanwhile.
+    async fn ask_side(&mut self, side: &Value) -> Result<()> {
+        let question = text(side, "id").to_owned();
+        let request_id = format!("side-question-{question}");
+        let request = json!({
+            "type": "control_request",
+            "request_id": request_id,
+            "request": {
+                "subtype": "side_question",
+                "question": side["text"],
+            },
+        });
+        // Writes no larger than PIPE_BUF are atomic on the nonblocking control pipe:
+        // a deadline cannot leave half a JSON frame for the main turn to consume.
+        if serde_json::to_vec(&request)?.len() + 1 > libc::PIPE_BUF {
+            return self
+                .side_failed(
+                    &question,
+                    "This side question is too large for the agent control channel.",
+                )
+                .await;
+        }
+        match tokio::time::timeout(SIDE_CONTROL_WAIT, send(&mut self.stdin, request)).await {
+            Ok(Ok(())) => {
+                self.sides.insert(request_id, question);
+            }
+            Ok(Err(_)) | Err(_) => {
+                self.side_failed(&question, "The agent could not receive this side question.")
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Withdraws the side questions Claude Code is still answering when the reply ends:
+    /// they never delay it, and can be asked again during the next one.
+    async fn withdraw_sides(&mut self) -> Result<()> {
+        for (request, question) in std::mem::take(&mut self.sides) {
+            self.cancel_side_request(&request).await;
+            self.side_failed(&question, crate::chats::side_questions::EXPIRED)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn withdraw_side(&mut self, question: &str) -> Result<()> {
+        let request = self
+            .sides
+            .iter()
+            .find(|(_, id)| *id == question)
+            .map(|(request, _)| request.clone());
+        if let Some(request) = request {
+            self.sides.remove(&request);
+            self.cancel_side_request(&request).await;
+        }
+        Ok(())
+    }
+
+    /// A side request must never hold or fail the main reply if Claude has stopped
+    /// reading its control channel. Each bounded send is best effort.
+    async fn cancel_side_request(&mut self, request: &str) {
+        let cancel = json!({ "type": "control_cancel_request", "request_id": request });
+        let _ = tokio::time::timeout(SIDE_CONTROL_WAIT, send(&mut self.stdin, cancel)).await;
+    }
+
+    /// The reply to a side question. Claude reports a missing or synthetic answer
+    /// (its own fallback text) when it could not answer.
+    async fn on_side_answer(&mut self, question: &str, response: &Value) -> Result<()> {
+        let answer = &response["response"];
+        let answered = response["subtype"] == "success"
+            && answer["synthetic"] != true
+            && !text(answer, "response").trim().is_empty();
+        if answered {
+            let answer = text(answer, "response");
+            if !crate::chats::side_questions::answer_fits(answer) {
+                return self
+                    .side_failed(question, "The side answer exceeded the size limit.")
+                    .await;
+            }
+            return self
+                .emit(json!({
+                    "type": "chat.side.answered",
+                    "sideQuestionId": question,
+                    "text": answer,
+                }))
+                .await;
+        }
+        // A synthetic answer is Claude Code's own explanation, such as a tool it refused.
+        // Preserve the whole field until the worker redacts configured secrets.
+        let explanation = text(answer, "response");
+        let error = if response["subtype"] == "error" && !text(response, "error").is_empty() {
+            text(response, "error")
+        } else if answer["synthetic"] == true && !explanation.trim().is_empty() {
+            explanation
+        } else {
+            "Claude Code could not answer this side question."
+        };
+        self.side_failed(question, error).await
+    }
+
+    async fn side_failed(&self, question: &str, error: &str) -> Result<()> {
+        let error = if crate::chats::side_questions::error_fits(error) {
+            error
+        } else {
+            "The side question error exceeded the size limit."
+        };
+        self.emit(json!({
+            "type": "chat.side.failed",
+            "sideQuestionId": question,
+            "error": error,
+        }))
+        .await
+    }
+
     /// Handles one stream-json line. Answers whether the request is complete.
     async fn handle(&mut self, value: &Value) -> Result<bool> {
         match text(value, "type") {
@@ -713,6 +859,15 @@ impl Turn<'_> {
                 crate::validation::uuid(session)?;
                 self.emit(json!({ "type": "thread.started", "thread_id": session }))
                     .await?;
+                let release = text(value, "claude_code_version");
+                self.side_available = answers_side_questions(release);
+                if self.side_available {
+                    self.emit(json!({ "type": "chat.side.available" })).await?;
+                } else {
+                    // Says why, instead of leaving the reply "still starting".
+                    self.emit(json!({ "type": "chat.side.unavailable", "release": release }))
+                        .await?;
+                }
             }
             "system" if value["subtype"] == "background_tasks_changed" => {
                 self.background_tasks(value).await?;
@@ -1415,6 +1570,7 @@ impl Turn<'_> {
             }
             return Ok(false);
         }
+        self.withdraw_sides().await?;
         if self.context_pending.is_some() {
             // Claude Code answers the compaction's context request after its result: wait
             // briefly for it so the run shows the compacted context.
@@ -1624,6 +1780,8 @@ pub async fn run(
         compactions: 0,
         compaction_attempts: 0,
         attempt: crate::config::id(),
+        sides: HashMap::new(),
+        side_available: false,
     };
     let operation = turn.execute(&mut stdout, auth.as_mut(), &cancel).await;
     // Closes Claude Code's stdin.
@@ -1682,4 +1840,30 @@ fn resolved(path: &Path) -> Option<PathBuf> {
         let parent = std::fs::canonicalize(path.parent()?).ok()?;
         Some(parent.join(path.file_name().unwrap_or_default()))
     })
+}
+
+#[cfg(test)]
+mod side_question_release_tests {
+    use super::answers_side_questions;
+
+    #[test]
+    fn only_the_qualified_release_answers_side_questions() {
+        assert!(answers_side_questions("2.1.308"));
+        for release in [
+            "2.1.280",
+            "2.1.307",
+            "2.1.307-rc",
+            "2.1.308-rc.1",
+            "2.1.308+build",
+            "2.1.310",
+            "2.1.310-beta.1",
+            "2.2.0",
+            "3.0.0+build",
+            "2.1",
+            "",
+            "next",
+        ] {
+            assert!(!answers_side_questions(release), "{release}");
+        }
+    }
 }

@@ -442,7 +442,7 @@ class LiveTest {
     }
 
     @Test
-    fun `deltas fold assistant rows and a new turn isolates reused item identifiers`() {
+    fun `deltas fold assistant rows and completed turns isolate reused item identifiers`() {
         val accumulator = LiveAccumulator()
         accumulator.append(listOf(message(1, "Bonjour"), message(2, " Cairn", true)))
         val rows =
@@ -452,7 +452,7 @@ class LiveTest {
                     RunEvent(
                         id = 3,
                         createdAt = 30,
-                        type = "turn.started",
+                        type = "turn.completed",
                         text = "",
                     ),
                     message(4, "Nouvelle réponse"),

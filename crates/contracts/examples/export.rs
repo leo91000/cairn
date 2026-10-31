@@ -259,6 +259,11 @@ fn main() {
     export::<ChatQuestionInput>(root, &mut generator, Contract::Deserialize);
     export::<AnswerChatQuestionInput>(root, &mut generator, Contract::Deserialize);
     export::<ListChatQuestionsOutput>(root, &mut generator, Contract::Deserialize);
+    export::<ChatSideQuestion>(root, &mut generator, Contract::Deserialize);
+    export::<SideQuestionInput>(root, &mut generator, Contract::Deserialize);
+    export::<AskChatSideQuestionInput>(root, &mut generator, Contract::Deserialize);
+    export::<ChatSideQuestionInput>(root, &mut generator, Contract::Deserialize);
+    export::<ListChatSideQuestionsOutput>(root, &mut generator, Contract::Deserialize);
     export::<WaitForOutput>(root, &mut generator, Contract::Deserialize);
     export::<ChatWakeup>(root, &mut generator, Contract::Deserialize);
     export::<WaitExternalCondition>(root, &mut generator, Contract::Deserialize);
@@ -332,6 +337,8 @@ fn main() {
         [
         {"name":"answerChatQuestion","input":"AnswerChatQuestionInput","output":"ChatQuestion","method":"POST","path":"/chats/{chatId}/questions/{questionId}/answer","bodyField":"answer"},
         {"name":"cancelChatQuestion","input":"ChatQuestionInput","output":"ChatQuestion","method":"POST","path":"/chats/{chatId}/questions/{questionId}/cancel"},
+        {"name":"askChatSideQuestion","input":"AskChatSideQuestionInput","output":"ChatSideQuestion","method":"POST","path":"/chats/{chatId}/side-questions","bodyField":"question"},
+        {"name":"cancelChatSideQuestion","input":"ChatSideQuestionInput","output":"ChatSideQuestion","method":"POST","path":"/chats/{chatId}/side-questions/{sideQuestionId}/cancel"},
 
             {
                 "name": "getConversationRetention",

@@ -554,6 +554,7 @@ private fun MarkdownBlockView(
         with(androidx.compose.ui.platform.LocalDensity.current) {
             MaterialTheme.typography.bodyLarge.lineHeight.toPx()
         }
+    val askAbout = LocalSideQuestionAsk.current
     AndroidView(
         factory = { context ->
             MarkdownTextView(context, copyText).apply {
@@ -562,6 +563,7 @@ private fun MarkdownBlockView(
         },
         modifier = modifier,
         update = {
+            it.askAbout = askAbout
             if (it.textSize != textSizePx)
                 it.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, textSizePx)
             val metrics = it.paint.fontMetrics

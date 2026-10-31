@@ -85,6 +85,7 @@ for current behavior.
 | 0074 | [Un outil Cairn commun pour les questions des agents](0074-common-agent-question-tool.md) |
 | 0075 | [Hooks de plugins, règles sans code et droits restreints par ressource](0075-plugin-hooks-rules-and-scoped-grants.md) |
 | 0077 | [Native close with independent backend namespaces](0077-native-close-with-independent-backend-namespaces.md) |
+| 0078 | [Side questions use Claude Code's native side mechanism; Codex stays unavailable](0078-native-side-questions.md) |
 
 ## Renumbered collisions
 

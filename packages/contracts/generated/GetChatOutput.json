@@ -280,6 +280,11 @@
           "default": "",
           "type": "string"
         },
+        "canAskSideQuestion": {
+          "default": false,
+          "description": "The running reply's coding agent can answer a side question now.",
+          "type": "boolean"
+        },
         "canRequestNewSession": {
           "default": false,
           "type": "boolean"
@@ -408,6 +413,13 @@
           "minimum": 0,
           "type": "integer"
         },
+        "pendingSideQuestions": {
+          "default": 0,
+          "description": "Side questions still waiting for an answer.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
         "preview": {
           "default": null,
           "type": [
@@ -511,6 +523,30 @@
         "sessionRestartRequested": {
           "default": false,
           "type": "boolean"
+        },
+        "sideQuestionReason": {
+          "default": null,
+          "description": "Why a side question cannot be asked now, when it cannot.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sideQuestionUnavailable": {
+          "default": null,
+          "description": "The case `side_question_reason` explains, for clients that word it themselves.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sideQuestions": {
+          "default": [],
+          "description": "Explanations asked beside the running reply, oldest first.",
+          "items": {
+            "$ref": "#/definitions/ChatSideQuestion"
+          },
+          "type": "array"
         },
         "slug": {
           "default": "",
@@ -911,6 +947,89 @@
       },
       "required": [
         "chatId"
+      ],
+      "type": "object"
+    },
+    "ChatSideQuestion": {
+      "properties": {
+        "answer": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "chatId": {
+          "type": "string"
+        },
+        "createdAt": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "error": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "itemId": {
+          "default": "",
+          "description": "The agent message the question refers to.",
+          "type": "string"
+        },
+        "provider": {
+          "default": null,
+          "pattern": "^(codex|claude|opencode)$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "quote": {
+          "default": "",
+          "description": "The passage of a reply the question is about.",
+          "type": "string"
+        },
+        "replyEventId": {
+          "default": "",
+          "description": "The stored event identifying the specific reply when native item IDs repeat.",
+          "maxLength": 16,
+          "type": "string"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "settledAt": {
+          "default": null,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "status": {
+          "pattern": "^(pending|answered|failed|cancelled)$",
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "chatId",
+        "runId",
+        "text",
+        "status",
+        "createdAt"
       ],
       "type": "object"
     },

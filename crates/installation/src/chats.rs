@@ -8,11 +8,13 @@ mod handoff;
 pub(crate) mod question_migration;
 pub(crate) mod question_storage;
 pub(crate) mod questions;
+pub(crate) mod side_questions;
 
 pub use crate::waits as wait_for;
 
 pub use handoff::{execution_text, with_invoked_skills};
 pub use questions::{Question, QuestionField, QuestionStatus};
+pub use side_questions::side_question_prefixes;
 
 use crate::{
     config::{id, now},
@@ -33,6 +35,8 @@ use std::collections::HashSet;
 pub use storage::{Conversation, Message, MessageAnswer};
 
 pub mod engine_switch;
+#[cfg(test)]
+pub(crate) mod list_measurements;
 pub(crate) mod migration;
 #[cfg(test)]
 mod read_tests;
@@ -242,7 +246,7 @@ fn conversation_view_with_run(
         .and_then(|run| Provider::of_run(run).ok())
         .map(|provider| serde_json::from_value(Value::from(provider.as_str())))
         .transpose()?;
-    Ok(Chat {
+    let mut view = Chat {
         can_request_new_session: crate::conversation_lifecycle::can_request_new_session(&chat, run),
         finished_at: serde_json::from_value(run_field("finishedAt"))?,
         context_usage: serde_json::from_value(run_field("contextUsage"))?,
@@ -278,14 +282,21 @@ fn conversation_view_with_run(
         coding_agent_switch,
         error,
         pending_questions,
+        pending_side_questions: 0,
+        can_ask_side_question: false,
+        side_question_reason: None,
+        side_question_unavailable: None,
         agent_name,
         project_name,
         status,
         preview: None,
         questions: Vec::new(),
+        side_questions: Vec::new(),
         messages: Vec::new(),
         run: None,
-    })
+    };
+    side_questions::view(db, &mut view, run)?;
+    Ok(view)
 }
 
 /// Whether the conversation's coding agent can compact its context, whether it is
@@ -450,12 +461,15 @@ fn detail_messages(db: &Db<'_>, id: &str, undelivered: bool) -> Result<Value> {
     let mut result = serde_json::to_value(conversation_view_with_run(db, chat, run.as_ref())?)?;
     if !is_active(&result) {
         result["questions"] = json!([]);
+        result["sideQuestions"] = json!([]);
         result["messages"] = json!([]);
         result["run"] = Value::Null;
         result["pendingQuestions"] = 0.into();
+        result["pendingSideQuestions"] = 0.into();
         return Ok(result);
     }
     result["questions"] = serde_json::to_value(questions(db, id)?)?;
+    result["sideQuestions"] = serde_json::to_value(side_questions::side_questions(db, id)?)?;
     result["messages"] = if undelivered {
         db.undelivered_messages(id)?
     } else {
@@ -1102,6 +1116,8 @@ fn continue_run(
         boundary: Some(json!({
             "chatExecution": serde_json::to_value(execution)?,
             "environmentState": null,
+            // The next turn's adapter announces again whether it can answer side questions.
+            "sideQuestions": null,
         })),
         ..Default::default()
     };
@@ -1512,7 +1528,23 @@ impl Service {
 
     pub async fn chat_tick(&self, active: &HashSet<String>) -> Result<()> {
         self.expire_attachment_uploads().await?;
+        let side_open = self.side_question_chats().await?;
         for chat in self.store.conversations().await? {
+            // Before anything holds the conversation (trash, cleaning, a pending agent
+            // switch): a stopped turn's side questions fail now.
+            if side_open.contains(&chat.id) {
+                let chat_id = chat.id.clone();
+                let expiring = self
+                    .store
+                    .read(move |db| side_questions::expiring(db, &chat_id))
+                    .await?;
+                if expiring {
+                    let chat_id = chat.id.clone();
+                    self.store
+                        .transaction(move |db| side_questions::expire(db, &chat_id))
+                        .await?;
+                }
+            }
             if chat.lifecycle != cairn_contracts::ConversationLifecycle::Active
                 || chat.environment_state == Some(EnvironmentState::Cleaning)
             {
@@ -1536,7 +1568,8 @@ impl Service {
             if let Some(run) = run.as_ref().filter(|run| run_is_active(run)) {
                 // Messages sent while compacting wait for the next turn instead of steering.
                 if !is_compaction(run) {
-                    self.publish_steering(&chat, run).await?;
+                    self.publish_steering(&chat, run, side_open.contains(&chat.id))
+                        .await?;
                 }
                 continue;
             }
@@ -1600,17 +1633,48 @@ impl Service {
         Ok(())
     }
 
+    /// Conversations with a side question their reply may still receive.
+    async fn side_question_chats(&self) -> Result<HashSet<String>> {
+        self.store.read(|db| side_questions::open_chats(db)).await
+    }
+
     /// Writes steering messages where the running agent turn reads them.
-    async fn publish_steering(&self, chat: &Conversation, run: &Value) -> Result<()> {
+    /// `side_open`: the conversation has side questions its reply may still receive.
+    async fn publish_steering(
+        &self,
+        chat: &Conversation,
+        run: &Value,
+        side_open: bool,
+    ) -> Result<()> {
         let chat_id = chat.id.clone();
         let paused = chat.paused;
         let delivering = run["chatExecution"]["messageId"].clone();
-        let mut steering = self
+        let run_id = text(run, "id").to_owned();
+        // Only a reply that announced side questions, with some to receive, reads them; a
+        // later tick sees an announcement or a question made since this one read them.
+        let announced = side_open && run["sideQuestions"] == true;
+        let (mut steering, side_turn) = self
             .store
-            .transaction(move |db| claim_steering(db, &chat_id, paused, &delivering))
+            .transaction(move |db| {
+                let mut steering = claim_steering(db, &chat_id, paused, &delivering)?;
+                // Side questions are not chat messages: the queue, pause and steering never
+                // hold them, and the adapter answers them beside the turn. The run is read
+                // again here: a launch since the tick read it withdrew its announcement.
+                let mut side_turn = String::new();
+                if announced && let Some(run) = db.run(&run_id)? {
+                    steering.extend(side_questions::deliveries(db, &chat_id, &run)?);
+                    side_turn = text(&run["chatExecution"], "messageId").to_owned();
+                }
+                Ok((steering, side_turn))
+            })
             .await?;
         let skills = &run["snapshot"]["skills"];
         for message in &mut steering {
+            let side =
+                message["sideQuestion"].is_object() || message["sideQuestionCancelled"] == true;
+            if side {
+                continue;
+            }
             self.prepare_chat_files(text(run, "id"), &message["attachments"])
                 .await?;
             message["text"] = with_invoked_skills(text(message, "text"), skills).into();
@@ -1631,10 +1695,14 @@ impl Service {
             .join("runs")
             .join(chat.run_id.as_deref().unwrap_or(""))
             .join("chat-input");
-        crate::skills::private_dir(&directory).await?;
-        crate::skills::atomic_write(
-            &directory.join("messages.json"),
-            &serde_json::to_vec(&steering)?,
+        // Nor may this write restore side questions an attempt removed meanwhile, or hand
+        // one turn's side questions to the next.
+        side_questions::publish_inbox(
+            &self.store,
+            text(run, "id"),
+            &side_turn,
+            &directory,
+            steering,
         )
         .await
     }

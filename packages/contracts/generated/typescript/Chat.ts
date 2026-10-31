@@ -4,6 +4,7 @@ import type { ChatCompaction } from './ChatCompaction'
 import type { ChatMessage } from './ChatMessage'
 import type { ChatQuestion } from './ChatQuestion'
 import type { ChatRequester } from './ChatRequester'
+import type { ChatSideQuestion } from './ChatSideQuestion'
 import type { ChatWakeup } from './ChatWakeup'
 import type { CodingAgentSwitch } from './CodingAgentSwitch'
 import type { ContextUsage } from './ContextUsage'
@@ -11,6 +12,7 @@ import type { ConversationEnvironmentState } from './ConversationEnvironmentStat
 import type { ConversationLifecycle } from './ConversationLifecycle'
 import type { ConversationRequester } from './ConversationRequester'
 import type { ConversationStatus } from './ConversationStatus'
+import type { SideQuestionUnavailable } from './SideQuestionUnavailable'
 
 export interface Chat {
   id: string
@@ -47,12 +49,32 @@ export interface Chat {
   accountWaitReason?: string | null
   accountRequired?: AgentProvider | null
   pendingQuestions: number
+  /**
+   * Side questions still waiting for an answer.
+   */
+  pendingSideQuestions: number
+  /**
+   * The running reply's coding agent can answer a side question now.
+   */
+  canAskSideQuestion: boolean
+  /**
+   * Why a side question cannot be asked now, when it cannot.
+   */
+  sideQuestionReason?: string | null
+  /**
+   * The case `side_question_reason` explains, for clients that word it themselves.
+   */
+  sideQuestionUnavailable?: SideQuestionUnavailable | null
   agentName: string
   projectName: string | null
   status: ConversationStatus
   suspendedByExclusive?: import('../../nodes').ExclusiveReservation | null
   wakeup?: ChatWakeup | null
   questions: Array<ChatQuestion>
+  /**
+   * Explanations asked beside the running reply, oldest first.
+   */
+  sideQuestions: Array<ChatSideQuestion>
   run: import('../../contracts').Run | null
   messages: Array<ChatMessage>
 }

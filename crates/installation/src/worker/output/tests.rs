@@ -809,6 +809,79 @@ fn question_event(id: &str, blocking: bool) -> Value {
 }
 
 #[tokio::test]
+async fn side_answers_are_stored_redacted() {
+    let mut fixture = Fixture::new().await;
+    let chat = question_chat(&fixture).await;
+    let (run, key) = (fixture.id.clone(), format!("chat-side-question:{chat}:"));
+    let (answered, failed) = (
+        "a1b2c3d4-0000-4000-8000-000000000001",
+        "a1b2c3d4-0000-4000-8000-000000000002",
+    );
+    for id in [answered, failed] {
+        let question = json!({
+            "id": id,
+            "chatId": chat,
+            "runId": run,
+            "text": "What was printed?",
+            "status": "pending",
+            "createdAt": 1,
+        });
+        // Asked during the run's current turn, which is still running.
+        let open = json!({ "runId": run, "turn": "", "status": "pending" });
+        let (key, open_key) = (
+            format!("{key}{id}"),
+            format!("chat-side-question-open:{chat}:{id}"),
+        );
+        fixture
+            .service
+            .store
+            .transaction(move |db| {
+                db.set(&key, &question, None)?;
+                db.set(&open_key, &open, None)
+            })
+            .await
+            .unwrap();
+    }
+    fixture
+        .service
+        .store
+        .change_run(
+            &run,
+            crate::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Running),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    fixture
+        .event(json!({
+            "type": "chat.side.answered",
+            "sideQuestionId": answered,
+            "text": "It printed sensitive-tool-credential.",
+        }))
+        .await;
+    fixture
+        .event(json!({
+            "type": "chat.side.failed",
+            "sideQuestionId": failed,
+            "error": "Failed near sensitive-tool-credential",
+        }))
+        .await;
+
+    let stored = fixture
+        .service
+        .store
+        .read(move |db| db.keys(&key))
+        .await
+        .unwrap();
+    let stored = serde_json::to_string(&stored).unwrap();
+    assert!(stored.contains("\"status\":\"answered\""), "{stored}");
+    assert!(stored.contains("\"status\":\"failed\""), "{stored}");
+    assert!(!stored.contains("sensitive-tool-credential"), "{stored}");
+}
+
+#[tokio::test]
 async fn common_questions_survive_native_closures_without_becoming_answers() {
     for blocking in [false, true] {
         let mut fixture = Fixture::new().await;

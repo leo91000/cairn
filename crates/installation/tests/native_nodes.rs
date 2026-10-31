@@ -1660,6 +1660,129 @@ async fn task_delegation_has_its_own_revocable_native_authority() {
 }
 
 #[tokio::test]
+async fn side_questions_check_native_access_without_changing_execution_provenance() {
+    let f = Fixture::new().await;
+    let mut agent = f.agent.clone();
+    agent["provider"] = "claude".into();
+    f.service.store.put_agent_fixture(agent).await.unwrap();
+    let (chat, run) = f.conversation().await;
+    let chat_id = chat["id"].as_str().unwrap();
+    let run_id = run["id"].as_str().unwrap();
+    f.service
+        .store
+        .change_run(
+            run_id,
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_installation::run_status::RunStatus::Running),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    f.service
+        .side_questions_available(run_id, true)
+        .await
+        .unwrap();
+    let before_chat = f.service.conversation_boundary(chat_id).await.unwrap();
+    let before_run = f.service.store.run(run_id).await.unwrap();
+    let mut node = f.node.clone();
+    node["nativeAccounts"] = json!([TRUSTED, OTHER]);
+    f.service
+        .store
+        .put_node_fixture(node.clone())
+        .await
+        .unwrap();
+
+    let question_id = id();
+    let path = format!("/api/chats/{chat_id}/side-questions");
+    let (status, response) = f
+        .owner_call("POST", &path, json!({ "id": question_id, "text": "Why?" }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let (status, response) = f
+        .owner_call("POST", &format!("{path}/{question_id}/cancel"), json!({}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let after_chat = f.service.conversation_boundary(chat_id).await.unwrap();
+    let after_run = f.service.store.run(run_id).await.unwrap();
+    for key in [
+        "nativePrincipals",
+        "nativeAuthorityNodes",
+        "nativeParentRunId",
+        "nativeParentAccess",
+        "nativePluginGrants",
+        "nativeProvenanceUnknown",
+    ] {
+        assert_eq!(after_chat[key], before_chat[key], "chat {key}");
+        assert_eq!(after_run[key], before_run[key], "run {key}");
+    }
+
+    let director = f
+        .service
+        .agent_fixture(
+            json!({ "name": "Side question caller", "access": { "installation": true } }),
+            None,
+        )
+        .await
+        .unwrap();
+    let mut parent = f.run();
+    parent["snapshot"]["agent"] = director;
+    parent["status"] = "running".into();
+    parent["nativePrincipals"] = json!([OTHER]);
+    common::add_run(&f.service.store, &parent).await;
+    let configuration = f
+        .service
+        .mcps
+        .run_configuration(&f.service, &parent)
+        .await
+        .unwrap();
+    let delegated_id = id();
+    let asked = delegated_call(
+        &f,
+        &configuration,
+        "ask_chat_side_question",
+        json!({
+            "chatId": chat_id, "question": { "id": delegated_id, "text": "Why this way?" },
+        }),
+    )
+    .await;
+    assert_ne!(asked["result"]["isError"], true, "{asked}");
+    let cancelled = delegated_call(
+        &f,
+        &configuration,
+        "cancel_chat_side_question",
+        json!({
+            "chatId": chat_id, "sideQuestionId": delegated_id,
+        }),
+    )
+    .await;
+    assert_ne!(cancelled["result"]["isError"], true, "{cancelled}");
+    let delegated_chat = f.service.conversation_boundary(chat_id).await.unwrap();
+    let delegated_run = f.service.store.run(run_id).await.unwrap();
+    for key in [
+        "nativePrincipals",
+        "nativeAuthorityNodes",
+        "nativeParentRunId",
+        "nativeParentAccess",
+        "nativePluginGrants",
+        "nativeProvenanceUnknown",
+    ] {
+        assert_eq!(
+            delegated_chat[key], before_chat[key],
+            "delegated chat {key}"
+        );
+        assert_eq!(delegated_run[key], before_run[key], "delegated run {key}");
+    }
+
+    node["nativeAccounts"] = json!([TRUSTED]);
+    f.service.store.put_node_fixture(node).await.unwrap();
+    let (status, _) = f
+        .owner_call("POST", &path, json!({ "id": id(), "text": "Denied" }))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
 async fn rejected_native_mutations_do_not_become_historical_directors() {
     let f = Fixture::new().await;
     let (chat, run) = f.conversation().await;

@@ -9,7 +9,7 @@
       "type": "integer"
     },
     "displayId": {
-      "description": "Client cache identity; never supplied by the event writer.",
+      "description": "Stable presentation identity for a coalesced reply; not supplied by event writers.",
       "format": "int64",
       "type": [
         "integer",

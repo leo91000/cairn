@@ -18,6 +18,8 @@ const home = process.env.CLAUDE_CONFIG_DIR
 if (!home)
   throw new Error('Missing isolated fixture home')
 mkdirSync(home, { recursive: true })
+// The release the init event reports: side questions were qualified on 2.1.308.
+const version = existsSync(path.join(home, 'fixture-claude-2.1.280')) ? '2.1.280' : '2.1.308'
 const auth = path.join(process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR || home, '.credentials.json')
 const args = process.argv.slice(2)
 const out = value => process.stdout.write(`${JSON.stringify(value)}\n`)
@@ -97,9 +99,17 @@ else {
     instructionsMode,
     backgroundTasksDisabled,
   })}\n`)
-  out({ type: 'system', subtype: 'init', session_id: session })
+  out({
+    type: 'system',
+    subtype: 'init',
+    session_id: session,
+    claude_code_version: version,
+  })
   let question
   let serial = 0
+  const sides = new Map()
+  // The first message of a reply that keeps working until a steering message arrives.
+  let working
   // Like Claude Code 2.1.280: the last response's prompt (cached or not) is the context,
   // and a local estimate stands in before the first response or after `/compact`.
   let lastUsage = null
@@ -148,6 +158,53 @@ else {
     const value = JSON.parse(line)
     if (value.type === 'user')
       appendFileSync(path.join(home, 'user-messages.jsonl'), `${JSON.stringify(value)}\n`)
+    if (value.type === 'control_cancel_request') {
+      appendFileSync(path.join(home, 'side-cancellations.jsonl'), `${JSON.stringify(value)}\n`)
+      const pending = sides.get(value.request_id)
+      if (pending) {
+        clearTimeout(pending)
+        sides.delete(value.request_id)
+        out({ type: 'control_response', response: { subtype: 'error', request_id: value.request_id, error: 'Side question cancelled' } })
+      }
+
+      return
+    }
+
+    if (value.type === 'control_request' && value.request.subtype === 'side_question') {
+      // Like Claude Code 2.1.308: answered beside the turn, never written to the transcript.
+      appendFileSync(path.join(home, 'side-questions.jsonl'), `${JSON.stringify(value)}\n`)
+      out({
+        type: 'system',
+        subtype: 'control_request_progress',
+        request_id: value.request_id,
+        status: 'started',
+      })
+      const asked = value.request.question
+      const delay = asked.includes('fixture:side-slow') ? 3000 : 200
+      if (asked.includes('fixture:side-close-input'))
+        process.stdin.destroy()
+      sides.set(value.request_id, setTimeout(() => {
+        sides.delete(value.request_id)
+        if (asked.includes('fixture:side-huge-error')) {
+          out({ type: 'control_response', response: { subtype: 'error', request_id: value.request_id, error: `${'x'.repeat(998)}SECRET_TOKEN_${'\u0001'.repeat(350000)}` } })
+          return
+        }
+
+        // Claude Code 2.1.308 denies tools and returns its own explanation as a synthetic answer.
+        const response = asked.includes('fixture:side-fail')
+          ? { response: null, synthetic: false }
+          : asked.includes('fixture:side-tool')
+            ? { response: '(The model tried to call Bash instead of answering directly. Try rephrasing or ask in the main conversation.)', synthetic: true }
+            : asked.includes('fixture:side-secret')
+              ? { response: '(fixture-secret)', synthetic: true }
+              : asked.includes('fixture:side-huge-answer')
+                ? { response: `${'x'.repeat(19998)}SECRET_TOKEN_${'\u0001'.repeat(350000)}`, synthetic: false }
+                : { response: `Side answer: ${asked}`, synthetic: false }
+        out({ type: 'control_response', response: { subtype: 'success', request_id: value.request_id, response } })
+      }, delay))
+      return
+    }
+
     if (value.type === 'control_request') {
       if (value.request.subtype === 'get_context_usage') {
         appendFileSync(path.join(home, 'context-requests.jsonl'), `${JSON.stringify(value.request)}\n`)
@@ -249,6 +306,32 @@ else {
     appendFileSync(path.join(home, 'inputs.jsonl'), `${JSON.stringify(value)}\n`)
     const prompt = value.message.content.filter(b => b.type === 'text').map(b => b.text).join('\n')
     const correlation = { user_message_uuid: value.uuid }
+    if (prompt.includes('fixture:close-before-side'))
+      process.stdin.destroy()
+    if (working) {
+      const first = working
+      working = undefined
+      complete('Finished after steering', false, { user_message_uuids: [first, value.uuid], user_message_uuid: value.uuid })
+      return
+    }
+
+    if (prompt.includes('fixture:side-before-reply')) {
+      working = value.uuid
+      return
+    }
+
+    if (prompt.includes('fixture:chat-hang') && !prompt.startsWith('Continue the interrupted')) {
+      // Like a reply still running tools: its first message streams, and no result follows.
+      working = value.uuid
+      const id = `assistant-${process.pid}-${++serial}`
+      const text = 'I’ll trace the component boundaries and keyboard handling, then propose a focused change.'
+      out({ type: 'stream_event', event: { type: 'message_start', message: { id } } })
+      out({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } } })
+      out({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } } })
+      out({ type: 'assistant', message: { id, content: [{ type: 'text', text }] } })
+      return
+    }
+
     if (prompt === '/compact') {
       // The local command: never a model turn, and nothing to compact in a new session.
       out({ type: 'command_lifecycle', command_uuid: value.uuid, state: 'started' })
@@ -282,7 +365,12 @@ else {
           compact_result: 'success',
           session_id: session,
         })
-        out({ type: 'system', subtype: 'init', session_id: session })
+        out({
+          type: 'system',
+          subtype: 'init',
+          session_id: session,
+          claude_code_version: version,
+        })
         out({
           type: 'system',
           subtype: 'compact_boundary',

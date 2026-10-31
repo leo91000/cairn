@@ -399,6 +399,24 @@ async fn chat_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resul
             )
             .await?
         }
+        ("POST", ["chats", id, "side-questions"]) => {
+            chat_command(
+                s,
+                input,
+                "ask_chat_side_question",
+                json!({ "chatId": id, "question": input.body }),
+            )
+            .await?
+        }
+        ("POST", ["chats", id, "side-questions", question, "cancel"]) => {
+            chat_command(
+                s,
+                input,
+                "cancel_chat_side_question",
+                json!({ "chatId": id, "sideQuestionId": question }),
+            )
+            .await?
+        }
         _ => return Ok(None),
     };
     Ok(Some(result))

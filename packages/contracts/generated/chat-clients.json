@@ -15,6 +15,21 @@
     "path": "/chats/{chatId}/questions/{questionId}/cancel"
   },
   {
+    "bodyField": "question",
+    "input": "AskChatSideQuestionInput",
+    "method": "POST",
+    "name": "askChatSideQuestion",
+    "output": "ChatSideQuestion",
+    "path": "/chats/{chatId}/side-questions"
+  },
+  {
+    "input": "ChatSideQuestionInput",
+    "method": "POST",
+    "name": "cancelChatSideQuestion",
+    "output": "ChatSideQuestion",
+    "path": "/chats/{chatId}/side-questions/{sideQuestionId}/cancel"
+  },
+  {
     "input": "GetConversationRetentionInput",
     "method": "GET",
     "name": "getConversationRetention",

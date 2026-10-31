@@ -398,6 +398,22 @@ pub struct Chat {
     pub account_required: Option<AgentProvider>,
     #[serde(default)]
     pub pending_questions: u32,
+    /// Side questions still waiting for an answer.
+    #[serde(default)]
+    pub pending_side_questions: u32,
+    /// The running reply's coding agent can answer a side question now.
+    #[serde(default)]
+    pub can_ask_side_question: bool,
+    /// Why a side question cannot be asked now, when it cannot.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub side_question_reason: Option<String>,
+    /// The case `side_question_reason` explains, for clients that word it themselves.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    // An open string, so older clients keep decoding when a code is added.
+    #[schemars(with = "Option<String>")]
+    pub side_question_unavailable: Option<SideQuestionUnavailable>,
     #[serde(default)]
     pub agent_name: String,
     #[serde(default)]
@@ -418,6 +434,9 @@ pub struct Chat {
     pub wakeup: Option<ChatWakeup>,
     #[serde(default)]
     pub questions: Vec<ChatQuestion>,
+    /// Explanations asked beside the running reply, oldest first.
+    #[serde(default)]
+    pub side_questions: Vec<ChatSideQuestion>,
     #[serde(default)]
     #[ts(type = "import('../../contracts').Run | null")]
     pub run: Option<Run>,

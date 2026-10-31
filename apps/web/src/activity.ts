@@ -84,6 +84,10 @@ export type ActivityEntry
     delivery?: string
     /** The model provider that wrote this reply, when the engine chose among several. */
     via?: string
+    /** The agent message's own ID, which side questions refer to. */
+    itemId?: string
+    /** Stored events folded into this reply, used to distinguish repeated item IDs. */
+    replyEventIds?: number[]
     attachments?: import('../../../packages/contracts/chats').ChatAttachment[]
   }
   | { kind: 'group', id: string, artifacts: ActivityArtifact[] }
@@ -554,6 +558,9 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       turn++
     }
 
+    if (event.type === 'turn.completed' || event.type === 'turn.failed')
+      turn++
+
     const reason = failureReason(event)
     if (event.type === 'turn.failed') {
       // The failure's card says why the turn ended; its reconnect attempts add nothing.
@@ -717,6 +724,7 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       if (existing) {
         existing.text = content
         existing.sourceId = `${event.runId}:${event.id}`
+        existing.replyEventIds = [existing.replyEventIds?.[0] ?? event.displayId ?? event.id, event.id]
       }
       else {
         const message = {
@@ -725,7 +733,9 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
           time: event.createdAt,
           text: content,
           sourceId: `${event.runId}:${event.id}`,
+          replyEventIds: [event.displayId ?? event.id, event.id],
           ...(via ? { via } : {}),
+          ...(itemId ? { itemId } : {}),
         }
         entries.push(message)
         messages.set(id, message)

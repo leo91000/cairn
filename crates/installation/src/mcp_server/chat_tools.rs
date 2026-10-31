@@ -48,6 +48,10 @@ fn summary(chat: &Value) -> Result<Value> {
         "lastActivityAt",
         "sessionRestartRequested",
         "canRequestNewSession",
+        "pendingSideQuestions",
+        "canAskSideQuestion",
+        "sideQuestionReason",
+        "sideQuestionUnavailable",
         "unread",
         "preview",
     ] {
@@ -161,6 +165,36 @@ fn question_page(values: &[Value], args: &Value) -> Result<Value> {
             questions,
             next_offset: (next < values.len()).then_some(next as u32),
             has_more: next < values.len(),
+        },
+    )?)
+}
+
+fn side_question_page(detail: &Value, args: &Value) -> Result<Value> {
+    let values = detail["sideQuestions"].as_array().unwrap();
+    let offset = args["offset"].as_u64().unwrap() as usize;
+    let limit = args["limit"].as_u64().unwrap() as usize;
+    let mut side_questions = Vec::new();
+    let mut bytes = 0;
+    for value in values.iter().skip(offset).take(limit) {
+        let question: cairn_contracts::ChatSideQuestion = serde_json::from_value(value.clone())?;
+        let size = serde_json::to_vec(&question)?.len();
+        if !side_questions.is_empty() && bytes + size > PAGE_BYTES {
+            break;
+        }
+        side_questions.push(question);
+        bytes += size;
+    }
+    let next = offset + side_questions.len();
+    Ok(serde_json::to_value(
+        cairn_contracts::ListChatSideQuestionsOutput {
+            side_questions,
+            next_offset: (next < values.len()).then_some(next as u32),
+            has_more: next < values.len(),
+            can_ask_side_question: detail["canAskSideQuestion"] == true,
+            side_question_reason: detail["sideQuestionReason"].as_str().map(str::to_owned),
+            side_question_unavailable: serde_json::from_value(
+                detail["sideQuestionUnavailable"].clone(),
+            )?,
         },
     )?)
 }
@@ -296,7 +330,11 @@ pub(crate) async fn invoke(
     }
     if matches!(
         name,
-        "list_chats" | "get_chat" | "list_chat_questions" | "read_chat_content"
+        "list_chats"
+            | "get_chat"
+            | "list_chat_questions"
+            | "list_chat_side_questions"
+            | "read_chat_content"
     ) {
         let operation = name.to_owned();
         if let Some(reader) = reader.as_deref().filter(|_| name == "list_chats") {
@@ -315,6 +353,10 @@ pub(crate) async fn invoke(
                     "list_chats" => list(db, &args, reader.as_deref())?,
                     "get_chat" => detail(db, &args)?,
                     "read_chat_content" => content(db, &args)?,
+                    "list_chat_side_questions" => {
+                        let detail = chats::detail(db, text(&args, "chatId"))?;
+                        side_question_page(&detail, &args)?
+                    }
                     _ => {
                         let detail = chats::detail(db, text(&args, "chatId"))?;
                         question_page(detail["questions"].as_array().unwrap(), &args)?
@@ -411,6 +453,21 @@ pub(crate) async fn invoke(
                 text(&args, "questionId"),
                 args["answer"].clone(),
                 commit_authority,
+            )
+            .await;
+    }
+    if name == "ask_chat_side_question" {
+        let question = serde_json::from_value(args["question"].clone())?;
+        return s
+            .side_question_ask_authorized(text(&args, "chatId"), question, commit_authority)
+            .await;
+    }
+    if name == "cancel_chat_side_question" {
+        return s
+            .side_question_cancel_authorized(
+                text(&args, "chatId"),
+                text(&args, "sideQuestionId"),
+                authorize,
             )
             .await;
     }

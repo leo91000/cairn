@@ -316,6 +316,8 @@ impl Db<'_> {
                 'contextUsage',json(boundary -> '$.contextUsage'),
                 'suspendedByExclusive',json(boundary -> '$.suspendedByExclusive'),
                 'restoredAt',json(boundary -> '$.restoredAt'),
+                'cancelRequestedAt',cancel_requested_at,
+                'sideQuestions',json(boundary -> '$.sideQuestions'),
                 'chatExecution',json_object('operation',json_extract(boundary,'$.chatExecution.operation'))
              ) FROM runs WHERE id=?",
             [id],

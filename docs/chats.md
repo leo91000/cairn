@@ -100,6 +100,59 @@ are retired at startup without rewriting historical messages. Questions and thei
 notification outbox entries are committed together. See the [questionnaire
 contract and examples](USER-QUESTIONS.md) and [ADR-0074](adr/0074-common-agent-question-tool.md).
 
+## Side questions
+
+While Claude Code works on a reply, you can ask a quick explanatory question
+without steering it. On the web, use the quote icon in an agent reply's header
+(**Ask about this reply**) or select a passage in the reply and choose **Ask about
+selection**. On Android, use the **Poser une question à côté** icon or **Demander à côté**
+in the text-selection menu. The question opens a side panel (a drawer on desktop, a
+bottom sheet on phones and Android) where the answer appears, linked back to its reply:
+**Show reply** scrolls the conversation to it (or, for a reply outside the loaded
+history, reopens the panel and says so), and each reply shows how many side
+questions it has. A card above the composer reports a pending or unread answer.
+
+A side question never joins the queue, steers the turn, pauses or resumes it, or
+enters the conversation's history or native session. It is answered beside the
+running turn, from what the engine already knows, with tool calls denied. An operator’s managed-policy hooks may still run and have side effects before a denial:
+explain a decision, a term or a step, not "check this file". Answers that would need
+tools say so and suggest asking in the conversation. Pending questions can be
+withdrawn; cancellation is best effort and cannot undo effects already performed. Up to five can wait at once.
+
+| Coding agent | Side questions |
+| --- | --- |
+| Claude Code | The streaming CLI's `side_question` control request (the same one as `/btw`), with best-effort withdrawal using `control_cancel_request`. Claude Code denies every tool before it could run, answers in one response from the live conversation (an unfinished tool call is marked as still in progress) and skips its transcript. It still runs `PreToolUse` hooks before that denial; Cairn configures none and ignores user and project settings, so only an operator's managed-policy hooks could run. |
+| Codex | Unavailable. Its side conversations (`thread/fork`) keep tools Cairn cannot remove before the model runs, such as code-mode shell commands and subagents, and stopping a fork once a tool starts does not undo its effect ([ADR-0078](adr/0078-native-side-questions.md)). |
+| OpenCode | Unavailable: it has no side mechanism. |
+
+Codex and OpenCode conversations never offer the action, nor does a Claude reply
+that is starting, stopping or compacting, one run by a Claude Code release other than
+2.1.308, or a conversation between replies. The
+side-question panel, when its earlier questions open it, and the API and tools
+(`sideQuestionReason`) say why. No second coding agent with write access is started,
+and the conversation's own transcript never contains the side question.
+
+The adapter of the running turn announces when its native session can answer a
+side question. Before that (while starting, and again after a resume, retry or
+recovery) and between replies, the action is unavailable and the API returns 409
+with the reason. Adapters from earlier releases never announce it, so their inbox
+never contains side questions they could mistake for steering. Side questions never
+delay the reply: when it ends, questions still being answered are withdrawn and,
+like those still pending, marked unanswered with an explanation. Retried submissions
+return the retained question for the same UUID and content. Once a question is pruned, a small identity marker remains until conversation deletion and any reuse is refused. The answer uses the subscription of the account running
+the turn, and secrets masked in the conversation are masked in it too. A conversation
+keeps its 30 latest side questions, at most 5 waiting at once, with answers of up to
+20,000 characters. An oversized native answer is reported as unanswered without keeping
+its text, so it cannot be cut through a secret before redaction. A reply holds at most 10 open side questions at once: those waiting
+and those withdrawn while it runs. A question about a whole reply reaches the agent with
+the first 2,000 characters of that reply. Clients identify a reply by its stored
+event as well as its native item ID, so an ID reused in a later turn does not select
+the later reply. Earlier clients can omit the event and use the item-ID lookup; Cairn stores the resolved event so later reuse cannot retarget the saved question. If that ID already appears in multiple turns, the request is refused until it identifies an event.
+The encoded side request, including its reply context and JSON envelope, must fit in one
+atomic pipe write (4,096 bytes on Linux); a larger request is reported unanswered. This
+bound keeps a stalled control channel from blocking the main reply or receiving a partial
+request. The 4,000-character input limit still applies independently.
+
 ## Notifications
 
 Open the bell in **Chats** (on phones, **Chat details → Question notifications**), or **Settings → Question notifications**, then choose **Enable on this device**. Permission is requested only after that click. Web Push can deliver while the app is closed; clicking a notification opens the relevant chat and question. Each device can opt out independently. The notification contains no question or answer text.

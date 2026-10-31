@@ -1065,6 +1065,11 @@ impl Chat<'_> {
             if message["questionCancelled"] == true {
                 continue;
             }
+            // Codex never announces side questions, so none should arrive. Never
+            // mistake one for steering if the inbox carries it anyway.
+            if message["sideQuestion"].is_object() || message["sideQuestionCancelled"] == true {
+                continue;
+            }
             let input = crate::attachments::input(
                 text(&message, "text"),
                 &message["attachments"],

@@ -525,6 +525,15 @@ async fn inactivity_never_archives_even_with_an_old_enabled_policy() {
 async fn immediate_deletion_removes_files_and_records_without_archival() {
     let app = App::new().await;
     let chat = app.create_chat().await;
+    let retired_key = format!(
+        "chat-side-question-used:{}:old-id",
+        chat["id"].as_str().unwrap()
+    );
+    app.service
+        .store
+        .set(&retired_key, json!(true), None)
+        .await
+        .unwrap();
     let directory = app
         .service
         .config
@@ -544,6 +553,7 @@ async fn immediate_deletion_removes_files_and_records_without_archival() {
     app.service.cleanup_conversations().await.unwrap();
     assert_eq!(app.get(&path).await.0, StatusCode::NOT_FOUND);
     assert!(!directory.exists());
+    assert!(app.service.store.kv(&retired_key).await.unwrap().is_none());
 }
 
 #[tokio::test]

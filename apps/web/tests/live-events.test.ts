@@ -12,7 +12,7 @@ it('preserves messages and tool order across batches, duplicates, reconnect and 
     text,
     payload: type.startsWith('item.') ? { item: { id: 'same', type: 'agent_message', text } } : undefined,
   })
-  const input = [event(1, 'turn.started'), event(2, 'item.updated', 'Hello'), event(3, 'item.updated', 'Hello world'), event(4, 'item.completed', 'Hello world!'), event(5, 'turn.started'), event(6, 'item.updated', 'Next'), event(7, 'item.completed', 'Next answer')]
+  const input = [event(1, 'turn.started'), event(2, 'item.updated', 'Hello'), event(3, 'item.updated', 'Hello world'), event(4, 'item.completed', 'Hello world!'), event(5, 'turn.completed'), event(6, 'item.updated', 'Next'), event(7, 'item.completed', 'Next answer')]
   const reducer = new LiveEvents()
   const actual: RunEvent[] = []
   reducer.append(actual, input.slice(0, 3))
@@ -20,7 +20,9 @@ it('preserves messages and tool order across batches, duplicates, reconnect and 
   reducer.append(actual, input.slice(4))
   expect(reducer.cursor).toBe(7)
   expect(actual).toHaveLength(4)
-  expect(activityEntries(actual)).toEqual(activityEntries(input))
+  const entries = activityEntries(actual)
+  expect(entries).toEqual(activityEntries(input))
+  expect(entries.filter(entry => entry.kind === 'message').map(entry => entry.kind === 'message' && entry.replyEventIds)).toEqual([[2, 4], [6, 7]])
 })
 
 it('bounds a long streaming message to one current snapshot', () => {
