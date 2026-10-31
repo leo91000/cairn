@@ -35,7 +35,7 @@ fn item(rest: &str) -> Result<(&str, ReadKind, &str)> {
 pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version == 18 {
+    if (18..=crate::store::DATABASE_VERSION).contains(&version) {
         return Ok(());
     }
     if version != 17 {

@@ -148,7 +148,7 @@ async fn version11_startup_conserves_inventory_credentials_and_references() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        18
+        19
     );
     for table in [
         "direct_storage_grants",
@@ -315,7 +315,7 @@ async fn empty_version11_inventory_upgrades_without_creating_a_node() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        18
+        19
     );
 }
 
@@ -339,7 +339,7 @@ async fn concurrent_startups_complete_the_version11_to15_chain_without_repeating
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        18
+        19
     );
     assert_eq!(
         db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
