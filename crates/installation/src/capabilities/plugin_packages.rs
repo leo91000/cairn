@@ -99,17 +99,98 @@ pub(crate) struct Authority {
 
 type LocalGuard = dyn Fn(&Db<'_>) -> Result<()> + Send + Sync;
 
+struct ExecutionPlugin {
+    id: String,
+    revision: String,
+    enabled: bool,
+    plugin: String,
+    active: Option<String>,
+    digest: Option<String>,
+}
+
 impl Authority {
+    /// Freeze the complete plugin authority used to prepare and launch a turn,
+    /// including disabled/inactive grants that must not become live mid-prepare.
+    pub(crate) async fn for_run(s: &Service, run: &Value) -> Result<Self> {
+        let authority = Self::for_execution(run);
+        let agent = crate::validation::text(&run["snapshot"]["agent"], "id").to_owned();
+        let captured = authority.clone();
+        let (agent, revision, plugins) = s
+            .store
+            .read(move |db| {
+                captured.authorize(db)?;
+                let grants = db.agent_plugin_grants(&agent)?;
+                let mut plugins = Vec::new();
+                for grant in grants.grants {
+                    let instance = crate::error::required(
+                        db.plugin_instance(&grant.instance_id.to_string())?,
+                        "Plugin instance removed",
+                    )?;
+                    let state = db.plugin_package(&instance.plugin_id)?;
+                    let digest = state
+                        .active
+                        .as_ref()
+                        .and_then(|version| state.approvals.get(version))
+                        .cloned();
+                    plugins.push(ExecutionPlugin {
+                        id: instance.id,
+                        revision: instance.revision,
+                        enabled: instance.enabled,
+                        plugin: instance.plugin_id,
+                        active: state.active,
+                        digest,
+                    });
+                }
+                Ok((agent, grants.revision, plugins))
+            })
+            .await?;
+        let authority = authority.with_guard(move |db| {
+            if crate::error::required(db.agent(&agent)?, "Agent not found")?.revision != revision {
+                return Err(Error::forbidden(
+                    "Agent grants changed during execution preparation.",
+                ));
+            }
+            for expected in &plugins {
+                let current = crate::error::required(
+                    db.plugin_instance(&expected.id)?,
+                    "Plugin instance removed",
+                )?;
+                let state = db.plugin_package(&expected.plugin)?;
+                let digest = state
+                    .active
+                    .as_ref()
+                    .and_then(|version| state.approvals.get(version));
+                if current.revision != expected.revision
+                    || current.enabled != expected.enabled
+                    || state.active != expected.active
+                    || digest != expected.digest.as_ref()
+                {
+                    return Err(Error::forbidden(
+                        "Plugin authority changed during execution preparation.",
+                    ));
+                }
+            }
+            Ok(())
+        });
+        crate::delegation::authorize_async_with(s, run, authority).await
+    }
+
     pub(crate) fn for_execution(run: &Value) -> Self {
         let id = crate::validation::text(run, "id").to_owned();
         let execution = crate::waits::execution_id(run).clone();
         Self::default().with_guard(move |db| {
             let run = crate::error::required(db.run(&id)?, "Run not found")?;
+            let agent = &run["snapshot"]["agent"];
+            let current = crate::error::required(
+                db.agent_snapshot(crate::validation::text(agent, "id"))?,
+                "Agent not found",
+            )?;
             if crate::waits::execution_id(&run) != &execution
                 || !run["cancelRequestedAt"].is_null()
                 || !crate::run_status::RunStatus::of(&run)
                     .is_some_and(crate::run_status::RunStatus::is_active)
                 || crate::waits::Owner::for_run(db, &run)?.run_id() != id
+                || !crate::service::covers(&current, agent)
             {
                 return Err(Error::forbidden("The calling execution ended or changed."));
             }

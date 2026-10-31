@@ -95,7 +95,7 @@ pub(crate) async fn checkout_authorized(
     project: &Value,
     config: &Config,
     credentials: &[GitAccess],
-    authorization: Option<&crate::project_git::Authorization>,
+    authorization: Option<&crate::plugins::run_credentials::Authorization>,
 ) -> Result<bool> {
     let recheck = || async {
         if let Some(authorization) = authorization {

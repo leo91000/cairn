@@ -84,7 +84,7 @@ pub(crate) async fn project_seed_authorized(
     config: &Config,
     root: &Path,
     credentials: &RunCredentials,
-    authorization: &crate::project_git::Authorization,
+    authorization: &crate::plugins::run_credentials::Authorization,
 ) -> Result<Value> {
     let entry =
         workspace::seed_authorized(run, project, config, root, credentials, authorization).await?;
@@ -109,6 +109,40 @@ pub async fn prepare_execution(
     account_home: Option<&Path>,
     generation: Option<&str>,
 ) -> Result<Prepared> {
+    prepare_execution_with(run, config, credentials, account_home, generation, None).await
+}
+
+pub(crate) async fn prepare_authorized(
+    run: &Value,
+    config: &Config,
+    credentials: &RunCredentials,
+    account_home: Option<&Path>,
+    generation: Option<&str>,
+    authorization: &crate::plugins::run_credentials::Authorization,
+) -> Result<Value> {
+    let prepared = prepare_execution_with(
+        run,
+        config,
+        credentials,
+        account_home,
+        generation,
+        Some(authorization),
+    )
+    .await?;
+    Ok(serde_json::to_value(prepared)?)
+}
+
+async fn prepare_execution_with(
+    run: &Value,
+    config: &Config,
+    credentials: &RunCredentials,
+    account_home: Option<&Path>,
+    generation: Option<&str>,
+    authorization: Option<&crate::plugins::run_credentials::Authorization>,
+) -> Result<Prepared> {
+    if let Some(authorization) = authorization {
+        authorization.recheck().await?;
+    }
     let directory = run_directory(run, config);
     let microvm = uses_vm(run, config);
     let is_isolated = microvm || isolated(&run["snapshot"]["agent"]);
@@ -133,7 +167,10 @@ pub async fn prepare_execution(
         let entry = workspace::prepare_project(
             run,
             project,
-            config,
+            workspace::ProjectContext {
+                config,
+                authorization,
+            },
             &root,
             single,
             generation,
@@ -169,7 +206,13 @@ pub async fn prepare_execution(
         credentials,
         account_home,
     };
+    if let Some(authorization) = authorization {
+        authorization.recheck().await?;
+    }
     let skills = home::prepare_home(run, &home, config, &options).await?;
+    if let Some(authorization) = authorization {
+        authorization.recheck().await?;
+    }
     mounts.insert(0, Mount::same(&root, false));
     mounts.push(Mount::new(&home, GUEST_HOME, false));
     mounts.push(Mount::same(&output_directory, false));
@@ -231,7 +274,17 @@ pub async fn restore(
     config: &Config,
     credentials: &RunCredentials,
 ) -> Result<Value> {
-    restore::restore(run, prepared, config, credentials).await
+    restore::restore(run, prepared, config, credentials, None).await
+}
+
+pub(crate) async fn restore_authorized(
+    run: &Value,
+    prepared: Value,
+    config: &Config,
+    credentials: &RunCredentials,
+    authorization: &crate::plugins::run_credentials::Authorization,
+) -> Result<Value> {
+    restore::restore(run, prepared, config, credentials, Some(authorization)).await
 }
 
 pub use home::{clear_run_credentials, credential_files};

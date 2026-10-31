@@ -68,6 +68,36 @@ pub struct RunCredentials {
     pub authorizations: Vec<CredentialGrant>,
 }
 
+/// A caller's live execution and the non-secret proofs of its fetch credentials.
+pub(crate) struct Authorization {
+    service: crate::service::Service,
+    authority: crate::capabilities::plugin_packages::Authority,
+    credentials: crate::plugins::run_credentials::RunCredentials,
+}
+
+impl Authorization {
+    pub(crate) fn new(
+        service: &crate::service::Service,
+        authority: crate::capabilities::plugin_packages::Authority,
+        credentials: &crate::plugins::run_credentials::RunCredentials,
+    ) -> Self {
+        Self {
+            service: service.clone(),
+            authority,
+            credentials: crate::plugins::run_credentials::RunCredentials {
+                authorizations: credentials.authorizations.clone(),
+                ..Default::default()
+            },
+        }
+    }
+
+    pub(crate) async fn recheck(&self) -> Result<()> {
+        self.authority.recheck(&self.service).await?;
+        self.credentials.authorize(&self.service).await?;
+        self.authority.recheck(&self.service).await
+    }
+}
+
 impl RunCredentials {
     pub(crate) async fn authorize(&self, s: &Service) -> Result<()> {
         for expected in &self.authorizations {

@@ -38,7 +38,11 @@ pub(super) async fn restore(
     mut prepared: Value,
     config: &Config,
     credentials: &RunCredentials,
+    authorization: Option<&crate::plugins::run_credentials::Authorization>,
 ) -> Result<Value> {
+    if let Some(authorization) = authorization {
+        authorization.recheck().await?;
+    }
     let microvm = uses_vm(run, config);
     let native = crate::native::policy::native(&run["snapshot"]["agent"]);
     if prepared["backend"] == "native" && !native || native && prepared["backend"] != "native" {
@@ -70,10 +74,19 @@ pub(super) async fn restore(
     verify_project_locations(run, &prepared, config).await?;
     verify_saved_paths(run, &prepared, config).await?;
     if is_isolated {
+        if let Some(authorization) = authorization {
+            authorization.recheck().await?;
+        }
         let root = run_directory(run, config);
         run_credentials(&root.join("home"), &root, credentials).await?;
+        if let Some(authorization) = authorization {
+            authorization.recheck().await?;
+        }
         // Helpers and identity follow the current grants too.
         configure_git(&root.join("home"), config, credentials).await?;
+    }
+    if let Some(authorization) = authorization {
+        authorization.recheck().await?;
     }
     Ok(prepared)
 }

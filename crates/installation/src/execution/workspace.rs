@@ -122,9 +122,9 @@ async fn add_worktree(
 }
 
 #[derive(Clone, Copy)]
-struct ProjectContext<'a> {
-    config: &'a Config,
-    authorization: Option<&'a crate::project_git::Authorization>,
+pub(super) struct ProjectContext<'a> {
+    pub(super) config: &'a Config,
+    pub(super) authorization: Option<&'a crate::plugins::run_credentials::Authorization>,
 }
 
 impl ProjectContext<'_> {
@@ -136,32 +136,8 @@ impl ProjectContext<'_> {
     }
 }
 
-/// Checks out one project for a run, in place or as a private copy under `root`.
+/// Checks out one project under the retained caller authority.
 pub(super) async fn prepare_project(
-    run: &Value,
-    project: &Value,
-    config: &Config,
-    root: &Path,
-    single: bool,
-    generation: Option<&str>,
-    credentials: &RunCredentials,
-) -> Result<Workspace> {
-    prepare_project_with(
-        run,
-        project,
-        ProjectContext {
-            config,
-            authorization: None,
-        },
-        root,
-        single,
-        generation,
-        credentials,
-    )
-    .await
-}
-
-async fn prepare_project_with(
     run: &Value,
     project: &Value,
     context: ProjectContext<'_>,
@@ -293,7 +269,7 @@ pub(super) async fn seed_authorized(
     config: &Config,
     root: &Path,
     credentials: &RunCredentials,
-    authorization: &crate::project_git::Authorization,
+    authorization: &crate::plugins::run_credentials::Authorization,
 ) -> Result<Workspace> {
     seed_with(
         run,
@@ -341,7 +317,7 @@ async fn seed_with(
     }
     private_dir(&staging).await?;
     let prepared =
-        prepare_project_with(run, project, context, &staging, false, None, credentials).await?;
+        prepare_project(run, project, context, &staging, false, None, credentials).await?;
     context.recheck().await?;
     strip_private_state(&prepared.path).await?;
     entry.revision = prepared.revision;

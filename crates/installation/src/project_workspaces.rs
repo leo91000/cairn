@@ -143,7 +143,8 @@ impl Projects {
             authority.clone(),
         )
         .await?;
-        let authorization = crate::project_git::Authorization::new(s, authority, &credentials);
+        let authorization =
+            crate::plugins::run_credentials::Authorization::new(s, authority, &credentials);
         let entry = crate::execution::project_seed_authorized(
             &run,
             &project,

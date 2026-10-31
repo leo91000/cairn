@@ -144,6 +144,7 @@ struct Workspace {
     state_home: PathBuf,
     env: Environment,
     mcp: Value,
+    authorization: crate::plugins::run_credentials::Authorization,
 }
 
 impl Workspace {
@@ -336,7 +337,7 @@ impl Execution<'_> {
     async fn prepare(&mut self, existing: bool) -> Result<Workspace> {
         let s = self.s;
         let mut timing = Operation::new("workspace_prepare", &self.id, "execution");
-        let (prepared, credentials) = self.prepare_execution(existing).await?;
+        let (prepared, credentials, authorization) = self.prepare_execution(existing).await?;
         // Plugin credentials written into the run are masked wherever they appear.
         for secret in &credentials.secrets {
             if !self.sensitive.contains(secret) {
@@ -344,6 +345,7 @@ impl Execution<'_> {
             }
         }
         timing.next("account_home");
+        authorization.recheck().await?;
         let state_home = self.prepare_state_home(&prepared).await?;
         let patch = crate::runs::RunChanges {
             workspace: Some(serde_json::from_value(prepared["cwd"].clone())?),
@@ -379,12 +381,14 @@ impl Execution<'_> {
         }
         crate::delegation::authorize_async(s, self.run).await?;
         credentials.authorize(s).await?;
+        authorization.recheck().await?;
         timing.finish();
         Ok(Workspace {
             prepared,
             state_home,
             env,
             mcp,
+            authorization,
         })
     }
 
@@ -392,7 +396,11 @@ impl Execution<'_> {
     async fn prepare_execution(
         &self,
         existing: bool,
-    ) -> Result<(Value, crate::plugins::run_credentials::RunCredentials)> {
+    ) -> Result<(
+        Value,
+        crate::plugins::run_credentials::RunCredentials,
+        crate::plugins::run_credentials::Authorization,
+    )> {
         let s = self.s;
         if existing && self.checkpoint.read(|c| c.prepared().is_none()).await {
             // A fresh generation keeps a half-prepared workspace from being reused.
@@ -403,20 +411,37 @@ impl Execution<'_> {
         }
         let saved = self.checkpoint.snapshot().await;
         let projects = crate::project_workspaces::catalog(self.run);
-        let credentials =
-            crate::plugins::run_credentials::for_execution(s, self.run, &projects).await?;
+        let authority =
+            crate::capabilities::plugin_packages::Authority::for_run(s, self.run).await?;
+        let credentials = crate::plugins::run_credentials::for_execution_authorized(
+            s,
+            self.run,
+            &projects,
+            authority.clone(),
+        )
+        .await?;
+        let authorization =
+            crate::plugins::run_credentials::Authorization::new(s, authority, &credentials);
         let prepared = match saved.prepared() {
             Some(prepared) => {
-                execution::restore(self.run, prepared.clone(), &s.config, &credentials).await?
+                execution::restore_authorized(
+                    self.run,
+                    prepared.clone(),
+                    &s.config,
+                    &credentials,
+                    &authorization,
+                )
+                .await?
             }
             None => {
                 let account_home = self.account.as_ref().map(|a| a.home.as_path());
-                execution::prepare(
+                execution::prepare_authorized(
                     self.run,
                     &s.config,
                     &credentials,
                     account_home,
                     saved.generation.as_deref(),
+                    &authorization,
                 )
                 .await?
             }
@@ -425,7 +450,8 @@ impl Execution<'_> {
         self.checkpoint
             .update(|c| c.prepared = Some(Some(saved_prepared)))
             .await?;
-        Ok((prepared, credentials))
+        authorization.recheck().await?;
+        Ok((prepared, credentials, authorization))
     }
 
     async fn prepare_state_home(&mut self, prepared: &Value) -> Result<PathBuf> {
@@ -548,6 +574,7 @@ impl Execution<'_> {
         if self.checkpoint.expired() {
             return Err(Error::conflict("Run exceeded its time limit."));
         }
+        workspace.authorization.recheck().await?;
         let output = workspace.output().to_owned();
         match tokio::fs::remove_file(&output).await {
             Ok(()) => {}
@@ -586,6 +613,7 @@ impl Execution<'_> {
             None
         };
         let chat = self.chat_plan(workspace, resume, &mut launch).await?;
+        workspace.authorization.recheck().await?;
         if workspace.isolated() {
             self.prepare_runner(workspace, resume, chat, &mut launch)
                 .await?;
@@ -814,6 +842,7 @@ impl Execution<'_> {
             }
         };
         timing.next("materialize");
+        workspace.authorization.recheck().await?;
         placement::materialize(s, &runner).await?;
         let node_id = placement["nodeId"].as_str().map(str::to_owned);
         let runtime_id = placement["runtimeId"].clone();
@@ -837,9 +866,15 @@ impl Execution<'_> {
         timing.next("remote_prepare");
         let runner_url = nodes::transport::url(s, &self.id).await?;
         if placement["nodeId"] != nodes::LOCAL_NODE_ID {
-            self.prepare_remote(&runner_url, &runner, text(&placement, "nodeId"))
-                .await?;
+            self.prepare_remote(
+                &runner_url,
+                &runner,
+                text(&placement, "nodeId"),
+                &workspace.authorization,
+            )
+            .await?;
         }
+        workspace.authorization.recheck().await?;
         timing.next("placement_commit");
         let patch = json!({
             "nodeId": placement["nodeId"],
@@ -945,6 +980,7 @@ impl Execution<'_> {
             },
             chat,
         };
+        workspace.authorization.recheck().await?;
         atomic_write(
             &plans.join(format!("{runner}.json")),
             &serde_json::to_vec(&plan)?,
@@ -952,16 +988,25 @@ impl Execution<'_> {
         .await
     }
 
-    async fn prepare_remote(&self, runner_url: &str, runner: &str, node_id: &str) -> Result<()> {
+    async fn prepare_remote(
+        &self,
+        runner_url: &str,
+        runner: &str,
+        node_id: &str,
+        authorization: &crate::plugins::run_credentials::Authorization,
+    ) -> Result<()> {
         let s = self.s;
+        let secret = execution::secret(&s.config.data_dir, "runner-secret").await?;
+        authorization.recheck().await?;
         let response = s
             .http
             .post(format!("{runner_url}/prepare/{runner}"))
-            .bearer_auth(execution::secret(&s.config.data_dir, "runner-secret").await?)
+            .bearer_auth(secret)
             .timeout(Duration::from_secs(300))
             .send()
             .await
             .map_err(|_| Error::unavailable("Remote workspace preparation interrupted."))?;
+        authorization.recheck().await?;
         if !response.status().is_success() {
             let status = response.status().as_u16();
             if status == 504 {
@@ -991,6 +1036,7 @@ impl Execution<'_> {
     ) -> Result<Exit> {
         let s = self.s;
         let previously_launched = self.checkpoint.read(RunCheckpoint::launched).await;
+        workspace.authorization.recheck().await?;
         let mut child = Supervised::spawn(
             &launch.binary,
             &launch.args,
@@ -1032,6 +1078,10 @@ impl Execution<'_> {
         if self.stopping() {
             child.stop().await;
             return Err(Error::conflict("Execution stopped before launch."));
+        }
+        if let Err(error) = workspace.authorization.recheck().await {
+            child.stop().await;
+            return Err(error);
         }
         let stdout = child.child.stdout.take().unwrap();
         let stderr = child.child.stderr.take().unwrap();
@@ -1390,6 +1440,230 @@ fn current_exe() -> Result<String> {
 mod tests {
     use super::*;
 
+    async fn preparation_fixture(root: &Path) -> (Arc<Service>, Value) {
+        use crate::run_fixture::DbRunFixture;
+        let config = serde_json::from_value(json!({
+            "dataDir": root.join("data"), "home": root.join("home"),
+            "workspaceRoots": [root], "publicUrl": "http://localhost:4310",
+            "host": "127.0.0.1", "port": 0, "codexBin": "false",
+            "concurrency": 1, "logger": false, "workerEnabled": false,
+            "runnerUrl": "http://runner.invalid",
+        }))
+        .unwrap();
+        let service = Service::new(config).await.unwrap();
+        let agent = service
+            .agent_snapshot(crate::config::MAIN_AGENT_ID)
+            .await
+            .unwrap();
+        let id = crate::config::id();
+        let record = json!({
+            "id": id, "taskId": id, "status": "running",
+            "snapshot": { "agent": agent, "task": { "id": id }, "projects": [] },
+        });
+        let run = service
+            .store
+            .transaction(move |db| db.add_run_fixture(&record, None))
+            .await
+            .unwrap();
+        (service, run)
+    }
+
+    #[tokio::test]
+    async fn initial_preparation_rechecks_revocation_between_remote_lookup_and_clone() {
+        use axum::{Router, routing::get};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let root = tempfile::tempdir().unwrap();
+        let (service, mut run) = preparation_fixture(root.path()).await;
+        let authority = crate::capabilities::plugin_packages::Authority::for_run(&service, &run)
+            .await
+            .unwrap();
+        let authorization = crate::plugins::run_credentials::Authorization::new(
+            &service,
+            authority,
+            &Default::default(),
+        );
+        let requests = Arc::new(AtomicUsize::new(0));
+        let count = requests.clone();
+        let revoked = service.clone();
+        let run_id = text(&run, "id").to_owned();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route(
+                "/repo/info/refs",
+                get(move || {
+                    let (s, id, count) = (revoked.clone(), run_id.clone(), count.clone());
+                    async move {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        s.store
+                            .change_run(
+                                &id,
+                                crate::runs::RunChanges {
+                                    cancel_requested_at: Some(Some(now())),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .unwrap();
+                        "0123456789012345678901234567890123456789\trefs/heads/main\n"
+                    }
+                }),
+            )
+            .route("/repo/HEAD", get(|| async { "ref: refs/heads/main\n" }));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let source = root.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        for args in [
+            vec!["init".to_owned(), "-q".into()],
+            vec![
+                "remote".into(),
+                "add".into(),
+                "origin".into(),
+                format!("http://{address}/repo"),
+            ],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&source)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let project = crate::config::id();
+        run["snapshot"]["task"]["projectId"] = project.clone().into();
+        run["snapshot"]["projects"] = json!([{
+            "id": project, "name": "Revoked project", "path": source,
+            "sourceMode": "remote", "baseBranch": "main",
+        }]);
+        let error = execution::prepare_authorized(
+            &run,
+            &service.config,
+            &Default::default(),
+            None,
+            None,
+            &authorization,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.status, 403, "{error:?}");
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            1,
+            "no clone may contact the remote after ls-remote revokes the run"
+        );
+        assert!(
+            !service
+                .config
+                .data_dir
+                .join("runs")
+                .join(text(&run, "id"))
+                .join("workspace")
+                .join(project)
+                .exists()
+        );
+        server.abort();
+        service.shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn remote_preparation_revocation_blocks_publication_and_every_launch() {
+        use axum::{Router, routing::post};
+        let root = tempfile::tempdir().unwrap();
+        let (service, mut run) = preparation_fixture(root.path()).await;
+        let authority = crate::capabilities::plugin_packages::Authority::for_run(&service, &run)
+            .await
+            .unwrap();
+        let authorization = crate::plugins::run_credentials::Authorization::new(
+            &service,
+            authority,
+            &Default::default(),
+        );
+        let revoked = service.clone();
+        let run_id = text(&run, "id").to_owned();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/prepare/attempt",
+            post(move || {
+                let (s, id) = (revoked.clone(), run_id.clone());
+                async move {
+                    s.store
+                        .change_run(
+                            &id,
+                            crate::runs::RunChanges {
+                                cancel_requested_at: Some(Some(now())),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    axum::Json(json!({}))
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let id = text(&run, "id").to_owned();
+        let checkpoint = Checkpoint::new(
+            service.store.clone(),
+            id.clone(),
+            RunCheckpoint::fresh(Some(60_000)),
+        );
+        let cancel = CancellationToken::new();
+        let mut account = None;
+        let mut sensitive = Vec::new();
+        let mut execution = Execution {
+            s: &service,
+            id,
+            run: &mut run,
+            account: &mut account,
+            preparation: None,
+            cancel: &cancel,
+            checkpoint: &checkpoint,
+            sensitive: &mut sensitive,
+            provider: Provider::Codex,
+            directory: root.path().into(),
+            attempt_id: String::new(),
+            reservation: None,
+        };
+        let error = execution
+            .prepare_remote(
+                &format!("http://{address}"),
+                "attempt",
+                "remote",
+                &authorization,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.status, 403);
+        let workspace = Workspace {
+            prepared: json!({ "cwd": root.path() }),
+            state_home: root.path().into(),
+            env: Environment::new(),
+            mcp: json!({}),
+            authorization,
+        };
+        // A separate/retried launch must also recheck, even if a caller already
+        // prepared a workspace. The nonexistent binary must never be spawned.
+        for _ in 0..2 {
+            let launch = Launch {
+                binary: "/nonexistent-revoked-agent".into(),
+                args: vec![],
+                prompt: String::new(),
+            };
+            let error = execution
+                .supervise(&workspace, launch, &mut 0)
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(error.status, 403);
+            assert!(!checkpoint.read(RunCheckpoint::launched).await);
+        }
+        server.abort();
+        service.shutdown.cancel();
+    }
+
     #[tokio::test]
     async fn active_clean_exit_requires_managed_provider_completion() {
         use crate::run_fixture::DbRunFixture;
@@ -1450,6 +1724,11 @@ mod tests {
                     state_home: root.path().into(),
                     env: Environment::new(),
                     mcp: json!({}),
+                    authorization: crate::plugins::run_credentials::Authorization::new(
+                        &service,
+                        Default::default(),
+                        &Default::default(),
+                    ),
                 };
                 execution
                     .finish(

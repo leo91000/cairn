@@ -10,36 +10,6 @@ use crate::{
 use serde_json::Value;
 use std::{path::Path, time::Duration};
 
-/// A caller's live execution and the non-secret proofs of its fetch credentials.
-pub(crate) struct Authorization {
-    service: crate::service::Service,
-    authority: crate::capabilities::plugin_packages::Authority,
-    credentials: crate::plugins::run_credentials::RunCredentials,
-}
-
-impl Authorization {
-    pub(crate) fn new(
-        service: &crate::service::Service,
-        authority: crate::capabilities::plugin_packages::Authority,
-        credentials: &crate::plugins::run_credentials::RunCredentials,
-    ) -> Self {
-        Self {
-            service: service.clone(),
-            authority,
-            credentials: crate::plugins::run_credentials::RunCredentials {
-                authorizations: credentials.authorizations.clone(),
-                ..Default::default()
-            },
-        }
-    }
-
-    pub(crate) async fn recheck(&self) -> Result<()> {
-        self.authority.recheck(&self.service).await?;
-        self.credentials.authorize(&self.service).await?;
-        self.authority.recheck(&self.service).await
-    }
-}
-
 fn path(path: &Path) -> Result<&str> {
     path.to_str()
         .ok_or_else(|| Error::bad("Workspace paths must use UTF-8."))
