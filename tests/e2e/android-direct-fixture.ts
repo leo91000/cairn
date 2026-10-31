@@ -13,7 +13,9 @@ async function main() {
   process.env.CAIRN_BEACON_STUN_LISTEN ||= '0.0.0.0:3478'
   process.env.CAIRN_BEACON_STUN_URL ||= 'stun:10.0.2.2:3478'
   const network = process.env.CAIRN_NETWORK_ANDROID === 'true'
-  const fixture = await beaconRelayFixture(4398, network ? '198.18.103.1' : '127.0.0.1')
+  // adb reverse exposes the relay on device loopback. Use its numeric address so
+  // fixture startup does not depend on the emulator's network DNS resolver.
+  const fixture = await beaconRelayFixture(4398, network ? '198.18.103.1' : '127.0.0.1', undefined, '127.0.0.1')
   let cookie = ''
   let csrf = ''
 
