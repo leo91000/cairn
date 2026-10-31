@@ -140,6 +140,21 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
 
     // A copy opened under another path is also saved where other openings look for it.
     const saved = () => [...new Set([value, (detail && options.savedAs?.(detail)) || value])]
+
+    function resetHistory() {
+      replacements++
+      accumulator = new LiveTimeline()
+      oldest = 0
+      older = false
+      complete = false
+      position.value = undefined
+      olderError.value = ''
+      if (scope) {
+        for (const path of saved())
+          void removeHistory(scope, path)
+      }
+    }
+
     persist = () => {
       if (!scope || !complete || !detail || !history || current !== generation || !state.authenticated || state.signingOut)
         return
@@ -215,17 +230,8 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
 
         const reset = batch.reset || (history && batch.history !== history)
           || (batch.state && detail?.run?.id !== batch.state.run?.id)
-        if (reset) {
-          replacements++
-          accumulator = new LiveTimeline()
-          oldest = 0
-          older = false
-          complete = false
-          position.value = undefined
-          olderError.value = ''
-          if (scope)
-            saved().forEach(path => void removeHistory(scope, path))
-        }
+        if (reset)
+          resetHistory()
 
         // Persist a complete snapshot only. An interrupted catch-up cannot corrupt it.
         const candidate = accumulator.copy()
@@ -294,7 +300,36 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
             saved().forEach(path => void removeHistory(scope, path))
         }
       }).finally(() => { checking = false })
-    }, cached ? { cursor: cached.cursor, history: cached.history } : undefined, () => position.value?.follow ?? true, options.list ? '&list=1' : '')
+    }, cached ? { cursor: cached.cursor, history: cached.history } : undefined, () => position.value?.follow ?? true, options.list ? '&list=1' : '', (metadata, legacyHistory) => {
+      if (disposed || current !== generation)
+        return false
+      const inactive = metadata?.chat?.lifecycle === 'trash' || metadata?.chat?.lifecycle === 'purging'
+      const changedRun = metadata !== undefined && (!metadata.run || inactive || detail?.run?.id !== metadata.run.id)
+      const changedHistory = !!history && history !== legacyHistory.replace(/^v1:/, 'v2:')
+      const reset = changedRun || changedHistory
+      complete = false
+      synced.value = false
+      clearTimeout(saveTimer)
+      saveTimer = undefined
+      waiting = false
+      if (reset) {
+        resetHistory()
+        cursor = 0
+        history = undefined
+        hasOlder.value = false
+        restored.value = false
+        catchingUp.value = !!(metadata ?? detail)?.run && !inactive
+        show()
+      }
+
+      if (metadata) {
+        detail = metadata
+        snapshot.value = metadata
+        carriesList.value = !!options.list && !!metadata.chats
+      }
+
+      return reset
+    })
   }
 
   watch([path, () => state.authenticated && !state.signingOut, () => state.csrf], ([value, enabled, csrf]) => {

@@ -536,7 +536,7 @@ it('moves live streams between routes using only the accepted cursor and history
   connection.close()
 })
 
-it('clears revoked conversation content when a stream fails while waiting for the manager update', async () => {
+it.each(['transport failure', 'trash', 'purging', 'retention'])('invalidates saved work after %s while waiting for the manager update', async (scenario) => {
   const { state } = await import('../src/api')
   const {
     cacheScope,
@@ -592,18 +592,34 @@ it('clears revoked conversation content when a stream fails while waiting for th
         events: [],
         reset: true,
         more: false,
-        history: 'v1:r:1',
+        history: scenario === 'retention' ? 'v1:r:5' : scenario === 'transport failure' ? 'v1:r:1' : 'v1::0',
+        state: scenario === 'trash' || scenario === 'purging'
+          ? { run: null, chat: { id: 'c', lifecycle: scenario, messages: [] }, artifacts: [] }
+          : undefined,
       }),
     }))
     expect(live.connectionNotice.value).toContain('finish updating')
     await vi.advanceTimersByTimeAsync(500)
     const resumed = Source.all.filter(source => source.url.includes('/chats/c/stream?')).at(-1)!
     expect(resumed).not.toBe(first)
-    resumed.onerror?.()
-    await vi.waitFor(() => expect(live.error.value).toBe('Access revoked'))
+    if (scenario === 'transport failure') {
+      resumed.onerror?.()
+      await vi.waitFor(() => expect(live.error.value).toBe('Access revoked'))
+      expect(live.snapshot.value).toBeUndefined()
+      expect(live.carriesList.value).toBe(false)
+    }
+    else {
+      expect(new URL(resumed.url, 'https://cairn.test').searchParams.get('after')).toBe('0')
+      expect(new URL(resumed.url, 'https://cairn.test').searchParams.get('history')).toBeNull()
+      expect(live.synced.value).toBe(false)
+      if (scenario !== 'retention') {
+        expect(live.snapshot.value?.chat?.lifecycle).toBe(scenario)
+        expect(live.snapshot.value?.run).toBeNull()
+        expect(live.catchingUp.value).toBe(false)
+      }
+    }
+
     expect(live.timeline.value).toHaveLength(0)
-    expect(live.snapshot.value).toBeUndefined()
-    expect(live.carriesList.value).toBe(false)
     await vi.waitFor(() => expect(peekHistory(cache, route)).toBeUndefined())
   }
   finally {

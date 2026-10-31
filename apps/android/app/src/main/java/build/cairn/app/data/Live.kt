@@ -375,6 +375,31 @@ fun CairnApi.live(path: String, session: LiveSession = LiveSession()): Flow<Live
                     frame ->
                     val batch = frame.batch
                     if (path != "/chats/stream" && batch.history?.startsWith("v1:") == true) {
+                        val state = batch.state
+                        val inactive = state?.chat?.lifecycle in setOf("trash", "purging")
+                        val changedRun =
+                            state != null &&
+                                (state.run == null ||
+                                    inactive ||
+                                    state.run.id != snapshot.state?.run?.id)
+                        val changedHistory =
+                            snapshot.history?.let {
+                                it != batch.history.replaceFirst("v1:", "v2:")
+                            } ?: false
+                        if (changedRun || changedHistory) {
+                            accumulator.clear()
+                            cursor = 0
+                            val metadata = state ?: snapshot.state
+                            snapshot =
+                                LiveSnapshot(
+                                    state = metadata,
+                                    catchingUp = metadata?.run != null && !inactive,
+                                    epoch = snapshot.epoch + 1,
+                                    timelineUnavailable = true,
+                                )
+                        } else if (state != null) {
+                            snapshot = snapshot.copy(state = state)
+                        }
                         throw TimelineUnavailable()
                     }
                     val large = readLargeTimeline(path, batch.largeEntries)

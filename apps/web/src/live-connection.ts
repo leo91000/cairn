@@ -1,4 +1,4 @@
-import type { LiveBatch } from '../../../packages/contracts/live'
+import type { LiveBatch, LiveState } from '../../../packages/contracts/live'
 import { watch } from 'vue'
 import { apiUrl, installationTransport, state } from './api'
 import { ProtocolMismatch } from './direct-channel'
@@ -12,7 +12,9 @@ export type LiveStatus = 'connecting' | 'live' | 'reconnecting' | 'offline' | 'u
 // `query` adds request parameters, such as `&list=1` for a stream that carries the list.
 // A status with `opening` is sent before creating the source, so a caller can release
 // another stream that temporarily occupies this one's slot.
-export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: number, signal?: AbortSignal) => void | Promise<void>, status: (value: LiveStatus, opening?: boolean) => void, initial?: { cursor: number, history: string }, followsLatest?: () => boolean, query = '') {
+// Legacy metadata remains authoritative while cards are unavailable. Its observer
+// returns true when the saved replay cursor must be discarded.
+export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: number, signal?: AbortSignal) => void | Promise<void>, status: (value: LiveStatus, opening?: boolean) => void, initial?: { cursor: number, history: string }, followsLatest?: () => boolean, query = '', observeLegacyState?: (state: LiveState | undefined, history: string) => boolean) {
   let cursor = String(initial?.cursor ?? 0)
   let history = initial?.history
   let source: EventSource | undefined
@@ -95,6 +97,12 @@ export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: 
         if (!Array.isArray(batch.events) || typeof batch.reset !== 'boolean' || typeof batch.more !== 'boolean')
           throw new Error('Invalid stream batch')
         if (windowed && batch.history?.startsWith('v1:')) {
+          if (observeLegacyState?.(batch.state, batch.history)) {
+            cursor = '0'
+            history = undefined
+            resetConsumer = true
+          }
+
           retry(true)
           return
         }

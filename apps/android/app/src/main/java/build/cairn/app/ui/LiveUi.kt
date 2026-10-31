@@ -140,6 +140,9 @@ fun rememberLive(
                                     value = pages.display(it)
                                     waiting = false
                                 }
+                                if (it.timelineUnavailable && it.history == null) {
+                                    vm.historyCache.remove(key)
+                                }
                                 if (it.httpStatus in listOf(401, 403, 404, 409)) {
                                     vm.historyCache.remove(key)
                                     value =

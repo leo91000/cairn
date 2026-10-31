@@ -32,3 +32,6 @@ anciennes suivent cette révision validée et un changement de représentation r
 le flux. Une application récente face à un manager encore en `v1` conserve son curseur et
 son cache, indique que l'installation doit terminer sa mise à jour et réessaie avec un
 recul borné ; elle n'accepte pas une conversation sans ses réponses comme synchronisée.
+Les métadonnées de cycle de vie restent applicables pendant cette attente. Un changement
+de run ou de rétention invalide le cache et son curseur ; une conversation supprimée garde
+sa présentation native de corbeille ou de purge, sans réafficher son ancien travail.
