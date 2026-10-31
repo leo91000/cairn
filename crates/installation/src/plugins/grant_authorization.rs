@@ -424,6 +424,12 @@ impl Invocation {
             .authorize(s, &grant, &fields, &self.input)
             .await?;
         }
+        let transfers = self.transfers.lock().unwrap().clone();
+        for origin in transfers {
+            origin
+                .authorize(s, &self.instance, Some(self.snapshot.clone()))
+                .await?;
+        }
         let snapshot = self.snapshot.clone();
         s.store
             .read(move |db| {

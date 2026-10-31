@@ -33,6 +33,7 @@ struct Fixture {
     entered: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
     moved_parent: Arc<AtomicBool>,
+    uploads: Arc<AtomicUsize>,
 }
 
 impl Fixture {
@@ -55,31 +56,60 @@ impl Fixture {
         let release = Arc::new(tokio::sync::Notify::new());
         let moved_parent = Arc::new(AtomicBool::new(false));
         let remote_parent = moved_parent.clone();
+        let uploads = Arc::new(AtomicUsize::new(0));
+        let uploaded = uploads.clone();
+        let hold_entered = entered.clone();
+        let hold_release = release.clone();
         let (paused, arrived, resume) = (pause.clone(), entered.clone(), release.clone());
-        let (origin, _server) = common::serve_locally(Router::new().route(
-            "/effect",
-            any(move || {
-                let moved = remote_parent.clone();
-                let (count, paused, arrived, resume) = (
-                    count.clone(),
-                    paused.clone(),
-                    arrived.clone(),
-                    resume.clone(),
-                );
-                async move {
-                    count.fetch_add(1, Ordering::SeqCst);
-                    if paused.swap(false, Ordering::SeqCst) {
-                        arrived.notify_one();
-                        resume.notified().await;
-                    }
-                    if moved.load(Ordering::SeqCst) {
-                        "general"
-                    } else {
-                        "ok"
-                    }
-                }
-            }),
-        ))
+        let (origin, _server) = common::serve_locally(
+            Router::new()
+                .route(
+                    "/effect",
+                    any(move || {
+                        let moved = remote_parent.clone();
+                        let (count, paused, arrived, resume) = (
+                            count.clone(),
+                            paused.clone(),
+                            arrived.clone(),
+                            resume.clone(),
+                        );
+                        async move {
+                            count.fetch_add(1, Ordering::SeqCst);
+                            if paused.swap(false, Ordering::SeqCst) {
+                                arrived.notify_one();
+                                resume.notified().await;
+                            }
+                            if moved.load(Ordering::SeqCst) {
+                                "general"
+                            } else {
+                                "ok"
+                            }
+                        }
+                    }),
+                )
+                .route(
+                    "/hold",
+                    any(move || {
+                        let entered = hold_entered.clone();
+                        let release = hold_release.clone();
+                        async move {
+                            entered.notify_one();
+                            release.notified().await;
+                            "held"
+                        }
+                    }),
+                )
+                .route(
+                    "/upload",
+                    any(move || {
+                        let uploaded = uploaded.clone();
+                        async move {
+                            uploaded.fetch_add(1, Ordering::SeqCst);
+                            "uploaded"
+                        }
+                    }),
+                ),
+        )
         .await;
         s.plugins.route_http_to(Some(origin));
         let shape = json!({
@@ -193,6 +223,11 @@ return {
             local original = cairn.files.read({instance=input.instances[1].id,id=input.input.copy})
             return cairn.files.append({instance=input.instances[1].id,id=destination.id,offset=0,data=original.data,encoding=original.encoding})
         end
+        if input.input.consume then
+            local original = cairn.files.read({instance=input.instances[1].id,id=input.input.consume})
+            cairn.http.request({instance=input.instances[1].id,url="https://service.example.test/hold"})
+            return cairn.http.request({instance=input.instances[1].id,method="POST",url="https://service.example.test/upload",body=original.data})
+        end
         if input.input.download then
             return cairn.http.request({instance=input.instances[1].id,url="https://service.example.test/effect",responseFile={name="private.txt"}})
         end
@@ -263,6 +298,7 @@ return {
             entered,
             release,
             moved_parent,
+            uploads,
         }
     }
 
@@ -1671,4 +1707,40 @@ async fn gateway_reresolves_external_ancestry_after_discovery_without_a_local_re
         "stale ancestry authorized a gateway mutation"
     );
     server.abort();
+}
+
+#[tokio::test]
+async fn consuming_a_transfer_rechecks_its_source_after_an_async_effect() {
+    let f = Fixture::new().await;
+    f.marker("live-parent").await;
+    f.set(json!([
+        contribution("tool", "grant_probe_post", support()),
+        contribution("tool", "grant_probe_other", json!([])),
+    ]))
+    .await;
+    let original = agents::call_tool(
+        &f.s,
+        &f.bearer,
+        "grant_probe_post",
+        &json!({ "thread": "support-thread", "download": true }),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let input = json!({ "consume": original["file"]["id"] });
+    let action = agents::call_tool(&f.s, &f.bearer, "grant_probe_other", &input);
+    let move_source = async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), f.entered.notified())
+            .await
+            .unwrap();
+        f.moved_parent.store(true, Ordering::SeqCst);
+        f.release.notify_one();
+    };
+    let (result, ()) = tokio::join!(action, move_source);
+    assert_eq!(
+        f.uploads.load(Ordering::SeqCst),
+        0,
+        "protected bytes escaped after source ancestry changed"
+    );
+    assert!(result.is_err(), "{result:?}");
 }
