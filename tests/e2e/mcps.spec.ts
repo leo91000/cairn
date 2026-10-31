@@ -46,7 +46,13 @@ test('failed saves keep feedback visible above a scrolled MCP form', async ({ pa
 
 test('OAuth navigation does not leave background polls running in the departing page', async ({ page, workspace }) => {
   // Keep the cross-origin navigation pending across the shell's initial poll.
-  const provider = await mcpProvider({ beforeAuthorize: () => setTimeout(4000) })
+  const authorizing = Promise.withResolvers<void>()
+  const provider = await mcpProvider({
+    beforeAuthorize: async () => {
+      authorizing.resolve()
+      await setTimeout(4000)
+    },
+  })
   const errors: string[] = []
   page.on('pageerror', error => errors.push(error.message))
   try {
@@ -57,15 +63,27 @@ test('OAuth navigation does not leave background polls running in the departing 
       auth: 'oauth',
       allowPrivateNetwork: true,
     })
+    const direct = Promise.withResolvers<void>()
+    await page.route('**/direct/authorize', async (route) => {
+      const response = await route.fetch()
+      direct.resolve()
+      await authorizing.promise
+      // Navigation cancels the held authorization when the transport stops.
+      await route.fulfill({ response }).catch(() => {})
+    })
     await page.goto(workspacePath('/mcps'))
     await authenticateWorkspace(page)
+    await direct.promise
     const card = page.locator('.mcp-card').filter({ hasText: 'Slow OAuth' })
     await card.getByRole('button', { name: 'Connect', exact: true }).click()
     await expect(card.getByText('Connected', { exact: true })).toBeVisible()
     expect(provider.exchanges).toBe(1)
     expect(errors).toEqual([])
   }
-  finally { await provider.close() }
+  finally {
+    authorizing.resolve()
+    await provider.close()
+  }
 })
 
 test('manages MCP connections, OAuth consent, tools and agent access on desktop and mobile', async ({ page, workspace }, testInfo) => {
