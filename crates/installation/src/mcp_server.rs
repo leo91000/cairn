@@ -9,7 +9,7 @@ use crate::{
     rpc::jsonrpc::{Frame, Message},
     service::Service,
     store::Db,
-    validation::{parse, text},
+    validation::{encoded_size, parse, text},
 };
 use axum::{
     Json,
@@ -786,25 +786,6 @@ pub(crate) async fn operation(
     invoke(s, name, args, None).await
 }
 
-/// Count wire bytes without allocating a second buffer for large raw engine
-/// payloads. Sizing a page must not decode or copy those payloads again.
-fn encoded_size(value: &impl Serialize) -> Result<usize> {
-    struct Counter(usize);
-    impl std::io::Write for Counter {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0 += bytes.len();
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut counter = Counter(0);
-    serde_json::to_writer(&mut counter, value)?;
-    Ok(counter.0)
-}
-
 fn event_preview(event: cairn_contracts::RunEvent) -> Result<cairn_contracts::RunEventPage> {
     use cairn_contracts::{EventPreview, RunEventPage};
     let total_bytes = encoded_size(&event)? as u64;
@@ -875,6 +856,124 @@ pub(crate) fn bounded_history_window(
     })
 }
 
+/// The newest cards before a position, as complete cards or explicit previews that
+/// keep the card's identity, cursor and source event for read_run_content.
+pub(crate) fn run_timeline(
+    db: &Db<'_>,
+    run: &str,
+    input: &cairn_contracts::ReadRunTimelineInput,
+) -> Result<cairn_contracts::RunTimelineOutput> {
+    use cairn_contracts::{TimelineContent, TimelineCursor, TimelineEntryPage, TimelinePreview};
+    const PREVIEW_BYTES: usize = 1024;
+    let (first, newest) = crate::live::event_bounds(db, run)?;
+    let history = format!("v2:{run}:{first}");
+    let changes = input.changes.as_ref();
+    if changes.is_some_and(|cursor| cursor.history != history || cursor.revision > newest) {
+        return Err(Error::conflict(
+            "Timeline history changed; restart from the newest page.",
+        ));
+    }
+    if input
+        .snapshot
+        .as_ref()
+        .is_some_and(|cursor| cursor.history != history || cursor.revision > newest)
+    {
+        return Err(Error::conflict(
+            "Timeline history changed; restart from the newest page.",
+        ));
+    }
+    let (cards, mut has_older) = if let Some(cursor) = changes {
+        let (mut cards, limited) =
+            crate::timeline::changes_after(db, run, cursor.revision, cursor.id.as_deref(), 101)?;
+        let more = limited || cards.len() > 100;
+        cards.truncate(100);
+        (cards, more)
+    } else {
+        let (mut cards, more) = crate::timeline::page(db, run, input.before, 100)?;
+        cards.reverse();
+        (cards, more)
+    };
+    let mut entries = Vec::new();
+    let mut bytes = 2;
+    let mut oldest = input.before;
+    let mut last_change = None;
+    for entry in cards {
+        let position = entry.position;
+        let cursor = (entry.revision, entry.id.clone());
+        let total_bytes = encoded_size(&entry)? as u64;
+        let complete = TimelineEntryPage::Complete {
+            entry: Box::new(entry),
+        };
+        let page = if encoded_size(&complete)? <= RUN_PAGE_BYTES - 2 {
+            complete
+        } else {
+            let TimelineEntryPage::Complete { entry } = complete else {
+                unreachable!()
+            };
+            let entry = *entry;
+            let (kind, text) = match &entry.content {
+                TimelineContent::UserMessage { text, .. } => ("userMessage", text.as_str()),
+                TimelineContent::AgentMessage { text, .. } => ("agentMessage", text.as_str()),
+                TimelineContent::Notice { notice } => {
+                    ("notice", notice.detail.as_deref().unwrap_or_default())
+                }
+            };
+            let mut end = text.len().min(PREVIEW_BYTES);
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            TimelineEntryPage::Truncated {
+                total_bytes,
+                preview: TimelinePreview {
+                    id: entry.id.clone(),
+                    position,
+                    revision: entry.revision,
+                    source: entry.source,
+                    kind: kind.to_owned(),
+                    text: text[..end].to_owned(),
+                    snapshot: Box::new(crate::live::large_reference(entry).snapshot),
+                },
+            }
+        };
+        let size = encoded_size(&page)? + usize::from(!entries.is_empty());
+        if !entries.is_empty() && bytes + size > RUN_PAGE_BYTES {
+            has_older = true;
+            break;
+        }
+        bytes += size;
+        oldest = position;
+        last_change = Some(cursor);
+        entries.push(page);
+    }
+    if changes.is_none() {
+        entries.reverse();
+    }
+    let has_more_changes = changes.is_some() && has_older;
+    let change_cursor = if has_more_changes {
+        let (revision, id) = last_change.expect("a bounded page always includes one card");
+        TimelineCursor {
+            revision,
+            id: Some(id),
+            history,
+        }
+    } else if let Some(snapshot) = &input.snapshot {
+        snapshot.clone()
+    } else {
+        TimelineCursor {
+            revision: newest,
+            id: None,
+            history,
+        }
+    };
+    Ok(cairn_contracts::RunTimelineOutput {
+        entries,
+        oldest,
+        has_older: changes.is_none() && has_older,
+        change_cursor,
+        has_more_changes,
+    })
+}
+
 pub(crate) fn run_history(db: &Db<'_>, id: &str, after: i64) -> Result<Value> {
     let run = required(db.run_view(id)?, "Run not found")?;
     let total_bytes = encoded_size(&run)? as u64;
@@ -914,7 +1013,7 @@ pub(crate) fn run_history(db: &Db<'_>, id: &str, after: i64) -> Result<Value> {
     let history = cairn_contracts::RunHistoryOutput {
         run,
         events,
-        history: format!("v1:{id}:{first}"),
+        history: format!("v2:{id}:{first}"),
         next_after: next,
         has_more: newest > next,
     };
@@ -927,7 +1026,26 @@ pub(crate) fn read_run_content(
 ) -> Result<Value> {
     let run_id = args.run_id.to_string();
     let id = run_id.as_str();
-    let data = if let Some(event_id) = args.event_id {
+    let data = if let Some(snapshot) = &args.timeline_snapshot {
+        db.require_run(id)?;
+        if args.entry_id.as_deref() != Some(snapshot.id.as_str())
+            || args.event_id.is_some()
+            || encoded_size(snapshot)? > RUN_PAGE_BYTES - 1024
+        {
+            return Err(Error::bad("Invalid timeline content reference."));
+        }
+        serde_json::to_string(&crate::timeline::snapshot_from_source(
+            db,
+            id,
+            (**snapshot).clone(),
+        )?)?
+    } else if let Some(entry_id) = &args.entry_id {
+        db.require_run(id)?;
+        serde_json::to_string(&required(
+            crate::timeline::entry(db, id, entry_id)?,
+            "Timeline entry not found in this run",
+        )?)?
+    } else if let Some(event_id) = args.event_id {
         db.require_run(id)?;
         let event = db
             .event_batch(id, event_id - 1, 1, RUN_PAGE_BYTES)?
@@ -939,7 +1057,15 @@ pub(crate) fn read_run_content(
     } else {
         serde_json::to_string(&required(db.run_view(id)?, "Run not found")?)?
     };
-    let digest = crate::auth::hex_digest(&data);
+    chunk_run_content(&data, args)
+}
+
+pub(crate) fn chunk_run_content(
+    data: &str,
+    args: &cairn_contracts::ReadRunContentInput,
+) -> Result<Value> {
+    let run_id = args.run_id.to_string();
+    let digest = crate::auth::hex_digest(data);
     let offset = usize::try_from(args.offset).map_err(|_| Error::bad("Invalid content offset."))?;
     if (offset > 0 || args.sha256.is_some()) && args.sha256.as_deref() != Some(&digest) {
         return Err(Error::conflict(
@@ -951,10 +1077,18 @@ pub(crate) fn read_run_content(
             "Offset must be a UTF-8 byte boundary within the content. Use nextOffset from the previous response.",
         ));
     }
-    let end = data.floor_char_boundary((offset + RUN_PAGE_BYTES).min(data.len()));
+    // Bound the encoded response, including escaping and room for the envelope.
+    // Large plain-text answers can use almost the entire budget instead of
+    // requiring many more full-card checksum reads.
+    let budget = RUN_PAGE_BYTES - 16 * 1024;
+    let mut end = data.floor_char_boundary((offset + budget).min(data.len()));
+    while serde_json::to_vec(&data[offset..end])?.len() > budget {
+        end = data.floor_char_boundary(offset + (end - offset) / 2);
+    }
     let chunk = cairn_contracts::RunContentOutput {
         run_id,
         event_id: args.event_id,
+        entry_id: args.entry_id.clone(),
         encoding: "utf-8".into(),
         format: "json".into(),
         offset: offset as u64,

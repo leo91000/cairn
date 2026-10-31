@@ -166,11 +166,11 @@ fun RunScreen(
     val more = live.catchingUp
     val timelineKeys = remember(id) { TimelineKeys() }
     val timeline =
-        remember(events, live.state?.artifacts, run?.wakeup) {
+        remember(events, live.entries, live.state?.artifacts, run?.wakeup) {
             deliveryTimeline(
                 timelineKeys.stabilize(
                     live.history,
-                    timelineEntries(events, pendingWakeup = run?.wakeup),
+                    timelineEntries(events, pendingWakeup = run?.wakeup, cards = live.entries),
                 ),
                 live.state?.artifacts.orEmpty(),
             )

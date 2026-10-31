@@ -380,6 +380,16 @@ it('retries interrupted reads on relay but leaves other mutations visibly failed
   expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url).endsWith('/api/chats/c'))).toHaveLength(0)
 })
 
+it('replays an interrupted immutable timeline snapshot read on relay', async () => {
+  const { api, channel } = await direct()
+  const body = JSON.stringify({ snapshot: { id: 'message:1:a' }, offset: 0, sha256: null })
+  const read = api('/runs/r/timeline-content', { method: 'POST', body })
+  await vi.waitFor(() => expect(channel.packets.length).toBe(1))
+  channel.dispatchEvent(new Event('close'))
+  expect(await read).toEqual({ marker: 'relay' })
+  expect(fetch).toHaveBeenLastCalledWith('/api/installations/install/api/runs/r/timeline-content', expect.objectContaining({ method: 'POST', body }))
+})
+
 it('sends an unsent mutation through relay when the channel is closing', async () => {
   const { api, channel, state } = await direct()
   channel.readyState = 'closing'

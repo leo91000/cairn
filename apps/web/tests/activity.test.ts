@@ -1,316 +1,81 @@
 import type { RunEvent } from '../../../packages/contracts/contracts'
+import type { TimelineEntry } from '../../../packages/contracts/live'
 import { describe, expect, it } from 'vitest'
-import sample from '../../../tests/fixtures/activity-events.json'
+import corpus from '../../../tests/fixtures/timeline-corpus.json'
 import {
   activityEntries,
   ActivityGroups,
-  sameReason,
-  stopEcho,
   teamEntries,
 } from '../src/activity'
 
-const events: RunEvent[] = sample.slice(0, 15).map((payload, index) => ({
-  id: index + 1,
-  runId: 'test',
-  createdAt: index,
-  type: payload.type,
-  text: '',
-  payload,
-}))
+// The server's UI events and timeline cards for the same three-engine corpus Android renders.
+interface CorpusRun { runId: string, events: RunEvent[], entries: TimelineEntry[] }
+
+const runs = corpus.runs as unknown as CorpusRun[]
+const [codex, claude, opencode, sample] = runs as [CorpusRun, CorpusRun, CorpusRun, CorpusRun]
+const events = sample.events
+const feed = (run: CorpusRun, chat: boolean) => activityEntries(run.events, chat, undefined, undefined, run.entries)
+
+function shown(run: CorpusRun) {
+  return feed(run, true).map(entry => entry.kind === 'message'
+    ? `${entry.role ?? 'agent'}: ${entry.text}${entry.via ? ` via ${entry.via}` : ''}`
+    : entry.kind === 'notice'
+      ? `notice: ${entry.artifact.title}`
+      : entry.kind)
+}
+
 describe('conversation activity', () => {
-  it('labels each reply with the provider its attempt used, until another attempt begins', () => {
-    let id = 0
-    const event = (type: string, text: string, payload?: Record<string, unknown>): RunEvent => ({
-      id: ++id,
-      runId: 'chat',
-      createdAt: id,
-      type,
-      text,
-      ...(payload ? { payload } : {}),
-    })
-    const reply = (text: string) => event('item.completed', '', { item: { id: `m${id}`, type: 'agent_message', text } })
-    const entries = activityEntries([
-      event('status', 'Preparing workspace', { attempt: true }),
-      event('status', 'Kimi K2 via OpenCode Go', { route: { model: 'opencode-go/kimi-k2', providerName: 'OpenCode Go' } }),
-      event('status', 'Opening project'),
-      reply('First'),
-      event('status', 'Preparing workspace', { attempt: true }),
-      event('status', 'Kimi K2 via OpenCode Zen', { route: { model: 'opencode/kimi-k2', providerName: 'OpenCode Zen' } }),
-      reply('Second'),
-      event('status', 'Preparing workspace', { attempt: true }),
-      reply('Third'),
-    ], true)
-    const replies = entries.filter(entry => entry.kind === 'message').map(entry => [entry.text, entry.via])
-    expect(replies).toEqual([['First', 'OpenCode Go'], ['Second', 'OpenCode Zen'], ['Third', undefined]])
-    expect(entries.some(entry => entry.kind !== 'message' && JSON.stringify(entry).includes('via OpenCode'))).toBe(false)
-  })
-
-  it('hides routine session updates in chat while preserving the raw activity and tool steps', () => {
-    const input: RunEvent[] = [
-      {
-        id: 1,
-        runId: 'chat',
-        createdAt: 1,
-        type: 'turn.started',
-        text: '',
-      },
-      {
-        id: 2,
-        runId: 'chat',
-        createdAt: 2,
-        type: 'item.completed',
-        text: '',
-        payload: {
-          item: {
-            id: 'tool',
-            type: 'command_execution',
-            command: 'pnpm test',
-            exit_code: 0,
-          },
-        },
-      },
-      {
-        id: 3,
-        runId: 'chat',
-        createdAt: 3,
-        type: 'diagnostic',
-        text: 'Worker ready',
-      },
-      {
-        id: 4,
-        runId: 'chat',
-        createdAt: 4,
-        type: 'item.completed',
-        text: 'The checks passed.',
-        payload: { item: { id: 'reply', type: 'agent_message', text: 'The checks passed.' } },
-      },
-      {
-        id: 5,
-        runId: 'chat',
-        createdAt: 5,
-        type: 'turn.completed',
-        text: '',
-      },
-      {
-        id: 6,
-        runId: 'chat',
-        createdAt: 6,
-        type: 'status',
-        text: 'succeeded',
-      },
-    ]
-    const raw = activityEntries(input)
-    const chat = activityEntries(input, true)
-    expect(chat.map(entry => entry.kind)).toEqual(['group', 'message'])
-    expect(chat[0]).toMatchObject({ artifacts: [{ kind: 'command', command: 'pnpm test' }] })
-    expect(chat[0].kind === 'group' && chat[0].artifacts).toHaveLength(1)
-    expect(raw.flatMap(entry => entry.kind === 'group' ? entry.artifacts : []).filter(item => item.kind === 'notice')).toHaveLength(4)
-    expect(activityEntries(input)).toEqual(raw)
-  })
-  it('keeps failures and interruptions inline in chat, in order with real tool steps', () => {
-    const input: RunEvent[] = [
-      {
-        id: 1,
-        runId: 'chat',
-        createdAt: 1,
-        type: 'status',
-        text: 'running',
-      },
-      {
-        id: 2,
-        runId: 'chat',
-        createdAt: 2,
-        type: 'item.completed',
-        text: '',
-        payload: {
-          item: {
-            id: 'a',
-            type: 'command_execution',
-            command: 'pnpm test',
-            exit_code: 1,
-          },
-        },
-      },
-      {
-        id: 3,
-        runId: 'chat',
-        createdAt: 3,
-        type: 'error',
-        text: '',
-        payload: { message: 'Validation failed' },
-      },
-      {
-        id: 4,
-        runId: 'chat',
-        createdAt: 4,
-        type: 'item.started',
-        text: '',
-        payload: {
-          item: {
-            id: 'b',
-            type: 'command_execution',
-            command: 'pnpm build',
-            status: 'in_progress',
-          },
-        },
-      },
-      {
-        id: 5,
-        runId: 'chat',
-        createdAt: 5,
-        type: 'status',
-        text: 'interrupted',
-      },
-    ]
-    const chat = activityEntries(input, true)
-    expect(chat.map(entry => entry.kind)).toEqual(['group', 'notice', 'group', 'notice'])
-    expect(chat[0]).toMatchObject({ artifacts: [{ status: 'error' }] })
-    expect(chat[1]).toMatchObject({ artifact: { blocks: [{ code: 'Validation failed' }] } })
-    expect(chat[2]).toMatchObject({ artifacts: [{ status: 'running' }] })
-    expect(chat[3]).toMatchObject({ artifact: { title: 'Run interrupted' } })
-    for (const text of ['failed', 'cancelled', 'interrupted'])
-      expect(activityEntries([{ ...input[4], text }], true)).toHaveLength(1)
-  })
-  it('shows one card per failed attempt and marks it when Cairn retries', () => {
-    const capacity = 'Selected model is at capacity. Please try a different model.'
-    const event = (id: number, type: string, text: string, payload?: Record<string, unknown>): RunEvent => ({
-      id,
-      runId: 'chat',
-      createdAt: id,
-      type,
-      text,
-      ...(payload ? { payload } : {}),
-    })
-    const attempt = (start: number) => [
-      event(start, 'turn.started', ''),
-      event(start + 1, 'turn.failed', capacity, { type: 'turn.failed', error: { message: capacity, codexErrorInfo: 'serverOverloaded' } }),
-      event(start + 2, 'turn.failed', 'Conversation interrupted.', { type: 'turn.failed', error: { message: 'Conversation interrupted.' } }),
-    ]
-    const failed = [...attempt(1), event(4, 'status', 'failed', { error: { message: capacity } })]
-    const notices = (events: RunEvent[]) => activityEntries(events, true).flatMap(entry => entry.kind === 'notice' ? [entry.artifact] : [])
-
-    expect(notices(failed)).toEqual([expect.objectContaining({ title: 'The agent ran into an error', status: 'error', blocks: [{ label: 'Details', code: capacity, language: 'plaintext' }] })])
-    expect(notices([...attempt(1), event(4, 'error', capacity)])).toHaveLength(1)
-
-    const retried = [
-      ...attempt(1),
-      event(4, 'retry.scheduled', 'Temporary agent error. Retrying in 33 seconds (attempt 1/3).', { retry: { attempt: 1, limit: 3, nextAttemptAt: 40_000 } }),
-      ...attempt(5),
-      event(8, 'error', capacity),
-    ]
-    expect(notices(retried.slice(0, 4)).map(notice => [notice.title, notice.status])).toEqual([
-      ['Temporary error — automatic retry 1/3', 'info'],
+  it('presents the server’s messages and failure cards in place among the tools', () => {
+    expect(shown(codex)).toEqual([
+      'user: Fix the build',
+      // A reply takes the place where it first appeared, before the tools that ran meanwhile.
+      'agent: Looking at the build. Fixed.',
+      'group',
+      'user: And the tests?',
+      'agent: Tests pass. via OpenRouter',
+      'user: Deploy it',
+      'notice: The agent ran into an error after 1 automatic retry',
     ])
-    // The next attempt's card replaces the retried one: the chain shows a single card.
-    expect(notices(retried).map(notice => [notice.title, notice.status])).toEqual([
-      ['The agent ran into an error after 1 automatic retry', 'error'],
+    // The tool's JSON-looking output stays a command, never a protocol event.
+    const tools = feed(codex, true).flatMap(entry => entry.kind === 'group' ? entry.artifacts : [])
+    expect(tools.map(tool => tool.kind)).toEqual(['command'])
+    expect(shown(claude)).toEqual([
+      // A private answer reaches the timeline only as the placeholder the event recorded.
+      'user: (private answer)',
+      'notice: This turn runs at Standard speed',
+      'agent: Working on it',
+      'notice: Claude Code warning',
+      'notice: Run cancelled',
     ])
-    const again = [...retried, event(9, 'retry.scheduled', '', { retry: { attempt: 2, limit: 3 } }), ...attempt(10)]
-    expect(notices(again).map(notice => notice.title)).toEqual(['The agent ran into an error after 2 automatic retries'])
-    const other = [...retried.slice(0, 5), event(6, 'turn.failed', 'Reconnect account', { error: { message: 'Reconnect account' } })]
-    expect(notices(other)).toHaveLength(2)
-    // A run that ends, or is stopped during the wait, ends the chain: a resume is not a retry.
-    expect(notices([...retried, ...attempt(9)]).map(notice => notice.title)).toEqual(['The agent ran into an error after 1 automatic retry', 'The agent ran into an error'])
-    const cancelledWait = [...retried.slice(0, 4), event(5, 'status', 'cancelled'), ...attempt(6)]
-    expect(notices(cancelledWait).map(notice => notice.title)).toEqual(['The agent ran into an error', 'Run cancelled', 'The agent ran into an error'])
-    // Without attempt markers (older Claude histories), a new request after a failed turn gets its own card.
-    const unmarked = [event(1, 'chat.user', 'hi'), event(2, 'turn.failed', capacity, { error: { message: capacity } }), event(3, 'status', 'failed', { error: { message: capacity } }), event(4, 'status', 'Resume requested'), event(5, 'chat.user', 'again'), event(6, 'turn.failed', capacity, { error: { message: capacity } }), event(7, 'status', 'failed', { error: { message: capacity } })]
-    expect(notices(unmarked)).toHaveLength(2)
-    // A retry that succeeds ends the chain: a later message failing for the same reason gets its own card.
-    const answered = [...retried.slice(0, 5), event(6, 'turn.completed', ''), event(7, 'chat.user', 'Next'), ...attempt(8)]
-    expect(notices(answered).map(notice => notice.title)).toEqual(['Temporary error — automatic retry 1/3', 'The agent ran into an error'])
-
-    for (const stop of ['Conversation stopped.', 'Claude execution stopped.', 'OpenCode execution stopped.']) {
-      const cancelled = [event(1, 'turn.started', ''), event(2, 'turn.failed', stop, { error: { message: stop } }), event(3, 'status', 'cancelled')]
-      expect(notices(cancelled).map(notice => notice.title)).toEqual(['Run cancelled'])
-    }
-
-    expect(stopEcho(event(2, 'turn.failed', 'Claude execution stopped.'))).toBe(true)
-    expect(stopEcho(event(2, 'status', 'failed', { error: { message: 'Claude execution stopped.' } }))).toBe(false)
-    // Only an adapter's report is an echo; a run that failed with that reason still says so.
-    expect(notices([event(1, 'turn.started', ''), event(2, 'status', 'failed', { error: { message: 'Conversation stopped.' } })]).map(notice => notice.title)).toEqual(['Run failed'])
-
-    const connection = 'WebSocket connection failed: 503 Service Unavailable'
-    const reconnected = [
-      event(1, 'turn.started', ''),
-      event(2, 'error', connection),
-      event(3, 'item.completed', '', { item: { id: 'answer', type: 'agent_message', text: 'Still here' } }),
-      event(4, 'turn.failed', connection, { error: { message: connection } }),
-      event(5, 'status', 'failed', { error: { message: connection } }),
-    ]
-    expect(notices(reconnected)).toEqual([expect.objectContaining({ title: 'The agent ran into an error' })])
-    // A turn's reconnect attempts share one card; the failure that ends the turn replaces it.
-    const reconnect = (id: number, step: number) => event(id, 'error', `Reconnecting... ${step}/5`, { willRetry: true, error: { message: `Reconnecting... ${step}/5`, codexErrorInfo: 'other' } })
-    const reconnecting = [event(1, 'turn.started', ''), reconnect(2, 1), reconnect(3, 2)]
-    expect(notices(reconnecting)).toEqual([expect.objectContaining({ title: 'Connection interrupted', blocks: [expect.objectContaining({ code: 'Reconnecting... 2/5' })] })])
-    // The worker's final error after the last retry repeats the failure, even when it reads like a connection error.
-    const websocket = 'WebSocket connection failed: 503 Service Unavailable'
-    const websocketAttempt = (start: number) => [event(start, 'turn.started', ''), event(start + 1, 'turn.failed', websocket, { error: { message: websocket } })]
-    const exhausted = [...websocketAttempt(1), event(3, 'retry.scheduled', '', { retry: { attempt: 1, limit: 1 } }), ...websocketAttempt(4), event(6, 'error', websocket)]
-    expect(notices(exhausted).map(notice => notice.title)).toEqual(['The agent ran into an error after 1 automatic retry'])
-    // The older event stream reports its reconnect attempts as plain errors.
-    const plainReconnects = [event(1, 'turn.started', ''), event(2, 'error', 'Reconnecting... 1/5'), event(3, 'error', 'Reconnecting... 2/5')]
-    expect(notices(plainReconnects)).toEqual([expect.objectContaining({ title: 'Connection interrupted', blocks: [expect.objectContaining({ code: 'Reconnecting... 2/5' })] })])
-    const disconnected = 'stream disconnected before completion'
-    expect(notices([...plainReconnects, event(4, 'turn.failed', disconnected, { error: { message: disconnected } })]).map(notice => notice.title)).toEqual(['The agent ran into an error'])
-    expect(notices([...reconnecting, event(4, 'turn.failed', disconnected, { error: { message: disconnected } })]).map(notice => notice.title)).toEqual(['The agent ran into an error'])
-
-    // Run diagnostics keep the final status without repeating the reason already reported.
-    const diagnostics = activityEntries(failed).flatMap(entry => entry.kind === 'group' ? entry.artifacts : [])
-    expect(diagnostics.filter(artifact => artifact.blocks.some(block => block.code === capacity))).toHaveLength(1)
-    expect(diagnostics.find(artifact => artifact.title === 'Run failed')?.blocks).toEqual([])
-
-    const stopped = [event(1, 'turn.started', ''), event(2, 'status', 'failed', { error: { message: 'Run exceeded its time limit.' } })]
-    expect(activityEntries(stopped).flatMap(entry => entry.kind === 'group' ? entry.artifacts : []).find(artifact => artifact.title === 'Run failed')?.blocks).toEqual([expect.objectContaining({ code: 'Run exceeded its time limit.' })])
-    expect(notices(stopped)).toEqual([expect.objectContaining({ title: 'Run failed', blocks: [expect.objectContaining({ code: 'Run exceeded its time limit.' })] })])
-    // After an error report, the generic adapter error says the turn ended.
-    const interrupted = { error: { message: 'Conversation interrupted.' } }
-    const reportedThenInterrupted = [event(1, 'turn.started', ''), event(2, 'error', 'Validation needs attention.'), event(3, 'turn.failed', 'Conversation interrupted.', interrupted), event(4, 'status', 'failed', interrupted)]
-    expect(notices(reportedThenInterrupted).map(notice => notice.title)).toEqual(['Worker reported an error', 'The agent ran into an error'])
-    // A run records at most 10,000 characters of its error; the truncated reason still repeats it.
-    const long = `Upstream error: ${'x'.repeat(10_050)}`
-    expect(notices([event(1, 'turn.started', ''), event(2, 'turn.failed', long, { error: { message: long } }), event(3, 'status', 'failed', { error: { message: long.slice(0, 10_000) } })])).toHaveLength(1)
-    expect(sameReason(long, long.slice(0, 10_000))).toBe(true)
-    expect(sameReason(long, '')).toBe(false)
-    // A final status with a reason not shown yet tells why the run ended.
-    const deniedThenTimedOut = [stopped[0], event(3, 'error', 'Access denied'), { ...stopped[1], id: 4 }]
-    expect(notices(deniedThenTimedOut).map(notice => notice.title)).toEqual(['Worker reported an error', 'Run failed'])
-    expect(notices([...attempt(1).slice(0, 2), event(4, 'runner.failed', 'Controller cleanup failed', { error: { message: 'Controller cleanup failed' } })])).toHaveLength(2)
+    expect(shown(opencode)).toEqual(['agent: Partial', 'notice: Runner failed', 'notice: Run interrupted'])
   })
-  it('hides recovered connection retries but keeps unresolved ones visible in chat', () => {
-    const connection: RunEvent = {
-      id: 1,
-      runId: 'chat',
-      createdAt: 1,
-      type: 'diagnostic',
-      text: 'Reconnecting... 2/5',
-    }
-    expect(activityEntries([connection], true)[0]).toMatchObject({ kind: 'notice', artifact: { title: 'Connection interrupted' } })
-    expect(activityEntries([connection, {
-      id: 2,
-      runId: 'chat',
-      createdAt: 2,
-      type: 'turn.completed',
-      text: '',
-    }], true)).toEqual([])
-    expect(activityEntries([{ ...connection, type: 'thread.started', text: '' }], true)).toEqual([])
+
+  it('keeps every lifecycle card in the run log, with its recovery and verbatim output', () => {
+    const notices = feed(codex, false).flatMap(entry => entry.kind === 'group' ? entry.artifacts.filter(item => item.kind === 'notice') : [])
+    const connections = notices.filter(item => item.title === 'Connection interrupted')
+    expect(connections).toHaveLength(2)
+    expect(connections.every(item => item.status === 'info' && item.statusLabel === 'Recovered')).toBe(true)
+    expect(notices.map(item => item.title)).toContain('Temporary error — automatic retry 1/3')
+    expect(notices.map(item => item.title)).toContain('Using Codex account: Studio')
+    const diagnostic = notices.at(-1)!
+    expect(diagnostic).toMatchObject({ title: 'Agent diagnostic', verbatim: true, blocks: [{ label: 'Output', language: 'plaintext' }] })
+    expect(diagnostic.blocks[0]!.code.startsWith('{"type":"turn.completed"}')).toBe(true)
+    // The raw record of each card is the event the server read, for the expandable details.
+    expect(diagnostic.raw).toBe(diagnostic.blocks[0]!.code)
+    // Covered events never render twice: no lifecycle event shows as a tool step.
+    expect(feed(codex, false).flatMap(entry => entry.kind === 'group' ? entry.artifacts : []).filter(item => item.kind !== 'notice')).toHaveLength(1)
   })
-  it('shows the message submission time with a fallback for older events', () => {
-    const message = {
-      id: 1,
-      runId: 'test',
-      createdAt: 60000,
-      type: 'chat.user',
-      text: 'Hello',
-    }
-    expect(activityEntries([{ ...message, payload: { createdAt: 1000 } }])[0]).toMatchObject({ time: 1000, role: 'user' })
-    for (const createdAt of [undefined, null, 'invalid', -1, Number.NaN, Number.MAX_VALUE])
-      expect(activityEntries([{ ...message, payload: { createdAt } }])[0]).toMatchObject({ time: 60000 })
+
+  it('shows a message at the time the person sent it', () => {
+    const card = codex.entries.find(entry => entry.content.kind === 'userMessage')!
+    const message = feed(codex, true)[0]!
+    expect(message).toMatchObject({ kind: 'message', role: 'user', time: card.content.kind === 'userMessage' ? card.content.sentAt : 0 })
   })
+
   it('groups actions between assistant messages and updates commands in place', () => {
-    const entries = activityEntries(events)
+    const entries = feed(sample, false)
     // The plan shows apart from the tools.
-    expect(entries.map(entry => entry.kind)).toEqual(['message', 'plan', 'group', 'message', 'group', 'message'])
+    expect(entries.map(entry => entry.kind)).toEqual(['message', 'plan', 'group', 'message', 'group', 'message', 'wait', 'wait'])
     const groups = entries.filter(entry => entry.kind === 'group')
     expect(groups[0].artifacts.map(item => item.kind)).toEqual(['search', 'search', 'read', 'read', 'browse', 'command'])
     expect(groups[1].artifacts.map(item => item.kind)).toEqual(['files', 'command', 'tool'])
@@ -468,51 +233,6 @@ describe('expected command outcomes and connection recovery', () => {
     })])
     expect(errors.every(item => item.status === 'error')).toBe(true)
   })
-  it('marks temporary connection trouble recovered only after subsequent progress', () => {
-    const connection = event(1, 'error', { message: 'WebSocket connection failed: 503 Service Unavailable' })
-    const unrelated = event(2, 'error', { message: 'Validation failed' })
-    expect(artifacts([connection])[0].status).toBe('error')
-    const results = artifacts([connection, unrelated, event(3, 'item.completed', { item: { type: 'agent_message', text: 'Continuing the audit.' } })])
-    expect(results[0]).toMatchObject({ status: 'info', statusLabel: 'Recovered', title: 'Connection interrupted' })
-    expect(results[0].raw).toContain('503')
-    expect(results[1].status).toBe('error')
-    expect(artifacts([connection, event(3, 'turn.failed', {}), event(4, 'turn.started', {}), event(5, 'turn.completed', {})])[0].status).toBe('error')
-  })
-  it('recognizes historical reconnect diagnostics and preserves the original detail', () => {
-    const old = {
-      id: 1,
-      runId: 'old',
-      createdAt: 1,
-      type: 'diagnostic',
-      text: 'Reconnecting... 2/5',
-    }
-    const result = artifacts([old, event(2, 'turn.completed', {})])[0]
-    expect(result).toMatchObject({ status: 'info', statusLabel: 'Recovered', raw: old.text })
-  })
-  it.each([
-    '{"type":"diagnostic","message":"disk full","code":"ENOSPC"}\n',
-    '{"item":{"type":"agent_message","text":"native diagnostic","id":"x"}}\n',
-    '{"item":{"type":"command_execution","command":"native diagnostic","exit_code":1}}\n',
-  ])('keeps event-shaped diagnostic JSON as process output: %s', (text) => {
-    const entries = activityEntries([{
-      id: 1,
-      runId: 'run',
-      createdAt: 1,
-      type: 'diagnostic',
-      text,
-    }])
-    expect(entries).toHaveLength(1)
-    expect(entries[0]).toMatchObject({
-      kind: 'group',
-      artifacts: [{
-        kind: 'notice',
-        title: 'Agent diagnostic',
-        verbatim: true,
-        raw: text,
-        blocks: [{ label: 'Output', code: text, language: 'plaintext' }],
-      }],
-    })
-  })
 })
 
 it.each([false, true])('caps activity groups at thirty tools after folding updates (chat=%s)', (chat) => {
@@ -559,6 +279,7 @@ it('counts visible tools rather than diagnostic events or gaps in global event I
         createdAt: id + 1,
         type: 'diagnostic',
         text: 'heartbeat',
+        timeline: true,
       },
       {
         id: id + 2,
@@ -720,6 +441,25 @@ it('lets partial groups grow while preserving message boundaries', () => {
     type: 'chat.user',
     text: 'Continue',
     payload: { messageId: 'next-message' },
+    timeline: true,
+  }
+  const card: TimelineEntry = {
+    id: 'user:1200',
+    runId: 'r',
+    position: 1200,
+    revision: 1200,
+    source: 1200,
+    turn: 0,
+    attempt: 0,
+    createdAt: 1200,
+    updatedAt: 1200,
+    content: {
+      kind: 'userMessage',
+      text: 'Continue',
+      messageId: 'next-message',
+      sentAt: 1200,
+      attachments: [],
+    },
   }
   const next = {
     ...tools[0]!,
@@ -733,6 +473,6 @@ it('lets partial groups grow while preserving message boundaries', () => {
       },
     },
   }
-  const entries = activityEntries([...tools, message, next], true, groups)
+  const entries = activityEntries([...tools, message, next], true, groups, undefined, [card])
   expect(entries.map(entry => entry.kind)).toEqual(['group', 'message', 'group'])
 })

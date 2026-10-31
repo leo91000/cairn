@@ -1,4 +1,5 @@
 use crate::error::{Error, Result};
+use serde::Serialize;
 use serde_json::Value;
 use std::{collections::HashMap, sync::LazyLock};
 
@@ -151,3 +152,22 @@ macro_rules! string_enum {
 }
 
 pub(crate) use string_enum;
+
+/// Count wire bytes without allocating a second buffer for large raw engine
+/// payloads. Sizing a page must not decode or copy those payloads again.
+pub(crate) fn encoded_size(value: &impl Serialize) -> Result<usize> {
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    serde_json::to_writer(&mut counter, value)?;
+    Ok(counter.0)
+}

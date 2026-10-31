@@ -798,6 +798,12 @@ pub async fn authorize_request(s: &Service, input: &crate::http::Input) -> Resul
         .trim_start_matches("/api/")
         .split('/')
         .collect::<Vec<_>>();
+    if input.method == "POST"
+        && matches!(parts.as_slice(), ["runs" | "chats", _, "timeline-content"])
+    {
+        // This endpoint reads an immutable source snapshot; use the same admission as history GET.
+        return Ok(());
+    }
     let reduces_execution = input.method == "POST"
         && match parts.as_slice() {
             ["runs", _, "cancel" | "cleanup"] | ["chats", _, "stop"] => true,

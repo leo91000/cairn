@@ -41,7 +41,7 @@ async fn history_compression_is_negotiated_and_preserved_through_the_relay() {
         .await
         .unwrap();
     let path = format!(
-        "/runs/{run_id}/history?before={}&history=v1:{run_id}:{first}",
+        "/runs/{run_id}/history?before={}&history=v2:{run_id}:{first}",
         i64::MAX
     );
     let response = relay
@@ -123,7 +123,7 @@ async fn history_endpoint_measurement() {
             .unwrap();
         let request = |before| {
             let path =
-                format!("/runs/{run_id}/history?before={before}&history=v1:{run_id}:{first}");
+                format!("/runs/{run_id}/history?before={before}&history=v2:{run_id}:{first}");
             let pending = relay.get(&path).header("accept-encoding", "gzip");
             async move {
                 let started = Instant::now();

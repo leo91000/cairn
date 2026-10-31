@@ -52,7 +52,7 @@ abstract class SavedConversationCases {
                     text = "Saved output",
                     runId = run.id,
                 )
-            val history = "v1:run:1"
+            val history = "v2:run:1"
             val path = "/chats/2a8c541e-da31-5626-abc9-62a7fb054a7b/stream"
             val requests = AtomicInteger()
             val requested = CountDownLatch(1)
@@ -68,7 +68,7 @@ abstract class SavedConversationCases {
                                 check(release.await(30, TimeUnit.SECONDS))
                             }
                             val batch =
-                                LiveBatch(
+                                timelineBatch(
                                     listOf(
                                         if (fresh) event.copy(id = 2, text = "Current output")
                                         else event
@@ -156,7 +156,7 @@ abstract class SavedConversationCases {
                                 val api = vm.api
                                 vm.historyCache.save(
                                     vm.historyCache.key(api.cacheScope, api.csrf, path),
-                                    CachedHistory(1, history, oldState, listOf(event)),
+                                    timelineCache(1, history, oldState, listOf(event)),
                                 )
                             }
                             prepared = true

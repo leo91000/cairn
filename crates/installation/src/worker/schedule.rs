@@ -102,6 +102,9 @@ impl Worker {
                 db.0.execute("DELETE FROM audit WHERE created_at<?", [now() - 90 * DAY_MS])?;
                 db.0.execute("DELETE FROM records WHERE kind='node-exclusive-requests' AND json_extract(data,'$.state') IN ('released','failed','expired') AND json_extract(data,'$.createdAt')<?", [now() - 30 * DAY_MS])?;
                 db.0.execute("DELETE FROM events WHERE created_at<? AND run_id IN (SELECT id FROM runs WHERE status NOT IN ('queued','running','waiting') AND trigger!='chat')", [now() - 30 * DAY_MS])?;
+                // Timeline cards read their source event; a card whose source expired goes with it.
+                db.0.execute("DELETE FROM timeline_entries WHERE run_id IN (SELECT id FROM runs WHERE status NOT IN ('queued','running','waiting') AND trigger!='chat') AND NOT EXISTS(SELECT 1 FROM events e WHERE e.id=timeline_entries.source)", [])?;
+                db.0.execute("DELETE FROM timeline_state WHERE run_id IN (SELECT id FROM runs WHERE status NOT IN ('queued','running','waiting') AND trigger!='chat') AND NOT EXISTS(SELECT 1 FROM events e WHERE e.run_id=timeline_state.run_id)", [])?;
                 Ok(())
             })
             .await?;
@@ -1181,6 +1184,51 @@ mod tests {
     use super::*;
     use crate::agent_fixture::AgentFixture;
     use std::{future::Future, task::Poll};
+
+    #[tokio::test]
+    async fn maintenance_removes_checkpoints_after_run_history_expires() {
+        let (_root, service, _chat, run, _workspace) = fixture().await;
+        service
+            .store
+            .event(
+                &run,
+                &cairn_contracts::EventKind::TurnFailed,
+                "expired secret",
+                Some(json!({"error":{"message":"expired secret"}})),
+            )
+            .await
+            .unwrap();
+        let id = run.clone();
+        service
+            .store
+            .write(move |db| {
+                db.0.execute(
+                    "UPDATE runs SET status='failed', trigger='manual' WHERE id=?",
+                    [&id],
+                )?;
+                db.0.execute("UPDATE events SET created_at=1 WHERE run_id=?", [&id])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        crate::worker::Worker::default()
+            .maintain(&service)
+            .await
+            .unwrap();
+        service
+            .store
+            .read(move |db| {
+                let remaining: i64 = db.0.query_row(
+                    "SELECT count(*) FROM timeline_state WHERE run_id=?",
+                    [&run],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(remaining, 0);
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
 
     async fn fixture() -> (
         tempfile::TempDir,

@@ -235,7 +235,7 @@ class ChatWaitTest {
             put("type", "time")
         }
         val entries =
-            timelineEntries(
+            fixtureEntries(
                 listOf(
                     event("run.wait", scheduled.json()),
                     event(
@@ -271,7 +271,7 @@ class ChatWaitTest {
             put("conclusion", "success")
         }
         val entries =
-            timelineEntries(
+            fixtureEntries(
                 listOf(
                     toolCall("wait_for", "cairn_workspace"),
                     event("chat.wait", scheduled.json()),
@@ -307,8 +307,7 @@ class ChatWaitTest {
         fun shape(entries: List<TimelineEntry>) = entries.map {
             when {
                 it.wait != null -> "wait"
-                it.message ->
-                    it.events.single().item().string("text").ifBlank { it.events.single().text }
+                it.message -> it.card!!.messageText()
                 else -> "activity"
             }
         }
@@ -338,10 +337,10 @@ class ChatWaitTest {
                 "La CI tourne ; je reprends à la fin.",
                 "wait",
             ),
-            shape(timelineEntries(turn, chat = true)),
+            shape(fixtureEntries(turn, chat = true)),
         )
         val ended =
-            timelineEntries(
+            fixtureEntries(
                 turn +
                     event("turn.completed", buildJsonObject {}) +
                     event("chat.user", buildJsonObject { put("text", "Merci") }, "Merci"),
@@ -360,7 +359,7 @@ class ChatWaitTest {
         assertEquals("cancelled", ended[3].wait?.ended)
         // A wait the agent replaced stays where the later call replaced it.
         val replaced =
-            timelineEntries(
+            fixtureEntries(
                 listOf(
                     event("chat.wait", scheduled.json()),
                     message("Un minuteur suffit."),
@@ -383,7 +382,7 @@ class ChatWaitTest {
             put("immediate", true)
         }
         val immediate =
-            timelineEntries(
+            fixtureEntries(
                 listOf(
                     event("turn.started", buildJsonObject {}),
                     event("chat.wait", scheduled.json()),
@@ -418,23 +417,23 @@ class ChatWaitTest {
         val scheduled = wakeup(checks).withWaitProgress(observation = observation)
         val ready = event("chat.wait_ready", observation).copy(text = "Wait condition resolved")
         val entries =
-            timelineEntries(listOf(ready, event("chat.wakeup", scheduled.json())), chat = true)
+            fixtureEntries(listOf(ready, event("chat.wakeup", scheduled.json())), chat = true)
         assertEquals(listOf("wait:wake"), entries.map { it.key })
         assertEquals(observation, entries.single().wait?.observation)
         assertNotNull(entries.single().wait?.resumedAt)
         val scheduleOnly = event("chat.wait", wakeup(checks).json())
         assertEquals(
             observation,
-            timelineEntries(listOf(scheduleOnly), chat = true, pendingWakeup = scheduled)
+            fixtureEntries(listOf(scheduleOnly), chat = true, pendingWakeup = scheduled)
                 .single()
                 .wait
                 ?.observation,
         )
-        val pending = timelineEntries(listOf(ready), chat = true, pendingWakeup = scheduled)
+        val pending = fixtureEntries(listOf(ready), chat = true, pendingWakeup = scheduled)
         assertEquals(listOf("wait:wake"), pending.map { it.key })
         assertEquals(observation, pending.single().wait?.observation)
         assertTrue(
-            timelineEntries(emptyList(), chat = true, pendingWakeup = scheduled)
+            fixtureEntries(emptyList(), chat = true, pendingWakeup = scheduled)
                 .single()
                 .wait!!
                 .finished
@@ -451,7 +450,7 @@ class ChatWaitTest {
             put("conclusion", "success")
         }
         val entries =
-            timelineEntries(
+            fixtureEntries(
                 listOf(
                     event("chat.wait", wakeup(checks).json()),
                     event("chat.wait_ready", observation)
@@ -476,7 +475,7 @@ class ChatWaitTest {
         val ready = event("chat.wait_ready", observation).copy(text = "Wait condition resolved")
         val later = wakeup(checks).copy(id = "later", createdAt = ready.createdAt + 1)
         val entries =
-            timelineEntries(
+            fixtureEntries(
                     listOf(
                         ready,
                         event("chat.user", buildJsonObject { put("text", "Another task") }),
@@ -496,7 +495,7 @@ class ChatWaitTest {
     @Test
     fun `keeps a failed wait call among the tools and recognises every provider's name`() {
         val entries =
-            timelineEntries(
+            fixtureEntries(
                 listOf(
                     toolCall("mcp__cairn_workspace__sleep", "Claude Code"),
                     toolCall("cairn_workspace_sleep", "OpenCode"),
@@ -512,7 +511,7 @@ class ChatWaitTest {
     @Test
     fun `marks a wait a message cancelled, and an immediate result as its own card`() {
         val entries =
-            timelineEntries(
+            fixtureEntries(
                 listOf(
                     event("chat.sleep", wakeup().json()),
                     event(
@@ -556,7 +555,7 @@ class ChatWaitTest {
             put("status", "succeeded")
         }
         val entries =
-            timelineEntries(
+            fixtureEntries(
                 listOf(
                     event("chat.wait", replaced.json()),
                     event("chat.wait_ready", immediate, IMMEDIATE_WAIT_RESULT),
@@ -592,7 +591,7 @@ class ChatWaitTest {
                 IMMEDIATE_WAIT_RESULT,
             )
         val recorded =
-            timelineEntries(
+            fixtureEntries(
                 listOf(
                     ready("Premier"),
                     call("item.started", "c1", "Premier"),
@@ -604,7 +603,7 @@ class ChatWaitTest {
         assertEquals(listOf("Premier", "Second"), recorded.mapNotNull { it.wait?.reason })
         // A resumption whose scheduling is unloaded keeps one card, even if it repeats.
         val resumed =
-            timelineEntries(
+            fixtureEntries(
                 listOf(
                     event("chat.wakeup", wakeup().json()),
                     event("chat.wakeup", wakeup().json()),
@@ -658,7 +657,7 @@ class ChatWaitTest {
     @Test
     fun `cancels the wait of a run that ends failed, not of a retried turn, and lists answered waits first`() {
         val retried =
-            timelineEntries(
+            fixtureEntries(
                 listOf(
                     event("chat.sleep", wakeup().json()),
                     event(
@@ -672,7 +671,7 @@ class ChatWaitTest {
             )
         assertNull(retried.first().wait?.ended)
         val failed =
-            timelineEntries(
+            fixtureEntries(
                 listOf(
                     event("chat.sleep", wakeup().json()),
                     event("status", buildJsonObject {}, "failed"),
