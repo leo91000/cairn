@@ -84,6 +84,14 @@ const explicitOtherTarget = cargoArgs.some(arg => ['--lib', '--bin', '--bins', '
 const includesAllTests = cargoArgs.some(arg => ['--tests', '--all-targets'].includes(arg))
 const needsWorkerFixture = installationSelected
   && (includesAllTests || (testTargets.length > 0 ? testTargets.some(target => /[*?[\]]/.test(target) ? path.matchesGlob('worker', target) : target === 'worker') : !explicitOtherTarget))
+const needsCodeWorker = !selectsPackage || args.includes('--workspace')
+  || packages.some(spec => maySelectPackage(spec, 'cairn-beacon'))
+const reusedBinaries = new Set(['--archive-file', '--binaries-metadata', '--cargo-metadata'])
+if (nextest && (needsWorkerFixture || needsCodeWorker) && cargoArgs.some(arg => reusedBinaries.has(arg.split('=')[0]))) {
+  console.error('Nextest archived or reused binaries cannot be paired safely with fixtures built from this checkout; run these tests from a matching fresh build.')
+  process.exit(2)
+}
+
 if (needsWorkerFixture) {
   const build = spawnSync('cargo', [
     'build',
@@ -131,8 +139,6 @@ if (needsWorkerFixture) {
 // Beacon's real MCP relay tests also execute the installation's isolated code
 // worker. Build it with the same profile flags before tests start, so a
 // nested Cargo invocation cannot overwrite the binary with another profile.
-const needsCodeWorker = !selectsPackage || args.includes('--workspace')
-  || packages.some(spec => maySelectPackage(spec, 'cairn-beacon'))
 if (needsCodeWorker) {
   const build = spawnSync('cargo', [
     'build',
