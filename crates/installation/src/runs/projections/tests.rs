@@ -221,7 +221,7 @@ fn startup_waits_for_a_rollback_journal_writer_and_preserves_projection() {
         Err(error) => panic!("startup stopped before completing: {error}"),
     };
     starter.join().unwrap();
-    assert_eq!(version(&connection), 19);
+    assert_eq!(version(&connection), crate::store::DATABASE_VERSION);
     assert_eq!(projections(&connection, "run_views"), expected);
     assert_eq!(
         connection
