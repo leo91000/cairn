@@ -6555,7 +6555,11 @@ async fn resource_handlers_do_not_send_after_grant_revocation_during_oauth_refre
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Notify;
 
-    for operation in ["list_plugin_resources", "resolve_plugin_resource"] {
+    for operation in [
+        "list_plugin_resources",
+        "resolve_plugin_resource",
+        "import_project",
+    ] {
         let root = TempDir::new().unwrap();
         let s = service(&root).await;
         s.plugins
@@ -6629,9 +6633,14 @@ async fn resource_handlers_do_not_send_after_grant_revocation_during_oauth_refre
                             "clientIdSetting": "clientId",
                         },
                     },
+                    "instructions": "Fixture instructions",
+                    "projectSources": [{ "name": "repositories", "title": "Repositories" }],
+                    "runCredentials": { "git": [{ "url": "https://api.example.test", "username": "fixture", "password": "{{credential}}" }] },
                     "resources": [{ "name": "repository", "description": "Repository" }],
                 },
-                "source": r#"return {resources = function(input)
+                "source": r#"return {
+                    projects = function(input) return {id=input.id, name="Repository", origin="https://api.example.test/repo.git", defaultBranch="main"} end,
+                    resources = function(input)
                 cairn.http.request({url = "https://api.example.test/resources", auth = true})
                 if input.op == "list" then return {items = cairn.array({})} end
                 return {resourceType = "repository", id = input.id, name = "Repository"}
@@ -6665,6 +6674,23 @@ async fn resource_handlers_do_not_send_after_grant_revocation_during_oauth_refre
                 .unwrap()
                 .grants(MAIN_AGENT_ID)
         );
+        if operation == "import_project" {
+            let current = common::owner_api_route(
+                &s,
+                "GET",
+                &format!("/api/agents/{MAIN_AGENT_ID}/plugin-grants"),
+                Value::Null,
+            )
+            .await
+            .unwrap();
+            common::owner_api_route(&s, "PUT", &format!("/api/agents/{MAIN_AGENT_ID}/plugin-grants"), json!({
+                "agentId": MAIN_AGENT_ID, "revision": current["revision"],
+                "grants": [{"instanceId": instance, "access": {"type": "selected", "contributions": [
+                    {"kind":"projectSource","name":"repositories","resources":[]},
+                    {"kind":"instructions","name":"","resources":[]}
+                ]}}], "runCredentialInstances": [],
+            })).await.unwrap();
+        }
         let key = cairn_installation::plugins::connections::credential_key(&instance);
         let credential = json!({
             "token": "fixture-expired",
@@ -6685,15 +6711,22 @@ async fn resource_handlers_do_not_send_after_grant_revocation_during_oauth_refre
         if operation == "resolve_plugin_resource" {
             args["id"] = json!("repo");
         }
+        if operation == "import_project" {
+            args = json!({"pluginId":"resource-refresh","source":"repositories","instance":instance,"id":"repo"});
+        }
         let invoke = async {
             let started = call(&s, &configuration, operation, args).await;
-            let response = finish_plugin_resource_call(
-                &s,
-                "/mcp-installation",
-                text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN"),
-                started,
-            )
-            .await;
+            let response = if operation == "import_project" {
+                started
+            } else {
+                finish_plugin_resource_call(
+                    &s,
+                    "/mcp-installation",
+                    text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN"),
+                    started,
+                )
+                .await
+            };
             assert!(
                 refresh_calls.load(Ordering::SeqCst) > 0,
                 "Refresh was not reached: {response}"
@@ -6702,9 +6735,30 @@ async fn resource_handlers_do_not_send_after_grant_revocation_during_oauth_refre
         };
         let revoke = async {
             started.notified().await;
-            s.agent_fixture(json!({ "plugins": [] }), Some(MAIN_AGENT_ID))
+            if operation == "import_project" {
+                let mut current = common::owner_api_route(
+                    &s,
+                    "GET",
+                    &format!("/api/agents/{MAIN_AGENT_ID}/plugin-grants"),
+                    Value::Null,
+                )
                 .await
                 .unwrap();
+                current["grants"][0]["access"]["contributions"] =
+                    json!([{"kind":"instructions","name":"","resources":[]}]);
+                common::owner_api_route(
+                    &s,
+                    "PUT",
+                    &format!("/api/agents/{MAIN_AGENT_ID}/plugin-grants"),
+                    current,
+                )
+                .await
+                .unwrap();
+            } else {
+                s.agent_fixture(json!({ "plugins": [] }), Some(MAIN_AGENT_ID))
+                    .await
+                    .unwrap();
+            }
             let current = s.store.plugin_instance(&instance).await.unwrap().unwrap();
             assert_eq!(current.revision, saved["revision"].as_str().unwrap());
             // Plugin grants are independent of the run's installation access.

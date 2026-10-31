@@ -46,19 +46,20 @@ pub(crate) fn migrate(db: &Db<'_>, directory: &std::path::Path) -> Result<()> {
     instances.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
     let mut chosen = std::collections::BTreeSet::new();
     for instance in instances {
-        let Ok(package) = super::registry::upgrade_package(db, directory, &instance.plugin_id)
-        else {
-            continue;
-        };
-        if package.manifest.run_credentials.is_none() {
-            continue;
-        }
+        // A temporarily unavailable package must keep the exact legacy choice.
+        // It cannot supply anything until its approved code loads again.
+        let supplies = super::registry::upgrade_package(db, directory, &instance.plugin_id)
+            .map(|package| package.manifest.run_credentials.is_some())
+            .unwrap_or(true);
         for agent in &instance.agent_ids {
             db.0.execute(
                 "INSERT OR IGNORE INTO plugin_credential_suppliers VALUES(?,?,NULL)",
                 params![agent, instance.plugin_id],
             )?;
-            if instance.enabled && chosen.insert((agent.clone(), instance.plugin_id.clone())) {
+            if supplies
+                && instance.enabled
+                && chosen.insert((agent.clone(), instance.plugin_id.clone()))
+            {
                 db.0.execute("UPDATE plugin_credential_suppliers SET instance_id=? WHERE agent_id=? AND plugin_id=?",params![instance.id,agent,instance.plugin_id])?;
             }
         }
@@ -171,12 +172,32 @@ impl Db<'_> {
     /// Legacy owner editors explicitly add full access. Only the first choice can
     /// initialize a supplier; a revoked choice cannot be replaced by this path.
     pub(crate) fn sync_full_plugin_grants(&self, agent: &str, instances: &[String]) -> Result<()> {
+        let directory = self
+            .0
+            .path()
+            .and_then(|path| std::path::Path::new(path).parent())
+            .unwrap_or(std::path::Path::new(""));
+        let mut packages = BTreeMap::new();
         for instance in instances {
             self.0.execute(
                 "DELETE FROM plugin_contribution_grants WHERE agent_id=? AND instance_id=?",
                 params![agent, instance],
             )?;
-            self.0.execute("INSERT OR IGNORE INTO plugin_credential_suppliers(agent_id,plugin_id,instance_id) SELECT ?,plugin_id,id FROM plugin_instances WHERE id=?", params![agent,instance])?;
+            let connection =
+                required(self.plugin_instance(instance)?, "Plugin instance not found")?;
+            let supplies = *packages
+                .entry(connection.plugin_id.clone())
+                .or_insert_with(|| {
+                    super::registry::upgrade_package(self, directory, &connection.plugin_id)
+                        .is_ok_and(|package| package.manifest.run_credentials.is_some())
+                });
+            let choice = supplies.then_some(instance);
+            // Even a package without credentials gets an empty choice: adding
+            // credentials in a later version must not silently select an instance.
+            self.0.execute(
+                "INSERT OR IGNORE INTO plugin_credential_suppliers VALUES(?,?,?)",
+                params![agent, connection.plugin_id, choice],
+            )?;
         }
         self.clear_ungranted_suppliers(agent)
     }
@@ -244,22 +265,6 @@ fn resources_cover(current: &[PluginResourceRef], proposed: &[PluginResourceRef]
             })
 }
 
-pub(crate) fn covers_in(db: &Db<'_>, requester: &str, target: &str) -> Result<bool> {
-    if requester == target {
-        return Ok(true);
-    }
-    let current = db.agent_plugin_grants(requester)?;
-    let proposed = db.agent_plugin_grants(target)?;
-    Ok(proposed.grants.iter().all(|next| {
-        current.grants.iter().any(|held| {
-            held.instance_id == next.instance_id && access_covers(&held.access, &next.access)
-        })
-    }) && proposed
-        .run_credential_instances
-        .iter()
-        .all(|id| current.run_credential_instances.contains(id)))
-}
-
 /// Ticket E/F supplies the rule usage lookup here, in the same publication
 /// transaction. Until provenance has been established, every current account's
 /// use is protected, including the owner's and disabled/blocked rules.
@@ -308,6 +313,16 @@ pub(crate) async fn replace(
     if input.grants.len() > 100 || input.run_credential_instances.len() > 100 {
         return Err(Error::bad("Select at most 100 plugin instances."));
     }
+    let target = id.clone();
+    let before = s
+        .store
+        .read(move |db| db.agent_plugin_grants(&target))
+        .await?;
+    if before.revision != input.revision {
+        return Err(Error::conflict(
+            "This agent changed. Reload it before saving.",
+        ));
+    }
     let mut instances = BTreeSet::new();
     let mut packages = BTreeMap::new();
     for grant in &input.grants {
@@ -320,8 +335,28 @@ pub(crate) async fn replace(
                 .await?,
             "Plugin instance not found",
         )?;
-        let package = super::registry::active(s, &instance.plugin_id).await?;
-        if package.manifest.agent_access.is_none() {
+        let package = match super::registry::active(s, &instance.plugin_id).await {
+            Ok(package) => Some(package),
+            Err(error) => {
+                let retained = before
+                    .grants
+                    .iter()
+                    .find(|held| held.instance_id == grant.instance_id)
+                    .is_some_and(|held| {
+                        held.access == grant.access
+                            || matches!(held.access, Access::Selected { .. })
+                                && access_covers(&held.access, &grant.access)
+                    });
+                if !retained {
+                    return Err(error);
+                }
+                None
+            }
+        };
+        if package
+            .as_ref()
+            .is_some_and(|package| package.manifest.agent_access.is_none())
+        {
             return Err(Error::bad(
                 "This plugin does not grant agent contributions.",
             ));
@@ -333,7 +368,9 @@ pub(crate) async fn replace(
             let mut seen = BTreeSet::new();
             for contribution in contributions {
                 if !seen.insert((contribution.kind, &contribution.name))
-                    || !declared(&package.manifest, contribution)
+                    || package
+                        .as_ref()
+                        .is_some_and(|package| !declared(&package.manifest, contribution))
                     || contribution.resources.len() > 100
                 {
                     return Err(Error::bad("Choose distinct declared contributions."));
@@ -347,11 +384,12 @@ pub(crate) async fn replace(
                 }
                 let mut resources = BTreeSet::new();
                 for resource in &contribution.resources {
-                    if package
-                        .manifest
-                        .resource_type(&resource.resource_type)
-                        .is_none()
-                        || resource.id.is_empty()
+                    if package.as_ref().is_some_and(|package| {
+                        package
+                            .manifest
+                            .resource_type(&resource.resource_type)
+                            .is_none()
+                    }) || resource.id.is_empty()
                         || resource.id.len() > 200
                         || resource.id.chars().any(char::is_control)
                         || !resources.insert((&resource.resource_type, &resource.id))
@@ -376,7 +414,10 @@ pub(crate) async fn replace(
         let permits = matches!(&grant.access, Access::Full)
             || matches!(&grant.access, Access::Selected { contributions } if contributions.iter().any(|c| c.kind == Kind::RunCredentials));
         if !permits
-            || package.manifest.run_credentials.is_none()
+            || match package {
+                Some(package) => package.manifest.run_credentials.is_none(),
+                None => !before.run_credential_instances.contains(supplier),
+            }
             || !suppliers.insert(instance.plugin_id.clone())
         {
             return Err(Error::bad(
@@ -396,16 +437,6 @@ pub(crate) async fn replace(
     }
     let mut reduction_snapshots = Vec::new();
     if reduce_only {
-        let agent = id.clone();
-        let before = s
-            .store
-            .read(move |db| db.agent_plugin_grants(&agent))
-            .await?;
-        if before.revision != input.revision {
-            return Err(Error::conflict(
-                "This agent changed. Reload it before saving.",
-            ));
-        }
         if input
             .run_credential_instances
             .iter()
@@ -446,6 +477,9 @@ pub(crate) async fn replace(
             let caller = crate::installation_mcp::authorize(s, bearer).await?;
             let caller_agent = crate::validation::text(&caller["snapshot"]["agent"], "id");
             let (instance, package) = &packages[&next.instance_id.to_string()];
+            let package = package.as_ref().ok_or_else(|| {
+                Error::conflict("Activate this package before comparing resource ancestry.")
+            })?;
             let snapshot = super::grant_authorization::Snapshot::capture_installation(
                 s,
                 caller_agent,
@@ -462,12 +496,15 @@ pub(crate) async fn replace(
                     })?;
                 super::grant_authorization::resource_set_covered(
                     s,
-                    package,
-                    instance,
-                    caller_agent,
+                    &super::grant_authorization::ResourceAuthorization {
+                        package,
+                        instance,
+                        agent: caller_agent,
+                        snapshot: snapshot.clone(),
+                        preparation: Some(authority.clone()),
+                    },
                     held,
                     &next.resources,
-                    snapshot.clone(),
                 )
                 .await?;
             }
@@ -477,6 +514,9 @@ pub(crate) async fn replace(
     authority.recheck(s).await?;
     let _publication = s.plugins.package_publication.lock().await;
     for (_, package) in packages.values() {
+        let Some(package) = package else {
+            continue;
+        };
         if super::registry::active(s, &package.manifest.id)
             .await?
             .digest
@@ -692,9 +732,18 @@ pub(crate) async fn check_coverage(
     requester: &str,
     target: &str,
 ) -> Result<(String, String)> {
+    check_coverage_authorized(s, requester, target, None).await
+}
+
+pub(crate) async fn check_coverage_authorized(
+    s: &crate::service::Service,
+    requester: &str,
+    target: &str,
+    authority: Option<crate::capabilities::plugin_packages::Authority>,
+) -> Result<(String, String)> {
     tokio::time::timeout(
         std::time::Duration::from_secs(40),
-        Box::pin(check_coverage_inner(s, requester, target)),
+        Box::pin(check_coverage_inner(s, requester, target, authority)),
     )
     .await
     .map_err(|_| Error::unavailable("Resource coverage could not be resolved in time."))?
@@ -704,7 +753,11 @@ async fn check_coverage_inner(
     s: &crate::service::Service,
     requester: &str,
     target: &str,
+    authority: Option<crate::capabilities::plugin_packages::Authority>,
 ) -> Result<(String, String)> {
+    if let Some(authority) = &authority {
+        authority.recheck(s).await?;
+    }
     let (requester, target) = (requester.to_owned(), target.to_owned());
     let (left, right) = (requester.clone(), target.clone());
     let (current, proposed) = s
@@ -744,9 +797,25 @@ async fn check_coverage_inner(
                     "Plugin instance not found",
                 )?;
                 let package = super::registry::active(s, &instance.plugin_id).await?;
-                let snapshot =
-                    super::grant_authorization::Snapshot::capture(s, &requester, None, &package)
-                        .await?;
+                let (reader, snapshot) = if let Some(bearer) = authority
+                    .as_ref()
+                    .and_then(|authority| authority.bearer.as_deref())
+                {
+                    let caller = crate::installation_mcp::authorize(s, bearer).await?;
+                    let agent =
+                        crate::validation::text(&caller["snapshot"]["agent"], "id").to_owned();
+                    let snapshot = super::grant_authorization::Snapshot::capture_installation(
+                        s, &agent, bearer, &package,
+                    )
+                    .await?;
+                    (agent, snapshot)
+                } else {
+                    let snapshot = super::grant_authorization::Snapshot::capture(
+                        s, &requester, None, &package,
+                    )
+                    .await?;
+                    (requester.clone(), snapshot)
+                };
                 for next in proposed {
                     let held = current
                         .iter()
@@ -754,12 +823,15 @@ async fn check_coverage_inner(
                         .ok_or_else(|| Error::forbidden("Plugin contribution not covered."))?;
                     super::grant_authorization::resource_set_covered(
                         s,
-                        &package,
-                        &instance,
-                        &requester,
+                        &super::grant_authorization::ResourceAuthorization {
+                            package: &package,
+                            instance: &instance,
+                            agent: &reader,
+                            snapshot: snapshot.clone(),
+                            preparation: authority.clone(),
+                        },
                         held,
                         &next.resources,
-                        snapshot.clone(),
                     )
                     .await?;
                 }
@@ -780,6 +852,9 @@ async fn check_coverage_inner(
             Ok(())
         })
         .await?;
+    if let Some(authority) = &authority {
+        authority.recheck(s).await?;
+    }
     Ok(revisions)
 }
 
@@ -824,6 +899,49 @@ mod migration_tests {
                 assert_eq!(
                     db.agent(&agent)?.unwrap().settings.plugins,
                     vec![later, earlier]
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod unavailable_migration_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn migration_keeps_the_legacy_choice_when_approved_package_files_are_unavailable() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        let directory = root.path().to_path_buf();
+        store
+            .transaction(move |db| {
+                db.activate_plugin_version("unavailable", "1", &"0".repeat(64), true)?;
+                let instance = "00000000-0000-4000-8000-000000000025";
+                let mut connection = super::super::connections::Connection::draft(
+                    instance,
+                    "unavailable",
+                    json!({}),
+                    Vec::new(),
+                );
+                connection.name = "Unavailable".into();
+                connection.enabled = true;
+                connection.revision = "r1".into();
+                db.save_plugin_instance(&connection)?;
+                let mut profile = crate::agent_fixture::profile(
+                    json!({"id":"00000000-0000-4000-8000-000000000026"}),
+                )?;
+                profile.settings.plugins = vec![instance.into()];
+                db.save_agent(&profile)?;
+                db.0.execute("DELETE FROM plugin_credential_suppliers", [])?;
+                migrate(db, &directory)?;
+                assert_eq!(
+                    db.plugin_credential_supplier(&profile.id.to_string(), "unavailable")?
+                        .as_deref(),
+                    Some(instance)
                 );
                 Ok(())
             })

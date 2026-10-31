@@ -268,8 +268,14 @@ pub(crate) async fn import(
         .tempdir_in(&root)?;
     let path = directory.path().join("repository");
     authority.recheck(s).await?;
-    let credentials = run_credentials::for_instance(s, &package, &connection).await?;
-    crate::project_git::import(&s.config, &credentials, &origin, &path, &branch).await?;
+    let management = authority.management();
+    let credentials =
+        run_credentials::for_instance_managed(s, &package, &connection, management.as_ref())
+            .await?;
+    crate::project_git::import_authorized(&s.config, &credentials, &origin, &path, &branch, || {
+        Box::pin(authority.recheck(s))
+    })
+    .await?;
     settings.path = path.to_string_lossy().into_owned();
     let source = ProjectSource {
         plugin_id: plugin_id.into(),

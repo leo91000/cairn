@@ -375,6 +375,17 @@ pub async fn for_instance(
     Ok(render_instance(s, package, connection, None).await?.git)
 }
 
+pub(crate) async fn for_instance_managed(
+    s: &Service,
+    package: &Package,
+    connection: &Connection,
+    authority: Option<&super::management::Authority>,
+) -> Result<Vec<GitAccess>> {
+    Ok(render_instance(s, package, connection, authority)
+        .await?
+        .git)
+}
+
 /// Whether the agent may hold another instance of this package: runs receive the
 /// credentials of one instance per package.
 pub fn one_per_package(manifest: &cairn_plugin_api::Manifest) -> bool {

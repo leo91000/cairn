@@ -1364,3 +1364,19 @@ those uses. Until the full ADR-0075 conversation provenance is established, ever
 current account's rule is protected; E's provenance integration may exclude only
 the eligible conversation's own account. No rule-writing, emergency-pause or
 budget authority is introduced here.
+
+Transfers returned by tools retain the producing contribution, resource inputs and
+transitive transfer dependencies. Every later read, attachment use or MIME
+composition reauthorizes those permissions for the consuming run; a retained
+instructions-only grant cannot download a revoked tool's attachment. The binding
+contains no producing run token, so a new turn can use a still-authorized handle.
+Unscoped transport/owner transfers require full instance access from an agent;
+agent uploads remain bound to their uploader unless a full-access agent uses them.
+
+An unavailable package's previously held grants and supplier can be retained while
+reducing another grant. Migration also retains the exact legacy instance choice
+for packages whose approved files cannot currently load, rather than permanently
+losing it. A package known not to declare run credentials gets an empty supplier
+choice, including through legacy full-access saves; adding credentials in a later
+version requires an explicit owner choice. Merge preparation resolves descendant
+coverage under the caller's authority and rechecks profile revisions at publication.

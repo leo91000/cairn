@@ -125,11 +125,37 @@ pub async fn command(s: &Service, bearer: &str, input: &Value) -> Result<Value> 
             "delete" => "files.delete",
             _ => return Err(Error::bad("Unknown file transfer operation.")),
         };
-        let scope = Scope::Agent {
-            agent_id,
-            instances,
-        };
-        let result = scope::call(s, &package, &scope, method, file).await?;
+        let snapshot =
+            super::grant_authorization::Snapshot::capture(s, &agent_id, Some(bearer), &package)
+                .await?;
+        let authorities = instances
+            .iter()
+            .map(|instance| {
+                (
+                    instance.id.clone(),
+                    super::management::Authority::agent_action(
+                        instance.clone(),
+                        snapshot.clone(),
+                        None,
+                    ),
+                )
+            })
+            .collect();
+        let scope = Scope::Contributions(
+            Box::new(Scope::Agent {
+                agent_id,
+                instances,
+            }),
+            authorities,
+        );
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(40),
+            Box::pin(scope::call(s, &package, &scope, method, file)),
+        )
+        .await
+        .map_err(|_| {
+            Error::unavailable("Transfer authorization could not be resolved in time.")
+        })??;
         return Ok(json!({ "output": "json", "value": result }));
     }
     let name = text(input, "command");
@@ -160,11 +186,11 @@ pub async fn command(s: &Service, bearer: &str, input: &Value) -> Result<Value> 
             package.manifest.name
         )));
     }
-    let scope = authorized_scope(
+    let snapshot =
+        super::grant_authorization::Snapshot::capture(s, &agent_id, Some(bearer), &package).await?;
+    let scope = super::grant_authorization::contribution_scope(
         s,
-        &package,
-        bearer,
-        &agent_id,
+        snapshot,
         instances,
         Kind::Command,
         name,
@@ -238,11 +264,11 @@ pub async fn call_tool(
     if !jsonschema::is_valid(&tool.input_schema, input) {
         return Err(Error::bad(format!("Invalid input for {name}.")));
     }
-    let scope = authorized_scope(
+    let snapshot =
+        super::grant_authorization::Snapshot::capture(s, &agent_id, Some(bearer), &package).await?;
+    let scope = super::grant_authorization::contribution_scope(
         s,
-        &package,
-        bearer,
-        &agent_id,
+        snapshot,
         instances,
         Kind::Tool,
         name,
@@ -258,21 +284,4 @@ pub async fn call_tool(
     scope::invoke(s, &package, "tool", payload, &scope)
         .await
         .map(Some)
-}
-
-/// Each invocation exposes only instances authorized for this contribution and
-/// input. Each host effect rechecks its own instance rather than a package-wide grant.
-async fn authorized_scope(
-    s: &Service,
-    package: &Package,
-    bearer: &str,
-    agent: &str,
-    instances: Vec<Connection>,
-    kind: Kind,
-    name: &str,
-    input: &Value,
-) -> Result<Scope> {
-    let snapshot =
-        super::grant_authorization::Snapshot::capture(s, agent, Some(bearer), package).await?;
-    super::grant_authorization::contribution_scope(s, snapshot, instances, kind, name, input).await
 }

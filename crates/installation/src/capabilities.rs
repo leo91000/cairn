@@ -11,6 +11,7 @@ use serde_json::Value;
 use std::sync::Arc;
 
 /// Constructed by authenticated transport adapters, never from command JSON.
+#[derive(Clone)]
 pub(crate) enum ResumeContext {
     Human(String),
     Public(Vec<String>, Option<String>),
@@ -454,6 +455,18 @@ impl AgentOperation {
                 })
                 .await;
         }
+        let merge_authority = if self.name == "merge_agents" {
+            Some(
+                crate::capabilities::plugin_packages::Authority::for_grants(
+                    s,
+                    context.clone(),
+                    "manage",
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
         let (editor, bearer) = match context {
             ResumeContext::Human(_) => (crate::service::AgentEditor::Owner, None),
             ResumeContext::Public(scopes, _) => {
@@ -500,7 +513,8 @@ impl AgentOperation {
                 s.agent_preview(decode(input)?, authorize).await?,
             )?),
             "merge_agents" => Ok(serde_json::to_value(
-                s.merge_agents_authorized(decode(input)?, authorize).await?,
+                s.merge_agents_authorized(decode(input)?, authorize, merge_authority)
+                    .await?,
             )?),
             "generate_agent_avatar" => {
                 let input: AgentInput = decode(input)?;

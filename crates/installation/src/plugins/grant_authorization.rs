@@ -14,7 +14,7 @@ use cairn_plugin_api::{Manifest, ResourceField};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 fn denied() -> Error {
@@ -105,14 +105,24 @@ impl Snapshot {
         Ok(snapshot)
     }
 
+    pub(crate) async fn recheck(&self, s: &Service) -> Result<()> {
+        let expected = self.clone();
+        s.store.read(move |db| expected.authorize(db)).await?;
+        if let Some((requester, _)) = &self.requester {
+            Box::pin(super::grants::check_coverage(s, requester, &self.agent)).await?;
+        }
+        let expected = self.clone();
+        s.store.read(move |db| expected.authorize(db)).await
+    }
+
     pub(crate) fn authorize(&self, db: &Db<'_>) -> Result<()> {
         if required(db.agent(&self.agent)?, "Agent not found")?.revision != self.revision {
             return Err(denied());
         }
-        if let Some((id, revision)) = &self.requester {
-            if required(db.agent(id)?, "Requesting agent not found")?.revision != *revision {
-                return Err(denied());
-            }
+        if let Some((id, revision)) = &self.requester
+            && required(db.agent(id)?, "Requesting agent not found")?.revision != *revision
+        {
+            return Err(denied());
         }
         if let Some((bearer, installation)) = &self.bearer {
             let run = if *installation {
@@ -172,9 +182,99 @@ pub(crate) struct Invocation {
     kind: Kind,
     name: String,
     input: Value,
+    transfers: Arc<Mutex<Vec<Arc<TransferOrigin>>>>,
+}
+
+/// The permission that produced a transfer, without the producing run's token.
+/// A consumer must authorize the same contribution and resources under its own
+/// current run, so handles remain usable across turns without surviving revocation.
+#[derive(Clone)]
+pub(crate) struct TransferOrigin {
+    instance: Connection,
+    package: Arc<Package>,
+    kind: Kind,
+    name: String,
+    input: Value,
+    dependencies: Vec<Arc<TransferOrigin>>,
+}
+
+impl TransferOrigin {
+    pub(crate) async fn authorize(
+        &self,
+        s: &Service,
+        connection: &Connection,
+        snapshot: Option<Snapshot>,
+    ) -> Result<()> {
+        let mut visited = BTreeSet::new();
+        Box::pin(self.authorize_inner(s, connection, snapshot, &mut visited)).await
+    }
+
+    async fn authorize_inner(
+        &self,
+        s: &Service,
+        connection: &Connection,
+        snapshot: Option<Snapshot>,
+        visited: &mut BTreeSet<usize>,
+    ) -> Result<()> {
+        if !visited.insert(std::ptr::from_ref(self) as usize) {
+            return Ok(());
+        }
+        if visited.len() > 256 {
+            return Err(denied());
+        }
+        if self.instance.id != connection.id
+            || self.instance.revision != connection.revision
+            || super::registry::active(s, &connection.plugin_id)
+                .await?
+                .digest
+                != self.package.digest
+        {
+            return Err(denied());
+        }
+        for dependency in &self.dependencies {
+            Box::pin(dependency.authorize_inner(s, connection, snapshot.clone(), visited)).await?;
+        }
+        if let Some(snapshot) = snapshot {
+            if snapshot.package.digest != self.package.digest {
+                return Err(denied());
+            }
+            Box::pin(Invocation::prepare(
+                s,
+                snapshot,
+                connection.clone(),
+                self.kind,
+                &self.name,
+                &self.input,
+            ))
+            .await?;
+        }
+        Ok(())
+    }
 }
 
 impl Invocation {
+    pub(crate) fn transfer_origin(&self) -> Arc<TransferOrigin> {
+        Arc::new(TransferOrigin {
+            instance: self.instance.clone(),
+            package: self.snapshot.package.clone(),
+            kind: self.kind,
+            name: self.name.clone(),
+            input: self.input.clone(),
+            dependencies: self.transfers.lock().unwrap().clone(),
+        })
+    }
+
+    pub(crate) fn remember_transfer(&self, origin: Arc<TransferOrigin>) -> Result<()> {
+        let mut transfers = self.transfers.lock().unwrap();
+        if !transfers.iter().any(|known| Arc::ptr_eq(known, &origin)) {
+            if transfers.len() >= 256 {
+                return Err(denied());
+            }
+            transfers.push(origin);
+        }
+        Ok(())
+    }
+
     pub(crate) async fn prepare(
         s: &Service,
         snapshot: Snapshot,
@@ -189,6 +289,7 @@ impl Invocation {
             kind,
             name: name.into(),
             input: input.clone(),
+            transfers: Arc::default(),
         });
         invocation.recheck(s).await?;
         Ok(invocation)
@@ -231,16 +332,14 @@ impl Invocation {
         }
         let fields = fields(&package.manifest, self.kind, &self.name)?;
         for (agent, grant) in grants {
-            authorize_resources(
-                s,
+            ResourceAuthorization {
                 package,
-                &self.instance,
-                &agent,
-                &grant,
-                &fields,
-                &self.input,
-                Some(self.snapshot.clone()),
-            )
+                instance: &self.instance,
+                agent: &agent,
+                snapshot: self.snapshot.clone(),
+                preparation: None,
+            }
+            .authorize(s, &grant, &fields, &self.input)
             .await?;
         }
         let snapshot = self.snapshot.clone();
@@ -323,114 +422,126 @@ fn designated<'a>(input: &'a Value, path: &str) -> Result<Vec<&'a str>> {
         .collect()
 }
 
-async fn authorize_resources(
-    s: &Service,
-    package: &Package,
-    instance: &Connection,
-    agent: &str,
-    grant: &PluginContributionGrant,
-    fields: &[ResourceField],
-    input: &Value,
-    snapshot: Option<Snapshot>,
-) -> Result<()> {
-    if grant.resources.is_empty() {
-        return Ok(());
-    }
-    let mut resolved = BTreeMap::<(String, String), Vec<PluginResourceRef>>::new();
-    let types = grant
-        .resources
-        .iter()
-        .map(|r| &r.resource_type)
-        .collect::<BTreeSet<_>>();
-    let mut matched = BTreeSet::new();
-    let mut references = Vec::new();
-    // Resolve all designations in the restricted hierarchy, including siblings
-    // supplied together. Unrelated types (for example authors) remain unrestricted.
-    for field in fields {
-        let relevant = types
+pub(crate) struct ResourceAuthorization<'a> {
+    pub package: &'a Package,
+    pub instance: &'a Connection,
+    pub agent: &'a str,
+    pub snapshot: Snapshot,
+    pub preparation: Option<crate::capabilities::plugin_packages::Authority>,
+}
+
+impl ResourceAuthorization<'_> {
+    async fn authorize(
+        &self,
+        s: &Service,
+        grant: &PluginContributionGrant,
+        fields: &[ResourceField],
+        input: &Value,
+    ) -> Result<()> {
+        let Self {
+            package,
+            instance,
+            agent,
+            snapshot,
+            preparation,
+        } = self;
+        if grant.resources.is_empty() {
+            return Ok(());
+        }
+        let mut resolved = BTreeMap::<(String, String), Vec<PluginResourceRef>>::new();
+        let types = grant
+            .resources
             .iter()
-            .filter(|kind| descendant(&package.manifest, &field.resource_type, kind))
-            .collect::<Vec<_>>();
-        let ancestor = types
-            .iter()
-            .any(|kind| descendant(&package.manifest, kind, &field.resource_type));
-        if relevant.is_empty() && !ancestor {
-            continue;
-        }
-        for id in designated(input, &field.path)? {
-            matched.extend(relevant.iter().map(|kind| (**kind).clone()));
-            references.push(PluginResourceRef {
-                resource_type: field.resource_type.clone(),
-                id: id.into(),
-            });
-        }
-    }
-    if matched.len() != types.len() || references.len() > 200 {
-        return Err(denied());
-    }
-    for reference in &references {
-        let key = (reference.resource_type.clone(), reference.id.clone());
-        if resolved.contains_key(&key) {
-            continue;
-        }
-        let input = ResolvePluginResourceInput {
-            plugin_id: package.manifest.id.clone(),
-            instance_id: uuid::Uuid::parse_str(&instance.id)
-                .map(cairn_contracts::PluginInstanceId)
-                .map_err(|_| denied())?,
-            resource_type: reference.resource_type.clone(),
-            id: reference.id.clone(),
-        };
-        let read = super::resources::prepare_resolve(s, &input, Some(agent), None).await?;
-        let read = if let Some(snapshot) = &snapshot {
-            read.with_snapshot(snapshot.clone(), instance.clone())
-        } else {
-            read
-        };
-        let resource = Box::pin(read.resolve(s, input)).await?;
-        let chain = std::iter::once(resource.resource)
-            .chain(resource.ancestors)
-            .map(|r| PluginResourceRef {
-                resource_type: r.resource_type,
-                id: r.id,
-            })
-            .collect::<Vec<_>>();
-        for kind in &types {
-            if descendant(&package.manifest, &reference.resource_type, kind)
-                && !chain.iter().any(|r| {
-                    &r.resource_type == *kind
-                        && grant.resources.iter().any(|allowed| {
-                            allowed.resource_type == r.resource_type && allowed.id == r.id
-                        })
-                })
-            {
-                return Err(denied());
-            }
-        }
-        resolved.insert(key, chain);
-    }
-    // A supplied channel and thread must name one consistent hierarchy. Multiple
-    // resources of the same type may legitimately be selected (batch operations).
-    for ((kind, _), chain) in &resolved {
-        let ancestor_types = references
-            .iter()
-            .filter(|r| {
-                r.resource_type != *kind && descendant(&package.manifest, kind, &r.resource_type)
-            })
             .map(|r| &r.resource_type)
             .collect::<BTreeSet<_>>();
-        for ancestor_type in ancestor_types {
-            if !chain.iter().any(|parent| {
-                &parent.resource_type == ancestor_type
-                    && references
-                        .iter()
-                        .any(|r| r.resource_type == parent.resource_type && r.id == parent.id)
-            }) {
-                return Err(denied());
+        let mut matched = BTreeSet::new();
+        let mut references = Vec::new();
+        // Resolve all designations in the restricted hierarchy, including siblings
+        // supplied together. Unrelated types (for example authors) remain unrestricted.
+        for field in fields {
+            let relevant = types
+                .iter()
+                .filter(|kind| descendant(&package.manifest, &field.resource_type, kind))
+                .collect::<Vec<_>>();
+            let ancestor = types
+                .iter()
+                .any(|kind| descendant(&package.manifest, kind, &field.resource_type));
+            if relevant.is_empty() && !ancestor {
+                continue;
+            }
+            for id in designated(input, &field.path)? {
+                matched.extend(relevant.iter().map(|kind| (**kind).clone()));
+                references.push(PluginResourceRef {
+                    resource_type: field.resource_type.clone(),
+                    id: id.into(),
+                });
             }
         }
+        if matched.len() != types.len() || references.len() > 200 {
+            return Err(denied());
+        }
+        for reference in &references {
+            let key = (reference.resource_type.clone(), reference.id.clone());
+            if resolved.contains_key(&key) {
+                continue;
+            }
+            let input = ResolvePluginResourceInput {
+                plugin_id: package.manifest.id.clone(),
+                instance_id: uuid::Uuid::parse_str(&instance.id)
+                    .map(cairn_contracts::PluginInstanceId)
+                    .map_err(|_| denied())?,
+                resource_type: reference.resource_type.clone(),
+                id: reference.id.clone(),
+            };
+            let read = super::resources::prepare_resolve(s, &input, Some(agent), None).await?;
+            let read =
+                read.with_snapshot(snapshot.clone(), (*instance).clone(), preparation.clone());
+            let resource = Box::pin(read.resolve(s, input)).await?;
+            let chain = std::iter::once(resource.resource)
+                .chain(resource.ancestors)
+                .map(|r| PluginResourceRef {
+                    resource_type: r.resource_type,
+                    id: r.id,
+                })
+                .collect::<Vec<_>>();
+            for kind in &types {
+                if descendant(&package.manifest, &reference.resource_type, kind)
+                    && !chain.iter().any(|r| {
+                        &r.resource_type == *kind
+                            && grant.resources.iter().any(|allowed| {
+                                allowed.resource_type == r.resource_type && allowed.id == r.id
+                            })
+                    })
+                {
+                    return Err(denied());
+                }
+            }
+            resolved.insert(key, chain);
+        }
+        // A supplied channel and thread must name one consistent hierarchy. Multiple
+        // resources of the same type may legitimately be selected (batch operations).
+        for ((kind, _), chain) in &resolved {
+            let ancestor_types = references
+                .iter()
+                .filter(|r| {
+                    r.resource_type != *kind
+                        && descendant(&package.manifest, kind, &r.resource_type)
+                })
+                .map(|r| &r.resource_type)
+                .collect::<BTreeSet<_>>();
+            for ancestor_type in ancestor_types {
+                if !chain.iter().any(|parent| {
+                    &parent.resource_type == ancestor_type
+                        && references
+                            .iter()
+                            .any(|r| r.resource_type == parent.resource_type && r.id == parent.id)
+                }) {
+                    return Err(denied());
+                }
+            }
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 /// Ticket F calls this before delivering an event. Unknown hooks, schema-invalid,
@@ -497,12 +608,9 @@ pub(crate) async fn contribution_scope(
 
 pub(crate) async fn resource_set_covered(
     s: &Service,
-    package: &Package,
-    instance: &Connection,
-    agent: &str,
+    authority: &ResourceAuthorization<'_>,
     held: &PluginContributionGrant,
     proposed: &[PluginResourceRef],
-    snapshot: Snapshot,
 ) -> Result<()> {
     let mut input = serde_json::Map::new();
     let fields = proposed
@@ -517,15 +625,7 @@ pub(crate) async fn resource_set_covered(
             }
         })
         .collect::<Vec<_>>();
-    authorize_resources(
-        s,
-        package,
-        instance,
-        agent,
-        held,
-        &fields,
-        &Value::Object(input),
-        Some(snapshot),
-    )
-    .await
+    authority
+        .authorize(s, held, &fields, &Value::Object(input))
+        .await
 }

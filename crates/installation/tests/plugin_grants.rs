@@ -74,7 +74,7 @@ impl Fixture {
         .await;
         s.plugins.route_http_to(Some(origin));
         let shape = json!({"type":"object","additionalProperties":false,"properties":{
-            "two":{"type":"boolean"},"channel":{"type":"string"},"thread":{"type":"string"},"server":{"type":"string"},"author":{"type":"string"},"instance":{"type":"string"},
+            "download":{"type":"boolean"},"two":{"type":"boolean"},"channel":{"type":"string"},"thread":{"type":"string"},"server":{"type":"string"},"author":{"type":"string"},"instance":{"type":"string"},
             "items":{"type":"array","items":{"type":"object","properties":{"channel":{"type":"string"}}}}
         }});
         let fields = json!([
@@ -83,7 +83,7 @@ impl Fixture {
             {"path":"/items/*/channel","resourceType":"channel"}
         ]);
         let installed=common::package_install(&s,&json!({"manifest":{
-            "id":"grant-probe","name":"Grant probe","version":"1","apiVersion":2,"agentAccess":{},"capabilities":["http","hooks","timers"],"settings":[{"key":"marker","title":"Marker","type":"string","default":"first"}],"runCredentials":{"files":[{"path":".config/probe/value","content":"{{settings.marker}}"}]},"hosts":["service.example.test"],"instructions":"probe instructions",
+            "id":"grant-probe","name":"Grant probe","version":"1","apiVersion":2,"agentAccess":{},"capabilities":["http","hooks","timers","files"],"settings":[{"key":"marker","title":"Marker","type":"string","default":"first"}],"runCredentials":{"files":[{"path":".config/probe/value","content":"{{settings.marker}}"}]},"hosts":["service.example.test"],"instructions":"probe instructions",
             "resources":[{"name":"server","description":"Server"},{"name":"channel","description":"Channel","parentType":"server"},{"name":"thread","description":"Thread","parentType":"channel"},{"name":"person","description":"Person"}],
             "tools":[{"name":"grant_probe_post","description":"Post","inputSchema":shape,"resourceFields":fields},{"name":"grant_probe_other","description":"Other","inputSchema":{"type":"object"}}],
             "commands":[{"name":"post","description":"Post","arguments":[{"name":"channel","description":"Channel","positional":true,"resourceType":"channel"}],"output":"json"}],
@@ -92,6 +92,11 @@ impl Fixture {
         },"source":r#"
 return {
     resources = function(input)
+        if input.op == "list" then
+            pcall(function() cairn.http.request({url="https://service.example.test/effect"}) end)
+            pcall(function() cairn.http.request({url="https://service.example.test/effect"}) end)
+            return {items=cairn.array({})}
+        end
         if input.id == "unknown" then return {} end
         local parent = nil
         if input.resourceType == "channel" then parent={ resourceType="server",id="guild" } end
@@ -99,6 +104,9 @@ return {
         return { resourceType=input.resourceType,id=input.id,name=input.id,parent=parent }
     end,
     tool = function(input)
+        if input.input.download then
+            return cairn.http.request({instance=input.instances[1].id,url="https://service.example.test/effect",responseFile={name="private.txt"}})
+        end
         local response = cairn.http.request({ instance=input.input.instance or input.instances[1].id, method="POST",url="https://service.example.test/effect" })
         if input.input.two then cairn.http.request({ instance=input.instances[1].id,method="POST",url="https://service.example.test/effect" }) end
         return response
@@ -607,4 +615,190 @@ async fn installation_can_narrow_a_resource_to_its_descendant_but_cannot_reverse
         )
         .await;
     assert_eq!(widened["result"]["isError"], true, "{widened}");
+}
+
+#[tokio::test]
+async fn transfer_reads_reauthorize_the_producing_contribution_and_resources() {
+    let f = Fixture::new().await;
+    f.set(json!([contribution("tool", "grant_probe_post", support())]))
+        .await;
+    let response = agents::call_tool(
+        &f.s,
+        &f.bearer,
+        "grant_probe_post",
+        &json!({ "channel": "support", "download": true }),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let transfer = json!({ "plugin": "grant-probe", "file": { "method": "read", "instance": f.instance, "id": response["file"]["id"] } });
+    let read = agents::command(&f.s, &f.bearer, &transfer).await.unwrap();
+    assert_eq!(read["value"]["data"], "b2s");
+    f.set(json!([contribution(
+        "tool",
+        "grant_probe_post",
+        json!([{ "resourceType": "channel", "id": "general" }])
+    )]))
+    .await;
+    assert!(agents::command(&f.s, &f.bearer, &transfer).await.is_err());
+    f.set(json!([contribution("instructions", "", json!([]))]))
+        .await;
+    assert!(agents::command(&f.s, &f.bearer, &transfer).await.is_err());
+}
+
+#[tokio::test]
+async fn unavailable_existing_grants_and_their_supplier_survive_other_reductions() {
+    let f = Fixture::new().await;
+    let second = common::save_plugin(
+        &f.s,
+        "grant-probe",
+        &json!({ "name": "Second", "enabled": true }),
+        None,
+    )
+    .await
+    .unwrap();
+    let full = |id: &Value| json!({ "instanceId": id, "access": { "type": "full" } });
+    let current = f.api("GET", json!({})).await.unwrap();
+    let saved = f.api("PUT", json!({ "agentId": MAIN_AGENT_ID, "revision": current["revision"], "grants": [full(&json!(f.instance)), full(&second["id"])], "runCredentialInstances": [f.instance] })).await.unwrap();
+    let path = f.s.config.data_dir.join("plugins/grant-probe/1/main.luau");
+    let original = std::fs::read(&path).unwrap();
+    std::fs::write(&path, "return {} -- awaiting review").unwrap();
+    let reduced = f.api("PUT", json!({ "agentId": MAIN_AGENT_ID, "revision": saved["revision"], "grants": [full(&json!(f.instance))], "runCredentialInstances": [f.instance] })).await.unwrap();
+    assert_eq!(reduced["runCredentialInstances"], json!([f.instance]));
+    assert_eq!(reduced["grants"].as_array().unwrap().len(), 1);
+    std::fs::write(&path, original).unwrap();
+    assert_eq!(
+        cairn_installation::plugins::run_credentials::for_run(&f.s, MAIN_AGENT_ID, &[])
+            .await
+            .unwrap()
+            .files
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn legacy_full_grants_without_run_credentials_round_trip_without_a_supplier() {
+    let f = Fixture::new().await;
+    common::save_plugin(&f.s, "onepassword", &json!({ "name": "Fixture", "enabled": true, "secrets": { "token": "ops_fixture" }, "agentIds": [MAIN_AGENT_ID] }), None).await.unwrap();
+    let current = f.api("GET", json!({})).await.unwrap();
+    assert_eq!(current["runCredentialInstances"], json!([]));
+    let saved = f.api("PUT", current).await.unwrap();
+    assert_eq!(saved["runCredentialInstances"], json!([]));
+}
+
+#[tokio::test]
+async fn merges_accept_semantically_covered_descendant_grants() {
+    let f = Fixture::new().await;
+    let source =
+        f.s.agent_fixture(json!({ "name": "Source" }), None)
+            .await
+            .unwrap();
+    let source_id = text(&source, "id");
+    f.set(json!([contribution("tool", "grant_probe_post", support())]))
+        .await;
+    f.set_for(
+        source_id,
+        json!([contribution(
+            "tool",
+            "grant_probe_post",
+            json!([{ "resourceType": "thread", "id": "support-thread" }])
+        )]),
+    )
+    .await;
+    let merged =
+        f.s.merge_agents(
+            serde_json::from_value(
+                json!({ "sourceId": source_id, "targetId": MAIN_AGENT_ID, "confirm": true }),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(merged.deleted);
+    assert!(f.s.store.agent(source_id).await.unwrap().is_none());
+    assert_eq!(
+        f.api("GET", json!({})).await.unwrap()["grants"][0]["access"]["contributions"][0]["resources"],
+        support()
+    );
+}
+
+#[tokio::test]
+async fn deferred_resource_effects_retain_the_delegation_resource_ceiling() {
+    let f = Fixture::new().await;
+    f.s.agent_fixture(
+        json!({ "access": { "delegation": true } }),
+        Some(MAIN_AGENT_ID),
+    )
+    .await
+    .unwrap();
+    let child =
+        f.s.agent_fixture(
+            json!({ "name": "Child", "access": { "installation": true } }),
+            None,
+        )
+        .await
+        .unwrap();
+    let child_id = text(&child, "id");
+    f.set(json!([contribution("tool", "grant_probe_post", support())]))
+        .await;
+    f.set_for(
+        child_id,
+        json!([contribution(
+            "tool",
+            "grant_probe_post",
+            json!([{ "resourceType": "thread", "id": "support-thread" }])
+        )]),
+    )
+    .await;
+    let parent =
+        f.s.chat_create(json!({ "agentId": MAIN_AGENT_ID }))
+            .await
+            .unwrap();
+    f.s.chat_send(
+        text(&parent, "id"),
+        json!({ "id": cairn_installation::config::id(), "text": "Delegate" }),
+    )
+    .await
+    .unwrap();
+    let parent_token = running_conversation(&f.s, text(&parent, "id")).await;
+    let task = cairn_installation::delegation::delegate(
+        &f.s,
+        &parent_token,
+        &json!({ "agentId": child_id, "task": "Read resources" }),
+    )
+    .await
+    .unwrap();
+    let child_token = running_conversation(&f.s, text(&task, "chatId")).await;
+    f.pause.store(true, Ordering::SeqCst);
+    let started = f.mcp("/mcp-installation", &child_token, "list_plugin_resources", json!({ "pluginId": "grant-probe", "instanceId": f.instance, "resourceType": "channel" })).await;
+    assert_ne!(started["result"]["isError"], true, "{started}");
+    let operation = text(
+        &started["result"]["structuredContent"]["result"],
+        "operation",
+    );
+    assert!(!operation.is_empty(), "{started}");
+    tokio::time::timeout(std::time::Duration::from_secs(5), f.entered.notified())
+        .await
+        .unwrap();
+    f.set(json!([contribution(
+        "tool",
+        "grant_probe_post",
+        json!([{ "resourceType": "channel", "id": "general" }])
+    )]))
+    .await;
+    f.release.notify_one();
+    let state = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let state = f.s.plugins.operations.get(operation).unwrap();
+            if matches!(text(&state, "state"), "completed" | "failed" | "cancelled") {
+                break state;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(state["state"], "failed", "{state}");
+    assert_eq!(f.posts.load(Ordering::SeqCst), 1);
 }

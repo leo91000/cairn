@@ -18,6 +18,19 @@ fn path(path: &Path) -> Result<&str> {
 /// Runs Git with only the given credentials, from a private credential-store file
 /// removed afterwards. Credentials configured on the server are never used.
 async fn git(config: &Config, credentials: &[GitAccess], args: &[&str]) -> Result<String> {
+    git_authorized(config, credentials, args, || std::future::ready(Ok(()))).await
+}
+
+async fn git_authorized<F, Fut>(
+    config: &Config,
+    credentials: &[GitAccess],
+    args: &[&str],
+    authorize: F,
+) -> Result<String>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
     let mut env = codex_environment(config, &config.home.join(".codex"));
     env.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
     env.insert("GIT_NO_LAZY_FETCH".into(), "0".into());
@@ -40,6 +53,7 @@ async fn git(config: &Config, credentials: &[GitAccess], args: &[&str]) -> Resul
         helper,
     ];
     arguments.extend(args.iter().map(|s| (*s).to_owned()));
+    authorize().await?;
     let output = bounded_output(
         command("git", &arguments, &env, None),
         Duration::from_secs(180),
@@ -261,13 +275,32 @@ pub async fn import(
     target: &Path,
     branch: &str,
 ) -> Result<()> {
-    git(
+    import_authorized(config, credentials, origin, target, branch, || {
+        std::future::ready(Ok(()))
+    })
+    .await
+}
+
+pub(crate) async fn import_authorized<F, Fut>(
+    config: &Config,
+    credentials: &[GitAccess],
+    origin: &str,
+    target: &Path,
+    branch: &str,
+    authorize: F,
+) -> Result<()>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    git_authorized(
         config,
         credentials,
         &["check-ref-format", &format!("refs/heads/{branch}")],
+        &authorize,
     )
     .await?;
-    git(
+    git_authorized(
         config,
         credentials,
         &[
@@ -279,6 +312,7 @@ pub async fn import(
             origin,
             path(target)?,
         ],
+        &authorize,
     )
     .await
     .map(|_| ())

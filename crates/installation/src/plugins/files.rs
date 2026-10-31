@@ -29,6 +29,8 @@ struct File {
     media_type: String,
     size: usize,
     expires: i64,
+    origin: Option<Arc<super::grant_authorization::TransferOrigin>>,
+    uploaded_by: Option<String>,
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -199,6 +201,49 @@ impl Files {
         Ok(file.clone())
     }
 
+    pub(crate) fn bind(&self, context: &super::capabilities::Context, value: &Value) -> Result<()> {
+        let file = self.get(&context.connection, text(value, "id"))?;
+        let mut file = file.lock().unwrap();
+        if let Some(authority) = &context.management {
+            file.origin = authority.transfer_origin();
+            if file.origin.is_none() {
+                file.uploaded_by = authority.snapshot().map(|snapshot| snapshot.agent);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn authorize(
+        &self,
+        s: &crate::service::Service,
+        context: &super::capabilities::Context,
+        id: &str,
+    ) -> Result<()> {
+        let file = self.get(&context.connection, id)?;
+        let (origin, uploaded_by) = {
+            let file = file.lock().unwrap();
+            (file.origin.clone(), file.uploaded_by.clone())
+        };
+        let snapshot = context
+            .management
+            .as_ref()
+            .and_then(|authority| authority.snapshot());
+        if let Some(origin) = origin {
+            origin.authorize(s, &context.connection, snapshot).await?;
+            if let Some(authority) = &context.management {
+                authority.remember_transfer(origin)?;
+            }
+        } else if let Some(snapshot) = snapshot
+            && uploaded_by.as_deref() != Some(snapshot.agent.as_str())
+            && !context.connection.grants(&snapshot.agent)
+        {
+            return Err(Error::forbidden(
+                "This transfer has no contribution authorized for this agent.",
+            ));
+        }
+        Ok(())
+    }
+
     pub fn create(
         &self,
         connection: &Connection,
@@ -255,6 +300,8 @@ impl Files {
                 media_type: media_type.to_owned(),
                 size: bytes.len(),
                 expires,
+                origin: None,
+                uploaded_by: None,
             })),
         );
         Ok(

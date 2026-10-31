@@ -37,6 +37,41 @@ impl Authority {
         }
     }
 
+    pub(crate) fn snapshot(&self) -> Option<super::grant_authorization::Snapshot> {
+        self.snapshot.as_deref().cloned()
+    }
+
+    pub(crate) fn transfer_origin(
+        &self,
+    ) -> Option<Arc<super::grant_authorization::TransferOrigin>> {
+        self.invocation
+            .as_ref()
+            .map(|invocation| invocation.transfer_origin())
+    }
+
+    pub(crate) fn remember_transfer(
+        &self,
+        origin: Arc<super::grant_authorization::TransferOrigin>,
+    ) -> Result<()> {
+        if let Some(invocation) = &self.invocation {
+            invocation.remember_transfer(origin)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn bind_snapshot(mut self, snapshot: super::grant_authorization::Snapshot) -> Self {
+        self.snapshot = Some(Arc::new(snapshot));
+        self
+    }
+
+    pub(crate) fn with_preparation(
+        mut self,
+        preparation: Option<crate::capabilities::plugin_packages::Authority>,
+    ) -> Self {
+        self.preparation = preparation;
+        self
+    }
+
     pub(crate) fn authorize(&self, db: &crate::store::Db<'_>) -> Result<()> {
         if let Some(snapshot) = &self.snapshot {
             snapshot.authorize(db)?;
@@ -86,6 +121,9 @@ impl Authority {
     }
 
     pub(crate) async fn recheck(&self, s: &Service) -> Result<()> {
+        if let Some(snapshot) = &self.snapshot {
+            Box::pin(snapshot.recheck(s)).await?;
+        }
         if let Some(invocation) = &self.invocation {
             Box::pin(invocation.recheck(s)).await?;
         }
