@@ -1432,9 +1432,8 @@ impl Controller {
         operation: F,
     ) -> Result<T>
     where
-        T: Send + 'static,
-        F: FnOnce(Self, String, CancellationToken) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = Result<T>> + Send + 'static,
+        F: FnOnce(Self, String, CancellationToken) -> Fut + Send,
+        Fut: std::future::Future<Output = Result<T>> + Send,
     {
         uuid(id)?;
         let pool = disk::lock(&self.state).await?;
@@ -1462,20 +1461,12 @@ impl Controller {
             }
             (attempt.run.clone(), attempt.stop.clone())
         };
-        let controller = self.clone();
-        // A dropped HTTP request must not detach a spawn_blocking filesystem
-        // open or buffered write from the guards that close will drain. The
-        // handle is never aborted; dropping it only detaches the caller.
-        tokio::spawn(async move {
-            let _pool = pool;
-            let _admitted = admitted;
-            if stop.is_cancelled() {
-                return Err(Error::forbidden(forbidden));
-            }
-            operation(controller, run, stop).await
-        })
-        .await
-        .map_err(Error::internal)?
+        // The existing non-GET handler owns this whole route in its task. A
+        // disconnected caller cannot drop these guards during a blocking open
+        // or buffered write; no second operation task is necessary.
+        let _pool = pool;
+        let _admitted = admitted;
+        operation(self.clone(), run, stop).await
     }
 
     async fn artifact_snapshot(
@@ -4418,8 +4409,8 @@ mod tests {
             let id = id.clone();
             let expire_request = expire_request.clone();
             async move {
-                let exporting = route(
-                    controller,
+                let exporting = handler(
+                    State(controller),
                     request(
                         &format!("/runs/{id}/artifact"),
                         &json!({ "runId": run, "path": "/tmp/result" }),

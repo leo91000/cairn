@@ -16,16 +16,19 @@ that access the mounted filesystem outside execution/finalization. They acquire
 the existing process-safe global gate **before** the attempt mutex. After both
 acquisitions, they revalidate the active attempt, requested conversation, mutex
 identity and cancellation. A request waiting for the global gate holds no
-attempt mutex, so it cannot delay close. A request queued before cancellation
-cannot access an already closed filesystem when the pool later becomes free.
+attempt mutex, so it cannot delay close. A request queued before controller
+cancellation cannot access an already closed filesystem when the pool later
+becomes free.
 
-After admission, an owned task retains both guards until the operation settles.
+The existing non-GET handler owns its entire route task. After admission, that
+task retains both guards until the operation settles; no nested task is needed.
 Dropping or timing out its HTTP caller detaches only that caller; it does not
 abort a blocking filesystem open or release its guards early. The file receiver
-must flush buffered writes even when a later transfer frame fails. A request
-cancelled before admission can still abandon its pool wait without starting
-filesystem work. The global gate still orders admitted writes against every
-other pool mutation and policy update, including shared cache/base operations.
+must flush buffered writes even when a later transfer frame fails. A dropped
+HTTP caller does not cancel an already queued POST: its route still revalidates
+the active attempt and controller cancellation after pool admission. The global
+gate still orders admitted writes against every other pool mutation and policy
+update, including shared cache/base operations.
 
 Finalization still publishes cancellation, positively fences the workload and
 settles its protection task before draining access. It drains only this attempt's

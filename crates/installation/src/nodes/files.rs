@@ -242,20 +242,28 @@ async fn receive_contents(
     file: &mut (impl tokio::io::AsyncWrite + Unpin),
     mut left: u64,
 ) -> Result<()> {
-    while left > 0 {
-        let frame = wire::read(reader)
-            .await?
-            .ok_or_else(|| Error::bad("Incomplete workspace transfer."))?;
-        let bytes = STANDARD
-            .decode(text(&frame, "data"))
-            .map_err(|_| Error::bad("Invalid workspace bytes."))?;
-        if bytes.is_empty() || bytes.len() > CHUNK || bytes.len() as u64 > left {
-            return Err(Error::bad("Invalid workspace chunk size."));
+    let received = async {
+        while left > 0 {
+            let frame = wire::read(reader)
+                .await?
+                .ok_or_else(|| Error::bad("Incomplete workspace transfer."))?;
+            let bytes = STANDARD
+                .decode(text(&frame, "data"))
+                .map_err(|_| Error::bad("Invalid workspace bytes."))?;
+            if bytes.is_empty() || bytes.len() > CHUNK || bytes.len() as u64 > left {
+                return Err(Error::bad("Invalid workspace chunk size."));
+            }
+            file.write_all(&bytes).await?;
+            left -= bytes.len() as u64;
         }
-        file.write_all(&bytes).await?;
-        left -= bytes.len() as u64;
+        Ok::<_, Error>(())
     }
-
+    .await;
+    // A Tokio file can accept bytes before its blocking write finishes. Drain
+    // that work on errors too, before callers release their filesystem guards.
+    let drained = file.flush().await;
+    received?;
+    drained?;
     Ok(())
 }
 
@@ -302,34 +310,46 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_transfer_drains_accepted_writes_before_returning_its_error() {
-        let mut stream = Vec::new();
-        wire::write(&mut stream, &json!({ "data": STANDARD.encode(b"kept") }))
-            .await
-            .unwrap();
-        wire::write(&mut stream, &json!({ "data": "invalid-base64!" }))
-            .await
-            .unwrap();
-        let (started, draining) = oneshot::channel();
-        let (release, released) = oneshot::channel();
-        let receiving = tokio::spawn(async move {
-            let mut writer = BufferedWriter {
-                started: Some(started),
-                release: released,
-                bytes: Vec::new(),
-            };
-            let result = receive_contents(&mut stream.as_slice(), &mut writer, 8).await;
-            (result, writer.bytes)
-        });
-        let drained = tokio::time::timeout(std::time::Duration::from_secs(2), draining).await;
-        let returned_too_early = receiving.is_finished();
-        let _ = release.send(());
-        let (result, bytes) = receiving.await.unwrap();
-        assert!(
-            matches!(drained, Ok(Ok(()))),
-            "error path did not drain buffered writes"
-        );
-        assert!(!returned_too_early);
-        assert_eq!(result.unwrap_err().message, "Invalid workspace bytes.");
-        assert_eq!(bytes, b"kept");
+        for (frame, error) in [
+            (
+                Some(json!({ "data": "invalid-base64!" })),
+                "Invalid workspace bytes.",
+            ),
+            (
+                Some(json!({ "data": STANDARD.encode(b"too-long") })),
+                "Invalid workspace chunk size.",
+            ),
+            (None, "Incomplete workspace transfer."),
+        ] {
+            let mut stream = Vec::new();
+            wire::write(&mut stream, &json!({ "data": STANDARD.encode(b"kept") }))
+                .await
+                .unwrap();
+            if let Some(frame) = frame {
+                wire::write(&mut stream, &frame).await.unwrap();
+            }
+            let (started, draining) = oneshot::channel();
+            let (release, released) = oneshot::channel();
+            let receiving = tokio::spawn(async move {
+                let mut writer = BufferedWriter {
+                    started: Some(started),
+                    release: released,
+                    bytes: Vec::new(),
+                };
+                let result = receive_contents(&mut stream.as_slice(), &mut writer, 8).await;
+                (result, writer.bytes)
+            });
+            let drained = tokio::time::timeout(std::time::Duration::from_secs(2), draining).await;
+            let returned_too_early = receiving.is_finished();
+            let _ = release.send(());
+            let (result, bytes) = receiving.await.unwrap();
+            assert!(
+                matches!(drained, Ok(Ok(()))),
+                "error path did not drain buffered writes"
+            );
+            assert!(!returned_too_early);
+            assert_eq!(result.unwrap_err().message, error);
+            assert_eq!(bytes, b"kept");
+        }
     }
 }
