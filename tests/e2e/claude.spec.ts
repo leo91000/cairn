@@ -1,3 +1,4 @@
+import { Buffer } from 'node:buffer'
 import { readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { connectClaude, limits, seedCodexAccount } from './accounts'
@@ -990,4 +991,31 @@ test('a proposal completed after steering remains implementable across history f
   const sent = (await request).postDataJSON()
   expect(sent.planApproval.sourceId).toBe(`${run.id}:${completion}`)
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).messages.some((message: { id: string }) => message.id === sent.id)).toBe(true)
+})
+
+test('an attachment-only Plan request keeps its badge after server history reload', async ({ page, workspace }) => {
+  test.setTimeout(120000)
+  if (!(await workspace.api('/api/accounts')).accounts.some((account: { provider: string }) => account.provider === 'claude'))
+    await connectClaude(workspace)
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: crypto.randomUUID(), text: 'Prepare the conversation', provider: 'claude' })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 30000 }).toBe('succeeded')
+  await page.goto(workspacePath(`/chats/${chat.slug}`))
+  await authenticateWorkspace(page)
+  await expect(page.getByRole('button', { name: /^Agent, model, reasoning and speed/ })).toHaveAccessibleName(/Claude Code.*Opus Fixture/)
+  await page.getByRole('button', { name: 'Plan first', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Plan first', exact: true })).toHaveAttribute('aria-pressed', 'true')
+  await page.getByLabel('Attach files', { exact: true }).setInputFiles([{
+    name: 'design-plan.txt',
+    mimeType: 'text/plain',
+    buffer: Buffer.from('Explore the design before implementing it.'),
+  }])
+  await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveValue('')
+  const request = page.waitForRequest(request => request.method() === 'POST' && request.url().endsWith(`/chats/${chat.id}/messages`))
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  expect((await request).postDataJSON()).toMatchObject({ text: '', plan: true })
+  const message = page.locator('.activity-message').filter({ has: page.locator('span.sr-only', { hasText: 'You' }) }).filter({ hasText: 'design-plan.txt' })
+  await expect(message.getByText('Plan', { exact: true })).toBeVisible()
+  await page.reload()
+  await expect(message.getByText('Plan', { exact: true })).toBeVisible()
 })

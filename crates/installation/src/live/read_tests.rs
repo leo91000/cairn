@@ -1,5 +1,28 @@
 use super::*;
 
+#[test]
+fn a_reference_invalidates_the_streamed_reply_baseline() {
+    let card = |revision: i64, text: &str| -> TimelineEntry {
+        serde_json::from_value(serde_json::json!({
+            "id": "message:1:a", "runId": "run", "position": 1, "revision": revision,
+            "source": revision, "turn": 1, "attempt": 0, "createdAt": 1, "updatedAt": revision,
+            "content": {"kind": "agentMessage", "itemId": "a", "text": text, "state": "running"}
+        }))
+        .unwrap()
+    };
+    let mut replies = Replies::default();
+    replies.encode(vec![card(1, "before")], false);
+    replies.forget(&[LargeTimelineReference {
+        snapshot: card(2, ""),
+    }]);
+    assert!(matches!(
+        replies
+            .encode(vec![card(3, "before changed")], false)
+            .as_slice(),
+        [TimelineChange::Upsert { .. }]
+    ));
+}
+
 #[tokio::test]
 #[ignore = "explicit conversation list and live-page read measurements"]
 async fn measure_conversation_reads_by_count_and_snapshot_size() {
@@ -150,6 +173,41 @@ async fn measure_conversation_reads_by_count_and_snapshot_size() {
             }
         }
     }
+}
+
+#[test]
+fn a_streaming_reply_resends_non_text_changes_whole() {
+    let reply = |revision: i64, text: &str, echo: bool| TimelineEntry {
+        id: "message:1:a".into(),
+        run_id: "run".into(),
+        position: 1,
+        revision,
+        source: revision,
+        turn: 1,
+        attempt: 1,
+        created_at: 1,
+        updated_at: revision,
+        content: TimelineContent::AgentMessage {
+            item_id: "a".into(),
+            text: text.into(),
+            state: TimelineState::Running,
+            via: None,
+            echo,
+        },
+    };
+    let mut replies = Replies::default();
+    assert!(matches!(
+        replies.encode(vec![reply(1, "One", false)], false)[0],
+        TimelineChange::Upsert { .. }
+    ));
+    assert!(matches!(
+        replies.encode(vec![reply(2, "One two", false)], false)[0],
+        TimelineChange::Append { .. }
+    ));
+    assert!(matches!(
+        replies.encode(vec![reply(3, "One two!", true)], false)[0],
+        TimelineChange::Upsert { .. }
+    ));
 }
 
 #[tokio::test]
@@ -348,4 +406,114 @@ CREATE VIEW chat_messages AS SELECT rowid AS rowid,id,chat_id,revision,
     let events = fast.unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].text, "new output");
+}
+
+#[tokio::test]
+async fn opening_window_includes_an_older_active_background_wait_once() {
+    use cairn_contracts::{EventKind, NoticeCode, TimelineContent};
+    use serde_json::json;
+
+    let root = tempfile::tempdir().unwrap();
+    let store = crate::store::Store::open(root.path()).unwrap();
+    store
+        .transaction(|db| {
+            let run = serde_json::from_value(
+                json!({"id":"wait-run", "taskId":"task", "status":"running"}),
+            )?;
+            db.admit_run(&run, None, &json!({}), None)?;
+            db.event(
+                "wait-run",
+                &EventKind::TurnWaiting,
+                "",
+                Some(&json!({"tasks":[{"id":"child","description":"Build"}]})),
+            )?;
+            for _ in 0..120 {
+                db.event("wait-run", &EventKind::Diagnostic, "progress", None)?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let cards = store
+        .read(|db| {
+            let mut range = CardRange {
+                run: "wait-run".into(),
+                from: 50,
+                upto: 121,
+                window: true,
+                earlier: true,
+                active_wait_pending: true,
+                position: 0,
+                id: String::new(),
+            };
+            let mut cards = Vec::new();
+            loop {
+                let (part, more) = range.read(db)?;
+                cards.extend(part);
+                if !more {
+                    break;
+                }
+            }
+            Ok(cards)
+        })
+        .await
+        .unwrap();
+    let waits = cards.iter().filter(|card| matches!(&card.content,
+        TimelineContent::Notice { notice } if notice.code == NoticeCode::BackgroundTasks && notice.waiting_since.is_some()
+    )).collect::<Vec<_>>();
+    assert_eq!(waits.len(), 1);
+    assert!(waits[0].position < 50);
+}
+
+#[test]
+fn oversized_wait_reference_omits_source_owned_tasks_and_ids() {
+    let card: TimelineEntry = serde_json::from_value(serde_json::json!({
+        "id":"notice:1", "runId":"run", "position":1, "revision":1, "source":1,
+        "turn":0, "attempt":0, "createdAt":1, "updatedAt":1,
+        "content":{"kind":"notice", "notice":{
+            "code":"backgroundTasks", "state":"info", "prominent":false,
+            "tasks":["x".repeat(300_000)], "taskIds":["y".repeat(300_000)], "waitingSince":1
+        }}
+    }))
+    .unwrap();
+    let reference = large_reference(card);
+    let value = serde_json::to_value(reference).unwrap();
+    let notice = &value["snapshot"]["content"]["notice"];
+    assert!(notice.get("tasks").is_none());
+    assert!(notice.get("taskIds").is_none());
+    assert_eq!(notice["waitingSince"], 1);
+    assert!(serde_json::to_vec(&value).unwrap().len() < 1024);
+}
+
+#[tokio::test]
+async fn oversized_wait_reference_rehydrates_task_ids_from_the_source() {
+    use cairn_contracts::{EventKind, TimelineContent};
+    use serde_json::json;
+
+    let root = tempfile::tempdir().unwrap();
+    let store = crate::store::Store::open(root.path()).unwrap();
+    store.transaction(|db| {
+        let run = serde_json::from_value(json!({"id":"large-wait", "taskId":"task", "status":"running"}))?;
+        db.admit_run(&run, None, &json!({}), None)?;
+        db.event("large-wait", &EventKind::TurnWaiting, "", Some(&json!({"tasks":[{"id":"y".repeat(300_000), "description":"x".repeat(300_000)}]})))?;
+        Ok(())
+    }).await.unwrap();
+    store
+        .read(|db| {
+            let card = crate::timeline::active_wait(db, "large-wait")?.unwrap();
+            let reference = large_reference(card);
+            let restored =
+                crate::timeline::snapshot_from_source(db, "large-wait", reference.snapshot)?;
+            match restored.content {
+                TimelineContent::Notice { notice } => {
+                    assert_eq!(notice.tasks, vec!["x".repeat(300_000)]);
+                    assert_eq!(notice.task_ids, vec!["y".repeat(300_000)]);
+                    assert!(notice.waiting_since.is_some());
+                }
+                _ => panic!("expected background wait"),
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
 }

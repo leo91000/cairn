@@ -18,6 +18,8 @@ pub struct Context {
     pub management: Option<super::management::Authority>,
     pub connection: Connection,
     pub manifest: Manifest,
+    /// Approval identity of the exact manifest and source loaded by this worker.
+    pub package_digest: Option<String>,
     pub event: Value,
     /// The instance's socket, for its transport worker only.
     pub link: Option<super::socket::Link>,
@@ -59,6 +61,7 @@ pub async fn checked(s: &Service, context: &Context, method: &str, args: Value) 
         "conversations.answer" => super::work::answer(s, context, &args).await,
         "conversations.cancel" => super::work::cancel(s, context, &args).await,
         "inbound.accept" => super::work::inbound(s, context, &args).await,
+        "hooks.emit" => super::hooks::emit(s, context, &args).await,
         "instance.status" => instance_status(s, context, &args).await,
         _ if method.starts_with("socket.") => super::socket::call(s, context, method, &args).await,
         _ => effect(s, context, method, args).await,

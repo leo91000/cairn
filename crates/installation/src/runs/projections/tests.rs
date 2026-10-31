@@ -8,6 +8,9 @@ const LEGACY_COLUMNS: &str = include_str!("../../../tests/fixtures/run-projectio
 /// Older domain fixtures start from a current Store, then restore their domain.
 /// The run layout must also represent the historical version they advertise.
 pub(crate) fn restore_legacy_columns(connection: &Connection) {
+    connection
+        .execute_batch("DROP TABLE IF EXISTS timeline_entries; DROP TABLE IF EXISTS timeline_state; DROP TABLE IF EXISTS run_progress;")
+        .unwrap();
     let current: bool = connection
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='view' AND name='run_views')",

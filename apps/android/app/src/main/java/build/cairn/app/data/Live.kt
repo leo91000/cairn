@@ -23,86 +23,100 @@ import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.Response
 
-/** Wire compression is per connection; presentation keeps one row per assistant message. */
+/**
+ * A stream's events and timeline cards, with its replay cursor. Cards arrive interpreted by the
+ * server: a newer revision replaces an older one, and a streaming reply may send only the text it
+ * appends to the copy this stream delivered.
+ */
 class LiveAccumulator {
     var cursor: Long = 0
         private set
 
-    private var rows = mutableListOf<RunEvent>()
-    private var messages = mutableMapOf<String, Int>()
+    private var rows = listOf<RunEvent>()
+    private var cards = mapOf<String, TimelineCard>()
+    private var streamCards = mapOf<String, TimelineCard>()
+
+    val events: List<RunEvent>
+        get() = rows
+
+    val entries: List<TimelineCard>
+        get() = timelineOrder(cards.values)
 
     fun clear() {
         cursor = 0
-        rows.clear()
-        messages.clear()
+        rows = emptyList()
+        cards = emptyMap()
+        streamCards = emptyMap()
     }
 
-    fun restore(events: List<RunEvent>, accepted: Long) {
-        clear()
-        rows = events.toMutableList()
+    fun restore(events: List<RunEvent>, accepted: Long, entries: List<TimelineCard>) {
+        rows = events.toList()
+        cards = entries.associateBy { it.id }
+        streamCards = cards
         cursor = accepted
-        rows.forEachIndexed { index, event ->
-            if (event.type == "turn.started") messages.clear()
-            val item = event.payload?.get("item") as? JsonObject
-            val id = item?.get("id")?.jsonPrimitive?.contentOrNull
-            if (
-                item?.get("type")?.jsonPrimitive?.contentOrNull == "agent_message" &&
-                    !id.isNullOrBlank()
-            )
-                messages[id] = index
-        }
     }
 
-    fun append(incoming: List<RunEvent>): List<RunEvent> {
-        // Commit only a complete valid batch, so reconnect never skips data after a parse failure.
+    /** Commits a complete valid batch only, so a reconnect never skips data after a failure. */
+    fun append(
+        incoming: List<RunEvent>,
+        changes: List<TimelineChange> = emptyList(),
+        accepted: Long = cursor,
+    ) {
         val next = rows.toMutableList()
-        val indices = messages.toMutableMap()
-        var accepted = cursor
-        for (original in incoming) {
-            if (original.id <= accepted) continue
-            if (original.type == "turn.started") indices.clear()
-            val item = original.payload?.get("item") as? JsonObject
-            val id = item?.get("id")?.jsonPrimitive?.contentOrNull
-            var event = original
-            if (
-                item?.get("type")?.jsonPrimitive?.contentOrNull == "agent_message" &&
-                    !id.isNullOrBlank()
-            ) {
-                val index = indices[id]
-                item["delta"]?.jsonPrimitive?.contentOrNull?.let { delta ->
-                    require(index != null) { "Texte de référence manquant." }
-                    val previous = next[index]
-                    val oldItem = previous.payload?.get("item") as? JsonObject
-                    val text =
-                        (oldItem?.get("text")?.jsonPrimitive?.contentOrNull ?: previous.text) +
-                            delta
-                    val expanded =
-                        JsonObject(
-                            item.filterKeys { it != "delta" } + ("text" to JsonPrimitive(text))
-                        )
-                    event =
-                        original.copy(
-                            text = text,
-                            payload = JsonObject(original.payload.orEmpty() + ("item" to expanded)),
-                        )
+        var last = cursor
+        for (event in incoming) {
+            if (event.id <= last) continue
+            next.add(event)
+            last = event.id
+        }
+        val updated = cards.toMutableMap()
+        val stream = streamCards.toMutableMap()
+        for (change in changes) {
+            when (change) {
+                is build.cairn.contracts.TimelineChange.A -> {
+                    val previous = stream[change.entry.id]
+                    if (previous != null && previous.revision >= change.entry.revision) continue
+                    stream[change.entry.id] = change.entry
+                    upsert(updated, change.entry)
                 }
-                if (index == null) {
-                    indices[id] = next.size
-                    next.add(event)
-                } else
-                    next[index] =
-                        event.copy(
-                            createdAt = next[index].createdAt,
-                            displayId = event.displayId ?: next[index].displayId ?: next[index].id,
+                is build.cairn.contracts.TimelineChange.B -> {
+                    val card = stream[change.id]
+                    val reply = card?.content as? build.cairn.contracts.TimelineContent.B
+                    require(card != null && reply != null) { "Texte de référence manquant." }
+                    if (change.revision <= card.revision) continue
+                    val next =
+                        card.copy(
+                            revision = change.revision,
+                            source = change.source,
+                            updatedAt = change.updatedAt,
+                            content = reply.copy(text = reply.text + change.text),
                         )
-            } else next.add(event)
-            accepted = original.id
+                    stream[change.id] = next
+                    upsert(updated, next)
+                }
+            }
         }
         rows = next
-        messages = indices
-        cursor = accepted
-        return next.toList()
+        cards = updated
+        streamCards = stream
+        cursor = maxOf(last, accepted)
     }
+}
+
+private fun upsert(cards: MutableMap<String, TimelineCard>, card: TimelineCard) {
+    val current = cards[card.id]
+    if (current == null || current.revision <= card.revision) cards[card.id] = card
+}
+
+/** Cards in the order they first appeared. */
+internal fun timelineOrder(cards: Collection<TimelineCard>): List<TimelineCard> =
+    cards.sortedWith(compareBy<TimelineCard> { it.position }.thenBy { it.id })
+
+/** Joins an older page's cards; neither replaces a newer revision of the same card. */
+internal fun mergeCards(older: List<TimelineCard>, recent: List<TimelineCard>): List<TimelineCard> {
+    val cards = recent.associateByTo(mutableMapOf()) { it.id }
+    for (card in older) upsert(cards, card)
+    return timelineOrder(cards.values)
 }
 
 data class StreamFrame(val cursor: Long, val batch: LiveBatch)
@@ -113,6 +127,8 @@ const val UPDATING_STATUS = "Actualisation…"
 data class LiveSnapshot(
     val state: LiveState? = null,
     val events: List<RunEvent> = emptyList(),
+    /** Timeline cards, in the order they first appeared. */
+    val entries: List<TimelineCard> = emptyList(),
     val httpStatus: Int? = null,
     val status: String = "Connexion…",
     val error: String? = null,
@@ -249,7 +265,7 @@ class LiveSession {
     @Volatile var followsLatest = true
 
     fun restore(value: CachedHistory, route: String, currentGeneration: Long) {
-        accumulator.restore(value.events, value.cursor)
+        accumulator.restore(value.events, value.cursor, value.entries)
         generation = currentGeneration
         path = route
         cursor = value.cursor
@@ -258,6 +274,7 @@ class LiveSession {
             LiveSnapshot(
                 value.state,
                 value.events,
+                value.entries,
                 status = UPDATING_STATUS,
                 catchingUp = false,
                 history = value.history,
@@ -267,6 +284,65 @@ class LiveSession {
                 hasOlder = value.hasOlder,
             )
     }
+}
+
+suspend fun CairnApi.readLargeTimeline(
+    path: String,
+    previews: List<build.cairn.contracts.LargeTimelineReference>,
+): List<TimelineCard> {
+    val cards = mutableListOf<TimelineCard>()
+    for (preview in previews) {
+        val snapshot = preview.snapshot
+        val text = StringBuilder()
+        var offset = 0L
+        var checksum: String? = null
+        var total: Long? = null
+        while (true) {
+            val part =
+                send<build.cairn.contracts.RunContentOutput>(
+                    "POST",
+                    path.removeSuffix("/stream") + "/timeline-content",
+                    wireJson.encodeToJsonElement(
+                        build.cairn.contracts.ReadLargeTimelineInput(
+                            snapshot = snapshot,
+                            offset = offset,
+                            sha256 = checksum,
+                        )
+                    ),
+                )
+            require(
+                part.entryId == snapshot.id &&
+                    part.runId == snapshot.runId &&
+                    part.offset == offset &&
+                    (checksum == null || part.sha256 == checksum) &&
+                    (total == null || part.totalBytes == total)
+            ) {
+                "Contenu de la chronologie modifié."
+            }
+            checksum = part.sha256
+            total = part.totalBytes
+            text.append(part.data)
+            val end = offset + part.data.toByteArray(Charsets.UTF_8).size
+            require(end <= part.totalBytes && (part.nextOffset ?: part.totalBytes) == end) {
+                "Longueur de la chronologie invalide."
+            }
+            val next = part.nextOffset ?: break
+            require(next > offset) { "Curseur de chronologie invalide." }
+            offset = next
+        }
+        val card = wireJson.decodeFromString<TimelineCard>(text.toString())
+        require(
+            card.id == snapshot.id &&
+                card.runId == snapshot.runId &&
+                card.position == snapshot.position &&
+                card.revision == snapshot.revision &&
+                card.source == snapshot.source
+        ) {
+            "Carte de chronologie modifiée."
+        }
+        cards.add(card)
+    }
+    return cards
 }
 
 fun CairnApi.live(path: String, session: LiveSession = LiveSession()): Flow<LiveSnapshot> = flow {
@@ -296,6 +372,7 @@ fun CairnApi.live(path: String, session: LiveSession = LiveSession()): Flow<Live
                 frames(path, cursor, generation, snapshot.history, forceRelay, recent).collect {
                     frame ->
                     val batch = frame.batch
+                    val large = readLargeTimeline(path, batch.largeEntries)
                     require(snapshot.history == null || batch.history != null) {
                         "Révision indisponible"
                     }
@@ -308,14 +385,19 @@ fun CairnApi.live(path: String, session: LiveSession = LiveSession()): Flow<Live
                     val replaceBoundary =
                         batch.oldest != null &&
                             (reset || snapshot.oldest == 0L || batch.oldest <= snapshot.oldest)
-                    val events =
-                        Performance.measure(PerfOperation.LIVE_REDUCE) {
-                            accumulator.append(batch.events)
-                        }
+                    Performance.measure(PerfOperation.LIVE_REDUCE) {
+                        accumulator.append(
+                            batch.events,
+                            batch.entries +
+                                large.map { build.cairn.contracts.TimelineChange.A(it) },
+                            frame.cursor,
+                        )
+                    }
                     snapshot =
                         LiveSnapshot(
                             batch.state ?: snapshot.state,
-                            events,
+                            accumulator.events,
+                            accumulator.entries,
                             status = "En direct",
                             catchingUp = batch.more,
                             synced = !batch.more,
@@ -371,10 +453,9 @@ fun CairnApi.live(path: String, session: LiveSession = LiveSession()): Flow<Live
     // Only decoded, complete snapshots can be conflated. Never drop wire deltas.
     .conflate()
 
-/** Prepending full snapshots must not replace a newer text revision at a page boundary. */
+/** Prepending a full page keeps the newer copy of an event already loaded. */
 internal fun mergeHistory(older: List<RunEvent>, recent: List<RunEvent>): List<RunEvent> {
     return Performance.measure(PerfOperation.HISTORY_MERGE) {
-        val merged = (older + recent).distinctBy { it.id }.sortedBy { it.id }
-        LiveAccumulator().append(merged)
+        (recent + older).distinctBy { it.id }.sortedBy { it.id }
     }
 }

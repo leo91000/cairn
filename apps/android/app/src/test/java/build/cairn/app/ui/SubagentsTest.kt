@@ -5,7 +5,6 @@ import build.cairn.app.data.RunEvent
 import kotlinx.serialization.json.*
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -78,7 +77,7 @@ class SubagentsTest {
     private fun turn(type: String) = event(type, buildJsonObject { put("type", type) })
 
     private fun teams(events: List<RunEvent>) =
-        timelineEntries(events, chat = true).filter { it.agents.isNotEmpty() }.map { it.agents }
+        fixtureEntries(events, chat = true).filter { it.agents.isNotEmpty() }.map { it.agents }
 
     private fun Subagent.commands() = steps.map {
         (it as SubagentStep.Action).activity.command to it.activity.state
@@ -222,7 +221,7 @@ class SubagentsTest {
     @Test
     fun `groups subagents started together and keeps their steps and messages out of the reply`() {
         val timeline =
-            timelineEntries(
+            fixtureEntries(
                 listOf(
                     user("Audit the webhooks"),
                     message("intro", "Starting two subagents."),
@@ -264,7 +263,7 @@ class SubagentsTest {
     @Test
     fun `keeps the agent steps around a team in their order`() {
         val timeline =
-            timelineEntries(
+            fixtureEntries(
                 listOf(
                     command("read", "cat README.md"),
                     subagent("item.started", "Review"),
@@ -336,7 +335,7 @@ class SubagentsTest {
     @Test
     fun `folds early lifecycle activity into its spawn without losing metadata or steps`() {
         val timeline =
-            timelineEntries(
+            fixtureEntries(
                 listOf(
                     subagent("item.started", "spawn"),
                     item("item.started") {
@@ -444,7 +443,7 @@ class SubagentsTest {
     @Test
     fun `names Codex subagent tools and keeps orphaned messages readable`() {
         val timeline =
-            timelineEntries(
+            fixtureEntries(
                 listOf(
                     item("item.completed") {
                         put("id", "close")
@@ -465,7 +464,7 @@ class SubagentsTest {
     @Test
     fun `finds the subagents of the current request and what each one does`() {
         val timeline =
-            timelineEntries(
+            fixtureEntries(
                 listOf(
                     user("First"),
                     subagent("item.completed", "Earlier") {
@@ -490,7 +489,7 @@ class SubagentsTest {
     @Test
     fun `keeps earlier workers and nested children reachable after another user message`() {
         val timeline =
-            timelineEntries(
+            fixtureEntries(
                 listOf(
                     user("First"),
                     subagent("item.started", "Earlier"),
@@ -534,71 +533,23 @@ class SubagentsTest {
     }
 
     @Test
-    fun `keeps waiting for background work while a background subagent reports progress`() {
-        val waiting =
-            event(
-                "turn.waiting",
-                buildJsonObject {
-                    put("type", "turn.waiting")
-                    putJsonArray("tasks") {
-                        addJsonObject {
-                            put("id", "task")
-                            put("description", "List files")
-                        }
-                    }
-                },
-            )
-        val events =
-            listOf(
-                user("List"),
-                subagent("item.completed", "List files") { put("background", true) },
-                waiting,
-            )
-        val progress =
-            events +
-                command("ls", "ls", parent = "List files") +
-                subagent("item.updated", "List files") {
-                    put("background", true)
-                    put("activity", "Running ls")
-                }
-        assertEquals(listOf("List files"), backgroundWait(progress)?.tasks)
-        assertNull(backgroundWait(events + message("msg", "")))
-    }
-
-    @Test
     fun `replaces an explicit wait only when every awaited task is represented in the bar`() {
-        fun waiting(vararg tasks: Pair<String, String>) =
-            event(
-                "turn.waiting",
-                buildJsonObject {
-                    put("type", "turn.waiting")
-                    putJsonArray("tasks") {
-                        tasks.forEach { (id, description) ->
-                            addJsonObject {
-                                put("id", id)
-                                put("description", description)
-                            }
-                        }
-                    }
-                },
-            )
         val events =
             listOf(
                 subagent("item.completed", "Worker") {
                     put("background", true)
                     put("task_id", "worker-task")
-                },
-                waiting("worker-task" to "Worker"),
+                }
             )
-        val agents = currentSubagents(timelineEntries(events, chat = true))
-        assertTrue(waitingForSubagents(events, agents))
+        val agents = currentSubagents(fixtureEntries(events, chat = true))
+        assertTrue(waitingForSubagents(listOf("worker-task"), agents))
         assertFalse(
             waitingForSubagents(
-                events + waiting("worker-task" to "Worker", "build-task" to "Build"),
+                listOf("worker-task", "build-task"),
                 agents,
             )
         )
-        assertFalse(waitingForSubagents(listOf(waiting()), agents))
+        assertFalse(waitingForSubagents(emptyList(), agents))
     }
 
     @Test
@@ -609,8 +560,8 @@ class SubagentsTest {
                 command("grep", "rg -n TODO", parent = "Review") +
                 subagent("item.completed", "Review") { put("status", "completed") }
         val keys = TimelineKeys()
-        val first = keys.stabilize("h", timelineEntries(start, chat = true))
-        val second = keys.stabilize("h", timelineEntries(later, chat = true))
+        val first = keys.stabilize("h", fixtureEntries(start, chat = true))
+        val second = keys.stabilize("h", fixtureEntries(later, chat = true))
         assertEquals(first.map { it.key }, second.map { it.key })
         assertEquals(SubagentState.DONE, second.single().agents.single().state)
     }
@@ -625,8 +576,8 @@ class SubagentsTest {
                 subagent("item.started", "Nested") { put("parent_id", "Review") },
             )
         val keys = TimelineKeys()
-        val first = keys.stabilize("h", timelineEntries(recent, chat = true))
-        val paged = keys.stabilize("h", timelineEntries(older + recent, chat = true))
+        val first = keys.stabilize("h", fixtureEntries(recent, chat = true))
+        val paged = keys.stabilize("h", fixtureEntries(older + recent, chat = true))
 
         assertEquals(
             subagentTeams(first).flatten().map { it.id },
@@ -643,16 +594,16 @@ class SubagentsTest {
         val older = listOf(message("older", "Earlier reply"), subagent("item.started", "Earlier"))
         val recent = listOf(subagent("item.started", "Review"))
         val keys = TimelineKeys()
-        val first = keys.stabilize("h", timelineEntries(recent, chat = true)).single()
+        val first = keys.stabilize("h", fixtureEntries(recent, chat = true)).single()
         val paged =
-            keys.stabilize("h", timelineEntries(older + recent, chat = true)).single {
+            keys.stabilize("h", fixtureEntries(older + recent, chat = true)).single {
                 it.agents.isNotEmpty()
             }
 
         assertEquals(first.key, paged.key)
         assertEquals(listOf("Earlier", "Review"), paged.agents.map { it.name })
         val reset =
-            keys.stabilize("new-history", timelineEntries(older + recent, chat = true)).single {
+            keys.stabilize("new-history", fixtureEntries(older + recent, chat = true)).single {
                 it.agents.isNotEmpty()
             }
         assertFalse(first.key == reset.key)
@@ -784,11 +735,11 @@ class SubagentsTest {
                 delegated("b"),
                 call("item.completed", "call-b", false, "completed"),
             )
-        val timeline = timelineEntries(events, chat = true)
+        val timeline = fixtureEntries(events, chat = true)
         assertEquals(2, timeline.size)
         assertEquals(listOf("a", "b"), timeline.last().agents.map { it.delegation?.chatId })
         val failed = call("item.completed", "call-c", true, "failed")
-        val withFailure = timelineEntries(events + failed, chat = true)
+        val withFailure = fixtureEntries(events + failed, chat = true)
         assertTrue(withFailure.last().events.contains(failed))
         assertTrue(presentActivity(failed).failed)
     }
@@ -796,7 +747,7 @@ class SubagentsTest {
     @Test
     fun `earlier delegated tasks stay with the request that started them`() {
         val timeline =
-            timelineEntries(listOf(user("First"), delegated("a"), user("Second")), chat = true)
+            fixtureEntries(listOf(user("First"), delegated("a"), user("Second")), chat = true)
         assertTrue(currentSubagents(timeline).isEmpty())
         val followed = timeline.followingDelegations(listOf(Chat(id = "a", status = "succeeded")))
         assertEquals(

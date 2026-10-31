@@ -28,7 +28,8 @@ export async function pluginRequest<T>(path: string, options: RequestInit): Prom
 function operationResult(result: PluginOperationResult): unknown {
   switch (result.kind) {
     case 'project': return result.project
-    case 'sourceProjects': return result.page
+    case 'sourceProjects': case 'resourcePage': return result.page
+    case 'resourceAncestry': return result.resolution
     case 'skillImport': return result.imported
     case 'skillSource': return result.status
     case 'skillBundle': return result.bundle

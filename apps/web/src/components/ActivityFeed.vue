@@ -3,6 +3,7 @@ import type { Provider } from '../../../../packages/contracts/accounts'
 import type { Deliverable } from '../../../../packages/contracts/artifacts'
 import type { ChatWakeup } from '../../../../packages/contracts/chats'
 import type { RunEvent, TaskOutcome } from '../../../../packages/contracts/contracts'
+import type { TimelineEntry } from '../../../../packages/contracts/live'
 import type { ActivityEntry } from '../activity'
 import type { SendingMessage } from '../chat-delivery'
 import type { ChatQuota } from '../chat-quota'
@@ -22,7 +23,6 @@ import {
 import { latestArtifacts } from '../../../../packages/contracts/artifacts'
 import { activityEntries, ActivityGroups, proposedPlanApproval } from '../activity'
 import { currentPlan } from '../agent-plan'
-import { quotaEntries } from '../chat-quota'
 import { deliveryEntries } from '../deliverables'
 import {
   ArrowDown,
@@ -57,6 +57,8 @@ import WorkingIndicator from './WorkingIndicator.vue'
 
 const props = defineProps<{
   events: RunEvent[]
+  /** Timeline cards the server interpreted: messages, the run cycle, errors and retries. */
+  timeline: TimelineEntry[]
   active: boolean
   suspended?: boolean
   agent: string
@@ -109,10 +111,9 @@ const pendingWakeup = computed<ChatWakeup | null>((previous) => {
   return previous && next?.id === previous.id && JSON.stringify(next.observation) === JSON.stringify(previous.observation) ? previous : next
 })
 const entries = computed(() => {
-  const projected = activityEntries(props.events, props.chat, activityGroups.value, pendingWakeup.value)
-  const entries = props.chat ? quotaEntries(projected, props.events) : projected
+  const entries = activityEntries(props.events, props.chat, activityGroups.value, pendingWakeup.value, props.timeline)
 
-  const acknowledged = new Set(props.events.filter(event => event.type === 'chat.user').map(event => event.payload?.messageId))
+  const acknowledged = new Set(entries.flatMap(entry => entry.kind === 'message' && entry.messageId ? [entry.messageId] : []))
   for (const { message, label } of props.sending ?? []) {
     if (!acknowledged.has(message.id)) {
       entries.push({
@@ -137,14 +138,14 @@ const plan = computed(() => currentPlan(activity.value))
 // Only the latest plan is still being followed.
 const livePlan = computed(() => props.active && !props.suspended ? activity.value.findLast(entry => entry.kind === 'plan')?.id : undefined)
 const working = computed(() => {
-  const wait = backgroundWait(props.events)
+  const wait = backgroundWait(props.timeline)
   if (wait)
-    return { ...waitingStep(wait), subagents: waitingForSubagents(props.events, subagents.value) }
+    return { ...waitingStep(wait), subagents: waitingForSubagents(wait.taskIds, subagents.value) }
   return workingStep(activity.value, props.agent, props.events[0]?.createdAt ?? null)
 })
 // Only the latest proposal, before any later request, offers to implement it.
 const implementable = computed(() => {
-  const sourceId = proposedPlanApproval(props.events)
+  const sourceId = proposedPlanApproval(props.events, props.timeline)
   return sourceId ? activity.value.findLast(entry => entry.kind === 'proposal' && entry.sourceId === sourceId)?.id : null
 })
 const visibleOutcome = computed(() => !props.active && !props.sending?.length && !props.loading ? props.outcome : null)
@@ -481,6 +482,7 @@ defineExpose({
                     </p>
                   </div>
                   <p v-else class="m-0! flex justify-end gap-2 text-2xs text-muted">
+                    <span v-if="entry.plan" class="inline-flex items-center gap-1 font-semibold text-accent" title="Plan turn: the agent explores and proposes without changing anything"><Icon :name="NotebookPen" :size="12" />Plan</span>
                     <span v-if="entry.delivery" role="status">{{ entry.delivery }}</span>
                     <time :datetime="messageTimes.format(entry.time).datetime" :title="messageTimes.format(entry.time).title">{{ messageTimes.format(entry.time).label }}</time>
                   </p>

@@ -63,7 +63,12 @@ const props = withDefaults(defineProps<{
 })
 const router = useRouter()
 const live = useLiveRun(() => `/runs/${props.runId}/stream`)
-const { events, connectionNotice, catchingUp: loading } = live
+const {
+  events,
+  timeline,
+  connectionNotice,
+  catchingUp: loading,
+} = live
 const run = computed(() => live.snapshot.value?.run ?? undefined)
 const suspended = computed(() => isExclusivelySuspended(run.value))
 const recovery = useRetryState(() => run.value)
@@ -283,6 +288,7 @@ async function copy() {
           :position="live.position.value"
           :deliverables="deliverables"
           :events="events"
+          :timeline="timeline"
           :active="!!active && run.status !== 'waiting'"
           :wakeup="{ wakeup: run.wakeup ?? null, paused: false, settled: run.status === 'waiting', canPause: false }"
           :suspended="suspended"

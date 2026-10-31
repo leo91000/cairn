@@ -12,7 +12,7 @@ export type LiveStatus = 'connecting' | 'live' | 'reconnecting' | 'offline'
 // `query` adds request parameters, such as `&list=1` for a stream that carries the list.
 // A status with `opening` is sent before creating the source, so a caller can release
 // another stream that temporarily occupies this one's slot.
-export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: number) => void, status: (value: LiveStatus, opening?: boolean) => void, initial?: { cursor: number, history: string }, followsLatest?: () => boolean, query = '') {
+export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: number, signal?: AbortSignal) => void | Promise<void>, status: (value: LiveStatus, opening?: boolean) => void, initial?: { cursor: number, history: string }, followsLatest?: () => boolean, query = '') {
   let cursor = String(initial?.cursor ?? 0)
   let history = initial?.history
   let source: EventSource | undefined
@@ -21,8 +21,11 @@ export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: 
   let stopped = false
   let failures = 0
   let resetConsumer = false
+  let abort: AbortController | undefined
 
   function disconnect() {
+    abort?.abort()
+    abort = undefined
     source?.close()
     source = undefined
     clearTimeout(timer)
@@ -72,12 +75,15 @@ export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: 
     }
 
     source = current
+    const controller = new AbortController()
+    abort = controller
+    let pending: Promise<void> | undefined
     alive()
     current.addEventListener('ping', () => {
       if (source === current && !stopped)
         alive()
     })
-    current.addEventListener('batch', (event) => {
+    const process = (event: MessageEvent): void | Promise<void> => {
       if (source !== current || stopped)
         return
       try {
@@ -92,27 +98,57 @@ export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: 
           throw new Error('Server no longer supports history validation')
         }
 
-        try {
-          accept(resetConsumer ? { ...batch, reset: true } : batch, Number(event.lastEventId))
+        const accepted = () => {
+          if (source !== current || stopped)
+            return
           resetConsumer = false
+          const transport = (current as EventSource & { transportRoute?: 'direct' | 'relay' }).transportRoute
+          if (transport)
+            observeTransport(transport, path, 'STREAM', Number(event.lastEventId))
+          cursor = event.lastEventId
+          history = batch.history
+          failures = 0
+          status('live')
+          alive()
         }
-        catch (error) {
+
+        const rejected = () => {
+          if (source !== current || stopped)
+            return
           cursor = '0'
           history = undefined
           resetConsumer = true
-          throw error
+          retry()
         }
 
-        const transport = (current as EventSource & { transportRoute?: 'direct' | 'relay' }).transportRoute
-        if (transport)
-          observeTransport(transport, path, 'STREAM', Number(event.lastEventId))
-        cursor = event.lastEventId
-        history = batch.history
-        failures = 0
-        status('live')
-        alive()
+        try {
+          const result = accept(resetConsumer ? { ...batch, reset: true } : batch, Number(event.lastEventId), controller.signal)
+          if (result)
+            return result.then(accepted).catch(rejected)
+          accepted()
+        }
+        catch {
+          rejected()
+        }
       }
-      catch { retry() }
+      catch {
+        if (source === current && !stopped)
+          retry()
+      }
+    }
+
+    current.addEventListener('batch', (event) => {
+      if (source !== current || stopped)
+        return
+      const result = pending ? pending.then(() => process(event)) : process(event)
+      if (result) {
+        const task = Promise.resolve(result)
+        pending = task
+        void task.finally(() => {
+          if (pending === task)
+            pending = undefined
+        })
+      }
     })
     current.onerror = () => {
       if (source === current)

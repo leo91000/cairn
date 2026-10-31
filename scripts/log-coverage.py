@@ -73,7 +73,7 @@ def classify(counts, message, kind):
 def read_page(command, kind, lower, upper, anchor, deadline, byte_limit, line_limit=16384):
     counts = empty_counts()
     result = {"counts": counts, "workBytes": 0, "eof": False, "exitCode": None,
-              "reason": None, "anchorFound": anchor is None, "anchor": None}
+              "reason": None, "anchorFound": anchor is None, "anchor": None, "diagnosticBytes": 0}
     child = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
     selector = selectors.DefaultSelector()
     buffers = {}
@@ -98,6 +98,11 @@ def read_page(command, kind, lower, upper, anchor, deadline, byte_limit, line_li
                 if result["workBytes"] > byte_limit:
                     result["reason"] = "byte_budget"
                     break
+                if kind != "docker" and key.data == "stderr":
+                    # journalctl emits records only on stdout. Keep diagnostics
+                    # private, but drain them to preserve the real exit status.
+                    result["diagnosticBytes"] += len(chunk)
+                    continue
                 buffer = buffers[key.data]
                 buffer.extend(chunk)
                 while b"\n" in buffer:
@@ -134,6 +139,8 @@ def read_page(command, kind, lower, upper, anchor, deadline, byte_limit, line_li
                 result["reason"] = "time_budget"
             if result["exitCode"] != 0 and not result["reason"]:
                 result["reason"] = "source_exit"
+            if result["diagnosticBytes"] and not result["reason"]:
+                result["reason"] = "source_diagnostic"
     finally:
         selector.close()
         if child.poll() is None:
@@ -194,7 +201,7 @@ def command_for(request, identity, lower, upper):
         return ["docker", "logs", "--timestamps", "--since", iso(lower), "--until", iso(upper), identity["id"]]
     command = ["journalctl", "--no-pager", "--all", "--output=json", "--output-fields=__REALTIME_TIMESTAMP,__CURSOR,MESSAGE", "--since", "@" + str(lower // NANO) + f".{lower % NANO:09d}",
                "--until", "@" + str(upper // NANO) + f".{upper % NANO:09d}"]
-    return command + (["--kernel"] if request["kind"] == "kernel" else ["--unit", request["unit"]])
+    return command + (["-k"] if request["kind"] == "kernel" else ["--unit", request["unit"]])
 
 
 def collect(request, get_metadata=metadata, reader=read_page, now_ns=None):

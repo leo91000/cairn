@@ -492,7 +492,8 @@ async fn plan_turns_list_and_call_only_workspace_tools_without_effects() {
             "exclusive_status",
             "list_nodes",
             "open_project",
-            "pending_questions"
+            "pending_questions",
+            "withdraw_question"
         ]
     );
     for (name, arguments) in [
@@ -1634,4 +1635,75 @@ async fn concurrent_large_questionnaire_responses_are_delivered_in_bounded_batch
         s.chat_acknowledge(text(&run, "id"), message).await.unwrap();
     }
     assert_eq!(received.len(), 2);
+}
+
+#[tokio::test]
+async fn plan_question_can_be_retired_after_chat_clarification_without_answer_or_authorization() {
+    let (_root, s, _) = fixture().await;
+    let original = run(&s, Value::Null, MAIN_AGENT_ID).await;
+    patch_run(
+        &s,
+        &original,
+        json!({
+            "status": RunStatus::Running,
+            "chatExecution": { "messageId": "plan-request", "text": "Explore", "plan": true }
+        }),
+    )
+    .await;
+    let current = s.store.run(text(&original, "id")).await.unwrap();
+    let token = run_token(&s, &current).await;
+    let mut chat = s.chat_create(json!({})).await.unwrap();
+    chat["runId"] = current["id"].clone();
+    let chat_id = text(&chat, "id").to_owned();
+    s.store.save_conversation_boundary(chat).await.unwrap();
+    let asked = workspace_rpc(&s, &token, "tools/call", json!({
+        "name": "ask_questions", "arguments": {
+            "requestId": id(),
+            "questions": [{ "id": "scope", "title": "Which scope?", "options": [{ "id": "web", "label": "Web" }] }]
+        }
+    })).await;
+    assert_ne!(asked["result"]["isError"], true, "{asked}");
+    let question = text(&asked["result"]["structuredContent"], "questionId").to_owned();
+    let sent = s
+        .chat_send(
+            &chat_id,
+            json!({ "id": id(), "text": "Only explore the web client.", "mode": "queue" }),
+        )
+        .await
+        .unwrap();
+    let before = s.chat_detail(&chat_id).await.unwrap()["messages"].clone();
+    let withdrawn = workspace_rpc(
+        &s,
+        &token,
+        "tools/call",
+        json!({ "name": "withdraw_question", "arguments": { "questionId": question } }),
+    )
+    .await;
+    assert_eq!(
+        withdrawn["result"]["structuredContent"]["status"], "cancelled",
+        "{withdrawn}"
+    );
+    assert_eq!(s.chat_detail(&chat_id).await.unwrap()["messages"], before);
+    assert_ne!(sent["plan"], true);
+    s.store.event(text(&current, "id"), &cairn_contracts::EventKind::ItemCompleted, "", Some(json!({
+        "item": { "id": "approach", "type": "proposed_plan", "text": "Read the web caller, then propose tests.", "request_id": "plan-request" }
+    }))).await.unwrap();
+    let reopened = Service::new(s.config.clone()).await.unwrap();
+    let question_id = question.clone();
+    let saved = reopened
+        .store
+        .read(move |db| {
+            Ok(db.0.query_row(
+                "SELECT status,plan FROM chat_questions WHERE id=?",
+                [question_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(saved, ("cancelled".to_owned(), true));
+    assert_eq!(
+        reopened.chat_detail(&chat_id).await.unwrap()["messages"],
+        before
+    );
 }

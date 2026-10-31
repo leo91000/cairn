@@ -238,6 +238,7 @@ fn context(connection: &Connection, event: &Value) -> capabilities::Context {
         management: None,
         connection: connection.clone(),
         manifest: registry::builtin("discord").unwrap().manifest,
+        package_digest: None,
         event: event.clone(),
         link: None,
         draft: None,
@@ -3141,4 +3142,307 @@ async fn deleting_a_shared_source_during_setup_does_not_commit_its_draft_or_secr
             .is_none()
     );
     server.abort();
+}
+
+async fn hooks_fixture() -> (TempDir, Arc<Service>, Connection, registry::Package) {
+    let (root, s, _agent) = service().await;
+    let installed = common::package_install(&s, &json!({
+        "manifest": {
+            "id": "hook-probe", "name": "Hooks", "version": "1", "apiVersion": 2,
+            "capabilities": ["hooks", "timers"], "agentAccess": {},
+            "resources": [
+                { "name": "server", "description": "Server" },
+                { "name": "channel", "description": "Channel", "parentType": "server" }
+            ],
+            "hooks": [{ "name": "message", "description": "Message", "payloadSchema": {
+                "type": "object", "required": ["channel"], "additionalProperties": false,
+                "properties": { "channel": { "type": "string" } }
+            }, "resourceFields": [{ "path": "/channel", "resourceType": "channel" }] }]
+        },
+        "source": r#"
+return {
+    socket = function(input) return cairn.hooks.emit(input) end,
+    timer = function(input) return cairn.hooks.emit(input.payload) end,
+    resources = function(input)
+        if input.op == "list" then
+            if input.query == "invalid" then return { items = cairn.array({ { resourceType = input.resourceType, id = "x", name = "X" } }) } end
+            if input.query == "bad-page" then return { items = cairn.array({}), nextPage = input.page } end
+            return { items = cairn.array({ { resourceType = "channel", id = "c", name = input.query, parent = { resourceType = "server", id = "s" } } }), nextPage = input.page + 1 }
+        end
+        if input.id == "wrong" then return { resourceType = input.resourceType, id = "different", name = "Wrong" } end
+        if input.id == "missing-parent" then return { resourceType = "channel", id = input.id, name = "Lost" } end
+        if input.id == "unknown-parent" then return { resourceType = "channel", id = input.id, name = "Lost", parent = { resourceType = "server", id = "wrong" } } end
+        return { resourceType = input.resourceType, id = input.id, name = input.id,
+            parent = if input.resourceType == "channel" then { resourceType = "server", id = "s" } else nil }
+    end,
+}
+"#
+    })).await.unwrap();
+    common::package_approve(&s, "hook-probe", "1", text(&installed, "digest"))
+        .await
+        .unwrap();
+    let saved = common::save_plugin(
+        &s,
+        "hook-probe",
+        &json!({"name":"Hook instance", "enabled":true}),
+        None,
+    )
+    .await
+    .unwrap();
+    let connection = connections::get(&s, "hook-probe", text(&saved, "id"))
+        .await
+        .unwrap();
+    let package = registry::active(&s, "hook-probe").await.unwrap();
+    (root, s, connection, package)
+}
+
+#[tokio::test]
+async fn declared_hooks_emit_from_transport_and_timers_but_not_one_shot_handlers() {
+    let (_root, s, connection, package) = hooks_fixture().await;
+    let mut session = s
+        .plugins
+        .host
+        .start(&worker(), &package.manifest, &package.source)
+        .await
+        .unwrap();
+    let (link, _commands) = socket::Link::channel();
+    let emission = json!({ "name": "message", "id": "transport", "payload": { "channel": "c" } });
+    assert_eq!(
+        socket::deliver(&s, &connection, &mut session, &link, emission.clone())
+            .await
+            .unwrap(),
+        true
+    );
+    assert_eq!(
+        socket::deliver(&s, &connection, &mut session, &link, emission.clone())
+            .await
+            .unwrap(),
+        false
+    );
+    for invalid in [
+        json!({ "name": "unknown", "id": "x", "payload": { "channel": "c" } }),
+        json!({ "name": "message", "id": "x", "payload": { "channel": 1 } }),
+        json!({ "name": "message", "id": "x", "payload": {} }),
+        json!({ "name": "message", "id": "bad\n", "payload": { "channel": "c" } }),
+        json!({ "name": "message", "id": "x", "payload": { "channel": "x".repeat(262_144) } }),
+    ] {
+        assert!(
+            socket::deliver(&s, &connection, &mut session, &link, invalid)
+                .await
+                .is_err()
+        );
+    }
+    let expected = connection.clone();
+    s.store
+        .transaction(move |db| {
+            db.save_plugin_timer(&cairn_installation::plugins::state::Timer {
+                id: cairn_installation::config::id(),
+                instance_id: expected.id.clone(),
+                revision: expected.revision.clone(),
+                name: "poll".into(),
+                payload: json!({"name":"message","id":"timer","payload":{"channel":"c"}}),
+                at: now() - 1,
+            })
+        })
+        .await
+        .unwrap();
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    // A subsequent pump cannot consume or redispatch hooks.
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    let expected = connection.clone();
+    let digest = package.digest.clone();
+    let events = s
+        .store
+        .read(move |db| db.plugin_hooks(&expected.id, &expected.revision, &digest, now()))
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().any(|event| event.external_id == "timer"));
+    assert!(
+        scope::invoke(
+            &s,
+            &package,
+            "socket",
+            emission,
+            &scope::Scope::Instance(Box::new(connection.clone()))
+        )
+        .await
+        .is_err()
+    );
+    let context = capabilities::Context {
+        management: None,
+        connection: connection.clone(),
+        manifest: package.manifest.clone(),
+        package_digest: None,
+        event: json!({"name":"message"}),
+        link: None,
+        draft: None,
+    };
+    assert!(
+        capabilities::checked(
+            &s,
+            &context,
+            "hooks.emit",
+            json!({"name":"message","id":"ordinary","payload":{"channel":"c"}})
+        )
+        .await
+        .is_err()
+    );
+    common::enable_plugin(&s, "hook-probe", &connection.id, &json!({"enabled":false}))
+        .await
+        .unwrap();
+    assert!(
+        socket::deliver(
+            &s,
+            &connection,
+            &mut session,
+            &link,
+            json!({"name":"message","id":"revoked","payload":{"channel":"c"}})
+        )
+        .await
+        .is_err()
+    );
+    session.stop().await;
+}
+
+#[tokio::test]
+async fn resource_listing_and_ancestry_reject_malformed_results_and_cross_instance_access() {
+    use cairn_installation::plugins::resources;
+    let (_root, s, connection, _package) = hooks_fixture().await;
+    let list = |query: &str| {
+        serde_json::from_value(json!({
+        "pluginId":"hook-probe", "instanceId":connection.id, "resourceType":"channel", "page":2, "query":query,
+    })).unwrap()
+    };
+    let page = resources::list(&s, list("Support"), None).await.unwrap();
+    assert_eq!(page.items[0].name, "Support");
+    assert_eq!(page.next_page, Some(3));
+    for query in ["invalid", "bad-page"] {
+        assert!(resources::list(&s, list(query), None).await.is_err());
+    }
+    assert!(
+        resources::list(&s, list("Support"), Some(MAIN_AGENT_ID))
+            .await
+            .is_err()
+    );
+    let resolve = |id: &str| {
+        serde_json::from_value(json!({
+            "pluginId":"hook-probe", "instanceId":connection.id, "resourceType":"channel", "id":id,
+        }))
+        .unwrap()
+    };
+    let resolved = resources::resolve(&s, resolve("c"), None).await.unwrap();
+    assert_eq!(resolved.resource.id, "c");
+    assert_eq!(resolved.ancestors.len(), 1);
+    assert_eq!(resolved.ancestors[0].id, "s");
+    for id in ["wrong", "missing-parent", "unknown-parent"] {
+        assert!(
+            resources::resolve(&s, resolve(id), None).await.is_err(),
+            "{id}"
+        );
+    }
+    let other = common::save_plugin(
+        &s,
+        "hook-probe",
+        &json!({"name":"Other", "enabled":true}),
+        None,
+    )
+    .await
+    .unwrap();
+    let cross = serde_json::from_value(
+        json!({"pluginId":"github", "instanceId":other["id"], "resourceType":"channel", "id":"c"}),
+    )
+    .unwrap();
+    assert!(resources::resolve(&s, cross, None).await.is_err());
+}
+
+#[tokio::test]
+async fn hook_registry_compiles_schemas_and_binds_new_declarations_to_approval() {
+    let (_root, s, _connection, package) = hooks_fixture().await;
+    let mut manifest = serde_json::to_value(&package.manifest).unwrap();
+    manifest["version"] = "2".into();
+    let original = common::package_install(
+        &s,
+        &json!({"manifest":manifest, "source":package.source.main}),
+    )
+    .await
+    .unwrap();
+    let mut changed = manifest.clone();
+    changed["version"] = "3".into();
+    changed["hooks"][0]["description"] = "Changed".into();
+    let altered = common::package_install(
+        &s,
+        &json!({"manifest":changed, "source":package.source.main}),
+    )
+    .await
+    .unwrap();
+    assert_ne!(original["digest"], altered["digest"]);
+    assert!(
+        common::package_approve(&s, "hook-probe", "3", text(&original, "digest"))
+            .await
+            .is_err()
+    );
+    manifest["version"] = "4".into();
+    manifest["hooks"][0]["payloadSchema"]["properties"]["channel"]["minLength"] = "invalid".into();
+    assert!(
+        common::package_install(
+            &s,
+            &json!({"manifest":manifest,"source":package.source.main})
+        )
+        .await
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn reapproving_changed_code_fences_loaded_workers_and_invalidates_old_hooks() {
+    let (root, s, connection, package) = hooks_fixture().await;
+    let mut session = s
+        .plugins
+        .host
+        .start(&worker(), &package.manifest, &package.source)
+        .await
+        .unwrap();
+    let (link, _commands) = socket::Link::channel();
+    let emission = json!({"name":"message","id":"first","payload":{"channel":"c"}});
+    assert_eq!(
+        socket::deliver(&s, &connection, &mut session, &link, emission)
+            .await
+            .unwrap(),
+        true
+    );
+    let mut source = package.source.clone();
+    source
+        .main
+        .push_str("\n-- Reapproved code with the same manifest\n");
+    std::fs::write(
+        root.path().join("data/plugins/hook-probe/1/main.luau"),
+        &source.main,
+    )
+    .unwrap();
+    let digest = source.digest(&package.manifest).unwrap();
+    common::package_approve(&s, "hook-probe", "1", &digest)
+        .await
+        .unwrap();
+    let old = connection.clone();
+    let old_digest = package.digest.clone();
+    assert!(
+        s.store
+            .read(move |db| db.plugin_hooks(&old.id, &old.revision, &old_digest, now()))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        socket::deliver(
+            &s,
+            &connection,
+            &mut session,
+            &link,
+            json!({"name":"message","id":"stale","payload":{"channel":"c"}})
+        )
+        .await
+        .is_err()
+    );
+    session.stop().await;
 }

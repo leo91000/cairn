@@ -236,3 +236,178 @@ Public executable SHA-256 values:
 
 Use post-release actor queue/CPU measurements and the actual workload to assess
 production impact. Retain raw numeric observations outside the repository.
+
+## Publication candidate selection
+
+The publisher and disk-status monitor share one candidate query. Its backup and
+storage fields already live in the physical run boundary. Filtering the complete
+wire projection reconstructed the frozen snapshot for each predicate, including
+rows that were rejected. The query now filters those unchanged boundary fields
+and constructs the full wire value only for selected rows. Publication revisions,
+dirty-disk protection, legacy envelopes, ownership and scheduling retain their
+existing conditions.
+
+A deterministic SQLite plan regression detects wire construction in eligibility
+predicates. It fails on the reference with eight `json_set` calls and passes after
+the change with none. A differential fixture checks 588 combinations of status,
+storage mode, dirty bytes and backup encodings, including nulls and legacy envelope
+values, against the frozen reference query. Selected wire strings remain identical.
+
+Reproduce the paired real-Store query and JSON-decoding measurement, alone:
+
+```sh
+TMPDIR=/var/tmp CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
+  pnpm test:backend -p cairn-installation \
+  --config 'profile.dev.package.cairn-installation.opt-level=2' \
+  --lib nodes::publication::selection_tests::candidate_scan_measurement \
+  -- --exact --ignored --nocapture --test-threads=1
+```
+
+The reference SQL is frozen from `23dee7bbce3379dc0a9358b06a89ab06d6023d23`.
+Both variants execute in the same binary and fixture. The current measurement
+uses clean committed source `35c06b5eb42107f402c847d2823479bf53de8e10`, including
+the native-storage and updater candidate integrations, and Rust crate tree
+`6993e5dc971de727f335ac129b1f2b04ca9bd05f`. The sealed executable SHA-256 is
+`dd294ce4389afd817979bb74b999ffe6bdf25adaf45281c1d67ace712b395408`.
+Rust 1.97.1 uses the development profile with the installation package optimized
+at level 2, development dependency defaults, no debug information and no
+incremental compilation. This is not a release-profile or production measurement.
+
+Measured on 2026-10-31 on the same Intel i9-14900K workstation described above,
+with disk-backed `/var/tmp`, bundled SQLite 3.53.2 and a 9,355,264-byte database.
+The fixture contains 64 runs with 128 KiB instructions; each query selects 32 runs
+and returns 4,249,534 wire bytes. Timed reads use the actual `Db::json_rows` JSON
+decoder, equality assertions and identical result ordering. Four alternating-order
+pairs per connection condition each execute eight reads per variant. CPU cells
+are medians of the four process-CPU batches. Wall cells are the median of each
+batch's elapsed time divided by eight, rather than individual-call percentiles.
+Task-owned compilation and tests finished before execution. No Rust compiler
+process was observed immediately before invocation; this remains a shared workstation.
+
+| Connection | CPU / eight reads, reference → candidate (ms) | Wall / read, reference → candidate (ms) | CPU reduction |
+| --- | ---: | ---: | ---: |
+| Reused | 276.159 → 117.237 | 34.617 → 14.693 | 57.5% |
+| New | 295.957 → 139.837 | 37.095 → 17.527 | 52.8% |
+
+New-connection timings include opening, read-only/foreign-key setup and closing.
+The OS cache stays warm in both conditions; no host cache was evicted. Both
+variants share the unchanged fixture write path: its 64-row construction and
+transaction took 237.422 ms wall / 156.942 ms CPU, before timed reads. This control
+includes fixture preparation and is not a separate before/after write comparison.
+The read-only query connection leaves WAL size unchanged in every case. Database,
+snapshot and output formats do not change.
+
+The preceding measurement on `0d22eff79a495fb2f3b577f0850dea36c4e22611`, Rust
+crate tree `65eacca5ad9dbf68ab6d1c8cd039fad4b57a0afc` and sealed executable
+`ffd1c7d3936f30807e6b685985fa90bece590059594dcaecc3d3a82d706a4452`, reported
+57.3% and 52.2% lower CPU for reused and new connections. Its shared fixture write
+control was 214.224 ms wall / 153.897 ms CPU.
+
+An earlier run of the same query/fixture source, before those main integrations,
+used Rust crate tree `9633411a99a706f72cf1bbd7d31d5bf6e2c60446` and sealed binary
+`e9083c344d97c462879af472acf64ed8a9f9dc40008cb293db78c77bcf777213`.
+It reported 55.9% lower reused-connection CPU and 49.2% lower new-connection CPU;
+its shared fixture write control was 178.449 ms wall / 156.614 ms CPU. Those
+observations remain prior-source evidence, separate from the current table.
+
+An additional exploratory check on a private offline production snapshot used
+Node SQLite 3.53.4, a 0.5-CPU/256-MiB network-isolated container and warm OS cache.
+Both queries selected the same 140 rows and 11,782,175 wire bytes; median SQL-only
+CPU fell from 1,381.122 ms to 161.821 ms across four alternating pairs. Its workload,
+SQLite version and decoding boundary differ from the real-Store measurement, so
+those figures are not interchangeable. No live database query or service was
+started for that experiment. Production effect still requires post-release
+CPU, actor-queue and synchronization observations under the actual workload.
+
+## Publication reference retirement
+
+Retirement marks a publication's exclusively owned objects as unused before
+deleting its references. The outer membership predicate guarantees one reference
+from the retiring publication. Since `(publication, object)` is unique and both
+columns are non-null, any second reference means another publication still owns
+the object. The query now checks that second index entry without loading the
+reference table's publication value. The existing object index, ACK fences,
+transaction boundary, timestamp rules and GC grace period remain unchanged.
+
+The bundled SQLite 3.53.2 plan guard fails on the reference table lookup and
+passes with the covering index. The differential regression checks all 32 owner
+sets across four object states, including unowned objects and existing unused
+timestamps. The complete shared-block module passes 14 tests; two optional
+measurements remain separately selected.
+
+Run the paired committed-transaction measurement alone:
+
+```sh
+TMPDIR=/var/tmp CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
+  pnpm test:backend -p cairn-installation \
+  --config 'profile.dev.package.cairn-installation.opt-level=2' \
+  --lib nodes::shared_blocks::retirement_tests::retirement_transaction_measurement \
+  -- --exact --ignored --nocapture --test-threads=1
+```
+
+The frozen reference is from `1aa24dc825f909874852ffd24213080f9443b8db`.
+The current measurement uses clean committed source
+`19dc649e4b11663371e2dce8efd3a2e0d80d63cd`, including publication-candidate
+selection and WAL observations, and installation crate tree
+`0d665cc23e33f28e704360e5ada0e9ff78e6ad73`. The sealed executable SHA-256 is
+`367449b6caa24901a942720431bc2447d99c05fd735429e9120bdcc2b6bfef02`.
+Rust 1.97.1 uses development dependency defaults, installation package opt-level
+2, no debug information and no incremental compilation. This is not a release
+profile or a production measurement.
+
+Measured on 2026-10-31 on the shared Intel i9-14900K workstation described above,
+with bundled SQLite 3.53.2 and disk-backed `/var/tmp`. Task-owned compilation and
+tests finished before the measurement batch; no Rust compiler process was
+observed immediately before that batch. The host was not dedicated or isolated.
+
+The 33,370,112-byte synthetic database has 65,536 objects and 78,644 references.
+The retiring publication owns 19,661 references. Each variant receives a fresh
+copy and SQLite connection, WAL mode and enabled foreign keys before timing.
+Four alternating-order pairs time `BEGIN IMMEDIATE`, the actual release
+statements, cascading reference deletion and `COMMIT`. Copying, connection/PRAGMA
+setup and verification are excluded. The OS cache is warm after copying; no
+host cache eviction was attempted. The shared fixture write control takes
+935.589 ms wall / 743.807 ms CPU, including preparation and commit; it is not
+a before/after write comparison.
+
+| Committed retirement | Reference median (ms) | Candidate median (ms) | Change |
+| --- | ---: | ---: | ---: |
+| Process CPU | 151.918 | 145.793 | -4.0% |
+| Wall time | 320.796 | 312.416 | -2.6% |
+
+Every trial has the same 32,769 changed rows and 19,450,552 WAL bytes. Foreign-key
+checks pass. Final object/publication/reference states compare equal after
+normalizing naturally different retirement timestamps. The diagnostic JSON
+representation of that normalized state is 12,681,350 bytes; this is neither
+stored-object nor wire-format size. Database and object formats do not change.
+The CPU improvement is modest. One reference trial took 558.361 ms wall while
+the other reference trials took 314.766–325.895 ms; no observation is trimmed.
+A preceding invocation passed the product assertions, but the temporary collector
+retained only seven JSON observations because the first line had a test-name
+prefix. Its incomplete records are preserved separately; this table uses one
+complete eight-observation batch after correcting the collector.
+
+The previous complete measurement on source
+`2881ff133acc381f2ce845afa358f1cec759ffc8`, crate tree
+`df141b7523e4e4622ab0882a9c8de1f81b00cd3f` and sealed executable
+`e5fb58fd5535bc1cbd1ede5c963cd166be34746b20401803941a1405a461a8ab` reported
+164.867 → 151.479 ms CPU (-8.1%) and 321.056 → 306.205 ms wall (-4.6%); its
+shared fixture write control was 1,057.520 ms wall / 788.434 ms CPU.
+An earlier measurement on crate tree
+`ca3018b31f84474cdec11984e00ded3724298922`, sealed executable
+`3672a5392dcb5ac1718d3b2cd19f796590f17d541ab2024c7e131c07e495c1a5`, reported
+159.888 → 149.631 ms CPU (-6.4%) but 380.867 → 390.399 ms wall (+2.5%). Other-user
+Rust compilation was observed before that earlier invocation; its shared fixture
+write control was 1,120.257 ms wall / 840.452 ms CPU. Retain the wall-time increase
+alongside the current decrease: these shared-host observations do not establish
+a consistent latency benefit or production gain.
+
+A separate read-only exploration on a private offline production snapshot uses
+Node SQLite 3.53.4, a network-isolated 0.5-CPU/256-MiB container and warm OS cache.
+Selected object IDs compare equal in memory, with no IDs or contents exported.
+For 2,270-reference and 17,405-reference publications, median selection CPU is
+34.465 → 22.521 ms and 245.698 → 144.805 ms respectively. Empty and 29-reference
+cases rise from 0.054 → 0.055 ms and 0.224 → 0.238 ms. These SELECT-only figures
+exclude writes, cascading deletion and commit and cannot replace the actual
+bundled-SQLite transaction measurement. Production effect still requires
+post-release CPU, actor-queue and storage observations under the real workload.

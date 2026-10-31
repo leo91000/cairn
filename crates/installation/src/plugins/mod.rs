@@ -9,6 +9,7 @@ pub mod connections;
 pub mod device_flow;
 pub mod files;
 pub mod forms;
+pub mod hooks;
 mod idempotency;
 pub mod instances;
 pub(crate) mod management;
@@ -22,6 +23,7 @@ pub mod programs;
 pub mod projects;
 pub mod queues;
 pub mod registry;
+pub mod resources;
 pub mod run_credentials;
 pub mod runtime;
 pub mod scope;
@@ -259,6 +261,39 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
         return manage_http(s, input, management::decode(command)?, false).await;
     }
     let package_command = match (input.method.as_str(), parts.as_slice()) {
+        ("GET", ["plugins", id, "connections", instance, "resources"]) => Some((
+            "list_plugin_resources",
+            json!({
+                "pluginId": id,
+                "instanceId": instance,
+                "resourceType": input.query.get("resourceType").cloned().unwrap_or_default(),
+                "page": input.number("page", 1, 1, 10_000)?,
+                "query": input.query.get("query").cloned().unwrap_or_default(),
+            }),
+        )),
+        (
+            "GET",
+            [
+                "plugins",
+                id,
+                "connections",
+                instance,
+                "resources",
+                "ancestors",
+            ],
+        ) => Some((
+            "resolve_plugin_resource",
+            json!({
+                "pluginId": id,
+                "instanceId": instance,
+                "resourceType": input.query.get("resourceType").cloned().unwrap_or_default(),
+                "id": input.query.get("id").cloned().unwrap_or_default(),
+            }),
+        )),
+        ("GET", ["plugins", "resources", "operations", id]) => Some((
+            "get_plugin_resource_operation",
+            json!({ "operationId": id }),
+        )),
         ("GET", ["plugins"]) => Some(("list_plugins", json!({}))),
         ("POST", ["plugins", "packages"]) => Some(("install_plugin_package", body.clone())),
         ("GET", ["plugins", "packages", "operations", id]) => {

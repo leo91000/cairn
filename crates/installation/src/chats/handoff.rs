@@ -259,6 +259,12 @@ mod tests {
     fn transcript_keeps_visible_history_and_omits_tool_secrets_and_stream_duplicates() {
         let connection = rusqlite::Connection::open_in_memory().unwrap();
         connection.execute_batch(EVENTS).unwrap();
+        // The event writer also applies each event to the run's timeline. These transcripts
+        // have no run row: the projection's run reference is not under test here.
+        connection.execute_batch(crate::timeline::SCHEMA).unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", false)
+            .unwrap();
         connection.execute_batch(crate::runs::SCHEMA).unwrap();
         let db = Db(&connection);
         let attachment = json!({ "attachments": [{ "id": "file", "name": "brief.pdf" }] });
@@ -404,6 +410,12 @@ mod tests {
     fn long_history_retains_original_scope_and_recent_unicode_without_unbounded_context() {
         let connection = rusqlite::Connection::open_in_memory().unwrap();
         connection.execute_batch(EVENTS).unwrap();
+        // The event writer also applies each event to the run's timeline. These transcripts
+        // have no run row: the projection's run reference is not under test here.
+        connection.execute_batch(crate::timeline::SCHEMA).unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", false)
+            .unwrap();
         connection.execute_batch(crate::runs::SCHEMA).unwrap();
         let db = Db(&connection);
         db.event("run", &EventKind::ChatUser, "Original scope", None)

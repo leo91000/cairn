@@ -144,7 +144,7 @@ class WorkspaceJourneyTest {
                                         .setBody(
                                             "event: batch\nid: 3\ndata: " +
                                                 wireJson.encodeToString(
-                                                    LiveBatch(
+                                                    timelineBatch(
                                                         listOf(
                                                             RunEvent(
                                                                 id = 1,

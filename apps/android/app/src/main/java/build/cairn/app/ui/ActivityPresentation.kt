@@ -342,111 +342,29 @@ private fun presentEvent(event: RunEvent): ActivityPresentation {
                 output = item.string("text"),
             )
         else -> {
-            // Statuses keep their text as the title; a payload only adds metadata.
+            // Unknown items and engine markers Cairn does not know yet. Messages, the run cycle,
+            // errors and retries are presented from their timeline cards.
             val plain =
-                if (data == null || event.type == "status") event.text
+                if (data == null) event.text
                 else
                     data.string("message").ifBlank {
                         data?.get("error").asObject().string("message")
                     }
-            val account = if (event.type == "status") accountUsed(event.text) else null
-            val backgroundTasks =
-                if (event.type != "turn.waiting") emptyList()
-                else
-                    data?.get("tasks").asArray().orEmpty().mapNotNull {
-                        it.asObject()?.get("description").plain().trim().ifEmpty { null }
-                    }
             val title =
                 when (event.type) {
-                    "thread.started" -> "Session ouverte"
-                    "turn.started",
                     "run.started" -> "Travail commencé"
-                    "turn.completed" -> "Travail terminé"
-                    "turn.waiting" ->
-                        if (data?.get("tasks").asArray().isNullOrEmpty())
-                            "Tâches en arrière-plan terminées"
-                        else "En attente de tâches en arrière-plan"
-                    "turn.failed",
-                    "error" -> "L’agent a rencontré une erreur"
-                    "engine.retry" -> engineRetryTitle(data)
-                    "provider.limit" -> usageLimitTitle(data)
-                    "engine.notice" -> engineNoticeTitle(data)
-                    "status" ->
-                        when {
-                            account != null -> "Compte ${account.first} sélectionné"
-                            speedFallback(data) -> "Ce tour passe en vitesse Standard"
-                            speedUnconfirmed(data) -> "Vitesse non confirmée pour ce tour"
-                            speedConfirmed(data) -> "Vitesse choisie demandée pour ce tour"
-                            event.text.lowercase() in
-                                listOf(
-                                    "succeeded",
-                                    "running",
-                                    "failed",
-                                    "queued",
-                                    "cancelled",
-                                    "interrupted",
-                                ) ->
-                                mapOf(
-                                        "succeeded" to "Exécution réussie",
-                                        "running" to "Exécution en cours",
-                                        "failed" to "Exécution en échec",
-                                        "queued" to "Exécution en attente",
-                                        "cancelled" to "Exécution annulée",
-                                        "interrupted" to "Exécution interrompue",
-                                    )[event.text.lowercase()]
-                                    .orEmpty()
-                            else -> plain.take(120).ifBlank { "État de l’exécution" }
-                        }
                     "output",
                     "item.completed" -> "Résultat enregistré"
                     "item.started" -> "Étape enregistrée"
                     else -> readableField(type.ifBlank { event.type })
                 }
-            val usage = data?.get("usage").asObject()
-            val subtitle =
-                if (account != null) account.second
-                else if (event.type == "status" && speedFallback(data))
-                    "Codex ne liste pas la vitesse choisie pour ce modèle ici : Cairn demande Standard"
-                else if (event.type == "status" && speedConfirmed(data))
-                    "Codex la liste pour ce modèle ici ; l’offre du compte décide si elle s’applique"
-                else if (event.type == "status" && speedUnconfirmed(data))
-                    "Elle n’a pas pu être confirmée pour ce compte et ce modèle ; ce tour peut passer en Standard"
-                else if (event.type == "engine.retry") engineRetryDetail(data)
-                else if (event.type == "provider.limit") usageLimitDetail(data)
-                else if (backgroundTasks.isNotEmpty()) backgroundTasks.joinToString(" · ")
-                else if (usage != null)
-                    listOf("input_tokens" to "entrée", "output_tokens" to "sortie")
-                        .mapNotNull { (key, label) ->
-                            usage[key]?.plain()?.takeIf { it.isNotEmpty() }?.let { "$it $label" }
-                        }
-                        .joinToString(" · ")
-                else ""
             base.copy(
                 kind =
                     if (item != null || event.type in listOf("output", "item.completed"))
                         ActivityKind.OUTPUT
                     else ActivityKind.NOTICE,
                 title = title,
-                subtitle = subtitle,
-                state =
-                    if (data?.get(RECOVERED.first) == JsonPrimitive(true)) RECOVERED_STATE
-                    else base.state,
-                output =
-                    if (
-                        event.type in
-                            listOf(
-                                "status",
-                                "thread.started",
-                                "turn.started",
-                                "run.started",
-                                "turn.completed",
-                            )
-                    ) {
-                        // A final status may say why the run ended.
-                        if (event.type == "status") data?.get("error").asObject().string("message")
-                        else if (data != null) plain
-                        else plain.takeUnless { it.startsWith('{') }.orEmpty()
-                    } else plain.ifBlank { if (data == null) event.text else "" },
+                output = plain.ifBlank { if (data == null) event.text else "" },
             )
         }
     }
@@ -551,24 +469,3 @@ internal fun resultParts(source: String): List<ResultPart> {
     if (start < source.length) parts.add(ResultPart.Text(source.substring(start)))
     return parts.ifEmpty { listOf(ResultPart.Text(source)) }
 }
-
-/** "Using Claude Code account: Studio" → ("Claude Code", "Studio"). */
-private fun accountUsed(text: String): Pair<String, String>? =
-    Regex("^Using (Codex|Claude Code) account: (.+)$").find(text)?.destructured?.let { (agent, name)
-        ->
-        agent to name.trim()
-    }
-
-/** A turn whose selected speed Codex does not offer for its model runs at Standard. */
-internal fun speedFallback(data: JsonObject?): Boolean =
-    data?.get("speed").asObject().string("applied") == STANDARD_SPEED
-
-/**
- * Codex lists the selected speed for the turn's model, possibly after an earlier attempt did not.
- */
-internal fun speedConfirmed(data: JsonObject?): Boolean =
-    data?.get("speed").asObject()?.get("confirmed") == JsonPrimitive(true)
-
-/** A turn asking for a speed Codex could not confirm for its model may run at Standard. */
-internal fun speedUnconfirmed(data: JsonObject?): Boolean =
-    data?.get("speed").asObject()?.get("unconfirmed") == JsonPrimitive(true)

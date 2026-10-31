@@ -152,7 +152,7 @@ class ContextCompactionJourneyTest {
                 )
             fun stream(state: LiveState, events: List<RunEvent> = emptyList()): MockResponse {
                 val body =
-                    "event: batch\nid: ${events.lastOrNull()?.id ?: 0}\ndata: ${wireJson.encodeToString(LiveBatch(events, state, false, false))}\n\n"
+                    "event: batch\nid: ${events.lastOrNull()?.id ?: 0}\ndata: ${wireJson.encodeToString(timelineBatch(events, state, false, false))}\n\n"
                 return MockResponse()
                     .setHeader("Content-Type", "text/event-stream")
                     .setBody(body + ": keepalive\n\n")

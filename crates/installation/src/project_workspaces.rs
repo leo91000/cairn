@@ -213,14 +213,15 @@ fn open_project_tool() -> Value {
 }
 
 /// Workspace tools of a plan turn: reading Cairn's state, including delegated task
-/// reports, and opening authorized projects in the private workspace. Every other tool,
+/// reports, retiring its own obsolete questions, and opening authorized projects. Every other tool,
 /// including delegation and plugin tools, has effects beyond the turn.
-const PLAN_TOOLS: [&str; 6] = [
+const PLAN_TOOLS: [&str; 7] = [
     "open_project",
     "list_nodes",
     "exclusive_status",
     "ask_questions",
     "pending_questions",
+    "withdraw_question",
     "task_status",
 ];
 

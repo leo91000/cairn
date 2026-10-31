@@ -194,10 +194,15 @@ jobs:
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
         with:
           tool: cargo-nextest@0.9.149
+      - name: Check all Rust targets for a backend-only qualification
+        if: inputs.backend-only == true
+        run: pnpm validate:pr rust
       - name: Run backend tests across binaries with isolated credentials
         run: |
           set -o pipefail
           node scripts/test-backend.mjs --nextest --test-threads 8 --no-fail-fast --color never --status-level pass 2>&1 | tee backend-tests.log
+      - name: Measure the bounded bootstrap observer without filesystem work
+        run: node scripts/test-backend.mjs -p cairn-installation --lib native::bootstrap::tests::observation_hot_path_measurement -- --exact --nocapture
       - name: Qualify native backend namespace isolation with ordinary private bind mounts
         run: node scripts/test-native-namespace.mjs --sudo
       - name: Check Rust documentation examples
@@ -284,7 +289,7 @@ jobs:
           # Each engine's own sandbox enforces a plan turn's boundary. The releases this build
           # ships run one through Cairn's adapters against a local model that asks for writes,
           # network access, escalation and subagents; none may take effect, and the turn after
-          # the plan must write again. See docs/adr/0077-plan-turns.md#qualification.
+          # the plan must write again. See docs/adr/0079-plan-turns.md#qualification.
           sudo apt-get install -y --no-install-recommends bubblewrap socat
           # Ubuntu restricts the unprivileged user namespaces both sandboxes create.
           if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then

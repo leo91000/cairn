@@ -50,6 +50,10 @@ L’installation dans laquelle on travaille dans l’interface ; on n’en voit 
 La part de la fenêtre de contexte du modèle qu’occupait la dernière requête de l’agent de code, telle que celui-ci la mesure ou l’estime. Elle n’est jamais déduite de la consommation cumulée d’une conversation ; sans mesure, elle reste indisponible.
 _Avoid_ : consommation, usage cumulé
 
+**Carte de timeline** :
+Ce qu’une conversation ou un journal d’exécution affiche d’un ou plusieurs événements, interprété une fois par Cairn : message, réponse de l’agent, avis de cycle, d’erreur ou de nouvelle tentative. Une carte garde son identité quand une réponse s’allonge ou qu’une erreur est réessayée ; les apps la présentent sans relire les événements.
+_Avoid_ : événement (la source brute d’une carte), entrée d’activité
+
 **Compaction du contexte** :
 Le résumé, par l’agent de code, de son contexte antérieur pour libérer de la place dans sa fenêtre. Elle ne modifie pas l’historique visible de la conversation et n’est pas un message de l’utilisateur.
 

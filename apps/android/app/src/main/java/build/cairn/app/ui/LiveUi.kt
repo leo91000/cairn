@@ -21,6 +21,7 @@ import build.cairn.app.data.*
 import build.cairn.app.diagnostics.PerfOperation
 import build.cairn.app.diagnostics.Performance
 import build.cairn.contracts.ReadRunHistoryInput
+import build.cairn.contracts.TimelineContent
 import build.cairn.contracts.readRunHistory
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -67,7 +68,13 @@ fun rememberLive(
             val history = previous.history
             val saved =
                 if (detail != null && history != null)
-                    CachedHistory(previous.cursor, history, detail, previous.events)
+                    CachedHistory(
+                        previous.cursor,
+                        history,
+                        detail,
+                        previous.events,
+                        previous.entries,
+                    )
                 else null
             mutableStateOf(streaming && saved != null && !current(saved))
         }
@@ -145,6 +152,7 @@ fun rememberLive(
                                             it.history,
                                             it.state,
                                             value.events,
+                                            value.entries,
                                             oldest = value.oldest,
                                             hasOlder = value.hasOlder,
                                         ),
@@ -200,7 +208,9 @@ fun rememberLive(
                                         "/history?before=$before&history=${segment(history)}"
                                 )
 
-                        val applied = pages.apply(page, value, requested)
+                        val large = api.readLargeTimeline(path, page.largeEntries.orEmpty())
+                        val applied =
+                            pages.apply(page.copy(entries = page.entries + large), value, requested)
                         if (applied != null) {
                             value = applied
                             // Release paging in the same UI turn as insertion. Disk persistence
@@ -214,6 +224,7 @@ fun rememberLive(
                                         history,
                                         detail,
                                         value.events,
+                                        value.entries,
                                         oldest = value.oldest,
                                         hasOlder = value.hasOlder,
                                     ),
@@ -468,6 +479,7 @@ internal class TimelineKeys {
         val nextPositions = mutableMapOf<Long, Int>()
         val activity = mutableListOf<RunEvent>()
         val sources = mutableMapOf<Long, List<Long>>()
+        val notices = mutableMapOf<Long, build.cairn.app.data.TimelineNotice>()
         fun identities(event: RunEvent) = sources[event.id] ?: listOf(event.id)
         fun previous(event: RunEvent) = identities(event).firstNotNullOfOrNull(fullPositions::get)
         fun flush() {
@@ -485,6 +497,8 @@ internal class TimelineKeys {
                         group.toList(),
                         false,
                         sourceIds = group.associate { it.id to identities(it) },
+                        notices =
+                            group.mapNotNull { e -> notices[e.id]?.let { e.id to it } }.toMap(),
                     )
                 )
                 if (group.size == MAX_ACTIVITY_GROUP_SIZE) {
@@ -507,6 +521,7 @@ internal class TimelineKeys {
             if (entry.key.startsWith("activity:")) {
                 activity.addAll(entry.events)
                 sources.putAll(entry.sourceIds)
+                notices.putAll(entry.notices)
             } else {
                 flush()
                 result.add(entry)
@@ -607,11 +622,11 @@ internal fun RunEvent.item(): JsonObject? = activityData()?.get("item") as? Json
 internal fun JsonObject?.string(key: String) =
     this?.get(key)?.let { it as? JsonPrimitive }?.contentOrNull.orEmpty()
 
-internal fun RunEvent.isMessage(): Boolean =
-    type == "chat.user" || item().string("type") == "agent_message"
-
 /** Approval identity is distinct from the row anchored for reading. */
-internal fun proposedPlanApproval(events: List<RunEvent>): String? {
+internal fun proposedPlanApproval(
+    events: List<RunEvent>,
+    cards: List<TimelineCard> = emptyList(),
+): String? {
     var latest: RunEvent? = null
     var lastRequest: RunEvent? = null
     for (event in events) {
@@ -626,10 +641,17 @@ internal fun proposedPlanApproval(events: List<RunEvent>): String? {
         )
             latest = event
     }
+    val requestCard = cards.filter { it.content is TimelineContent.A }.maxByOrNull { it.source }
+    val requestSource =
+        maxOf(lastRequest?.id ?: Long.MIN_VALUE, requestCard?.source ?: Long.MIN_VALUE)
+    val requestId =
+        if (requestCard != null && requestCard.source == requestSource)
+            (requestCard.content as? TimelineContent.A)?.messageId
+        else lastRequest?.payload?.string("messageId")
     val proposal = latest ?: return null
     if (
         proposal.type != "item.completed" ||
-            proposal.id <= (lastRequest?.id ?: Long.MIN_VALUE) ||
+            proposal.id <= requestSource ||
             proposal.item().string("text").isBlank()
     )
         return null
@@ -638,7 +660,7 @@ internal fun proposedPlanApproval(events: List<RunEvent>): String? {
     if (
         item?.containsKey("request_id") == true &&
             (authoredRequest.isBlank() ||
-                lastRequest != null && authoredRequest != lastRequest.payload?.string("messageId"))
+                requestSource != Long.MIN_VALUE && authoredRequest != requestId)
     )
         return null
     return "${proposal.runId}:${proposal.id}"
@@ -650,8 +672,10 @@ internal data class TimelineEntry(
     val message: Boolean,
     val files: List<Deliverable> = emptyList(),
     val notice: Boolean = false,
-    /** The model provider that wrote this reply, when the engine chose among several. */
-    val via: String = "",
+    /** The server's card for a message or a conversation notice. */
+    val card: TimelineCard? = null,
+    /** Run-log presentation of the lifecycle events in an activity group, by event. */
+    val notices: Map<Long, build.cairn.app.data.TimelineNotice> = emptyMap(),
     /** Persisted events folded into each activity; item IDs may repeat in later turns. */
     val sourceIds: Map<Long, List<Long>> = emptyMap(),
     /** Subagents started one after another work as a team, shown apart from the agent's steps. */
@@ -668,17 +692,18 @@ internal data class TimelineEntry(
     val planUpdate: PlanUpdate? = null,
     /** The coding agent compacted its context; the history above stays as it was. */
     val compaction: ContextCompaction? = null,
-    /** A failure notice's own title, such as Cairn's automatic retry. */
-    val noticeTitle: String = "",
-    /** Cairn retries this failure itself: the notice is a warning, not a dead end. */
-    val retrying: Boolean = false,
 )
 
-/** Fold updates in place within a turn; keep messages and errors in chronological order. */
+/**
+ * Fold tool updates in place within a turn. Messages, the run cycle, errors and retries arrive as
+ * cards the server interpreted; they take their place among the activity, and the events they
+ * present only mark the boundaries of the families still read here.
+ */
 internal fun timelineEntries(
     events: List<RunEvent>,
     chat: Boolean = false,
     pendingWakeup: ChatWakeup? = null,
+    cards: List<TimelineCard> = emptyList(),
 ): List<TimelineEntry> =
     Performance.measure(PerfOperation.TIMELINE) {
         val folded = mutableListOf<RunEvent>()
@@ -703,7 +728,7 @@ internal fun timelineEntries(
             val itemType = item.string("type")
             // Each plan update keeps its place: it shows what changed at that moment.
             val planUpdate = itemType == "todo_list"
-            if (!event.isMessage() && id.isNotBlank() && !planUpdate) {
+            if (event.timeline != true && id.isNotBlank() && !planUpdate) {
                 // A paginated child proposal can outlive its spawning event. Its
                 // item ID must not replace the conversation's own proposed plan.
                 val proposalParent =
@@ -725,6 +750,16 @@ internal fun timelineEntries(
         }
         val sourceIds =
             folded.mapIndexed { index, event -> event.id to sources[index].toList() }.toMap()
+        // The run log presents a lifecycle event through its card; a conversation shows the
+        // cards the server marked for it.
+        val runLog =
+            if (chat) emptyMap()
+            else
+                cards
+                    .mapNotNull { card ->
+                        (card.content as? TimelineContent.C)?.let { card.source to it.notice }
+                    }
+                    .toMap()
         val result = mutableListOf<TimelineEntry>()
         var activity = mutableListOf<RunEvent>()
         var team: Int? = null
@@ -737,21 +772,49 @@ internal fun timelineEntries(
                         activity,
                         false,
                         sourceIds = activity.associate { it.id to sourceIds.getValue(it.id) },
+                        notices =
+                            activity.mapNotNull { e -> runLog[e.id]?.let { e.id to it } }.toMap(),
                     )
                 )
                 activity = mutableListOf()
             }
         }
-        val recovered =
-            if (chat)
-                recoveredChatConnections(
-                    events,
-                    folded.filter { it.isMessage() }.map { it.id }.toSet(),
-                )
-            else emptySet()
-        val hiddenEngine = if (chat) hiddenEngineNotices(events) else emptySet()
-        val recoveredRetries = if (chat) emptySet() else recoveredEngineRetries(events)
-        var via = ""
+        var nextCard = 0
+        fun placeCards(before: Long) {
+            while (nextCard < cards.size && cards[nextCard].position < before) {
+                val card = cards[nextCard++]
+                when (val content = card.content) {
+                    is TimelineContent.A -> {
+                        flushActivity()
+                        result.add(TimelineEntry(card.id, emptyList(), true, card = card))
+                    }
+                    // A reply repeating a failure the conversation reports stays in the run log.
+                    is TimelineContent.B ->
+                        if (!chat || content.echo != true) {
+                            flushActivity()
+                            result.add(TimelineEntry(card.id, emptyList(), true, card = card))
+                        }
+                    is TimelineContent.C ->
+                        if (chat && content.notice.shown()) {
+                            flushActivity()
+                            result.add(
+                                TimelineEntry(
+                                    card.id,
+                                    emptyList(),
+                                    false,
+                                    notice = true,
+                                    card = card,
+                                )
+                            )
+                        } else if (!chat && card.source !in sourceIds) {
+                            // A card can change in this window while its source is on an older
+                            // page.
+                            flushActivity()
+                            result.add(TimelineEntry(card.id, emptyList(), false, card = card))
+                        }
+                }
+            }
+        }
         // The plan its updates change, until the agent finishes it or writes another one.
         var planIndex: Int? = null
         // By run and item: a compaction's start and end update one divider.
@@ -767,17 +830,6 @@ internal fun timelineEntries(
         // the history does.
         var scheduled: Int? = null
         val moves = mutableMapOf<Int, Int>()
-        // A conversation shows one notice per failure. The adapter, the worker and the final
-        // status may each repeat the provider's error; only a new reason adds a notice. When
-        // Cairn retries, the next attempt's notice with the same reason replaces the previous one.
-        val failures = mutableMapOf<String, FailedAttempt>()
-        val retried = mutableMapOf<String, FailedAttempt>()
-        val replaced = mutableSetOf<String>()
-        // The turn's reconnect attempts share one notice; the failure that ends it replaces them.
-        val connections = mutableListOf<Int>()
-        fun hideConnections() = connections.forEach { replaced.add(result[it].key) }
-        // Diagnostics keep every lifecycle event, but a final status does not repeat a reason.
-        val reported = mutableMapOf<String, MutableSet<String>>()
         fun placeScheduled() {
             val index = scheduled ?: return
             flushActivity()
@@ -785,6 +837,7 @@ internal fun timelineEntries(
             scheduled = null
         }
         for ((eventIndex, event) in folded.withIndex()) {
+            placeCards(event.id)
             // A compaction still running when its turn or run ends did not complete.
             compactionEnd(event.type, event.text)?.let { end ->
                 for ((key, index) in compactions) {
@@ -802,53 +855,6 @@ internal fun timelineEntries(
                     (event.type == "status" && event.text in TERMINAL_STATUSES)
             )
                 placeScheduled()
-            if (event.type == "turn.started") {
-                connections.clear()
-            }
-            val failure = failureReason(event)
-            if (event.type == "turn.failed") {
-                if (chat && !failure.isNullOrBlank() && failure != "Conversation interrupted.")
-                    hideConnections()
-                connections.clear()
-            }
-            // A run that ends, or is stopped while it waits, ends its retry chain: a resume
-            // starts afresh.
-            if (event.type == "status" && event.text in TERMINAL_STATUSES) {
-                retried.remove(event.runId)
-                failures[event.runId]?.let { attempt ->
-                    // The announced retry will not run: the notice reports the failure again.
-                    val index = attempt.notice
-                    if (attempt.pending && index != null)
-                        result[index] =
-                            result[index].copy(
-                                noticeTitle = attempt.failedTitle.orEmpty(),
-                                retrying = false,
-                            )
-                    attempt.pending = false
-                }
-            }
-            if (
-                event.type == "turn.started" ||
-                    (event.type == "status" &&
-                        event.activityData()?.get("attempt") == JsonPrimitive(true))
-            ) {
-                failures.remove(event.runId)?.let { if (it.pending) retried[event.runId] = it }
-                reported.remove(event.runId)
-            }
-            val repeated =
-                failure
-                    ?.takeIf { it.isNotBlank() }
-                    ?.let { reported.getOrPut(event.runId) { mutableSetOf() }.add(it) } == false
-            // A retry chain ends with an attempt that does not fail again, or with a new message.
-            if (event.type == "turn.completed" || event.type == "chat.user")
-                retried.remove(event.runId)
-            // A new request after a failed turn gets its own notice, even without an attempt
-            // marker.
-            if (
-                event.type == "chat.user" &&
-                    failures[event.runId]?.let { it.ended && !it.pending } == true
-            )
-                failures.remove(event.runId)
             when (event.type) {
                 "chat.sleep",
                 "chat.wait",
@@ -986,6 +992,17 @@ internal fun timelineEntries(
                     updateWait(index) { it.copy(ended = "cancelled") }
                     openWait = null
                 }
+            // The timeline presents this event: its card takes its place here. The run log keeps
+            // a lifecycle event among the activity, presented by its card.
+            if (event.timeline == true) {
+                placeCards(event.id + 1)
+                if (event.id in runLog) {
+                    if (activity.size == MAX_ACTIVITY_GROUP_SIZE) flushActivity()
+                    team = null
+                    activity.add(event)
+                }
+                continue
+            }
             val waitTool =
                 event.item().let { it.string("type") == "mcp_tool_call" && isWaitTool(it) }
             val delegateTool =
@@ -994,18 +1011,6 @@ internal fun timelineEntries(
             // The wait shows as its own card; only a call that failed stays among the tools.
             if (waitTool && !presentActivity(event).failed) {
                 continue
-            }
-            val route = event.activityData()?.get("route") as? JsonObject
-            // An attempt may name the provider of its replies; the next attempt ends that label.
-            val data = event.activityData()
-            if (
-                event.type == "status" &&
-                    (data?.get("attempt") as? JsonPrimitive)?.booleanOrNull == true
-            )
-                via = ""
-            if (event.type == "status" && route.string("providerName").isNotBlank()) {
-                via = route.string("providerName")
-                if (chat) continue
             }
             val compactionItem =
                 event.item()?.takeIf {
@@ -1134,113 +1139,16 @@ internal fun timelineEntries(
                 )
                 continue
             }
-            if (event.isMessage()) {
+            // An engine marker Cairn does not know yet stays in the run log.
+            if (chat && presentActivity(event).let { it.kind == ActivityKind.NOTICE && !it.failed })
+                continue
+            if (activity.size == MAX_ACTIVITY_GROUP_SIZE) {
                 flushActivity()
-                result.add(
-                    TimelineEntry(
-                        "message:${event.displayId ?: event.id}",
-                        listOf(event),
-                        true,
-                        via = if (event.type == "chat.user") "" else via,
-                    )
-                )
-            } else {
-                val presentation = if (chat) presentActivity(event) else null
-                val shown = failures[event.runId]
-                // A connection error is a connection notice: recovery hides it and the turn's
-                // failure replaces it. One repeating the attempt's failure, such as the final
-                // error after the last retry, folds into it.
-                val connection =
-                    presentation != null &&
-                        shown?.reasons?.contains(failure) != true &&
-                        connectionNotice(event, presentation)
-                val reason = if (chat && !connection) failure else null
-                // An adapter reports its own stop as a failed turn; the terminal status says so.
-                if (reason != null && stopEcho(event, reason)) continue
-                if (reason != null && shown != null && shown.repeats(event, reason)) {
-                    shown.reasons.add(reason)
-                    shown.ended = shown.ended || event.type != "error"
-                    continue
-                }
-                // Cairn retries a temporary failure itself: its notice says so.
-                if (chat && event.type == "retry.scheduled" && shown?.notice != null) {
-                    val index = shown.notice!!
-                    val (attempt, limit) = retryProgress(event, shown.retries)
-                    shown.retries = attempt
-                    shown.pending = true
-                    if (shown.failedTitle == null) shown.failedTitle = result[index].noticeTitle
-                    result[index] =
-                        result[index].copy(
-                            noticeTitle = retryTitle(attempt, limit),
-                            retrying = true,
-                        )
-                    continue
-                }
-                if (presentation?.kind == ActivityKind.NOTICE) {
-                    val interrupted =
-                        event.type == "status" &&
-                            event.text.lowercase() in listOf("cancelled", "interrupted")
-                    // The engine's own retries, usage limit and warnings are not failures.
-                    val engine =
-                        event.type in ENGINE_EVENTS &&
-                            event.id !in hiddenEngine &&
-                            engineAttention(event.type, presentation.data)
-                    // A speed Codex does not offer or cannot confirm for the model says so.
-                    val speed =
-                        event.type == "status" &&
-                            (speedFallback(presentation.data) ||
-                                speedUnconfirmed(presentation.data) ||
-                                speedConfirmed(presentation.data))
-                    if (
-                        event.id !in recovered &&
-                            (presentation.failed || interrupted || connection || engine || speed)
-                    ) {
-                        flushActivity()
-                        if (connection) {
-                            hideConnections()
-                            connections.add(result.size)
-                        }
-                        var title = ""
-                        if (reason != null) {
-                            val attempt = failures.getOrPut(event.runId) { FailedAttempt() }
-                            attempt.reasons.add(reason)
-                            attempt.notice = result.size
-                            attempt.ended = attempt.ended || event.type != "error"
-                            val previous = retried.remove(event.runId)
-                            val chained = previous?.notice
-                            if (chained != null && reason in previous.reasons) {
-                                replaced.add(result[chained].key)
-                                attempt.retries = previous.retries
-                                title = retriedFailureTitle(previous.retries ?: 1)
-                            }
-                        }
-                        result.add(
-                            TimelineEntry(
-                                "notice:${event.id}",
-                                listOf(event),
-                                false,
-                                notice = true,
-                                noticeTitle = title,
-                            )
-                        )
-                    }
-                } else {
-                    if (activity.size == MAX_ACTIVITY_GROUP_SIZE) {
-                        flushActivity()
-                    }
-                    team = null
-                    activity.add(
-                        if (!chat && repeated && event.type == "status")
-                            event.copy(
-                                payload = event.payload?.let { JsonObject(it.minus("error")) }
-                            )
-                        else if (event.id in recoveredRetries)
-                            event.copy(payload = JsonObject(event.payload.orEmpty() + RECOVERED))
-                        else event
-                    )
-                }
             }
+            team = null
+            activity.add(event)
         }
+        placeCards(Long.MAX_VALUE)
         flushActivity()
         placeScheduled()
         val knownWait = pendingWakeup?.id?.let(waits::get)
@@ -1277,7 +1185,7 @@ internal fun timelineEntries(
                     }
                 }
             }
-        if (replaced.isEmpty()) placed else placed.filter { it.key !in replaced }
+        placed
     }
 
 // Where a scheduled wait's card is placed: its turn ended, or a message or another wait event came.
@@ -1313,14 +1221,11 @@ internal fun deliveryTimeline(
     for (file in latest) {
         var position = entries.lastIndex
         for ((index, entry) in entries.withIndex()) {
-            if (!entry.message) continue
-            val event = entry.events.single()
-            val time =
-                (event.payload?.get("createdAt") as? JsonPrimitive)?.longOrNull?.takeIf {
-                    it > 0 && it <= event.createdAt
-                } ?: event.createdAt
+            val card = entry.card?.takeIf { entry.message } ?: continue
+            val sent = card.content as? TimelineContent.A
+            val time = sent?.sentAt ?: card.createdAt
             if (time < file.createdAt) continue
-            position = if (event.type == "chat.user") index - 1 else index
+            position = if (sent != null) index - 1 else index
             break
         }
         groups.getOrPut(position) { mutableListOf() }.add(file)
@@ -1364,12 +1269,18 @@ internal fun TimelineRow(
 ) {
     if (entry.files.isNotEmpty()) ArtifactStrip(vm, entry.files)
     else if (entry.agents.isNotEmpty()) SubagentTeam(entry.agents, active, identity = entry.key)
-    else if (entry.message)
+    else if (entry.message && entry.card != null)
         CompositionLocalProvider(LocalMarkdownRendering provides rendering) {
-            EventRow(
+            val card = entry.card
+            val via = (card.content as? TimelineContent.B)?.via
+            MessageRow(
                 vm,
-                entry.events.single(),
-                if (entry.via.isBlank()) agent else "$agent · via ${entry.via}",
+                card.userMessage,
+                card.messageText(),
+                (card.content as? TimelineContent.A)?.attachments.orEmpty(),
+                card.createdAt,
+                if (via.isNullOrBlank()) agent else "$agent · via $via",
+                planRequest = (card.content as? TimelineContent.A)?.plan == true,
             )
         }
     else if (entry.proposal) ProposedPlanCard(entry.events.single(), implement, canImplement)
@@ -1378,55 +1289,42 @@ internal fun TimelineRow(
     else if (entry.planUpdate != null) PlanUpdateRow(entry.planUpdate)
     else if (entry.compaction != null) ContextCompactionRow(entry.compaction)
     else if (entry.notice)
-        entry.events.single().let { event ->
-            val presentation = presentActivity(event)
-            ChatNotice(
-                presentation,
-                entry.noticeTitle,
-                entry.retrying,
-                connectionNotice(event, presentation),
-            )
-        }
+        (entry.card?.content as? TimelineContent.C)?.let { ChatNotice(it.notice) }
     else {
-        val presentations = remember(entry.events) { entry.events.map(::presentActivity) }
+        // The run log presents a lifecycle event through its card, never its payload.
+        val presentations =
+            remember(entry.events, entry.notices, entry.card) {
+                val events =
+                    entry.events.map { event ->
+                        entry.notices[event.id]?.let { presentNotice(it, event) }
+                            ?: presentActivity(event)
+                    }
+                val notice = (entry.card?.content as? TimelineContent.C)?.notice
+                if (notice == null) events else events + presentNotice(notice)
+            }
         AgentActions(entry.key, presentations, hideRunning)
     }
 }
 
+/** A person's message or the agent's reply, from its timeline card. */
 @Composable
-fun EventRow(vm: CairnViewModel, event: RunEvent, agent: String = "Cairn") {
-    val item = event.item()
-    val user = event.type == "chat.user"
-    if (event.isMessage()) {
-        val content =
-            if (user)
-                questionAnswerText(
-                    (event.payload?.get("text") as? JsonPrimitive)?.contentOrNull ?: event.text,
-                    (event.payload?.get("questionId") as? JsonPrimitive)?.contentOrNull,
-                )
-            else item.string("text").ifEmpty { event.text }
-        // A plan turn explores and proposes without changing anything.
-        val planRequest =
-            user && (event.payload?.get("plan") as? JsonPrimitive)?.booleanOrNull == true
-        val attachments =
-            if (!user) emptyList()
-            else
-                remember(event) {
-                    runCatching {
-                        event.payload?.get("attachments")?.let {
-                            wireJson.decodeFromJsonElement<List<ChatAttachment>>(it)
-                        }
-                    }
-                        .getOrNull()
-                        .orEmpty()
-                }
+fun MessageRow(
+    vm: CairnViewModel,
+    user: Boolean,
+    content: String,
+    attachments: List<ChatAttachment>,
+    createdAt: Long,
+    agent: String = "Cairn",
+    planRequest: Boolean = false,
+) {
+    run {
         val time =
             java.text
                 .SimpleDateFormat(
                     "HH:mm",
                     androidx.compose.ui.platform.LocalConfiguration.current.locales[0],
                 )
-                .format(java.util.Date(event.createdAt))
+                .format(java.util.Date(createdAt))
         BoxWithConstraints(
             Modifier.fillMaxWidth(),
             contentAlignment = if (user) Alignment.CenterEnd else Alignment.CenterStart,
@@ -1501,13 +1399,15 @@ fun EventRow(vm: CairnViewModel, event: RunEvent, agent: String = "Cairn") {
                     }
                 else
                     Text(
-                        time,
+                        if (planRequest) "Plan · $time" else time,
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color =
+                            if (planRequest) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
                     )
             }
         }
-    } else ActivityCard(event)
+    }
 }
 
 internal suspend fun restoreHistoryPosition(

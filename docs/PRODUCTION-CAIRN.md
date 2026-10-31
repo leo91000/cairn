@@ -73,9 +73,12 @@ Version 16 then upgrades to 17 through the
 [attachment reservation migration](migrations/0017-attachment-reservations.md).
 Version 17 then upgrades to 18 through the
 [per-account read state migration](migrations/0018-personal-read-state.md).
-Version 18 then upgrades to 19 by moving run JSON projections into a read view,
-without rewriting run rows. Version 19 then upgrades to 20 through the
-[plan request migration](migrations/0020-plan-requests.md).
+Version 18 upgrades to 19 through the [run projections migration](migrations/0019-run-projections.md).
+Version 19 upgrades to 20 by adding plugin hook tables.
+Version 20 upgrades to 21 through the [writer-owned progress migration](migrations/0021-run-progress.md).
+Version 21 upgrades to 22 through the [timeline projection migration](migrations/0022-timeline-projection.md), replaying retained events.
+Version 22 upgrades to 23 through the [plan request migration](migrations/0023-plan-requests.md).
+
 Stop the old manager and retain a consistent database/WAL backup first. Keep the
 installation identity, configuration, data roots, node state and object storage.
 The migration preserves node identities, credentials, configuration and references;

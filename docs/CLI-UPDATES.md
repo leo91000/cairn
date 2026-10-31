@@ -156,6 +156,5 @@ following checks before merge:
   It needs bubblewrap, and socat for Claude Code. On a native node,
   `NATIVE_PROBE_PATH` adds a directory to the engine's `PATH`,
   `NATIVE_PROBE_DROP_CAPS` drops inherited capabilities, and
-  `NATIVE_PROBE_PRIVATE_TMP` gives Codex its own `/tmp` (with `TMPDIR` outside
-  `/tmp`); see [the plan-turn decision](adr/0078-plan-turns.md#qualification).
+  A private `/tmp` wraps the entire test runner, with `TMPDIR` outside it; see [the plan-turn decision](adr/0079-plan-turns.md#qualification).
 - All engines: keep their autoupdaters disabled at runtime.

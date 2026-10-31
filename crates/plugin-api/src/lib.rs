@@ -5,6 +5,7 @@ use serde_json::Value;
 mod arguments;
 mod form;
 mod integrations;
+mod resources;
 mod settings;
 mod setup;
 mod sources;
@@ -16,6 +17,7 @@ pub use integrations::{
     Condition, DeviceFlow, GitCredential, GitIdentity, OAuth, ProjectSource, RunCredentials,
     RunFile, SkillSource, home_path, render,
 };
+pub use resources::{Hook, ResourceField, ResourceType};
 pub use settings::validate_settings_schema;
 pub use setup::{CopyValue, Effort, Preset, Risk, Setup, Step, StepKind, Task};
 pub use sources::{MAX_MODULES, MAX_SOURCE_BYTES, Sources, module_path, resolve};
@@ -44,6 +46,7 @@ pub const CAPABILITIES: &[(&str, &str)] = &[
         "conversations.control",
         "Answer the agent's questions and stop its work, for people you allow",
     ),
+    ("hooks", "Emit declared events for Cairn hook rules"),
     ("storage", "Keep small private notes for each connection"),
     (
         "files",
@@ -84,6 +87,7 @@ pub fn capability(method: &str) -> Option<&'static str> {
         "exec.run" | "download" | "archive.executable" => "exec",
         "socket.connect" | "socket.send" | "socket.close" | "socket.timer" => "socket",
         "inbound.accept" => "inbound",
+        "hooks.emit" => "hooks",
         _ => return None,
     };
     CAPABILITIES
@@ -214,6 +218,9 @@ pub struct Argument {
     pub pattern: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_length: Option<usize>,
+    /// The resource type identified by this argument.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_type: Option<String>,
 }
 
 /// A command agents run in their conversation: `cairn plugin <plugin> <name> …`.
@@ -243,6 +250,9 @@ pub struct Tool {
     pub description: String,
     #[ts(type = "any ")]
     pub input_schema: Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(transform = crate::client_default::<Vec<ResourceField>>)]
+    pub resource_fields: Vec<ResourceField>,
 }
 
 /// Agents the owner grants on each instance may run the package's commands and tools.
@@ -320,6 +330,12 @@ pub struct Manifest {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(transform = crate::client_default::<Vec<Tool>>)]
     pub tools: Vec<Tool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(transform = crate::client_default::<Vec<Hook>>)]
+    pub hooks: Vec<Hook>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(transform = crate::client_default::<Vec<ResourceType>>)]
+    pub resources: Vec<ResourceType>,
     /// Added to the prompt of runs whose agent is granted on an enabled instance.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     #[schemars(transform = crate::client_default::<String>)]
@@ -513,6 +529,7 @@ impl Manifest {
         self.validate_programs()?;
         self.validate_agent_interface()?;
         self.validate_integrations()?;
+        self.validate_resources()?;
         self.validate_setup()
     }
 
@@ -548,7 +565,8 @@ impl Manifest {
         let interface = !self.commands.is_empty()
             || !self.tools.is_empty()
             || !self.instructions.is_empty()
-            || !self.conditions.is_empty();
+            || !self.conditions.is_empty()
+            || !self.hooks.is_empty();
         if interface && self.agent_access.is_none() {
             return Err("Plugin commands, tools and instructions need agentAccess.");
         }
@@ -604,7 +622,9 @@ impl Manifest {
     /// state with `instance.status`.
     pub fn permits(&self, method: &str) -> bool {
         if method == "instance.status" {
-            return self.permits_capability("socket") || self.permits_capability("inbound");
+            return self.permits_capability("socket")
+                || self.permits_capability("inbound")
+                || self.permits_capability("hooks");
         }
         capability(method).is_some_and(|capability| self.permits_capability(capability))
     }

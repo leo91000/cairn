@@ -31,6 +31,13 @@ acknowledgement measurements. Host and guest run the same application build.
 
 ## Timings
 
+The native controller also exposes [bootstrap phases and bounded costs](NATIVE-BOOTSTRAP-OBSERVATION.md)
+before systemd receives a workload. Its memory lookup does not inspect the
+conversation's volume. Optional native journal export honors `cairn_performance`
+at startup, but uses a separate non-blocking transport rather than the agent's
+stderr stream. These are technical preparation observations, never proof of a
+coding-engine turn or a successful execution.
+
 | Operation | What it distinguishes |
 | --- | --- |
 | `agent_prepare` | Marking running, access validation, workspace setup, session lookup |
@@ -98,8 +105,52 @@ pnpm test:backend -p cairn-installation --lib store::performance::cache::tests::
 ```
 
 This reports local wall time for 100,000 samples, not production query latency.
-The sampling path runs only at actor startup and the report boundary, never for
-every job. It performs no SQL statement or file I/O.
+The cache sampling path runs only at actor startup and the report boundary, never
+for every job. It performs no SQL statement or file I/O.
+
+The writer's `database_actor` record also samples WAL state at the same report
+boundary. Reader records do not sample the WAL. `wal_available=false` means the
+snapshot is unavailable or inapplicable; ignore its zero-valued fields. This can
+happen for a non-WAL database or a failed inspection and does not prove that
+there are no pending pages.
+
+| Field | Meaning when `wal_available=true` |
+| --- | --- |
+| `wal_frames` | Current frames in the WAL |
+| `wal_checkpointed_frames` | Frames in that WAL already checkpointed |
+| `wal_pending_frames` | Frames minus checkpointed frames |
+| `wal_autocheckpoint_frames` | Current automatic-checkpoint threshold; zero disables automatic checkpoints |
+| `sqlite_synchronous` | Current SQLite synchronous mode: 0 OFF, 1 NORMAL, 2 FULL, 3 EXTRA |
+
+These are point-in-time gauges, not interval deltas or counts of work performed
+by the sampler. Frame counts can reset when SQLite restarts the WAL. A low
+pending count at report time does not rule out an earlier costly checkpoint or
+prove that an in-flight operation has finished.
+
+The bundled SQLite `SQLITE_CHECKPOINT_NOOP` inspection checkpoints zero frames;
+it does not install a WAL hook, perform a passive/full checkpoint, reset counters
+or change any setting. The two PRAGMA statements only read current settings.
+No SQL, paths, error text, payloads or user/account/conversation identifiers are
+logged. Regression coverage compares pending-frame counts, database/WAL bytes,
+changed rows and settings before and after sampling.
+
+Measure the actual snapshot helper on a synthetic warm WAL connection with:
+
+```sh
+CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
+  pnpm test:backend -p cairn-installation --lib \
+  store::performance::wal::tests::measure_wal_snapshot_sampling \
+  -- --exact --ignored --nocapture --test-threads=1
+```
+
+This reports local wall time and mean sampling cost over 10,000 inspections,
+including equality assertions, rather than production query latency or a tail
+percentile. Sampling remains writer-only at the existing actor report boundary,
+never per job. Keep measured results and exact source/profile/host conditions in
+the PR description or temporary evidence. Correlate WAL gauges with actor
+execution/queue times, cache activity and OS CPU/I/O before changing checkpoint
+policy or durability.
+
 
 An explicit local metadata-write benchmark exercises the real `Store` on synthetic
 0/128/512 KiB frozen snapshots:

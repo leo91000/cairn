@@ -114,6 +114,13 @@
         "required": {
           "default": false,
           "type": "boolean"
+        },
+        "resourceType": {
+          "description": "The resource type identified by this argument.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -328,6 +335,31 @@
       ],
       "type": "object"
     },
+    "PluginHook": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "payloadSchema": true,
+        "resourceFields": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/PluginResourceField"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "payloadSchema"
+      ],
+      "type": "object"
+    },
     "PluginInstances": {
       "additionalProperties": false,
       "description": "How the owner's interfaces name one configured instance, e.g. \"Service account\".",
@@ -409,6 +441,13 @@
           "description": "One sentence shown in the owner's plugin catalogue.",
           "type": "string"
         },
+        "hooks": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/PluginHook"
+          },
+          "type": "array"
+        },
         "hosts": {
           "default": [],
           "description": "Hostnames reachable through `http` (HTTPS) and `socket` (WSS). `*.example.com`\ncovers every subdomain of `example.com`, not the domain itself.",
@@ -465,6 +504,13 @@
           "description": "Projects the owner can import through the `projects` handler.",
           "items": {
             "$ref": "#/definitions/PluginProjectSource"
+          },
+          "type": "array"
+        },
+        "resources": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/PluginResourceType"
           },
           "type": "array"
         },
@@ -678,6 +724,45 @@
       ],
       "type": "object"
     },
+    "PluginResourceField": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "description": "JSON Pointer through properties; `*` traverses array items.",
+          "type": "string"
+        },
+        "resourceType": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "resourceType"
+      ],
+      "type": "object"
+    },
+    "PluginResourceType": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "parentType": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "description"
+      ],
+      "type": "object"
+    },
     "PluginRunCredentials": {
       "additionalProperties": false,
       "description": "Rendered by the host for granted agents, when their run is prepared or resumed, and\nfor its own Git fetches of matching remotes. Removed when the run ends or the grant\nis withdrawn.",
@@ -797,6 +882,13 @@
         "inputSchema": true,
         "name": {
           "type": "string"
+        },
+        "resourceFields": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/PluginResourceField"
+          },
+          "type": "array"
         }
       },
       "required": [

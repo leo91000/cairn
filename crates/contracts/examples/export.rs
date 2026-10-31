@@ -500,6 +500,12 @@ fn main() {
     export::<RunHistoryWindowOutput>(root, &mut generator, Contract::Serialize);
     export::<ReadRunHistoryInput>(root, &mut generator, Contract::Deserialize);
     export::<HistoryPage>(root, &mut generator, Contract::Deserialize);
+    export::<TimelineEntry>(root, &mut generator, Contract::Serialize);
+    export::<LargeTimelineReference>(root, &mut generator, Contract::Serialize);
+    export::<ReadLargeTimelineInput>(root, &mut generator, Contract::Deserialize);
+    export::<TimelineChange>(root, &mut generator, Contract::Serialize);
+    export::<ReadRunTimelineInput>(root, &mut generator, Contract::Deserialize);
+    export::<RunTimelineOutput>(root, &mut generator, Contract::Serialize);
     export::<RunHistoryOutput>(root, &mut generator, Contract::Serialize);
     export::<Run>(root, &mut generator, Contract::Serialize);
     export::<RunState>(root, &mut generator, Contract::Serialize);
@@ -764,6 +770,10 @@ fn main() {
     export::<ProgramRelease>(root, &mut generator, Contract::Serialize);
     export::<InstalledProgram>(root, &mut generator, Contract::Serialize);
     export::<ProgramState>(root, &mut generator, Contract::Serialize);
+    export::<ListPluginResourcesInput>(root, &mut generator, Contract::Deserialize);
+    export::<ListPluginResourcesOutput>(root, &mut generator, Contract::Serialize);
+    export::<ResolvePluginResourceInput>(root, &mut generator, Contract::Deserialize);
+    export::<ResolvePluginResourceOutput>(root, &mut generator, Contract::Serialize);
     export::<ListPluginProgramsInput>(root, &mut generator, Contract::Deserialize);
     export::<ListPluginProgramsOutput>(root, &mut generator, Contract::Serialize);
     export::<InstallPluginPackageInput>(root, &mut generator, Contract::Deserialize);
@@ -870,6 +880,9 @@ fn main() {
         {"name": "installPluginPackage", "input": "InstallPluginPackageInput", "output": "PackageVersion", "method": "POST", "path": "/plugins/packages"},
         {"deferred": true, "name": "approvePluginPackage", "input": "ApprovePluginPackageInput", "output": "PackageVersion", "method": "POST", "path": "/plugins/packages/{pluginId}/approve"},
         {"deferred": true, "name": "activatePluginPackage", "input": "ActivatePluginPackageInput", "output": "PackageVersion", "method": "POST", "path": "/plugins/packages/{pluginId}/activate"},
+        {"name": "getPluginResourceOperation", "input": "PluginOperationInput", "output": "PluginOperation", "method": "GET", "path": "/plugins/resources/operations/{operationId}"},
+        {"name": "listPluginResources", "input": "ListPluginResourcesInput", "output": "ListPluginResourcesOutput", "method": "GET", "deferred": true, "path": "/plugins/{pluginId}/connections/{instanceId}/resources", "query": ["resourceType", "page", "query"]},
+        {"name": "resolvePluginResource", "input": "ResolvePluginResourceInput", "output": "ResolvePluginResourceOutput", "method": "GET", "deferred": true, "path": "/plugins/{pluginId}/connections/{instanceId}/resources/ancestors", "query": ["resourceType", "id"]},
         {"name": "listPluginPrograms", "input": "ListPluginProgramsInput", "output": "ListPluginProgramsOutput", "method": "GET", "path": "/plugins/{pluginId}/programs"},
         {"name": "getPluginOperation", "input": "PluginOperationInput", "output": "PluginOperation", "method": "GET", "path": "/plugins/packages/operations/{operationId}"},
         { "name": "preparePluginProgram", "input": "PluginProgramInput", "output": "ProgramState", "method": "POST", "path": "/plugins/programs/prepare", "deferred": true },
