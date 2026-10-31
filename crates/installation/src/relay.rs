@@ -96,7 +96,13 @@ pub(crate) async fn authorize_plugin_mcp_scope(
     credential_digest: &str,
     scope: &str,
 ) -> Result<()> {
-    authorize_mcp(service, credential_digest, scope, "plugin-mcp-authorization").await
+    authorize_mcp(
+        service,
+        credential_digest,
+        scope,
+        "plugin-mcp-authorization",
+    )
+    .await
 }
 
 pub(crate) async fn authorize_read_mcp(
