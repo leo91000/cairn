@@ -21,6 +21,10 @@ fn denied() -> Error {
     Error::forbidden("This plugin contribution or its resources are not granted to the caller.")
 }
 
+fn package_changed() -> Error {
+    Error::conflict("The plugin package changed. Retry the operation.")
+}
+
 #[derive(Clone)]
 pub(crate) struct Snapshot {
     pub agent: String,
@@ -209,7 +213,7 @@ impl Snapshot {
                 || current.approvals.get(&self.package.manifest.version)
                     != Some(&self.package.digest)
             {
-                return Err(denied());
+                return Err(package_changed());
             }
         }
         Ok(())
@@ -280,14 +284,15 @@ impl TransferOrigin {
         if visited.len() > 256 {
             return Err(denied());
         }
-        if self.instance.id != connection.id
-            || self.instance.revision != connection.revision
-            || super::registry::active(s, &connection.plugin_id)
-                .await?
-                .digest
-                != self.package.digest
-        {
+        if self.instance.id != connection.id || self.instance.revision != connection.revision {
             return Err(denied());
+        }
+        if super::registry::active(s, &connection.plugin_id)
+            .await?
+            .digest
+            != self.package.digest
+        {
+            return Err(package_changed());
         }
         for dependency in &self.dependencies {
             Box::pin(dependency.authorize_inner(s, connection, snapshot.clone(), visited)).await?;
@@ -397,7 +402,7 @@ impl Invocation {
             .digest
             != package.digest
         {
-            return Err(denied());
+            return Err(package_changed());
         }
         let coverage = if let Some((requester, _)) = &self.snapshot.requester {
             Some(
