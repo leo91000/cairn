@@ -400,6 +400,9 @@ fetch('http://127.0.0.1:4310/health', {{ signal: AbortSignal.timeout(5000) }}).t
                                      and not manager_health(inspect(config['pendingImage'])))
             if not config.get('leaseAcquired') or not (stopped or unavailable_candidate):
                 raise
+        else:
+            config['leaseAcquired'] = True
+            atomic(config_file, json.dumps(config))
         launch(config['pendingImage'])
         finish()
 

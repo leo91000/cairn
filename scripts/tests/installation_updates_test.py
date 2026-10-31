@@ -94,7 +94,15 @@ if 'exec' in args:
                     if failure in ('ublk', 'unapproved', 'digest', 'lease'):
                         self.assertFalse(any('stop' in event for event in events))
                     if failure not in ('ublk', 'unapproved'):
-                        if failure in ('health', 'unresponsive'):
+                        if failure == 'lease':
+                            interrupted = update('up')
+                            self.assertNotEqual(interrupted.returncode, 0)
+                            acknowledged = json.loads((root / 'installation.json').read_text())
+                            self.assertTrue(acknowledged.get('leaseAcquired'),
+                                            'A retry must save its lease acknowledgement before stopping the manager')
+                            self.assertEqual(acknowledged['leaseOwner'], config['leaseOwner'])
+                            retry = update('candidate-unavailable')
+                        elif failure in ('health', 'unresponsive'):
                             for refused in ('foreign-lease', 'foreign-manager'):
                                 rejected = update(refused)
                                 self.assertNotEqual(rejected.returncode, 0)
