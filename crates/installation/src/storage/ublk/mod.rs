@@ -2,6 +2,9 @@
 //! A caller closes only after fencing its VMM. Drop stops I/O but leaves the
 //! registration for verified startup cleanup; it never guesses that a VM died.
 mod io;
+mod namespace;
+
+pub(crate) use namespace::BackendNamespace;
 
 use super::Disk;
 use libublk::{UblkError, UblkFlags, ctrl::UblkCtrlBuilder};
@@ -529,16 +532,20 @@ pub fn mount_disk(
 
 /// Host consumers must not share the backend's mount namespace: namespace exit
 /// could otherwise flush a filesystem through the very backend that is exiting.
-/// The backend unshares before the caller mounts its new block device.
+/// Every backend enters the clean startup namespace before adding its device;
+/// it never copies an existing or concurrently closing host consumer.
 pub(crate) fn mount_host_disk(
     disk: Arc<dyn Disk>,
     state: &Path,
     jail: &Path,
-    inherited_mounts: Vec<PathBuf>,
+    namespace: &BackendNamespace,
+    directory: &Path,
 ) -> stdio::Result<MountedDisk> {
-    mount(disk, state, jail, 0, Some(inherited_mounts))
+    let entry = namespace.prepare(state, &[state, directory, &directory.join("lazy"), jail])?;
+    mount(disk, state, jail, 0, Some(entry))
 }
 
+#[cfg(test)]
 pub(crate) fn private_mount_namespace(inherited_mounts: &[PathBuf]) -> stdio::Result<()> {
     if unsafe { libc::unshare(libc::CLONE_NEWNS) } != 0 {
         return Err(stdio::Error::last_os_error());
@@ -572,7 +579,7 @@ fn mount(
     state: &Path,
     jail: &Path,
     uid: u32,
-    private_namespace: Option<Vec<PathBuf>>,
+    private_namespace: Option<namespace::Entry>,
 ) -> stdio::Result<MountedDisk> {
     if disk.size() == 0 || !disk.size().is_multiple_of(512) {
         return Err(stdio::Error::other("Invalid ublk disk size"));
@@ -598,8 +605,8 @@ fn mount(
             // Fail before ADD without the required capability. All newly
             // created I/O threads inherit the validated flusher state.
             io::enable_io_flusher()?;
-            if let Some(inherited_mounts) = private_namespace {
-                private_mount_namespace(&inherited_mounts)?;
+            if let Some(namespace) = private_namespace {
+                namespace.enter()?;
             }
             let token = (uuid::Uuid::new_v4().as_u128() as u64).max(1);
             let mut record = Record {
