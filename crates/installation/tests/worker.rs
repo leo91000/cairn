@@ -47,7 +47,6 @@ struct Fixture {
     process: Option<Child>,
     url: String,
     clock: Option<FixtureClock>,
-    observation_busy: Option<PathBuf>,
 }
 
 struct FixtureClock {
@@ -283,7 +282,6 @@ impl Fixture {
             process: None,
             url: String::new(),
             clock: None,
-            observation_busy: None,
         };
         fixture.start().await;
         fixture
@@ -303,12 +301,8 @@ impl Fixture {
         let mut command = Command::new(binary);
         command.arg("serve");
         command.env_remove("CAIRN_FIXTURE_CLOCK_FILE");
-        command.env_remove("CAIRN_FIXTURE_OBSERVATION_BUSY");
         if let Some(clock) = &self.clock {
             command.env("CAIRN_FIXTURE_CLOCK_FILE", &clock.value);
-        }
-        if let Some(marker) = &self.observation_busy {
-            command.env("CAIRN_FIXTURE_OBSERVATION_BUSY", marker);
         }
         let usage = self.root.path().join("usage.json");
         if usage.exists() {
@@ -5028,11 +5022,11 @@ async fn quiet_chat_protocol_keeps_a_finite_checkpoint_deadline() {
         )
         .await
         .unwrap();
-    // Resume the final eight seconds of an existing one-minute budget.
+    // Resume the final second of an existing one-minute budget.
     common::set_checkpoint(
         &s.store,
         id,
-        json!({ "launched": false, "remainingMs": 8000 }),
+        json!({ "launched": false, "remainingMs": 1000 }),
     )
     .await;
     fixture.start().await;

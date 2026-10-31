@@ -1,5 +1,13 @@
+import { Buffer } from 'node:buffer'
 import { spawnSync } from 'node:child_process'
-import { copyFileSync, mkdtempSync, rmSync } from 'node:fs'
+import {
+  closeSync,
+  copyFileSync,
+  mkdtempSync,
+  openSync,
+  readSync,
+  rmSync,
+} from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
@@ -92,6 +100,30 @@ const needsWorkerFixture = installationSelected
   && (includesAllTests || (testTargets.length > 0 ? testTargets.some(target => /[*?[\]]/.test(target) ? path.matchesGlob('worker', target) : target === 'worker') : !explicitOtherTarget))
 const needsCodeWorker = !selectsPackage || selectsWorkspace
   || packages.some(spec => maySelectPackage(spec, 'cairn-beacon'))
+
+// Inspect bytes instead of executing the fixture: it may target another architecture.
+function hasFixtureHooks(binary) {
+  const marker = Buffer.from('cairn-worker-fixture-hooks-v1')
+  const fd = openSync(binary, 'r')
+  const buffer = Buffer.alloc(65536 + marker.length - 1)
+  let retained = 0
+  try {
+    for (;;) {
+      const read = readSync(fd, buffer, retained, 65536, null)
+      if (read === 0)
+        return false
+      const length = retained + read
+      if (buffer.subarray(0, length).includes(marker))
+        return true
+      retained = Math.min(marker.length - 1, length)
+      buffer.copyWithin(0, length - retained, length)
+    }
+  }
+  finally {
+    closeSync(fd)
+  }
+}
+
 const archivedBinaries = new Set(['--archive-file', '--binaries-metadata'])
 const usesArchive = cargoArgs.some(arg => archivedBinaries.has(arg.split('=')[0]))
 const usesCargoMetadata = cargoArgs.some(arg => arg.split('=')[0] === '--cargo-metadata')
@@ -138,6 +170,8 @@ if (needsWorkerFixture) {
       continue
     const binary = path.join(directory, `worker_fixture-${artifacts.size}${path.extname(source)}`)
     copyFileSync(source, binary)
+    if (!hasFixtureHooks(binary))
+      throw new Error('Copied worker fixture lacks test hooks; another Cargo build may have replaced it')
     artifacts.set(target, binary)
   }
 
