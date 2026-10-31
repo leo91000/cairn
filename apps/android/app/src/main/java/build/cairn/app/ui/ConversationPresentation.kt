@@ -103,17 +103,17 @@ internal fun conversationError(chat: Chat?): String? {
 }
 
 /** The conversation already shows a failed run's reason as its failure notice. */
-internal fun failureShown(chat: Chat?, events: List<RunEvent>): Boolean {
+internal fun failureShown(chat: Chat?, cards: List<TimelineCard>): Boolean {
     if (!chat?.error.isNullOrBlank()) return false
     val run = chat?.run?.takeIf { it.status == "failed" } ?: return false
     val error = run.error?.takeIf { it.isNotBlank() } ?: return false
-    // Quota bookkeeping hides some failures from the conversation: they show nothing.
-    val hidden = quotaHiddenEvents(events)
-    return events.any {
-        it.runId == run.id &&
-            it.id !in hidden &&
-            sameReason(failureReason(it).orEmpty(), error) &&
-            !stopEcho(it)
+    // The server hides usage-limit bookkeeping and the adapter's stop echoes: they show nothing.
+    return cards.any { card ->
+        val notice = (card.content as? build.cairn.contracts.TimelineContent.C)?.notice
+        card.runId == run.id &&
+            notice?.code == "failure" &&
+            notice.prominent &&
+            sameReason(notice.detail.orEmpty(), error)
     }
 }
 
@@ -142,13 +142,12 @@ internal fun ChatWaitingNotice(
 /** The server's durable dispatch queue is not necessarily a waiting user message. */
 internal fun chatDelivery(
     chat: Chat?,
-    events: List<RunEvent>,
+    cards: List<TimelineCard>,
     outgoing: ChatMessage? = null,
 ): ChatDelivery {
     val acknowledged =
-        events
-            .filter { it.type == "chat.user" }
-            .mapNotNull { (it.payload?.get("messageId") as? JsonPrimitive)?.contentOrNull }
+        cards
+            .mapNotNull { (it.content as? build.cairn.contracts.TimelineContent.A)?.messageId }
             .toSet()
     val messages =
         chat?.messages.orEmpty().filter { it.status in setOf("queued", "sending") }.toMutableList()

@@ -48,45 +48,22 @@ internal fun isQuotaWait(status: String, reason: String?, accountRequired: Strin
             )
             .containsMatchIn(reason.orEmpty())
 
-private fun quotaFailure(event: RunEvent): String {
-    if (event.type !in listOf("turn.failed", "error")) return ""
-    val data = event.activityData()
-    if (data?.get("willRetry") == JsonPrimitive(true)) return ""
-    val error = if (event.type == "turn.failed") data?.get("error").asObject() else data
-    val message = error.string("message").ifBlank { event.text }
-    val exhausted =
-        error.string("code") == "usage_limit_reached" ||
-            error.string("codexErrorInfo") == "usageLimitExceeded" ||
-            isQuotaMessage(message)
-    return if (exhausted) message.ifBlank { "Usage limit reached" } else ""
-}
-
 /** A saved failure needs manual resume; only the manager's explicit wait is automatic. */
-internal fun chatQuota(run: Run?, events: List<RunEvent>): ChatQuota? {
+internal fun chatQuota(run: Run?, cards: List<TimelineCard>): ChatQuota? {
     if (run == null) return null
-    val current = events.filter { it.runId == run.id }
-    var failureMessage = ""
-    // When the engine reported the limit, it said when the limit resets.
-    var failureReset: Long? = null
-    for (event in current) {
-        val turnBoundary = event.type in listOf("chat.user", "turn.started", "turn.completed")
-        val executionBoundary =
-            event.type == "status" &&
-                event.text in listOf("queued", "succeeded", "cancelled", "interrupted")
-        if (turnBoundary || executionBoundary) {
-            failureMessage = ""
-            failureReset = null
-        }
-        val failure = quotaFailure(event)
-        if (failure.isNotEmpty()) {
-            // The runner repeats the engine's failure without its reset.
-            val reset =
-                (event.activityData()?.get("error").asObject()?.get("resetsAt") as? JsonPrimitive)
-                    ?.longOrNull
-            failureReset = reset ?: failureReset.takeIf { failure == failureMessage }
-            failureMessage = failure
-        }
-    }
+    // The server marks the current turn's usage-limit failure, with the reset the engine gave.
+    val current =
+        cards
+            .lastOrNull { card ->
+                card.runId == run.id &&
+                    (card.content as? build.cairn.contracts.TimelineContent.C)
+                        ?.notice
+                        ?.quota
+                        ?.current == true
+            }
+            ?.let { (it.content as build.cairn.contracts.TimelineContent.C).notice.quota }
+    val failureMessage = current?.message.orEmpty()
+    val failureReset = current?.resetsAt
     val exhausted =
         run.active &&
             run.accountWaitReason.orEmpty().startsWith("Usage exhausted.", ignoreCase = true)
@@ -117,75 +94,6 @@ internal fun chatQuota(run: Run?, events: List<RunEvent>): ChatQuota? {
         // Pausing the follow-up queue does not pause an execution's capacity wait.
         waiting,
     )
-}
-
-private data class QuotaEcho(var text: String = "", val ids: MutableList<Long> = mutableListOf())
-
-private data class QuotaTurn(
-    var exhausted: Boolean = false,
-    val causes: MutableSet<String> = mutableSetOf(),
-    val failures: MutableSet<String> = mutableSetOf(),
-    val messages: MutableMap<String, QuotaEcho> = mutableMapOf(),
-)
-
-/**
- * Keep recovered quota bookkeeping and replies echoing a failure in run diagnostics, rather than
- * restoring chat errors.
- */
-internal fun quotaHiddenEvents(events: List<RunEvent>): Set<Long> {
-    val hidden = mutableSetOf<Long>()
-    val turns = mutableMapOf<String, QuotaTurn>()
-    for (event in events) {
-        if (event.runId !in turns || event.type in listOf("turn.started", "chat.user"))
-            turns[event.runId] = QuotaTurn()
-        val turn = turns.getValue(event.runId)
-        val item = event.item()
-        if (item.string("type") == "agent_message") {
-            val key = item.string("id").ifBlank { event.id.toString() }
-            val message = turn.messages.getOrPut(key) { QuotaEcho() }
-            message.text = item.string("text").ifBlank { event.text }
-            message.ids.add(event.id)
-            if (
-                (turn.exhausted && (isQuotaMessage(message.text) || message.text in turn.causes)) ||
-                    message.text.trim() in turn.failures
-            )
-                hidden.addAll(message.ids)
-        }
-        // An agent may also say its failure as a reply, as Claude Code does for API errors: the
-        // failure notice already shows it.
-        val reason = failureReason(event)?.trim()
-        if (!reason.isNullOrEmpty() && reason != "Conversation interrupted.") {
-            turn.failures.add(reason)
-            turn.messages.values
-                .filter { it.text.trim() == reason }
-                .forEach { hidden.addAll(it.ids) }
-        }
-        val cause = quotaFailure(event)
-        if (cause.isNotEmpty()) {
-            turn.exhausted = true
-            turn.causes.add(cause)
-            hidden.add(event.id)
-            turn.messages.values
-                .filter { isQuotaMessage(it.text) || it.text in turn.causes }
-                .forEach { hidden.addAll(it.ids) }
-        }
-        if (turn.exhausted && event.type == "status" && event.text == "failed") hidden.add(event.id)
-    }
-    return hidden
-}
-
-/** Process lifecycle events first so subagents and plans retain their real stopped state. */
-internal fun quotaTimeline(
-    entries: List<TimelineEntry>,
-    events: List<RunEvent>,
-): List<TimelineEntry> {
-    val hidden = quotaHiddenEvents(events)
-    return entries.filterNot { entry ->
-        val event = entry.events.singleOrNull()
-        event != null &&
-            (entry.message || entry.notice) &&
-            (event.id in hidden || entry.sourceIds[event.id].orEmpty().any { it in hidden })
-    }
 }
 
 @Composable

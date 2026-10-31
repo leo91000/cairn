@@ -65,16 +65,67 @@ it('releases list delivery when a conversation is terminally unavailable', async
   expect(vi.mocked(liveConnection).mock.results[0]!.value.close).toHaveBeenCalled()
 })
 
+it('loads a referenced card before exposing a completed stream batch', async () => {
+  const scope = effectScope()
+  scopes.push(scope)
+  const live = scope.run(() => useLiveRun(() => '/runs/r/stream'))!
+  await vi.waitFor(() => expect(liveConnection).toHaveBeenCalled())
+  const card = {
+    id: 'message:1:a',
+    runId: 'r',
+    position: 1,
+    revision: 2,
+    source: 2,
+    turn: 1,
+    attempt: 0,
+    createdAt: 1,
+    updatedAt: 2,
+    content: {
+      kind: 'agentMessage' as const,
+      itemId: 'a',
+      text: 'full answer',
+      state: 'done' as const,
+    },
+  }
+  const data = JSON.stringify(card)
+  let resolve: ((value: unknown) => void) | undefined
+  vi.mocked(api).mockImplementationOnce(() => new Promise((done) => {
+    resolve = done
+  }))
+  const accept = vi.mocked(liveConnection).mock.calls.at(-1)![1]
+  const pending = accept({
+    events: [],
+    entries: [],
+    reset: false,
+    more: false,
+    history: 'v2:r:1',
+    largeEntries: [{ snapshot: { ...card, content: { ...card.content, itemId: '', text: '' } } }],
+  }, 2)
+  expect(live.timeline.value).toHaveLength(0)
+  resolve?.({
+    entryId: card.id,
+    runId: card.runId,
+    offset: 0,
+    totalBytes: new TextEncoder().encode(data).length,
+    sha256: 'a'.repeat(64),
+    data,
+    nextOffset: null,
+  })
+  await pending
+  expect(live.timeline.value).toMatchObject([{ id: card.id, content: { text: 'full answer' } }])
+})
+
 it.each(['navigation', 'hidden', 'dispose'] as const)('retains older history when an outdated copy is saved on %s before receiving a batch', async (reason) => {
   const scope = await cacheScope('test-session')
   const stream = '/chats/a/stream'
   const saved: CachedHistory = {
-    version: 1,
+    version: 2,
     cursor: 20,
-    history: 'v1:r:1',
+    history: 'v2:r:1',
     oldest: 20,
     hasOlder: true,
     state: { run: null, chat: null, artifacts: [] },
+    entries: [],
     events: [{
       id: 20,
       runId: 'r',
@@ -112,7 +163,7 @@ it.each(['navigation', 'hidden', 'dispose'] as const)('retains older history whe
   const reopened = nextScope.run(() => useLiveRun(() => stream))!
   // An ordinary resume does not resend the window boundary; the saved flag owns it.
   const accept = vi.mocked(liveConnection).mock.calls.at(-1)![1]
-  accept({
+  await accept({
     events: [],
     reset: false,
     more: false,
@@ -121,11 +172,12 @@ it.each(['navigation', 'hidden', 'dispose'] as const)('retains older history whe
   expect(reopened.hasOlder.value).toBe(true)
   vi.mocked(api).mockResolvedValueOnce({
     events: [],
+    entries: [],
     oldest: 1,
     hasOlder: false,
     history: saved.history,
   })
   await reopened.loadOlder()
-  expect(api).toHaveBeenCalledWith('/chats/a/history?before=20&history=v1%3Ar%3A1')
+  expect(api).toHaveBeenCalledWith('/chats/a/history?before=20&history=v2%3Ar%3A1')
   expect(reopened.hasOlder.value).toBe(false)
 })

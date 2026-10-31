@@ -1,7 +1,7 @@
 import type { RunEvent } from '../../../packages/contracts/contracts'
 import { describe, expect, it } from 'vitest'
-import { activityEntries } from '../src/activity'
 import { compactionText, contextSummary } from '../src/context-usage'
+import { fixtureEntries } from './timeline-fixture'
 
 function event(id: number, type: string, payload: Record<string, unknown> = {}): RunEvent {
   return {
@@ -70,7 +70,7 @@ describe('context usage', () => {
 
 describe('context compaction', () => {
   it('shows one divider per compaction without hiding the earlier history', () => {
-    const entries = activityEntries([
+    const entries = fixtureEntries([
       event(1, 'chat.user', { text: 'First request' }),
       event(2, 'item.completed', { item: { id: 'reply', type: 'agent_message', text: 'Done.' } }),
       event(3, 'context.usage', {
@@ -110,9 +110,9 @@ describe('context compaction', () => {
   })
 
   it('shows running and failed compactions honestly', () => {
-    const running = activityEntries([event(1, 'item.started', { item: { id: 'c', type: 'context_compaction', status: 'in_progress' } })], true)
+    const running = fixtureEntries([event(1, 'item.started', { item: { id: 'c', type: 'context_compaction', status: 'in_progress' } })], true)
     expect(running).toMatchObject([{ kind: 'compaction', state: 'running' }])
-    const failed = activityEntries([
+    const failed = fixtureEntries([
       event(1, 'item.started', { item: { id: 'c', type: 'context_compaction', status: 'in_progress' } }),
       event(2, 'item.completed', { item: { id: 'c', type: 'context_compaction', status: 'failed' } }),
     ], true)
@@ -126,10 +126,10 @@ describe('context compaction', () => {
     const status = (id: number, text: string) => ({ ...event(id, 'status'), text })
 
     // Codex fails the turn, or the run is stopped, without completing the compaction item.
-    const failed = activityEntries([started, event(2, 'turn.failed', { error: { message: 'Compaction failed' } })], true)
+    const failed = fixtureEntries([started, event(2, 'turn.failed', { error: { message: 'Compaction failed' } })], true)
     expect(failed.find(entry => entry.kind === 'compaction')).toMatchObject({ state: 'failed' })
     for (const text of ['cancelled', 'interrupted']) {
-      const stopped = activityEntries([started, status(2, text)], true)
+      const stopped = fixtureEntries([started, status(2, text)], true)
       const compaction = stopped.find(entry => entry.kind === 'compaction')
       expect(compaction).toMatchObject({ state: 'stopped' })
       if (compaction?.kind === 'compaction')
@@ -137,18 +137,18 @@ describe('context compaction', () => {
     }
 
     // A later execution of the conversation does not revive it.
-    const resumed = activityEntries([started, status(2, 'cancelled'), event(3, 'turn.started')], true)
+    const resumed = fixtureEntries([started, status(2, 'cancelled'), event(3, 'turn.started')], true)
     expect(resumed.find(entry => entry.kind === 'compaction')).toMatchObject({ state: 'stopped' })
 
     // A completed compaction stays completed when its turn ends, and other runs are unaffected.
-    const completed = activityEntries([
+    const completed = fixtureEntries([
       started,
       event(2, 'item.completed', { item: { id: 'c', type: 'context_compaction', status: 'completed' } }),
       event(3, 'turn.completed'),
       { ...event(4, 'turn.failed'), runId: 'other' },
     ], true)
     expect(completed.find(entry => entry.kind === 'compaction')).toMatchObject({ state: 'done' })
-    const elsewhere = activityEntries([started, { ...event(2, 'turn.failed'), runId: 'other' }], true)
+    const elsewhere = fixtureEntries([started, { ...event(2, 'turn.failed'), runId: 'other' }], true)
     expect(elsewhere.find(entry => entry.kind === 'compaction')).toMatchObject({ state: 'running' })
   })
 })
