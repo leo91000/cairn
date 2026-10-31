@@ -48,6 +48,74 @@ struct Fixture {
     url: String,
 }
 
+// Readiness is emitted only after the manager has initialized durable state,
+// bound its socket, and started the worker. Allow slow storage to finish while
+// still bounding a child that never becomes ready.
+const WORKER_STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
+
+async fn wait_for_worker_ready(child: &mut Child, limit: Duration) -> Result<String, String> {
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or("worker fixture stdout is missing")?;
+    let mut lines = BufReader::new(stdout).lines();
+    let line = tokio::time::timeout(limit, lines.next_line())
+        .await
+        .map_err(|_| format!("worker fixture did not become ready within {limit:?}"))?
+        .map_err(|error| format!("reading worker fixture readiness: {error}"))?;
+    let Some(line) = line else {
+        let status = child.try_wait().map_err(|error| error.to_string())?;
+        return Err(format!(
+            "worker fixture closed stdout before readiness (status: {status:?})"
+        ));
+    };
+    line.strip_prefix("Listening on ")
+        .map(str::to_owned)
+        .ok_or_else(|| format!("unexpected worker fixture readiness: {line}"))
+}
+
+#[tokio::test]
+async fn worker_readiness_waits_for_output_and_reports_blocked_or_exited_children() {
+    let mut delayed = Command::new("sh")
+        .args(["-c", "sleep 0.1; echo 'Listening on http://127.0.0.1:1234'"])
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    assert_eq!(
+        wait_for_worker_ready(&mut delayed, Duration::from_secs(2))
+            .await
+            .unwrap(),
+        "http://127.0.0.1:1234"
+    );
+
+    let mut blocked = Command::new("sh")
+        .args(["-c", "exec sleep 5"])
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    assert!(
+        wait_for_worker_ready(&mut blocked, Duration::from_millis(100))
+            .await
+            .unwrap_err()
+            .contains("did not become ready")
+    );
+
+    let mut exited = Command::new("sh")
+        .args(["-c", "exit 1"])
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    assert!(
+        wait_for_worker_ready(&mut exited, Duration::from_secs(2))
+            .await
+            .unwrap_err()
+            .contains("closed stdout before readiness")
+    );
+}
+
 impl Fixture {
     async fn new() -> Self {
         Self::with_concurrency(2).await
@@ -102,14 +170,9 @@ impl Fixture {
             .kill_on_drop(true)
             .spawn()
             .unwrap();
-        let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
-        let line = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+        self.url = wait_for_worker_ready(&mut child, WORKER_STARTUP_TIMEOUT)
             .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        assert!(line.starts_with("Listening on"), "{line}");
-        self.url = line.trim_start_matches("Listening on ").to_owned();
+            .unwrap_or_else(|error| panic!("{error}"));
         self.process = Some(child);
     }
 
