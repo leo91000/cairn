@@ -52,7 +52,33 @@ async fn upgrades_real_previous_store_with_order_privacy_and_unrelated_data_inta
         .unwrap()
         .collect::<rusqlite::Result<_>>()
         .unwrap();
+    // A10 changes the records constraint and removes the duplicate inventory
+    // reservation column. Compare their retained data independently of DDL.
+    let columns: Vec<String> = db
+        .prepare("SELECT name FROM pragma_table_info('nodes') WHERE name!='exclusive_reservation' ORDER BY cid")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    let nodes_sql = format!(
+        "SELECT json_array({}) FROM nodes ORDER BY id",
+        columns.join(",")
+    );
+    let retained = |sql: &str| -> Vec<String> {
+        db.prepare(sql)
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    let nodes_before = retained(&nodes_sql);
+    let records_sql = "SELECT json_array(id,kind,data,updated_at) FROM records ORDER BY id";
+    let records_before = retained(records_sql);
     let store = Store::open(root.path()).unwrap();
+    assert_eq!(retained(&nodes_sql), nodes_before);
+    assert_eq!(retained(records_sql), records_before);
     assert_eq!(
         db.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
             .unwrap(),
@@ -88,7 +114,7 @@ async fn upgrades_real_previous_store_with_order_privacy_and_unrelated_data_inta
     for (name, old) in &before {
         if !matches!(
             name.as_str(),
-            "conversations" | "chat_messages" | "kv" | "runs"
+            "conversations" | "chat_messages" | "kv" | "runs" | "nodes" | "records"
         ) {
             assert_eq!(after.get(name), Some(old), "unrelated table {name}");
         }
@@ -493,9 +519,11 @@ fn migrates_retained_native_github_wait_without_reactivating_it() {
         0
     );
     let after = snapshot(&db);
-    for table in ["agents", "plugin_instances", "plugin_approvals", "records"] {
+    for table in ["agents", "plugin_instances", "plugin_approvals"] {
         assert_eq!(after[table], before[table]);
     }
+    // A10 changes the records constraint; the unconverted values stay intact.
+    assert_eq!(after["records"].1, before["records"].1);
     let stable = snapshot(&db);
     drop(store);
     drop(Store::open(root.path()).unwrap());

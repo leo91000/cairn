@@ -634,7 +634,7 @@ async fn long_dependency_chains_are_allowed_but_cycles_at_the_end_are_rejected()
     }
     for pair in targets.windows(2) {
         f.s.store
-            .change_run_fixture(
+            .update_run_boundary_fixture(
                 text(&pair[0], "id"),
                 json!({
                     "wakeup": { "condition": run_condition(&pair[1]) },
@@ -649,7 +649,7 @@ async fn long_dependency_chains_are_allowed_but_cycles_at_the_end_are_rejected()
         true
     );
     f.s.store
-        .change_run_fixture(
+        .update_run_boundary_fixture(
             text(&targets[39], "id"),
             json!({
                 "wakeup": { "condition": { "type": "run_finished", "runId": f.run } },

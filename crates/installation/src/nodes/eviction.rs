@@ -37,7 +37,7 @@ pub async fn maintain(s: Arc<Service>) {
              AND status IN ('succeeded','failed','cancelled','interrupted')
              AND json_extract(r.data,'$.finishedAt')<=?2
              AND json_extract(r.data,'$.storage.mode')='on-demand'
-             AND (json_extract(r.data,'$.executionBackend')='native'
+             AND (r.placement_execution_backend='native'
                   OR json_extract(r.data,'$.snapshot.agent.access.backend')='native')
              AND EXISTS(SELECT 1 FROM records v WHERE v.kind='node-volumes'
                 AND json_extract(v.data,'$.runId')=r.id
@@ -93,8 +93,7 @@ fn pressure_page(db: &Db<'_>, node: &str) -> Result<Vec<Value>> {
     // A normal chat continuation clears finishedAt before admission. Its last
     // released execution still establishes when that inactive cache was used.
     let idle_at = "COALESCE(json_extract(r.data,'$.finishedAt'),
-        (SELECT MAX(json_extract(a.data,'$.releasedAt')) FROM records a
-         WHERE a.kind='node-attempts' AND json_extract(a.data,'$.runId')=r.id),0)";
+        (SELECT MAX(a.released_at) FROM placements p JOIN attempts a ON a.id=p.id WHERE p.run_id=r.id),0)";
     let query = format!(
         "SELECT json_set(r.data,'$._evictionIdleAt',{idle_at}) FROM run_views r
          WHERE status IN ('succeeded','failed','cancelled','interrupted','queued')
@@ -223,26 +222,21 @@ fn candidate(
     if volume["materialized"] != true || already_evicted {
         return Ok(None);
     }
-    let attempts = db.json_rows(
-        "SELECT data FROM records WHERE kind='node-attempts' AND json_extract(data,'$.runId')=?",
-        [run],
-    )?;
+    let attempts = db.run_attempts(run)?;
     let execution = checkpoint
         .runner_id
         .as_deref()
-        .and_then(|id| attempts.iter().find(|attempt| attempt["id"] == id));
+        .and_then(|id| attempts.iter().find(|attempt| attempt.id == id));
     // Consumed historical destination reservations may lack releasedAt. The
     // actual latest execution must positively prove that its writer stopped.
-    if execution.is_none_or(|attempt| {
-        attempt["releasedAt"]
-            .as_i64()
-            .is_none_or(|released| released > cutoff)
-    }) || attempts.iter().any(|attempt| {
-        attempt["released"] != true
-            || attempt["releasedAt"]
-                .as_i64()
-                .is_some_and(|released| released > cutoff)
-    }) {
+    if execution.is_none_or(|attempt| attempt.released_at.is_none_or(|released| released > cutoff))
+        || attempts.iter().any(|attempt| {
+            !attempt.released
+                || attempt
+                    .released_at
+                    .is_some_and(|released| released > cutoff)
+        })
+    {
         return Ok(None);
     }
     let Some(point) = db.get("node-backups", text(&current["backup"], "id"))? else {
@@ -394,6 +388,9 @@ async fn evict_clean(
 }
 
 #[cfg(test)]
+use crate::attempt_fixture::*;
+
+#[cfg(test)]
 use crate::node_fixture::*;
 
 #[cfg(test)]
@@ -430,13 +427,10 @@ mod tests {
                 "materialized": true, "diskMiB": 123, "activeDiskMiB": 100,
             }),
         )?;
-        db.put(
-            "node-attempts",
-            &json!({
-                "id": attempt, "role": "execution", "runId": run, "nodeId": node,
-                "released": true, "releasedAt": time - IDLE_MS,
-            }),
-        )?;
+        db.put_attempt_fixture(&json!({
+            "id": attempt, "role": "execution", "runId": run, "nodeId": node,
+            "released": true, "releasedAt": time - IDLE_MS,
+        }))?;
         db.put("node-backups", &point)?;
         Ok(())
     }
@@ -487,7 +481,7 @@ mod tests {
                 assert_eq!(pressure_page(db, node)?[0]["id"], run);
                 assert!(candidate(db, &run, time, None)?.is_none());
                 assert!(candidate(db, &run, time, Some(node))?.is_some());
-                db.update_run_boundary(&run, &json!({ "backup": { "status": "saving" } }))?;
+                db.update_run_boundary_fixture(&run, &json!({ "backup": { "status": "saving" } }))?;
                 assert!(candidate(db, &run, time, Some(node))?.is_none());
                 Ok(())
             })
@@ -540,7 +534,7 @@ mod tests {
                     if index < 32 {
                         let mut backup = db.run(&run)?.unwrap()["backup"].clone();
                         backup["status"] = "error".into();
-                        db.update_run_boundary(&run, &json!({ "backup": backup }))?;
+                        db.update_run_boundary_fixture(&run, &json!({ "backup": backup }))?;
                     } else {
                         final_run = run;
                     }
@@ -591,7 +585,17 @@ mod tests {
                 let node_id = super::super::LOCAL_NODE_ID;
                 let mut storage = db.run(&run)?.unwrap()["storage"].clone();
                 storage["dirtyBytes"] = 0.into();
-                db.update_run_boundary(&run, &json!({ "nodeId": node_id, "storage": storage }))?;
+                db.change_run(
+                    &run,
+                    crate::runs::RunChanges {
+                        placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {
+                            node_id: Some(serde_json::from_value(serde_json::json!(node_id))?),
+                            ..Default::default()
+                        })),
+                        boundary: Some(serde_json::json!({"storage": storage})),
+                        ..Default::default()
+                    },
+                )?;
                 let mut node = db.node_boundary(node_id)?.unwrap();
                 node["limits"] = json!({ "diskMiB": 102400 });
                 node["diskCapacity"] = json!({
@@ -604,7 +608,7 @@ mod tests {
                 assert_eq!(accounting["unsynchronizedBytes"], 0);
                 let mut storage = db.run(&run)?.unwrap()["storage"].clone();
                 storage["dirtyBytes"] = 4096.into();
-                db.update_run_boundary(&run, &json!({ "storage": storage }))?;
+                db.update_run_boundary_fixture(&run, &json!({ "storage": storage }))?;
                 let accounting = super::super::disk_capacity::accounting(db, &node, &[])?;
                 assert_eq!(accounting["reclaimableBytes"], 0);
                 assert_eq!(accounting["unsynchronizedBytes"], 4096);
@@ -632,17 +636,20 @@ mod tests {
                     },
                 )?;
                 let saved = db.checkpoint_boundary(&run)?.unwrap();
-                let mut attempt = db.get("node-attempts", text(&saved, "runnerId"))?.unwrap();
+                let mut attempt = db.attempt_fixture(text(&saved, "runnerId"))?.unwrap();
                 attempt["releasedAt"] = time.into();
-                db.put("node-attempts", &attempt)?;
+                db.put_attempt_fixture(&attempt)?;
                 assert!(candidate(db, &run, time - IDLE_MS, None)?.is_none());
                 assert!(candidate(db, &run, time, None)?.is_some());
                 attempt["released"] = false.into();
-                db.put("node-attempts", &attempt)?;
+                db.put_attempt_fixture(&attempt)?;
                 assert!(candidate(db, &run, time, None)?.is_none());
                 attempt["released"] = true.into();
-                db.put("node-attempts", &attempt)?;
-                db.update_run_boundary(&run, &json!({ "backup": { "requestedRevision": 3 } }))?;
+                db.put_attempt_fixture(&attempt)?;
+                db.update_run_boundary_fixture(
+                    &run,
+                    &json!({ "backup": { "requestedRevision": 3 } }),
+                )?;
                 assert!(candidate(db, &run, time, None)?.is_none());
                 Ok(())
             })
@@ -674,11 +681,11 @@ mod tests {
                     ..Default::default()
                 },
                 crate::runs::RunChanges {
-                    boundary: Some(json!({ "moveRequest": {} })),
+                    placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {move_request: Some(Some(crate::nodes::run_placement::MoveRequest { reservation:id(),node_id:crate::nodes::LOCAL_NODE_ID.into(),resources:cairn_contracts::NodeResources::default(),requested_at:Some(time),automatic:false,idle:None,required_tags:None,backup_id:None })), ..Default::default() })),
                     ..Default::default()
                 },
                 crate::runs::RunChanges {
-                    boundary: Some(json!({ "nodeState": "restoring" })),
+                    placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {node_state: Some(serde_json::from_value(serde_json::json!("restoring"))?), ..Default::default() })),
                     ..Default::default()
                 },
                 crate::runs::RunChanges {
@@ -701,27 +708,27 @@ mod tests {
                     recovery_pending: Some(false),
                     ..Default::default()
                 })?;
-                db.update_run_boundary(&run, &json!({ "moveRequest": null, "nodeState": null, "backup": original["backup"] }))?;
+                db.change_run(&run, crate::runs::RunChanges { placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {move_request: Some(None), node_state: Some(None), ..Default::default() })), boundary: Some(serde_json::json!({"backup": original["backup"]})), ..Default::default() })?;
             }
             let saved = db.checkpoint_boundary(&run)?.unwrap();
-            let mut execution = db.get("node-attempts", text(&saved, "runnerId"))?.unwrap();
+            let mut execution = db.attempt_fixture(text(&saved, "runnerId"))?.unwrap();
             execution["releasedAt"] = (time - IDLE_MS + 1).into();
-            db.put("node-attempts", &execution)?;
+            db.put_attempt_fixture(&execution)?;
             assert!(candidate(db, &run, time - IDLE_MS, None)?.is_none());
             execution["releasedAt"] = (time - IDLE_MS).into();
-            db.put("node-attempts", &execution)?;
+            db.put_attempt_fixture(&execution)?;
             // A real consumed destination reservation has no release timestamp.
-            db.put("node-attempts", &json!({
+            db.put_attempt_fixture(&json!({
                 "id": id(), "role": "destination", "runId": run, "nodeId": super::super::LOCAL_NODE_ID,
                 "released": true,
             }))?;
             assert!(candidate(db, &run, time - IDLE_MS, None)?.is_some());
             execution["released"] = false.into();
-            db.put("node-attempts", &execution)?;
+            db.put_attempt_fixture(&execution)?;
             assert!(candidate(db, &run, time - IDLE_MS, None)?.is_none());
             execution["released"] = true.into();
             execution["releasedAt"] = Value::Null;
-            db.put("node-attempts", &execution)?;
+            db.put_attempt_fixture(&execution)?;
             assert!(candidate(db, &run, time - IDLE_MS, None)?.is_none());
             Ok(())
         }).await.unwrap();

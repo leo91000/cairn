@@ -205,6 +205,7 @@ pub(super) async fn still_authorized(
 #[serde(rename_all = "lowercase")]
 pub(super) enum PluginAuthorizationScope {
     Read,
+    Run,
     #[default]
     Manage,
 }
@@ -253,6 +254,7 @@ pub(super) async fn plugin_authorization(
         .is_some_and(|grant| {
             let required_scope = match input.scope {
                 PluginAuthorizationScope::Read => "read",
+                PluginAuthorizationScope::Run => "run",
                 PluginAuthorizationScope::Manage => "manage",
             };
             grant.installation == installation

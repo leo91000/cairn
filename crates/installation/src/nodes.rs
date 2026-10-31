@@ -1,5 +1,9 @@
 //! Trusted node identities. Enrollment and revocation are serialized with heartbeats.
 pub mod alerts;
+pub mod attempts;
+pub(crate) mod attempts_migration;
+#[cfg(test)]
+mod attempts_migration_tests;
 pub mod checkpoint;
 pub mod connector;
 pub mod coordination;
@@ -7,6 +11,7 @@ pub(crate) mod disk_capacity;
 pub mod disk_grants;
 pub(crate) mod eviction;
 pub mod exclusive;
+pub mod exclusive_state;
 pub mod executor;
 pub mod files;
 pub mod inventory;
@@ -18,6 +23,7 @@ pub mod placement;
 pub mod publication;
 pub mod relay;
 pub mod restore;
+pub mod run_placement;
 pub mod shared_blocks;
 pub mod snapshots;
 pub mod storage;
@@ -211,8 +217,8 @@ fn public(mut node: ExecutionNode) -> Result<Value> {
     Ok(serde_json::to_value(node)?)
 }
 
-pub(crate) fn is_active_attempt(attempt: &Value) -> bool {
-    attempt["released"] != true
+pub(crate) fn is_active_attempt(attempt: &attempts::Attempt) -> bool {
+    !attempt.released
 }
 
 /// A disk kept on a node that no conversation needs there any more.
@@ -226,19 +232,22 @@ struct StaleDisk {
 /// Disk kept on nodes that no conversation needs there any more: the whole disk of a
 /// conversation now running elsewhere (it may hold changes newer than the recovery
 /// point used to resume it), or older copies set aside beside a current disk.
-fn stale_disks(db: &Db<'_>, volumes: &[Value], attempts: &[Value]) -> Result<Vec<StaleDisk>> {
+fn stale_disks(
+    db: &Db<'_>,
+    volumes: &[Value],
+    attempts: &[attempts::Attempt],
+) -> Result<Vec<StaleDisk>> {
     use rusqlite::OptionalExtension;
 
     let active: std::collections::HashSet<_> = attempts
         .iter()
         .filter(|attempt| is_active_attempt(attempt))
-        .map(|attempt| (text(attempt, "runId"), text(attempt, "nodeId")))
+        .map(|attempt| (attempt.run_id.as_str(), attempt.node_id.as_str()))
         .collect();
     // Inventory needs only move flags and checkpoint ownership. Frozen prompts,
     // summaries and prepared checkpoints can be hundreds of KiB per volume.
     let mut state = db.0.prepare_cached(
-        "SELECT coalesce(json_type(r.boundary,'$.moveRequest')='object',0)
-             OR coalesce(json_type(r.boundary,'$.moveReservation')='text',0),
+        "SELECT r.placement_move_request IS NOT NULL OR r.placement_move_reservation IS NOT NULL,
              CASE WHEN json_type(c.state,'$.nodeId')='text'
                   THEN json_extract(c.state,'$.nodeId') END
          FROM runs r LEFT JOIN run_checkpoints c ON c.run_id=r.id WHERE r.id=?",
@@ -281,7 +290,7 @@ fn stale_disks(db: &Db<'_>, volumes: &[Value], attempts: &[Value]) -> Result<Vec
 }
 
 struct Usage<'a> {
-    attempts: &'a [Value],
+    attempts: &'a [attempts::Attempt],
     agents: &'a [Value],
     stale: &'a [StaleDisk],
 }
@@ -338,7 +347,7 @@ impl Usage<'_> {
         let used = self
             .attempts
             .iter()
-            .filter(|a| a["nodeId"] == node.id.to_string() && is_active_attempt(a))
+            .filter(|a| a.node_id == node.id.to_string() && is_active_attempt(a))
             .count() as u32;
         let capacity = node.slots();
         node.slots = Some(capacity);
@@ -369,7 +378,7 @@ pub async fn typed_inventory(s: &Service) -> Result<Vec<ExecutionNode>> {
             // One consistent read snapshot, without hundreds of actor round trips.
             let transaction = db.0.unchecked_transaction()?;
             let db = &Db(&transaction);
-            let attempts = db.list("node-attempts")?;
+            let attempts = db.attempts()?;
             let volumes = db.list("node-volumes")?;
             let agents = db.agent_snapshots()?;
             timing.next("stale_disks");
@@ -424,6 +433,35 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
         .split('/')
         .collect::<Vec<_>>();
     let command = match (input.method.as_str(), segments.as_slice()) {
+        ("GET", ["nodes", "placement", run]) => {
+            Some(("get_conversation_placement", json!({"runId":run})))
+        }
+        ("PUT", ["nodes", "placement", run]) => {
+            let mut body = input.body.clone();
+            if !body.is_object() {
+                return Err(Error::bad("Invalid placement selection."));
+            }
+            if body.get("runId").is_some_and(|id| id != *run) {
+                return Err(Error::bad("Conversation identity differs from path."));
+            }
+            body["runId"] = (*run).into();
+            Some(("configure_conversation_placement", body))
+        }
+        ("POST", ["nodes", "placement", run, "move"]) => {
+            let mut body = input.body.clone();
+            if !body.is_object() {
+                return Err(Error::bad("Invalid movement request."));
+            }
+            if body.get("runId").is_some_and(|id| id != *run) {
+                return Err(Error::bad("Conversation identity differs from path."));
+            }
+            body["runId"] = (*run).into();
+            Some(("move_to_node", body))
+        }
+        ("POST", ["nodes", _, "exclusive", reservation, "release"]) => Some((
+            "release_node_reservation",
+            json!({"reservationId":reservation}),
+        )),
         ("GET", ["nodes"]) => Some(("list_nodes", json!({}))),
         ("GET", ["nodes", "native-callers"]) => Some(("list_native_callers", json!({}))),
         ("POST", ["nodes", "enrollments"]) => Some(("create_node_enrollment", input.body.clone())),
@@ -468,23 +506,6 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
         let _ = refresh_local(s).await;
     }
     match (input.method.as_str(), segments.as_slice()) {
-        ("GET" | "PUT", ["nodes", "placement", run]) => {
-            if input.method == "GET" {
-                placement::configure(s, run, None).await
-            } else {
-                placement::configure_authorized(
-                    s,
-                    run,
-                    Some(input.body.clone()),
-                    crate::native::policy::run_authorization(run),
-                )
-                .await
-            }
-        }
-        ("POST", ["nodes", "placement", run, "move"]) => {
-            crate::validation::uuid(run)?;
-            moves::request(s, &s.store.run(run).await?, &input.body).await
-        }
         ("GET", ["nodes", "placement", run, "backend-migration"]) => {
             let chat = crate::backend_migration::chat_id(s, run).await?;
             crate::backend_migration::preview(s, &chat, |_| Ok(())).await
@@ -506,9 +527,6 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
         }
         ("PUT", ["nodes", "settings"]) => publication::configure(s, input.body.clone()).await,
         ("GET", ["nodes", "backups", run]) => backups(s, run).await,
-        ("POST", ["nodes", _, "exclusive", reservation, "release"]) => {
-            exclusive::release_owned(s, reservation, None).await
-        }
         ("POST", ["nodes", node, "stale-disks", "delete"]) => delete_stale_disks(s, node).await,
         ("PUT", ["nodes", node, "agents"]) => grant_agents(s, node, input.body.clone()).await,
         _ => Err(Error::not_found("Not found")),
@@ -841,7 +859,7 @@ pub(crate) async fn invite(
 
 async fn delete_stale_disks(s: &Service, node: &str) -> Result<Value> {
     crate::validation::uuid(node)?;
-    let attempts = s.store.list("node-attempts").await?;
+    let attempts = s.store.attempts().await?;
     let volumes = s
         .store
         .list("node-volumes")
@@ -1070,18 +1088,17 @@ pub(crate) async fn revoke(
 fn release_placements(db: &Db<'_>, node: &str) -> Result<u64> {
     let runs = db.json_rows(
         "SELECT data FROM run_views AS runs
-         WHERE json_extract(data,'$.pinnedNodeId')=?1 OR json_extract(data,'$.preferredNodeId')=?1",
+         WHERE placement_pinned_node_id=?1 OR placement_preferred_node_id=?1",
         [node],
     )?;
     let mut released = 0;
     for run in runs {
-        let mut patch = json!({});
-        for field in ["pinnedNodeId", "preferredNodeId"] {
-            if run[field] == node {
-                patch[field] = Value::Null;
-            }
-        }
-        db.update_run_boundary(text(&run, "id"), &patch)?;
+        let changes = run_placement::PlacementChanges {
+            pinned_node_id: (run["pinnedNodeId"] == node).then_some(None),
+            preferred_node_id: (run["preferredNodeId"] == node).then_some(None),
+            ..Default::default()
+        };
+        db.update_run_placement(text(&run, "id"), changes)?;
         released += 1;
     }
     Ok(released)
@@ -1376,17 +1393,17 @@ fn execution_ready(node: &Value, body: &Value, expected: &Expectations) -> bool 
 /// Extends the leases of attempts this node still owns and may keep running.
 fn renew_leases(db: &Db<'_>, node_id: &str, lease_ms: u64) -> Result<Vec<Lease>> {
     let mut leases = Vec::new();
-    for mut attempt in db.list("node-attempts")? {
-        if attempt["nodeId"] != node_id || !is_active_attempt(&attempt) {
+    for mut attempt in db.attempts()? {
+        if attempt.node_id != node_id || !is_active_attempt(&attempt) {
             continue;
         }
-        let run_id = text(&attempt, "runId");
+        let run_id = &attempt.run_id;
         let run = db.run(run_id)?.unwrap_or_default();
         let checkpoint = db_checkpoint(db, run_id)?;
         let agent = db.agent_snapshot(run_agent(&run))?.unwrap_or_default();
         let owns_execution = run["status"] == RunStatus::Running
             && run["cancelRequestedAt"].is_null()
-            && checkpoint["runnerId"] == attempt["id"]
+            && checkpoint["runnerId"] == attempt.id
             && agent_allows(&agent, node_id);
         let native_allowed =
             !crate::native::policy::node_native(&db.node_boundary(node_id)?.unwrap_or_default())
@@ -1408,15 +1425,11 @@ fn renew_leases(db: &Db<'_>, node_id: &str, lease_ms: u64) -> Result<Vec<Lease>>
         if lease_ms == 0 {
             continue;
         }
-        attempt["leaseExpiresAt"] = (now() + lease_ms as i64).into();
-        attempt["leaseDurationMs"] = attempt["leaseDurationMs"]
-            .as_u64()
-            .unwrap_or(0)
-            .max(lease_ms)
-            .into();
-        db.put("node-attempts", &attempt)?;
+        attempt.lease_expires_at = Some(now() + lease_ms as i64);
+        attempt.lease_duration_ms = Some(attempt.lease_duration_ms.unwrap_or(0).max(lease_ms));
+        db.save_attempt(&attempt)?;
         leases.push(Lease {
-            id: text(&attempt, "id").to_owned(),
+            id: attempt.id.clone(),
             remaining_ms: lease_ms,
         });
     }

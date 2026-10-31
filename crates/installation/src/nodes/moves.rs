@@ -20,23 +20,19 @@ const PAUSE_DELAY_MS: i64 = 2000;
 const MAX_WAIT_SECONDS: u64 = 3600;
 
 pub fn tool() -> Value {
+    let mut input = cairn_contracts::schema_for::<cairn_contracts::MoveToNodeInput>(
+        cairn_contracts::Contract::Deserialize,
+    );
+    input["properties"].as_object_mut().unwrap().remove("runId");
+    input["required"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|field| field != "runId");
     json!({
         "name": "move_to_node",
         "description": MOVE_DESCRIPTION,
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "requiredTags": {
-                    "type": "array",
-                    "maxItems": 32,
-                    "items": { "type": "string", "maxLength": 40 },
-                },
-                "nodeId": { "type": "string", "format": "uuid" },
-                "waitSeconds": { "type": "integer", "minimum": 0 },
-            },
-            "required": ["nodeId"],
-            "additionalProperties": false,
-        },
+        "inputSchema": input,
+        "outputSchema": cairn_contracts::schema_for::<cairn_contracts::MoveToNodeOutput>(cairn_contracts::Contract::Serialize)
     })
 }
 
@@ -138,13 +134,86 @@ pub async fn list(s: &Service, run: &Value) -> Result<Value> {
 
 /// Owner-initiated move from the web or Android conversation controls.
 pub async fn request(s: &Service, run: &Value, args: &Value) -> Result<Value> {
-    requested(s, run, args, false).await
+    requested(s, run, args, false, Authorization::default()).await
+}
+
+type LocalAuthorization = std::sync::Arc<dyn Fn(&Db<'_>) -> Result<()> + Send + Sync>;
+
+#[derive(Clone)]
+pub(crate) struct Authorization {
+    local: LocalAuthorization,
+    public_credential: Option<String>,
+}
+
+impl Default for Authorization {
+    fn default() -> Self {
+        Self::new(|_| Ok(()), None)
+    }
+}
+
+impl Authorization {
+    pub(crate) fn new(
+        local: impl Fn(&Db<'_>) -> Result<()> + Send + Sync + 'static,
+        public_credential: Option<String>,
+    ) -> Self {
+        Self {
+            local: std::sync::Arc::new(local),
+            public_credential,
+        }
+    }
+
+    pub(crate) fn workspace(bearer: &str, run: &Value) -> Self {
+        let bearer = bearer.to_owned();
+        let run_id = text(run, "id").to_owned();
+        let turn = crate::waits::execution_id(run).clone();
+        Self::new(
+            move |db| {
+                let current = crate::project_workspaces::authorize_in(db, &bearer)?;
+                if text(&current, "id") != run_id || *crate::waits::execution_id(&current) != turn {
+                    return Err(Error::unauthorized(
+                        "Workspace access expired or was revoked.",
+                    ));
+                }
+                Ok(())
+            },
+            None,
+        )
+    }
+
+    pub(crate) fn check(&self, db: &Db<'_>) -> Result<()> {
+        (self.local)(db)
+    }
+
+    pub(crate) async fn recheck(&self, s: &Service) -> Result<()> {
+        if let Some(digest) = &self.public_credential {
+            crate::relay::authorize_plugin_mcp_scope(s, digest, "run").await?;
+        }
+        Ok(())
+    }
+}
+
+pub(crate) async fn request_authorized(
+    s: &Service,
+    run: &Value,
+    args: &Value,
+    authorize: Authorization,
+) -> Result<Value> {
+    requested(s, run, args, false, authorize).await
 }
 
 /// Agents choose a node; the runtime owns all resource sharing.
 pub async fn request_by_agent(s: &Service, run: &Value, args: &Value) -> Result<Value> {
+    request_by_agent_authorized(s, run, args, Authorization::default()).await
+}
+
+pub(crate) async fn request_by_agent_authorized(
+    s: &Service,
+    run: &Value,
+    args: &Value,
+    authorize: Authorization,
+) -> Result<Value> {
     crate::validation::uuid(text(args, "nodeId"))?;
-    requested(s, run, args, true).await.map_err(|mut error| {
+    requested(s, run, args, true, authorize).await.map_err(|mut error| {
         if super::placement::is_no_capacity(&error) {
             error.message.push_str(" The current conversation keeps running. Retry move_to_node with waitSeconds or choose another node.");
         }
@@ -156,7 +225,7 @@ fn validate_destination(args: &Value) -> Result<()> {
     if let Some(node) = args["nodeId"].as_str() {
         crate::validation::uuid(node)?;
     }
-    let Some(tags) = args.get("requiredTags") else {
+    let Some(tags) = args.get("requiredTags").filter(|tags| !tags.is_null()) else {
         return Ok(());
     };
     let valid = tags
@@ -172,7 +241,13 @@ fn validate_destination(args: &Value) -> Result<()> {
     Ok(())
 }
 
-async fn requested(s: &Service, run: &Value, args: &Value, by_agent: bool) -> Result<Value> {
+async fn requested(
+    s: &Service,
+    run: &Value,
+    args: &Value,
+    by_agent: bool,
+    authorize: Authorization,
+) -> Result<Value> {
     if run["environmentState"].is_string() {
         return Err(Error::conflict(
             "The working environment expired. Send a new message before moving it.",
@@ -224,9 +299,19 @@ async fn requested(s: &Service, run: &Value, args: &Value, by_agent: bool) -> Re
     selecting["targetNodeId"] = args["nodeId"].clone();
     selecting["requiredTags"] = args
         .get("requiredTags")
+        .filter(|tags| !tags.is_null())
         .unwrap_or(&run["requiredTags"])
         .clone();
-    let selected = wait_for_capacity(s, run_id, &selecting, &reservation, idle, deadline).await?;
+    let selected = wait_for_capacity(
+        s,
+        run_id,
+        &selecting,
+        &reservation,
+        idle,
+        deadline,
+        authorize.clone(),
+    )
+    .await?;
     let move_request = serde_json::to_value(MoveRequest {
         reservation: &reservation,
         node_id: &selected["nodeId"],
@@ -242,7 +327,9 @@ async fn requested(s: &Service, run: &Value, args: &Value, by_agent: bool) -> Re
     } else {
         RunStatus::Running
     };
-    if let Err(error) = record_request(s, run_id, move_request, idle, expected, source).await {
+    if let Err(error) =
+        record_request(s, run_id, move_request, idle, expected, source, authorize).await
+    {
         super::placement::release(s, &reservation).await?;
         return Err(error);
     }
@@ -283,6 +370,7 @@ async fn wait_for_capacity(
     reservation: &str,
     idle: bool,
     deadline: i64,
+    authorize: Authorization,
 ) -> Result<Value> {
     loop {
         let current = s.store.run(run_id).await?;
@@ -293,7 +381,9 @@ async fn wait_for_capacity(
             set_capacity_wait(s, run_id, None).await?;
             return Err(Error::conflict("Conversation is no longer active."));
         }
-        match super::placement::reserve(s, selecting, reservation).await {
+        match super::placement::reserve_authorized(s, selecting, reservation, authorize.clone())
+            .await
+        {
             Ok(value) => return Ok(value),
             Err(error) if error.is_unavailable() && now() < deadline => {
                 set_capacity_wait(s, run_id, Some(deadline)).await?;
@@ -322,10 +412,13 @@ async fn record_request(
     idle: bool,
     expected: RunStatus,
     source: Option<crate::native::policy::Origin>,
+    authorize: Authorization,
 ) -> Result<()> {
+    authorize.recheck(s).await?;
     let owner = run_id.to_owned();
     s.store
         .transaction(move |db| {
+            authorize.check(db)?;
             let current = db
                 .run(&owner)?
                 .ok_or_else(|| Error::not_found("Conversation removed."))?;
@@ -359,21 +452,30 @@ async fn record_request(
             }
             if let Some(source) = source {
                 crate::native::policy::authorize_run_in(db, &owner, &source)?;
-                let directed = db.run(&owner)?.unwrap_or_default();
-                if crate::native::policy::native(&directed["snapshot"]["agent"]) {
-                    let node = db
-                        .node_boundary(text(&move_request, "nodeId"))?
-                        .unwrap_or_default();
-                    if !crate::native::policy::allows(db, &directed, &node)? {
-                        return Err(Error::forbidden(
-                            "Destination native authorization changed.",
-                        ));
-                    }
-                }
+            }
+            let directed = db.run(&owner)?.unwrap_or_default();
+            let destination = text(&move_request, "nodeId");
+            let agent = db
+                .agent_snapshot(super::run_agent(&directed))?
+                .unwrap_or_default();
+            let node = db.node_boundary(destination)?.unwrap_or_default();
+            if !super::agent_allows(&agent, destination)
+                || node["revoked"] == true
+                || crate::native::policy::node_native(&node)
+                    && !crate::native::policy::allows(db, &directed, &node)?
+            {
+                return Err(Error::forbidden("Destination authorization changed."));
             }
             let mut patch = crate::runs::RunChanges {
-                capacity_wait_until : Some(None),
-                boundary: Some(serde_json::json!({"movementError": null,"moveRequest": move_request,"nodeState": NodeState::Pausing})),
+                capacity_wait_until: Some(None),
+                placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {
+                    movement_error: Some(None),
+                    move_request: Some(serde_json::from_value(serde_json::json!(move_request))?),
+                    node_state: Some(serde_json::from_value(serde_json::json!(
+                        NodeState::Pausing
+                    ))?),
+                    ..Default::default()
+                })),
                 ..Default::default()
             };
             if idle || expected == RunStatus::Queued {
@@ -513,7 +615,17 @@ pub async fn queue_capacity_move(s: &Service, run: &Value) -> Result<bool> {
         required_tags: None,
         backup_id: None,
     })?;
-    if let Err(error) = record_request(s, run_id, movement, false, RunStatus::Queued, None).await {
+    if let Err(error) = record_request(
+        s,
+        run_id,
+        movement,
+        false,
+        RunStatus::Queued,
+        None,
+        Authorization::default(),
+    )
+    .await
+    {
         super::placement::release(s, &reservation).await?;
         return Err(error);
     }
@@ -558,7 +670,12 @@ async fn plan_recovery(s: &Service, current: &Value) -> Result<Recovery> {
             account_wait_reason: Some(Some(
                 "Original node unavailable; no usable recovery point exists.".into(),
             )),
-            boundary: Some(serde_json::json!({"nodeState": NodeState::WaitingForNode})),
+            placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {
+                node_state: Some(serde_json::from_value(serde_json::json!(
+                    NodeState::WaitingForNode
+                ))?),
+                ..Default::default()
+            })),
             ..Default::default()
         };
         s.store.change_run(run_id, patch).await?;
@@ -647,7 +764,15 @@ pub(crate) async fn advance_for_attempt(
                         {
                             return Ok(false);
                         }
-                        db.update_run_boundary(&owner, &json!({ "moveRequest": pending }))?;
+                        db.update_run_placement(
+                            &owner,
+                            crate::nodes::run_placement::PlacementChanges {
+                                move_request: Some(serde_json::from_value(serde_json::json!(
+                                    pending
+                                ))?),
+                                ..Default::default()
+                            },
+                        )?;
                         Ok(true)
                     })
                     .await;
@@ -689,13 +814,29 @@ async fn transfer(s: &Service, current: &Value) -> Result<Value> {
         s.get("node-backups", id).await?
     } else {
         s.store
-            .update_run_boundary(run_id, json!({ "nodeState": NodeState::Saving }))
+            .update_run_placement(
+                run_id,
+                crate::nodes::run_placement::PlacementChanges {
+                    node_state: Some(serde_json::from_value(serde_json::json!(
+                        NodeState::Saving
+                    ))?),
+                    ..Default::default()
+                },
+            )
             .await?;
         let point = super::publication::capture(s, current).await?;
         s.get("node-backups", text(&point, "id")).await?
     };
     s.store
-        .update_run_boundary(run_id, json!({ "nodeState": NodeState::Restoring }))
+        .update_run_placement(
+            run_id,
+            crate::nodes::run_placement::PlacementChanges {
+                node_state: Some(serde_json::from_value(serde_json::json!(
+                    NodeState::Restoring
+                ))?),
+                ..Default::default()
+            },
+        )
         .await?;
     super::placement::materialize(s, text(movement, "reservation")).await?;
     let source = super::checkpoint(s, run_id).await?;
@@ -712,9 +853,13 @@ async fn fail_transfer(s: &Service, current: &Value, error: &Error) -> Result<()
     let node_state = (!idle).then_some(NodeState::WaitingForNode);
     let mut patch = crate::runs::RunChanges {
         recovery_pending: Some(!idle),
-        boundary: Some(
-            serde_json::json!({"moveRequest": null,"moveReservation": null,"nodeState": node_state,"movementError": error.message}),
-        ),
+        placement: Some(Box::new(super::run_placement::PlacementChanges {
+            move_request: Some(None),
+            move_reservation: Some(None),
+            node_state: Some(serde_json::from_value(serde_json::to_value(node_state)?)?),
+            movement_error: Some(Some(error.message.clone())),
+            ..Default::default()
+        })),
         ..Default::default()
     };
     if idle {
@@ -730,7 +875,7 @@ async fn fail_transfer(s: &Service, current: &Value, error: &Error) -> Result<()
             if cancelled {
                 patch.status = Some(RunStatus::Cancelled);
                 patch.recovery_pending = Some(false);
-                patch.boundary.as_mut().unwrap()["nodeState"] = Value::Null;
+                patch.placement.as_mut().unwrap().node_state = Some(None);
             }
             db.change_run(&owner, patch)?;
             // A run waiting for an automatic retry shows the stop in its conversation.
@@ -802,17 +947,21 @@ async fn resume_at_destination(
         session_id: Some(serde_json::from_value(backup["sessionId"].clone())?),
         recovery_pending: Some(!idle),
         status: Some(status),
-        boundary: Some(serde_json::json!({
-            "storage": { "mode": super::ON_DEMAND },
-            "movementError": null,
-            "nodeId": node,
-            "nodeState": node_state,
-            "resources": movement["resources"],
-            "requiredTags": required_tags,
-            "moveRequest": null,
-            "moveReservation": reservation,
-            "restoredAt": captured_at,
+        placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {
+            movement_error: Some(None),
+            node_id: Some(serde_json::from_value(serde_json::json!(node))?),
+            node_state: Some(serde_json::from_value(serde_json::json!(node_state))?),
+            resources: Some(serde_json::from_value(serde_json::json!(
+                movement["resources"]
+            ))?),
+            required_tags: Some(serde_json::from_value(serde_json::json!(required_tags))?),
+            move_request: Some(None),
+            move_reservation: Some(serde_json::from_value(serde_json::json!(reservation))?),
+            ..Default::default()
         })),
+        boundary: Some(
+            serde_json::json!({"storage": { "mode": super::ON_DEMAND },"restoredAt": captured_at}),
+        ),
         ..Default::default()
     };
     let owner = run_id.clone();
@@ -925,27 +1074,33 @@ pub(crate) async fn abort_terminal_recovery(
 /// Only unclaimed destination reservations are released; retained disks and the
 /// source execution stay owned by their existing fencing/storage lifecycle.
 pub(crate) fn release_terminal_destination_in(db: &crate::store::Db<'_>, id: &str) -> Result<()> {
-    let current = db
-        .run(id)?
-        .ok_or_else(|| Error::not_found("Conversation removed."))?;
-    let movement = &current["moveRequest"];
-    if !movement.is_object() && current["moveReservation"].is_null() {
+    let placement = db.run_placement(id)?;
+    if placement.move_request.is_none() && placement.move_reservation.is_none() {
         return Ok(());
     }
     for reservation in [
-        movement["reservation"].as_str(),
-        current["moveReservation"].as_str(),
+        placement
+            .move_request
+            .as_ref()
+            .map(|movement| movement.reservation.as_str()),
+        placement.move_reservation.as_deref(),
     ]
     .into_iter()
     .flatten()
     {
         super::placement::release_in(db, reservation)?;
     }
-    db.update_run_boundary(id, &serde_json::json!({
-        "moveRequest": null,
-        "moveReservation": null,
-        "nodeState": null,
-        "movementError": "Movement stopped because the execution will not resume automatically.",
-    }))?;
+    db.update_run_placement(
+        id,
+        super::run_placement::PlacementChanges {
+            move_request: Some(None),
+            move_reservation: Some(None),
+            node_state: Some(None),
+            movement_error: Some(Some(
+                "Movement stopped because the execution will not resume automatically.".into(),
+            )),
+            ..Default::default()
+        },
+    )?;
     Ok(())
 }
