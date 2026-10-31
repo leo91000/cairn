@@ -41,6 +41,13 @@ test.beforeEach(async ({ page }) => {
   await page.waitForFunction(() => window.chatRendering)
 })
 
+test('rendering measurement accepts streamed timeline updates', async ({ page }) => {
+  const result = await page.evaluate(() => window.chatRendering.algorithms(10))
+  expect(result.events).toBe(10)
+  expect(result.accumulator.samples).toBe(100)
+  expect(result.timeline.samples).toBe(100)
+})
+
 test('streaming retains unchanged paragraphs, code, table position and text selection', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 844 })
   const prefix = '# Heading\n\nA **stable paragraph** with a [link](https://example.test/docs).\n\n```typescript\nconst value = 1\n```\n\n| A | B | C | D |\n| --- | --- | --- | --- |\n| one | two | three | four |\n\n'

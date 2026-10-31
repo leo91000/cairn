@@ -222,7 +222,7 @@ function algorithms(count: number) {
   const accumulator = new LiveTimeline()
   accumulator.restore([], count, events)
   const reply = event(count + 1, '')
-  accumulator.upsert(reply)
+  accumulator.apply([], [{ kind: 'upsert', entry: reply }])
   const times = []
   const reduction = []
   for (let index = 0; index < 120; index++) {
