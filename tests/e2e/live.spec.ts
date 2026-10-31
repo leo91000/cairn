@@ -657,7 +657,7 @@ test('a cached run restores the reading offset while its stream is still connect
 test('following the latest output resumes a long backlog on the recent window, while a reader keeps its place', async ({ page, workspace }) => {
   // Each of the 560 durable fixture appends starts the real Rust helper. Keep
   // that setup time separate from the unchanged per-assertion response limits.
-  test.setTimeout(60_000)
+  test.setTimeout(120_000)
   await useRelayForHttpMocks(page)
   const run = workspace.service.store.runs()[0]
   const write = (from: number, to: number) => {
