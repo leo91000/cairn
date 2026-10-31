@@ -4,7 +4,7 @@ import path from 'node:path'
 import process from 'node:process'
 import { pathToFileURL } from 'node:url'
 
-const phases = new Set(['before-restore', 'after-restore', 'before-save'])
+const phases = new Set(['before-build', 'after-build'])
 const errorCodes = new Set(['ENOENT', 'EACCES', 'EPERM', 'ETIMEDOUT', 'ENOSPC', 'EIO'])
 
 function errorCode(error) {
@@ -81,21 +81,21 @@ function publicMetadata(environment) {
   return metadata
 }
 
-export function observeRustCache(phase, environment, dependencies = {}) {
+export function observeRustBuild(phase, environment, dependencies = {}) {
   if (!phases.has(phase))
-    throw new Error('Unknown cache observation phase.')
+    throw new Error('Unknown Rust build observation phase.')
   if (environment.GITHUB_ACTIONS !== 'true')
-    throw new Error('Cache observations run only on a coordinated disposable CI host.')
+    throw new Error('Rust build observations run only on a coordinated disposable CI host.')
   for (const name of ['GITHUB_WORKSPACE', 'RUNNER_TEMP', 'HOME']) {
     if (typeof environment[name] !== 'string' || !path.isAbsolute(environment[name]))
-      throw new Error('Cache observation requires absolute CI filesystem locations.')
+      throw new Error('Rust build observation requires absolute CI filesystem locations.')
   }
 
   const workspace = environment.GITHUB_WORKSPACE
   const temporary = environment.RUNNER_TEMP
   const cargo = environment.CARGO_HOME || path.join(environment.HOME, '.cargo')
   if (!path.isAbsolute(cargo))
-    throw new Error('Cache observation requires an absolute Cargo location.')
+    throw new Error('Rust build observation requires an absolute Cargo location.')
   const statfs = dependencies.statfs ?? fs.statfsSync
   const execute = dependencies.execute ?? execFileSync
   const now = dependencies.now ?? Date.now
@@ -109,7 +109,7 @@ export function observeRustCache(phase, environment, dependencies = {}) {
   }
   const locations = {
     targetDebug: path.join(workspace, 'target', 'debug'),
-    excludedIncremental: path.join(workspace, 'target', 'debug', 'incremental'),
+    incremental: path.join(workspace, 'target', 'debug', 'incremental'),
     registryIndex: path.join(cargo, 'registry', 'index'),
     registryArchives: path.join(cargo, 'registry', 'cache'),
     cargoGit: path.join(cargo, 'git'),
@@ -125,15 +125,15 @@ export function observeRustCache(phase, environment, dependencies = {}) {
     elapsedMs: now() - startedAt,
     filesystem: capacity,
     usage: measurements,
-    scope: 'Directory aggregates, not archive expanded-size or peak-restore measurement. Incremental is excluded by cache policy; reported separately.',
+    scope: 'Fixed Rust build directory aggregates, not a combined allocation bound or peak disk measurement.',
   }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   const [, , phase, destination] = process.argv
   if (!destination || !phases.has(phase))
-    throw new Error('Usage: ci-rust-cache-observation.mjs PHASE OUTPUT.json')
-  const observation = observeRustCache(phase, process.env)
+    throw new Error('Usage: ci-rust-build-observation.mjs PHASE OUTPUT.json')
+  const observation = observeRustBuild(phase, process.env)
   fs.mkdirSync(path.dirname(destination), { recursive: true })
   fs.writeFileSync(destination, `${JSON.stringify(observation)}\n`, { mode: 0o600 })
   console.log(JSON.stringify(observation))

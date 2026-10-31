@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process'
 import process from 'node:process'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { observeRustCache } from '../ci-rust-cache-observation.mjs'
+import { observeRustBuild } from '../ci-rust-build-observation.mjs'
 
 const environment = {
   GITHUB_ACTIONS: 'true',
@@ -29,7 +29,7 @@ const statistics = {
 
 test('records bytes, inode capacity and directory aggregates without private paths or arbitrary environment', () => {
   const calls = []
-  const result = observeRustCache('before-restore', environment, {
+  const result = observeRustBuild('before-build', environment, {
     now: () => 0,
     statfs: () => statistics,
     execute(command, args, options) {
@@ -40,7 +40,7 @@ test('records bytes, inode capacity and directory aggregates without private pat
   assert.equal(result.filesystem.workspace.availableBytes, '40960')
   assert.equal(result.filesystem.workspace.freeInodes, '900')
   assert.equal(result.usage.targetDebug.allocatedBytes.value, '42')
-  assert.equal(result.usage.excludedIncremental.inodes.value, '42')
+  assert.equal(result.usage.incremental.inodes.value, '42')
   assert.equal(result.metadata.head, environment.GITHUB_SHA)
   assert.equal(calls.length, 15)
   assert.ok(calls.every(call => call.command === 'du' && call.args.includes('--') && call.options.timeout <= 15000))
@@ -51,7 +51,7 @@ test('records bytes, inode capacity and directory aggregates without private pat
 })
 
 test('bounds failed statfs, child errors and unexpected output to fixed error codes', () => {
-  const result = observeRustCache('after-restore', environment, {
+  const result = observeRustBuild('after-build', environment, {
     now: () => 0,
     statfs() { throw Object.assign(new Error('private-path'), { code: 'secret-error-code' }) },
     execute() { throw Object.assign(new Error('private-stderr'), { code: 'ENOSPC' }) },
@@ -59,7 +59,7 @@ test('bounds failed statfs, child errors and unexpected output to fixed error co
   assert.deepEqual(result.filesystem.workspace, { readable: false, errorCode: 'unavailable' })
   assert.deepEqual(result.usage.targetDebug.allocatedBytes, { errorCode: 'ENOSPC' })
   assert.ok(!JSON.stringify(result).includes('private'))
-  const invalid = observeRustCache('before-save', environment, {
+  const invalid = observeRustBuild('after-build', environment, {
     now: () => 0,
     statfs: () => statistics,
     execute: () => 'secret-not-a-number',
@@ -70,7 +70,7 @@ test('bounds failed statfs, child errors and unexpected output to fixed error co
 test('has one total observation budget across all directories', () => {
   let elapsed = 0
   let executions = 0
-  const result = observeRustCache('before-save', environment, {
+  const result = observeRustBuild('after-build', environment, {
     now: () => elapsed,
     statfs: () => statistics,
     execute(_command, _args, options) {
@@ -90,15 +90,16 @@ test('rejects local execution, unknown phases and missing locations before files
     statfs() { assert.fail('must not inspect filesystem') },
     execute() { assert.fail('must not execute') },
   }
-  assert.throws(() => observeRustCache('unknown', environment, dependencies), /Unknown cache observation phase/)
-  assert.throws(() => observeRustCache('before-restore', { ...environment, GITHUB_ACTIONS: 'false' }, dependencies), /only on a coordinated disposable CI host/)
-  assert.throws(() => observeRustCache('before-restore', { ...environment, HOME: undefined }, dependencies), /absolute CI filesystem locations/)
-  assert.throws(() => observeRustCache('before-restore', { ...environment, CARGO_HOME: 'relative' }, dependencies), /absolute Cargo location/)
+  for (const phase of ['unknown', 'before-restore', 'after-restore', 'before-save'])
+    assert.throws(() => observeRustBuild(phase, environment, dependencies), /Unknown Rust build observation phase/)
+  assert.throws(() => observeRustBuild('before-build', { ...environment, GITHUB_ACTIONS: 'false' }, dependencies), /only on a coordinated disposable CI host/)
+  assert.throws(() => observeRustBuild('before-build', { ...environment, HOME: undefined }, dependencies), /absolute CI filesystem locations/)
+  assert.throws(() => observeRustBuild('before-build', { ...environment, CARGO_HOME: 'relative' }, dependencies), /absolute Cargo location/)
 })
 
 test('CLI refuses a local probe and does not expose its environment', () => {
-  const script = fileURLToPath(new URL('../ci-rust-cache-observation.mjs', import.meta.url))
-  const result = spawnSync(process.execPath, [script, 'before-restore', '/not-written.json'], {
+  const script = fileURLToPath(new URL('../ci-rust-build-observation.mjs', import.meta.url))
+  const result = spawnSync(process.execPath, [script, 'before-build', '/not-written.json'], {
     encoding: 'utf8',
     env: { ...environment, GITHUB_ACTIONS: 'false' },
   })

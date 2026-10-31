@@ -1,74 +1,69 @@
-# Observe native admission and Rust cache failures
+# Cold Rust CI preparation and native admission observations
 
-This change collects evidence for two unresolved CI failures. It changes no
-installation behavior, admission decision, cache key/path/publication policy,
-request sequence, retry, timeout or qualification assertion.
+## Cold shared Rust builds
 
-## Immutable comparison
+The shared build, Clippy, backend and node-qualification jobs compile Rust without
+restoring or publishing a Cargo target-tree cache. There is no v3 or legacy
+`target/` bootstrap and no optional warm mode. Existing shared caches are left
+untouched; the workflow simply no longer reads or writes them.
 
-The diagnostic branch deliberately starts at historical main
-`1bf0a0551a23bccaf0724394091cb5f49edb74b4`, where reference admission previously
-returned HTTP 409. Remote main had subsequently advanced to `ecf323e4` (SQLite
-observation). One diagnostic commit retains `1bf0a055` as its first parent, which
-the existing manual-workflow reference selector uses. The Rust product source is
-identical in reference and candidate; this run does not qualify PR #649, PR #651
-or later main. Before any durable integration, update the base and repeat the
-appropriate independent review and exact-head checks.
+This removes the optional large-archive download/extraction contribution to a
+reader's disk use. It does **not** guarantee that the runner cannot run out of
+space: compilation, package installation and unrelated writers still allocate
+resources. The historical ENOSPC runner/archive is not replayed or claimed fixed.
+Measured cold jobs completed within their existing deadlines on one earlier
+source/image; this is feasibility evidence, not a paired warm/cold comparison or a
+performance guarantee for later source. Deadlines and concurrency are unchanged.
 
-## Native admission
+Small registry/Git reuse may be considered separately with its own resource
+contract. This patch implements no new cache format, quota, threshold or pruning.
+The exact native-reference **binary** cache remains separate: its immutable key
+binds the reference commit, image, Rust version, profile and features; embedded
+metadata and binary checksums are verified before use. Same-run build artifacts,
+container-image caching and the specialized Firecracker qualification are distinct
+from the removed shared target cache.
 
-The existing reference and candidate qualification run in their original order,
-against their unchanged binaries and exact archived protocol fixtures. Each
-temporary fixture receives the same two observation statements after the API has
-read a failing HTTP response. The overlay verifies that removing those statements
-restores the complete original AST and exact original text. An unexpected shape
-or repeated overlay is refused. The log records both fixture hashes.
+## Read-only build capacity observations
 
-Only `POST /runs/{UUID}` with HTTP 409 can produce an observation. A response of
-at most 4096 bytes containing exactly one `error` string is compared to fixed
+The four shared Rust jobs upload small capacity observations before and after
+build/test work. The early upload can survive a later worker failure. Fixed
+filesystem locations report available bytes and inodes; fixed Rust directories
+report allocated bytes, apparent bytes and inode counts. Unknown measurements are
+reported as unavailable, never zero or success.
+
+Each observation has one total 15-second child-process budget. It emits neither
+filenames nor arbitrary environment/error text. Image, source and run identifiers
+use explicit technical-field validation. The command refuses non-CI invocation;
+offline tests use injected synthetic filesystem/child-process dependencies rather
+than probing the shared development host. Observation failures do not replace the
+job's outcome, and missing artifacts mean missing evidence.
+
+Directory aggregates are not a hard-link-aware combined allocation bound, exact
+archive contents, or peak disk-use measurement. They do not reconstruct the
+historical failed runner's capacity. Incremental output is measured separately;
+compilation still runs with its existing incremental/debug settings.
+
+## Native admission diagnostics
+
+The complete reference and candidate qualifications retain their original order,
+unchanged binaries and exact archived protocol fixtures. Each temporary fixture
+receives the same two observation statements after the API has read a failing
+HTTP response. Removing those statements must restore the complete original AST
+and exact original text. An incompatible or repeated overlay is refused. Actual
+fixture hashes are logged to prove provenance.
+
+Only `POST /runs/{UUID}` with HTTP409 can emit an observation. A response of at most
+4096 bytes containing exactly one `error` string is compared to fixed
 source-defined literals. Output contains only reference/candidate role, route
 label, synthetic attempt UUID, status, fixed reason code and response length.
-Unknown, oversized or malformed data produces `unrecognized`, never raw payload,
-request, header, plan or environment data. A closed output stream must not replace
-the original HTTP exception. All existing assertions, phases and Docker flags
-remain in place; no new requests or retry delays are introduced.
+Unknown, oversized or malformed data emits `unrecognized`, never raw response,
+request, header, plan or environment data. A closed output stream cannot replace
+the original HTTP exception. No request, assertion, phase, Docker flag, retry or
+policy is changed. The existing CI reference selector supplies the actual base
+commit; no historical reference is imposed permanently.
 
-## Rust cache capacity
-
-The cache action records filesystem bytes and inodes before restore, and uploads
-that small artifact **before** invoking any cache restore. A runner that dies
-during restore can therefore leave the initial capacity evidence. Further
-artifacts record after-restore directory aggregates and the backend writer's
-expanded directories before post-save. Diagnostic failures do not change the
-cache action's outcome or suppress its existing failure; missing artifacts mean
-missing evidence.
-
-Each observation measures only fixed cache directories with one total 15-second
-child-process budget. It reports allocated bytes, apparent bytes and inodes,
-including the incremental directory separately because the current cache excludes
-it. It reports neither filenames nor arbitrary environment/error text. Image,
-source and run identifiers use explicit technical-field validation. The command
-refuses non-CI invocation; offline tests use injected synthetic filesystem and
-child-process dependencies instead of probing the shared development host.
-
-Directory aggregates do not directly measure archive contents, hard-link-aware
-combined size, extraction peak, or the original failed runner's missing capacity.
-The writer observation precedes action cleanup/post steps; it is not proof a cache
-was saved. The original failing archive is no longer visible in the repository's
-cache inventory. A new successful restore is useful qualification, not proof of a
-causal cache repair. No cache is removed, pruned or assigned a new key by these
-observations.
-
-## Validation and interpretation
-
-Offline tests compare the actual fixture API before and after insertion, including
-privacy boundaries, HTTP exceptions and output failure, plus strict overlay
-rejection. Node tests cover synthetic bytes/inodes, invalid/error measurements,
-the single total budget and refusal to probe outside CI. Workflow contract tests
-check evidence ordering and unchanged cache/native qualification contracts.
-
-The complete disposable native job remains necessary: a shortened case has not
-been shown to preserve the history preceding the 409. A failure remains a failure;
-non-reproduction remains non-reproduction. These observations establish no
-production cause, recovery or speedup. A confirmed independent product defect
-must be handed to a different implementer before its own review and validation.
+Guard tests intentionally produce some409 responses. Their presence alone does
+not establish a failed admission. A cause must be correlated with an unhandled
+request and failing phase. A passing observation of the historical fixture does
+not prove a repair; non-reproduction is recorded as such. Local API/privacy tests
+and full native qualification remain separate evidence.

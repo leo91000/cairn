@@ -89,7 +89,9 @@ jobs:
       - run: rustup toolchain install 1.97.1 --profile minimal && rustup default 1.97.1
       - name: Install bindings toolchain for the required ublk transport
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev
-      - uses: ./.github/actions/cache-rust
+      - uses: ./.github/actions/observe-rust-build
+        with:
+          phase: before-build
       - name: Build the browser-test backend and frontend
         run: |
           cargo build --locked --bin cairn --example worker_fixture --example browser_fixture --example network_direct_client --example network_qualification --example native_storage_qualifier
@@ -113,6 +115,10 @@ jobs:
           name: browser-build
           path: dist/
           retention-days: 1
+      - uses: ./.github/actions/observe-rust-build
+        if: always()
+        with:
+          phase: after-build
   quality:
     needs: resolve
     if: needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main'
@@ -157,9 +163,15 @@ jobs:
       - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy && rustup default 1.97.1
       - name: Install native test dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age e2fsprogs fakeroot
-      - uses: ./.github/actions/cache-rust
+      - uses: ./.github/actions/observe-rust-build
+        with:
+          phase: before-build
       - name: Check all Rust targets, including the required ublk transport
         run: pnpm validate:pr rust
+      - uses: ./.github/actions/observe-rust-build
+        if: always()
+        with:
+          phase: after-build
   backend:
     services:
       postgres:
@@ -188,9 +200,9 @@ jobs:
       - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy && rustup default 1.97.1
       - name: Install native test dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age e2fsprogs fakeroot
-      - uses: ./.github/actions/cache-rust
+      - uses: ./.github/actions/observe-rust-build
         with:
-          save: true
+          phase: before-build
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
         with:
           tool: cargo-nextest@0.9.149
@@ -279,18 +291,10 @@ jobs:
             qualify "$served" "$resolved"
             qualify "$resolved" "$served"
           fi
-      # The cache action saves in its post step; record its expanded input first.
-      - name: Observe Rust cache writer footprint before post-save
+      - uses: ./.github/actions/observe-rust-build
         if: always()
-        continue-on-error: true
-        run: node scripts/ci-rust-cache-observation.mjs before-save "$RUNNER_TEMP/cairn-cache-observation/before-save.json"
-      - uses: actions/upload-artifact@v7.0.1
-        if: always()
-        continue-on-error: true
         with:
-          name: rust-cache-before-save-${{ github.job }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/cairn-cache-observation/before-save.json
-          retention-days: 14
+          phase: after-build
   node-checks:
     services:
       postgres:
@@ -320,7 +324,9 @@ jobs:
       - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy && rustup default 1.97.1
       - name: Install native test dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age e2fsprogs fakeroot
-      - uses: ./.github/actions/cache-rust
+      - uses: ./.github/actions/observe-rust-build
+        with:
+          phase: before-build
       - name: Prepare the installation host's required ublk driver
         run: |
           if ! sudo modprobe ublk_drv; then
@@ -349,6 +355,10 @@ jobs:
           .node-s3-test/bin/python scripts/tests/storage_observer_test.py
           .node-s3-test/bin/python scripts/tests/storage_sample_test.py
           PATH="$PWD/.node-s3-test/bin:$PATH" .node-s3-test/bin/python scripts/tests/node_s3_test.py
+      - uses: ./.github/actions/observe-rust-build
+        if: always()
+        with:
+          phase: after-build
   native-runtime:
     name: Native Linux ublk storage and process ownership (CPU workload)
     needs: [resolve, build]
