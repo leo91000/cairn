@@ -27,6 +27,15 @@ class Updates(unittest.TestCase):
                         image = NEW if failure != 'unapproved' else 'ghcr.io/leo91000/cairn:latest'
                         self.wfile.write(json.dumps({'image': image}).encode())
 
+                    def do_POST(self):
+                        self.rfile.read(int(self.headers.get('Content-Length', '0')))
+                        status = {'/lease-conflict': 409, '/lease-refused': 403}.get(self.path, 200)
+                        self.send_response(status)
+                        self.end_headers()
+                        self.wfile.write(json.dumps({'paused': self.command != 'DELETE'}).encode())
+
+                    do_DELETE = do_POST
+
                     def log_message(self, *_):
                         pass
 
@@ -47,7 +56,7 @@ class Updates(unittest.TestCase):
                 binaries.mkdir()
                 docker = binaries / 'docker'
                 docker.write_text(r'''#!/usr/bin/env python3
-import json, os, pathlib, sys
+import json, os, pathlib, subprocess, sys
 root = pathlib.Path(os.environ['CAIRN_INSTALLATION_ROOT'])
 args = sys.argv[1:]
 failure = os.environ['FAILURE']
@@ -65,11 +74,17 @@ if 'ps' in args:
 if 'exec' in args:
     launches = sum('up' in json.loads(event) for event in (root / 'events').read_text().splitlines())
     unavailable = failure == 'candidate-unavailable' and launches < 2
-    if 'deployment-lease' in args[-1] and (failure in ('lease', 'foreign-lease', 'foreign-manager') or unavailable):
-        sys.exit(1)
+    if 'deployment-lease' in args[-1]:
+        if failure in ('lease', 'foreign-manager') or unavailable:
+            sys.exit(1)
+        route = {'foreign-lease': '/lease-conflict', 'refused-lease': '/lease-refused'}.get(failure, '/lease-accepted')
+        script = args[-1].replace("'/data/maintenance-token'", json.dumps(str(root / 'data/maintenance-token')))
+        script = script.replace("'http://127.0.0.1:4310/internal/deployment-lease'",
+                                json.dumps(os.environ['FIXTURE_MANAGER_ORIGIN'] + route))
+        sys.exit(subprocess.run(['node', '-e', script]).returncode)
     if failure == 'unresponsive' and 'deployment-lease' not in args[-1]:
         sys.exit(1)
-    healthy = failure != 'health' and (failure != 'candidate-unavailable' or launches >= 2)
+    healthy = failure not in ('health', 'foreign-lease', 'refused-lease') and (failure != 'candidate-unavailable' or launches >= 2)
     print(json.dumps({'healthy': healthy}))
 ''')
                 docker.chmod(0o755)
@@ -78,7 +93,8 @@ if 'exec' in args:
                 def update(fault):
                     return subprocess.run(['python3', str(installer), origin, '--update'],
                                           env={**os.environ, 'PATH': str(binaries) + ':' + os.environ['PATH'],
-                                               'CAIRN_INSTALLATION_ROOT': directory, 'FAILURE': fault},
+                                               'CAIRN_INSTALLATION_ROOT': directory, 'FAILURE': fault,
+                                               'FIXTURE_MANAGER_ORIGIN': origin},
                                           capture_output=True, text=True, timeout=30)
 
                 try:
@@ -90,6 +106,7 @@ if 'exec' in args:
                         self.assertEqual(config['pendingImage'], NEW)
                     events = [json.loads(line) for line in (root / 'events').read_text().splitlines()] if (root / 'events').exists() else []
                     starts = [event for event in events if 'up' in event]
+                    stop_count = sum('stop' in event for event in events)
                     self.assertLessEqual(len(starts), 1, 'A failed candidate must never launch a rollback')
                     if failure in ('ublk', 'unapproved', 'digest', 'lease'):
                         self.assertFalse(any('stop' in event for event in events))
@@ -103,10 +120,15 @@ if 'exec' in args:
                             self.assertEqual(acknowledged['leaseOwner'], config['leaseOwner'])
                             retry = update('candidate-unavailable')
                         elif failure in ('health', 'unresponsive'):
-                            for refused in ('foreign-lease', 'foreign-manager'):
+                            for refused in ('foreign-lease', 'refused-lease', 'foreign-manager'):
                                 rejected = update(refused)
                                 self.assertNotEqual(rejected.returncode, 0)
+                                if refused == 'foreign-lease':
+                                    self.assertIn('Another deployment owns the installation lease.', rejected.stderr)
+                                elif refused == 'refused-lease':
+                                    self.assertIn('The manager refused the deployment lease.', rejected.stderr)
                                 after = [json.loads(line) for line in (root / 'events').read_text().splitlines()]
+                                self.assertEqual(sum('stop' in event for event in after), stop_count)
                                 self.assertEqual(sum('up' in event for event in after), len(starts))
                             retry = update('candidate-unavailable')
                         else:
