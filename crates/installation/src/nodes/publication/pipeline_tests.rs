@@ -119,15 +119,15 @@ impl ControlEffects {
                     receipt["objects"].as_array_mut().unwrap().pop();
                 }
                 ReceiptFault::DuplicateObject => {
-                    receipt["objects"][1] = receipt["objects"][0].clone()
+                    receipt["objects"][1] = receipt["objects"][0].clone();
                 }
                 ReceiptFault::WrongPlaintext => {
                     receipt["plaintextBytes"] =
-                        (receipt["plaintextBytes"].as_u64().unwrap() + 1).into()
+                        (receipt["plaintextBytes"].as_u64().unwrap() + 1).into();
                 }
                 ReceiptFault::OversizedEncoding => {
                     receipt["encodedBytes"] =
-                        (direct::BATCH as u64 * block_codec::MAX_ENCODED_BYTES + 1).into()
+                        (direct::BATCH as u64 * block_codec::MAX_ENCODED_BYTES + 1).into();
                 }
                 ReceiptFault::MissingFields => receipt = json!({}),
                 ReceiptFault::LostResponse => {
