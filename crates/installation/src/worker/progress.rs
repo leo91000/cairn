@@ -17,7 +17,7 @@ pub(crate) fn upgrade(connection: &mut rusqlite::Connection) -> Result<()> {
     if version == 20 {
         tx.execute_batch(SCHEMA)?;
         tx.pragma_update(None, "user_version", 21)?;
-    } else if version != 21 {
+    } else if !(21..=crate::store::DATABASE_VERSION).contains(&version) {
         return Err(crate::error::Error::bad(
             "Unexpected installation database version during progress upgrade.",
         ));
@@ -875,6 +875,18 @@ mod migration_tests {
             db.pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
                 .unwrap(),
             20
+        );
+    }
+
+    #[test]
+    fn upgrade_accepts_a_database_already_advanced_by_another_opener() {
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("PRAGMA user_version=22;").unwrap();
+        upgrade(&mut db).unwrap();
+        assert_eq!(
+            db.pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .unwrap(),
+            22
         );
     }
 }

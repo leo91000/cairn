@@ -16,6 +16,20 @@ fn previous(root: &std::path::Path) -> Connection {
     let mut db = Connection::open(root.join("manager.db")).unwrap();
     db.execute_batch(PREVIOUS).unwrap();
     crate::runs::projections::upgrade(&mut db).unwrap();
+    db.execute_batch(crate::plugins::hooks::SCHEMA).unwrap();
+    db.pragma_update(None, "user_version", 20).unwrap();
+    crate::worker::progress::upgrade(&mut db).unwrap();
+    db.execute_batch(
+        "INSERT INTO plugin_instances(id,plugin_id,name,enabled,revision,settings,secret_keys,updated_at) VALUES('00000000-0000-4000-8000-000000000099','github','retained',1,'revision','{}','[]',1);
+         INSERT INTO plugin_hook_events(id,instance_id,revision,package_digest,external_id,name,payload,created_at) VALUES('retained-hook','00000000-0000-4000-8000-000000000099','revision','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','external','event','{}',1);
+         INSERT INTO plugin_hook_receipts(instance_id,external_id,expires_at) VALUES('00000000-0000-4000-8000-000000000099','external',1000);",
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO run_progress(run_id,state) VALUES(?,'{}')",
+        [CODEX],
+    )
+    .unwrap();
     std::fs::write(root.join("mcp-encryption-key"), [42_u8; 32]).unwrap();
     db
 }
@@ -258,7 +272,7 @@ async fn long_engine_item_ids_survive_migration_and_live_updates() {
     }
     let before = tables(&db);
     let store = Store::open(root.path()).unwrap();
-    assert_eq!(version(&db), 20);
+    assert_eq!(version(&db), 22);
     assert_eq!(tables(&db), before);
     let old = cards(&store, CODEX).await;
     let first_card = old.iter().find(|card| matches!(&card.content, TimelineContent::AgentMessage { item_id, .. } if item_id == &first)).unwrap();
@@ -394,7 +408,7 @@ async fn upgrade_builds_the_timeline_from_retained_events_and_changes_nothing_el
     assert!(before["events"].len() >= 48);
 
     let store = Store::open(root.path()).unwrap();
-    assert_eq!(version(&db), 20);
+    assert_eq!(version(&db), 22);
     assert_eq!(tables(&db), before);
     assert_eq!(
         db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
@@ -543,7 +557,7 @@ fn notice_code(card: &TimelineEntry) -> Option<NoticeCode> {
 }
 
 #[test]
-fn a_failed_upgrade_leaves_version_19_and_its_events_intact() {
+fn a_failed_upgrade_leaves_version_21_and_its_events_intact() {
     let root = tempfile::tempdir().unwrap();
     let db = previous(root.path());
     // A conflicting leftover table makes the projection's schema fail mid-upgrade.
@@ -551,7 +565,7 @@ fn a_failed_upgrade_leaves_version_19_and_its_events_intact() {
         .unwrap();
     let before = tables(&db);
     assert!(Store::open(root.path()).is_err());
-    assert_eq!(version(&db), 19);
+    assert_eq!(version(&db), 21);
     assert_eq!(tables(&db), before);
     assert!(
         !db.prepare("SELECT 1 FROM sqlite_master WHERE name='timeline_entries'")
@@ -1056,7 +1070,7 @@ fn version_18_upgrades_through_both_projections() {
         .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
         .unwrap();
     Store::open(root.path()).unwrap();
-    assert_eq!(version(&db), 20);
+    assert_eq!(version(&db), 22);
     assert_eq!(
         db.query_row("SELECT COUNT(*) FROM events", [], |row| row
             .get::<_, i64>(0))
