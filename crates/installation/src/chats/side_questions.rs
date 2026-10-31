@@ -42,8 +42,8 @@ const MAX_ANSWER: usize = 20_000;
 const MAX_ABOUT: usize = 2_000;
 const MAX_ERROR: usize = 1_000;
 
-/// Bound adapter output before serializing it into the worker's line transport.
-pub(crate) fn bounded_answer(answer: &str) -> String {
+/// Shorten only after the worker has redacted complete secrets.
+fn bounded_answer(answer: &str) -> String {
     if answer.chars().count() > MAX_ANSWER {
         format!("{}…", answer.chars().take(MAX_ANSWER).collect::<String>())
     } else {
@@ -51,8 +51,18 @@ pub(crate) fn bounded_answer(answer: &str) -> String {
     }
 }
 
-pub(crate) fn bounded_error(error: &str) -> String {
+fn bounded_error(error: &str) -> String {
     error.chars().take(MAX_ERROR).collect()
+}
+
+/// An adapter does not have the worker's redaction secrets. It must omit an oversized
+/// field whole rather than cut through a secret before sending it to the worker.
+pub(crate) fn answer_fits(answer: &str) -> bool {
+    answer.chars().count() <= MAX_ANSWER
+}
+
+pub(crate) fn error_fits(error: &str) -> bool {
+    error.chars().count() <= MAX_ERROR
 }
 
 pub(crate) const EXPIRED: &str = "The reply stopped before this side question was answered. Ask it again while the agent works, or ask in the conversation.";

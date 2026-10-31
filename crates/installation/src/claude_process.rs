@@ -57,6 +57,7 @@ const CONTEXT_REQUEST: &str = "cairn-context-";
 /// How long a finished execution waits for the context report requested at a compaction
 /// boundary. Claude Code answers it locally, after the command's result.
 const CONTEXT_REPORT_WAIT: Duration = Duration::from_secs(5);
+const SIDE_CANCEL_WAIT: Duration = Duration::from_millis(100);
 
 const DENIED: &str =
     "This tool is outside the agent's access policy. Ask the user in your response.";
@@ -775,8 +776,7 @@ impl Turn<'_> {
     /// they never delay it, and can be asked again during the next one.
     async fn withdraw_sides(&mut self) -> Result<()> {
         for (request, question) in std::mem::take(&mut self.sides) {
-            let cancel = json!({ "type": "control_cancel_request", "request_id": request });
-            send(&mut self.stdin, cancel).await?;
+            self.cancel_side_request(&request).await;
             self.side_failed(&question, crate::chats::side_questions::EXPIRED)
                 .await?;
         }
@@ -791,10 +791,16 @@ impl Turn<'_> {
             .map(|(request, _)| request.clone());
         if let Some(request) = request {
             self.sides.remove(&request);
-            let cancel = json!({ "type": "control_cancel_request", "request_id": request });
-            send(&mut self.stdin, cancel).await?;
+            self.cancel_side_request(&request).await;
         }
         Ok(())
+    }
+
+    /// A side request must never hold or fail the main reply if Claude has stopped
+    /// reading its control channel. Each bounded send is best effort.
+    async fn cancel_side_request(&mut self, request: &str) {
+        let cancel = json!({ "type": "control_cancel_request", "request_id": request });
+        let _ = tokio::time::timeout(SIDE_CANCEL_WAIT, send(&mut self.stdin, cancel)).await;
     }
 
     /// The reply to a side question. Claude reports a missing or synthetic answer
@@ -805,22 +811,26 @@ impl Turn<'_> {
             && answer["synthetic"] != true
             && !text(answer, "response").trim().is_empty();
         if answered {
+            let answer = text(answer, "response");
+            if !crate::chats::side_questions::answer_fits(answer) {
+                return self
+                    .side_failed(question, "The side answer exceeded the size limit.")
+                    .await;
+            }
             return self
                 .emit(json!({
                     "type": "chat.side.answered",
                     "sideQuestionId": question,
-                    "text": crate::chats::side_questions::bounded_answer(text(answer, "response")),
+                    "text": answer,
                 }))
                 .await;
         }
         // A synthetic answer is Claude Code's own explanation, such as a tool it refused.
-        let explanation = text(answer, "response")
-            .trim()
-            .trim_start_matches('(')
-            .trim_end_matches(')');
+        // Preserve the whole field until the worker redacts configured secrets.
+        let explanation = text(answer, "response");
         let error = if response["subtype"] == "error" && !text(response, "error").is_empty() {
             text(response, "error")
-        } else if answer["synthetic"] == true && !explanation.is_empty() {
+        } else if answer["synthetic"] == true && !explanation.trim().is_empty() {
             explanation
         } else {
             "Claude Code could not answer this side question."
@@ -829,10 +839,15 @@ impl Turn<'_> {
     }
 
     async fn side_failed(&self, question: &str, error: &str) -> Result<()> {
+        let error = if crate::chats::side_questions::error_fits(error) {
+            error
+        } else {
+            "The side question error exceeded the size limit."
+        };
         self.emit(json!({
             "type": "chat.side.failed",
             "sideQuestionId": question,
-            "error": crate::chats::side_questions::bounded_error(error),
+            "error": error,
         }))
         .await
     }

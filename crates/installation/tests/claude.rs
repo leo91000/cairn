@@ -1256,12 +1256,61 @@ async fn oversized_side_responses_are_bounded_before_worker_transport() {
         }
     })
     .await;
-    let answer = &events[position(&events, "chat.side.answered")];
-    let error = &events[position(&events, "chat.side.failed")];
-    assert_eq!(answer["text"].as_str().unwrap().chars().count(), 20_001);
-    assert_eq!(error["error"].as_str().unwrap().chars().count(), 1_000);
-    assert!(serde_json::to_vec(answer).unwrap().len() < 2_000_000);
-    assert!(serde_json::to_vec(error).unwrap().len() < 2_000_000);
+    let failed = events
+        .iter()
+        .filter(|event| event["type"] == "chat.side.failed")
+        .collect::<Vec<_>>();
+    assert_eq!(failed.len(), 2);
+    for event in failed {
+        let encoded = serde_json::to_string(event).unwrap();
+        assert!(encoded.len() < 2_000_000);
+        assert!(!encoded.contains("SECRET"));
+        assert!(!encoded.contains(&"x".repeat(100)));
+        assert!(encoded.contains("exceeded the size limit"));
+    }
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["type"] == "chat.side.answered")
+    );
+}
+
+#[tokio::test]
+async fn closed_side_control_does_not_fail_a_completed_main_turn() {
+    let (root, _config, events) = with_side_questions("fixture:slow", |root, event| {
+        if event["type"] == "chat.side.available" {
+            deliver(
+                root,
+                &json!([side_question(
+                    "a1b2c3d4-0000-4000-8000-000000000001",
+                    "fixture:side-slow fixture:side-close-input",
+                )]),
+            );
+        }
+    })
+    .await;
+    assert!(position(&events, "chat.side.failed") < position(&events, "turn.completed"));
+    assert!(root.path().join("result.claude-receipt.json").exists());
+}
+
+#[tokio::test]
+async fn synthetic_side_error_preserves_secret_boundaries_for_worker_redaction() {
+    let (_root, _config, events) = with_side_questions("fixture:slow", |root, event| {
+        if event["type"] == "chat.side.available" {
+            deliver(
+                root,
+                &json!([side_question(
+                    "a1b2c3d4-0000-4000-8000-000000000001",
+                    "fixture:side-secret",
+                )]),
+            );
+        }
+    })
+    .await;
+    assert_eq!(
+        events[position(&events, "chat.side.failed")]["error"],
+        "(fixture-secret)"
+    );
 }
 
 #[tokio::test]
@@ -1343,7 +1392,7 @@ async fn a_finished_turn_withdraws_the_side_questions_it_is_still_answering() {
     let refused = outcome("a1b2c3d4-0000-4000-8000-000000000005");
     assert_eq!(
         events[refused]["error"],
-        "The model tried to call Bash instead of answering directly. Try rephrasing or ask in the main conversation."
+        "(The model tried to call Bash instead of answering directly. Try rephrasing or ask in the main conversation.)"
     );
     assert!(
         !events

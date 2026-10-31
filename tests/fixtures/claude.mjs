@@ -181,10 +181,12 @@ else {
       })
       const asked = value.request.question
       const delay = asked.includes('fixture:side-slow') ? 3000 : 200
+      if (asked.includes('fixture:side-close-input'))
+        process.stdin.destroy()
       sides.set(value.request_id, setTimeout(() => {
         sides.delete(value.request_id)
         if (asked.includes('fixture:side-huge-error')) {
-          out({ type: 'control_response', response: { subtype: 'error', request_id: value.request_id, error: '\u0001'.repeat(350000) } })
+          out({ type: 'control_response', response: { subtype: 'error', request_id: value.request_id, error: `${'x'.repeat(998)}SECRET_TOKEN_${'\u0001'.repeat(350000)}` } })
           return
         }
 
@@ -193,9 +195,11 @@ else {
           ? { response: null, synthetic: false }
           : asked.includes('fixture:side-tool')
             ? { response: '(The model tried to call Bash instead of answering directly. Try rephrasing or ask in the main conversation.)', synthetic: true }
-            : asked.includes('fixture:side-huge-answer')
-              ? { response: '\u0001'.repeat(350000), synthetic: false }
-              : { response: `Side answer: ${asked}`, synthetic: false }
+            : asked.includes('fixture:side-secret')
+              ? { response: '(fixture-secret)', synthetic: true }
+              : asked.includes('fixture:side-huge-answer')
+                ? { response: `${'x'.repeat(19998)}SECRET_TOKEN_${'\u0001'.repeat(350000)}`, synthetic: false }
+                : { response: `Side answer: ${asked}`, synthetic: false }
         out({ type: 'control_response', response: { subtype: 'success', request_id: value.request_id, response } })
       }, delay))
       return
