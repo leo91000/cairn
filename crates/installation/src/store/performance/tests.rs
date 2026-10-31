@@ -139,3 +139,82 @@ fn bounds_compiler_generated_names() {
     assert!(bounded.len() <= 256);
     assert!(complete.starts_with(bounded));
 }
+
+#[test]
+fn reports_wal_frames_without_checkpointing_or_changing_durability() {
+    let root = tempfile::tempdir().unwrap();
+    let database = root.path().join("private.db");
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
+             PRAGMA wal_autocheckpoint=0;
+             CREATE TABLE private_values(value TEXT);
+             INSERT INTO private_values VALUES('synthetic-private-do-not-log');
+             PRAGMA wal_checkpoint(TRUNCATE);
+             UPDATE private_values SET value='synthetic-private-updated-do-not-log';",
+        )
+        .unwrap();
+    let frames = || {
+        connection
+            .query_row("PRAGMA wal_checkpoint(NOOP)", [], |row| {
+                Ok((row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))
+            })
+            .unwrap()
+    };
+    let before = frames();
+    assert!(
+        before.0 > before.1,
+        "The fixture must have pending WAL pages"
+    );
+    let database_before = std::fs::read(&database).unwrap();
+    let wal_before = std::fs::read(database.with_extension("db-wal")).unwrap();
+    let changes_before = connection.total_changes();
+    let capture = Capture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(capture.clone())
+        .finish();
+    let mut metrics = Metrics::new("write", 0, &connection);
+    metrics.since = Instant::now() - Duration::from_secs(31);
+    tracing::subscriber::with_default(subscriber, || {
+        metrics.record(
+            &Completed {
+                caller: "fixed_test_caller",
+                queue: Duration::ZERO,
+                execution: Duration::ZERO,
+                failed: false,
+                abandoned_reply: false,
+            },
+            &connection,
+        );
+    });
+
+    let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+    assert!(output.contains("wal_available=true"));
+    assert!(output.contains(&format!("wal_frames={}", before.0)));
+    assert!(output.contains(&format!("wal_checkpointed_frames={}", before.1)));
+    assert!(output.contains(&format!("wal_pending_frames={}", before.0 - before.1)));
+    assert!(output.contains("wal_autocheckpoint_frames=0"));
+    assert!(output.contains("sqlite_synchronous=2"));
+    for private in ["synthetic-private", "private_values", "UPDATE", "INSERT"] {
+        assert!(!output.contains(private));
+    }
+    assert_eq!(output.lines().count(), 1);
+    assert_eq!(frames(), before);
+    assert_eq!(connection.total_changes(), changes_before);
+    assert_eq!(std::fs::read(&database).unwrap(), database_before);
+    assert_eq!(
+        std::fs::read(database.with_extension("db-wal")).unwrap(),
+        wal_before
+    );
+    for (pragma, expected) in [("wal_autocheckpoint", 0), ("synchronous", 2)] {
+        assert_eq!(
+            connection
+                .pragma_query_value(None, pragma, |row| row.get::<_, i64>(0))
+                .unwrap(),
+            expected
+        );
+    }
+}
