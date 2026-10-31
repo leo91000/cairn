@@ -113,6 +113,9 @@ layers that disagree about the root span. A filter that disables that root span
 suppresses the report; thread startup or logging failure has no fallback to the
 caller context. Disabled diagnostics do not start a thread. SQL, captured values
 and error contents remain excluded.
+The shared enabled precheck catches unwinding filter callbacks and treats that
+observation as disabled. SQLite closures still execute and maintenance cleanup
+still runs when the diagnostic filter fails.
 No query, checkpoint, database setting, durability or scheduling policy changes.
 
 Measure per-job collection overhead separately from application latency on Linux:

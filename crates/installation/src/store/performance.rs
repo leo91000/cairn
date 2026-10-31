@@ -97,7 +97,7 @@ impl Metrics {
             self.cpu_us = self.cpu_us.saturating_add(micros(cpu));
             self.cpu_sampled_jobs = self.cpu_sampled_jobs.saturating_add(1);
         }
-        if tracing::event_enabled!(target: "cairn_performance", tracing::Level::INFO) {
+        if crate::performance::enabled() {
             self.callers.record(job);
         }
 

@@ -63,6 +63,63 @@ async fn failed_cost_probe(store: &Store, private: String) -> crate::error::Resu
 }
 
 #[tokio::test]
+async fn failing_diagnostic_filter_cannot_interrupt_real_sqlite_jobs() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_calls = calls.clone();
+    let filter = tracing_subscriber::filter::dynamic_filter_fn(move |metadata, _| {
+        if metadata.is_event() && metadata.target() == "cairn_performance" {
+            observed_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        assert!(
+            !metadata.is_event() || metadata.target() != "cairn_performance",
+            "synthetic performance filter failure"
+        );
+        true
+    });
+    let subscriber = tracing_subscriber::registry()
+        .with(tracing_subscriber::layer::Identity::new().with_filter(filter));
+    let dispatcher = tracing::Dispatch::new(subscriber);
+    let (sender, mut receiver) = mpsc::channel::<crate::store::Job>(4);
+    let actor = std::thread::spawn(move || {
+        tracing::dispatcher::with_default(&dispatcher, || {
+            let mut connection = Connection::open_in_memory().unwrap();
+            let mut metrics = Metrics::new("write", 0, &connection);
+            for _ in 0..2 {
+                let completed = receiver.blocking_recv().unwrap()(&mut connection);
+                assert!(completed.cpu.is_none());
+                metrics.since = Instant::now() - Duration::from_secs(31);
+                metrics.record(&completed, &connection);
+            }
+            assert_eq!(metrics.window, 2);
+        });
+    });
+    let store = Store(Arc::new(Pool {
+        writer: sender.clone(),
+        readers: sender,
+        changes: watch::channel(0).0,
+        discarded_changes: Arc::new(AtomicU64::new(0)),
+    }));
+    let written = store.write(|db| {
+        db.0.execute_batch("CREATE TABLE protected_jobs(value INTEGER); INSERT INTO protected_jobs VALUES (17)")?;
+        Ok(17)
+    }).await.unwrap();
+    assert_eq!(written, 17);
+    let read = store
+        .read(|db| {
+            Ok(db
+                .0
+                .query_row("SELECT value + 6 FROM protected_jobs", [], |row| {
+                    row.get::<_, i64>(0)
+                })?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(read, 23);
+    actor.join().unwrap();
+    assert!(calls.load(std::sync::atomic::Ordering::Relaxed) > 0);
+}
+
+#[tokio::test]
 async fn caller_costs_include_failed_work_after_its_receiver_is_abandoned() {
     let capture = Capture::default();
     let subscriber = tracing_subscriber::fmt()

@@ -2,7 +2,7 @@
 /// Per-layer filters can otherwise skip a root span and restore private context.
 /// Thread startup or logging failure drops the diagnostic without a fallback.
 pub(crate) fn without_span_context(record: impl FnOnce() + Send) {
-    if !tracing::event_enabled!(target: "cairn_performance", tracing::Level::INFO) {
+    if !super::enabled() {
         return;
     }
     let dispatch = tracing::dispatcher::get_default(Clone::clone);

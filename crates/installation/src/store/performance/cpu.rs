@@ -5,7 +5,7 @@ pub(crate) struct CpuTime(Option<Duration>);
 
 impl CpuTime {
     pub(crate) fn start() -> Self {
-        if !tracing::event_enabled!(target: "cairn_performance", tracing::Level::INFO) {
+        if !crate::performance::enabled() {
             return Self(None);
         }
         Self(read())
