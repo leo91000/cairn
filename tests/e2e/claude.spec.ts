@@ -643,6 +643,7 @@ test('plan drafts keep their mode across conversation switches and reloads', asy
   const message = page.getByRole('textbox', { name: 'Message' })
   const toggle = page.getByRole('button', { name: 'Plan first' })
   const fil = page.getByRole('complementary', { name: 'Fil' })
+  await expect(page.getByRole('button', { name: /^Agent, model, reasoning and speed/ })).toHaveAccessibleName('Agent, model, reasoning and speed: Claude Code · Opus Fixture (1M context) · Medium reasoning')
   await toggle.click()
   await expect(toggle).toHaveAttribute('aria-pressed', 'true')
   await message.fill('Inspect the saved Plan draft')

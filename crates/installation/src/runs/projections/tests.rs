@@ -182,3 +182,59 @@ fn concurrent_startups_converge_on_one_preserved_projection() {
     assert_eq!(projections(&connection, "run_views"), expected);
     drop(stores);
 }
+
+#[test]
+fn startup_waits_for_a_rollback_journal_writer_and_preserves_projection() {
+    use std::{sync::mpsc, time::Duration};
+
+    let root = tempfile::tempdir().unwrap();
+    let mut connection = previous(root.path());
+    let expected = projections(&connection, "runs");
+    assert_eq!(
+        connection
+            .pragma_query_value::<String, _>(None, "journal_mode", |row| row.get(0))
+            .unwrap(),
+        "delete"
+    );
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    let (started, starting) = mpsc::channel();
+    let (completed, completion) = mpsc::channel();
+    let path = root.path().to_owned();
+    let starter = std::thread::spawn(move || {
+        started.send(()).unwrap();
+        assert!(completed.send(Store::open(&path)).is_ok());
+    });
+    starting.recv_timeout(Duration::from_secs(5)).unwrap();
+    // A rollback-mode write reservation makes WAL conversion return BUSY
+    // immediately, bypassing SQLite's busy handler. Keep it held long enough
+    // to distinguish waiting for release from returning that error to startup.
+    let early = completion.recv_timeout(Duration::from_millis(250));
+    transaction.commit().unwrap();
+    let store = match early {
+        Ok(result) => result.unwrap(),
+        Err(mpsc::RecvTimeoutError::Timeout) => completion
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap(),
+        Err(error) => panic!("startup stopped before completing: {error}"),
+    };
+    starter.join().unwrap();
+    assert_eq!(version(&connection), crate::store::DATABASE_VERSION);
+    assert_eq!(projections(&connection, "run_views"), expected);
+    assert_eq!(
+        connection
+            .query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
+            .unwrap(),
+        "ok"
+    );
+    assert!(
+        !connection
+            .prepare("PRAGMA foreign_key_check")
+            .unwrap()
+            .exists([])
+            .unwrap()
+    );
+    drop(store);
+}
