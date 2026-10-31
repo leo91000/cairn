@@ -463,18 +463,15 @@ pub(super) struct Registry {
 
 impl Registry {
     pub(super) fn new(runtime: String, boot: Option<String>) -> Self {
-        Self::with_sink(runtime, boot, |snapshot| {
-            send_journal(
-                &snapshot,
-                std::path::Path::new("/run/systemd/journal/socket"),
-            )
-        })
+        let sink = tracing::enabled!(target: "cairn_performance", tracing::Level::INFO)
+            .then_some(journal_sink);
+        Self::with_sink(runtime, boot, sink)
     }
 
     fn with_sink(
         runtime: String,
         boot: Option<String>,
-        sink: impl Fn(Snapshot) -> bool + Send + 'static,
+        sink: Option<impl Fn(Snapshot) -> bool + Send + 'static>,
     ) -> Self {
         let runtime = if crate::nodes::valid_runtime(&runtime) {
             runtime
@@ -482,20 +479,22 @@ impl Registry {
             "unavailable".into()
         };
         let boot = boot.filter(|boot| crate::validation::uuid(boot).is_ok());
-        let (sender, receiver) = mpsc::sync_channel::<Export>(EXPORT_QUEUE);
-        // A detached, bounded observer must not retain a Tokio blocking task:
-        // runtime shutdown waits for those tasks, even after cancellation.
-        let exporter = std::thread::Builder::new()
-            .name("bootstrap-observer".into())
-            .spawn(move || {
-                while let Ok(export) = receiver.recv() {
-                    if !export.forgotten.load(Ordering::Relaxed) && !sink(export.snapshot) {
-                        add(&export.dropped, 1);
+        let exporter = sink.and_then(|sink| {
+            let (sender, receiver) = mpsc::sync_channel::<Export>(EXPORT_QUEUE);
+            // A detached observer cannot retain a Tokio blocking task: runtime
+            // shutdown waits for those tasks, even after cancellation.
+            std::thread::Builder::new()
+                .name("bootstrap-observer".into())
+                .spawn(move || {
+                    while let Ok(export) = receiver.recv() {
+                        if !export.forgotten.load(Ordering::Relaxed) && !sink(export.snapshot) {
+                            add(&export.dropped, 1);
+                        }
                     }
-                }
-            })
-            .ok()
-            .map(|_| sender);
+                })
+                .ok()
+                .map(|_| sender)
+        });
         Self {
             history: Arc::default(),
             runtime,
@@ -671,6 +670,13 @@ fn send_journal(snapshot: &Snapshot, destination: &std::path::Path) -> bool {
     socket.set_nonblocking(true).is_ok() && socket.send_to(&bytes, destination).is_ok()
 }
 
+fn journal_sink(snapshot: Snapshot) -> bool {
+    send_journal(
+        &snapshot,
+        std::path::Path::new("/run/systemd/journal/socket"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -747,6 +753,19 @@ mod tests {
     }
 
     #[test]
+    fn disabling_performance_logs_keeps_memory_observation_without_an_exporter() {
+        let registry =
+            tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || {
+                Registry::new("fixture-runtime".into(), None)
+            });
+        let id = crate::config::id();
+        let scope = registry.begin(&id);
+        scope.trace().phase(Phase::Mount);
+        assert_eq!(registry.get(&id).unwrap().phase, Phase::Mount);
+        assert_eq!(registry.health()["exportConfigured"], false);
+    }
+
+    #[test]
     fn a_blocked_sink_does_not_retain_the_controller_runtime_on_shutdown() {
         let (entered, receiving) = mpsc::channel();
         let (release, blocked) = mpsc::sync_channel(1);
@@ -758,13 +777,17 @@ mod tests {
                 .unwrap();
             runtime.block_on(async {
                 let first = AtomicBool::new(true);
-                let registry = Registry::with_sink("fixture-runtime".into(), None, move |_| {
-                    if first.swap(false, Ordering::Relaxed) {
-                        entered.send(()).unwrap();
-                        let _ = blocked.recv_timeout(Duration::from_secs(5));
-                    }
-                    true
-                });
+                let registry = Registry::with_sink(
+                    "fixture-runtime".into(),
+                    None,
+                    Some(move |_| {
+                        if first.swap(false, Ordering::Relaxed) {
+                            entered.send(()).unwrap();
+                            let _ = blocked.recv_timeout(Duration::from_secs(5));
+                        }
+                        true
+                    }),
+                );
                 let scope = registry.begin(&crate::config::id());
                 scope.trace().phase(Phase::Mount);
                 scope.submitted();

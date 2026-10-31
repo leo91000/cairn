@@ -75,6 +75,9 @@ that could skip this recovery or avoid inspecting required filesystem metadata.
 
 ## Export and privacy
 
+Memory observation remains available independently of logging. Export is enabled
+only when the existing `cairn_performance=info` tracing target is enabled at
+controller startup; a disabled target creates no exporter thread or channel.
 Phase changes and a final bounded report are offered to a 32-entry channel using
 `try_send`; repeated visits to the same phase are rate-limited. Per-inode counters
 do not export, log or perform I/O. An optional detached observer sends one
