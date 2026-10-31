@@ -80,6 +80,107 @@ and compiler names can change between builds; these are not stable operation
 identifiers or unique call-site IDs. Maxima reset with each actor's window, and
 equal durations retain the first completed job. There is no per-job log.
 
+Each actor also reports cumulative costs by those same bounded caller names.
+`database_caller` records share the actor's `window` and `interval_ms` with
+`database_actor`. Only the first 64 distinct callers in a window are tracked;
+the union of the eight highest execution-wall totals and eight highest CPU totals
+produces at most 16 caller records. One additional `caller="other"` record accounts
+for all remaining jobs, including names that exceeded the tracking capacity.
+`caller_recorded_jobs`, `caller_untracked_jobs` and `caller_coverage_complete` make
+incomplete tracking explicit. The selected callers are not necessarily the
+global leaders when capacity was exceeded. Counts and cumulative queue, execution
+and sampled CPU times reconcile with the actor totals; there is no per-job log or
+new reporting timer. Counters and caller storage reset at the existing boundary.
+
+On Linux, two thread-CPU clock samples bracket each SQLite closure, including any
+transaction commit and excluding queue admission and reply delivery. A disabled
+performance target skips the clocks and caller
+tracking. `cpu_sampled_jobs` identifies how many completed jobs have valid CPU
+evidence; `cpu_available=false` means the reported CPU sum covers only that subset,
+not that the remaining jobs used no CPU. Unsupported platforms and failed or
+regressed clock samples stay unavailable. These sums exclude actor bookkeeping,
+report formatting and other process threads, and are not process CPU utilization.
+Times are rounded down to microseconds per job. Compare cumulative CPU and wall
+time before distinguishing repeated computation from disk or other waits.
+The same per-actor limits apply independently to the writer and four readers:
+at most 320 tracked names and 85 caller rows across five report windows. Reader
+work can overlap; cumulative wall time is not elapsed process time or CPU time.
+
+These records transfer an owned, bounded window to one diagnostic worker per
+process through a 16-entry queue with nonblocking admission. One additional
+report may be executing. A full queue or busy admission drops the new report; a permanently blocked
+sink cannot grow this queue or block SQLite jobs or maintenance cleanup. Each
+report retains its subscriber and emits parentless events with an empty span
+stack, creating no diagnostic spans. Text and JSON exclude the caller's private
+context, including with layered or event-only filters. No span cleanup can cause
+a second logging panic during unwinding. Disabled diagnostics do not start the
+worker. SQL, captured values and error contents remain excluded.
+
+`diagnostic_queue_us` describes transport delay, separately from SQLite job
+`queue_us`. `diagnostic_dropped_reports_total` is a process-wide cumulative count
+of transport rejection/start/disconnection failures and callbacks that unwind;
+it does not certify delivery or detect I/O errors swallowed by a subscriber.
+These header fields apply to the caller rows sharing that actor/window. A late
+report still describes its original completed-job window. Queued diagnostics are
+not persisted or replayed across process exit.
+The shared enabled precheck catches unwinding filter callbacks and treats that
+observation as disabled. SQLite closures still execute and maintenance cleanup
+still runs when the diagnostic filter fails.
+No query, checkpoint, database setting, durability or scheduling policy changes.
+
+Measure per-job collection overhead separately from application latency on Linux:
+
+```sh
+CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 pnpm test:backend -p cairn-installation --lib store::performance::measurement::measure_writer_cost_sampling_overhead -- --ignored --nocapture --test-threads=1
+```
+
+Replace `measure_writer_cost_sampling_overhead` with
+`measure_reader_cost_sampling_overhead` to measure the actual reader path.
+
+The test alternates four enabled/disabled pairs on the same candidate, with
+20,000 no-op writer jobs per observation after warmup. Initialization is excluded;
+the actual queue, closure dispatch and actor teardown are included. It uses
+in-memory SQLite and does not force a report boundary, so periodic formatting is
+outside this measurement. Disabled diagnostics are the reference, not an older
+released binary.
+
+On 2026-10-31, the test profile with these flags, SQLite 3.53.2, Linux
+7.2.11-arch1-1 and an i9-14900K host with 32 logical CPUs produced these median
+costs in microseconds per job. Each lane retains all eight observations; host
+load shortly after these runs was approximately 7.68 / 7.32 / 9.31.
+
+| Lane | Disabled wall / process CPU | Enabled wall / process CPU |
+| --- | --- | --- |
+| Writer | 7.447 / 9.393 | 6.323 / 8.471 |
+| Reader | 9.032 / 11.488 | 7.330 / 9.930 |
+
+An earlier writer-only observation favored disabled collection by 1.187
+microseconds wall / 2.952 microseconds CPU per job. The differing signs and
+overlapping ranges do not establish a fixed per-job overhead or a gain from
+enabling diagnostics. These are local queue/no-op observations with scheduling
+variation, not production query latency, application throughput or release gains.
+
+Measure the report producer and completed delivery separately:
+
+```sh
+CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 pnpm test:backend -p cairn-installation --lib store::performance::measurement::measure_isolated_report_overhead -- --ignored --nocapture --test-threads=1
+```
+
+Four alternating pairs of 100 forced report boundaries run after warmup.
+`producerMicros` measures the actor's sampling and enqueue work. Total wall and
+process CPU also include formatting into a sink and a test-only bounded flush
+after each report. The flush ensures completed delivery instead of silently
+measuring dropped bursts; its cost is present in both modes. This workload uses
+one tracked caller, not the maximum 17 caller rows or real log I/O. Production
+boundaries remain at least 30 seconds apart per actor and require a completed job;
+production code never flushes or joins the worker.
+
+On the host/profile above, all eight observations yielded median producer costs
+of 6.445 microseconds enabled and 1.000 disabled per report. Complete wall time
+including the test flush was 44.680 / 9.810 microseconds, and process CPU was
+48.055 / 12.025 microseconds. These are local observations with one caller and a
+sink writer, not guarantees for maximum cardinality or production log delivery.
+
 The same record samples the connection's pager cache at the interval boundary.
 `cache_hits`, `cache_misses` and `cache_writes` are interval deltas of counters
 read through SQLite's 64-bit connection-status API; `cache_bytes` is the current approximate pager
