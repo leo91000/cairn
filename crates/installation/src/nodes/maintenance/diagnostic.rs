@@ -47,12 +47,8 @@ impl Outcome {
     }
 }
 
-pub(super) struct Drain {
-    started: Instant,
-    phase_started: Instant,
-    phase: Phase,
-    durations: [Duration; 6],
-    finished: bool,
+#[derive(Clone, Copy, Default)]
+pub(super) struct Counters {
     pub attempts: u64,
     pub stale_attempts: u64,
     pub pause_requests: u64,
@@ -64,6 +60,15 @@ pub(super) struct Drain {
     pub placement_failures: u64,
 }
 
+pub(super) struct Drain {
+    started: Instant,
+    phase_started: Instant,
+    phase: Phase,
+    durations: [Duration; 6],
+    finished: bool,
+    pub counters: Counters,
+}
+
 impl Drain {
     pub fn new() -> Self {
         let now = Instant::now();
@@ -73,15 +78,7 @@ impl Drain {
             phase: Phase::Inventory,
             durations: [Duration::ZERO; 6],
             finished: false,
-            attempts: 0,
-            stale_attempts: 0,
-            pause_requests: 0,
-            pause_failures: 0,
-            capture_calls: 0,
-            capture_waits: 0,
-            capture_failures: 0,
-            placement_releases: 0,
-            placement_failures: 0,
+            counters: Counters::default(),
         }
     }
 
@@ -103,34 +100,52 @@ impl Drain {
     fn record(&mut self, outcome: Outcome) {
         let now = Instant::now();
         self.settle(now);
-        let milliseconds = |phase: Phase| self.durations[phase.index()].as_millis() as u64;
-        // Formatting layers may skip a root span and restore older context.
-        // Emit this single summary with an empty thread-local span stack.
-        crate::performance::without_span_context(|| {
-            tracing::info!(
-                target: "cairn_performance",
-                parent: None,
-                operation = "node_maintenance_drain",
-                outcome = outcome.label(),
-                phase = self.phase.label(),
-                elapsed_ms = now.saturating_duration_since(self.started).as_millis() as u64,
-                inventory_ms = milliseconds(Phase::Inventory),
-                preparation_ms = milliseconds(Phase::Preparation),
-                pause_request_ms = milliseconds(Phase::PauseRequest),
-                capture_ms = milliseconds(Phase::Capture),
-                capture_wait_ms = milliseconds(Phase::CaptureWait),
-                placement_release_ms = milliseconds(Phase::PlacementRelease),
-                attempts = self.attempts,
-                stale_attempts = self.stale_attempts,
-                pause_requests = self.pause_requests,
-                pause_failures = self.pause_failures,
-                capture_calls = self.capture_calls,
-                capture_waits = self.capture_waits,
-                capture_failures = self.capture_failures,
-                placement_releases = self.placement_releases,
-                placement_failures = self.placement_failures,
-            );
-        });
+        let summary = Summary {
+            phase: self.phase.label(),
+            outcome: outcome.label(),
+            elapsed_ms: now.saturating_duration_since(self.started).as_millis() as u64,
+            durations_ms: self.durations.map(|duration| duration.as_millis() as u64),
+            counters: self.counters,
+        };
+        let _ = crate::performance::try_record(move |delivery| summary.emit(delivery));
+    }
+}
+
+struct Summary {
+    phase: &'static str,
+    outcome: &'static str,
+    elapsed_ms: u64,
+    durations_ms: [u64; 6],
+    counters: Counters,
+}
+
+impl Summary {
+    fn emit(self, delivery: crate::performance::Delivery) {
+        tracing::info!(
+            target: "cairn_performance",
+            parent: None,
+            operation = "node_maintenance_drain",
+            outcome = self.outcome,
+            phase = self.phase,
+            elapsed_ms = self.elapsed_ms,
+            diagnostic_queue_us = delivery.queue_us,
+            dropped_reports_total = delivery.dropped_reports_total,
+            inventory_ms = self.durations_ms[Phase::Inventory.index()],
+            preparation_ms = self.durations_ms[Phase::Preparation.index()],
+            pause_request_ms = self.durations_ms[Phase::PauseRequest.index()],
+            capture_ms = self.durations_ms[Phase::Capture.index()],
+            capture_wait_ms = self.durations_ms[Phase::CaptureWait.index()],
+            placement_release_ms = self.durations_ms[Phase::PlacementRelease.index()],
+            attempts = self.counters.attempts,
+            stale_attempts = self.counters.stale_attempts,
+            pause_requests = self.counters.pause_requests,
+            pause_failures = self.counters.pause_failures,
+            capture_calls = self.counters.capture_calls,
+            capture_waits = self.counters.capture_waits,
+            capture_failures = self.counters.capture_failures,
+            placement_releases = self.counters.placement_releases,
+            placement_failures = self.counters.placement_failures,
+        );
     }
 }
 

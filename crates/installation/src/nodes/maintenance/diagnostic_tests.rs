@@ -9,7 +9,7 @@ use axum::{Router, http::StatusCode, response::IntoResponse};
 use std::{
     io::{self, Write},
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
 };
@@ -50,6 +50,59 @@ impl Write for PanickingWriter {
     }
 }
 
+#[derive(Default)]
+struct BlockedSink {
+    state: Mutex<(bool, bool)>,
+    changed: Condvar,
+}
+
+impl BlockedSink {
+    fn wait(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.0 = true;
+        self.changed.notify_all();
+        while !state.1 {
+            state = self.changed.wait(state).unwrap();
+        }
+    }
+
+    fn entered(&self) -> bool {
+        self.state.lock().unwrap().0
+    }
+
+    fn release(&self) {
+        self.state.lock().unwrap().1 = true;
+        self.changed.notify_all();
+    }
+}
+
+struct ReleaseSink(Arc<BlockedSink>);
+
+impl Drop for ReleaseSink {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+#[derive(Clone)]
+struct BlockedWriter {
+    capture: Capture,
+    sink: Arc<BlockedSink>,
+}
+
+impl Write for BlockedWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if std::thread::current().name() == Some("cairn-diagnostics") {
+            self.sink.wait();
+        }
+        self.capture.write(bytes)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.capture.flush()
+    }
+}
+
 #[tokio::test]
 async fn maintenance_reports_actual_native_capture_retries_and_preserves_ownership() {
     for child in [
@@ -58,6 +111,7 @@ async fn maintenance_reports_actual_native_capture_retries_and_preserves_ownersh
         "nodes::maintenance::diagnostic_tests::layered_capture_retry_report_child",
         "nodes::maintenance::diagnostic_tests::panicking_filter_report_child",
         "nodes::maintenance::diagnostic_tests::panicking_writer_report_child",
+        "nodes::maintenance::diagnostic_tests::blocked_writer_report_child",
     ] {
         // Abort regressions must not create a core dump or change the parent's limits.
         let output = tokio::process::Command::new("sh")
@@ -96,7 +150,7 @@ async fn native_capture_retry_report_child() {
             .finish(),
     )
     .unwrap();
-    actual_drain_reports(capture, false).await;
+    actual_drain_reports(capture, false, None).await;
 }
 
 struct Identity;
@@ -127,7 +181,7 @@ async fn layered_capture_retry_report_child() {
         !tracing::info_span!(target: "cairn_performance", parent: None, "maintenance_summary")
             .is_disabled()
     );
-    actual_drain_reports(capture, false).await;
+    actual_drain_reports(capture, false, None).await;
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -160,7 +214,7 @@ async fn panicking_filter_report_child() {
         ));
     tracing::subscriber::set_global_default(tracing_subscriber::registry().with(formatting))
         .unwrap();
-    actual_drain_reports(capture, true).await;
+    actual_drain_reports(capture, true, None).await;
     assert!(failures.load(Ordering::SeqCst) > 0);
 }
 
@@ -183,11 +237,37 @@ async fn panicking_writer_report_child() {
             .finish(),
     )
     .unwrap();
-    actual_drain_reports(capture, true).await;
+    actual_drain_reports(capture, true, None).await;
     assert_eq!(failures.load(Ordering::SeqCst), 1);
 }
 
-async fn actual_drain_reports(capture: Capture, suppress_summary: bool) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "isolated blocked diagnostic writer for actual maintenance path"]
+async fn blocked_writer_report_child() {
+    let capture = Capture::default();
+    let sink = Arc::new(BlockedSink::default());
+    let _release = ReleaseSink(sink.clone());
+    let writer = BlockedWriter {
+        capture: capture.clone(),
+        sink: sink.clone(),
+    };
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::fmt()
+            .json()
+            .with_ansi(false)
+            .with_env_filter("info")
+            .with_writer(move || writer.clone())
+            .finish(),
+    )
+    .unwrap();
+    actual_drain_reports(capture, false, Some(sink)).await;
+}
+
+async fn actual_drain_reports(
+    capture: Capture,
+    suppress_summary: bool,
+    blocked_sink: Option<Arc<BlockedSink>>,
+) {
     let private_span = tracing::info_span!(
         "private_fixture_parent",
         private = "private-context-must-not-escape"
@@ -273,6 +353,74 @@ async fn actual_drain_reports(capture: Capture, suppress_summary: bool) {
         .await
         .unwrap();
     assert_eq!(reply["maintenance"], "draining");
+    if let Some(sink) = blocked_sink {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !sink.entered() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let ready_while_blocked = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let current = service.node_boundary(&node).await.unwrap();
+                if current["maintenance"] == "ready-to-update"
+                    && !service.node_maintenance_tasks.lock().await.contains(&node)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        let (observed, delivered) = std::sync::mpsc::channel();
+        let admitted: Vec<bool> = (0..16)
+            .map(|_| {
+                let observed = observed.clone();
+                crate::performance::try_record(move |delivery| {
+                    let _ = observed.send(delivery.dropped_reports_total);
+                })
+            })
+            .collect();
+        let full_rejected = !crate::performance::try_record(|_| {});
+        // Always release the sink and await cleanup before reporting a failed assertion.
+        sink.release();
+        let flushed = crate::performance::flush(Duration::from_secs(5));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while service.node_maintenance_tasks.lock().await.contains(&node) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let bytes = capture.0.lock().unwrap().clone();
+                if bytes
+                    .windows(b"node_maintenance_drain".len())
+                    .any(|window| window == b"node_maintenance_drain")
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        service.shutdown.cancel();
+        peer.abort();
+        assert!(flushed);
+        assert!(admitted.into_iter().all(|accepted| accepted));
+        assert!(full_rejected);
+        let drops: Vec<u64> = delivered.try_iter().collect();
+        assert_eq!(drops.len(), 16);
+        assert!(drops.into_iter().all(|total| total >= 1));
+        assert!(
+            ready_while_blocked.is_ok(),
+            "Blocked diagnostics must not delay maintenance readiness or task cleanup"
+        );
+        return;
+    }
     let drained = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if !service.node_maintenance_tasks.lock().await.contains(&node) {
@@ -296,6 +444,7 @@ async fn actual_drain_reports(capture: Capture, suppress_summary: bool) {
             .unwrap()["released"],
         true
     );
+    assert!(crate::performance::flush(Duration::from_secs(5)));
     let logs = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
     let reports: Vec<Value> = logs
         .lines()
@@ -449,6 +598,7 @@ async fn actual_drain_reports(capture: Capture, suppress_summary: bool) {
 }
 
 fn drain_report(capture: &Capture) -> Value {
+    assert!(crate::performance::flush(Duration::from_secs(5)));
     let bytes = capture.0.lock().unwrap().clone();
     let logs = String::from_utf8(bytes).unwrap();
     let reports: Vec<Value> = logs

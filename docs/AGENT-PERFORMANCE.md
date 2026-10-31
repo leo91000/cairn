@@ -411,7 +411,7 @@ or had opted out.
 
 ## Node maintenance preparation
 
-Once background preparation starts, the manager emits one
+Once background preparation starts, the manager attempts one
 `node_maintenance_drain` record on `cairn_performance`, including error, deadline
 or dropped preparation.
 It aggregates the whole episode without logging individual attempts or retries.
@@ -433,18 +433,26 @@ counted when entered; failures count completed error results. An interrupted
 request therefore need not increment its failure counter. Stale checkpoint
 ownership is skipped as before. A failed native archive capture retains placement.
 
-The summary precedes the readiness database write. It is not proof that readiness
+The summary captures preparation before the readiness database write. Delivery
+is asynchronous and can follow that write. It is not proof that readiness
 was persisted, the controller stopped, the node updated, or real work completed.
 `cancelled` means the manager's preparation future was dropped; a separately owned
 publication task may continue. Abrupt process termination cannot emit a summary.
 Concurrent node drains remain separate records without a node/run identifier.
 The event contains no identifiers, URLs, error strings or inherited private spans.
-A short-lived scoped logging thread uses the current subscriber with an empty
-thread-local span stack, so per-layer filters cannot restore an older private
-span. It emits only the summary event and creates no diagnostic span. The thread
-is created only at the existing summary boundary when INFO performance events
-are enabled, never per attempt or retry. Thread startup or logging failure drops
-the diagnostic without a context-bearing fallback. The shared
-`performance::enabled()` precheck catches subscriber/filter panics and disables
-that observation, so readiness persistence and task cleanup continue.
+One dedicated logging worker uses the captured subscriber with an empty
+thread-local span stack and creates no diagnostic spans. Callers submit bounded,
+owned observations with a nonblocking queue; no caller waits for sink IO. There
+is at most one executing report and sixteen queued reports, even with a blocked
+sink. Startup failure, admission contention, full/disconnected queue and callback
+panics drop the observation without a caller-context fallback. Normal shutdown
+can also lose pending observations. There is no per-job, attempt or retry thread.
+
+`diagnostic_queue_us` measures the report's wait before its callback starts;
+`dropped_reports_total` is the process-wide saturating count of known helper
+rejections and callback failures at that point, across all report kinds. It does
+not detect IO errors swallowed by subscriber formatting or establish successful
+log persistence. The shared `performance::enabled()` precheck catches
+subscriber/filter panics and disables that observation, so readiness persistence
+and task cleanup continue.
 The maintenance API, deadlines, retries and ownership rules are unchanged.

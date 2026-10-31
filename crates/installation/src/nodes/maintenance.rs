@@ -243,14 +243,14 @@ async fn drain(s: &Service, node: &str, diagnostic: &mut Drain) -> Result<()> {
                 && a["role"] == super::placement::AttemptRole::Execution.as_str()
         })
     {
-        diagnostic.attempts += 1;
+        diagnostic.counters.attempts += 1;
         diagnostic.next(Phase::Preparation);
         let run = s.store.run(text(&attempt, "runId")).await?;
         let native = crate::native::policy::native(&run["snapshot"]["agent"]);
         let run_id = text(&run, "id");
         let checkpoint = super::checkpoint(s, run_id).await?;
         if checkpoint["nodeId"] != node || checkpoint["runnerId"] != attempt["id"] {
-            diagnostic.stale_attempts += 1;
+            diagnostic.counters.stale_attempts += 1;
             continue;
         }
         s.store
@@ -265,7 +265,7 @@ async fn drain(s: &Service, node: &str, diagnostic: &mut Drain) -> Result<()> {
             )
             .await?;
         diagnostic.next(Phase::PauseRequest);
-        diagnostic.pause_requests += 1;
+        diagnostic.counters.pause_requests += 1;
         let stopped = s
             .http
             .delete(format!(
@@ -278,7 +278,7 @@ async fn drain(s: &Service, node: &str, diagnostic: &mut Drain) -> Result<()> {
             .send()
             .await;
         if !stopped.is_ok_and(|r| r.status().is_success()) {
-            diagnostic.pause_failures += 1;
+            diagnostic.counters.pause_failures += 1;
             failure = Some(Error::unavailable(
                 "Node did not confirm maintenance pause.",
             ));
@@ -291,18 +291,18 @@ async fn drain(s: &Service, node: &str, diagnostic: &mut Drain) -> Result<()> {
         if run["sessionId"].is_string() {
             loop {
                 diagnostic.next(Phase::Capture);
-                diagnostic.capture_calls += 1;
+                diagnostic.counters.capture_calls += 1;
                 match super::publication::capture_for_update(s, &run, node).await {
                     Ok(_) => break,
                     Err(error) if native && error.status == 425 => {
                         // The enclosing drain deadline bounds this wait. Keep
                         // placement until the node's stopped archive is ready.
-                        diagnostic.capture_waits += 1;
+                        diagnostic.counters.capture_waits += 1;
                         diagnostic.next(Phase::CaptureWait);
                         tokio::time::sleep(Duration::from_millis(100)).await;
                     }
                     Err(error) => {
-                        diagnostic.capture_failures += 1;
+                        diagnostic.counters.capture_failures += 1;
                         failure = Some(error);
                         synchronized = false;
                         break;
@@ -319,10 +319,10 @@ async fn drain(s: &Service, node: &str, diagnostic: &mut Drain) -> Result<()> {
 
 async fn release_placement(s: &Service, attempt: &str, diagnostic: &mut Drain) -> Result<()> {
     diagnostic.next(Phase::PlacementRelease);
-    diagnostic.placement_releases += 1;
+    diagnostic.counters.placement_releases += 1;
     let result = super::placement::release(s, attempt).await;
     if result.is_err() {
-        diagnostic.placement_failures += 1;
+        diagnostic.counters.placement_failures += 1;
     }
     result
 }
