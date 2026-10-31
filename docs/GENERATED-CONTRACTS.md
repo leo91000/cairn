@@ -883,7 +883,7 @@ reported by the work. See [ADR-0077](adr/0077-cairn-timeline.md).
 `crates/installation/src/timeline` holds the pure reducer and its SQL projection.
 `Db::event` applies each event in a savepoint with its insert, so a caller that
 catches a failure never keeps half of an event. Fresh installs create the schema;
-version 18 upgrades through [migration 0019](migrations/0019-timeline-projection.md).
+version 19 upgrades through [migration 0020](migrations/0020-timeline-projection.md).
 Message text, notice details and quota messages are read from the source event:
 the projection stores no copy of them. Pruned events take their cards along.
 
