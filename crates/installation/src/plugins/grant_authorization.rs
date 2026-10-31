@@ -464,12 +464,10 @@ fn designated<'a>(input: &'a Value, path: &str) -> Result<Vec<&'a str>> {
         let key = part.replace("~1", "/").replace("~0", "~");
         let mut next = Vec::new();
         for node in nodes {
-            if part == "*" {
-                if let Some(items) = node.as_array() {
-                    next.extend(items);
-                } else if !node.is_null() {
-                    return Err(denied());
-                }
+            if part == "*"
+                && let Some(items) = node.as_array()
+            {
+                next.extend(items);
             } else if let Some(value) = node.get(&key) {
                 next.push(value);
             }

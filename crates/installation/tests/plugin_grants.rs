@@ -81,6 +81,7 @@ impl Fixture {
                 "download": { "type": "boolean" },
                 "two": { "type": "boolean" },
                 "channel": { "type": "string" },
+                "*": { "type": "string" },
                 "thread": { "type": "string" },
                 "server": { "type": "string" },
                 "author": { "type": "string" },
@@ -96,6 +97,7 @@ impl Fixture {
         });
         let fields = json!([
             { "path": "/channel", "resourceType": "channel" },
+            { "path": "/*", "resourceType": "channel" },
             { "path": "/thread", "resourceType": "thread" },
             { "path": "/server", "resourceType": "server" },
             { "path": "/author", "resourceType": "person" },
@@ -370,6 +372,7 @@ async fn tools_commands_and_hooks_resolve_every_designation_and_reject_contradic
     assert_eq!(agents::instructions(&f.s, MAIN_AGENT_ID).await.unwrap(), "");
     for input in [
         json!({"channel":"support","author":"anyone"}),
+        json!({"*":"support"}),
         json!({"thread":"support-thread"}),
         json!({"channel":"support","thread":"support-thread","server":"guild"}),
         json!({"items":[{"channel":"support"}]}),
@@ -391,6 +394,8 @@ async fn tools_commands_and_hooks_resolve_every_designation_and_reject_contradic
     for input in [
         json!({}),
         json!({"channel":"general"}),
+        json!({"*":"general"}),
+        json!({"*":"support","items":[{"channel":"general"}]}),
         json!({"thread":"general-thread"}),
         json!({"channel":"support","thread":"general-thread"}),
         json!({"channel":"support","server":"different"}),

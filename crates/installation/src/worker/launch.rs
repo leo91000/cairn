@@ -1439,6 +1439,9 @@ fn current_exe() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        capabilities::plugin_packages::Authority, plugins::run_credentials::RunCredentials,
+    };
 
     async fn preparation_fixture(root: &Path) -> (Arc<Service>, Value) {
         use crate::run_fixture::DbRunFixture;
@@ -1480,7 +1483,7 @@ mod tests {
         let authorization = crate::plugins::run_credentials::Authorization::new(
             &service,
             authority,
-            &Default::default(),
+            &RunCredentials::default(),
         );
         let requests = Arc::new(AtomicUsize::new(0));
         let count = requests.clone();
@@ -1540,7 +1543,7 @@ mod tests {
         let error = execution::prepare_authorized(
             &run,
             &service.config,
-            &Default::default(),
+            &RunCredentials::default(),
             None,
             None,
             &authorization,
@@ -1578,7 +1581,7 @@ mod tests {
         let authorization = crate::plugins::run_credentials::Authorization::new(
             &service,
             authority,
-            &Default::default(),
+            &RunCredentials::default(),
         );
         let revoked = service.clone();
         let run_id = text(&run, "id").to_owned();
@@ -1726,8 +1729,8 @@ mod tests {
                     mcp: json!({}),
                     authorization: crate::plugins::run_credentials::Authorization::new(
                         &service,
-                        Default::default(),
-                        &Default::default(),
+                        Authority::default(),
+                        &RunCredentials::default(),
                     ),
                 };
                 execution
