@@ -315,6 +315,7 @@ fn background_preparation_yields_to_foreground_intent_and_then_finishes() {
 #[ignore = "executed by the isolated background preparation wrapper"]
 async fn background_preparation_yields_to_foreground_intent_and_then_finishes_child() {
     use std::{sync::Arc, time::Duration};
+
     let (_root, bases, archive, policy) = fixture().await;
     super::atomic_write(
         &bases.state.join("storage-policy.json"),
@@ -351,21 +352,20 @@ async fn background_preparation_yields_to_foreground_intent_and_then_finishes_ch
         .is_ok()
     );
     drop(foreground);
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if bases
-                .lookup(std::slice::from_ref(&archive), 128)
-                .await
-                .unwrap()
-                .is_some()
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .unwrap();
+    // Wait for the actual worker lifecycle, not filesystem metadata: an
+    // in-flight sync can make no visible changes. The ceiling allows for the
+    // measured 27-second slow-sync build while still bounding a stuck worker.
+    tokio::time::timeout(Duration::from_secs(60), warmer.wait_idle())
+        .await
+        .expect("native base warmer did not finish");
+    assert!(
+        bases
+            .lookup(std::slice::from_ref(&archive), 128)
+            .await
+            .unwrap()
+            .is_some(),
+        "native base warmer finished without publishing a ready base"
+    );
     stop.cancel();
     warmer.wait_idle().await;
 }
