@@ -223,7 +223,7 @@ def collect(request, get_metadata=metadata, reader=read_page, now_ns=None):
     previous_span = str(prior.get("pageSpanNs", 70 * NANO))
     if not previous_span.isdigit() or not 1_000_000 <= int(previous_span) <= 70 * NANO:
         raise ValueError("page_span")
-    span = int(previous_span)
+    span = 70 * NANO if changed else int(previous_span)
     last = None
     while through < upper and attempts < max_attempts and work < work_limit and time.monotonic() < read_deadline:
         end = min(through + span, upper)
@@ -257,8 +257,17 @@ def collect(request, get_metadata=metadata, reader=read_page, now_ns=None):
         if anchor is None or anchor_due:
             anchor = last["anchor"] or anchor
         through, pages = end, pages + 1
-    if through == requested_upper and work < work_limit // 2 and attempts < 4:
-        span = min(70 * NANO, span * 2)
+        # Relearn available capacity during backlog too: waiting for catch-up
+        # before widening would make a formerly busy source lag forever.
+        if last["workBytes"] <= page_limit // 4:
+            span = min(70 * NANO, span * 2)
+    if through < upper:
+        if time.monotonic() >= read_deadline:
+            reasons.add("time_budget")
+        if work >= work_limit:
+            reasons.add("work_budget")
+        if attempts >= max_attempts:
+            reasons.add("attempt_budget")
     after = get_metadata(request, deadline)
     if after != identity:
         continuity = "source_changed"

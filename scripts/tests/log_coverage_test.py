@@ -191,7 +191,7 @@ except BrokenPipeError:pass
             data = b"".join((coverage.iso(at) + " 2026-10-31T10:24:19Z INFO fixture: retained\n").encode()
                             for at in range(START, START + 7 * coverage.NANO, coverage.NANO) if read_since <= at <= upper)
             return pipe_page(data, lower=lower, upper=upper, anchor=anchor)
-        first = coverage.collect(request(until=coverage.iso(START + 7 * coverage.NANO), previous=prior, maxAttempts=3),
+        first = coverage.collect(request(until=coverage.iso(START + 7 * coverage.NANO), previous=prior, maxAttempts=2),
                                  lambda *_: IDENTITY, reader, now_ns=END + 3 * coverage.NANO)
         self.assertEqual(first["continuity"], "anchor_pending")
         self.assertEqual(first["anchor"], prior["anchor"])
@@ -200,6 +200,32 @@ except BrokenPipeError:pass
                                   lambda *_: IDENTITY, reader, now_ns=END + 3 * coverage.NANO)
         self.assertEqual(second["continuity"], "anchor_confirmed")
         self.assertTrue(second["complete"])
+
+    def test_high_to_low_volume_recovers_backlog_against_a_moving_upper_bound(self):
+        density = 120000
+        def reader(command, kind, lower, upper, anchor, deadline, allowance):
+            needed = (upper - lower) * density // coverage.NANO
+            ok = needed <= allowance
+            return {"ok": ok, "counts": coverage.empty_counts(), "workBytes": min(needed, allowance + 1),
+                    "eof": ok, "exitCode": 0 if ok else None, "reason": None if ok else "byte_budget", "anchorFound": True,
+                    "anchor": {"at": str(upper - 1), "key": str(upper)}}
+        first = coverage.collect(request(), lambda *_: IDENTITY, reader, now_ns=END + 3 * coverage.NANO)
+        prior = {"identity": IDENTITY, "anchor": first["anchor"], "pageSpanNs": first["pageSpanNs"]}
+        cursor = START
+        density = 1000
+        lags = []
+        for tick in range(5):
+            end = START + (600 + tick * 60) * coverage.NANO
+            result = coverage.collect(request(since=coverage.iso(cursor), until=coverage.iso(end), previous=prior),
+                                      lambda *_: IDENTITY, reader, now_ns=end + 3 * coverage.NANO)
+            cursor = coverage.timestamp(result["coveredThrough"])
+            prior = {"identity": IDENTITY, "anchor": result["anchor"], "pageSpanNs": result["pageSpanNs"]}
+            lags.append((end - cursor) // coverage.NANO)
+            if result["caughtUp"]:
+                break
+        self.assertEqual(lags[-1], 0)
+        self.assertLess(lags[1], lags[0])
+        self.assertGreater(int(result["pageSpanNs"]), int(first["pageSpanNs"]))
 
     def test_source_clock_bootstrap_and_missing_anchor_are_explicit(self):
         def reader(*_):
