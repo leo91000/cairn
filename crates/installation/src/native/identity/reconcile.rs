@@ -1,6 +1,7 @@
 //! Ownership changes clear set-ID bits and file capabilities. Journal original
 //! metadata before chown, then replay it after a crash before advancing the map.
 use super::{Identity, translate};
+use crate::native::bootstrap::{Cost, Counter, Trace};
 use crate::{
     error::{Error, Result},
     native::{atomic_write, block},
@@ -234,66 +235,114 @@ fn set_attribute(path: &Path, name: &str, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-async fn remove(data: &Path, name: &str) -> Result<()> {
-    tokio::fs::remove_file(data.join(name)).await?;
-    tokio::fs::File::open(data).await?.sync_all().await?;
+async fn publish(path: &Path, bytes: &[u8], observation: &Trace) -> Result<()> {
+    observation
+        .measure(Cost::JournalPublication, atomic_write(path, bytes))
+        .await?;
+    observation.add(Counter::DirectorySyncsCompleted, 1);
     Ok(())
 }
 
-async fn replay(data: &Path) -> Result<()> {
-    let bytes = match tokio::fs::read(data.join(PENDING)).await {
+async fn remove(data: &Path, name: &str, observation: &Trace) -> Result<()> {
+    tokio::fs::remove_file(data.join(name)).await?;
+    tokio::fs::File::open(data).await?.sync_all().await?;
+    observation.add(Counter::DirectorySyncsCompleted, 1);
+    Ok(())
+}
+
+async fn replay(data: &Path, observation: &Trace) -> Result<()> {
+    let bytes = match observation
+        .measure(Cost::PendingReadback, tokio::fs::read(data.join(PENDING)))
+        .await
+    {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error.into()),
     };
+    observation.add(Counter::PendingBytesRead, bytes.len() as u64);
     let entries: Vec<Entry> = serde_json::from_slice(&bytes)?;
     for entry in entries {
+        let _operation = observation.operation(Cost::Apply);
         apply(data, &entry)?;
+        observation.add(Counter::EntriesApplied, 1);
     }
-    block::sync(data).await?;
-    remove(data, PENDING).await
+    observation.measure(Cost::Syncfs, block::sync(data)).await?;
+    observation.add(Counter::SyncfsCompleted, 1);
+    observation
+        .measure(Cost::PendingRetire, remove(data, PENDING, observation))
+        .await?;
+    observation.add(Counter::PendingRetired, 1);
+    Ok(())
 }
 
-async fn migrate(data: &Path, transition: &Transition) -> Result<()> {
-    replay(data).await?;
+async fn migrate(data: &Path, transition: &Transition, observation: &Trace) -> Result<()> {
+    replay(data, observation).await?;
     let mut pending = vec![data.to_owned()];
     let mut batch = Vec::new();
     while let Some(path) = pending.pop() {
-        let metadata = std::fs::symlink_metadata(&path)?;
-        if metadata.is_dir() {
-            for entry in std::fs::read_dir(&path)? {
-                let entry = entry?;
-                if path == data
-                    && [MARKER, TRANSITION, PENDING]
-                        .iter()
-                        .any(|name| entry.file_name() == *name)
-                {
-                    continue;
+        {
+            let _operation = observation.operation(Cost::Scan);
+            let metadata = std::fs::symlink_metadata(&path)?;
+            if metadata.is_dir() {
+                for entry in std::fs::read_dir(&path)? {
+                    let entry = entry?;
+                    if path == data
+                        && [MARKER, TRANSITION, PENDING]
+                            .iter()
+                            .any(|name| entry.file_name() == *name)
+                    {
+                        continue;
+                    }
+                    pending.push(entry.path());
                 }
-                pending.push(entry.path());
             }
         }
-        let entry = capture(data, &path, transition)?;
+        observation.add(Counter::EntriesSeen, 1);
+        let entry = {
+            let _operation = observation.operation(Cost::Capture);
+            capture(data, &path, transition)?
+        };
         // On retries an already migrated inode needs no new transaction. The
         // durable pending batch has already restored its original mode/xattrs.
         if entry.needs_apply {
+            observation.add(Counter::EntriesChanged, 1);
             batch.push(entry);
         }
         if batch.len() == 32 || pending.is_empty() && !batch.is_empty() {
-            atomic_write(&data.join(PENDING), &serde_json::to_vec(&batch)?).await?;
-            replay(data).await?;
+            let bytes = serde_json::to_vec(&batch)?;
+            publish(&data.join(PENDING), &bytes, observation).await?;
+            observation.add(Counter::PendingBytesWritten, bytes.len() as u64);
+            observation.add(Counter::BatchesPublished, 1);
+            replay(data, observation).await?;
             batch.clear();
         }
     }
-    atomic_write(&data.join(MARKER), &serde_json::to_vec(&transition.target)?).await?;
-    remove(data, TRANSITION).await
+    publish(
+        &data.join(MARKER),
+        &serde_json::to_vec(&transition.target)?,
+        observation,
+    )
+    .await?;
+    remove(data, TRANSITION, observation).await
 }
 
 /// The transition itself travels with the disk. Complete a partially applied
 /// mapping before starting another, even when recovery happens on a third node.
-pub(in crate::native) async fn reconcile(data: &Path, identity: &Identity) -> Result<()> {
+pub(in crate::native) async fn reconcile(
+    data: &Path,
+    identity: &Identity,
+    observation: &Trace,
+) -> Result<()> {
     match tokio::fs::read(data.join(TRANSITION)).await {
-        Ok(bytes) => migrate(data, &serde_json::from_slice::<Transition>(&bytes)?).await?,
+        Ok(bytes) => {
+            observation.add(Counter::ReplayTransition, 1);
+            migrate(
+                data,
+                &serde_json::from_slice::<Transition>(&bytes)?,
+                observation,
+            )
+            .await?;
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
         Err(error) => return Err(error.into()),
     }
@@ -303,19 +352,127 @@ pub(in crate::native) async fn reconcile(data: &Path, identity: &Identity) -> Re
         Err(error) => return Err(error.into()),
     };
     if previous.as_ref() == Some(identity) {
+        observation.add(Counter::MarkerMatch, 1);
         return Ok(());
     }
     let transition = Transition {
         previous,
         target: identity.clone(),
     };
-    atomic_write(&data.join(TRANSITION), &serde_json::to_vec(&transition)?).await?;
-    migrate(data, &transition).await
+    publish(
+        &data.join(TRANSITION),
+        &serde_json::to_vec(&transition)?,
+        observation,
+    )
+    .await?;
+    observation.add(Counter::NewTransition, 1);
+    migrate(data, &transition, observation).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn reconcile(data: &Path, identity: &Identity) -> Result<()> {
+        super::reconcile(data, identity, &Trace::default()).await
+    }
+
+    fn count(report: &serde_json::Value, counter: Counter) -> u64 {
+        let counter = serde_json::to_value(counter).unwrap();
+        report["counters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|value| value["counter"] == counter)
+            .unwrap()["value"]
+            .as_u64()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn observation_counts_real_batches_and_preserves_the_identity_fast_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let data = directory.path();
+        let previous = Identity {
+            user: "old-fixture".into(),
+            root_uid: 900,
+            root_gid: 901,
+            subuid: 100000,
+            subgid: 100000,
+            host_engine: None,
+        };
+        let target = Identity {
+            user: "new-fixture".into(),
+            root_uid: 902,
+            root_gid: 903,
+            subuid: 200000,
+            subgid: 200000,
+            host_engine: None,
+        };
+        atomic_write(&data.join(MARKER), &serde_json::to_vec(&previous).unwrap())
+            .await
+            .unwrap();
+        let mut acl = 2u32.to_le_bytes().to_vec();
+        for (tag, permissions, id) in [
+            (1u16, 6u16, u32::MAX),
+            (2, 4, 100010),
+            (4, 4, u32::MAX),
+            (16, 4, u32::MAX),
+            (32, 0, u32::MAX),
+        ] {
+            acl.extend(tag.to_le_bytes());
+            acl.extend(permissions.to_le_bytes());
+            acl.extend(id.to_le_bytes());
+        }
+        for index in 0..33 {
+            let path = data.join(format!("entry-{index}"));
+            std::fs::write(&path, b"unchanged payload").unwrap();
+            set_attribute(&path, "system.posix_acl_access", &acl).unwrap();
+        }
+        let registry = crate::native::bootstrap::Registry::new("fixture-runtime".into(), None);
+        let id = crate::config::id();
+        let scope = registry.begin(&id);
+        super::reconcile(data, &target, &scope.trace())
+            .await
+            .unwrap();
+        let report = serde_json::to_value(registry.get(&id).unwrap()).unwrap();
+        assert_eq!(count(&report, Counter::EntriesSeen), 34);
+        assert_eq!(count(&report, Counter::EntriesChanged), 33);
+        assert_eq!(count(&report, Counter::EntriesApplied), 33);
+        assert_eq!(count(&report, Counter::BatchesPublished), 2);
+        assert_eq!(count(&report, Counter::SyncfsCompleted), 2);
+        assert_eq!(count(&report, Counter::PendingRetired), 2);
+        assert_eq!(count(&report, Counter::DirectorySyncsCompleted), 7);
+        assert_eq!(
+            count(&report, Counter::PendingBytesWritten),
+            count(&report, Counter::PendingBytesRead)
+        );
+        assert!(count(&report, Counter::PendingBytesRead) > 0);
+        assert!(!data.join(PENDING).exists());
+        assert!(!data.join(TRANSITION).exists());
+        assert_eq!(
+            std::fs::read(data.join("entry-0")).unwrap(),
+            b"unchanged payload"
+        );
+        let migrated_acl = attribute(&data.join("entry-0"), "system.posix_acl_access")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            u32::from_le_bytes(migrated_acl[16..20].try_into().unwrap()),
+            200010
+        );
+
+        let second_id = crate::config::id();
+        let second = registry.begin(&second_id);
+        super::reconcile(data, &target, &second.trace())
+            .await
+            .unwrap();
+        let fast = serde_json::to_value(registry.get(&second_id).unwrap()).unwrap();
+        assert_eq!(count(&fast, Counter::MarkerMatch), 1);
+        assert_eq!(count(&fast, Counter::EntriesSeen), 0);
+        assert_eq!(count(&fast, Counter::BatchesPublished), 0);
+        assert_eq!(count(&fast, Counter::SyncfsCompleted), 0);
+    }
 
     #[test]
     fn capability_and_acl_ids_follow_the_namespace_mapping() {
@@ -490,6 +647,10 @@ mod tests {
             target: identity.clone(),
         };
         let entry = capture(&data, &target, &transition).unwrap();
+        // An already matching marker must not skip a still-pending transition.
+        atomic_write(&data.join(MARKER), &serde_json::to_vec(&identity).unwrap())
+            .await
+            .unwrap();
         atomic_write(
             &data.join(TRANSITION),
             &serde_json::to_vec(&transition).unwrap(),
@@ -506,9 +667,13 @@ mod tests {
         // Holding this inode prevents unlink/create from accidentally reusing it.
         let old_target = std::fs::File::open(&target).unwrap();
 
-        let bindings = crate::native::home::prepare_for_identity(&source, &data, &identity)
-            .await
-            .unwrap();
+        let registry = crate::native::bootstrap::Registry::new("fixture-runtime".into(), None);
+        let id = crate::config::id();
+        let scope = registry.begin(&id);
+        let bindings =
+            crate::native::home::prepare_for_identity(&source, &data, &identity, &scope.trace())
+                .await
+                .unwrap();
 
         assert_eq!(old_target.metadata().unwrap().mode() & 0o7777, 0o640);
         let fresh = std::fs::metadata(&target).unwrap();
@@ -524,6 +689,11 @@ mod tests {
             && binding.read_only));
         assert!(!data.join(PENDING).exists());
         assert!(!data.join(TRANSITION).exists());
+        let report = serde_json::to_value(registry.get(&id).unwrap()).unwrap();
+        assert_eq!(count(&report, Counter::ReplayTransition), 1);
+        assert_eq!(count(&report, Counter::MarkerMatch), 1);
+        assert_eq!(count(&report, Counter::NewTransition), 0);
+        assert_eq!(count(&report, Counter::SyncfsCompleted), 1);
         assert_eq!(
             serde_json::from_slice::<Identity>(&std::fs::read(data.join(MARKER)).unwrap()).unwrap(),
             identity
@@ -562,7 +732,7 @@ mod tests {
         .await
         .unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        replay(data).await.unwrap();
+        replay(data, &Trace::default()).await.unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o7777, 0o640);
         assert!(!data.join(PENDING).exists());
     }
