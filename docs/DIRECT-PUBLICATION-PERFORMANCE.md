@@ -34,12 +34,21 @@ buffers, codec workspaces and other publications also consume memory.
 
 ## Reproduce in isolated CI
 
-Use the pinned Rust toolchain and the safe backend launcher. The opt-in workflow
-runs all-target Clippy and the backend suite, then preserves the measurement log
-as `direct-publication-measurement`. It contacts only a loopback object server
-with synthetic credentials, not a real provider or live disk.
+Use the pinned Rust toolchain and the safe backend launcher. Measurement mode
+runs all-target Clippy and this fixture only, then preserves the log as
+`direct-publication-measurement`. Its job is named `publication measurement`,
+so its success does not stand for the full backend suite. Run ordinary backend
+or complete qualification separately on the same commit. This keeps independent
+checks from duplicating the full workspace suite ahead of the benchmark in one
+job budget. Existing deadlines and full/default qualification remain unchanged.
+The fixture contacts only a loopback object server with synthetic credentials,
+not a real provider or live disk.
 
 ```sh
+# Ordinary backend/Clippy/namespace/doctest qualification.
+gh workflow run ci.yaml --ref YOUR_BRANCH -f backend-only=true
+
+# Separate measurement job; this does not replace ordinary qualification.
 gh workflow run ci.yaml --ref YOUR_BRANCH \
   -f backend-only=true -f publication-measurement=true
 ```

@@ -11,7 +11,7 @@ on:
         type: boolean
         default: false
       publication-measurement:
-        description: Measure the controlled loopback direct publication fixture (backend-only)
+        description: Run only the controlled publication measurement after Clippy (requires backend-only)
         type: boolean
         default: false
       browser-workers:
@@ -165,6 +165,7 @@ jobs:
       - name: Check all Rust targets, including the required ublk transport
         run: pnpm validate:pr rust
   backend:
+    name: ${{ inputs.backend-only == true && inputs.publication-measurement == true && 'publication measurement' || 'backend' }}
     services:
       postgres:
         image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
@@ -203,6 +204,7 @@ jobs:
         if: inputs.backend-only == true
         run: pnpm validate:pr rust
       - name: Run backend tests across binaries with isolated credentials
+        if: inputs.backend-only != true || inputs.publication-measurement != true
         run: |
           set -o pipefail
           node scripts/test-backend.mjs --nextest --test-threads 8 --no-fail-fast --color never --status-level pass 2>&1 | tee backend-tests.log
@@ -219,10 +221,13 @@ jobs:
           path: direct-publication-measurement.log
           retention-days: 14
       - name: Measure the bounded bootstrap observer without filesystem work
+        if: inputs.backend-only != true || inputs.publication-measurement != true
         run: node scripts/test-backend.mjs -p cairn-installation --lib native::bootstrap::tests::observation_hot_path_measurement -- --exact --nocapture
       - name: Qualify native backend namespace isolation with ordinary private bind mounts
+        if: inputs.backend-only != true || inputs.publication-measurement != true
         run: node scripts/test-native-namespace.mjs --sudo
       - name: Check Rust documentation examples
+        if: inputs.backend-only != true || inputs.publication-measurement != true
         run: node scripts/test-backend.mjs --doc
       - name: Qualify the resolved OpenCode release against its native adapter
         if: inputs.backend-only != true
