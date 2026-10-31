@@ -9,6 +9,52 @@ use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 use std::{path::Path, time::Instant};
 
+// Count Rust allocator requests in this opt-in measurement executable. SQLite's
+// C allocator is outside this counter. Totals are process-wide, so run alone.
+struct CountingAllocator;
+
+static ALLOCATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static ALLOCATED_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+// SAFETY: allocation, reallocation and deallocation are delegated to System
+// with the same pointer and layout supplied by the caller.
+unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        ALLOCATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        ALLOCATED_BYTES.fetch_add(layout.size() as u64, std::sync::atomic::Ordering::Relaxed);
+        // SAFETY: the allocator contract supplies a valid layout.
+        unsafe { std::alloc::GlobalAlloc::alloc(&std::alloc::System, layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+        // SAFETY: the caller supplies a pointer and layout from this allocator.
+        unsafe { std::alloc::GlobalAlloc::dealloc(&std::alloc::System, ptr, layout) }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, size: usize) -> *mut u8 {
+        ALLOCATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        ALLOCATED_BYTES.fetch_add(size as u64, std::sync::atomic::Ordering::Relaxed);
+        // SAFETY: the caller supplies a valid pointer, layout and new size.
+        unsafe { std::alloc::GlobalAlloc::realloc(&std::alloc::System, ptr, layout, size) }
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: CountingAllocator = CountingAllocator;
+
+fn allocations() -> (u64, u64) {
+    use std::sync::atomic::Ordering;
+    (
+        ALLOCATIONS.load(Ordering::Relaxed),
+        ALLOCATED_BYTES.load(Ordering::Relaxed),
+    )
+}
+
+fn allocation_delta(before: (u64, u64)) -> serde_json::Value {
+    let after = allocations();
+    json!({ "requests": after.0 - before.0, "requestedBytes": after.1 - before.1 })
+}
+
 fn cpu() -> i64 {
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
     unsafe {

@@ -382,6 +382,10 @@ class ChatRenderingBenchmarkDeviceTest {
                         Triple(40, 2000, "prose"),
                         Triple(400, 2000, "prose"),
                         Triple(2000, 2000, "prose"),
+                        // Qualification for the timeline spec's synthetic history sizes.
+                        Triple(100, 2000, "prose"),
+                        Triple(10000, 2000, "prose"),
+                        Triple(100000, 2000, "prose"),
                         Triple(40, 20000, "prose"),
                         Triple(40, 100000, "prose"),
                         Triple(40, 20000, "code"),
@@ -423,6 +427,12 @@ class ChatRenderingBenchmarkDeviceTest {
                     }
                     Thread.sleep(150)
                     val scroll = Performance.report()
+                    android.util.Log.i(
+                        "CairnBenchmark",
+                        "historyRows=$count characters=$length shape=$shape openingMs=$openingMs " +
+                            "updateP50Ms=${stats(updateTimes)["p50Ms"]} " +
+                            "updateP95Ms=${stats(updateTimes)["p95Ms"]} views=$initialViewCount",
+                    )
                     add(
                         buildJsonObject {
                             put("historyRows", count)

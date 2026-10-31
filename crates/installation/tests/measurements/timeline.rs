@@ -2,7 +2,7 @@
 //! frozen A6 event mapping as reference: the base writer without a projection and the
 //! base UI reads that carried every reply snapshot. The candidate writes each event
 //! with its timeline card and reads windows of UI events plus their cards.
-use super::{connection, cpu, distribution, measured};
+use super::{allocation_delta, allocations, connection, cpu, distribution, measured};
 use cairn_contracts::{EventKind, RunState};
 use cairn_installation::store::{Db, Store};
 use rusqlite::Connection;
@@ -192,6 +192,7 @@ async fn timeline_storage_layouts() {
                 .unwrap();
                 Db(&db).admit_run(&state, None, &json!({}), None).unwrap();
                 let tx = db.unchecked_transaction().unwrap();
+                let allocated_before = allocations();
                 let start_cpu = cpu();
                 let started = std::time::Instant::now();
                 for n in 0..count {
@@ -200,6 +201,7 @@ async fn timeline_storage_layouts() {
                 tx.commit().unwrap();
                 let bulk_us = started.elapsed().as_micros();
                 let bulk_cpu = cpu() - start_cpu;
+                let bulk_allocations = allocation_delta(allocated_before);
                 let opening_wire_bytes = read(&db, reference, i64::MAX, true).len();
                 for _ in 0..2 {
                     for n in 0..50 {
@@ -208,6 +210,7 @@ async fn timeline_storage_layouts() {
                 }
                 let mut batches = Vec::new();
                 let mut batch_bytes = 0;
+                let allocated_before = allocations();
                 let start_cpu = cpu();
                 for n in 0..100 {
                     batch_bytes += measured(&mut batches, || {
@@ -216,7 +219,9 @@ async fn timeline_storage_layouts() {
                     .len();
                 }
                 let batch_cpu = cpu() - start_cpu;
+                let batch_allocations = allocation_delta(allocated_before);
                 let mut opening = Vec::new();
+                let allocated_before = allocations();
                 let start_cpu = cpu();
                 for _ in 0..100 {
                     std::hint::black_box(measured(&mut opening, || {
@@ -224,6 +229,7 @@ async fn timeline_storage_layouts() {
                     }));
                 }
                 let opening_cpu = cpu() - start_cpu;
+                let opening_allocations = allocation_delta(allocated_before);
                 let mut cold = Vec::new();
                 let start_cpu = cpu();
                 for _ in 0..50 {
@@ -261,6 +267,7 @@ async fn timeline_storage_layouts() {
                     Option<i64>,
                 ) = (None, None);
                 let mut writes = Vec::new();
+                let allocated_before = allocations();
                 let start_cpu = cpu();
                 for n in count..count + 200 {
                     measured(&mut writes, || {
@@ -270,6 +277,7 @@ async fn timeline_storage_layouts() {
                     });
                 }
                 let write_cpu = cpu() - start_cpu;
+                let write_allocations = allocation_delta(allocated_before);
                 let wal =
                     std::fs::metadata(format!("{}-wal", path.display())).map_or(0, |m| m.len());
                 db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
@@ -299,6 +307,12 @@ async fn timeline_storage_layouts() {
                         "connectionColdOpening": distribution(&cold),
                         "osColdOpening": os_cold,
                         "write": distribution(&writes),
+                        "rustAllocations": {
+                            "bulkWrite": bulk_allocations,
+                            "batch100": batch_allocations,
+                            "opening100": opening_allocations,
+                            "write200": write_allocations,
+                        },
                         "cpuUs": {
                             "bulkWrite": bulk_cpu,
                             "batch100": batch_cpu,
