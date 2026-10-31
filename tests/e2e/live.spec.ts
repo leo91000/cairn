@@ -189,25 +189,31 @@ for (const kind of ['chat', 'task'] as const) {
       path = `/chats/${chat.id}`
     }
 
+    const events: Parameters<typeof workspace.service.store.seedEvents>[1] = []
     for (let i = 0; i < 100; i++) {
       const text = `Buffered message ${i}: earlier conversation context.`
-      workspace.service.store.event(run.id, 'item.completed', text, { item: { id: `buffer-${i}`, type: 'agent_message', text } })
+      events.push({ type: 'item.completed', text, payload: { item: { id: `buffer-${i}`, type: 'agent_message', text } } })
     }
 
     // Reads fold into bounded groups; short output should still prefetch older pages.
     for (let i = 0; i < 250; i++) {
-      workspace.service.store.event(run.id, 'item.completed', 'Checked a file', {
-        item: {
-          id: `fold-${i}`,
-          type: 'command_execution',
-          command: 'cat README.md',
-          exit_code: 0,
-          aggregated_output: historyNoise(`fold-${i}`),
+      events.push({
+        type: 'item.completed',
+        text: 'Checked a file',
+        payload: {
+          item: {
+            id: `fold-${i}`,
+            type: 'command_execution',
+            command: 'cat README.md',
+            exit_code: 0,
+            aggregated_output: historyNoise(`fold-${i}`),
+          },
         },
       })
     }
 
-    workspace.service.store.event(run.id, 'item.completed', 'Latest short answer', { item: { id: 'latest-short', type: 'agent_message', text: 'Latest short answer' } })
+    events.push({ type: 'item.completed', text: 'Latest short answer', payload: { item: { id: 'latest-short', type: 'agent_message', text: 'Latest short answer' } } })
+    workspace.service.store.seedEvents(run.id, events)
     const requests: string[] = []
     page.on('request', (request) => {
       if (request.url().includes('/history?'))
