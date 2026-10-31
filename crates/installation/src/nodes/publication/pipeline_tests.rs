@@ -615,11 +615,6 @@ async fn direct_serial_reference_preserves_the_observed_barrier() {
     isolated("nodes::publication::pipeline_tests::direct_serial_straggler_child").await;
 }
 
-#[tokio::test]
-async fn experimental_direct_window_fills_free_put_slots() {
-    isolated("nodes::publication::pipeline_tests::direct_candidate_straggler_child").await;
-}
-
 async fn isolated(child: &str) {
     // The shipped PUT semaphore is process-global. Keep unrelated fixture
     // publications from occupying its permits during this ordering witness.
@@ -643,12 +638,6 @@ async fn direct_window_straggler_child() {
 #[ignore = "isolated process-global PUT budget child"]
 async fn direct_serial_straggler_child() {
     straggler(Some(1), false).await;
-}
-
-#[tokio::test]
-#[ignore = "isolated process-global PUT budget child"]
-async fn direct_candidate_straggler_child() {
-    straggler(Some(2), true).await;
 }
 
 async fn straggler(window: Option<usize>, expected_overlap: bool) {

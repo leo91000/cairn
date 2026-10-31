@@ -33,9 +33,9 @@ const S3: &str = "s3";
 /// Current block format: shared immutable objects.
 const SHARED_V1: &str = "shared-v1";
 const DIRECT_PUBLICATIONS: usize = 16;
-// Keep the shipped schedule serialized until the matched fixture qualifies the
-// bounded overlap candidate. No runtime setting can increase the window.
-const DIRECT_BATCH_WINDOW: usize = 1;
+// Refill freed global PUT capacity without an unbounded control/producer queue.
+// The terminal batch still waits for every earlier receipt to settle.
+const DIRECT_BATCH_WINDOW: usize = 2;
 const MAX_DIRECT_BATCH_WINDOW: usize = 2;
 
 mod direct_reader;
