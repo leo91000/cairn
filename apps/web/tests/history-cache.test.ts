@@ -102,3 +102,36 @@ it('bounds cached history by bytes and invalidates offsets only when a prefix is
   expect(saved).toMatchObject({ oldest: 3, hasOlder: true, cursor: 4 })
   expect(saved?.position).toBeUndefined()
 })
+
+it('retains a bounded suffix of timeline cards together with their source events', async () => {
+  const events = Array.from({ length: 4 }, (_, i) => ({ ...record().events[0], id: i + 1 }))
+  const entries = events.map(event => ({
+    id: `reply:${event.id}`,
+    runId: 'r',
+    position: event.id === 4 ? 1 : event.id,
+    source: event.id,
+    revision: event.id,
+    turn: 1,
+    attempt: 1,
+    createdAt: 1,
+    updatedAt: 1,
+    content: {
+      kind: 'agentMessage' as const,
+      itemId: `reply:${event.id}`,
+      state: 'done' as const,
+      text: 'x'.repeat(600 * 1024),
+    },
+  }))
+  await writeHistory('s', 'cards', {
+    ...record(),
+    cursor: 4,
+    events,
+    entries,
+    position: { top: 50, follow: false },
+  })
+  const saved = await readHistory('s', 'cards')
+  expect(saved?.events.map(event => event.id)).toEqual([3, 4])
+  expect(saved?.entries.map(card => card.source)).toEqual([3, 4])
+  expect(saved).toMatchObject({ oldest: 3, hasOlder: true, cursor: 4 })
+  expect(saved?.position).toBeUndefined()
+})

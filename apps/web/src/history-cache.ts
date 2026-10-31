@@ -207,10 +207,15 @@ export function clearHistoryCache() {
 
 export function recentHistory(value: CachedHistory): CachedHistory {
   let size = JSON.stringify(value.state).length * 2 + 4096
-  const ordered = value.events.toSorted((a, b) => a.id - b.id)
+  const groups = new Map<number, number>()
+  for (const event of value.events)
+    groups.set(event.id, (groups.get(event.id) ?? 0) + JSON.stringify(event).length * 2 + 2)
+  for (const card of value.entries)
+    groups.set(card.source, (groups.get(card.source) ?? 0) + JSON.stringify(card).length * 2 + 2)
+  const ordered = [...groups.keys()].toSorted((a, b) => a - b)
   let start = ordered.length
   while (start > 0) {
-    const bytes = JSON.stringify(ordered[start - 1]).length * 2 + 2
+    const bytes = groups.get(ordered[start - 1]!)!
     if (size + bytes > MAX_HISTORY)
       break
     size += bytes
@@ -219,11 +224,12 @@ export function recentHistory(value: CachedHistory): CachedHistory {
 
   if (!start)
     return value
-  const oldest = ordered[start]?.id ?? value.cursor + 1
+  const oldest = ordered[start] ?? value.cursor + 1
   const events = value.events.filter(e => e.id >= oldest)
   return {
     ...value,
     events,
+    entries: value.entries.filter(card => card.source >= oldest),
     oldest,
     hasOlder: true,
     position: undefined,

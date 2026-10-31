@@ -141,6 +141,52 @@ class HistoryCacheTest {
         }
 
     @Test
+    fun `timeline cards and source events are trimmed together to a bounded suffix`() =
+        runBlocking {
+            val events =
+                (1L..4L).map { RunEvent(id = it, createdAt = it, type = "output", text = "") }
+            val cards =
+                (1L..4L).map {
+                    TimelineCard(
+                        id = "reply:$it",
+                        runId = "r",
+                        position = if (it == 4L) 1 else it,
+                        source = it,
+                        revision = it,
+                        turn = 1,
+                        attempt = 1,
+                        createdAt = it,
+                        updatedAt = it,
+                        content =
+                            build.cairn.contracts.TimelineContent.B(
+                                itemId = "reply:$it",
+                                state = "done",
+                                text = "x".repeat(1200 * 1024),
+                            ),
+                    )
+                }
+            cache()
+                .save(
+                    "cards",
+                    CachedHistory(
+                        4,
+                        "v2:r:1",
+                        LiveState(),
+                        events,
+                        entries = cards,
+                        position = ReadingPosition(5, 10, false),
+                    ),
+                    true,
+                )
+            val restored = cache().read("cards")!!
+            assertEquals(listOf(3L, 4L), restored.events.map { it.id })
+            assertEquals(listOf(3L, 4L), restored.entries.map { it.source })
+            assertEquals(3L, restored.oldest)
+            assertTrue(restored.hasOlder)
+            assertNull(restored.position)
+        }
+
+    @Test
     fun `disk restores complete snapshots and position across instances and isolates sessions`() =
         runBlocking {
             val first = cache()
