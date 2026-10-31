@@ -15,6 +15,12 @@ impl CpuTime {
         let started = self.0?;
         read()?.checked_sub(started)
     }
+
+    pub(super) fn checkpoint(&mut self) -> Option<Duration> {
+        let started = self.0?;
+        self.0 = read();
+        self.0?.checked_sub(started)
+    }
 }
 
 #[cfg(target_os = "linux")]

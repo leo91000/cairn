@@ -351,12 +351,17 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
             }
             let before = db.0.total_changes();
             let discarded_before = discarded.load(Ordering::Relaxed);
+            let mut timing = performance::TransactionTimings::new(caller);
             let tx = rusqlite::Transaction::new_unchecked(
                 db.0,
                 rusqlite::TransactionBehavior::Immediate,
-            )?;
-            let value = f(&mut Db(&tx))?;
-            tx.commit()?;
+            )
+            .inspect_err(|_| timing.failed())?;
+            timing.begun();
+            let value = f(&mut Db(&tx)).inspect_err(|_| timing.failed())?;
+            timing.executed();
+            tx.commit().inspect_err(|_| timing.failed())?;
+            timing.committed();
             // Notify only after commit, excluding rows undone at run savepoints.
             if db.0.total_changes() - before
                 > discarded
