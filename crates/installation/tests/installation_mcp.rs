@@ -3302,6 +3302,66 @@ async fn chat_recovery_tools_preserve_confirmation_and_retention_rules() {
 }
 
 #[tokio::test]
+async fn trashed_conversations_reject_timeline_content_on_both_mcp_surfaces() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let (target, _) = active_run(&s, &main).await;
+    let run_id = target["id"].as_str().unwrap();
+    s.store
+        .event(
+            run_id,
+            &EventKind::EngineRetry,
+            "retry",
+            Some(json!({"type":"engine.retry", "attempt":1, "reason":"overloaded"})),
+        )
+        .await
+        .unwrap();
+    s.store
+        .change_run(
+            run_id,
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Failed),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let mut chat = s.chat_create(json!({})).await.unwrap();
+    chat["runId"] = target["id"].clone();
+    let chat_id = chat["id"].as_str().unwrap().to_owned();
+    s.store.save_conversation_boundary(chat).await.unwrap();
+
+    let timeline = call(
+        &s,
+        &configuration,
+        "read_run_timeline",
+        json!({"runId": run_id}),
+    )
+    .await;
+    let entry = result(&timeline)["entries"][0]["entry"].clone();
+    let entry_id = entry["id"].as_str().unwrap().to_owned();
+    let inputs = [
+        json!({"runId":run_id, "entryId":entry_id}),
+        json!({"runId":run_id, "entryId":entry_id, "timelineSnapshot":entry}),
+    ];
+    for input in &inputs {
+        result(&call(&s, &configuration, "read_run_content", input.clone()).await);
+        result(&public_call(&s, &["read"], "read_run_content", input.clone()).await);
+    }
+
+    let deleted = call(&s, &configuration, "delete_chat", json!({"chatId":chat_id})).await;
+    assert_eq!(result(&deleted)["lifecycle"], "trash");
+    for input in inputs {
+        let installation = call(&s, &configuration, "read_run_content", input.clone()).await;
+        let public = public_call(&s, &["read"], "read_run_content", input).await;
+        assert_eq!(installation["result"]["isError"], true);
+        assert_eq!(public["result"]["isError"], true);
+    }
+}
+
+#[tokio::test]
 async fn code_mode_discovers_schemas_and_composes_chat_and_artifact_reads() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;

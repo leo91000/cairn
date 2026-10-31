@@ -276,6 +276,9 @@ impl RunOperation {
                         )?;
                         let db = Db(&tx);
                         authorize(&db)?;
+                        let run = input.run_id.to_string();
+                        db.require_run(&run)?;
+                        crate::conversation_lifecycle::require_active_run(&db, &run)?;
                         crate::mcp_server::read_run_content(&db, &input)
                     })
                     .await
