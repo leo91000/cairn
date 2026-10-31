@@ -48,17 +48,40 @@ test('chat groups visible calls despite diagnostics, updates and global event ID
   })
   const chat = await workspace.api('/api/chats', 'POST', {})
   workspace.service.store.put('chats', { ...chat, runId: run.id, title: 'Visible tool groups' })
+  const seeded: Parameters<typeof workspace.service.store.seedInterleavedEvents>[0] = []
   for (let i = 0; i < 65; i++) {
     const item = { id: `group-tool-${i}`, type: 'command_execution', command: `echo grouping-${i}` }
-    workspace.service.store.event(run.id, 'item.started', '', { item: { ...item, status: 'in_progress' } })
-    workspace.service.store.event(run.id, 'diagnostic', 'heartbeat')
-    workspace.service.store.event(original.id, 'diagnostic', 'Other conversation')
-    workspace.service.store.event(run.id, 'item.updated', '', { item })
-    workspace.service.store.event(run.id, 'item.completed', '', { item: { ...item, exit_code: 0 } })
+    seeded.push(
+      {
+        runId: run.id,
+        type: 'item.started',
+        text: '',
+        payload: { item: { ...item, status: 'in_progress' } },
+      },
+      { runId: run.id, type: 'diagnostic', text: 'heartbeat' },
+      { runId: original.id, type: 'diagnostic', text: 'Other conversation' },
+      {
+        runId: run.id,
+        type: 'item.updated',
+        text: '',
+        payload: { item },
+      },
+      {
+        runId: run.id,
+        type: 'item.completed',
+        text: '',
+        payload: { item: { ...item, exit_code: 0 } },
+      },
+    )
   }
+
+  workspace.service.store.seedInterleavedEvents(seeded)
 
   // Keep this test about grouping rather than paging; paging has a separate modal/anchor test.
   const events = workspace.service.store.events(run.id, 0, 500) as RunEvent[]
+  expect(events).toHaveLength(260)
+  for (let i = 0; i < 65; i++)
+    expect(events[i * 4 + 2].id).toBe(events[i * 4 + 1].id + 2)
   await useRelayForHttpMocks(page)
   await page.route(`**/chats/${chat.id}/stream*`, route => route.fulfill({
     contentType: 'text/event-stream',
@@ -240,17 +263,25 @@ for (const kind of ['chat', 'task'] as const) {
 test('an older page preserves expanded newer tools and their open detail sheet', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
   const run = workspace.service.store.runs().find(run => run.status === 'succeeded' && run.trigger !== 'chat')!
-  workspace.service.store.event(run.id, 'turn.started', '')
+  const seeded: Parameters<typeof workspace.service.store.seedEvents>[1] = [
+    { type: 'turn.started', text: '' },
+  ]
   for (let i = 0; i < 260; i++) {
-    workspace.service.store.event(run.id, 'item.completed', '', {
-      item: {
-        id: `inspect-${i}`,
-        type: 'command_execution',
-        command: `echo inspect-${i}`,
-        exit_code: 0,
+    seeded.push({
+      type: 'item.completed',
+      text: '',
+      payload: {
+        item: {
+          id: `inspect-${i}`,
+          type: 'command_execution',
+          command: `echo inspect-${i}`,
+          exit_code: 0,
+        },
       },
     })
   }
+
+  workspace.service.store.seedEvents(run.id, seeded)
 
   let release!: () => void
   const gate = new Promise<void>((resolve) => {
@@ -661,16 +692,18 @@ test('a cached run restores the reading offset while its stream is still connect
 })
 
 test('following the latest output resumes a long backlog on the recent window, while a reader keeps its place', async ({ page, workspace }) => {
-  // Each of the 560 durable fixture appends starts the real Rust helper. Keep
-  // that setup time separate from the unchanged per-assertion response limits.
+  // Each phase is seeded before its navigation so the replay boundaries stay distinct.
   test.setTimeout(120_000)
   await useRelayForHttpMocks(page)
   const run = workspace.service.store.runs()[0]
   const write = (from: number, to: number) => {
+    const events: Parameters<typeof workspace.service.store.seedEvents>[1] = []
     for (let i = from; i < to; i++) {
       const text = `Resume line ${String(i).padStart(3, '0')}. A paragraph to retain a stable reading position.`
-      workspace.service.store.event(run.id, 'item.completed', text, { item: { id: `resume-${i}`, type: 'agent_message', text } })
+      events.push({ type: 'item.completed', text, payload: { item: { id: `resume-${i}`, type: 'agent_message', text } } })
     }
+
+    workspace.service.store.seedEvents(run.id, events)
   }
 
   const line = (i: number) => page.locator('.activity-message').filter({ hasText: `Resume line ${String(i).padStart(3, '0')}.` })
