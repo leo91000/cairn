@@ -9,7 +9,7 @@ use crate::{
     rpc::jsonrpc::{Frame, Message},
     service::Service,
     store::Db,
-    validation::{parse, text},
+    validation::{encoded_size, parse, text},
 };
 use axum::{
     Json,
@@ -786,25 +786,6 @@ pub(crate) async fn operation(
     invoke(s, name, args, None).await
 }
 
-/// Count wire bytes without allocating a second buffer for large raw engine
-/// payloads. Sizing a page must not decode or copy those payloads again.
-fn encoded_size(value: &impl Serialize) -> Result<usize> {
-    struct Counter(usize);
-    impl std::io::Write for Counter {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0 += bytes.len();
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut counter = Counter(0);
-    serde_json::to_writer(&mut counter, value)?;
-    Ok(counter.0)
-}
-
 fn event_preview(event: cairn_contracts::RunEvent) -> Result<cairn_contracts::RunEventPage> {
     use cairn_contracts::{EventPreview, RunEventPage};
     let total_bytes = encoded_size(&event)? as u64;
@@ -1067,7 +1048,14 @@ pub(crate) fn read_run_content(
             "Offset must be a UTF-8 byte boundary within the content. Use nextOffset from the previous response.",
         ));
     }
-    let end = data.floor_char_boundary((offset + RUN_PAGE_BYTES).min(data.len()));
+    // Bound the encoded response, including escaping and room for the envelope.
+    // Large plain-text answers can use almost the entire budget instead of
+    // requiring many more full-card checksum reads.
+    let budget = RUN_PAGE_BYTES - 16 * 1024;
+    let mut end = data.floor_char_boundary((offset + budget).min(data.len()));
+    while serde_json::to_vec(&data[offset..end])?.len() > budget {
+        end = data.floor_char_boundary(offset + (end - offset) / 2);
+    }
     let chunk = cairn_contracts::RunContentOutput {
         run_id,
         event_id: args.event_id,

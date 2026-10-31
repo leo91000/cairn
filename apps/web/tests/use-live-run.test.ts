@@ -65,6 +65,62 @@ it('releases list delivery when a conversation is terminally unavailable', async
   expect(vi.mocked(liveConnection).mock.results[0]!.value.close).toHaveBeenCalled()
 })
 
+it('loads a referenced card before exposing a completed stream batch', async () => {
+  const scope = effectScope()
+  scopes.push(scope)
+  const live = scope.run(() => useLiveRun(() => '/runs/r/stream'))!
+  await vi.waitFor(() => expect(liveConnection).toHaveBeenCalled())
+  const card = {
+    id: 'message:1:a',
+    runId: 'r',
+    position: 1,
+    revision: 2,
+    source: 2,
+    turn: 1,
+    attempt: 0,
+    createdAt: 1,
+    updatedAt: 2,
+    content: {
+      kind: 'agentMessage',
+      itemId: 'a',
+      text: 'full answer',
+      state: 'done',
+    },
+  }
+  const data = JSON.stringify(card)
+  let resolve: ((value: unknown) => void) | undefined
+  vi.mocked(api).mockImplementationOnce(() => new Promise((done) => {
+    resolve = done
+  }))
+  const accept = vi.mocked(liveConnection).mock.calls.at(-1)![1]
+  const pending = accept({
+    events: [],
+    entries: [],
+    reset: false,
+    more: false,
+    history: 'v2:r:1',
+    largeEntries: [{
+      id: card.id,
+      position: 1,
+      revision: 2,
+      source: 2,
+      kind: 'agentMessage',
+      text: '',
+    }],
+  }, 2)
+  expect(live.timeline.value).toHaveLength(0)
+  resolve?.({
+    entryId: card.id,
+    offset: 0,
+    totalBytes: new TextEncoder().encode(data).length,
+    sha256: 'a'.repeat(64),
+    data,
+    nextOffset: null,
+  })
+  await pending
+  expect(live.timeline.value).toMatchObject([{ id: card.id, content: { text: 'full answer' } }])
+})
+
 it.each(['navigation', 'hidden', 'dispose'] as const)('retains older history when an outdated copy is saved on %s before receiving a batch', async (reason) => {
   const scope = await cacheScope('test-session')
   const stream = '/chats/a/stream'
@@ -113,7 +169,7 @@ it.each(['navigation', 'hidden', 'dispose'] as const)('retains older history whe
   const reopened = nextScope.run(() => useLiveRun(() => stream))!
   // An ordinary resume does not resend the window boundary; the saved flag owns it.
   const accept = vi.mocked(liveConnection).mock.calls.at(-1)![1]
-  accept({
+  await accept({
     events: [],
     reset: false,
     more: false,

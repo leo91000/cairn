@@ -10,6 +10,8 @@ data class HistoryPage(
     val events: List<RunEvent>,
     val hasOlder: Boolean,
     val history: String,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val largeEntries: List<TimelinePreview>? = null,
     val oldest: Long,
 ) {
     init {}

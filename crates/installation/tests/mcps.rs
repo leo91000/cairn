@@ -155,6 +155,7 @@ async fn read_whole_event(mcp: &Mcp, run: &str, event: i64) -> (String, Value) {
         let response = mcp.bounded("read_run_content", arguments).await;
         assert_ne!(response["result"]["isError"], true, "{response}");
         let chunk = result(&response);
+        assert!(chunk["data"].is_string(), "{response}");
         digest = chunk["sha256"].clone();
         original.push_str(chunk["data"].as_str().unwrap());
         if chunk["nextOffset"].is_null() {

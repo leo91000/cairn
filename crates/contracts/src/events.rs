@@ -169,6 +169,10 @@ pub struct HistoryPage {
     /// Timeline cards that first appeared within this page or last changed in it.
     #[serde(default)]
     pub entries: Vec<TimelineEntry>,
+    /// Oversized timeline cards, fetched in bounded chunks before this page is applied.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(as = "Option<Vec<TimelinePreview>>", optional)]
+    pub large_entries: Vec<TimelinePreview>,
     pub history: String,
     #[ts(type = "number")]
     pub oldest: i64,

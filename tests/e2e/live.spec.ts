@@ -21,6 +21,23 @@ function historyNoise(id: string) {
   return Array.from({ length: 128 }, (_, index) => createHash('sha256').update(`${id}:${index}`).digest('hex')).join('')
 }
 
+test('large timeline answers load completely through bounded content chunks', async ({ page, workspace }) => {
+  const run = workspace.service.store.runs().find(run => run.status === 'succeeded' && run.trigger !== 'chat')!
+  const answer = `${'bounded fragment '.repeat(18_000)}end of large answer`
+  workspace.service.store.event(run.id, 'item.completed', '', {
+    item: { id: 'large-answer', type: 'agent_message', text: answer },
+  })
+  const chunks: number[] = []
+  page.on('response', (response) => {
+    if (response.url().includes('/timeline-content?'))
+      chunks.push(response.status())
+  })
+  await page.goto(workspacePath(`${workspace.url}/runs/${run.id}`))
+  await authenticateWorkspace(page)
+  await expect(page.locator('.activity-message').filter({ hasText: 'end of large answer' })).toBeVisible()
+  expect(chunks.filter(status => status === 200).length).toBeGreaterThan(1)
+})
+
 test('chat groups visible calls despite diagnostics, updates and global event ID gaps', async ({ page, workspace }) => {
   const original = workspace.service.store.runs().find(run => run.status === 'succeeded')!
   const run = workspace.service.store.addRun({

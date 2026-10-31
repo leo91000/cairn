@@ -271,6 +271,57 @@ class LiveSession {
     }
 }
 
+suspend fun CairnApi.readLargeTimeline(
+    path: String,
+    previews: List<build.cairn.contracts.TimelinePreview>,
+): List<TimelineCard> {
+    val cards = mutableListOf<TimelineCard>()
+    for (preview in previews) {
+        val text = StringBuilder()
+        var offset = 0L
+        var checksum: String? = null
+        var total: Long? = null
+        while (true) {
+            val query =
+                "entryId=${segment(preview.id)}&offset=$offset" +
+                    (checksum?.let { "&sha256=${segment(it)}" } ?: "")
+            val part =
+                get<build.cairn.contracts.RunContentOutput>(
+                    path.removeSuffix("/stream") + "/timeline-content?$query"
+                )
+            require(
+                part.entryId == preview.id &&
+                    part.offset == offset &&
+                    (checksum == null || part.sha256 == checksum) &&
+                    (total == null || part.totalBytes == total)
+            ) {
+                "Contenu de la chronologie modifié."
+            }
+            checksum = part.sha256
+            total = part.totalBytes
+            text.append(part.data)
+            val end = offset + part.data.toByteArray(Charsets.UTF_8).size
+            require(end <= part.totalBytes && (part.nextOffset ?: part.totalBytes) == end) {
+                "Longueur de la chronologie invalide."
+            }
+            val next = part.nextOffset ?: break
+            require(next > offset) { "Curseur de chronologie invalide." }
+            offset = next
+        }
+        val card = wireJson.decodeFromString<TimelineCard>(text.toString())
+        require(
+            card.id == preview.id &&
+                card.position == preview.position &&
+                card.revision >= preview.revision &&
+                (card.revision != preview.revision || card.source == preview.source)
+        ) {
+            "Carte de chronologie modifiée."
+        }
+        cards.add(card)
+    }
+    return cards
+}
+
 fun CairnApi.live(path: String, session: LiveSession = LiveSession()): Flow<LiveSnapshot> = flow {
     session.mutex.withLock {
         val generation = streamGeneration.get()
@@ -298,6 +349,7 @@ fun CairnApi.live(path: String, session: LiveSession = LiveSession()): Flow<Live
                 frames(path, cursor, generation, snapshot.history, forceRelay, recent).collect {
                     frame ->
                     val batch = frame.batch
+                    val large = readLargeTimeline(path, batch.largeEntries)
                     require(snapshot.history == null || batch.history != null) {
                         "Révision indisponible"
                     }
@@ -311,7 +363,12 @@ fun CairnApi.live(path: String, session: LiveSession = LiveSession()): Flow<Live
                         batch.oldest != null &&
                             (reset || snapshot.oldest == 0L || batch.oldest <= snapshot.oldest)
                     Performance.measure(PerfOperation.LIVE_REDUCE) {
-                        accumulator.append(batch.events, batch.entries, frame.cursor)
+                        accumulator.append(
+                            batch.events,
+                            batch.entries +
+                                large.map { build.cairn.contracts.TimelineChange.A(it) },
+                            frame.cursor,
+                        )
                     }
                     snapshot =
                         LiveSnapshot(

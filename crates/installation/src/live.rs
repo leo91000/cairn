@@ -299,6 +299,8 @@ impl CardRange {
 struct Batch {
     events: Vec<crate::store::Event>,
     entries: Vec<TimelineChange>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    large_entries: Vec<TimelinePreview>,
     reset: bool,
     more: bool,
     history: String,
@@ -310,7 +312,9 @@ struct Batch {
     state: Option<State>,
 }
 
-use cairn_contracts::{HistoryPage, TimelineChange, TimelineContent, TimelineEntry, TimelineState};
+use cairn_contracts::{
+    HistoryPage, TimelineChange, TimelineContent, TimelineEntry, TimelinePreview, TimelineState,
+};
 
 #[cfg(test)]
 mod read_tests;
@@ -448,7 +452,8 @@ fn read_page(
     let (entries, more_cards) = range.read(db)?;
     let separate_cards = more_cards
         || (!entries.is_empty()
-            && serde_json::to_vec(&entries)?.len() + serde_json::to_vec(&events)?.len()
+            && crate::validation::encoded_size(&entries)?
+                + crate::validation::encoded_size(&events)?
                 > PAGE_BYTES);
     let state = State {
         artifacts: artifacts(db, run_id)?,
@@ -714,10 +719,12 @@ impl Subscription {
         self.history = Some(current.history.clone());
         let changed = self.previous.as_ref() != Some(&current.state);
         if current.draining_cards && !current.entries.is_empty() {
-            let entries = std::mem::take(&mut current.entries);
+            let (entries, large_entries) = split_large(std::mem::take(&mut current.entries))?;
+            self.replies.forget(&large_entries);
             let batch = Batch {
                 events: Vec::new(),
                 entries: self.replies.encode(entries, reset),
+                large_entries,
                 reset,
                 more: true,
                 history: current.history.clone(),
@@ -739,9 +746,12 @@ impl Subscription {
         }
         let has_events = !current.events.is_empty() || !current.entries.is_empty();
         self.cursor = current.events.last().map_or(self.cursor, |e| e.id);
+        let (entries, large_entries) = split_large(current.entries)?;
+        self.replies.forget(&large_entries);
         let batch = Batch {
             events: ui_events(current.events),
-            entries: self.replies.encode(current.entries, reset),
+            entries: self.replies.encode(entries, reset),
+            large_entries,
             reset,
             more: current.more,
             history: current.history,
@@ -800,12 +810,58 @@ pub async fn history(s: &Service, kind: &str, id: &str, input: &Input) -> Result
                 page.has_older = true;
                 page.events.retain(|event| event.id >= page.oldest);
             }
-            page.entries = entries;
+            (page.entries, page.large_entries) = split_large(entries)?;
             page.events = ui_events(std::mem::take(&mut page.events));
             Ok(page)
         })
         .await?;
     Ok(serde_json::to_value(page)?)
+}
+
+/// Fetch a referenced oversized card in bounded, checksum-verified chunks.
+pub async fn content(s: &Service, kind: &str, id: &str, input: &Input) -> Result<Value> {
+    uuid(id)?;
+    let entry = input
+        .query
+        .get("entryId")
+        .cloned()
+        .ok_or_else(|| Error::bad("A timeline entry is required."))?;
+    if entry.is_empty() || entry.chars().count() > 1024 {
+        return Err(Error::bad("Invalid timeline entry."));
+    }
+    let offset = input.number("offset", 0, 0, 9_007_199_254_740_991)?;
+    let sha = input.query.get("sha256").cloned();
+    if sha.as_ref().is_some_and(|value| {
+        value.len() != 64
+            || !value
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    }) {
+        return Err(Error::bad("Invalid content checksum."));
+    }
+    let scope = Scope::new(kind, id, "");
+    s.store
+        .read(move |db| {
+            let tx = rusqlite::Transaction::new_unchecked(
+                db.0,
+                rusqlite::TransactionBehavior::Deferred,
+            )?;
+            let db = Db(&tx);
+            let run = if scope.chat {
+                crate::chats::history_run(&db, &scope.id)?
+            } else {
+                text(&scoped_run(&db, &scope, &Value::Null)?, "id").to_owned()
+            };
+            let args: cairn_contracts::ReadRunContentInput =
+                serde_json::from_value(serde_json::json!({
+                    "runId": run,
+                    "entryId": entry,
+                    "offset": offset,
+                    "sha256": sha,
+                }))?;
+            crate::mcp_server::read_run_content(&db, &args)
+        })
+        .await
 }
 
 /// The UI receives a reply through its timeline card, never as raw snapshots;
@@ -821,12 +877,44 @@ pub fn ui_events(events: Vec<crate::store::Event>) -> Vec<crate::store::Event> {
         .collect()
 }
 
+/// A large card is fetched separately; the reference contains no partial content.
+fn split_large(entries: Vec<TimelineEntry>) -> Result<(Vec<TimelineEntry>, Vec<TimelinePreview>)> {
+    let mut complete = Vec::new();
+    let mut large = Vec::new();
+    for entry in entries {
+        if crate::validation::encoded_size(&entry)? <= PAGE_BYTES - 1024 {
+            complete.push(entry);
+            continue;
+        }
+        let kind = match &entry.content {
+            TimelineContent::UserMessage { .. } => "userMessage",
+            TimelineContent::AgentMessage { .. } => "agentMessage",
+            TimelineContent::Notice { .. } => "notice",
+        };
+        large.push(TimelinePreview {
+            id: entry.id,
+            position: entry.position,
+            revision: entry.revision,
+            source: entry.source,
+            kind: kind.to_owned(),
+            text: String::new(),
+        });
+    }
+    Ok((complete, large))
+}
+
 /// Wire-only compression of streaming replies. Persisted cards and history pages
 /// keep complete text; a new connection or reset always receives whole cards.
 #[derive(Default)]
 struct Replies(HashMap<String, (String, Option<String>, bool)>);
 
 impl Replies {
+    fn forget(&mut self, entries: &[TimelinePreview]) {
+        for entry in entries {
+            self.0.remove(&entry.id);
+        }
+    }
+
     fn encode(&mut self, entries: Vec<TimelineEntry>, reset: bool) -> Vec<TimelineChange> {
         if reset {
             self.0.clear();
@@ -893,6 +981,7 @@ pub(crate) fn history_page(
         oldest: events.first().map_or(before, |event| event.id),
         events,
         entries: Vec::new(),
+        large_entries: Vec::new(),
         history,
         has_older,
     })

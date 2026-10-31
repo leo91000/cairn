@@ -49,6 +49,9 @@
   "history": {
     "events": [],
     "entries": [],
+    "largeEntries": [
+      { "id": "message:1:é", "position": 1, "revision": 2, "source": 2, "kind": "agentMessage", "text": "" }
+    ],
     "history": "v2:00000000-0000-4000-8000-000000000001:1",
     "oldest": 1,
     "hasOlder": false

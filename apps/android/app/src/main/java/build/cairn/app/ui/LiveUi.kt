@@ -207,7 +207,9 @@ fun rememberLive(
                                         "/history?before=$before&history=${segment(history)}"
                                 )
 
-                        val applied = pages.apply(page, value, requested)
+                        val large = api.readLargeTimeline(path, page.largeEntries.orEmpty())
+                        val applied =
+                            pages.apply(page.copy(entries = page.entries + large), value, requested)
                         if (applied != null) {
                             value = applied
                             // Release paging in the same UI turn as insertion. Disk persistence

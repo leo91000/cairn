@@ -107,6 +107,45 @@ impl Fixture {
             .unwrap()
     }
 
+    async fn large_card(&self, preview: &Value) -> Value {
+        let id = preview["id"].as_str().unwrap();
+        let mut offset = 0_u64;
+        let mut checksum = String::new();
+        let mut content = String::new();
+        loop {
+            let mut query = vec![("entryId", id.to_owned()), ("offset", offset.to_string())];
+            if !checksum.is_empty() {
+                query.push(("sha256", checksum.clone()));
+            }
+            let mut url = reqwest::Url::parse(&format!(
+                "{}/api/runs/{}/timeline-content",
+                self.url, self.run
+            ))
+            .unwrap();
+            url.query_pairs_mut().extend_pairs(&query);
+            let response = reqwest::Client::new()
+                .get(url)
+                .header("x-test-relay-token", &self.token)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = response.bytes().await.unwrap();
+            assert!(bytes.len() <= 256 * 1024);
+            let part: Value = serde_json::from_slice(&bytes).unwrap();
+            checksum = part["sha256"].as_str().unwrap().to_owned();
+            content.push_str(part["data"].as_str().unwrap());
+            let Some(next) = part["nextOffset"].as_u64() else {
+                break;
+            };
+            assert!(next > offset);
+            offset = next;
+        }
+        let card: Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(card["id"], preview["id"]);
+        card
+    }
+
     /// Appends `count` output events to the run in one transaction.
     async fn append(&self, count: usize) {
         let run = self.run.clone();
@@ -243,6 +282,65 @@ async fn older_history_pages_bound_hydrated_cards_without_losing_positions() {
         before = next;
     }
     assert_eq!(received.len(), 40);
+}
+
+#[tokio::test]
+async fn oversized_card_chunks_reject_a_change_between_reads() {
+    let f = Fixture::new().await;
+    let payload =
+        json!({"item": {"id": "large", "type": "agent_message", "text": "🦊".repeat(100_000)}});
+    f.service
+        .store
+        .event(&f.run, &EventKind::ItemUpdated, "", Some(payload))
+        .await
+        .unwrap();
+    let mut stream = f.open(0).await;
+    let preview = loop {
+        let (_, batch) = stream.batch().await;
+        assert!(serde_json::to_vec(&batch).unwrap().len() < 256 * 1024);
+        if let Some(preview) = batch["largeEntries"]
+            .as_array()
+            .and_then(|entries| entries.first())
+        {
+            break preview.clone();
+        }
+    };
+    assert_eq!(preview["kind"], "agentMessage");
+    let mut url =
+        reqwest::Url::parse(&format!("{}/api/runs/{}/timeline-content", f.url, f.run)).unwrap();
+    url.query_pairs_mut()
+        .append_pair("entryId", preview["id"].as_str().unwrap());
+    let client = reqwest::Client::new();
+    let first = client
+        .get(url.clone())
+        .header("x-test-relay-token", &f.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let chunk: Value = first.json().await.unwrap();
+    let next = chunk["nextOffset"].as_u64().unwrap();
+    let sha = chunk["sha256"].as_str().unwrap();
+    f.service
+        .store
+        .event(
+            &f.run,
+            &EventKind::ItemUpdated,
+            "",
+            Some(json!({"item": {"id": "large", "type": "agent_message", "text": "changed"}})),
+        )
+        .await
+        .unwrap();
+    url.query_pairs_mut()
+        .append_pair("offset", &next.to_string())
+        .append_pair("sha256", sha);
+    let second = client
+        .get(url)
+        .header("x-test-relay-token", &f.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status(), StatusCode::CONFLICT);
 }
 
 async fn serve(service: Arc<Service>) -> (String, tokio::task::JoinHandle<()>) {
@@ -1464,7 +1562,7 @@ async fn backwards_pages_skip_superseded_long_answers_but_keep_reused_ids_in_old
     // The window holds only the latest snapshot; the reply arrives as its complete card,
     // although it first appeared before the window.
     assert!(first["events"].as_array().unwrap().is_empty());
-    let reply = &first["entries"][0]["entry"];
+    let reply = f.large_card(&first["largeEntries"][0]).await;
     assert!(reply["content"]["text"].as_str().unwrap().ends_with("-79"));
     assert!(reply["position"].as_i64().unwrap() < first["oldest"].as_i64().unwrap());
     assert_eq!(first["hasOlder"], true);
@@ -1481,6 +1579,11 @@ async fn backwards_pages_skip_superseded_long_answers_but_keep_reused_ids_in_old
             .unwrap();
         events.extend(page["events"].as_array().unwrap().iter().cloned());
         cards.extend(page["entries"].as_array().unwrap().iter().cloned());
+        if let Some(large) = page["largeEntries"].as_array() {
+            for preview in large {
+                cards.push(f.large_card(preview).await);
+            }
+        }
         if page["hasOlder"] == false {
             break;
         }

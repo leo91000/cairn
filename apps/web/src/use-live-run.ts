@@ -19,6 +19,7 @@ import {
   removeHistory,
   writeHistory,
 } from './history-cache'
+import { readLargeTimeline } from './large-timeline'
 import { liveConnection } from './live-connection'
 import { LiveTimeline } from './live-timeline'
 
@@ -172,12 +173,13 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
         const page = runId
           ? await readRunHistory(api, { runId, before, history: expected })
           : await api<HistoryPage>(`${value.replace(/\/stream$/, '')}/history?before=${before}&history=${encodeURIComponent(expected)}`)
+        const large = await readLargeTimeline(value, page.largeEntries ?? [])
         if (disposed || current !== generation || history !== expected || page.history !== expected || replacements !== baseline)
           return
         if (page.hasOlder && page.oldest >= before)
           throw new Error('Invalid history page')
         const candidate = accumulator.copy()
-        candidate.merge(page.events, page.entries)
+        candidate.merge(page.events, [...page.entries, ...large])
         accumulator = candidate
         oldest = page.oldest
         older = page.hasOlder
@@ -196,63 +198,71 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
     }
 
     let checking = false
-    connection = liveConnection(value, (batch, accepted) => {
-      if (batch.state?.cacheRevision) {
-        const revisionKey = state.installationId ? `conversation-cache-revision:${state.installationId}` : 'conversation-cache-revision'
-        try {
-          if (localStorage.getItem(revisionKey) !== batch.state.cacheRevision) {
-            void clearHistoryCache()
-            localStorage.setItem(revisionKey, batch.state.cacheRevision)
+    connection = liveConnection(value, (batch, accepted, signal) => {
+      const apply = (large: TimelineEntry[]) => {
+        if (signal?.aborted || disposed || current !== generation)
+          return
+        if (batch.state?.cacheRevision) {
+          const revisionKey = state.installationId ? `conversation-cache-revision:${state.installationId}` : 'conversation-cache-revision'
+          try {
+            if (localStorage.getItem(revisionKey) !== batch.state.cacheRevision) {
+              void clearHistoryCache()
+              localStorage.setItem(revisionKey, batch.state.cacheRevision)
+            }
           }
+          catch { void clearHistoryCache() }
         }
-        catch { void clearHistoryCache() }
-      }
 
-      const reset = batch.reset || (history && batch.history !== history)
-        || (batch.state && detail?.run?.id !== batch.state.run?.id)
-      if (reset) {
-        replacements++
-        accumulator = new LiveTimeline()
-        oldest = 0
-        older = false
-        complete = false
-        position.value = undefined
-        olderError.value = ''
-        if (scope)
-          saved().forEach(path => void removeHistory(scope, path))
-      }
+        const reset = batch.reset || (history && batch.history !== history)
+          || (batch.state && detail?.run?.id !== batch.state.run?.id)
+        if (reset) {
+          replacements++
+          accumulator = new LiveTimeline()
+          oldest = 0
+          older = false
+          complete = false
+          position.value = undefined
+          olderError.value = ''
+          if (scope)
+            saved().forEach(path => void removeHistory(scope, path))
+        }
 
-      // Persist a complete snapshot only. An interrupted catch-up cannot corrupt it.
-      const candidate = accumulator.copy()
-      candidate.apply(batch.events, batch.entries, accepted)
-      accumulator = candidate
-      if (batch.state)
-        detail = batch.state
-      carriesList.value = !!options.list && !!detail?.chats
-
-      cursor = accepted
-      history = batch.history
-      // Revalidation describes the server's recent window, not the pages already read.
-      // Keep the earliest loaded boundary unless the stream replaces the history.
-      if (batch.oldest !== undefined && (reset || !oldest || batch.oldest <= oldest)) {
-        oldest = batch.oldest
-        older = batch.hasOlder ?? false
-      }
-
-      complete = !batch.more
-      if (complete) {
-        waiting = false
-        hasOlder.value = older
-        synced.value = true
+        // Persist a complete snapshot only. An interrupted catch-up cannot corrupt it.
+        const candidate = accumulator.copy()
+        candidate.apply(batch.events, [...(batch.entries ?? []), ...large.map(entry => ({ kind: 'upsert' as const, entry }))], accepted)
+        accumulator = candidate
         if (batch.state)
-          restored.value = false
-        snapshot.value = detail
-        show()
-        catchingUp.value = false
-        scheduleSave()
+          detail = batch.state
+        carriesList.value = !!options.list && !!detail?.chats
+
+        cursor = accepted
+        history = batch.history
+        // Revalidation describes the server's recent window, not the pages already read.
+        // Keep the earliest loaded boundary unless the stream replaces the history.
+        if (batch.oldest !== undefined && (reset || !oldest || batch.oldest <= oldest)) {
+          oldest = batch.oldest
+          older = batch.hasOlder ?? false
+        }
+
+        complete = !batch.more
+        if (complete) {
+          waiting = false
+          hasOlder.value = older
+          synced.value = true
+          if (batch.state)
+            restored.value = false
+          snapshot.value = detail
+          show()
+          catchingUp.value = false
+          scheduleSave()
+        }
+
+        error.value = ''
       }
 
-      error.value = ''
+      if (batch.largeEntries?.length)
+        return readLargeTimeline(value, batch.largeEntries, signal).then(apply)
+      apply([])
     }, (connectionStatus, opening = false) => {
       if (options.list && opening)
         carriesList.value = true

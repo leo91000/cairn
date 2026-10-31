@@ -1,5 +1,33 @@
 use super::*;
 
+#[test]
+fn a_reference_invalidates_the_streamed_reply_baseline() {
+    let card = |revision: i64, text: &str| -> TimelineEntry {
+        serde_json::from_value(serde_json::json!({
+            "id": "message:1:a", "runId": "run", "position": 1, "revision": revision,
+            "source": revision, "turn": 1, "attempt": 0, "createdAt": 1, "updatedAt": revision,
+            "content": {"kind": "agentMessage", "itemId": "a", "text": text, "state": "running"}
+        }))
+        .unwrap()
+    };
+    let mut replies = Replies::default();
+    replies.encode(vec![card(1, "before")], false);
+    replies.forget(&[TimelinePreview {
+        id: "message:1:a".into(),
+        position: 1,
+        revision: 2,
+        source: 2,
+        kind: "agentMessage".into(),
+        text: String::new(),
+    }]);
+    assert!(matches!(
+        replies
+            .encode(vec![card(3, "before changed")], false)
+            .as_slice(),
+        [TimelineChange::Upsert { .. }]
+    ));
+}
+
 #[tokio::test]
 #[ignore = "explicit conversation list and live-page read measurements"]
 async fn measure_conversation_reads_by_count_and_snapshot_size() {

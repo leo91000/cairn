@@ -311,7 +311,7 @@ fn entries_bounded(
         };
         if let Some(budget) = budget {
             // Leave room for the surrounding change or page variant as well.
-            let size = serde_json::to_vec(&entry)?.len().saturating_add(32);
+            let size = crate::validation::encoded_size(&entry)?.saturating_add(32);
             if !entries.is_empty()
                 && bytes.saturating_add(size) > budget
                 && (!keep_positions

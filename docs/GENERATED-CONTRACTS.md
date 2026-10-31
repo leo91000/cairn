@@ -895,6 +895,19 @@ history pages carry the cards that first appeared in them. Events the timeline
 presents carry `timeline: true`; clients read them only as boundaries of unconverted
 families. History revisions become `v2:` so saved `v1:` histories reload with cards.
 
+Card hydration is byte-budgeted in revision/ID or position/ID order. A stream keeps
+its event cursor until all card batches have been sent, so reconnecting replays any
+unaccepted batches. Backwards pages retain whole event-position groups and advance
+their boundary only after including them. Oversized individual cards are referenced
+in `largeEntries` instead of being partially rendered: both apps fetch their complete
+JSON through the conversation or run's `timeline-content` endpoint in UTF-8 chunks,
+using the returned checksum to detect changes, before accepting the page or cursor.
+An event-position group remains together even if its combined references exceed the
+page budget. A single database read still hydrates a complete card to create a
+reference or verify a chunk; client transfer is bounded, not peak per-card memory.
+The current checksum implementation reserializes the complete card for each chunk,
+so very large cards take proportionally more CPU to fetch; this is a known limit.
+
 `read_run_timeline` (`read` scope) gives public MCP and `cairn_installation` the
 same cards, newest page first, with `complete`/`truncated` pages bounded like the
 other run windows; a truncated card can be read by `entryId` through `read_run_content`.

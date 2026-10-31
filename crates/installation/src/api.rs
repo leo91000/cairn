@@ -221,6 +221,9 @@ async fn run_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Result
         ("GET", [kind @ ("chats" | "runs"), id, "history"]) => {
             crate::live::history(s, kind, id, input).await?
         }
+        ("GET", [kind @ ("chats" | "runs"), id, "timeline-content"]) => {
+            crate::live::content(s, kind, id, input).await?
+        }
         ("GET", ["runs", id]) => s.store.run(id).await?,
         ("POST", ["runs", id, "chat"]) => {
             chat_command(s, input, "convert_run_to_chat", json!({ "runId": id })).await?

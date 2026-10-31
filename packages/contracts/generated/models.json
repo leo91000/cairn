@@ -3723,6 +3723,13 @@
         "history": {
           "type": "string"
         },
+        "largeEntries": {
+          "description": "Oversized timeline cards, fetched in bounded chunks before this page is applied.",
+          "items": {
+            "$ref": "#/definitions/TimelinePreview"
+          },
+          "type": "array"
+        },
         "oldest": {
           "format": "int64",
           "type": "integer"
