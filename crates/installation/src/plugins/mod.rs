@@ -154,7 +154,14 @@ impl Plugins {
 
     /// Run-scoped CLI commands declared by any package the run's agent is granted.
     pub async fn command(&self, s: &Service, bearer: &str, input: &Value) -> Result<Value> {
-        crate::project_workspaces::authorize(s, bearer).await?;
+        let run = crate::project_workspaces::authorize(s, bearer).await?;
+        // A failed policy read never confers ordinary-turn authority. Keep this
+        // check at the common dispatch boundary, including non-HTTP callers.
+        if crate::chats::planning(&run) {
+            return Err(Error::forbidden(
+                "Plugin commands are unavailable during a plan turn. Include the step in your plan; the user starts implementation explicitly.",
+            ));
+        }
         agents::command(s, bearer, input).await
     }
 
@@ -180,17 +187,6 @@ pub(crate) async fn command_response(s: &Service, request: Request) -> Result<Re
         .and_then(|value| value.strip_prefix("Bearer "))
         .unwrap_or("")
         .to_owned();
-    // Plugin commands act on external services: never during a plan turn.
-    if let Some(run) = crate::mcps::granted_run(s, &bearer).await.ok().flatten()
-        && s.store
-            .run(&run)
-            .await
-            .is_ok_and(|run| crate::chats::planning(&run))
-    {
-        return Err(Error::forbidden(
-            "Plugin commands are unavailable during a plan turn. Include the step in your plan; the user starts implementation explicitly.",
-        ));
-    }
     let input = Input::read(request).await?;
     let value = s.plugins.command(s, &bearer, &input.body).await?;
     let mut response = Json(value).into_response();

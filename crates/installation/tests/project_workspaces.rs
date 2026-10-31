@@ -1707,3 +1707,86 @@ async fn plan_question_can_be_retired_after_chat_clarification_without_answer_or
         before
     );
 }
+
+#[tokio::test]
+async fn plan_policy_read_failure_cannot_write_outcome_or_dispatch_plugin_command() {
+    for plugin in [false, true] {
+        let (_root, s, _) = fixture().await;
+        let run = run(&s, Value::Null, MAIN_AGENT_ID).await;
+        patch_run(
+            &s,
+            &run,
+            json!({
+                "status": RunStatus::Running,
+                "chatExecution": { "messageId": "plan-message", "text": "Plan", "plan": true }
+            }),
+        )
+        .await;
+        let run = s.store.run(text(&run, "id")).await.unwrap();
+        let token = run_token(&s, &run).await;
+        let app = cairn_installation::http::router(s.clone()).await.unwrap();
+        common::policy_read_fault::fail_next_grant_read(&s.store).await;
+        if plugin {
+            // With the old swallowed read error this proceeds to command lookup
+            // and returns 404. The policy error must stop dispatch first.
+            let request = common::request("POST", "/plugin-command")
+                .header("authorization", format!("Bearer {token}"))
+                .body(axum::body::Body::from(
+                    json!({ "plugin": "not-installed", "command": "mutate", "arguments": [] })
+                        .to_string(),
+                ))
+                .unwrap();
+            let response = common::send(&app, request).await;
+            assert_eq!(
+                response.status(),
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR
+            );
+        } else {
+            // Call the real MCP dispatcher after endpoint authentication, so the
+            // one-shot failure occurs in the Plan guard, not the outer HTTP gate.
+            let result = project_workspaces::rpc(
+                &s,
+                &token,
+                "tools/call",
+                &json!({
+                    "name": "report_outcome",
+                    "arguments": { "status": "completed", "reason": "Must not write", "evidence": ["synthetic fixture"] }
+                }),
+            )
+            .await;
+            assert_eq!(result.unwrap_err().status, 500);
+        }
+        // The same token is valid after the single failing reader lookup. The
+        // old outcome path could authorize successfully on the writer and write.
+        assert!(project_workspaces::authorize(&s, &token).await.is_ok());
+        let stored = s.store.run(text(&run, "id")).await.unwrap();
+        assert!(stored["outcome"].is_null(), "{stored}");
+        assert_eq!(stored["chatExecution"]["plan"], true);
+        if plugin {
+            let input = json!({ "plugin": "not-installed", "command": "mutate", "arguments": [] });
+            assert_eq!(
+                s.plugins
+                    .command(&s, &token, &input)
+                    .await
+                    .unwrap_err()
+                    .status,
+                403
+            );
+            patch_run(
+                &s,
+                &run,
+                json!({ "chatExecution": { "messageId": "plan-message", "plan": false } }),
+            )
+            .await;
+            // Ordinary authority still reaches lookup; no blanket plugin ban.
+            assert_eq!(
+                s.plugins
+                    .command(&s, &token, &input)
+                    .await
+                    .unwrap_err()
+                    .status,
+                404
+            );
+        }
+    }
+}

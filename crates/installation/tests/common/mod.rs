@@ -6,6 +6,7 @@
 use self::run_fixture::DbRunFixture;
 
 pub mod github;
+pub mod policy_read_fault;
 
 use axum::{
     Router,

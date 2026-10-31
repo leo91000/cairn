@@ -229,9 +229,8 @@ const PLAN_DENIED: &str = "This tool is unavailable during a plan turn because i
 
 async fn call_tool(s: &Service, bearer: &str, name: &str, args: &Value) -> Result<Value> {
     let summary = Value::to_string;
-    let planning = authorize(s, bearer)
-        .await
-        .is_ok_and(|run| crate::chats::planning(&run));
+    let run = authorize(s, bearer).await?;
+    let planning = crate::chats::planning(&run);
     if planning && !PLAN_TOOLS.contains(&name) {
         return ToolResult::from_result(Err(Error::forbidden(PLAN_DENIED)), summary);
     }
