@@ -532,7 +532,7 @@ abstract class PlanTurnCases {
                                 wireJson.decodeFromJsonElement<List<ChatAttachment>>(it)
                             }
                             .orEmpty()
-                    TimelineChange.A(
+                    build.cairn.contracts.TimelineChange.A(
                         TimelineCard(
                             id = "user:${event.id}",
                             runId = "run",
