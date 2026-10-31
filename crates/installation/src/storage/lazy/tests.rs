@@ -1084,3 +1084,176 @@ fn failed_parallel_reconstruction_never_commits_a_manifest_and_can_retry() {
         }
     }
 }
+
+// Diagnostic fixture for independent disk sources with one shared node cache.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn diagnostic_two_volume_cold_read_authorization_isolation() {
+    use crate::storage::source::Source as RuntimeSource;
+    use axum::{
+        Router,
+        extract::State,
+        http::{HeaderMap, StatusCode},
+        routing::{get, post},
+    };
+    use std::sync::atomic::AtomicBool;
+    use tokio::sync::Notify;
+    use tokio_util::sync::CancellationToken;
+
+    struct Fixture {
+        a_entered: Notify,
+        b_entered: Notify,
+        release_b: Notify,
+        renewed: AtomicBool,
+        mode: usize,
+        b_reads: AtomicUsize,
+        renewals: AtomicUsize,
+        payload: Vec<u8>,
+    }
+    async fn read(State(s): State<Arc<Fixture>>, headers: HeaderMap) -> (StatusCode, Vec<u8>) {
+        let authorization = headers.get("authorization").unwrap().to_str().unwrap();
+        if authorization == "Bearer fixture-a" {
+            s.a_entered.notify_one();
+            std::future::pending::<()>().await;
+        }
+        assert_eq!(authorization, "Bearer fixture-b");
+        let count = s.b_reads.fetch_add(1, Ordering::SeqCst);
+        if count == 0 {
+            s.b_entered.notify_one();
+            s.release_b.notified().await;
+        }
+        if s.mode == 2 {
+            return (StatusCode::FORBIDDEN, vec![]);
+        }
+        if (s.mode == 1 || s.mode == 3) && !s.renewed.load(Ordering::SeqCst) {
+            return (StatusCode::UNAUTHORIZED, vec![]);
+        }
+        (StatusCode::OK, s.payload.clone())
+    }
+    async fn renew(State(s): State<Arc<Fixture>>, headers: HeaderMap) -> StatusCode {
+        assert_eq!(headers.get("authorization").unwrap(), "Bearer fixture-b");
+        s.renewals.fetch_add(1, Ordering::SeqCst);
+        if s.mode == 3 {
+            return StatusCode::FORBIDDEN;
+        }
+        s.renewed.store(true, Ordering::SeqCst);
+        StatusCode::OK
+    }
+    for mode in 0..6 {
+        for iteration in 0..10 {
+            let root = tempfile::tempdir().unwrap();
+            let payload = vec![(iteration + mode * 10 + 1) as u8; 4096];
+            let fixture = Arc::new(Fixture {
+                a_entered: Notify::new(),
+                b_entered: Notify::new(),
+                release_b: Notify::new(),
+                renewed: AtomicBool::new(false),
+                mode,
+                b_reads: AtomicUsize::new(0),
+                renewals: AtomicUsize::new(0),
+                payload: payload.clone(),
+            });
+            let app = Router::new()
+                .route("/internal/node-restore/{hash}", get(read))
+                .route("/internal/node-restore/renew", post(renew))
+                .with_state(fixture.clone());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let origin = format!("http://{}/", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let stop_a = CancellationToken::new();
+            let stop_b = if mode == 4 {
+                stop_a.clone()
+            } else {
+                CancellationToken::new()
+            };
+            let source_a = Arc::new(
+                RuntimeSource::new(
+                    &serde_json::json!({"master":origin,"grant":"fixture-a"}),
+                    tokio::runtime::Handle::current(),
+                    stop_a.clone(),
+                )
+                .unwrap(),
+            );
+            let source_b = Arc::new(
+                RuntimeSource::new(
+                    &serde_json::json!({"master":origin,"grant":"fixture-b"}),
+                    tokio::runtime::Handle::current(),
+                    stop_b,
+                )
+                .unwrap(),
+            );
+            let hash = block_digest(&payload);
+            let manifest = single_block(4096, BLOCK, &hash.into());
+            let a = Arc::new(
+                LazyDisk::create(&root.path().join("disks/a/lazy"), &manifest, source_a).unwrap(),
+            );
+            let b = Arc::new(
+                LazyDisk::create(&root.path().join("disks/b/lazy"), &manifest, source_b).unwrap(),
+            );
+            assert!(
+                Arc::ptr_eq(&a.blocks, &b.blocks),
+                "fixture must share node cache"
+            );
+            let publication_stop = CancellationToken::new();
+            let read_stop = (mode == 5).then(|| publication_stop.clone());
+            let read_a = tokio::task::spawn_blocking(move || {
+                let mut data = [0u8; 4096];
+                crate::storage::read_scope::scope(read_stop, || a.read_at(0, &mut data))
+            });
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                fixture.a_entered.notified(),
+            )
+            .await
+            .unwrap();
+            let read_b = tokio::task::spawn_blocking(move || {
+                let mut data = [0u8; 4096];
+                b.read_at(0, &mut data).map(|()| data)
+            });
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                fixture.b_entered.notified(),
+            )
+            .await
+            .expect("B must reach its source while A is blocked on the same hash");
+            if mode == 5 {
+                publication_stop.cancel();
+                assert!(!stop_a.is_cancelled());
+            } else {
+                stop_a.cancel();
+            }
+            let error_a = tokio::time::timeout(std::time::Duration::from_secs(5), read_a)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap_err();
+            assert_eq!(error_a.kind(), io::ErrorKind::Interrupted);
+            fixture.release_b.notify_one();
+            let result = tokio::time::timeout(std::time::Duration::from_secs(5), read_b)
+                .await
+                .unwrap()
+                .unwrap();
+            match mode {
+                0 | 1 | 5 => assert_eq!(result.unwrap().as_slice(), payload),
+                2 | 3 => assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied),
+                4 => assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Interrupted),
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                fixture.renewals.load(Ordering::SeqCst),
+                usize::from(mode == 1 || mode == 3)
+            );
+            println!(
+                "diagnostic mode={mode} iteration={iteration} A=interrupted B={} renewals={}",
+                if mode < 2 || mode == 5 {
+                    "verified"
+                } else if mode == 4 {
+                    "shared-token-interrupted"
+                } else {
+                    "denied"
+                },
+                fixture.renewals.load(Ordering::SeqCst)
+            );
+            server.abort();
+        }
+    }
+}
