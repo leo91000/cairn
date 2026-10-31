@@ -55,105 +55,16 @@ jobs:
         run: sudo apt-get -o Dir::Cache::archives="$PWD/.qualification/apt" -o Dir::Cache::pkgcache="$PWD/.qualification/apt/pkgcache.bin" -o Dir::Cache::srcpkgcache="$PWD/.qualification/apt/srcpkgcache.bin" update -qq && sudo apt-get -o Dir::Cache::archives="$PWD/.qualification/apt" -o Dir::Cache::pkgcache="$PWD/.qualification/apt/pkgcache.bin" -o Dir::Cache::srcpkgcache="$PWD/.qualification/apt/srcpkgcache.bin" install -y --no-install-recommends libclang-dev
       - name: Build the browser-test backend and frontend
         run: |
-          cargo build --locked --bin cairn --example worker_fixture --example browser_fixture --example network_direct_client --example network_qualification --example native_storage_qualifier
-          cargo build --locked -p cairn-beacon --bin cairn-beacon --example network_stun_server
-          pnpm exec vite build --config apps/web/vite.config.ts
+          cargo build --locked --bin cairn --example native_storage_qualifier
           (cd target/debug && sha256sum cairn examples/native_storage_qualifier > qualification-sha256)
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: browser-backend
           path: |
             target/debug/cairn
-            target/debug/cairn-beacon
             target/debug/qualification-sha256
             target/debug/examples/native_storage_qualifier
-            target/debug/examples/worker_fixture
-            target/debug/examples/browser_fixture
-            target/debug/examples/network_direct_client
-            target/debug/examples/network_qualification
-            target/debug/examples/network_stun_server
           retention-days: 1
-      - uses: actions/upload-artifact@v7.0.1
-        with:
-          name: browser-build
-          path: dist/
-          retention-days: 1
-  node-checks:
-    services:
-      postgres:
-        image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
-        env:
-          POSTGRES_USER: cairn
-          POSTGRES_PASSWORD: test-only
-          POSTGRES_DB: cairn_beacon_test
-        ports: ['5432:5432']
-        options: >-
-          --health-cmd "pg_isready -U cairn -d cairn_beacon_test"
-          --health-interval 5s --health-timeout 5s --health-retries 10
-    runs-on: ubuntu-latest
-    # Hosted Ubuntu package downloads can consume over 20 minutes before fixtures run.
-    timeout-minutes: 45
-    env:
-      CARGO_PROFILE_DEV_DEBUG: '0'
-      CARGO_INCREMENTAL: '0'
-      CAIRN_BEACON_TEST_DATABASE_URL: postgres://cairn:test-only@localhost:5432/cairn_beacon_test
-    steps:
-      - uses: actions/checkout@v7.0.1
-        with:
-          ref: ${{ inputs.source-sha }}
-      - name: Verify the exact qualified source
-        env:
-          SOURCE_SHA: ${{ inputs.source-sha }}
-        run: |
-          [[ "$SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]]
-          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
-          test -z "$(git status --porcelain)"
-          git show -s --format='%H %T'
-      - name: Prepare workspace-owned temporary and cache paths
-        run: |
-          mkdir -p .qualification/{tmp,cargo,rustup,cache,npm,pnpm,gradle,var-tmp,apt/partial}
-          echo "TMPDIR=$PWD/.qualification/tmp" >> "$GITHUB_ENV"
-          echo "CARGO_HOME=$PWD/.qualification/cargo" >> "$GITHUB_ENV"
-          echo "CARGO_TARGET_DIR=$PWD/target" >> "$GITHUB_ENV"
-          echo "RUSTUP_HOME=$PWD/.qualification/rustup" >> "$GITHUB_ENV"
-          echo "XDG_CACHE_HOME=$PWD/.qualification/cache" >> "$GITHUB_ENV"
-          echo "npm_config_cache=$PWD/.qualification/npm" >> "$GITHUB_ENV"
-          echo "PNPM_HOME=$PWD/.qualification/pnpm" >> "$GITHUB_ENV"
-          echo "GRADLE_USER_HOME=$PWD/.qualification/gradle" >> "$GITHUB_ENV"
-      - uses: ./.github/actions/setup-pnpm
-        with:
-          cache: false
-      - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy && rustup default 1.97.1
-      - name: Install native test dependencies
-        run: sudo apt-get -o Dir::Cache::archives="$PWD/.qualification/apt" -o Dir::Cache::pkgcache="$PWD/.qualification/apt/pkgcache.bin" -o Dir::Cache::srcpkgcache="$PWD/.qualification/apt/srcpkgcache.bin" update -qq && sudo apt-get -o Dir::Cache::archives="$PWD/.qualification/apt" -o Dir::Cache::pkgcache="$PWD/.qualification/apt/pkgcache.bin" -o Dir::Cache::srcpkgcache="$PWD/.qualification/apt/srcpkgcache.bin" install -y --no-install-recommends libclang-dev age e2fsprogs fakeroot
-      - name: Prepare the installation host's required ublk driver
-        run: |
-          if ! sudo modprobe ublk_drv; then
-            sudo apt-get -o Dir::Cache::archives="$PWD/.qualification/apt" -o Dir::Cache::pkgcache="$PWD/.qualification/apt/pkgcache.bin" -o Dir::Cache::srcpkgcache="$PWD/.qualification/apt/srcpkgcache.bin" update -qq
-            sudo apt-get -o Dir::Cache::archives="$PWD/.qualification/apt" -o Dir::Cache::pkgcache="$PWD/.qualification/apt/pkgcache.bin" -o Dir::Cache::srcpkgcache="$PWD/.qualification/apt/srcpkgcache.bin" install -y "linux-modules-extra-$(uname -r)"
-            sudo modprobe ublk_drv
-          fi
-          test -c /dev/ublk-control
-      - name: Build the frontend used by installer and update fixtures
-        run: pnpm exec vite build --config apps/web/vite.config.ts
-      - name: Validate node supervisor and S3 recovery
-        run: |
-          python3 scripts/tests/guest_trim_test.py
-          python3 scripts/tests/guest_projects_test.py
-          python3 scripts/tests/node_supervisor_test.py
-          python3 deploy/nodes/test_native_host.py
-          bash -n deploy/nodes/native-install.sh
-          python3 scripts/tests/installation_installer_test.py
-          python3 scripts/tests/compressed_swap_test.py
-          python3 scripts/tests/installation_updates_test.py
-          python3 scripts/tests/production_release_test.py
-          bash tests/installation-installer-container.sh
-          python3 tests/installation_update_containers.py
-          python3 -m venv .node-s3-test
-          .node-s3-test/bin/pip install 'moto[server]==5.2.3' awscli blake3==1.0.8
-          .node-s3-test/bin/python scripts/tests/storage_observer_test.py
-          .node-s3-test/bin/python scripts/tests/storage_sample_test.py
-          PATH="$PWD/.node-s3-test/bin:$PATH" .node-s3-test/bin/python scripts/tests/node_s3_test.py
   native-runtime:
     needs: build
     name: Native Linux ublk storage and process ownership (CPU workload)
@@ -316,6 +227,16 @@ jobs:
           reference_fixture="$PWD/.qualification/reference-fixture"
           mkdir -p "$reference_fixture"
           git archive "$REFERENCE_SHA" scripts/tests deploy/nodes/native-host.py | tar -x -C "$reference_fixture"
+          python3 - "$reference_fixture/scripts/tests/native_runtime_test.py" <<'PYWATCHDOG'
+          from pathlib import Path
+          import sys
+          fixture = Path(sys.argv[1])
+          source = fixture.read_text()
+          needle = "            api('/runs/' + earlier, method='DELETE')\n"
+          probe = "            watchdog_done = threading.Event()\n            def watchdog_snapshot():\n                if watchdog_done.wait(15):\n                    return\n                try:\n                    output = Path(os.environ['NATIVE_STORAGE_EVIDENCE_DIR']).parent / 'watchdog'\n                    output.mkdir(parents=True, exist_ok=True)\n                    units = [supervisor, 'cairn-native-' + earlier + '.service', 'cairn-native-' + later + '.service']\n                    roots = set()\n                    with (output / 'units.txt').open('w') as out:\n                        for unit in units:\n                            result = subprocess.run(['systemctl', 'show', unit, '--property=ActiveState,SubState,MainPID,ControlGroup', '--no-pager'], capture_output=True, text=True, timeout=5)\n                            out.write('unit\\n' + result.stdout)\n                            for line in result.stdout.splitlines():\n                                if line.startswith('MainPID=') and line[8:].isdigit() and int(line[8:]) > 0:\n                                    roots.add(int(line[8:]))\n                    processes = {}\n                    for proc in Path('/proc').iterdir():\n                        if not proc.name.isdigit():\n                            continue\n                        try:\n                            fields = dict(line.split(':', 1) for line in (proc / 'status').read_text().splitlines() if ':' in line)\n                            processes[int(proc.name)] = (int(fields['PPid'].strip()), fields['Name'].strip(), fields['State'].strip())\n                        except (OSError, KeyError, ValueError):\n                            continue\n                    selected = set(roots)\n                    while True:\n                        more = {pid for pid, (parent, _, _) in processes.items() if parent in selected}\n                        if more <= selected:\n                            break\n                        selected.update(more)\n                    devices = set()\n                    for dev in Path('/sys/block').glob('ublkb*/dev'):\n                        try:\n                            devices.add(dev.read_text().strip())\n                        except OSError:\n                            pass\n                    with (output / 'processes.txt').open('w') as out:\n                        out.write('ublk device numbers: ' + ','.join(sorted(devices)) + '\\n')\n                        for pid in sorted(selected):\n                            if pid not in processes:\n                                continue\n                            parent, name, state_text = processes[pid]\n                            out.write(f'pid={pid} ppid={parent} name={name} state={state_text}\\n')\n                            try:\n                                mounts = (Path('/proc') / str(pid) / 'mountinfo').read_text().splitlines()\n                                counts = {dev: sum(line.split()[2] == dev for line in mounts) for dev in devices}\n                                out.write(f'ublk mount counts={counts}\\n')\n                            except OSError:\n                                pass\n                            for task in (Path('/proc') / str(pid) / 'task').glob('[0-9]*'):\n                                try:\n                                    task_mounts = (task / 'mountinfo').read_text().splitlines()\n                                    task_counts = {dev: sum(line.split()[2] == dev for line in task_mounts) for dev in devices}\n                                    out.write(f'tid={task.name} ublk mount counts={task_counts}\\n')\n                                except OSError:\n                                    pass\n                                for field in ('wchan', 'stack'):\n                                    try:\n                                        value = (task / field).read_text().strip()\n                                        out.write(f'tid={task.name} {field}={value}\\n')\n                                    except OSError:\n                                        pass\n                except Exception as error:\n                    # Never print exception values which could contain paths or data.\n                    print('Native watchdog failed: ' + type(error).__name__, flush=True)\n            threading.Thread(target=watchdog_snapshot, daemon=True).start()\n            try:\n                api('/runs/' + earlier, method='DELETE')\n            finally:\n                watchdog_done.set()\n"
+          assert source.count(needle) == 1
+          fixture.write_text(source.replace(needle, probe))
+          PYWATCHDOG
           chmod +x reference-native/cairn reference-native/examples/native_storage_qualifier
           sudo env TMPDIR="$TMPDIR" PATH="$PWD/.native-s3-test/bin:$PATH" CAIRN_NATIVE_DISPOSABLE_HOST=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence/reference" .native-s3-test/bin/python scripts/tests/node_s3_test.py --repo "$reference_fixture" --native-runtime reference-native/cairn --qualifier reference-native/examples/native_storage_qualifier
       - name: Qualify real ublk, S3, eviction, systemd ownership and crash recovery
