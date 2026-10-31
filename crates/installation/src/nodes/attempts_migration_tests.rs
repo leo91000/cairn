@@ -22,6 +22,8 @@ ALTER TABLE nodes ADD COLUMN exclusive_reservation TEXT;
 PRAGMA user_version=18;").unwrap();
     Db(&db).put_node_fixture(&json!({"id":NODE})).unwrap();
     crate::runs::projections::upgrade(&mut db).unwrap();
+    db.pragma_update(None, "user_version", 20).unwrap();
+    crate::worker::progress::upgrade(&mut db).unwrap();
     db
 }
 
@@ -135,7 +137,7 @@ async fn startup_preserves_attempt_ownership_placement_counters_and_private_boun
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        20
+        crate::store::DATABASE_VERSION
     );
     drop(store);
     assert!(Store::open(root.path()).is_ok());
@@ -223,7 +225,7 @@ async fn failed_late_conversion_rolls_back_schema_rows_counters_and_version() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        19
+        21
     );
     assert_eq!(
         db.query_row(
@@ -286,11 +288,14 @@ async fn qualify_previous_manager_database(allowance: Option<u64>) {
     source
         .execute_batch(include_str!("../../tests/fixtures/placements-v15.sql"))
         .unwrap();
-    // Apply the actual previous manager migrations to obtain its version-19 layout.
+    // Apply the actual previous manager migrations to obtain its version-21 layout, retaining hooks and writer-owned progress.
     crate::chats::question_migration::upgrade(&mut source).unwrap();
     crate::attachments::migration::upgrade(&mut source).unwrap();
     crate::reads::migration::upgrade(&mut source).unwrap();
     crate::runs::projections::upgrade(&mut source).unwrap();
+    source.execute_batch(crate::plugins::hooks::SCHEMA).unwrap();
+    source.pragma_update(None, "user_version", 20).unwrap();
+    crate::worker::progress::upgrade(&mut source).unwrap();
     if let Some(allowance) = allowance {
         let allowance = i64::try_from(allowance).unwrap();
         // The previous writer stored derived allowances without reapplying the
@@ -312,7 +317,7 @@ async fn qualify_previous_manager_database(allowance: Option<u64>) {
         source
             .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
             .unwrap(),
-        19
+        21
     );
     let runs: Vec<(String, Value)> = source
         .prepare("SELECT id,data FROM run_views ORDER BY id")
@@ -325,6 +330,15 @@ async fn qualify_previous_manager_database(allowance: Option<u64>) {
         .collect::<rusqlite::Result<_>>()
         .unwrap();
     assert!(!runs.is_empty());
+    crate::worker::progress::Progress::launched(
+        "retained-progress-execution".into(),
+        None,
+        None,
+        None,
+        1,
+    )
+    .store_in(&Db(&source), &runs[0].0)
+    .unwrap();
     let tables: Vec<String> = source
         .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name!='runs' ORDER BY name")
         .unwrap()
@@ -423,6 +437,6 @@ async fn qualify_previous_manager_database(allowance: Option<u64>) {
         after
             .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
             .unwrap(),
-        20
+        crate::store::DATABASE_VERSION
     );
 }
