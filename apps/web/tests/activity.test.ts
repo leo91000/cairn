@@ -326,6 +326,23 @@ describe('conversation activity', () => {
     // Older events and ordinary requests carry no plan marker.
     expect(entries[3]).not.toHaveProperty('plan')
   })
+  it('keeps proposal approval identity exclusive to its completed lifecycle event', () => {
+    const event = (id: number, type: string, text: string): RunEvent => ({
+      id,
+      runId: 'run',
+      createdAt: id,
+      type,
+      text: '',
+      payload: { item: { id: 'proposal', type: 'proposed_plan', text } },
+    })
+    const started = event(1, 'item.started', 'Partial design')
+    expect(activityEntries([started], true)[0]).toMatchObject({ kind: 'proposal', text: 'Partial design' })
+    expect(activityEntries([started], true)[0]).not.toHaveProperty('sourceId', 'run:1')
+    const completed = event(2, 'item.completed', 'Reviewed complete design')
+    expect(activityEntries([started, completed], true)[0]).toMatchObject({ kind: 'proposal', sourceId: 'run:2', text: 'Reviewed complete design' })
+    const reopened = event(3, 'item.started', 'Revising design')
+    expect(activityEntries([started, completed, reopened], true)[0]).not.toHaveProperty('sourceId', 'run:2')
+  })
   it.each([false, true])('keeps subagent proposals attributed when they follow the parent proposal=%s', (childLast) => {
     const event = (id: number, item: Record<string, unknown>): RunEvent => ({
       id,

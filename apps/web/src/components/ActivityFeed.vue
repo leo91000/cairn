@@ -148,7 +148,8 @@ const implementable = computed(() => {
   const index = items.findLastIndex(entry => entry.kind === 'proposal')
   if (index < 0 || items.slice(index + 1).some(entry => entry.kind === 'message' && entry.role === 'user'))
     return null
-  return items[index]!.id
+  const proposal = items[index]!
+  return proposal.kind === 'proposal' && proposal.sourceId ? proposal.id : null
 })
 const visibleOutcome = computed(() => !props.active && !props.sending?.length && !props.loading ? props.outcome : null)
 const outcomeEntryId = computed(() => {
@@ -507,7 +508,7 @@ defineExpose({
                       class="text-sm"
                       :disabled="!canImplement"
                       title="Queue an implementation request in this conversation"
-                      @click="emit('implement', entry.sourceId)"
+                      @click="entry.sourceId && emit('implement', entry.sourceId)"
                     >
                       <Icon :name="Hammer" :size="14" />Implement
                     </UiButton>

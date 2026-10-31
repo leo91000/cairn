@@ -94,7 +94,8 @@ export type ActivityEntry
     id: string
     time: number
     text: string
-    sourceId: string
+    /** Only a completed proposal can be approved. */
+    sourceId?: string
   }
   | { kind: 'group', id: string, artifacts: ActivityArtifact[] }
   | { kind: 'team', id: string, agents: ActivityArtifact[] }
@@ -724,10 +725,11 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
 
     if (type === 'proposed_plan' && !text(item.parent_id)) {
       const content = text(item.text)
+      const sourceId = event.type === 'item.completed' ? `${event.runId}:${event.id}` : undefined
       const existing = proposals.get(id)
       if (existing) {
         existing.text = content || existing.text
-        existing.sourceId = `${event.runId}:${event.id}`
+        existing.sourceId = sourceId
       }
       else if (content) {
         const proposal = {
@@ -735,7 +737,7 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
           id,
           time: event.createdAt,
           text: content,
-          sourceId: `${event.runId}:${event.id}`,
+          sourceId,
         }
         entries.push(proposal)
         proposals.set(id, proposal)

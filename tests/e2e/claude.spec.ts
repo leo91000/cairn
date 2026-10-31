@@ -854,3 +854,41 @@ test('the quota card switches to OpenCode with an available model and preserves 
   expect(after.workspace).toBe(before.workspace)
   await expect(card).toHaveCount(0)
 })
+
+for (const status of ['failed', 'cancelled']) {
+  test(`an interrupted proposal cannot approve or alter Plan after ${status}`, async ({ page, workspace }) => {
+    if (!(await workspace.api('/api/accounts')).accounts.some((a: { provider: string }) => a.provider === 'claude'))
+      expect((await connectClaude(workspace)).state).toBe('complete')
+    const chat = await workspace.api('/api/chats', 'POST', {})
+    await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
+      id: crypto.randomUUID(),
+      text: 'fixture:plan-turn Inspect the design',
+      provider: 'claude',
+      plan: true,
+    })
+    await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 30000 }).toBe('succeeded')
+    const run = (await workspace.api(`/api/chats/${chat.id}`)).run
+    // A newer unfinished root proposal must also suppress the older completed card.
+    workspace.service.store.event(run.id, 'item.started', '', {
+      item: {
+        id: 'interrupted-proposal',
+        type: 'proposed_plan',
+        text: 'Review is still incomplete',
+        status: 'in_progress',
+      },
+    })
+    workspace.service.store.updateRun(run.id, { status })
+    workspace.service.store.event(run.id, 'status', status)
+    await page.goto(workspacePath(`/chats/${chat.id}`))
+    await authenticateWorkspace(page)
+    await expect(page.getByTestId('proposed-plan').filter({ hasText: 'Review is still incomplete' })).toBeVisible()
+    const toggle = page.getByRole('button', { name: 'Plan first' })
+    if (await toggle.getAttribute('aria-pressed') !== 'true')
+      await toggle.click()
+    await expect(toggle).toHaveAttribute('aria-pressed', 'true')
+    await expect(page.getByRole('button', { name: 'Implement', exact: true })).toHaveCount(0)
+    await expect(toggle).toHaveAttribute('aria-pressed', 'true')
+    const detail = await workspace.api(`/api/chats/${chat.id}`)
+    expect(detail.messages.some((m: { text: string }) => m.text === 'Implement the plan you proposed.')).toBe(false)
+  })
+}
