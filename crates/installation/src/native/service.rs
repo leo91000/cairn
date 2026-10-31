@@ -3689,6 +3689,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn first_close_drain_does_not_wait_for_an_unrelated_pool_operation() {
+        let (_fixture, controller) = fixture().await;
+        // This is the production pool gate used by seed transfers and policy
+        // updates, not a simulated delay in the close operation itself.
+        let unrelated = disk::lock(&controller.state).await.unwrap();
+        let mut close = StorageClose::default();
+        let result = tokio::time::timeout(
+            Duration::from_millis(250),
+            close.finish(&controller.state, async { Ok(block::Completion::Flushed) }),
+        )
+        .await;
+        drop(unrelated);
+        assert!(
+            result.is_ok(),
+            "unrelated pool ownership blocked the first close drain"
+        );
+        assert_eq!(result.unwrap().unwrap(), block::Completion::Flushed);
+    }
+
+    #[tokio::test]
     async fn close_drains_admitted_mutations_then_allows_policy_changes_and_refuses_late_mutations()
     {
         let (_fixture, controller) = fixture().await;
