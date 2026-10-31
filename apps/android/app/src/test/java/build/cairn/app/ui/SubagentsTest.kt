@@ -85,6 +85,41 @@ class SubagentsTest {
     }
 
     @Test
+    fun `proposal approval keeps the completed source separate from its presentation key`() {
+        fun proposed(kind: String, text: String, parent: String? = null) =
+            item(kind) {
+                put("id", "plan")
+                put("type", "proposed_plan")
+                put("text", text)
+                if (parent != null) put("parent_id", parent)
+            }
+        val started = proposed("item.started", "Draft approach")
+        val completed = proposed("item.completed", "Reviewed approach")
+        val replay = completed.copy(id = ++serial)
+        val child = proposed("item.completed", "Child approach", "Research")
+        val initial = timelineEntries(listOf(started), chat = true).single { it.proposal }
+        assertNull(initial.proposalSourceId)
+        val paired = timelineEntries(listOf(started, completed), chat = true).single { it.proposal }
+        assertEquals(initial.key, paired.key)
+        assertEquals(started.id, paired.events.single().id)
+        assertEquals("run:${completed.id}", paired.proposalSourceId)
+        assertEquals(listOf(started.id, completed.id), paired.sourceIds.getValue(started.id))
+        // Reopened history may start at the completion; a receipt can replay it later.
+        val reopened = timelineEntries(listOf(completed), chat = true).single { it.proposal }
+        assertEquals(paired.proposalSourceId, reopened.proposalSourceId)
+        val replayed =
+            timelineEntries(listOf(started, completed, replay, child), chat = true).single {
+                it.proposal
+            }
+        assertEquals(initial.key, replayed.key)
+        assertEquals("run:${replay.id}", replayed.proposalSourceId)
+        assertEquals(
+            listOf(started.id, completed.id, replay.id),
+            replayed.sourceIds.getValue(started.id),
+        )
+    }
+
+    @Test
     fun `child proposals remain activity rather than conversation approval`() {
         fun proposal(parent: String?) =
             item("item.completed") {

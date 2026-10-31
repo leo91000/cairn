@@ -626,6 +626,8 @@ internal data class TimelineEntry(
     val wait: ActivityWait? = null,
     /** The approach a plan turn proposed. */
     val proposal: Boolean = false,
+    /** The completed root event to approve, separate from the first-event display key. */
+    val proposalSourceId: String? = null,
     /** The agent's plan, kept up to date by its later updates. */
     val plan: AgentPlan? = null,
     /** Where an update changed the plan. */
@@ -1082,8 +1084,19 @@ internal fun timelineEntries(
                     event.item().string("parent_id").isBlank()
             ) {
                 flushActivity()
+                val proposalSources = sourceIds.getValue(event.id)
                 result.add(
-                    TimelineEntry("proposal:${event.id}", listOf(event), false, proposal = true)
+                    TimelineEntry(
+                        "proposal:${event.id}",
+                        listOf(event),
+                        false,
+                        sourceIds = mapOf(event.id to proposalSources),
+                        proposal = true,
+                        proposalSourceId =
+                            if (event.type == "item.completed")
+                                "${event.runId}:${proposalSources.last()}"
+                            else null,
+                    )
                 )
                 continue
             }

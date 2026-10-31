@@ -180,6 +180,14 @@ apps. `plan: true` requests a [plan turn](chats.md#plan-turns); during such a tu
 `cairn_installation` only lists and runs `read` operations. Supply a UUID in `message.id` and reuse it with identical content on retries.
 A message starts work with the target agent's permissions.
 
+To approve a reviewed approach with the same freshness check as the apps, supply
+`message.planApproval: {sourceId: "<runId>:<completed-event-id>", revision: "<chat-revision>"}`.
+Use the latest completed root `proposed_plan` event from `get_run`/`read_run_content`,
+not a folded presentation ID, native tool ID or child proposal. The manager checks
+this identity and revision atomically with queue insertion and refuses stale
+approvals. Retried accepted message IDs keep their original result. Omit this
+precondition for freely composed ordinary messages.
+
 | Scope | Conversation operations |
 | --- | --- |
 | `read` | `list_chats`, `get_chat`, `read_chat_content`, `list_chat_questions`, `list_chat_artifacts`, `read_chat_artifact`, `list_chat_attachments`, `read_chat_attachment` |

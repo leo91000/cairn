@@ -487,9 +487,10 @@ internal fun ChatPage(
             timeline
                 .getOrNull(index)
                 ?.takeIf {
-                    timeline.drop(index + 1).none { entry ->
-                        entry.events.any { event -> event.type == "chat.user" }
-                    }
+                    it.proposalSourceId != null &&
+                        timeline.drop(index + 1).none { entry ->
+                            entry.events.any { event -> event.type == "chat.user" }
+                        }
                 }
                 ?.key
         }
@@ -840,14 +841,13 @@ internal fun ChatPage(
                 delivery.sending.isNotEmpty()
         )
             return
-        planning = false
-        val event = entry.events.lastOrNull() ?: return
+        val sourceId = entry.proposalSourceId ?: return
         val revision = chat?.revision ?: return
+        planning = false
         send(
             "queue",
             plan = false,
-            planApproval =
-                PlanApproval(sourceId = "${event.runId}:${event.id}", revision = revision),
+            planApproval = PlanApproval(sourceId = sourceId, revision = revision),
         )
     }
     fun steerQueued(message: ChatMessage) {

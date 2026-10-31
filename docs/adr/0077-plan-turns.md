@@ -90,7 +90,7 @@ Le passage à l’implémentation est explicite : un message ordinaire dans le m
 envoyé depuis le composeur ou le bouton **Implement** / **Implémenter** du dernier
 plan proposé. Il s’exécute avec les droits courants de l’agent, contrôlés comme
 avant par `covers` : il n’élargit aucun droit. Le bouton transmet `planApproval`
-(identité de l’événement principal affiché et révision du fil). Dans la transaction
+(identité `runId:eventId` de l’événement principal achevé et révision du fil). Dans la transaction
 qui accepte le message, Cairn exige cette révision, la dernière proposition
 principale et l’absence de demande en attente ou de tour actif. Une approbation
 périmée échoue en conflit et les clients rafraîchissent le fil ; elle ne devient

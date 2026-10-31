@@ -97,6 +97,26 @@ class PlanTurnJourneyTest {
                             chatExecution = ChatExecution(messageId = "plan-request", plan = true),
                         ),
                 )
+            fun proposalEvent(eventId: Long, kind: String) =
+                RunEvent(
+                    id = eventId,
+                    runId = "run",
+                    createdAt = 1789315189000 + eventId * 1000,
+                    type = kind,
+                    text = "",
+                    payload =
+                        buildJsonObject {
+                            put(
+                                "item",
+                                buildJsonObject {
+                                    put("id", "exit-plan-tool")
+                                    put("type", "proposed_plan")
+                                    put("text", "1. Lire le composeur\n2. Ajouter le bouton Plan")
+                                    if (kind == "item.completed") put("status", "completed")
+                                },
+                            )
+                        },
+                )
             val events =
                 listOf(
                     RunEvent(
@@ -111,29 +131,9 @@ class PlanTurnJourneyTest {
                             },
                     ),
                     RunEvent(id = 2, createdAt = 1789315190000, type = "turn.started", text = ""),
-                    RunEvent(
-                        id = 3,
-                        runId = "run",
-                        createdAt = 1789315191000,
-                        type = "item.completed",
-                        text = "",
-                        payload =
-                            buildJsonObject {
-                                put(
-                                    "item",
-                                    buildJsonObject {
-                                        put("id", "exit-plan-tool")
-                                        put("type", "proposed_plan")
-                                        put(
-                                            "text",
-                                            "1. Lire le composeur\n2. Ajouter le bouton Plan",
-                                        )
-                                        put("status", "completed")
-                                    },
-                                )
-                            },
-                    ),
-                    RunEvent(id = 4, createdAt = 1789315192000, type = "turn.completed", text = ""),
+                    proposalEvent(3, "item.started"),
+                    proposalEvent(4, "item.completed"),
+                    RunEvent(id = 5, createdAt = 1789315193000, type = "turn.completed", text = ""),
                 )
             val vm =
                 mountPlanChat(
@@ -174,7 +174,7 @@ class PlanTurnJourneyTest {
             assertEquals(false, implementing["plan"]?.jsonPrimitive?.boolean)
             val approval = implementing["planApproval"]!!.jsonObject
             assertEquals("reviewed-revision", approval["revision"]!!.jsonPrimitive.content)
-            assertEquals("run:3", approval["sourceId"]!!.jsonPrimitive.content)
+            assertEquals("run:4", approval["sourceId"]!!.jsonPrimitive.content)
             assertEquals(
                 "Implémente le plan que tu as proposé.",
                 implementing["text"]?.jsonPrimitive?.content,
@@ -415,7 +415,8 @@ class PlanTurnJourneyTest {
                     if (path == "/api/installations/fixture/api/chats/$CHAT/stream") {
                         streamRequests?.incrementAndGet()
                         check(initialSnapshot?.await(20, TimeUnit.SECONDS) != false)
-                        val initial = "event: batch\nid: 4\ndata: $batch\n\n"
+                        val initial =
+                            "event: batch\nid: ${events.maxOfOrNull { it.id } ?: 0L}\ndata: $batch\n\n"
                         return MockResponse()
                             .setHeader("Content-Type", "text/event-stream")
                             .setBody(initial + ": keepalive\n".repeat(100_000))
