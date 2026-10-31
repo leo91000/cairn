@@ -448,13 +448,17 @@ async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
         )
         .await
         .unwrap();
-    let stale = mcp
+    let older_during_stream = mcp
         .bounded(
             "read_run_timeline",
             json!({"runId":run_id, "before":timeline_page["oldest"], "snapshot":change_cursor}),
         )
         .await;
-    assert_eq!(stale["result"]["isError"], true, "{stale}");
+    assert_ne!(
+        older_during_stream["result"]["isError"], true,
+        "{older_during_stream}"
+    );
+    assert_eq!(result(&older_during_stream)["changeCursor"], change_cursor);
     s.store
         .event(
             run_id,

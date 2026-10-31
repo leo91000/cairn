@@ -53,7 +53,7 @@ pub(crate) const RUN_OPERATIONS: &[RunOperation] = &[
     RunOperation {
         name: "read_run_timeline",
         scope: "read",
-        description: "Read the run's timeline, newest page first. Save the first page's changeCursor and pass it as snapshot with oldest as before for older pages. Restart if the timeline changes between pages. Then pass the saved cursor as changes and follow changeCursor while hasMoreChanges is true to catch up. A newer card revision replaces an older one. Read a truncated card by entryId with read_run_content.",
+        description: "Read the run's timeline, newest page first. Save the first page's changeCursor and pass it as snapshot with oldest as before for older pages. Pages can include newer revisions while the run continues. Then pass the saved cursor as changes and follow changeCursor while hasMoreChanges is true to catch up. Restart if retained history changes. A newer card revision replaces an older one. Read a truncated card by entryId with read_run_content.",
     },
     RunOperation {
         name: "read_run_content",

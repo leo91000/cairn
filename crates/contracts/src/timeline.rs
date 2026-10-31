@@ -346,7 +346,8 @@ pub struct ReadRunTimelineInput {
     /// Resume the change feed from a cursor returned by this operation.
     #[serde(default)]
     pub changes: Option<TimelineCursor>,
-    /// Pin older pages to the first page's cursor. A change requires restarting.
+    /// Keep the first page's cursor while loading older pages, then read changes
+    /// from that cursor. Older cards can reflect changes made during pagination.
     #[serde(default)]
     pub snapshot: Option<TimelineCursor>,
 }

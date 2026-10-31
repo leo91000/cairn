@@ -13,7 +13,8 @@ export interface ReadRunTimelineInput {
    */
   changes: TimelineCursor | null
   /**
-   * Pin older pages to the first page's cursor. A change requires restarting.
+   * Keep the first page's cursor while loading older pages, then read changes
+   * from that cursor. Older cards can reflect changes made during pagination.
    */
   snapshot: TimelineCursor | null
 }

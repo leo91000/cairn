@@ -876,10 +876,10 @@ pub(crate) fn run_timeline(
     if input
         .snapshot
         .as_ref()
-        .is_some_and(|cursor| cursor.history != history || cursor.revision != newest)
+        .is_some_and(|cursor| cursor.history != history || cursor.revision > newest)
     {
         return Err(Error::conflict(
-            "Timeline changed between pages; restart from the newest page.",
+            "Timeline history changed; restart from the newest page.",
         ));
     }
     let (cards, mut has_older) = if let Some(cursor) = changes {
@@ -950,6 +950,8 @@ pub(crate) fn run_timeline(
             id: Some(id),
             history,
         }
+    } else if let Some(snapshot) = &input.snapshot {
+        snapshot.clone()
     } else {
         TimelineCursor {
             revision: newest,
