@@ -67,6 +67,7 @@ class PlanTurnJourneyTest {
     private fun approvalJourney(staleApproval: Boolean) {
         MockWebServer().use { server ->
             val streamRequests = AtomicInteger()
+            val approvalResponse = CountDownLatch(1)
             val calls = CopyOnWriteArrayList<String>()
             val chat =
                 Chat(
@@ -142,6 +143,7 @@ class PlanTurnJourneyTest {
                     calls,
                     rejectApproval = staleApproval,
                     streamRequests = streamRequests,
+                    approvalResponse = approvalResponse,
                 )
             compose.waitUntil(20000) {
                 compose.onAllNodesWithTag("proposed-plan").fetchSemanticsNodes().isNotEmpty()
@@ -152,8 +154,22 @@ class PlanTurnJourneyTest {
 
             // An idle proposal can be explicitly implemented as an ordinary message.
             val initialStreams = streamRequests.get()
-            compose.onNodeWithTag("implement-plan").assertIsEnabled().performClick()
-            compose.waitUntil(20000) { calls.size == 1 }
+            try {
+                compose.onNodeWithTag("implement-plan").assertIsEnabled().performClick()
+                compose.waitUntil(20000) { calls.size == 1 }
+                // Request arrival is not acceptance. Hold the HTTP response to make that
+                // distinction deterministic: the composer remains busy until it arrives.
+                assertTrue(vm.state.value.busy)
+                compose.onNodeWithTag("plan-toggle").assertIsNotEnabled()
+            } finally {
+                approvalResponse.countDown()
+            }
+            compose.waitUntil(20000) {
+                // Deliver the response continuation on Robolectric's main looper too;
+                // polling only StateFlow leaves that continuation queued.
+                compose.waitForIdle()
+                !vm.state.value.busy
+            }
             val implementing = wireJson.parseToJsonElement(calls[0]).jsonObject
             assertEquals(false, implementing["plan"]?.jsonPrimitive?.boolean)
             val approval = implementing["planApproval"]!!.jsonObject
@@ -389,6 +405,7 @@ class PlanTurnJourneyTest {
         initialSnapshot: CountDownLatch? = null,
         rejectApproval: Boolean = false,
         streamRequests: AtomicInteger? = null,
+        approvalResponse: CountDownLatch? = null,
     ): CairnViewModel {
         val batch = wireJson.encodeToString(LiveBatch(events, LiveState(chat = chat), true, false))
         server.dispatcher =
@@ -411,6 +428,7 @@ class PlanTurnJourneyTest {
                     if (path == "/api/installations/fixture/api/chats/$CHAT/messages") {
                         val sent = request.body.readUtf8()
                         calls += sent
+                        check(approvalResponse?.await(20, TimeUnit.SECONDS) != false)
                         if (rejectApproval)
                             return MockResponse()
                                 .setResponseCode(409)
