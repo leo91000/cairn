@@ -163,7 +163,9 @@ fn exit_record(code: i32, finalization_failed: bool) -> String {
     if finalization_failed {
         json!({ "StatusCode": code, "FinalizationFailed": true }).to_string()
     } else {
-        code.to_string()
+        // This function is called for a healthy final write only after the
+        // workload, mount ownership and suspension accounting have drained.
+        json!({ "StatusCode": code, "PhysicalFinalized": true }).to_string()
     }
 }
 
@@ -3665,7 +3667,10 @@ mod tests {
             );
         }
         let (code, failed) = completion_status(1, block::Completion::Flushed);
-        assert_eq!(exit_record(code, failed), "1");
+        assert_eq!(
+            serde_json::from_str::<Value>(&exit_record(code, failed)).unwrap(),
+            json!({ "StatusCode": 1, "PhysicalFinalized": true })
+        );
     }
 
     #[tokio::test]
