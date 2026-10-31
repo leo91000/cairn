@@ -494,17 +494,29 @@ pub(crate) fn expire(db: &Db<'_>, chat_id: &str) -> Result<()> {
         if answers(run.as_ref(), &open) {
             continue;
         }
-        let question = find(db, chat_id, &id)?;
-        let Some(mut question) =
-            question.filter(|question| question.status == SideQuestionStatus::Pending)
-        else {
-            db.delete(&open_key(chat_id, &id))?;
-            continue;
-        };
-        question.status = SideQuestionStatus::Failed;
-        question.error = Some(EXPIRED.into());
-        question.settled_at = Some(now());
-        save(db, &question)?;
+        expire_question(db, chat_id, &id)?;
+    }
+    Ok(())
+}
+
+fn expire_question(db: &Db<'_>, chat_id: &str, id: &str) -> Result<()> {
+    let question = find(db, chat_id, id)?;
+    let Some(mut question) =
+        question.filter(|question| question.status == SideQuestionStatus::Pending)
+    else {
+        return db.delete(&open_key(chat_id, id));
+    };
+    question.status = SideQuestionStatus::Failed;
+    question.error = Some(EXPIRED.into());
+    question.settled_at = Some(now());
+    save(db, &question)
+}
+
+fn expire_attempt(db: &Db<'_>, chat_id: &str, run_id: &str) -> Result<()> {
+    for (question_id, marker) in open(db, chat_id)? {
+        if marker.run_id == run_id {
+            expire_question(db, chat_id, &question_id)?;
+        }
     }
     Ok(())
 }
@@ -557,16 +569,23 @@ pub(crate) async fn forget_deliveries(run_directory: &std::path::Path) -> Result
     crate::skills::atomic_write(&inbox, &serde_json::to_vec(&kept)?).await
 }
 
-/// Before another attempt reads the run's inbox: only an attempt whose adapter announced
-/// side questions receives them, once it has.
+/// End an attempt's side-question capability and fail its pending questions before a
+/// replacement attempt can announce support, even if the run and turn are unchanged.
 pub(crate) async fn withdraw_announcement(
     store: &crate::store::Store,
     run_id: &str,
     run_directory: &std::path::Path,
 ) -> Result<()> {
     let _inbox = INBOX.lock().await;
+    let id = run_id.to_owned();
     store
-        .update_run_boundary(run_id, json!({ "sideQuestions": null }))
+        .transaction(move |db| {
+            db.update_run_boundary(&id, &json!({ "sideQuestions": null }))?;
+            if let Some(chat) = chat_for_run(db, &id)? {
+                expire_attempt(db, text(&chat, "id"), &id)?;
+            }
+            Ok(())
+        })
         .await?;
     forget_deliveries(run_directory).await
 }
@@ -688,6 +707,7 @@ impl Service {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::run_fixture::DbRunFixture;
 
     fn question(quote: &str) -> ChatSideQuestion {
         ChatSideQuestion {
@@ -789,6 +809,93 @@ mod tests {
         assert_eq!(expired.status, SideQuestionStatus::Failed);
         assert_eq!(expired.error.as_deref(), Some(EXPIRED));
         assert_eq!(after, (HashSet::new(), 3));
+    }
+
+    #[tokio::test]
+    async fn ending_an_attempt_fails_its_questions_before_the_same_turn_resumes() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        let chat = crate::chats::list_measurements::chat_id(0);
+        let chat_for_assertions = chat.clone();
+        store
+            .transaction(move |db| {
+                db.add_run_fixture(
+                    &json!({
+                        "id": "r", "taskId": "r", "createdAt": 0, "status": "running",
+                        "snapshot": { "agent": { "provider": "claude" } },
+                        "chatExecution": { "messageId": "same-turn" }, "sideQuestions": true,
+                    }),
+                    None,
+                )?;
+                let conversation: crate::chats::Conversation = serde_json::from_value(json!({
+                    "id": chat, "slug": "test-chat", "title": "Test", "agentId": "agent",
+                    "createdAt": 0, "updatedAt": 0, "runId": "r",
+                }))?;
+                db.save_conversation(&conversation)?;
+                for (id, run, status) in [
+                    ("pending", "r", SideQuestionStatus::Pending),
+                    ("withdrawn", "r", SideQuestionStatus::Cancelled),
+                    ("answered", "r", SideQuestionStatus::Answered),
+                    ("other-run", "other", SideQuestionStatus::Pending),
+                ] {
+                    let mut entry = question("");
+                    entry.id = id.into();
+                    entry.chat_id = chat.clone();
+                    entry.run_id = run.into();
+                    entry.status = status;
+                    open_question(db, &entry, "same-turn", "")?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let inbox = root.path().join("chat-input");
+        std::fs::create_dir(&inbox).unwrap();
+        std::fs::write(
+            inbox.join("messages.json"),
+            json!([
+                { "id": "side-question:pending", "sideQuestion": { "id": "pending" } },
+                { "id": "steer", "text": "continue" },
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        withdraw_announcement(&store, "r", root.path())
+            .await
+            .unwrap();
+        let run = store.run("r").await.unwrap();
+        assert!(run["sideQuestions"].is_null());
+        assert!(unavailable(Some(&run)).is_some());
+        let inbox: Value =
+            serde_json::from_slice(&std::fs::read(inbox.join("messages.json")).unwrap()).unwrap();
+        assert_eq!(inbox, json!([{ "id": "steer", "text": "continue" }]));
+        // A later adapter can announce again on the same run and turn, but cannot
+        // receive or settle a question belonging to the exhausted attempt.
+        store
+            .update_run_boundary("r", json!({ "sideQuestions": true }))
+            .await
+            .unwrap();
+        store
+            .read(move |db| {
+                let failed = find(db, &chat_for_assertions, "pending")?.unwrap();
+                assert_eq!(failed.status, SideQuestionStatus::Failed);
+                assert_eq!(failed.error.as_deref(), Some(EXPIRED));
+                assert_eq!(
+                    find(db, &chat_for_assertions, "withdrawn")?.unwrap().status,
+                    SideQuestionStatus::Cancelled
+                );
+                assert_eq!(
+                    find(db, &chat_for_assertions, "answered")?.unwrap().status,
+                    SideQuestionStatus::Answered
+                );
+                let remaining = open(db, &chat_for_assertions)?;
+                assert_eq!(remaining.len(), 1);
+                assert_eq!(remaining[0].0, "other-run");
+                assert!(deliveries(db, &chat_for_assertions, &db.run("r")?.unwrap())?.is_empty());
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

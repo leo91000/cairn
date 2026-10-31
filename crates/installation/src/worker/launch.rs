@@ -696,6 +696,16 @@ impl Execution<'_> {
         if let Some(session) = session.as_ref()
             && self.may_switch_account(&exit)
         {
+            // This adapter has exited; its side questions cannot wait for a different
+            // account, even though the run and turn remain running during the switch.
+            if self.run["chatExecution"].is_object() {
+                crate::chats::side_questions::withdraw_announcement(
+                    &s.store,
+                    &self.id,
+                    &self.directory,
+                )
+                .await?;
+            }
             if workspace.isolated() {
                 recovery::fence(s, &s.store.run(&self.id).await?).await?;
             }
