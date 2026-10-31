@@ -347,10 +347,10 @@ TMPDIR=/var/tmp CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
 
 The frozen reference is from `1aa24dc825f909874852ffd24213080f9443b8db`.
 The current measurement uses clean committed source
-`2881ff133acc381f2ce845afa358f1cec759ffc8`, including the native-storage and
-updater candidate integrations, and crate tree
-`df141b7523e4e4622ab0882a9c8de1f81b00cd3f`. The sealed executable SHA-256 is
-`e5fb58fd5535bc1cbd1ede5c963cd166be34746b20401803941a1405a461a8ab`.
+`19dc649e4b11663371e2dce8efd3a2e0d80d63cd`, including publication-candidate
+selection and WAL observations, and installation crate tree
+`0d665cc23e33f28e704360e5ada0e9ff78e6ad73`. The sealed executable SHA-256 is
+`367449b6caa24901a942720431bc2447d99c05fd735429e9120bdcc2b6bfef02`.
 Rust 1.97.1 uses development dependency defaults, installation package opt-level
 2, no debug information and no incremental compilation. This is not a release
 profile or a production measurement.
@@ -367,20 +367,33 @@ Four alternating-order pairs time `BEGIN IMMEDIATE`, the actual release
 statements, cascading reference deletion and `COMMIT`. Copying, connection/PRAGMA
 setup and verification are excluded. The OS cache is warm after copying; no
 host cache eviction was attempted. The shared fixture write control takes
-1,057.520 ms wall / 788.434 ms CPU, including preparation and commit; it is not
+935.589 ms wall / 743.807 ms CPU, including preparation and commit; it is not
 a before/after write comparison.
 
 | Committed retirement | Reference median (ms) | Candidate median (ms) | Change |
 | --- | ---: | ---: | ---: |
-| Process CPU | 164.867 | 151.479 | -8.1% |
-| Wall time | 321.056 | 306.205 | -4.6% |
+| Process CPU | 151.918 | 145.793 | -4.0% |
+| Wall time | 320.796 | 312.416 | -2.6% |
 
 Every trial has the same 32,769 changed rows and 19,450,552 WAL bytes. Foreign-key
 checks pass. Final object/publication/reference states compare equal after
 normalizing naturally different retirement timestamps. The diagnostic JSON
 representation of that normalized state is 12,681,350 bytes; this is neither
 stored-object nor wire-format size. Database and object formats do not change.
-The CPU improvement is modest. An earlier measurement on crate tree
+The CPU improvement is modest. One reference trial took 558.361 ms wall while
+the other reference trials took 314.766–325.895 ms; no observation is trimmed.
+A preceding invocation passed the product assertions, but the temporary collector
+retained only seven JSON observations because the first line had a test-name
+prefix. Its incomplete records are preserved separately; this table uses one
+complete eight-observation batch after correcting the collector.
+
+The previous complete measurement on source
+`2881ff133acc381f2ce845afa358f1cec759ffc8`, crate tree
+`df141b7523e4e4622ab0882a9c8de1f81b00cd3f` and sealed executable
+`e5fb58fd5535bc1cbd1ede5c963cd166be34746b20401803941a1405a461a8ab` reported
+164.867 → 151.479 ms CPU (-8.1%) and 321.056 → 306.205 ms wall (-4.6%); its
+shared fixture write control was 1,057.520 ms wall / 788.434 ms CPU.
+An earlier measurement on crate tree
 `ca3018b31f84474cdec11984e00ded3724298922`, sealed executable
 `3672a5392dcb5ac1718d3b2cd19f796590f17d541ab2024c7e131c07e495c1a5`, reported
 159.888 → 149.631 ms CPU (-6.4%) but 380.867 → 390.399 ms wall (+2.5%). Other-user
