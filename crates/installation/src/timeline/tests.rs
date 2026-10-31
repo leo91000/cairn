@@ -65,6 +65,62 @@ async fn cards(store: &Store, run: &str) -> Vec<TimelineEntry> {
 }
 
 #[tokio::test]
+async fn replay_and_migration_discard_reset_timestamps_outside_the_wire_range() {
+    use serde_json::json;
+    let root = tempfile::tempdir().unwrap();
+    let db = previous(root.path());
+    for (kind, payload) in [
+        (
+            EventKind::ProviderLimit,
+            json!({"status": "rejected", "resetsAt": 10_000_000_000_000_000_i64}),
+        ),
+        (
+            EventKind::TurnFailed,
+            json!({"error": {"message": "You've hit your usage limit. Try again later.", "resetsAt": -1}}),
+        ),
+        (EventKind::EngineRetry, json!({"delayMs": u64::MAX})),
+    ] {
+        db.execute(
+            "INSERT INTO events(run_id,created_at,type,text,payload) VALUES(?,?,?,?,?)",
+            rusqlite::params![CODEX, 1000, kind.as_str(), "", payload.to_string()],
+        )
+        .unwrap();
+    }
+    drop(db);
+    let store = Store::open(root.path()).unwrap();
+    let migrated = cards(&store, CODEX).await;
+    assert!(migrated.iter().any(|card| matches!(&card.content,
+        TimelineContent::Notice { notice } if notice.usage_limit.as_ref().is_some_and(|limit| limit.resets_at.is_none())
+    )));
+    assert!(migrated.iter().any(|card| matches!(&card.content,
+        TimelineContent::Notice { notice } if notice.quota.as_ref().is_some_and(|quota| quota.resets_at.is_none())
+    )));
+    assert!(migrated.iter().any(|card| matches!(&card.content,
+        TimelineContent::Notice { notice } if notice.engine_retry.as_ref().is_some_and(|retry| retry.delay_ms.is_none())
+    )));
+    store
+        .event(
+            CODEX,
+            &EventKind::ProviderLimit,
+            "",
+            Some(json!({"status": "rejected", "resetsAt": 10_000_000_000_000_000_i64})),
+        )
+        .await
+        .unwrap();
+    let live = cards(&store, CODEX).await;
+    assert!(
+        live.iter()
+            .filter_map(|card| match &card.content {
+                TimelineContent::Notice { notice } => notice.usage_limit.as_ref(),
+                _ => None,
+            })
+            .all(|limit| limit
+                .resets_at
+                .is_none_or(|reset| (0..=9_007_199_254_740_991).contains(&reset)))
+    );
+}
+
+#[tokio::test]
 async fn ending_many_replies_does_not_amplify_a_small_live_batch() {
     let root = tempfile::tempdir().unwrap();
     previous(root.path());

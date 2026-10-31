@@ -370,6 +370,12 @@ fn count(value: &Value) -> Option<u32> {
     value.as_u64().and_then(|value| u32::try_from(value).ok())
 }
 
+fn wire_timestamp(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .filter(|timestamp| (0..=9_007_199_254_740_991).contains(timestamp))
+}
+
 /// The detail a notice reads from its source event: the work's own words.
 pub(crate) fn notice_detail(event: &Event<'_>, code: NoticeCode) -> Option<String> {
     let data = event.data();
@@ -845,7 +851,7 @@ impl<C: Cards> Reducer<'_, C> {
             notice.prominent = false;
             // The runner repeats the engine's failure without its reset.
             let previous = self.state.quota.take();
-            let resets_at = data["error"]["resetsAt"].as_i64().or_else(|| {
+            let resets_at = wire_timestamp(&data["error"]["resetsAt"]).or_else(|| {
                 previous
                     .as_ref()
                     .filter(|previous| previous.digest == crate::auth::hex_digest(&cause))
@@ -1074,7 +1080,9 @@ impl<C: Cards> Reducer<'_, C> {
                     max_retries: count(&data["maxRetries"]).filter(|limit| *limit > 0),
                     reason: data["reason"].as_str().map(|_| String::new()),
                     http_status: count(&data["status"]).filter(|status| *status > 0),
-                    delay_ms: data["delayMs"].as_u64(),
+                    delay_ms: data["delayMs"]
+                        .as_u64()
+                        .filter(|delay| i64::try_from(*delay).is_ok()),
                     no_response: data["noResponse"].is_object(),
                 });
                 NoticeCode::EngineRetry
@@ -1087,7 +1095,7 @@ impl<C: Cards> Reducer<'_, C> {
                     status: String::new(),
                     window: data["window"].as_str().map(|_| String::new()),
                     blocked: data["blocked"] == true,
-                    resets_at: data["resetsAt"].as_i64().filter(|reset| *reset >= 0),
+                    resets_at: wire_timestamp(&data["resetsAt"]),
                 });
                 NoticeCode::UsageLimit
             }
