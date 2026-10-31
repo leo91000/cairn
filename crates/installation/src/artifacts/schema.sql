@@ -30,8 +30,9 @@ CREATE INDEX artifact_versions_run ON artifact_versions(run_id,created_at,id);
 CREATE TABLE artifact_visibility(
  version_id TEXT PRIMARY KEY NOT NULL REFERENCES artifact_versions(id) ON DELETE CASCADE,
  visibility TEXT NOT NULL CHECK(visibility IN ('private','public')),
- public_token TEXT UNIQUE,
+ public_token TEXT,
  public_url TEXT,
  CHECK((visibility='public' AND public_token IS NOT NULL AND public_url IS NOT NULL)
     OR (visibility='private' AND public_token IS NULL AND public_url IS NULL))
 ) WITHOUT ROWID;
+CREATE UNIQUE INDEX artifact_visibility_public_token ON artifact_visibility(public_token) WHERE public_token IS NOT NULL;

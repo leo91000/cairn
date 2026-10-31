@@ -93,6 +93,11 @@ async fn real_previous_database_preserves_versions_links_sources_and_unrelated_d
         .await
         .unwrap();
     assert_eq!(versions.len(), 3);
+    let mut duplicate_link = versions
+        .iter()
+        .find(|version| version.public_token.is_none())
+        .unwrap()
+        .clone();
     for version in versions {
         let mut actual = serde_json::to_value(&version).unwrap();
         // Omitted optional null fields carry the same public semantics and no data.
@@ -108,7 +113,24 @@ async fn real_previous_database_preserves_versions_links_sources_and_unrelated_d
         serde_json::to_value(source.unwrap()).unwrap(),
         documents["skill-source:global/guide"]
     );
-    assert_eq!(public.unwrap().public_token.as_deref(), Some(TOKEN));
+    let public = public.unwrap();
+    assert_eq!(public.public_token.as_deref(), Some(TOKEN));
+    duplicate_link.visibility = Some("public".to_owned());
+    duplicate_link.public_token = public.public_token.clone();
+    duplicate_link.public_url = public.public_url.clone();
+    assert!(
+        store
+            .transaction(move |db| db.save_artifact_visibility(&duplicate_link))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .read(|db| Ok(db.public_artifact(TOKEN)?.unwrap().id))
+            .await
+            .unwrap(),
+        public.id
+    );
     let historical = store
         .skill_source("00000000-0000-4000-8000-000000000dad", "guide")
         .await
