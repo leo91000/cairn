@@ -1,4 +1,4 @@
--- Real Store b3ebdc4b: upgraded v17 fixture, metadata written by its browser_fixture. All contents and credentials synthetic.
+-- Real Store 23dee7bb: actual v18 fixture upgraded offline to schema19; all data and credentials synthetic.
 PRAGMA foreign_keys=OFF;
 BEGIN TRANSACTION;
 CREATE TABLE account_dismissals(
@@ -821,58 +821,6 @@ CREATE TABLE runs(
   snapshot TEXT CHECK(snapshot IS NULL OR json_valid(snapshot)),
   boundary TEXT NOT NULL CHECK(json_valid(boundary) AND json_type(boundary)='object' AND json_type(boundary,'$.snapshot') IS NULL),
   dedupe TEXT UNIQUE,
-  data TEXT GENERATED ALWAYS AS (json_set(boundary,'$.snapshot',json(snapshot),'$.summary',summary,
-
-  '$.id',id,
-  '$.taskId',task_id,
-  '$.projectId',project_id,
-  '$.status',status,
-  '$.trigger',trigger,
-  '$.createdAt',created_at,
-  '$.startedAt',started_at,
-  '$.finishedAt',finished_at,
-  '$.error',error,
-  '$.sessionId',session_id,
-  '$.workspace',workspace,
-  '$.workspaceCleanedAt',workspace_cleaned_at,
-  '$.recoveryPending',json(CASE WHEN recovery_pending THEN 'true' ELSE 'false' END),
-  '$.resumeAvailable',json(CASE WHEN resume_available THEN 'true' ELSE 'false' END),
-  '$.resumeCount',resume_count,
-  '$.cancelRequestedAt',cancel_requested_at,
-  '$.accountId',account_id,
-  '$.accountName',account_name,
-  '$.accountWaitReason',account_wait_reason,
-  '$.accountRequired',account_required,
-  '$.capacityWaitUntil',capacity_wait_until,
-  '$.requestedBy',json(requested_by),
-  '$.retry',json(CASE WHEN retry_attempt IS NULL THEN NULL ELSE json_object('attempt',retry_attempt,'limit',retry_limit,'nextAttemptAt',retry_next_at,'startedAt',retry_started_at,'deadlineAt',retry_deadline_at,'cause',json(retry_cause)) END)
-)) VIRTUAL,
-  summary_data TEXT GENERATED ALWAYS AS (json_set(boundary,
-
-  '$.id',id,
-  '$.taskId',task_id,
-  '$.projectId',project_id,
-  '$.status',status,
-  '$.trigger',trigger,
-  '$.createdAt',created_at,
-  '$.startedAt',started_at,
-  '$.finishedAt',finished_at,
-  '$.error',error,
-  '$.sessionId',session_id,
-  '$.workspace',workspace,
-  '$.workspaceCleanedAt',workspace_cleaned_at,
-  '$.recoveryPending',json(CASE WHEN recovery_pending THEN 'true' ELSE 'false' END),
-  '$.resumeAvailable',json(CASE WHEN resume_available THEN 'true' ELSE 'false' END),
-  '$.resumeCount',resume_count,
-  '$.cancelRequestedAt',cancel_requested_at,
-  '$.accountId',account_id,
-  '$.accountName',account_name,
-  '$.accountWaitReason',account_wait_reason,
-  '$.accountRequired',account_required,
-  '$.capacityWaitUntil',capacity_wait_until,
-  '$.requestedBy',json(requested_by),
-  '$.retry',json(CASE WHEN retry_attempt IS NULL THEN NULL ELSE json_object('attempt',retry_attempt,'limit',retry_limit,'nextAttemptAt',retry_next_at,'startedAt',retry_started_at,'deadlineAt',retry_deadline_at,'cause',json(retry_cause)) END)
-,'$.taskName',task_name,'$.agentName',agent_name,'$.provider',provider)) VIRTUAL,
   CHECK((retry_attempt IS NULL AND retry_limit IS NULL AND retry_cause IS NULL AND retry_next_at IS NULL AND retry_started_at IS NULL AND retry_deadline_at IS NULL) OR (retry_attempt IS NOT NULL AND retry_limit IS NOT NULL AND retry_cause IS NOT NULL)),
   CHECK(retry_deadline_at IS NULL OR retry_started_at IS NULL OR retry_deadline_at>=retry_started_at)
 );
@@ -996,7 +944,61 @@ CREATE UNIQUE INDEX durable_wakeups_mission ON durable_wakeups(mission_run_id) W
 CREATE UNIQUE INDEX conversation_lineage_request ON conversation_lineage(requester_chat_id,request_id);
 CREATE INDEX attachments_order ON attachments(chat_id,created_at,id);
 CREATE INDEX attachment_reservations_expiry ON attachment_reservations(expires_at);
+CREATE VIEW run_views AS SELECT runs.*,
+  json_set(boundary,'$.snapshot',json(snapshot),'$.summary',summary,
+
+  '$.id',id,
+  '$.taskId',task_id,
+  '$.projectId',project_id,
+  '$.status',status,
+  '$.trigger',trigger,
+  '$.createdAt',created_at,
+  '$.startedAt',started_at,
+  '$.finishedAt',finished_at,
+  '$.error',error,
+  '$.sessionId',session_id,
+  '$.workspace',workspace,
+  '$.workspaceCleanedAt',workspace_cleaned_at,
+  '$.recoveryPending',json(CASE WHEN recovery_pending THEN 'true' ELSE 'false' END),
+  '$.resumeAvailable',json(CASE WHEN resume_available THEN 'true' ELSE 'false' END),
+  '$.resumeCount',resume_count,
+  '$.cancelRequestedAt',cancel_requested_at,
+  '$.accountId',account_id,
+  '$.accountName',account_name,
+  '$.accountWaitReason',account_wait_reason,
+  '$.accountRequired',account_required,
+  '$.capacityWaitUntil',capacity_wait_until,
+  '$.requestedBy',json(requested_by),
+  '$.retry',json(CASE WHEN retry_attempt IS NULL THEN NULL ELSE json_object('attempt',retry_attempt,'limit',retry_limit,'nextAttemptAt',retry_next_at,'startedAt',retry_started_at,'deadlineAt',retry_deadline_at,'cause',json(retry_cause)) END)
+) AS data,
+  json_set(boundary,
+
+  '$.id',id,
+  '$.taskId',task_id,
+  '$.projectId',project_id,
+  '$.status',status,
+  '$.trigger',trigger,
+  '$.createdAt',created_at,
+  '$.startedAt',started_at,
+  '$.finishedAt',finished_at,
+  '$.error',error,
+  '$.sessionId',session_id,
+  '$.workspace',workspace,
+  '$.workspaceCleanedAt',workspace_cleaned_at,
+  '$.recoveryPending',json(CASE WHEN recovery_pending THEN 'true' ELSE 'false' END),
+  '$.resumeAvailable',json(CASE WHEN resume_available THEN 'true' ELSE 'false' END),
+  '$.resumeCount',resume_count,
+  '$.cancelRequestedAt',cancel_requested_at,
+  '$.accountId',account_id,
+  '$.accountName',account_name,
+  '$.accountWaitReason',account_wait_reason,
+  '$.accountRequired',account_required,
+  '$.capacityWaitUntil',capacity_wait_until,
+  '$.requestedBy',json(requested_by),
+  '$.retry',json(CASE WHEN retry_attempt IS NULL THEN NULL ELSE json_object('attempt',retry_attempt,'limit',retry_limit,'nextAttemptAt',retry_next_at,'startedAt',retry_started_at,'deadlineAt',retry_deadline_at,'cause',json(retry_cause)) END)
+,'$.taskName',task_name,'$.agentName',agent_name,'$.provider',provider) AS summary_data
+FROM runs;
 DELETE FROM "sqlite_sequence";
 INSERT INTO "sqlite_sequence" VALUES('audit',780);
 COMMIT;
-PRAGMA user_version=18;
+PRAGMA user_version=19;

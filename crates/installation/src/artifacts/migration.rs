@@ -1,4 +1,4 @@
-//! The v18 documents are read only here, inside one startup transaction.
+//! The v19 documents are read only here, inside one startup transaction.
 use super::sql::SCHEMA;
 use crate::skills::sql::SourceRecord;
 use crate::{
@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ShareV18 {
+struct ShareV19 {
     run_id: String,
     id: String,
 }
@@ -25,10 +25,10 @@ fn invalid() -> Error {
 pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if (19..=crate::store::DATABASE_VERSION).contains(&version) {
+    if (20..=crate::store::DATABASE_VERSION).contains(&version) {
         return Ok(());
     }
-    if version != 18 {
+    if version != 19 {
         return Err(invalid());
     }
     tx.execute_batch(SCHEMA)?;
@@ -44,7 +44,7 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
         }
         if let Some(token) = key.strip_prefix("artifact-share:") {
             uuid(token)?;
-            let link: ShareV18 = serde_json::from_str(data)?;
+            let link: ShareV19 = serde_json::from_str(data)?;
             links.insert(token, link);
         }
     }
@@ -102,7 +102,7 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
     if tx.prepare("PRAGMA foreign_key_check")?.exists([])? {
         return Err(invalid());
     }
-    tx.pragma_update(None, "user_version", 19)?;
+    tx.pragma_update(None, "user_version", 20)?;
     tx.commit()?;
     Ok(())
 }

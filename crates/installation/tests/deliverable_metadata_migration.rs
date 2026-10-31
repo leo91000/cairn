@@ -1,10 +1,10 @@
-//! Frozen by the real v18 Store (b3ebdc4b), including metadata written by its fixture binary.
+//! Frozen by the real v19 Store (23dee7bb), retaining metadata from the preceding fixture.
 use cairn_installation::store::Store;
 use rusqlite::{Connection, types::Value as SqlValue};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-const PREVIOUS: &str = include_str!("fixtures/deliverable-metadata-v18.sql");
+const PREVIOUS: &str = include_str!("fixtures/deliverable-metadata-v19.sql");
 const RUN: &str = "00000000-0000-4000-8000-000000000010";
 const TOKEN: &str = "00000000-0000-4000-8000-000000000e01";
 
@@ -15,6 +15,15 @@ fn previous(path: &std::path::Path) -> Connection {
 }
 
 type Snapshot = BTreeMap<String, (String, Vec<Vec<SqlValue>>)>;
+
+fn schema(db: &Connection) -> BTreeMap<(String, String), String> {
+    db.prepare("SELECT type,name,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY type,name")
+        .unwrap()
+        .query_map([], |row| Ok(((row.get(0)?, row.get(1)?), row.get(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+}
 
 fn snapshot(db: &Connection) -> Snapshot {
     let tables = db
@@ -82,6 +91,7 @@ async fn real_previous_database_preserves_versions_links_sources_and_unrelated_d
     db.execute("INSERT INTO kv VALUES(NULL,'{\"nullKey\":true}',NULL)", [])
         .unwrap();
     let before = snapshot(&db);
+    let before_schema = schema(&db);
     let documents = documents(&db);
     let store = Store::open(root.path()).unwrap();
     let (versions, source, public) = store
@@ -154,7 +164,7 @@ async fn real_previous_database_preserves_versions_links_sources_and_unrelated_d
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        19
+        20
     );
     assert_eq!(
         db.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
@@ -168,6 +178,16 @@ async fn real_previous_database_preserves_versions_links_sources_and_unrelated_d
             .unwrap()
     );
     let after = snapshot(&db);
+    let after_schema = schema(&db);
+    for ((kind, name), definition) in before_schema {
+        if kind != "table" || name != "kv" {
+            assert_eq!(
+                after_schema.get(&(kind, name)),
+                Some(&definition),
+                "Unrelated schema objects must remain unchanged"
+            );
+        }
+    }
     for (table, (sql, rows)) in before {
         if table != "kv" {
             assert_eq!(after[&table], (sql, rows), "{table}");
@@ -227,12 +247,14 @@ fn invalid_previous_metadata_leaves_schema_and_every_row_intact() {
         let db = previous(root.path());
         db.execute_batch(corruption).unwrap();
         let before = snapshot(&db);
+        let before_schema = schema(&db);
         assert!(Store::open(root.path()).is_err(), "{corruption}");
         assert_eq!(snapshot(&db), before, "{corruption}");
+        assert_eq!(schema(&db), before_schema, "{corruption}");
         assert_eq!(
             db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            18
+            19
         );
     }
 }
