@@ -6,6 +6,11 @@ import { isolateTestCredentials } from './test-environment.mjs'
 // must use their own temporary homes and synthetic brokers instead.
 isolateTestCredentials()
 const nextest = process.argv[2] === '--nextest'
+// The integration fixtures start real workers and databases. Unbounded libtest
+// parallelism can exhaust the shared host and make deadline tests unreliable.
+// Preserve an explicit caller choice; nextest controls its own concurrency.
+if (!nextest && !process.env.RUST_TEST_THREADS)
+  process.env.RUST_TEST_THREADS = '4'
 const args = process.argv.slice(nextest ? 3 : 2)
 const selectsPackage = args.some(arg => arg === '-p' || arg === '--package' || arg.startsWith('--package='))
 // Beacon's real MCP relay tests also execute the installation's isolated code

@@ -113,6 +113,8 @@ impl Store {
         }
         writer.set_prepared_statement_cache_capacity(128);
         enable_wal(&writer, Duration::from_secs(5))?;
+        // Allow durable writes on a slow disk to finish under contention.
+        writer.busy_timeout(Duration::from_secs(30))?;
         writer.execute_batch("PRAGMA foreign_keys=ON;")?;
         if !fresh && version == 11 {
             let upgraded = crate::nodes::inventory::migration::upgrade(&mut writer);
