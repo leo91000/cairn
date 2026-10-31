@@ -194,6 +194,9 @@ jobs:
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
         with:
           tool: cargo-nextest@0.9.149
+      - name: Check all Rust targets for a backend-only qualification
+        if: inputs.backend-only == true
+        run: pnpm validate:pr rust
       - name: Run backend tests across binaries with isolated credentials
         run: |
           set -o pipefail

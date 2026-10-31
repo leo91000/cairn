@@ -73,6 +73,7 @@ Version 16 then upgrades to 17 through the
 [attachment reservation migration](migrations/0017-attachment-reservations.md).
 Version 17 then upgrades to 18 through the
 [per-account read state migration](migrations/0018-personal-read-state.md).
+Version 20 upgrades to 21 through the [writer-owned progress migration](migrations/0021-run-progress.md).
 Stop the old manager and retain a consistent database/WAL backup first. Keep the
 installation identity, configuration, data roots, node state and object storage.
 The migration preserves node identities, credentials, configuration and references;
