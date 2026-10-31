@@ -54,6 +54,14 @@ internal fun Modifier.withoutLineHeight() = layout { measurable, constraints ->
 /** Asks about the passage selected in a reply, from its text selection menu. */
 internal val LocalSideQuestionAsk = compositionLocalOf<((String) -> Unit)?> { null }
 
+internal data class SideQuestionDraft(
+    val text: String,
+    val quote: String,
+    val itemId: String,
+    val replyEventId: Long?,
+    val revision: Long,
+)
+
 /** At most [count] code points, as the server counts them, never cutting an emoji. */
 internal fun String.takeCodePoints(count: Int): String =
     substring(0, offsetByCodePoints(0, minOf(count, codePointCount(0, length))))
@@ -75,8 +83,27 @@ internal class SideQuestionState {
     private var seen by mutableStateOf<Set<String>?>(null)
     private var submission = ""
     private var submissionKey = ""
+    private var revision = 0L
+
+    fun draft() = SideQuestionDraft(text, quote, itemId, replyEventId, revision)
+
+    fun editText(value: String) {
+        if (text != value) revision++
+        text = value
+    }
+
+    fun clearQuote() {
+        if (quote.isNotEmpty()) revision++
+        quote = ""
+    }
+
+    fun showAll() {
+        if (focus.isNotEmpty()) revision++
+        focus = ""
+    }
 
     fun ask(itemId: String, quote: String, replyEventId: Long? = null) {
+        revision++
         this.itemId = itemId
         this.replyEventId = replyEventId
         this.quote = quote.trim().takeCodePoints(4000)
@@ -89,6 +116,7 @@ internal class SideQuestionState {
 
     /** Opens the sheet, on the side questions about one reply when [itemId] is given. */
     fun show(itemId: String = "", replyEventId: Long? = null, lastEventId: Long? = replyEventId) {
+        revision++
         // Questions asked from a reply's sheet are about that reply.
         if (itemId.isNotEmpty() && (itemId != this.itemId || replyEventId != this.replyEventId)) {
             this.itemId = itemId
@@ -139,8 +167,9 @@ internal class SideQuestionState {
     }
 
     /** Asked: the next question remains about the focused reply, if any. */
-    fun submitted() {
-        submissionKey = ""
+    fun submitted(sent: SideQuestionDraft, id: String) {
+        if (submission == id) submissionKey = ""
+        if (draft() != sent) return
         text = ""
         quote = ""
         itemId = focus
@@ -272,7 +301,9 @@ internal fun ColumnScope.SideQuestionPanel(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
-                        ActionIcon("Retirer le passage cité", CairnIcons.Close) { side.quote = "" }
+                        ActionIcon("Retirer le passage cité", CairnIcons.Close) {
+                            side.clearQuote()
+                        }
                     }
                 }
             Field(
@@ -282,15 +313,16 @@ internal fun ColumnScope.SideQuestionPanel(
                     else -> "Votre question"
                 },
                 side.text,
-                { side.text = it.takeCodePoints(4000) },
+                { side.editText(it.takeCodePoints(4000)) },
                 3,
                 enabled = !state.busy,
             )
             Button(
                 onClick = {
-                    val question = side.text.trim()
+                    val draft = side.draft()
+                    val question = draft.text.trim()
                     val content =
-                        listOf(chat.id, question, side.quote, side.itemId, side.replyEventId)
+                        listOf(chat.id, question, draft.quote, draft.itemId, draft.replyEventId)
                             .joinToString("\u0000")
                     val id = side.submissionId(content)
                     // Close the keyboard so the answer appears in view.
@@ -303,13 +335,13 @@ internal fun ColumnScope.SideQuestionPanel(
                                     SideQuestionInput(
                                         id = id,
                                         text = question,
-                                        quote = side.quote,
-                                        itemId = side.itemId,
-                                        replyEventId = side.replyEventId?.toString().orEmpty(),
+                                        quote = draft.quote,
+                                        itemId = draft.itemId,
+                                        replyEventId = draft.replyEventId?.toString().orEmpty(),
                                     ),
                             )
                         )
-                        side.submitted()
+                        side.submitted(draft, id)
                     }
                 },
                 enabled = !state.busy && side.text.isNotBlank(),
@@ -355,7 +387,7 @@ internal fun ColumnScope.SideQuestionPanel(
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                TextButton(onClick = { side.focus = "" }) { Text("Tout afficher") }
+                TextButton(onClick = { side.showAll() }) { Text("Tout afficher") }
             }
         if (shown.isEmpty())
             Text(

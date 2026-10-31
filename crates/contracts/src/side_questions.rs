@@ -78,13 +78,16 @@ pub struct SideQuestionInput {
     #[schemars(length(min = 1, max = 4000))]
     pub text: String,
     #[serde(default)]
+    #[ts(as = "Option<String>", optional)]
     #[schemars(length(max = 4000))]
     pub quote: String,
     #[serde(default)]
+    #[ts(as = "Option<String>", optional)]
     #[schemars(length(max = 200))]
     pub item_id: String,
     /// The event of the reply to distinguish repeated native item IDs.
     #[serde(default)]
+    #[ts(as = "Option<String>", optional)]
     #[schemars(length(max = 16))]
     pub reply_event_id: String,
 }

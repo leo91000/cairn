@@ -6,11 +6,11 @@ export interface SideQuestionInput {
  */
   id: string
   text: string
-  quote: string
-  itemId: string
+  quote?: string
+  itemId?: string
   /**
    * The event of the reply to distinguish repeated native item IDs.
    */
-  replyEventId: string
+  replyEventId?: string
 
 }

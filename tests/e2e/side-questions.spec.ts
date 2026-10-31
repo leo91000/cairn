@@ -5,6 +5,7 @@ import {
   expect,
   expectSingleScroll,
   test,
+  useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
 
@@ -16,6 +17,50 @@ test.beforeAll(async ({ workspace }) => {
   const { accounts } = await workspace.api('/api/accounts')
   if (!accounts.some((account: { provider: string }) => account.provider === 'claude'))
     await connectClaude(workspace, 'Side questions', 'fixture-code:side-questions@example.test')
+})
+
+test('an earlier response preserves a newer reply draft', async ({ page, workspace }) => {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Review. fixture:chat-hang', provider: 'claude' })
+  await useRelayForHttpMocks(page)
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  const message = page.locator('.activity-message').filter({ hasText: reply })
+  await expect(message).toBeVisible()
+  let release!: () => void
+  let received!: () => void
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const started = new Promise<void>((resolve) => {
+    received = resolve
+  })
+  await page.route('**/side-questions', async (route) => {
+    if (route.request().method() === 'POST') {
+      received()
+      await gate
+    }
+
+    await route.continue()
+  })
+  try {
+    await page.getByRole('button', { name: 'Ask a side question' }).click()
+    const panel = page.getByRole('dialog', { name: 'Side questions' })
+    await panel.getByRole('textbox', { name: 'Your question', exact: true }).fill('Earlier question')
+    await panel.getByRole('button', { name: 'Ask', exact: true }).click()
+    await started
+    await panel.getByRole('button', { name: 'Close dialog' }).click()
+    await message.getByRole('button', { name: 'Ask about this reply' }).click()
+    await panel.getByRole('textbox', { name: 'Your question about this reply' }).fill('Later draft')
+    release()
+    await expect(panel.getByRole('button', { name: 'Ask', exact: true })).toBeEnabled()
+    await expect(panel.getByRole('textbox', { name: 'Your question about this reply' })).toHaveValue('Later draft')
+  }
+  finally {
+    release()
+    await page.unroute('**/side-questions')
+    await workspace.api(`/api/chats/${chat.id}/stop`, 'POST', {})
+  }
 })
 
 test('asks before the first assistant reply appears', async ({ page, workspace }) => {

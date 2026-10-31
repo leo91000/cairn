@@ -45,12 +45,17 @@ const error = ref('')
 /** The dialog focuses the question field when it opens to ask. */
 const asking = ref(false)
 let submission: { id: string, serialized: string } | undefined
+let draftRevision = 0
+watch([text, quote, itemId, replyEventId, focus], () => {
+  draftRevision++
+}, { flush: 'sync' })
 
 // Answers that arrived while the panel was closed show above the composer until read.
 const seen = ref(new Set<string>())
 let known = ''
 watch(() => [props.chatId, props.questions] as const, ([chatId, questions]) => {
   if (known !== chatId) {
+    draftRevision++
     known = chatId
     seen.value = new Set(questions.filter(question => question.status !== 'pending').map(question => question.id))
     open.value = false
@@ -96,6 +101,7 @@ const status = computed(() => {
 })
 
 function ask(about: { itemId: string, replyEventId: number | null, quote: string }) {
+  draftRevision++
   itemId.value = about.itemId
   replyEventId.value = about.replyEventId
   quote.value = about.quote
@@ -108,6 +114,7 @@ function ask(about: { itemId: string, replyEventId: number | null, quote: string
 
 /** Opens the panel, on the side questions about one reply when `item` is given. */
 function show(reply?: { itemId: string, replyEventId: number | null, replyEventIds: number[] }) {
+  draftRevision++
   const item = reply?.itemId ?? ''
   // Questions asked from a reply's panel are about that reply.
   if (item && (item !== itemId.value || reply?.replyEventId !== replyEventId.value)) {
@@ -151,6 +158,8 @@ async function send() {
     return
   busy.value = true
   error.value = ''
+  const chatId = props.chatId
+  const revision = draftRevision
   try {
     const body = {
       text: question,
@@ -158,20 +167,25 @@ async function send() {
       itemId: itemId.value,
       replyEventId: replyEventId.value?.toString() ?? '',
     }
-    const serialized = JSON.stringify({ chatId: props.chatId, ...body })
+    const serialized = JSON.stringify({ chatId, ...body })
     if (submission?.serialized !== serialized)
       submission = { id: crypto.randomUUID(), serialized }
-    await askChatSideQuestion(api, { chatId: props.chatId, question: { id: submission.id, ...body } })
-    submission = undefined
-    // Keeps what was typed meanwhile.
-    if (text.value.trim() === question)
+    const sent = submission
+    await askChatSideQuestion(api, { chatId, question: { id: sent.id, ...body } })
+    if (submission === sent)
+      submission = undefined
+    if (props.chatId === chatId && draftRevision === revision) {
       text.value = ''
-    quote.value = ''
-    itemId.value = focus.value
-    if (!focus.value)
-      replyEventId.value = null
+      quote.value = ''
+      itemId.value = focus.value
+      if (!focus.value)
+        replyEventId.value = null
+    }
   }
-  catch (e) { error.value = (e as Error).message }
+  catch (e) {
+    if (props.chatId === chatId && draftRevision === revision)
+      error.value = (e as Error).message
+  }
   finally { busy.value = false }
 }
 

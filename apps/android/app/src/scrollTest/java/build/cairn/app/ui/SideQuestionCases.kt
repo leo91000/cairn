@@ -12,6 +12,8 @@ import androidx.lifecycle.ViewModelStore
 import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.*
@@ -62,7 +64,7 @@ abstract class SideQuestionCases {
             sideQuestions = listOf(answered, pending),
         )
 
-    private fun server(writes: MutableList<Pair<String, String>>) =
+    private fun server(writes: MutableList<Pair<String, String>>, release: CountDownLatch? = null) =
         MockWebServer().apply {
             dispatcher =
                 object : Dispatcher() {
@@ -70,6 +72,7 @@ abstract class SideQuestionCases {
                         val path = request.path!!.substringBefore('?')
                         if (request.method == "POST" && path.contains("/side-questions")) {
                             writes += path to request.body.readUtf8()
+                            if (release != null) check(release.await(20, TimeUnit.SECONDS))
                             val question =
                                 if (path.endsWith("/cancel"))
                                     pending.copy(status = "cancelled", settledAt = 4)
@@ -106,6 +109,65 @@ abstract class SideQuestionCases {
             },
             beaconOrigin = "",
         )
+
+    @Test
+    fun completingAnEarlierAskKeepsANewerDraftAndItsTarget() {
+        val writes = CopyOnWriteArrayList<Pair<String, String>>()
+        val release = CountDownLatch(1)
+        server(writes, release).use { server ->
+            val vm = viewModel()
+            val models = ViewModelStore().apply { put("fixture", vm) }
+            val side = SideQuestionState().apply { ask("reply-1", "ancien passage", 11) }
+            try {
+                compose.setContent {
+                    val state by vm.state.collectAsState()
+                    LaunchedEffect(Unit) {
+                        vm.state.first { it.ready }
+                        vm.connect(server.url("/").toString())
+                    }
+                    CairnTheme {
+                        if (state.installation != null)
+                            Column(Modifier.verticalScroll(rememberScrollState())) {
+                                SideQuestionPanel(vm, state, chat(canAsk = true), side) { _, _ -> }
+                            }
+                    }
+                }
+                compose.waitUntil(20000) {
+                    vm.state.value.installation != null && !vm.state.value.busy
+                }
+                compose
+                    .onNode(hasSetTextAction() and hasText("Votre question sur ce passage"))
+                    .performScrollTo()
+                    .performTextInput("Ancienne question")
+                compose.onNodeWithText("Demander").performScrollTo().performClick()
+                compose.waitUntil(10000) { writes.size == 1 }
+                compose.runOnIdle {
+                    side.open = false
+                    side.ask("reply-2", "nouveau passage", 22)
+                    side.text = "Nouvelle question"
+                }
+                release.countDown()
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodesWithText("nouveau passage")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty() && !vm.state.value.busy
+                }
+                compose.runOnIdle {
+                    assertEquals("Nouvelle question", side.text)
+                    assertEquals("nouveau passage", side.quote)
+                    assertEquals("reply-2", side.itemId)
+                    assertEquals(22L, side.replyEventId)
+                }
+                val body = Json.parseToJsonElement(writes.single().second).jsonObject
+                assertEquals("reply-1", body["itemId"]!!.jsonPrimitive.content)
+                assertEquals("ancien passage", body["quote"]!!.jsonPrimitive.content)
+            } finally {
+                release.countDown()
+                models.clear()
+            }
+        }
+    }
 
     @Test
     fun aQuotedSideQuestionIsSentWithItsReplyAndAPendingOneCanBeWithdrawn() {
@@ -268,22 +330,38 @@ abstract class SideQuestionCases {
         val first = side.submissionId("chat\u0000Pourquoi ?")
         // A retried submission keeps its identifier until it is asked.
         assertEquals(first, side.submissionId("chat\u0000Pourquoi ?"))
-        side.submitted()
+        side.submitted(side.draft(), first)
         assertTrue(first != side.submissionId("chat\u0000Pourquoi ?"))
+    }
+
+    @Test
+    fun changingTheFilterWhileAnAskIsPendingKeepsTheDraft() {
+        val side =
+            SideQuestionState().apply {
+                show("reply-1", 11)
+                text = "Pourquoi ?"
+            }
+        val draft = side.draft()
+        val id = side.submissionId("first")
+        side.showAll()
+        side.submitted(draft, id)
+        assertEquals("Pourquoi ?", side.text)
+        assertEquals("reply-1", side.itemId)
+        assertEquals(11L, side.replyEventId)
     }
 
     @Test
     fun aQuestionIsAboutTheReplyWhoseSheetAsksIt() {
         val side = SideQuestionState().apply { ask("reply-1", "le passage") }
         side.text = "Pourquoi ?"
-        side.submitted()
+        side.submitted(side.draft(), "")
         assertEquals(listOf("", "", ""), listOf(side.itemId, side.quote, side.text))
         // Opened from another reply's count, the next question is about that reply.
         side.show("reply-2")
         assertEquals("reply-2", side.itemId)
         assertEquals("reply-2", side.focus)
         side.text = "Une autre question"
-        side.submitted()
+        side.submitted(side.draft(), "")
         assertEquals("reply-2", side.itemId)
         assertEquals("reply-2", side.focus)
         // Opened from the card, a draft keeps the reply it is about.
@@ -298,7 +376,7 @@ abstract class SideQuestionCases {
         assertEquals("", side.quote)
         assertTrue(side.shows(answered.copy(itemId = "reused", replyEventId = "12")))
         assertFalse(side.shows(answered.copy(itemId = "reused", replyEventId = "11")))
-        side.submitted()
+        side.submitted(side.draft(), "")
         assertEquals(12L, side.replyEventId)
     }
 
