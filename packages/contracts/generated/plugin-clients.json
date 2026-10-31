@@ -30,6 +30,14 @@
     "path": "/plugins/packages/{pluginId}/activate"
   },
   {
+    "input": "PluginOperationInput",
+    "method": "GET",
+    "name": "getPluginResourceOperation",
+    "output": "PluginOperation",
+    "path": "/plugins/resources/operations/{operationId}"
+  },
+  {
+    "deferred": true,
     "input": "ListPluginResourcesInput",
     "method": "GET",
     "name": "listPluginResources",
@@ -42,6 +50,7 @@
     ]
   },
   {
+    "deferred": true,
     "input": "ResolvePluginResourceInput",
     "method": "GET",
     "name": "resolvePluginResource",

@@ -279,6 +279,10 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
                 "id": input.query.get("id").cloned().unwrap_or_default(),
             }),
         )),
+        ("GET", ["plugins", "resources", "operations", id]) => Some((
+            "get_plugin_resource_operation",
+            json!({ "operationId": id }),
+        )),
         ("GET", ["plugins"]) => Some(("list_plugins", json!({}))),
         ("POST", ["plugins", "packages"]) => Some(("install_plugin_package", body.clone())),
         ("GET", ["plugins", "packages", "operations", id]) => {

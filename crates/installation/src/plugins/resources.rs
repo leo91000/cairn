@@ -38,6 +38,25 @@ fn item(manifest: &Manifest, raw: Value, kind: &str) -> Result<PluginResource> {
     Ok(resource)
 }
 
+/// Prepared before enqueueing: settings, grants and package identity cannot
+/// silently switch while an operation waits for its worker or is polled.
+pub(crate) struct Read {
+    package: registry::Package,
+    scope: Scope,
+}
+
+impl Read {
+    pub(crate) async fn authorize(&self, s: &Service) -> Result<()> {
+        let current = registry::active(s, &self.package.manifest.id).await?;
+        if current.digest != self.package.digest {
+            return Err(Error::forbidden(
+                "The plugin package changed. Retry the resource read.",
+            ));
+        }
+        scope::authorize(s, &self.scope).await
+    }
+}
+
 /// Resource reads use credentials. Installation access alone must not give an
 /// agent access to an ungranted instance's service account.
 async fn instance(
@@ -47,7 +66,7 @@ async fn instance(
     kind: &str,
     agent: Option<&str>,
     authority: Option<Authority>,
-) -> Result<(registry::Package, Scope)> {
+) -> Result<Read> {
     let package = registry::active(s, plugin).await?;
     if package.manifest.resource_type(kind).is_none() {
         return Err(Error::not_found("This plugin has no such resource type."));
@@ -81,7 +100,7 @@ async fn instance(
         Some(authority) => Scope::Managed(Box::new(scope), authority),
         None => scope,
     };
-    Ok((package, scope))
+    Ok(Read { package, scope })
 }
 
 pub async fn list(
@@ -89,15 +108,18 @@ pub async fn list(
     input: ListPluginResourcesInput,
     agent: Option<&str>,
 ) -> Result<ListPluginResourcesOutput> {
-    list_authorized(s, input, agent, None).await
+    prepare_list(s, &input, agent, None)
+        .await?
+        .list(s, input)
+        .await
 }
 
-pub(crate) async fn list_authorized(
+pub(crate) async fn prepare_list(
     s: &Service,
-    input: ListPluginResourcesInput,
+    input: &ListPluginResourcesInput,
     agent: Option<&str>,
     authority: Option<Authority>,
-) -> Result<ListPluginResourcesOutput> {
+) -> Result<Read> {
     if !(1..=10_000).contains(&input.page)
         || input.query.chars().count() > 200
         || input.query.chars().any(char::is_control)
@@ -106,7 +128,7 @@ pub(crate) async fn list_authorized(
             "Choose a page from 1 to 10000 and a query of at most 200 characters.",
         ));
     }
-    let (package, scope) = instance(
+    instance(
         s,
         &input.plugin_id,
         &input.instance_id.to_string(),
@@ -114,44 +136,7 @@ pub(crate) async fn list_authorized(
         agent,
         authority,
     )
-    .await?;
-    let result = scope::invoke(
-        s,
-        &package,
-        "resources",
-        json!({
-            "op": "list",
-            "resourceType": input.resource_type,
-            "page": input.page,
-            "query": input.query,
-            "instance": scope.instances()[0],
-        }),
-        &scope,
-    )
-    .await?;
-    let raw = result["items"]
-        .as_array()
-        .filter(|items| items.len() <= 200)
-        .ok_or_else(invalid)?;
-    let mut seen = BTreeSet::new();
-    let mut items = Vec::with_capacity(raw.len());
-    for raw in raw {
-        let resource = item(&package.manifest, raw.clone(), &input.resource_type)?;
-        if !seen.insert(resource.id.clone()) {
-            return Err(invalid());
-        }
-        items.push(resource);
-    }
-    let next_page = match result.get("nextPage") {
-        None | Some(Value::Null) => None,
-        Some(value) => Some(
-            value
-                .as_i64()
-                .filter(|page| *page > input.page && *page <= 10_000)
-                .ok_or_else(invalid)?,
-        ),
-    };
-    Ok(ListPluginResourcesOutput { items, next_page })
+    .await
 }
 
 pub async fn resolve(
@@ -159,19 +144,22 @@ pub async fn resolve(
     input: ResolvePluginResourceInput,
     agent: Option<&str>,
 ) -> Result<ResolvePluginResourceOutput> {
-    resolve_authorized(s, input, agent, None).await
+    prepare_resolve(s, &input, agent, None)
+        .await?
+        .resolve(s, input)
+        .await
 }
 
-pub(crate) async fn resolve_authorized(
+pub(crate) async fn prepare_resolve(
     s: &Service,
-    input: ResolvePluginResourceInput,
+    input: &ResolvePluginResourceInput,
     agent: Option<&str>,
     authority: Option<Authority>,
-) -> Result<ResolvePluginResourceOutput> {
+) -> Result<Read> {
     if !plain(&input.id, 200) {
         return Err(Error::bad("Choose a resource ID of at most 200 bytes."));
     }
-    let (package, scope) = instance(
+    instance(
         s,
         &input.plugin_id,
         &input.instance_id.to_string(),
@@ -179,44 +167,105 @@ pub(crate) async fn resolve_authorized(
         agent,
         authority,
     )
-    .await?;
-    let mut target = PluginResourceRef {
-        resource_type: input.resource_type,
-        id: input.id,
-    };
-    let mut chain = Vec::new();
-    // The manifest is an acyclic graph of at most 32 types. Each parent is
-    // independently resolved; caller-provided ancestors are never trusted.
-    for _ in 0..package.manifest.resources.len() {
-        let raw = scope::invoke(
+    .await
+}
+
+impl Read {
+    pub(crate) async fn list(
+        &self,
+        s: &Service,
+        input: ListPluginResourcesInput,
+    ) -> Result<ListPluginResourcesOutput> {
+        self.authorize(s).await?;
+        let package = &self.package;
+        let scope = &self.scope;
+        let result = scope::invoke(
             s,
-            &package,
+            package,
             "resources",
             json!({
-                "op": "resolve",
-                "resourceType": target.resource_type,
-                "id": target.id,
+                "op": "list",
+                "resourceType": input.resource_type,
+                "page": input.page,
+                "query": input.query,
                 "instance": scope.instances()[0],
             }),
-            &scope,
+            scope,
         )
         .await?;
-        let resource = item(&package.manifest, raw, &target.resource_type)?;
-        if resource.id != target.id {
-            return Err(invalid());
+        let raw = result["items"]
+            .as_array()
+            .filter(|items| items.len() <= 200)
+            .ok_or_else(invalid)?;
+        let mut seen = BTreeSet::new();
+        let mut items = Vec::with_capacity(raw.len());
+        for raw in raw {
+            let resource = item(&package.manifest, raw.clone(), &input.resource_type)?;
+            if !seen.insert(resource.id.clone()) {
+                return Err(invalid());
+            }
+            items.push(resource);
         }
-        let parent = resource.parent.clone();
-        chain.push(resource);
-        match parent {
-            Some(parent) => target = parent,
-            None => {
-                let resource = chain.remove(0);
-                return Ok(ResolvePluginResourceOutput {
-                    resource,
-                    ancestors: chain,
-                });
+        let next_page = match result.get("nextPage") {
+            None | Some(Value::Null) => None,
+            Some(value) => Some(
+                value
+                    .as_i64()
+                    .filter(|page| *page > input.page && *page <= 10_000)
+                    .ok_or_else(invalid)?,
+            ),
+        };
+        self.authorize(s).await?;
+        Ok(ListPluginResourcesOutput { items, next_page })
+    }
+
+    pub(crate) async fn resolve(
+        &self,
+        s: &Service,
+        input: ResolvePluginResourceInput,
+    ) -> Result<ResolvePluginResourceOutput> {
+        let package = &self.package;
+        let scope = &self.scope;
+        let mut target = PluginResourceRef {
+            resource_type: input.resource_type,
+            id: input.id,
+        };
+        let mut chain = Vec::new();
+        // The manifest is an acyclic graph of at most 32 types. Each parent is
+        // independently resolved; caller-provided ancestors are never trusted.
+        for _ in 0..package.manifest.resources.len() {
+            self.authorize(s).await?;
+            let raw = scope::invoke(
+                s,
+                package,
+                "resources",
+                json!({
+                    "op": "resolve",
+                    "resourceType": target.resource_type,
+                    "id": target.id,
+                    "instance": scope.instances()[0],
+                }),
+                scope,
+            )
+            .await?;
+            let resource = item(&package.manifest, raw, &target.resource_type)?;
+            if resource.id != target.id {
+                return Err(invalid());
+            }
+            let parent = resource.parent.clone();
+            chain.push(resource);
+            match parent {
+                Some(parent) => target = parent,
+                None => {
+                    let resource = chain.remove(0);
+                    self.authorize(s).await?;
+                    return Ok(ResolvePluginResourceOutput {
+                        resource,
+                        ancestors: chain,
+                    });
+                }
             }
         }
+        Err(invalid())
     }
-    Err(invalid())
 }

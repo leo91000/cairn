@@ -26,12 +26,17 @@ pub(crate) const PLUGIN_PACKAGE_OPERATIONS: &[PluginPackageOperation] = &[
     PluginPackageOperation {
         name: "list_plugin_resources",
         scope: "read",
-        description: "List a plugin instance's resources by declared type, page and query. Installation agents also need a grant on the instance.",
+        description: "List a plugin instance\'s resources by declared type, page and query. Returns an operation id; poll get_plugin_resource_operation. Installation agents also need a grant on the instance.",
     },
     PluginPackageOperation {
         name: "resolve_plugin_resource",
         scope: "read",
-        description: "Resolve an instance resource and each ancestor through its plugin. Installation agents also need a grant on the instance.",
+        description: "Resolve an instance resource and each ancestor through its plugin. Returns an operation id; poll get_plugin_resource_operation. Installation agents also need a grant on the instance.",
+    },
+    PluginPackageOperation {
+        name: "get_plugin_resource_operation",
+        scope: "read",
+        description: "Poll a resource read started by list_plugin_resources or resolve_plugin_resource. Current instance grants and initiating authority are rechecked; management preparations are not readable here.",
     },
     PluginPackageOperation {
         name: "install_plugin_package",
@@ -176,21 +181,22 @@ impl PluginPackageOperation {
             }
             "list_plugin_programs" => schema_for::<ListPluginProgramsInput>(Contract::Deserialize),
             "prepare_plugin_program" => schema_for::<PluginProgramInput>(Contract::Deserialize),
-            "get_plugin_operation" | "cancel_plugin_operation" => {
+            "get_plugin_operation"
+            | "get_plugin_resource_operation"
+            | "cancel_plugin_operation" => {
                 schema_for::<PluginOperationInput>(Contract::Deserialize)
             }
             _ => schema_for::<PluginPackageInput>(Contract::Deserialize),
         };
         let output = match self.name {
             "list_plugins" => schema_for::<PluginCatalog>(Contract::Serialize),
-            "list_plugin_resources" => schema_for::<ListPluginResourcesOutput>(Contract::Serialize),
-            "resolve_plugin_resource" => {
-                schema_for::<ResolvePluginResourceOutput>(Contract::Serialize)
+            "list_plugin_resources" | "resolve_plugin_resource" => {
+                schema_for::<PluginOperationStarted>(Contract::Serialize)
             }
             "list_plugin_programs" => schema_for::<ListPluginProgramsOutput>(Contract::Serialize),
-            "get_plugin_operation" | "cancel_plugin_operation" => {
-                schema_for::<PluginOperation>(Contract::Serialize)
-            }
+            "get_plugin_operation"
+            | "get_plugin_resource_operation"
+            | "cancel_plugin_operation" => schema_for::<PluginOperation>(Contract::Serialize),
             "delete_plugin_package" => schema_for::<DeletePluginPackageOutput>(Contract::Serialize),
             "install_plugin_package" => schema_for::<PackageVersion>(Contract::Serialize),
             _ => schema_for::<PluginOperationStarted>(Contract::Serialize),
@@ -263,6 +269,7 @@ impl PluginPackageOperation {
         };
         let check = authority.clone();
         s.store.read(move |db| check.authorize(db)).await?;
+        let mut resource_result = None;
         let result = match self.name {
             "list_plugins" => {
                 let _: ListPluginPackagesInput = decode(input)?;
@@ -277,29 +284,43 @@ impl PluginPackageOperation {
                 let agent = caller
                     .as_ref()
                     .map(|run| crate::validation::text(&run["snapshot"]["agent"], "id"));
-                let result = if self.name == "list_plugin_resources" {
-                    serde_json::to_value(
-                        Box::pin(resources::list_authorized(
-                            s,
-                            decode(input)?,
-                            agent,
-                            Some(authority.clone()),
-                        ))
-                        .await?,
+                let audience =
+                    operations::Audience::from_bearer(authority.bearer.as_deref(), owner);
+                let service = s.clone();
+                if self.name == "list_plugin_resources" {
+                    let input: ListPluginResourcesInput = decode(input)?;
+                    let read = Arc::new(
+                        resources::prepare_list(s, &input, agent, Some(authority.clone())).await?,
+                    );
+                    let work = read.clone();
+                    s.plugins.operations.start_resource_read(
+                        s.clone(),
+                        audience,
+                        read,
+                        async move {
+                            Ok(PluginOperationResult::ResourcePage {
+                                page: Box::new(work.list(&service, input).await?),
+                            })
+                        },
                     )?
                 } else {
-                    serde_json::to_value(
-                        Box::pin(resources::resolve_authorized(
-                            s,
-                            decode(input)?,
-                            agent,
-                            Some(authority.clone()),
-                        ))
-                        .await?,
+                    let input: ResolvePluginResourceInput = decode(input)?;
+                    let read = Arc::new(
+                        resources::prepare_resolve(s, &input, agent, Some(authority.clone()))
+                            .await?,
+                    );
+                    let work = read.clone();
+                    s.plugins.operations.start_resource_read(
+                        s.clone(),
+                        audience,
+                        read,
+                        async move {
+                            Ok(PluginOperationResult::ResourceAncestry {
+                                resolution: Box::new(work.resolve(&service, input).await?),
+                            })
+                        },
                     )?
-                };
-                authority.recheck(s).await?;
-                result
+                }
             }
             "install_plugin_package" => {
                 let input: InstallPluginPackageInput = decode(input)?;
@@ -395,13 +416,22 @@ impl PluginPackageOperation {
                         Ok(PluginOperationResult::Program { program })
                     })?
             }
-            "get_plugin_operation" | "cancel_plugin_operation" => {
+            "get_plugin_operation"
+            | "get_plugin_resource_operation"
+            | "cancel_plugin_operation" => {
                 let input: PluginOperationInput = decode(input)?;
                 s.plugins.operations.authorize(
                     &input.operation_id,
                     authority.bearer.as_deref(),
                     owner,
                 )?;
+                resource_result = s.plugins.operations.resource_read(
+                    &input.operation_id,
+                    self.name == "get_plugin_resource_operation",
+                )?;
+                if resource_result.is_some() {
+                    authority.recheck(s).await?;
+                }
                 if self.name == "cancel_plugin_operation" {
                     s.plugins.operations.cancel(&input.operation_id)?;
                 }
@@ -410,6 +440,9 @@ impl PluginPackageOperation {
             _ => return Err(Error::not_found("Unknown plugin package operation.")),
         };
         s.store.read(move |db| authority.authorize(db)).await?;
+        if let Some(read) = resource_result {
+            read.authorize(s).await?;
+        }
         Ok(result)
     }
 }

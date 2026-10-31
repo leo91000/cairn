@@ -107,6 +107,14 @@ async fn current(s: &Service, scope: &Scope, args: &Value) -> Result<Connection>
     Ok(connection)
 }
 
+/// Resource operations retain this scope until their result is delivered.
+pub(crate) async fn authorize(s: &Service, scope: &Scope) -> Result<()> {
+    for instance in scope.instances() {
+        current(s, scope, &json!({ "instance": instance["id"] })).await?;
+    }
+    Ok(())
+}
+
 /// One capability call from a one-shot handler, after the manifest gate.
 pub async fn call(
     s: &Service,

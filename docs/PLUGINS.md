@@ -1225,21 +1225,36 @@ Cairn calls `resolve` for the target and then independently for each immediate
 parent, through the root, rejecting mismatched IDs/types and unresolved parents.
 The result is `{ resource, ancestors }`, nearest parent first.
 
+Resource reads return a short-lived operation ID immediately, so multiple ancestor
+lookups or program preparation do not hold a relay/MCP request past its deadline.
+Poll the operation in separate requests until it completes; the bounded manager
+operation has a nine-minute total budget. Completed results are tagged
+`resourcePage` with `page`, or `resourceAncestry` with `resolution`.
+The captured package, instance revision, initiating authority and instance grants
+remain checked during work and before every polling response, including through
+the existing management polling route. Changing the package/instance or revoking
+access refuses the retained result.
+
 Read surfaces share these implementations:
 
 - HTTP: `GET /api/plugins/{pluginId}/connections/{instanceId}/resources?resourceType=channel&page=1&query=`
   and `GET .../resources/ancestors?resourceType=channel&id=200` (authenticated owner,
   matching the existing plugin management routes).
+- HTTP polling: `GET /api/plugins/resources/operations/{operationId}`.
+  It accepts only resource-read operations, with the same owner authorization.
 - Public MCP and `cairn_installation`: `list_plugin_resources`
   (`pluginId`, `instanceId`, `resourceType`, optional `page`/`query`) and
-  `resolve_plugin_resource` (`pluginId`, `instanceId`, `resourceType`, `id`). Public
-  MCP requires `read`. Installation agents also need a current grant on the
-  instance, because discovery uses its service credentials; installation access
+  `resolve_plugin_resource` (`pluginId`, `instanceId`, `resourceType`, `id`), then
+  `get_plugin_resource_operation` (`operationId`). All require public MCP `read`.
+  The read polling tool cannot retrieve management preparations. Installation
+  agents also need a current grant on the instance, because discovery uses its service credentials; installation access
   alone does not confer access to the service account. Authorization and instance
   grants are checked before each host capability, after slow I/O and after the handler.
   Installation-agent grants stay bound to the instance during OAuth refresh, including
   credential publication and the service request. Generated web/Android clients use
-  the same typed contracts; no picker UI is introduced in this ticket.
+  the same typed contracts; Android clients await polling automatically, and web
+  callers pass the existing `pluginRequest` transport to the generated clients.
+  No picker UI is introduced in this ticket.
 
 Transport (`socket`) and durable `timer` handlers can emit declared hooks:
 
@@ -1269,5 +1284,9 @@ and receipts. The existing script event pump never delivers hook events.
 
 Ticket F can use `Db::plugin_hooks(instance, revision, digest, now)` to read current
 events and `Db::remove_plugin_hook(instance, id)` to acknowledge them in its own
-transaction; receipts remain intact. Ticket C can use `plugins::resources::resolve`
-and the manifest's `resourceFields`/argument `resourceType` for grant enforcement.
+transaction; receipts remain intact. Ticket C can use the manifest's
+`resourceFields`/argument `resourceType` and prepare resource resolution with
+the caller's captured authority (`plugins::resources::prepare_resolve`).
+Trusted host callers also have the synchronous `plugins::resources::resolve`
+wrapper. Resolve current ancestry before enforcing a grant; labels and retained
+picker results confer no authority.

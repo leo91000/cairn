@@ -2,12 +2,17 @@
 package build.cairn.contracts
 
 import build.cairn.app.data.CairnApi
+import build.cairn.app.data.pluginOperation
 import build.cairn.app.data.segment
+import build.cairn.app.data.wireJson
+import kotlinx.serialization.json.decodeFromJsonElement
 
 suspend fun CairnApi.resolvePluginResource(
     input: ResolvePluginResourceInput
 ): ResolvePluginResourceOutput =
-    send(
-        "GET",
-        "/plugins/${segment(input.pluginId)}/connections/${segment(input.instanceId)}/resources/ancestors?resourceType=${segment(input.resourceType.toString())}&id=${segment(input.id.toString())}",
+    wireJson.decodeFromJsonElement(
+        pluginOperation(
+            "/plugins/${segment(input.pluginId)}/connections/${segment(input.instanceId)}/resources/ancestors?resourceType=${segment(input.resourceType.toString())}&id=${segment(input.id.toString())}",
+            method = "GET",
+        )
     )

@@ -8210,6 +8210,40 @@
             "wrapped"
           ],
           "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "resourcePage",
+              "type": "string"
+            },
+            "page": {
+              "$ref": "#/definitions/ListPluginResourcesOutput"
+            }
+          },
+          "required": [
+            "kind",
+            "page"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "resourceAncestry",
+              "type": "string"
+            },
+            "resolution": {
+              "$ref": "#/definitions/ResolvePluginResourceOutput"
+            }
+          },
+          "required": [
+            "kind",
+            "resolution"
+          ],
+          "type": "object"
         }
       ]
     },
