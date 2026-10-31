@@ -60,6 +60,21 @@ and a readable PNG shared through FileProvider). The corpus also covers cyclic h
 long titles, large pie legends and single-participant notes; both platforms check text and
 path bounds and a deterministic measurement budget for long labels.
 
+## Project and skill lifecycle through the capability registry (B3, #418)
+
+Both apps use generated Rust contracts and HTTP clients for project source
+listing/import, the skill library, bundle/file reads and edits, archive import/export,
+deleting skills and source status/update/forget. Their existing screens and native
+pickers are unchanged. Web uploads raw blobs; Android uploads bytes selected with
+the system document picker. These are the bounded raw transport of
+`stage_skill_upload`; both agent tools can stage the same bytes as base64.
+Archive exports use revision-pinned 512 KiB chunks on all surfaces, below the tool
+result limit. HTTP, public MCP and `cairn_installation` invoke the same registry.
+An execution must already hold the source instance grant; installation management
+never supplies it and importing never changes project, skill or plugin grants.
+Owner-only UI writes and source access remain owner-only. No visual or feature
+difference between web and Android is introduced.
+
 ## Direct storage and overdue synchronization (2026-10-28)
 
 Web and Android expose overdue synchronization while the agent continues on its
@@ -446,3 +461,9 @@ the 100 returned entries with their details, as before. Public MCP and
 that authorized a public grant, executions without an account delegation are refused
 and see no personal state, and storage credentials can only be saved by the human
 owner in the apps.
+
+B3 preparations (project source pages/import, skill import/source status/update)
+use the same bounded manager operations on web, Android and both tools. The apps
+keep their existing busy states while generated calls poll the result; failures
+retain their HTTP status, including revision conflicts. Tools receive an operation
+id and use `get_plugin_operation`/`cancel_plugin_operation`. No layout change.

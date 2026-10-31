@@ -1,5 +1,6 @@
 pub mod bundle;
 pub mod diff;
+pub(crate) mod lifecycle;
 pub mod sources;
 mod usage;
 pub mod zip;
@@ -11,7 +12,6 @@ use crate::{
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use bundle::{Base, Change};
-use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
     os::unix::fs::PermissionsExt,
@@ -62,12 +62,7 @@ pub fn mentions(text: &str, names: &[&str]) -> Vec<String> {
     found
 }
 
-/// SKILL.md frontmatter.
-#[derive(Serialize)]
-pub(crate) struct Metadata {
-    name: String,
-    description: String,
-}
+pub(crate) use cairn_contracts::SkillMetadata as Metadata;
 
 pub(crate) fn metadata(content: &str) -> Result<Metadata> {
     if content.len() > 100000 {
@@ -104,41 +99,25 @@ pub fn parse(content: &str) -> Result<Value> {
     Ok(serde_json::to_value(metadata(content)?)?)
 }
 
-/// A skill directory as listed to the owner, including invalid ones.
-#[derive(Serialize)]
-struct Listing<'a> {
-    name: String,
-    description: String,
-    scope: &'a str,
-    path: String,
+fn read_listing(
+    listing: &mut cairn_contracts::Skill,
+    directory: &str,
+    path: &Path,
     content: String,
-    valid: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    files: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    bytes: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    executables: Option<usize>,
-}
-
-impl Listing<'_> {
-    fn read(&mut self, directory: &str, path: &Path, content: String) {
-        self.path = path.to_string_lossy().into_owned();
-        match metadata(&content) {
-            Ok(parsed) => {
-                self.valid = parsed.name == directory;
-                if !self.valid {
-                    self.error = Some("Name differs from directory".into());
-                }
-                self.name = parsed.name;
-                self.description = parsed.description;
+) {
+    listing.path = path.to_string_lossy().into_owned();
+    match metadata(&content) {
+        Ok(parsed) => {
+            listing.valid = parsed.name == directory;
+            if !listing.valid {
+                listing.error = Some("Name differs from directory".into());
             }
-            Err(error) => self.error = Some(error.message),
+            listing.name = parsed.name;
+            listing.description = parsed.description;
         }
-        self.content = content;
+        Err(error) => listing.error = Some(error.message),
     }
+    listing.content = content;
 }
 
 pub fn relative(value: &str) -> Result<()> {
@@ -320,7 +299,7 @@ async fn expire(directory: &Path, age: i64) {
 }
 
 const HOUR: i64 = 3_600_000;
-const ARCHIVE_CHUNK: usize = 4 * 1024 * 1024;
+const ARCHIVE_CHUNK: usize = 512 * 1024;
 
 /// The frozen copy of a skill revision, when `revision` is a revision.
 pub fn frozen(config: &Config, revision: &str) -> Option<PathBuf> {
@@ -344,6 +323,7 @@ pub fn bundle_response(scope: &str, skill: &str, described: &bundle::Described) 
 #[derive(Clone)]
 pub struct Skills {
     pub config: Config,
+    pub(crate) mutations: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Skills {
@@ -386,10 +366,10 @@ impl Skills {
             if !entry.file_type().await?.is_dir() || directory.starts_with('.') {
                 continue;
             }
-            let mut listing = Listing {
+            let mut listing = cairn_contracts::Skill {
                 name: directory.clone(),
                 description: "Invalid skill".into(),
-                scope,
+                scope: scope.to_owned(),
                 path: root
                     .join(&directory)
                     .join("SKILL.md")
@@ -398,9 +378,11 @@ impl Skills {
                 content: String::new(),
                 valid: false,
                 error: None,
-                files: None,
-                bytes: None,
-                executables: None,
+                files: 0,
+                bytes: 0,
+                executables: 0,
+                usage_count: 0,
+                source: None,
             };
             let read = async {
                 name(&directory)?;
@@ -410,14 +392,15 @@ impl Skills {
             }
             .await;
             match read {
-                Ok((path, content)) => listing.read(&directory, &path, content),
+                Ok((path, content)) => read_listing(&mut listing, &directory, &path, content),
                 Err(error) => listing.error = Some(error.message),
             }
             match bundle::scan(&root.join(&directory)).await {
                 Ok(files) => {
-                    listing.files = Some(files.len());
-                    listing.bytes = Some(files.iter().map(|file| file.size).sum());
-                    listing.executables = Some(files.iter().filter(|file| file.executable).count());
+                    listing.files = files.len() as u32;
+                    listing.bytes = files.iter().map(|file| file.size).sum();
+                    listing.executables =
+                        files.iter().filter(|file| file.executable).count() as u32;
                 }
                 Err(error) => {
                     listing.valid = false;
@@ -445,7 +428,7 @@ impl Skills {
         skill: &str,
         content: &str,
         project: Option<&Path>,
-        authorization: Option<bundle::Authorization>,
+        authorization: Option<bundle::Authorization<'_>>,
     ) -> Result<Value> {
         name(skill)?;
         let parsed = metadata(content)?;
@@ -475,51 +458,6 @@ impl Skills {
         )
         .await?;
         Ok(serde_json::to_value(parsed)?)
-    }
-
-    /// Writes one file immediately, as a batch of one change.
-    pub async fn write(
-        &self,
-        skill: &str,
-        file: &str,
-        bytes: Vec<u8>,
-        executable: Option<bool>,
-        project: Option<&Path>,
-    ) -> Result<Value> {
-        name(skill)?;
-        let root = self.root(project).await?;
-        let directory = root.join(skill);
-        let revision = match fs::symlink_metadata(&directory).await {
-            Ok(_) => Some(bundle::describe(&directory).await?.revision),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error.into()),
-        };
-        let base = revision.as_deref().map_or(Base::Create, Base::Edit);
-        let change = Change::Write {
-            path: file.to_owned(),
-            bytes,
-            executable,
-        };
-        bundle::save(&root, skill, base, &[change]).await?;
-        Ok(json!({ "saved": true }))
-    }
-
-    pub async fn remove(&self, skill: &str, project: Option<&Path>) -> Result<()> {
-        let _write = bundle::ACCESS.write().await;
-        let directory = self.directory(skill, project).await?;
-        fs::remove_dir_all(directory).await?;
-        Ok(())
-    }
-
-    /// Paths of the visible files, for clients that predate bundles.
-    pub async fn files(&self, skill: &str, project: Option<&Path>) -> Result<Vec<String>> {
-        let _read = bundle::ACCESS.read().await;
-        let directory = self.directory(skill, project).await?;
-        Ok(bundle::scan(&directory)
-            .await?
-            .into_iter()
-            .map(|entry| entry.path)
-            .collect())
     }
 
     /// Text files as UTF-8, other files as base64.
@@ -561,12 +499,14 @@ impl Skills {
         Ok(bundle_response(scope, skill, &described))
     }
 
-    /// Resolves the JSON changes of a batch, reading staged uploads. Returns the
+    /// Resolves canonical batch changes, reading staged uploads. Returns the
     /// upload ids to discard once the batch succeeds.
-    pub async fn changes(&self, value: &Value) -> Result<(Vec<Change>, Vec<String>)> {
-        let items = value
-            .as_array()
-            .ok_or_else(|| Error::bad("changes: expected a list"))?;
+    pub(crate) async fn changes(
+        &self,
+        items: Vec<cairn_contracts::SkillChange>,
+    ) -> Result<(Vec<Change>, Vec<String>)> {
+        use cairn_contracts::SkillChange;
+
         if items.len() > 4 * bundle::FILES {
             return Err(Error::bad("Too many changes in one save."));
         }
@@ -574,47 +514,40 @@ impl Skills {
         let mut uploads = Vec::new();
         let mut written = 0;
         for item in items {
-            let field = |key: &str| {
-                item[key]
-                    .as_str()
-                    .map(str::to_owned)
-                    .ok_or_else(|| Error::bad(format!("{key}: expected text")))
-            };
-            let change = match item["op"].as_str() {
-                Some("write") => {
-                    let bytes = if let Some(upload) = item["upload"].as_str() {
-                        if uploads.iter().any(|used| used == upload) {
+            let change = match item {
+                SkillChange::Write {
+                    path,
+                    content,
+                    encoding,
+                    upload,
+                    executable,
+                } => {
+                    let bytes = if let Some(upload) = upload {
+                        if uploads.iter().any(|used| used == &upload) {
                             return Err(Error::bad("Each upload can be used once."));
                         }
-                        uploads.push(upload.to_owned());
-                        self.upload(upload).await?
+                        let bytes = self.upload(&upload).await?;
+                        uploads.push(upload);
+                        bytes
                     } else {
-                        decode(&field("content")?, item["encoding"].as_str())?
+                        let content = content
+                            .as_deref()
+                            .ok_or_else(|| Error::bad("content: expected text"))?;
+                        decode(content, encoding.as_deref())?
                     };
                     written += bytes.len() as u64;
                     if written > 2 * bundle::BUNDLE_BYTES {
                         return Err(Error::too_large("This save writes too much at once."));
                     }
                     Change::Write {
-                        path: field("path")?,
+                        path,
                         bytes,
-                        executable: item["executable"].as_bool(),
+                        executable,
                     }
                 }
-                Some("delete") => Change::Delete {
-                    path: field("path")?,
-                },
-                Some("move") => Change::Move {
-                    from: field("from")?,
-                    to: field("to")?,
-                },
-                Some("mode") => Change::Mode {
-                    path: field("path")?,
-                    executable: item["executable"]
-                        .as_bool()
-                        .ok_or_else(|| Error::bad("executable: expected a boolean"))?,
-                },
-                _ => return Err(Error::bad("op: use write, delete, move or mode")),
+                SkillChange::Delete { path } => Change::Delete { path },
+                SkillChange::Move { from, to } => Change::Move { from, to },
+                SkillChange::Mode { path, executable } => Change::Mode { path, executable },
             };
             changes.push(change);
         }
@@ -639,25 +572,12 @@ impl Skills {
         base: Option<&str>,
         changes: &[Change],
         project: Option<&Path>,
-        authorization: Option<bundle::Authorization>,
+        authorization: Option<bundle::Authorization<'_>>,
     ) -> Result<bundle::Described> {
         name(skill)?;
         let root = self.root(project).await?;
         let base = base.map_or(Base::Create, Base::Edit);
         bundle::save_authorized(&root, skill, base, changes, authorization).await
-    }
-
-    /// Replaces every file of an existing skill.
-    pub async fn replace(
-        &self,
-        skill: &str,
-        base: &str,
-        changes: &[Change],
-        project: Option<&Path>,
-    ) -> Result<bundle::Described> {
-        name(skill)?;
-        let root = self.root(project).await?;
-        bundle::save(&root, skill, Base::Replace(base), changes).await
     }
 
     fn uploads(&self) -> PathBuf {
@@ -763,12 +683,13 @@ impl Skills {
     }
 
     /// Creates a skill from a staged `.zip` or `.skill` archive.
-    pub async fn import_archive(
+    pub(crate) async fn import_archive(
         &self,
         scope: &str,
         upload: &str,
         requested: Option<&str>,
         project: Option<&Path>,
+        authorization: bundle::Authorization<'_>,
     ) -> Result<Value> {
         let archive = self.upload(upload).await?;
         let entries = zip::entries(&archive)?;
@@ -807,7 +728,9 @@ impl Skills {
         }
 
         let skill = imported_name(&changes)?;
-        let saved = self.apply(&skill, None, &changes, project).await?;
+        let saved = self
+            .apply_authorized(&skill, None, &changes, project, Some(authorization))
+            .await?;
         self.discard(&[upload.to_owned()]).await;
         Ok(json!({
             "imported": bundle_response(scope, &skill, &saved),

@@ -796,7 +796,8 @@ internal fun ChatPage(
             } catch (e: Exception) {
                 outgoing = null
                 if (planApproval != null && e is ApiException && e.status == 409) {
-                    clearDraft()
+                    submissionKey = ""
+                    submissionId = ""
                     live.reconnect()
                 }
                 throw e

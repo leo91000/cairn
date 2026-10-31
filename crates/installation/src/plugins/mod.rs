@@ -337,7 +337,23 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
         ("POST", ["plugins", id, "device-flow"]) => device_flow::start(s, id).await,
         ("GET", ["plugins", id, "device-flow", flow]) => device_flow::status(s, id, flow),
         ("DELETE", ["plugins", id, "device-flow", flow]) => Ok(device_flow::cancel(s, id, flow)),
-        ("GET", ["plugins", id, "projects"]) => projects::list(s, id, input).await,
+        ("GET", ["plugins", id, "projects"]) => {
+            let command = cairn_contracts::ListSourceProjectsInput {
+                plugin_id: (*id).into(),
+                source: input.query.get("source").cloned().unwrap_or_default(),
+                instance: input.query.get("instance").cloned().unwrap_or_default(),
+                page: input.number("page", 1, 1, 10000)? as u32,
+                query: input.query.get("query").cloned().unwrap_or_default(),
+            };
+            crate::capabilities::resource_operation("list_source_projects")
+                .unwrap()
+                .invoke(
+                    s,
+                    serde_json::to_value(command)?,
+                    crate::capabilities::ResumeContext::http(input)?,
+                )
+                .await
+        }
         _ => Err(Error::not_found("Not found.")),
     }
 }

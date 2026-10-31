@@ -711,10 +711,8 @@ async function send(mode: 'queue' | 'steer' = 'queue', planApproval?: { sourceId
     if (planApproval) {
       // Reconnect for a current snapshot after a refused stale approval. Keep the
       // original request ID for an uncertain response, never silently approve anew.
-      if (e instanceof ApiError && e.status === 409) {
-        draft.value = ''
+      if (e instanceof ApiError && e.status === 409)
         submission = undefined
-      }
 
       live.reconnect()
     }

@@ -69,22 +69,7 @@ fun Task.runTaskSnapshot(): build.cairn.contracts.RunTaskSnapshot =
         wireJson.encodeToJsonElement(build.cairn.contracts.Mission.serializer(), this),
     )
 
-@Serializable
-data class Skill(
-    val name: String = "",
-    val description: String = "",
-    val scope: String = "global",
-    val content: String = "",
-    val path: String = "",
-    val valid: Boolean = true,
-    val usageCount: Int = 0,
-    val error: String? = null,
-    /** Counts over the whole skill directory; see docs/SKILLS.md. */
-    val files: Int = 0,
-    val bytes: Long = 0,
-    val executables: Int = 0,
-    val source: SkillSource? = null,
-)
+typealias Skill = build.cairn.contracts.Skill
 
 typealias SnapshotSkill = build.cairn.contracts.RunSkill
 

@@ -69,6 +69,14 @@ impl Github {
         std::fs::write(self.root.join("github-state.json"), value.to_string()).unwrap();
     }
 
+    pub fn blob_size(&self, id: &str) -> usize {
+        let name = format!("repos_fixture_skills_git_blobs_{id}");
+        let response: Value =
+            serde_json::from_slice(&std::fs::read(self.root.join("github").join(name)).unwrap())
+                .unwrap();
+        STANDARD.decode(text(&response, "content")).unwrap().len()
+    }
+
     /// Answers `endpoint` (as `repos/x/y?recursive=1`) with `value`.
     pub fn respond(&self, endpoint: &str, value: &Value) {
         let name = endpoint.replace(['/', '?', '=', '%'], "_");
@@ -138,6 +146,11 @@ async fn answer(root: &Path, calls: &Mutex<Vec<Value>>, request: Request<Body>) 
         "userAgent": headers.get("user-agent").and_then(|value| value.to_str().ok()),
     }));
     let state = state(root);
+    if full.contains("/git/blobs/")
+        && let Some(delay) = state["blobDelay"].as_u64()
+    {
+        tokio::time::sleep(Duration::from_millis(delay)).await;
+    }
 
     if let Some(gate) = state.get("gate")
         && gate["path"] == full.as_str()

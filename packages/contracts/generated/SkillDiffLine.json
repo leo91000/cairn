@@ -1,0 +1,17 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "kind": {
+      "default": "",
+      "pattern": "^(context|added|removed|gap)$",
+      "type": "string"
+    },
+    "text": {
+      "default": "",
+      "type": "string"
+    }
+  },
+  "title": "SkillDiffLine",
+  "type": "object"
+}

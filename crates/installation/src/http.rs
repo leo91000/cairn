@@ -422,6 +422,7 @@ impl Input {
         } else if path == "/api/plugins/packages" && parts.method == "POST" {
             cairn_plugin_api::MAX_FRAME_BYTES
         } else if skill_batch
+            || path == "/api/skills/stage"
             || path.ends_with("/avatar/upload")
             || matches!(path, "/mcp" | "/api/mcp" | "/mcp-installation")
         {
@@ -646,6 +647,11 @@ async fn raw_route(app: &App, path: &str, request: Request) -> Result<Route> {
             if request.method() != "POST" {
                 return Err(Error::method_not_allowed("Method not allowed."));
             }
+            let identity = request
+                .extensions()
+                .get::<InstallationIdentity>()
+                .ok_or_else(|| Error::unauthorized("A verified identity is required."))?;
+            let context = crate::capabilities::ResumeContext::identity(identity);
             let limit = crate::skills::bundle::UPLOAD_BYTES;
             let bytes = tokio::time::timeout(
                 std::time::Duration::from_secs(60),
@@ -656,7 +662,9 @@ async fn raw_route(app: &App, path: &str, request: Request) -> Result<Route> {
             .map_err(|_| {
                 Error::too_large(format!("Uploads are limited to {} MiB.", limit >> 20))
             })?;
-            axum::Json(s.skills.stage(&bytes).await?).into_response()
+            let authority = crate::skills::lifecycle::Authority::new(s, context, "manage").await?;
+            axum::Json(crate::capabilities::stage_resource_upload(s, &bytes, authority).await?)
+                .into_response()
         }
         ["", "api", "chats", chat, "attachments", id] => {
             let chat = resolve_chat_id(s, chat).await?;

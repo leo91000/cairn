@@ -189,10 +189,12 @@ pub use models::*;
 
 mod conversations;
 mod questions;
+mod skills;
 
 pub use questions::*;
 
 pub use conversations::*;
+pub use skills::*;
 
 mod waits;
 

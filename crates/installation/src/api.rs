@@ -4,10 +4,7 @@ use crate::{
     service::Service,
 };
 use serde_json::{Value, json};
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::sync::Arc;
 
 type Route<'a> = (&'a str, &'a [&'a str]);
 
@@ -179,11 +176,14 @@ async fn record_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Res
     }
     let result = match route {
         ("POST", ["projects", "import"]) => {
-            static IMPORT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-            let _guard = IMPORT.try_lock().map_err(|_| {
-                Error::conflict("A project import is already running. Retry shortly.")
-            })?;
-            crate::plugins::projects::import(s, &input.body).await?
+            crate::capabilities::resource_operation("import_project")
+                .unwrap()
+                .invoke(
+                    s,
+                    input.body.clone(),
+                    crate::capabilities::ResumeContext::http(input)?,
+                )
+                .await?
         }
         ("POST", ["task-authors", "refresh"]) => {
             s.synchronize_task_authors().await?;
@@ -406,188 +406,70 @@ async fn chat_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resul
 }
 
 async fn skill_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Result<Option<Value>> {
-    use crate::skills::sources;
-    let result = match route {
-        ("GET", ["skills"]) => {
-            let mut items = s.skills.list("global", None).await?;
-            for project in s.store.projects().await? {
-                let path = Path::new(&project.settings.path);
-                items.extend(s.skills.list(&project.id.to_string(), Some(path)).await?);
-            }
-            sources::attach(s, &mut items).await?;
-            s.attach_skill_usage(&mut items).await?;
-            items.into()
-        }
+    let command = match route {
+        ("GET", ["skills"]) => Some(("list_skills", json!({ "scope": input.query.get("scope") }))),
+        ("POST", ["skills", "import"]) => Some(("import_skill", input.body.clone())),
+        ("POST", ["skills", "stage"]) => Some(("stage_skill_upload", input.body.clone())),
         ("POST", ["skills", scope, "import"]) => {
-            let project = skill_project(s, scope).await?;
-            let result = match input.body["source"].as_str() {
-                Some("archive") => {
-                    s.skills
-                        .import_archive(
-                            scope,
-                            input.string("upload", 100)?,
-                            input.body["path"].as_str(),
-                            project.as_deref(),
-                        )
-                        .await?
-                }
-                Some("plugin") => {
-                    sources::import(s, scope, &input.body, project.as_deref()).await?
-                }
-                _ => return Err(Error::bad("source: use archive or plugin")),
-            };
-            if let Some(name) = result["imported"]["name"].as_str() {
-                let detail = json!({
-                    "scope": scope,
-                    "name": name
-                });
-                s.store.audit("skill.saved", detail).await?;
-            }
-            result
+            Some(("import_skill", skill_body(input, scope, None)?))
         }
         ("PUT", ["skills", scope, name]) => {
-            let project = skill_project(s, scope).await?;
-            let content = input.string("content", 100000)?;
-            let result = s.skills.save(name, content, project.as_deref()).await?;
-            let detail = json!({
-                "scope": scope,
-                "name": name
-            });
-            s.store.audit("skill.saved", detail).await?;
-            result
+            Some(("save_skill", skill_body(input, scope, Some(name))?))
         }
         ("DELETE", ["skills", scope, name]) => {
-            let project = skill_project(s, scope).await?;
-            delete_skill(s, scope, name, project.as_deref()).await?
-        }
-        (_, ["skills", scope, _]) => {
-            skill_project(s, scope).await?;
-            return Err(Error::not_found("Not found"));
+            Some(("delete_skill", json!({"scope": scope, "name": name})))
         }
         ("GET", ["skills", scope, name, "bundle"]) => {
-            let project = skill_project(s, scope).await?;
-            let mut bundle = s.skills.bundle(scope, name, project.as_deref()).await?;
-            sources::source(s, scope, name, &mut bundle).await?;
-            bundle
+            Some(("read_skill", json!({"scope": scope, "name": name})))
         }
         ("POST", ["skills", scope, name, "bundle"]) => {
-            let project = skill_project(s, scope).await?;
-            let base = match &input.body["base"] {
-                Value::Null => None,
-                Value::String(base) => Some(base.as_str()),
-                _ => return Err(Error::bad("base: expected a revision or null")),
-            };
-            let (changes, uploads) = s.skills.changes(&input.body["changes"]).await?;
-            let saved = s
-                .skills
-                .apply(name, base, &changes, project.as_deref())
-                .await?;
-            s.skills.discard(&uploads).await;
-            let detail = json!({
-                "scope": scope,
-                "name": name
-            });
-            s.store.audit("skill.saved", detail).await?;
-            let mut bundle = crate::skills::bundle_response(scope, name, &saved);
-            sources::source(s, scope, name, &mut bundle).await?;
-            bundle
+            Some(("edit_skill_files", skill_body(input, scope, Some(name))?))
         }
-        ("GET", ["skills", scope, name, "files"]) => {
-            let project = skill_project(s, scope).await?;
-            s.skills.files(name, project.as_deref()).await?.into()
-        }
-        ("GET", ["skills", scope, name, "file"]) => {
-            let file = input
-                .query
-                .get("path")
-                .map(String::as_str)
-                .ok_or_else(|| Error::bad("Choose a file path."))?;
-            let project = skill_project(s, scope).await?;
-            s.skills.read(name, file, project.as_deref()).await?
-        }
-        ("PUT", ["skills", scope, name, "file"]) => {
-            let file = input.string("path", 4096)?;
-            let content = input.string("content", 150_000)?;
-            let bytes = crate::skills::decode(content, input.body["encoding"].as_str())?;
-            let project = skill_project(s, scope).await?;
-            let result = if file == "SKILL.md" {
-                let content = std::str::from_utf8(&bytes)
-                    .map_err(|_| Error::bad("SKILL.md must be UTF-8 text."))?;
-                let parsed = crate::skills::metadata(content)?;
-                s.skills
-                    .write(
-                        name,
-                        file,
-                        bytes,
-                        input.body["executable"].as_bool(),
-                        project.as_deref(),
-                    )
-                    .await?;
-                serde_json::to_value(parsed)?
-            } else {
-                let executable = input.body["executable"].as_bool();
-                s.skills
-                    .write(name, file, bytes, executable, project.as_deref())
-                    .await?
-            };
-            let detail = json!({
-                "scope": scope,
-                "name": name
-            });
-            s.store.audit("skill.saved", detail).await?;
-            result
-        }
-        ("GET", ["skills", scope, name, "archive"]) => {
-            let project = skill_project(s, scope).await?;
-            let offset = input.number("offset", 0, 0, i64::from(u32::MAX))?;
-            let revision = input.query.get("revision").map(String::as_str);
-            s.skills
-                .archive(name, revision, offset as u64, project.as_deref())
-                .await?
-        }
-        ("GET", ["skills", scope, name, "source"]) => {
-            let project = skill_project(s, scope).await?;
-            sources::status(s, scope, name, project.as_deref()).await?
-        }
+        ("GET", ["skills", scope, name, "file"]) => Some((
+            "read_skill",
+            json!({"scope": scope, "name": name, "path": input.query.get("path").ok_or_else(|| Error::bad("Choose a file path."))?}),
+        )),
+        ("GET", ["skills", scope, name, "archive"]) => Some((
+            "export_skill_archive",
+            json!({"scope": scope, "name": name, "offset": input.number("offset", 0, 0, i64::from(u32::MAX))?, "revision": input.query.get("revision")}),
+        )),
+        ("GET", ["skills", scope, name, "source"]) => Some((
+            "get_skill_source_status",
+            json!({"scope": scope, "name": name}),
+        )),
         ("POST", ["skills", scope, name, "source", "update"]) => {
-            let project = skill_project(s, scope).await?;
-            sources::update(s, scope, name, &input.body, project.as_deref()).await?
+            Some(("update_skill_source", skill_body(input, scope, Some(name))?))
         }
         ("DELETE", ["skills", scope, name, "source"]) => {
-            skill_project(s, scope).await?;
-            sources::forget(s, scope, name).await?;
-            json!({ "detached": true })
+            Some(("forget_skill_source", json!({"scope": scope, "name": name})))
         }
-        _ => return Ok(None),
+        _ => None,
     };
+    let Some((name, body)) = command else {
+        return Ok(None);
+    };
+    let result = crate::capabilities::resource_operation(name)
+        .unwrap()
+        .invoke(s, body, crate::capabilities::ResumeContext::http(input)?)
+        .await?;
     Ok(Some(result))
 }
 
-async fn delete_skill(
-    s: &Service,
-    scope: &str,
-    name: &str,
-    project: Option<&Path>,
-) -> Result<Value> {
-    let key = format!("{scope}/{name}");
-    let selected = s.store.missions().await?.iter().any(|task| {
-        task.settings
-            .skills
-            .as_ref()
-            .is_some_and(|skills| skills.contains(&key))
-    });
-    if selected {
-        return Err(Error::conflict(
-            "This skill is selected by a task. Update that task first.",
-        ));
+fn skill_body(input: &Input, scope: &str, name: Option<&str>) -> Result<Value> {
+    let mut body = input
+        .body
+        .as_object()
+        .cloned()
+        .ok_or_else(|| Error::bad("Expected an object."))?;
+    for (field, expected) in [("scope", Some(scope)), ("name", name)] {
+        if let Some(expected) = expected {
+            if body.get(field).is_some_and(|actual| actual != expected) {
+                return Err(Error::bad("Skill identity does not match the path."));
+            }
+            body.insert(field.into(), expected.into());
+        }
     }
-    crate::skills::sources::remove(s, scope, name, project).await?;
-    let detail = json!({
-        "scope": scope,
-        "name": name
-    });
-    s.store.audit("skill.deleted", detail).await?;
-    Ok(json!({ "deleted": true }))
+    Ok(Value::Object(body))
 }
 
 /// Installation settings and personal read state, through their registered capabilities.
@@ -628,13 +510,4 @@ async fn settings_routes(
         }
     };
     Ok(Some(result))
-}
-
-async fn skill_project(s: &Service, scope: &str) -> Result<Option<PathBuf>> {
-    if scope == "global" {
-        return Ok(None);
-    }
-    Ok(Some(PathBuf::from(
-        s.get_project(scope).await?.settings.path,
-    )))
 }

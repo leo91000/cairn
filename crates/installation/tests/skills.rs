@@ -245,7 +245,18 @@ impl Api {
             .unwrap();
         let response = common::send(&self.router, request).await;
         let status = response.status();
-        (status, common::read_json(response).await)
+        let value = common::read_json(response).await;
+        if status == StatusCode::OK {
+            match common::resource_result(&self.service, value).await {
+                Ok(value) => (status, value),
+                Err(error) => (
+                    StatusCode::from_u16(error.status).unwrap(),
+                    json!({ "error": error.message }),
+                ),
+            }
+        } else {
+            (status, value)
+        }
     }
 
     async fn ok(&self, method: &str, uri: &str, body: Option<Value>) -> Value {
@@ -275,6 +286,38 @@ impl Api {
         assert_eq!(status, StatusCode::OK, "{staged}");
         text(&staged, "id").to_owned()
     }
+}
+
+async fn source_route(
+    s: &Arc<Service>,
+    path: &str,
+    body: Value,
+) -> cairn_installation::error::Result<Value> {
+    common::owner_api_route(s, "POST", path, body).await
+}
+
+async fn update_source(
+    s: &Arc<Service>,
+    scope: &str,
+    skill: &str,
+    body: &Value,
+    _project: Option<&Path>,
+) -> cairn_installation::error::Result<Value> {
+    source_route(
+        s,
+        &format!("/api/skills/{scope}/{skill}/source/update"),
+        body.clone(),
+    )
+    .await
+}
+
+async fn import_source(
+    s: &Arc<Service>,
+    scope: &str,
+    body: &Value,
+    _project: Option<&Path>,
+) -> cairn_installation::error::Result<Value> {
+    source_route(s, &format!("/api/skills/{scope}/import"), body.clone()).await
 }
 
 fn mode(path: &Path) -> u32 {
@@ -693,7 +736,9 @@ async fn batches_save_every_file_at_once_with_modes_and_revisions() {
     assert_eq!(listed[0]["executables"], 1);
     assert!(listed[0]["source"].is_null());
     assert_eq!(
-        api.ok("GET", "/skills/global/review/files", None).await,
+        json!(paths(
+            &api.ok("GET", "/skills/global/review/bundle", None).await
+        )),
         json!([
             "SKILL.md",
             "docs/notes.md",
@@ -704,17 +749,16 @@ async fn batches_save_every_file_at_once_with_modes_and_revisions() {
 }
 
 #[tokio::test]
-async fn immediate_manifest_writes_apply_explicit_modes() {
+async fn manifest_batches_apply_explicit_modes() {
     let api = Api::new().await;
     for executable in [true, false] {
         let saved = api
             .ok(
-                "PUT",
-                "/skills/global/review/file",
+                "POST",
+                "/skills/global/review/bundle",
                 Some(json!({
-                    "path": "SKILL.md",
-                    "content": SKILL,
-                    "executable": executable,
+                    "base": if executable { Value::Null } else { api.ok("GET", "/skills/global/review/bundle", None).await["revision"].clone() },
+                    "changes": [{ "op": "write", "path": "SKILL.md", "content": SKILL, "executable": executable }],
                 })),
             )
             .await;
@@ -727,7 +771,7 @@ async fn immediate_manifest_writes_apply_explicit_modes() {
 }
 
 #[tokio::test]
-async fn older_single_file_writes_keep_working_and_respect_limits() {
+async fn single_file_batches_keep_modes_and_respect_limits() {
     let api = Api::new().await;
     api.ok(
         "PUT",
@@ -736,9 +780,9 @@ async fn older_single_file_writes_keep_working_and_respect_limits() {
     )
     .await;
     api.ok(
-        "PUT",
-        "/skills/global/review/file",
-        Some(json!({ "path": "scripts/check.sh", "content": "#!/bin/sh\n" })),
+        "POST",
+        "/skills/global/review/bundle",
+        Some(json!({ "base": api.ok("GET", "/skills/global/review/bundle", None).await["revision"], "changes": [{ "op": "write", "path": "scripts/check.sh", "content": "#!/bin/sh\n" }] })),
     )
     .await;
     assert_eq!(
@@ -746,9 +790,9 @@ async fn older_single_file_writes_keep_working_and_respect_limits() {
         0o700
     );
     api.ok(
-        "PUT",
-        "/skills/global/review/file",
-        Some(json!({ "path": "scripts/check.sh", "content": "#!/bin/sh\nexit 0\n", "executable": false })),
+        "POST",
+        "/skills/global/review/bundle",
+        Some(json!({ "base": api.ok("GET", "/skills/global/review/bundle", None).await["revision"], "changes": [{ "op": "write", "path": "scripts/check.sh", "content": "#!/bin/sh\nexit 0\n", "executable": false }] })),
     )
     .await;
     assert_eq!(
@@ -1235,7 +1279,7 @@ fn commit(github: &Github, commit: &str, tree: char, files: &[(&str, &str, &str)
     );
     let entries = files
         .iter()
-        .map(|(path, mode, id)| json!({ "path": path, "mode": mode, "type": "blob", "sha": id, "size": 20 }))
+        .map(|(path, mode, id)| json!({ "path": path, "mode": mode, "type": "blob", "sha": id, "size": github.blob_size(id) }))
         .collect::<Vec<_>>();
     github.respond(
         &format!("repos/fixture/skills/git/trees/{review}?recursive=1"),
@@ -1247,12 +1291,83 @@ fn commit(github: &Github, commit: &str, tree: char, files: &[(&str, &str, &str)
         json!({ "path": "skills/triage/SKILL.md", "mode": "100644", "type": "blob", "sha": sha('f'), "size": 20 }),
     ];
     everything.extend(files.iter().map(|(path, mode, id)| {
-        json!({ "path": format!("skills/review/{path}"), "mode": mode, "type": "blob", "sha": id, "size": 20 })
+        json!({ "path": format!("skills/review/{path}"), "mode": mode, "type": "blob", "sha": id, "size": github.blob_size(id) })
     }));
     github.respond(
         &format!("repos/fixture/skills/git/trees/{top}?recursive=1"),
         &json!({ "tree": everything, "truncated": false }),
     );
+}
+
+#[tokio::test]
+async fn source_discovery_limits_only_selected_skill_relative_paths() {
+    for folder in ["skills/review", "a/b/c/d/e/f/g/h/skills/review"] {
+        let (api, github) = with_github().await;
+        let content = sha('a');
+        blob(&github, &content, SKILL);
+        github.respond("repos/fixture/skills", &json!({ "default_branch": "main" }));
+        let serve = |version: &str, tree: &str, files: Value| {
+            let commit = json!({
+                "sha": version,
+                "commit": {
+                    "tree": { "sha": tree },
+                    "message": "Release",
+                    "committer": { "date": "2026-10-01T10:00:00Z" },
+                },
+            });
+            github.respond("repos/fixture/skills/commits/main", &commit);
+            github.respond(&format!("repos/fixture/skills/commits/{version}"), &commit);
+            github.respond(
+                &format!("repos/fixture/skills/git/trees/{tree}?recursive=1"),
+                &json!({ "tree": files, "truncated": false }),
+            );
+        };
+        let mut files = vec![
+            json!({
+                "path": format!("{folder}/SKILL.md"),
+                "type": "blob", "mode": "100644", "sha": content, "size": SKILL.len(),
+            }),
+            json!({
+                "path": "src/a/b/c/d/e/f/g/h/Main.kt",
+                "type": "blob", "mode": "100644", "sha": sha('f'), "size": 20,
+            }),
+        ];
+        serve(&sha('1'), &sha('3'), json!(files));
+        let imported = api
+            .ok(
+                "POST",
+                "/skills/global/import",
+                Some(import(&json!({ "repository": "fixture/skills" }), None)),
+            )
+            .await;
+        assert_eq!(paths(&imported["imported"]), ["SKILL.md"]);
+        assert_eq!(imported["imported"]["source"]["folder"], folder);
+
+        // Selected files still obey bundle limits before any download starts.
+        files.push(json!({
+            "path": format!("{folder}/a/b/c/d/e/f/g/h/extra.md"),
+            "type": "blob", "mode": "100644", "sha": sha('e'), "size": 20,
+        }));
+        serve(&sha('2'), &sha('4'), json!(files));
+        let downloads = || {
+            github
+                .calls()
+                .iter()
+                .filter(|call| text(call, "path").contains("/git/blobs/"))
+                .count()
+        };
+        let before = downloads();
+        let (code, error) = api
+            .call(
+                "POST",
+                "/skills/global/import",
+                Some(import(&json!({ "repository": "fixture/skills" }), None)),
+            )
+            .await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{error}");
+        assert!(error.to_string().contains("at most 8 parts"), "{error}");
+        assert_eq!(downloads(), before);
+    }
 }
 
 #[tokio::test]
@@ -1402,8 +1517,6 @@ async fn github_imports_record_their_source_and_preview_updates() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pending_github_updates_cannot_restore_detached_or_reimported_sources() {
-    use cairn_installation::skills::sources;
-
     for reimport in [false, true] {
         let (api, github) = with_github().await;
         let root = api._root.path().to_owned();
@@ -1446,7 +1559,7 @@ async fn pending_github_updates_cannot_restore_detached_or_reimported_sources() 
         let service = api.service.clone();
         let base = imported["imported"]["revision"].clone();
         let updater = tokio::spawn(async move {
-            sources::update(
+            update_source(
                 &service,
                 "global",
                 "review",
@@ -1491,10 +1604,7 @@ async fn pending_github_updates_cannot_restore_detached_or_reimported_sources() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn github_updates_record_the_upstream_revision_before_a_queued_local_edit() {
-    use cairn_installation::skills::{
-        bundle::{self, Change},
-        sources,
-    };
+    use cairn_installation::skills::bundle::{self, Change};
     let (api, github) = with_github().await;
     let root = api._root.path().to_owned();
     let first = sha('a');
@@ -1524,7 +1634,7 @@ async fn github_updates_record_the_upstream_revision_before_a_queued_local_edit(
             .map(|name| (name.as_str(), "100644", upstream_blob.as_str())),
     );
     commit(&github, &second, '4', &files);
-    let imported = sources::import(
+    let imported = import_source(
         &api.service,
         "global",
         &import(
@@ -1550,7 +1660,7 @@ async fn github_updates_record_the_upstream_revision_before_a_queued_local_edit(
     let service = api.service.clone();
     let base = imported["imported"]["revision"].clone();
     let updater = tokio::spawn(async move {
-        sources::update(
+        update_source(
             &service,
             "global",
             "review",

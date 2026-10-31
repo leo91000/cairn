@@ -830,3 +830,41 @@ SQLite 17 → 18 imports the KV state atomically; see
 schema bounds in Rust, TS/Ajv and Kotlin. `project_measurement::reads` extends the
 A1/A2 harness against the frozen `f489e1a5` KV mapping for marks and dismissals,
 with another member's state in the same tables; raw results stay outside Git.
+
+## Project and skill lifecycle (B3)
+
+`import_project`, `list_source_projects` and the skill commands extend the existing
+capability registry. The four former dynamic skill descriptors and their dispatcher
+are removed. Rust owns imports, source status, edits, uploads, archives and the
+library/bundle/file envelopes; both apps remove their wire models and route builders.
+Android retains its local byte-owning draft edits, explicitly separate from generated
+wire changes. The existing Kotlin template derives each union's discriminator from
+the first variant's constant property (`kind`, `op` or `source`); the shared skill
+corpus verifies encoding as well as decoding.
+
+The domain instances own import/source mutation exclusion. Source downloads occur
+before mutation exclusion; publication rechecks the actor, project revision, package
+approval and selected instance revision/grant. File swaps and source metadata use
+the existing authorized bundle writer transaction. A source detached or replaced
+while downloading cannot be restored by that pending update. Importing resources
+never edits an agent's grants. Project clones are owned by the queued writer through
+registration even if the transport future is dropped.
+
+SQLite remains v18: project SQL, source KV keys/document fields and skill files,
+bundles, uploads and archives retain their formats. Source KV is read/written as a
+named Rust record; only the manifest-defined location is extensible JSON. No schema
+change, historical runtime reader, data reset or migration is required. Existing
+single-file UI-only transports are removed in favor of `edit_skill_files`/bundle.
+Raw upload is a declared bounded transport of `stage_skill_upload`; archive chunks
+are 512 KiB so public and built-in tools can export the same complete ZIP.
+
+B3 remote preparation (project source pages/import, skill import/source status/update)
+uses the existing plugin operation manager: return an operation id immediately,
+then read `get_plugin_operation` (or cancel it) with the same audience checks.
+Both generated app clients await the canonical typed result. Preparations retain
+the existing four slots, nine-minute deadline and cancellation fence; the code
+worker keeps its 30-second limit. Failed operations preserve their HTTP status
+for revision-conflict handling. The operation catalogue/results are in memory,
+with no SQL or persistent-format change. Bundle publication refreshes external
+owner/public proofs after staging and lock waits, then checks local execution,
+project and source revisions in the writer transaction.

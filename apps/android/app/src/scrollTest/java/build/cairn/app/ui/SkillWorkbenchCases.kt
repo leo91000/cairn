@@ -83,15 +83,21 @@ abstract class SkillWorkbenchCases {
 
     private fun files(paths: Map<String, ByteArray>, executables: Set<String>) =
         paths.map { (path, bytes) ->
-            SkillFile(path, bytes.size.toLong(), path in executables, path != "assets/logo.png")
+            SkillFile(
+                path = path,
+                size = bytes.size.toLong(),
+                executable = path in executables,
+                text = path != "assets/logo.png",
+            )
         }
 
     private val reviewBundle =
         SkillBundle(
-            "global",
-            "review",
-            "4f1c0d2e9a7b",
-            files(contents, setOf("scripts/check.sh")),
+            scope = "global",
+            name = "review",
+            revision = "4f1c0d2e9a7b",
+            files = files(contents, setOf("scripts/check.sh")),
+            limits = SkillLimits(),
         )
 
     private val pdfSource =
@@ -181,37 +187,40 @@ abstract class SkillWorkbenchCases {
 
     private val pdfBundle =
         SkillBundle(
-            "global",
-            "pdf-tools",
-            "77aa01",
-            listOf(
-                SkillFile("SKILL.md", 120),
-                SkillFile("scripts/extract.py", 640, executable = true),
-                SkillFile("reference.md", 2048),
-            ),
+            scope = "global",
+            name = "pdf-tools",
+            revision = "77aa01",
+            files =
+                listOf(
+                    SkillFile(path = "SKILL.md", size = 120),
+                    SkillFile(path = "scripts/extract.py", size = 640, executable = true),
+                    SkillFile(path = "reference.md", size = 2048),
+                ),
             source = pdfSource,
+            limits = SkillLimits(),
         )
 
     private val skills =
         listOf(
             Skill(
-                "review",
-                "Relire une branche, lancer les vérifications et rédiger un compte rendu clair.",
+                name = "review",
+                description =
+                    "Relire une branche, lancer les vérifications et rédiger un compte rendu clair.",
                 files = 6,
                 bytes = contents.values.sumOf { it.size }.toLong(),
                 executables = 1,
             ),
             Skill(
-                "pdf-tools",
-                "Extraire du texte et des tableaux depuis des PDF.",
+                name = "pdf-tools",
+                description = "Extraire du texte et des tableaux depuis des PDF.",
                 files = 3,
                 bytes = 2808,
                 executables = 1,
                 source = pdfSource,
             ),
             Skill(
-                "release-notes",
-                "Rédiger les notes de version à partir des commits.",
+                name = "release-notes",
+                description = "Rédiger les notes de version à partir des commits.",
                 scope = "46d045dd-9bce-51e3-8a99-65aa9384efc9",
                 files = 1,
                 bytes = 900,
@@ -276,11 +285,12 @@ abstract class SkillWorkbenchCases {
                         json(
                             wireJson.encodeToString(
                                 SkillFileContent(
-                                    if (binary) Base64.getEncoder().encodeToString(bytes)
-                                    else String(bytes),
-                                    if (binary) "base64" else "utf-8",
-                                    bytes.size.toLong(),
-                                    query == "scripts/check.sh",
+                                    content =
+                                        if (binary) Base64.getEncoder().encodeToString(bytes)
+                                        else String(bytes),
+                                    encoding = if (binary) "base64" else "utf-8",
+                                    size = bytes.size.toLong(),
+                                    executable = query == "scripts/check.sh",
                                 )
                             )
                         )
@@ -311,10 +321,12 @@ abstract class SkillWorkbenchCases {
                                         )
                                     else
                                         SkillBundle(
-                                            "global",
-                                            "release-checklist",
-                                            "new-1",
-                                            listOf(SkillFile("SKILL.md", 140)),
+                                            scope = "global",
+                                            name = "release-checklist",
+                                            revision = "new-1",
+                                            files =
+                                                listOf(SkillFile(path = "SKILL.md", size = 140)),
+                                            limits = SkillLimits(),
                                         )
                                 )
                             )
@@ -332,7 +344,10 @@ abstract class SkillWorkbenchCases {
                             if (index == 1) fixture.oldReferenceReturned = true
                             json(
                                 wireJson.encodeToString(
-                                    SkillFileContent(content, size = content.length.toLong())
+                                    SkillFileContent(
+                                        content = content,
+                                        size = content.length.toLong(),
+                                    )
                                 )
                             )
                         } else
@@ -356,7 +371,7 @@ abstract class SkillWorkbenchCases {
                             )
                         )
                     }
-                    path == "$api/skills/global/import" -> {
+                    path == "$api/skills/import" -> {
                         val body = wireJson.parseToJsonElement(request.body.readUtf8()).jsonObject
                         fixture.imports += body
                         if (body["folder"] == null)
@@ -393,42 +408,57 @@ abstract class SkillWorkbenchCases {
 
     private val sourceStatus =
         SkillSourceStatus(
-            pdfSource,
-            SkillSourceVersion(
-                "c0ffee1234567",
-                "Extract tables with pdfplumber\n\nDetails",
-                "2026-10-12T09:30:00Z",
-            ),
+            source = pdfSource,
+            latest =
+                SkillSourceVersion(
+                    version = "c0ffee1234567",
+                    message = "Extract tables with pdfplumber\n\nDetails",
+                    date = "2026-10-12T09:30:00Z",
+                ),
             current = false,
             changes =
                 listOf(
                     SkillSourceChange(
-                        "scripts/extract.py",
-                        "modified",
+                        path = "scripts/extract.py",
+                        status = "modified",
                         lines =
                             listOf(
-                                SkillDiffLine("gap", "12 lignes inchangées"),
-                                SkillDiffLine("context", "def extract(path):"),
-                                SkillDiffLine("removed", "    return pdftotext(path)"),
-                                SkillDiffLine("added", "    with pdfplumber.open(path) as pdf:"),
+                                SkillDiffLine(kind = "gap", text = "12 lignes inchangées"),
+                                SkillDiffLine(kind = "context", text = "def extract(path):"),
                                 SkillDiffLine(
-                                    "added",
-                                    "        return [page.extract_tables() for page in pdf.pages]",
+                                    kind = "removed",
+                                    text = "    return pdftotext(path)",
                                 ),
-                                SkillDiffLine("context", ""),
-                                SkillDiffLine("gap", "40 lignes inchangées"),
+                                SkillDiffLine(
+                                    kind = "added",
+                                    text = "    with pdfplumber.open(path) as pdf:",
+                                ),
+                                SkillDiffLine(
+                                    kind = "added",
+                                    text =
+                                        "        return [page.extract_tables() for page in pdf.pages]",
+                                ),
+                                SkillDiffLine(kind = "context", text = ""),
+                                SkillDiffLine(kind = "gap", text = "40 lignes inchangées"),
                             ),
                     ),
                     SkillSourceChange(
-                        "reference.md",
-                        "added",
+                        path = "reference.md",
+                        status = "added",
                         lines =
                             listOf(
-                                SkillDiffLine("added", "# Tables"),
-                                SkillDiffLine("added", "Use `extract_tables` for grids."),
+                                SkillDiffLine(kind = "added", text = "# Tables"),
+                                SkillDiffLine(
+                                    kind = "added",
+                                    text = "Use `extract_tables` for grids.",
+                                ),
                             ),
                     ),
-                    SkillSourceChange("assets/sample.pdf", "removed", binary = true),
+                    SkillSourceChange(
+                        path = "assets/sample.pdf",
+                        status = "removed",
+                        binary = true,
+                    ),
                 ),
         )
 
