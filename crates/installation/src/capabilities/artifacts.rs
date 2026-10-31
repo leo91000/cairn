@@ -59,8 +59,15 @@ impl ArtifactOperation {
             "description": self.description,
             "inputSchema": input,
             "outputSchema": output,
-            "_meta": { "securitySchemes": [{ "type": "oauth2", "scopes": [self.scope] }] },
-            "annotations": { "readOnlyHint": self.scope == "read", "destructiveHint": self.scope == "manage", "idempotentHint": true, "openWorldHint": false },
+            "_meta": {
+                "securitySchemes": [{ "type": "oauth2", "scopes": [self.scope] }],
+            },
+            "annotations": {
+                "readOnlyHint": self.scope == "read",
+                "destructiveHint": self.scope == "manage",
+                "idempotentHint": true,
+                "openWorldHint": false,
+            },
         })
     }
 
