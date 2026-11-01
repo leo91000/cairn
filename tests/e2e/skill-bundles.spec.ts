@@ -282,7 +282,9 @@ test('builds a multi-file skill, saves one batch and round-trips it through a zi
   await editor.getByRole('button', { name: 'Download .zip' }).click()
   const archive = await download
   expect(archive.suggestedFilename()).toBe('bundle-demo.zip')
-  const zip = await readFile((await archive.path())!)
+  const archivePath = testInfo.outputPath('bundle-demo.zip')
+  await archive.saveAs(archivePath)
+  const zip = await readFile(archivePath)
   expect(zip.subarray(0, 2).toString()).toBe('PK')
   await editor.getByRole('button', { name: 'Close', exact: true }).click()
 
