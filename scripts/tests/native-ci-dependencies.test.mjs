@@ -8,6 +8,7 @@ import {
 import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { parse } from 'yaml'
 
@@ -15,7 +16,12 @@ const root = new URL('../../', import.meta.url)
 const workflow = parse(readFileSync(new URL('.github/workflows/ci.yaml', root), 'utf8'))
 const setup = workflow.jobs.backend.steps.find(step => step.name === 'Install native test dependencies')
 
-async function executeSetup(fault = '', { closeOutput = false, blockedOutput = false, throwingMarker = false } = {}) {
+async function executeSetup(fault = '', {
+  profile = 'native',
+  closeOutput = false,
+  blockedOutput = false,
+  throwingMarker = false,
+} = {}) {
   const directory = mkdtempSync(path.join(os.tmpdir(), 'cairn-native-dependencies-'))
   const history = path.join(directory, 'calls.jsonl')
   writeFileSync(history, '')
@@ -52,11 +58,16 @@ if (phase === fault) {
 
   const started = Date.now()
   const fillOutput = `let full = false; const bytes = Buffer.alloc(64 * 1024); for (let i = 0; i < 256; i++) { try { writeSync(process.stdout.fd, bytes); } catch (error) { full = error.code === 'EAGAIN'; break; } } appendFileSync(${JSON.stringify(history)}, JSON.stringify({ phase: 'blocked-output', pid: process.pid, full }) + '\\n');`
-  const driver = `import { writeSync, appendFileSync } from 'node:fs'; import { installNativeCiDependencies } from ${JSON.stringify(new URL('scripts/install-native-ci-dependencies.mjs', root).href)}; ${blockedOutput ? fillOutput : ''} process.exitCode = installNativeCiDependencies({ phaseSeconds: { update: 0.15, install: 0.15 }, entryAllowanceSeconds: 0.65, killAfterSeconds: 0.4${throwingMarker ? ', write: () => { throw new Error("fixture marker failure") }' : ''} });`
-  const command = fault || closeOutput || throwingMarker ? process.execPath : '/bin/bash'
-  const args = fault || closeOutput || throwingMarker
-    ? ['--input-type=module', '-e', driver]
-    : ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', setup.run]
+  const driver = `import { writeSync, appendFileSync } from 'node:fs'; import { installNativeCiDependencies } from ${JSON.stringify(new URL('scripts/install-native-ci-dependencies.mjs', root).href)}; ${blockedOutput ? fillOutput : ''} process.exitCode = installNativeCiDependencies({ profile: ${JSON.stringify(profile)}, phaseSeconds: { update: 0.15, install: 0.15 }, entryAllowanceSeconds: 0.65, killAfterSeconds: 0.4${throwingMarker ? ', write: () => { throw new Error("fixture marker failure") }' : ''} });`
+  const unsupportedProfile = !['native', 'android-network'].includes(profile)
+  const useDriver = fault || closeOutput || blockedOutput || throwingMarker
+  const androidSetup = workflow.jobs['android-direct'].steps.find(step => step.name === 'Install Android network test dependencies' || step.run?.includes('iproute2 iptables util-linux'))
+  const command = unsupportedProfile || useDriver ? process.execPath : '/bin/bash'
+  const args = unsupportedProfile
+    ? [fileURLToPath(new URL('scripts/install-native-ci-dependencies.mjs', root)), '--profile', profile]
+    : useDriver
+      ? ['--input-type=module', '-e', driver]
+      : ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', profile === 'android-network' ? androidSetup.run : setup.run]
   const child = spawn(command, args, {
     cwd: root,
     detached: true,
@@ -141,6 +152,31 @@ describe('native CI dependency setup', () => {
     expect(result.output).toContain('phase=install event=end code=0')
   })
 
+  it('preserves the observed Android caller\'s exact closed package profile', async () => {
+    const result = await executeSetup('', { profile: 'android-network' })
+    expect(result.harnessKilled).toBe(false)
+    expect(result.status).toBe(0)
+    const apt = result.calls.filter(call => ['update', 'install'].includes(call.phase))
+    expect(apt.map(call => call.phase)).toEqual(['update', 'install'])
+    expect(apt[1].args.slice(apt[1].args.indexOf('install') + 1)).toEqual(['-y', '--no-install-recommends', 'iproute2', 'iptables', 'util-linux'])
+    expect(result.output).toContain('profile=android-network')
+  })
+
+  it('bounds the observed Android profile through the same privileged supervisor', async () => {
+    const result = await executeSetup('update', { profile: 'android-network' })
+    expect(result.harnessKilled).toBe(false)
+    expect(result.status).toBe(124)
+    expect(result.output).toContain('profile=android-network')
+    expect(result.calls.filter(call => call.phase === 'install')).toHaveLength(0)
+    expect(result.survivingFixturePids).toEqual([])
+  })
+
+  it.each(['arbitrary-packages', 'constructor'])('refuses unsupported profile %s before privilege entry', async (profile) => {
+    const result = await executeSetup('', { profile })
+    expect(result.status).toBe(2)
+    expect(result.calls).toEqual([])
+  })
+
   it.each(['entry', 'update', 'install'])('bounds and identifies a silent %s stall without starting later work', async (fault) => {
     const result = await executeSetup(fault)
     expect(result.harnessKilled).toBe(false)
@@ -208,5 +244,10 @@ describe('native CI dependency setup', () => {
       expect(step.run).toBe('node scripts/install-native-ci-dependencies.mjs')
       expect(step['timeout-minutes']).toBe(10)
     }
+
+    const android = workflow.jobs['android-direct'].steps.find(step => step.name === 'Install Android network test dependencies')
+    expect(android.run).toBe('node scripts/install-native-ci-dependencies.mjs --profile android-network')
+    expect(android['timeout-minutes']).toBe(5)
+    expect(workflow.jobs['android-direct']['timeout-minutes']).toBe(20)
   })
 })
