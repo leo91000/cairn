@@ -896,7 +896,7 @@ async fn automatic_creation_portrait_keeps_its_initiating_ceiling_after_the_requ
                 crate::agents::SaveProfile::Create(cairn_contracts::CreateAgentInput {
                     creation_id: None,
                     settings,
-                    review: Default::default(),
+                    review: cairn_contracts::AgentReview::default(),
                 }),
                 crate::service::AgentEditor::Installation,
                 authority,

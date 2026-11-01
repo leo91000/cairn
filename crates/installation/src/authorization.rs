@@ -69,14 +69,15 @@ impl Authorization {
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
         let callback = Mutex::new(Some(authorize));
-        let mut authority = Self::default();
-        authority.admission = Some(Arc::new(move |db| {
-            let authorize = callback.lock().unwrap().take().ok_or_else(|| {
-                Error::forbidden("The publication authorization was already consumed.")
-            })?;
-            authorize(db)
-        }));
-        authority
+        Self {
+            admission: Some(Arc::new(move |db| {
+                let authorize = callback.lock().unwrap().take().ok_or_else(|| {
+                    Error::forbidden("The publication authorization was already consumed.")
+                })?;
+                authorize(db)
+            })),
+            ..Self::default()
+        }
     }
 
     pub(crate) fn live(s: &Service, authority: Authority) -> Self {
