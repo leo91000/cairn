@@ -85,7 +85,7 @@ impl ResumeRun {
                 (Origin::Run(caller), Some(bearer))
             }
         };
-        let selection = input.selection;
+        let mut selection = input.selection;
         let run = if selection.is_some() {
             let authorize_id = id.clone();
             let authorize_origin = origin.clone();
@@ -99,7 +99,7 @@ impl ResumeRun {
         } else {
             s.store.run(&id).await?
         };
-        let selected_provider = if let Some(selection) = selection.as_ref() {
+        let selected_provider = if let Some(selection) = selection.as_mut() {
             let expected_turn_id = input.turn_id.as_deref().ok_or_else(|| {
                 Error::bad("A turn identifier is required when selecting a model for resume.")
             })?;

@@ -6,8 +6,4 @@ import build.cairn.app.data.segment
 import kotlinx.serialization.json.encodeToJsonElement
 
 suspend fun CairnApi.resumeChat(input: ResumeChatInput): Run =
-    send(
-        "POST",
-        "/chats/${segment(input.chatId)}/resume",
-        contractJson.encodeToJsonElement(input),
-    )
+    send("POST", "/chats/${segment(input.chatId)}/resume", contractJson.encodeToJsonElement(input))

@@ -12,9 +12,7 @@ data class ResumeRunInput(
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val turnId: String? = null,
 ) {
-
     init {
         java.util.UUID.fromString(runId)
-        turnId?.let { require(it.length in 1..200) }
     }
 }

@@ -21,7 +21,7 @@ impl std::fmt::Display for RunId {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResumeExecutionSelection {
-    #[schemars(length(max = 120), pattern(r"^[\w./:\[\]-]*$"))]
+    #[schemars(length(max = 120))]
     pub model: String,
     #[schemars(length(max = 40), pattern(r"^(?:[a-z][a-z0-9_-]*)?$"))]
     pub reasoning: String,
@@ -87,7 +87,7 @@ pub struct QualificationFixture {
 pub const RESUME_RUN_ID: &str = "resume_run";
 pub const RESUME_RUN_SCOPE: &str = "run";
 pub const RESUME_RUN_PATH: &str = "/runs/{runId}/resume";
-pub const RESUME_RUN_DESCRIPTION: &str = "Resume an existing stopped chat run with its saved workspace, session and checkpoint. An optional selection changes only the model, reasoning and speed for this same coding agent; turnId is required and guards against a stale selection. Mission runs retain their existing resume behavior without model selection. This does not create a new run (unlike run_task or retry).";
+pub const RESUME_RUN_DESCRIPTION: &str = "Resume an existing stopped chat run with its saved workspace, session and checkpoint. An optional selection changes only the model, reasoning and speed for this same coding agent; turnId is required and guards against a stale selection. For Codex, an empty selection speed inherits the saved request and standard explicitly selects Standard. Mission runs retain their existing resume behavior without model selection. This does not create a new run (unlike run_task or retry).";
 
 /// One schema profile for exported files and live MCP discovery.
 pub fn schema_for<T: JsonSchema>(contract: Contract) -> serde_json::Value {
@@ -108,6 +108,18 @@ fn wire_integer<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<i64
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resume_selection_schema_leaves_model_ids_to_provider_catalogs() {
+        let schema = schema_for::<ResumeExecutionSelection>(Contract::Deserialize);
+        let model = &schema["properties"]["model"];
+        assert_eq!(model["maxLength"], 120);
+        assert!(model.get("pattern").is_none());
+        assert_eq!(
+            schema["properties"]["reasoning"]["pattern"],
+            "^(?:[a-z][a-z0-9_-]*)?$"
+        );
+    }
 
     #[test]
     fn qualification_corpus_decodes_and_round_trips() {

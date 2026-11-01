@@ -381,7 +381,7 @@ pub(crate) async fn invoke(
         let commit_chat_id = chat_id.clone();
         let expected_run_id = input.run_id.map(|expected| expected.to_string());
         let expected_turn_id = input.turn_id;
-        let selection = input.selection;
+        let mut selection = input.selection;
         if expected_turn_id
             .as_ref()
             .is_some_and(|turn| turn.is_empty() || turn.chars().count() > 200)
@@ -415,7 +415,7 @@ pub(crate) async fn invoke(
             })
             .await?;
         let run = s.store.run(&run_id).await?;
-        let selected_provider = if let Some(selection) = selection.as_ref() {
+        let selected_provider = if let Some(selection) = selection.as_mut() {
             let expected_turn_id = expected_turn_id.as_deref().ok_or_else(|| {
                 Error::bad("A turn identifier is required when selecting a model for resume.")
             })?;

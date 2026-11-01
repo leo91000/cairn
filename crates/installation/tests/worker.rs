@@ -41,6 +41,17 @@ use tokio::{
     process::{Child, Command},
 };
 
+async fn api_post(app: &Router, token: &str, path: &str, body: Value) -> (StatusCode, Value) {
+    let request = common::request("POST", path)
+        .header("x-test-relay-token", token)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let response = common::send(app, request).await;
+    let status = response.status();
+    (status, common::read_json(response).await)
+}
+
 /// Signal only the checkpoint supervisor's private runner child.
 async fn kill_fixture_runner_child(saved: &Value) {
     let process = saved["process"].clone();
@@ -4938,6 +4949,288 @@ async fn claude_conversations_run_together_and_lowering_limit_does_not_cancel_th
 }
 
 #[tokio::test]
+async fn manual_resume_cancels_a_staged_switch_during_worker_fencing() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let mut fixture = Fixture::new().await;
+    fixture.stop(false).await;
+    let controller = Arc::new(Controller {
+        data: fixture.service.config.data_dir.clone(),
+        plans: tokio::sync::Mutex::new(Vec::new()),
+        failures: 0,
+        slots: 4,
+        hold: AtomicBool::new(true),
+    });
+    let block_fence = Arc::new(AtomicBool::new(false));
+    let fence_entered = Arc::new(tokio::sync::Notify::new());
+    let fence_release = Arc::new(tokio::sync::Notify::new());
+    let app = Router::new()
+        .fallback(any({
+            let (block_fence, fence_entered, fence_release) = (
+                block_fence.clone(),
+                fence_entered.clone(),
+                fence_release.clone(),
+            );
+            move |state: State<Arc<Controller>>, request: Request| {
+                let (block_fence, fence_entered, fence_release) = (
+                    block_fence.clone(),
+                    fence_entered.clone(),
+                    fence_release.clone(),
+                );
+                async move {
+                    if block_fence.load(Ordering::SeqCst)
+                        && request.method() == axum::http::Method::DELETE
+                        && request.uri().path().starts_with("/runs/")
+                    {
+                        fence_entered.notify_one();
+                        fence_release.notified().await;
+                    }
+                    serve_controller(state, request).await
+                }
+            }
+        }))
+        .with_state(controller.clone());
+    let (listener, address) = common::bind().await;
+    common::reconfigure(&mut fixture.service, |config| {
+        config.runner_url = format!("http://{address}");
+    })
+    .await;
+    let s = fixture.service.clone();
+    let server = common::serve(listener, app);
+    let home = s.config.home.join(".codex");
+    tokio::fs::create_dir_all(&home).await.unwrap();
+    tokio::fs::write(home.join("auth.json"), "{}")
+        .await
+        .unwrap();
+    tokio::fs::write(
+        s.config.data_dir.join("storage-s3.json"),
+        json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
+    )
+    .await
+    .unwrap();
+    cairn_installation::nodes::refresh_local(&s).await.unwrap();
+    s.store
+        .set(
+            "codex-models:",
+            json!({
+                "checkedAt": now(),
+                "models": [
+                    {
+                        "model": "gpt-6-sol",
+                        "isDefault": true,
+                        "supportedReasoningEfforts": [{ "reasoningEffort": "high" }],
+                        "serviceTiers": [{ "id": "priority" }],
+                    },
+                    {
+                        "model": "gpt-6-luna",
+                        "isDefault": false,
+                        "supportedReasoningEfforts": [{ "reasoningEffort": "xhigh" }],
+                        "serviceTiers": [{ "id": "priority" }],
+                    },
+                ],
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let chat = s.chat_create(json!({})).await.unwrap();
+    let chat_id = text(&chat, "id").to_owned();
+    let mut sent = message("fixture:chat-hang");
+    sent["provider"] = "codex".into();
+    sent["model"] = "gpt-6-sol".into();
+    sent["reasoning"] = "high".into();
+    sent["speed"] = "priority".into();
+    let turn_id = text(&sent, "id").to_owned();
+    s.chat_send(&chat_id, sent).await.unwrap();
+    fixture.start().await;
+    let run_id = fixture.chat_run(&chat_id).await;
+    let active = fixture
+        .until(&run_id, |run| {
+            run["status"] == RunStatus::Running && run["sessionId"].is_string()
+        })
+        .await;
+    eventually(
+        Duration::from_secs(20),
+        Duration::from_millis(30),
+        async || {
+            controller
+                .plans
+                .lock()
+                .await
+                .iter()
+                .any(|plan| plan["runId"] == run_id)
+                .then_some(())
+        },
+    )
+    .await;
+    let relay = common::relay_fixture::context(&s).await;
+    let relay_token = text(&relay, "value");
+    let client = reqwest::Client::new();
+    let stopped = client
+        .post(format!("{}/api/chats/{chat_id}/stop", fixture.url))
+        .header("x-test-relay-token", relay_token)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    stopped.error_for_status().unwrap();
+    let terminal = fixture
+        .until(&run_id, |run| {
+            run["status"] == RunStatus::Cancelled && run["resumeAvailable"] == true
+        })
+        .await;
+    assert_eq!(terminal["sessionId"], active["sessionId"]);
+    fixture.stop(false).await;
+    s.store
+        .change_run(
+            &run_id,
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Failed),
+                finished_at: Some(Some(now())),
+                error: Some(Some("Usage limit has been reached".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let mut alternative = serde_json::to_value(
+        s.accounts
+            .create(&s, Provider::Claude, "Switch target")
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let alternative_id = text(&alternative, "id").to_owned();
+    alternative["state"] = "ready".into();
+    s.store.save_account_fixture(alternative).await.unwrap();
+    let claude_home = accounts::claude::account_home(&s.config, &alternative_id);
+    std::fs::create_dir_all(&claude_home).unwrap();
+    std::fs::write(
+        claude_home.join(".credentials.json"),
+        json!({
+            "claudeAiOauth": {
+                "accessToken": "fixture-access",
+                "expiresAt": now() + 3_600_000,
+                "scopes": ["user:inference"],
+            },
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let api = common::relay_fixture::router(s.clone()).await.unwrap();
+    let switch_id = id();
+    let switch = json!({
+        "runId": run_id,
+        "turnId": turn_id,
+        "requestId": switch_id,
+        "provider": "claude",
+    });
+    let (stage_status, stage_response) = api_post(
+        &api,
+        relay_token,
+        &format!("/api/chats/{chat_id}/coding-agent"),
+        switch,
+    )
+    .await;
+    assert_eq!(stage_status, StatusCode::OK, "{stage_response}");
+    assert!(
+        s.store
+            .read({
+                let chat_id = chat_id.clone();
+                move |db| Ok(db.engine_switch(&chat_id)?.unwrap().pending)
+            })
+            .await
+            .unwrap()
+    );
+
+    block_fence.store(true, Ordering::SeqCst);
+    controller
+        .hold
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    fixture.start().await;
+    tokio::time::timeout(Duration::from_secs(10), fence_entered.notified())
+        .await
+        .expect("the production switch worker should reach runner fencing");
+
+    let cancelled = client
+        .post(format!("{}/api/chats/{chat_id}/stop", fixture.url))
+        .header("x-test-relay-token", relay_token)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    cancelled.error_for_status().unwrap();
+    assert!(
+        !s.store
+            .read({
+                let chat_id = chat_id.clone();
+                move |db| Ok(db.engine_switch(&chat_id)?.unwrap().pending)
+            })
+            .await
+            .unwrap()
+    );
+
+    fence_release.notify_one();
+    let resumed = client
+        .post(format!("{}/api/chats/{chat_id}/resume", fixture.url))
+        .header("x-test-relay-token", relay_token)
+        .json(&json!({
+            "runId": run_id,
+            "turnId": turn_id,
+            "selection": {
+                "model": "gpt-6-luna",
+                "reasoning": "xhigh",
+                "speed": "",
+            },
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resumed.status().is_success());
+    let completed = fixture.until_finished(&run_id).await;
+    assert_eq!(completed["status"], RunStatus::Succeeded, "{completed}");
+    assert_eq!(completed["snapshot"]["agent"]["provider"], "codex");
+    assert_eq!(completed["snapshot"]["agent"]["speed"], "priority");
+    assert_eq!(completed["chatExecution"]["messageId"], turn_id);
+    assert_eq!(completed["sessionId"], terminal["sessionId"]);
+    let resumed_plan = controller
+        .plans
+        .lock()
+        .await
+        .iter()
+        .find(|plan| {
+            plan["runId"] == run_id
+                && plan["chat"]["execution"]["messageId"] == turn_id
+                && plan["chat"]["model"] == "gpt-6-luna"
+        })
+        .cloned()
+        .expect("the selected resume must launch after the stale switch is fenced");
+    assert_eq!(resumed_plan["chat"]["provider"], "codex");
+    assert_eq!(resumed_plan["chat"]["serviceTier"], "priority");
+    assert!(controller.plans.lock().await.iter().all(|plan| {
+        plan["runId"] != run_id
+            || plan["chat"]["execution"]["messageId"] != turn_id
+            || plan["chat"]["provider"] != "claude"
+    }));
+    let receipt = s
+        .store
+        .read({
+            let chat_id = chat_id.clone();
+            move |db| db.engine_switch(&chat_id)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.request_id, switch_id);
+    assert!(!receipt.pending);
+
+    fixture.stop(false).await;
+    server.abort();
+}
+
+#[tokio::test]
 async fn chat_resume_selection_keeps_saved_identity_and_reaches_the_worker_plan() {
     use std::sync::atomic::AtomicBool;
 
@@ -4983,13 +5276,13 @@ async fn chat_resume_selection_keeps_saved_identity_and_reaches_the_worker_plan(
                         "model": "gpt-6-sol",
                         "isDefault": true,
                         "supportedReasoningEfforts": [{ "reasoningEffort": "high" }],
-                        "serviceTiers": [],
+                        "serviceTiers": [{ "id": "priority" }],
                     },
                     {
                         "model": "gpt-6-luna",
                         "isDefault": false,
                         "supportedReasoningEfforts": [{ "reasoningEffort": "xhigh" }],
-                        "serviceTiers": [],
+                        "serviceTiers": [{ "id": "priority" }],
                     },
                 ],
             }),
@@ -5013,6 +5306,7 @@ async fn chat_resume_selection_keeps_saved_identity_and_reaches_the_worker_plan(
     sent["provider"] = "codex".into();
     sent["model"] = "gpt-6-sol".into();
     sent["reasoning"] = "high".into();
+    sent["speed"] = "priority".into();
     sent["attachmentIds"] = json!([attachment_id]);
     s.chat_send(chat_id, sent).await.unwrap();
     fixture.start().await;
@@ -5049,7 +5343,7 @@ async fn chat_resume_selection_keeps_saved_identity_and_reaches_the_worker_plan(
     let override_selection = json!({
         "model": "gpt-6-luna",
         "reasoning": "xhigh",
-        "speed": "standard",
+        "speed": "",
     });
 
     let active_refusal = resume(json!({
@@ -5160,24 +5454,161 @@ async fn chat_resume_selection_keeps_saved_identity_and_reaches_the_worker_plan(
         RunStatus::Cancelled
     );
 
-    controller
-        .hold
-        .store(false, std::sync::atomic::Ordering::Relaxed);
-    let resumed = resume(json!({
+    drop(resume);
+    fixture.stop(false).await;
+    s.store
+        .change_run(
+            &run_id,
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Failed),
+                finished_at: Some(Some(now())),
+                error: Some(Some("Usage limit has been reached".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let mut alternative = serde_json::to_value(
+        s.accounts
+            .create(&s, Provider::Claude, "Switch target")
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let alternative_id = text(&alternative, "id").to_owned();
+    alternative["state"] = "ready".into();
+    s.store.save_account_fixture(alternative).await.unwrap();
+    let claude_home = accounts::claude::account_home(&s.config, &alternative_id);
+    std::fs::create_dir_all(&claude_home).unwrap();
+    std::fs::write(
+        claude_home.join(".credentials.json"),
+        json!({
+            "claudeAiOauth": {
+                "accessToken": "fixture-access",
+                "expiresAt": now() + 3_600_000,
+                "scopes": ["user:inference"],
+            },
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
+    let relay_token = text(&session, "value");
+    let switch_id = id();
+    let switch = json!({
+        "runId": run_id,
+        "turnId": turn_id,
+        "requestId": switch_id,
+        "provider": "claude",
+    });
+    let (switch_status, _) = api_post(
+        &app,
+        relay_token,
+        &format!("/api/chats/{chat_id}/coding-agent"),
+        switch.clone(),
+    )
+    .await;
+    assert_eq!(switch_status, StatusCode::OK);
+    let staged = s
+        .store
+        .read({
+            let chat_id = chat_id.to_owned();
+            move |db| db.engine_switch(&chat_id)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(staged.request_id, switch_id);
+    assert!(staged.pending);
+
+    let (switch_retry_status, _) = api_post(
+        &app,
+        relay_token,
+        &format!("/api/chats/{chat_id}/coding-agent"),
+        switch.clone(),
+    )
+    .await;
+    assert_eq!(switch_retry_status, StatusCode::OK);
+    let resume_body = json!({
         "runId": run_id,
         "turnId": turn_id,
         "selection": override_selection,
-    }))
-    .send()
-    .await
-    .unwrap();
-    assert!(resumed.status().is_success());
+    });
+    let (resume_status, resume_response) = api_post(
+        &app,
+        relay_token,
+        &format!("/api/chats/{chat_id}/resume"),
+        resume_body,
+    )
+    .await;
+    assert_eq!(resume_status, StatusCode::OK, "{resume_response}");
+    let queued_resume = s.store.run(&run_id).await.unwrap();
+    assert_eq!(queued_resume["status"], RunStatus::Queued);
+    assert_eq!(queued_resume["snapshot"]["agent"]["provider"], "codex");
+    assert_eq!(queued_resume["snapshot"]["agent"]["speed"], "priority");
+    assert_eq!(queued_resume["chatExecution"]["messageId"], turn_id);
+    let cancelled_switch = s
+        .store
+        .read({
+            let chat_id = chat_id.to_owned();
+            move |db| db.engine_switch(&chat_id)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(cancelled_switch.request_id, switch_id);
+    assert!(!cancelled_switch.pending);
+
+    let late_switch = json!({
+        "runId": run_id,
+        "turnId": turn_id,
+        "requestId": id(),
+        "provider": "claude",
+    });
+    let (late_switch_status, _) = api_post(
+        &app,
+        relay_token,
+        &format!("/api/chats/{chat_id}/coding-agent"),
+        late_switch,
+    )
+    .await;
+    assert_eq!(late_switch_status, StatusCode::CONFLICT);
+
+    let (completed_switch_retry_status, _) = api_post(
+        &app,
+        relay_token,
+        &format!("/api/chats/{chat_id}/coding-agent"),
+        switch,
+    )
+    .await;
+    assert_eq!(completed_switch_retry_status, StatusCode::OK);
+    assert!(
+        !s.store
+            .read({
+                let chat_id = chat_id.to_owned();
+                move |db| Ok(db.engine_switch(&chat_id)?.unwrap().pending)
+            })
+            .await
+            .unwrap()
+    );
+
+    controller
+        .hold
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    fixture.start().await;
+    let resume = |body: Value| {
+        client
+            .post(format!("{}/api/chats/{chat_id}/resume", fixture.url))
+            .header("x-test-relay-token", text(&session, "value"))
+            .json(&body)
+    };
+    let completed = fixture.until_finished(&run_id).await;
+    assert_eq!(completed["status"], RunStatus::Succeeded, "{completed}");
     let mut expected_snapshot = before["snapshot"].clone();
     expected_snapshot["agent"]["model"] = "gpt-6-luna".into();
     expected_snapshot["agent"]["reasoning"] = "xhigh".into();
-    expected_snapshot["agent"]["speed"] = "standard".into();
-    let completed = fixture.until_finished(&run_id).await;
-    assert_eq!(completed["status"], RunStatus::Succeeded, "{completed}");
+    expected_snapshot["agent"]["speed"] = "priority".into();
     assert_eq!(completed["snapshot"], expected_snapshot);
     for field in ["id", "taskId", "workspace", "sessionId", "chatExecution"] {
         assert_eq!(completed[field], before[field], "{field}");
@@ -5201,7 +5632,7 @@ async fn chat_resume_selection_keeps_saved_identity_and_reaches_the_worker_plan(
         .cloned()
         .expect("the resumed worker plan must contain the selected model and reasoning");
     assert_eq!(selected_plan["chat"]["execution"]["messageId"], turn_id);
-    assert_eq!(selected_plan["chat"]["serviceTier"], "default");
+    assert_eq!(selected_plan["chat"]["serviceTier"], "priority");
     assert_eq!(selected_plan["chat"]["sessionId"], before["sessionId"]);
     assert_eq!(
         selected_plan["chat"]["execution"]["attachments"],
@@ -5223,6 +5654,7 @@ async fn chat_resume_selection_keeps_saved_identity_and_reaches_the_worker_plan(
     later_message["provider"] = "codex".into();
     later_message["model"] = "gpt-6-luna".into();
     later_message["reasoning"] = "xhigh".into();
+    later_message["speed"] = "priority".into();
     let later_turn_id = text(&later_message, "id").to_owned();
     s.chat_send(chat_id, later_message).await.unwrap();
     let later_turn = fixture
@@ -5282,10 +5714,162 @@ async fn chat_resume_selection_keeps_saved_identity_and_reaches_the_worker_plan(
         after_stale_existing_turn["chatExecution"]["messageId"],
         later_turn_id
     );
+
+    controller
+        .hold
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    let (standard_resume, standard_snapshot) = (
+        resume(json!({
+            "runId": run_id,
+            "turnId": later_turn_id,
+            "selection": {
+                "model": "gpt-6-luna",
+                "reasoning": "xhigh",
+                "speed": "standard",
+            },
+        }))
+        .send()
+        .await
+        .unwrap(),
+        {
+            let mut snapshot = expected_snapshot.clone();
+            snapshot["agent"]["speed"] = "standard".into();
+            snapshot
+        },
+    );
+    assert!(standard_resume.status().is_success());
+    let standard_completed = fixture.until_finished(&run_id).await;
+    assert_eq!(standard_completed["status"], RunStatus::Succeeded);
+    assert_eq!(standard_completed["snapshot"], standard_snapshot);
+    for field in ["id", "taskId", "workspace", "sessionId"] {
+        assert_eq!(
+            standard_completed[field], later_turn_stopped[field],
+            "{field}"
+        );
+    }
+    assert_eq!(
+        standard_completed["chatExecution"]["messageId"],
+        later_turn_id
+    );
+    let standard_plan = controller
+        .plans
+        .lock()
+        .await
+        .iter()
+        .find(|plan| {
+            plan["runId"] == run_id
+                && plan["chat"]["execution"]["messageId"] == later_turn_id
+                && plan["chat"]["model"] == "gpt-6-luna"
+        })
+        .cloned()
+        .expect("the explicit Standard request must reach the resumed worker plan");
+    assert_eq!(standard_plan["chat"]["serviceTier"], "default");
+
     drop(resume);
     controller
         .hold
         .store(false, std::sync::atomic::Ordering::Relaxed);
+
+    fixture.stop(false).await;
+    s.store
+        .change_run(
+            &run_id,
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Failed),
+                finished_at: Some(Some(now())),
+                error: Some(Some("Usage limit has been reached".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let normal_switch_id = id();
+    let normal_switch = json!({
+        "runId": run_id,
+        "turnId": later_turn_id,
+        "requestId": normal_switch_id,
+        "provider": "claude",
+    });
+    let (normal_stage_status, normal_stage_response) = api_post(
+        &app,
+        relay_token,
+        &format!("/api/chats/{chat_id}/coding-agent"),
+        normal_switch.clone(),
+    )
+    .await;
+    assert_eq!(
+        normal_stage_status,
+        StatusCode::OK,
+        "{normal_stage_response}"
+    );
+    let (normal_retry_status, _) = api_post(
+        &app,
+        relay_token,
+        &format!("/api/chats/{chat_id}/coding-agent"),
+        normal_switch.clone(),
+    )
+    .await;
+    assert_eq!(normal_retry_status, StatusCode::OK);
+    let normal_staged = s
+        .store
+        .read({
+            let chat_id = chat_id.to_owned();
+            move |db| db.engine_switch(&chat_id)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(normal_staged.request_id, normal_switch_id);
+    assert!(normal_staged.pending);
+
+    fixture.start().await;
+    let switched = fixture
+        .until(&run_id, |run| {
+            run["snapshot"]["agent"]["provider"] == "claude"
+        })
+        .await;
+    assert_eq!(switched["id"], run_id);
+    assert_eq!(switched["chatExecution"]["messageId"], later_turn_id);
+    let completed_switch = fixture.until_finished(&run_id).await;
+    assert_eq!(completed_switch["snapshot"]["agent"]["provider"], "claude");
+    let normal_receipt = s
+        .store
+        .read({
+            let chat_id = chat_id.to_owned();
+            move |db| db.engine_switch(&chat_id)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(normal_receipt.request_id, normal_switch_id);
+    assert_eq!(normal_receipt.provider, "claude");
+    assert!(!normal_receipt.pending);
+    let claude_plan = controller
+        .plans
+        .lock()
+        .await
+        .iter()
+        .find(|plan| {
+            plan["runId"] == run_id
+                && plan["chat"]["execution"]["messageId"] == later_turn_id
+                && plan["chat"]["provider"] == "claude"
+        })
+        .cloned()
+        .expect("the normal pending switch must reach the Claude worker plan");
+    assert_eq!(claude_plan["chat"]["provider"], "claude");
+    let plans_before_receipt_retry = controller.plans.lock().await.len();
+    let (normal_receipt_retry_status, _) = api_post(
+        &app,
+        relay_token,
+        &format!("/api/chats/{chat_id}/coding-agent"),
+        normal_switch,
+    )
+    .await;
+    assert_eq!(normal_receipt_retry_status, StatusCode::OK);
+    assert_eq!(
+        controller.plans.lock().await.len(),
+        plans_before_receipt_retry
+    );
 
     let compatibility_chat = s.chat_create(json!({})).await.unwrap();
     let compatibility_chat_id = text(&compatibility_chat, "id");

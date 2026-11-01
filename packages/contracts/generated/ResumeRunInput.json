@@ -7,7 +7,6 @@
       "properties": {
         "model": {
           "maxLength": 120,
-          "pattern": "^[\\w./:\\[\\]-]*$",
           "type": "string"
         },
         "reasoning": {
@@ -21,12 +20,12 @@
           "type": "string"
         }
       },
-      "type": "object",
       "required": [
         "model",
         "reasoning",
         "speed"
-      ]
+      ],
+      "type": "object"
     }
   },
   "properties": {
@@ -43,11 +42,9 @@
         {
           "type": "null"
         }
-      ],
-      "default": null
+      ]
     },
     "turnId": {
-      "default": null,
       "maxLength": 200,
       "minLength": 1,
       "type": [

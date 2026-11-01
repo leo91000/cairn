@@ -4,7 +4,6 @@
   "properties": {
     "model": {
       "maxLength": 120,
-      "pattern": "^[\\w./:\\[\\]-]*$",
       "type": "string"
     },
     "reasoning": {
@@ -18,11 +17,11 @@
       "type": "string"
     }
   },
-  "title": "ResumeExecutionSelection",
-  "type": "object",
   "required": [
     "model",
     "reasoning",
     "speed"
-  ]
+  ],
+  "title": "ResumeExecutionSelection",
+  "type": "object"
 }

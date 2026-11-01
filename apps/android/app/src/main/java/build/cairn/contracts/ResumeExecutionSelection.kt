@@ -11,11 +11,7 @@ data class ResumeExecutionSelection(
     val speed: String,
 ) {
     init {
-        require(model.length <= 120)
-        require(Regex("^[\\w./:\\[\\]-]*$").containsMatchIn(model))
-        require(reasoning.length <= 40)
-        require(Regex("^(?:[a-z][a-z0-9_-]*)?$").containsMatchIn(reasoning))
-        require(speed.length <= 40)
-        require(Regex("^(?:[a-z][a-z0-9_-]*)?$").containsMatchIn(speed))
+        require(Regex("^(?:[a-z][a-z0-9_-]*)?\\$").containsMatchIn(reasoning))
+        require(Regex("^(?:[a-z][a-z0-9_-]*)?\\$").containsMatchIn(speed))
     }
 }

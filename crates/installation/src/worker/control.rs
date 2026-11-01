@@ -366,6 +366,9 @@ fn requeue(
     // A manual resume may arrive before chat_tick observes the terminal turn.
     // Its scheduled continuation must not survive into the resumed execution.
     crate::chats::continuation::cancel_for_run(db, id)?;
+    if state.trigger == "chat" {
+        crate::chats::coding_agent::cancel_in(db, id)?;
+    }
     if let Some(mut checkpoint) = checkpoint {
         checkpoint.remaining_ms = Some(crate::run_limits::budget_ms(&run["snapshot"]["agent"]));
         checkpoint.controller_recoveries = None;
@@ -535,7 +538,7 @@ pub async fn routes(s: &Arc<Service>, input: &crate::http::Input) -> Option<Resu
                         "Resume runId must match the run in the request path.",
                     ));
                 }
-                fields.insert("runId".into(), id.into());
+                fields.insert("runId".into(), (*id).into());
                 let command = crate::capabilities::RESUME_RUN.decode(body)?;
                 let context = crate::capabilities::ResumeContext::http(input)?;
                 let output = crate::capabilities::RESUME_RUN

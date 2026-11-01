@@ -11,7 +11,7 @@ use serde_json::Value;
 pub(crate) async fn validate(
     s: &Service,
     run: &Value,
-    selection: &ResumeExecutionSelection,
+    selection: &mut ResumeExecutionSelection,
     expected_turn_id: &str,
 ) -> Result<Provider> {
     if !matches!(text(run, "status"), "failed" | "interrupted" | "cancelled")
@@ -26,6 +26,9 @@ pub(crate) async fn validate(
         ));
     }
     let provider = Provider::of_run(run)?;
+    if provider == Provider::Codex && selection.speed.is_empty() {
+        selection.speed = text(&run["snapshot"]["agent"], "speed").to_owned();
+    }
     validate_shape(selection)?;
     crate::models::validate_speed(&selection.speed)?;
 
@@ -41,11 +44,7 @@ pub(crate) async fn validate(
 }
 
 fn validate_shape(selection: &ResumeExecutionSelection) -> Result<()> {
-    let valid_model = selection.model.len() <= 120
-        && selection.model.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric()
-                || matches!(byte, b'_' | b'.' | b'/' | b':' | b'[' | b']' | b'-')
-        });
+    let valid_model = selection.model.len() <= 120;
     if !valid_model || !valid_effort(&selection.reasoning) || !valid_effort(&selection.speed) {
         return Err(Error::bad(
             "Choose a valid model, reasoning level and speed.",
@@ -128,4 +127,50 @@ fn validate_catalog(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opencode_catalog_route_ids_keep_provider_validation_and_bounds() {
+        let selection = ResumeExecutionSelection {
+            model: "openrouter/model@revision+vision".into(),
+            reasoning: "xhigh".into(),
+            speed: String::new(),
+        };
+        validate_shape(&selection).unwrap();
+
+        let agent = serde_json::json!({
+            "provider": "opencode",
+            "model": selection.model,
+            "reasoning": selection.reasoning,
+            "access": { "sandbox": "yolo" },
+        });
+        Provider::Opencode.adapter().validate_agent(&agent).unwrap();
+        let catalog = serde_json::json!({
+            "models": [{
+                "model": "opencode/canonical-key",
+                "routes": [{
+                    "model": "openrouter/model@revision+vision",
+                    "supportedReasoningEfforts": [{ "reasoningEffort": "xhigh" }],
+                }],
+            }],
+        });
+        validate_catalog(Provider::Opencode, &selection, &catalog).unwrap();
+
+        let mut oversized = selection.clone();
+        oversized.model = "m".repeat(121);
+        assert!(validate_shape(&oversized).is_err());
+
+        let mut unlisted = selection.clone();
+        unlisted.model = "openrouter/unlisted@revision+vision".into();
+        assert!(validate_shape(&unlisted).is_ok());
+        assert!(validate_catalog(Provider::Opencode, &unlisted, &catalog).is_err());
+
+        let mut invalid_effort = selection;
+        invalid_effort.reasoning = "2xhigh".into();
+        assert!(validate_shape(&invalid_effort).is_err());
+    }
 }

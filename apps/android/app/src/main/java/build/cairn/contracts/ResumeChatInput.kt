@@ -17,6 +17,5 @@ data class ResumeChatInput(
     init {
         java.util.UUID.fromString(chatId)
         runId?.let { java.util.UUID.fromString(it) }
-        turnId?.let { require(it.length in 1..200) }
     }
 }
