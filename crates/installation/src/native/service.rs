@@ -2516,9 +2516,11 @@ pub(crate) mod tests {
         drop(file);
         let output = b"{\"type\":\"turn.started\"}\n";
         let result = controller.output(attempt, false, output.as_slice()).await;
-        assert!(
-            result.is_err(),
-            "fixture must exercise the real output guard"
+        let error = result.as_ref().unwrap_err();
+        assert_eq!(error.status, 400);
+        assert_eq!(
+            error.message,
+            "Native output exceeded its bounded log budget."
         );
         let code = controller.execution_status(attempt, result).await;
         assert_eq!(code, crate::runner::CONTROLLER_FAILED);
