@@ -634,16 +634,21 @@ async fn legacy_stdio_servers_can_exit_on_the_modern_probe() {
 }
 
 const BOUNDED_RESULT_SERVER: &str = r#"
-const { createInterface } = require('node:readline');
+const { createServer } = require('node:http');
 const { appendFileSync, readFileSync } = require('node:fs');
 const schema = {
     $schema: 'https://json-schema.org/draft/2020-12/schema',
     type: 'object', properties: { value: { type: 'string' } }, required: ['value'],
     $defs: { recursive: { $anchor: 'node', $ref: '#node' }, external: { $ref: 'https://invalid.example/do-not-fetch' } },
 };
-createInterface({ input: process.stdin }).on('line', line => {
-    const request = JSON.parse(line);
-    if (request.id === undefined) return;
+const server = createServer(async (incoming, response) => {
+    let body = '';
+    for await (const chunk of incoming) body += chunk;
+    const request = JSON.parse(body);
+    if (request.id === undefined) {
+        response.writeHead(202).end();
+        return;
+    }
     let result;
     if (request.method === 'server/discover') {
         result = { supportedVersions: ['2026-07-28'], capabilities: { tools: {} } };
@@ -671,21 +676,46 @@ createInterface({ input: process.stdin }).on('line', line => {
     } else {
         result = {};
     }
-    console.log(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }));
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }));
 });
+server.listen(0, '127.0.0.1', () => console.log(`http://127.0.0.1:${server.address().port}/mcp`));
 "#;
+
+/// Run a controlled HTTP producer on the transport that receives gateway grants.
+/// Direct coding-agent stdio connections intentionally receive no gateway grant.
+async fn bounded_result_server(root: &TempDir) -> (String, tokio::process::Child) {
+    std::fs::write(root.path().join("catalog-mode"), "valid").unwrap();
+    let mut child = tokio::process::Command::new("node")
+        .args(["-e", BOUNDED_RESULT_SERVER])
+        .env("TEST_COUNTER", root.path().join("counter"))
+        .env("TEST_CATALOG_MODE", root.path().join("catalog-mode"))
+        .env(
+            "TEST_DISCOVERY_COUNTER",
+            root.path().join("discovery-counter"),
+        )
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap()).lines();
+    let endpoint = output.next_line().await.unwrap().unwrap();
+    (endpoint, child)
+}
 
 #[tokio::test]
 async fn gateway_bounds_completed_results_without_changing_schemas_grants_or_effect_count() {
     let root = TempDir::new().unwrap();
     std::fs::create_dir(root.path().join("home")).unwrap();
     let counter = root.path().join("counter");
+    let (upstream_url, mut upstream) = bounded_result_server(&root).await;
     let (s, origin, server) = served(&root).await;
     let connection = s
         .mcp_fixture(
             json!({
-                "name": "Bounded result fixture", "transport": "stdio", "command": "node",
-                "args": ["-e", BOUNDED_RESULT_SERVER], "env": { "TEST_COUNTER": counter },
+                "name": "Bounded result fixture", "url": upstream_url, "allowPrivateNetwork": true,
             }),
             None,
         )
@@ -831,6 +861,8 @@ async fn gateway_bounds_completed_results_without_changing_schemas_grants_or_eff
         calls
     );
     server.abort();
+    upstream.kill().await.unwrap();
+    upstream.wait().await.unwrap();
 }
 
 #[tokio::test]
@@ -846,15 +878,14 @@ async fn malformed_advertisement_scope(restricted: bool) {
     let mode = root.path().join("catalog-mode");
     let discovery = root.path().join("discovery-counter");
     std::fs::write(&mode, "valid").unwrap();
+    let (upstream_url, mut upstream) = bounded_result_server(&root).await;
     let (s, origin, server) = served(&root).await;
     let connection = s
         .mcp_fixture(
             json!({
                 "name": "Malformed advertisement fixture",
-                "transport": "stdio",
-                "command": "node",
-                "args": ["-e", BOUNDED_RESULT_SERVER],
-                "env": { "TEST_CATALOG_MODE": mode, "TEST_DISCOVERY_COUNTER": discovery },
+                "url": upstream_url,
+                "allowPrivateNetwork": true,
             }),
             None,
         )
@@ -971,6 +1002,8 @@ async fn malformed_advertisement_scope(restricted: bool) {
         calls
     );
     server.abort();
+    upstream.kill().await.unwrap();
+    upstream.wait().await.unwrap();
 }
 
 async fn fetch_error(endpoint: &str, allow_private: bool) -> String {
