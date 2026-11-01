@@ -786,3 +786,5 @@ pub fn resource_output(value: &Value) -> Value {
     };
     value[field].clone()
 }
+
+pub mod attempt_fixture;

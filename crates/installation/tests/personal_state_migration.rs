@@ -1,5 +1,7 @@
 //! Snapshot produced by the previous real Store/Service, with synthetic accounts and secrets.
 mod common;
+#[path = "common/placement_migration_fixture.rs"]
+mod placement_migration_fixture;
 
 use axum::body::Body;
 use cairn_installation::{reads::sql::ReadKind, service::Service, store::Store};
@@ -62,7 +64,8 @@ async fn real_v17_upgrade_preserves_each_accounts_reads_and_set_aside_outcomes()
     std::fs::create_dir_all(root.path().join("data")).unwrap();
     let db = previous(root.path());
     let before = snapshot(&db);
-    let runs_before = common::run_fixture::projection_rows(&db);
+    let run_columns = placement_migration_fixture::retained_run_columns(&db);
+    let run_views = placement_migration_fixture::run_views(&db);
     let previous_state = personal_keys(&db);
     assert_eq!(previous_state.len(), 11);
     let proof: Value = serde_json::from_str(
@@ -152,7 +155,6 @@ async fn real_v17_upgrade_preserves_each_accounts_reads_and_set_aside_outcomes()
     )));
 
     let after = snapshot(&db);
-    assert_eq!(common::run_fixture::projection_rows(&db), runs_before);
     for (name, old) in &before {
         if matches!(name.as_str(), "chat_messages" | "chat_questions") {
             let (schema, rows) = &after[name];
@@ -172,10 +174,21 @@ async fn real_v17_upgrade_preserves_each_accounts_reads_and_set_aside_outcomes()
                 })
                 .collect::<Vec<_>>();
             assert_eq!(previous_rows, old.1, "preserved rows in {name}");
-        } else if name != "kv" && name != "runs" {
+        } else if !matches!(name.as_str(), "kv" | "nodes" | "records" | "runs") {
             assert_eq!(after.get(name), Some(old), "unrelated table {name}");
         }
     }
+    // A10 intentionally changes these schemas. This B4 fixture has no node or
+    // attempt/reservation data; preserve every row and all unrelated run values.
+    for table in ["nodes", "records"] {
+        assert!(before[table].1.is_empty(), "fixture table {table}");
+        assert_eq!(after[table].1, before[table].1, "retained rows {table}");
+    }
+    assert_eq!(
+        placement_migration_fixture::retained_run_columns(&db),
+        run_columns
+    );
+    assert_eq!(placement_migration_fixture::run_views(&db), run_views);
     let kv = |snapshot: &Snapshot| {
         snapshot["kv"]
             .1
@@ -211,7 +224,7 @@ async fn real_v17_upgrade_preserves_each_accounts_reads_and_set_aside_outcomes()
     assert_eq!(
         db.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
             .unwrap(),
-        23
+        24
     );
 
     // The real service serves each account its own preserved outcomes.
@@ -319,7 +332,7 @@ async fn v17_upgrade_preserves_legacy_paid_retry_and_checkpoint() {
     assert_eq!(
         db.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
             .unwrap(),
-        23
+        24
     );
 }
 
@@ -360,6 +373,6 @@ fn malformed_previous_read_state_rolls_back_schema_data_and_version() {
     assert_eq!(
         db.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
             .unwrap(),
-        23
+        24
     );
 }

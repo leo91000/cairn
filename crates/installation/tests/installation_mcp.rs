@@ -2,6 +2,7 @@ use crate::common::run_fixture::DbRunFixture;
 use cairn_contracts::EventKind;
 use common::account_fixture::AccountFixtures;
 use common::node_fixture::*;
+use common::run_fixture::*;
 #[allow(unused_imports)]
 use common::{PluginServiceFixture as _, PluginStoreFixture as _};
 
@@ -395,7 +396,7 @@ async fn node_switch_controls_match_public_mcp_and_installation_tools_and_keep_t
         assert_eq!(node["slots"], 6);
         assert_eq!(node["exclusiveReservations"], true);
         s.store
-            .update_run_boundary(
+            .update_run_boundary_fixture(
                 run["id"].as_str().unwrap(),
                 json!({ "pinnedNodeId": previous }),
             )
@@ -416,7 +417,7 @@ async fn node_switch_controls_match_public_mcp_and_installation_tools_and_keep_t
         assert!(s.store.run(run["id"].as_str().unwrap()).await.unwrap()["pinnedNodeId"].is_null());
         // Ordinary revocation preserves an explicit preference, as the owner UI does.
         s.store
-            .update_run_boundary(
+            .update_run_boundary_fixture(
                 run["id"].as_str().unwrap(),
                 json!({ "preferredNodeId": next }),
             )
@@ -1216,6 +1217,12 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "cancel_plugin_operation",
     ]);
     public_names.extend([
+        "get_conversation_placement",
+        "configure_conversation_placement",
+        "move_to_node",
+        "get_node_move_operation",
+        "cancel_node_move_operation",
+        "release_node_reservation",
         "list_nodes",
         "list_native_callers",
         "create_node_enrollment",
@@ -2190,7 +2197,7 @@ async fn run_grants_enforce_revocation_completion_and_chat_turn_binding() {
         .unwrap();
     let id = run["id"].as_str().unwrap();
     s.store
-        .update_run_boundary(id, json!({ "chatExecution": { "messageId": "new-turn" } }))
+        .update_run_boundary_fixture(id, json!({ "chatExecution": { "messageId": "new-turn" } }))
         .await
         .unwrap();
     assert_eq!(
@@ -2198,7 +2205,7 @@ async fn run_grants_enforce_revocation_completion_and_chat_turn_binding() {
         StatusCode::UNAUTHORIZED
     );
     s.store
-        .update_run_boundary(id, json!({ "chatExecution": null }))
+        .update_run_boundary_fixture(id, json!({ "chatExecution": null }))
         .await
         .unwrap();
     s.agent_fixture(
@@ -5546,8 +5553,6 @@ async fn agents_follow_owner_sign_in_without_challenge_or_mutation_authority() {
     assert!(s.store.coding_account(id).await.unwrap().is_none());
 }
 
-/// Settings, overview, audit and redacted storage read the same on HTTP and both tools.
-/// Credentials stay owner-only in the apps and never appear in any output.
 #[tokio::test]
 async fn installation_settings_audit_and_storage_match_on_every_surface() {
     let root = TempDir::new().unwrap();
@@ -7470,4 +7475,95 @@ async fn resource_poll_fences_package_activation_during_remote_authorization() {
     }
     server.abort();
     s.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn placement_capabilities_share_their_commands_scopes_and_live_installation_grant() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (run, configuration) = active_run(&s, &main).await;
+    let agent_token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
+        .as_str()
+        .unwrap();
+    let owner_token = common::relay_fixture::grant(&s, &["read", "manage", "run"]).await;
+    let read_token = common::relay_fixture::grant(&s, &["read"]).await;
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
+    s.store
+        .put_node_fixture(
+            json!({"id":cairn_installation::nodes::LOCAL_NODE_ID,"name":"Placement fixture"}),
+        )
+        .await
+        .unwrap();
+    for (endpoint, token) in [
+        ("/mcp", owner_token.as_str()),
+        ("/mcp-installation", agent_token),
+    ] {
+        let (_, view) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "get_conversation_placement",
+            json!({"runId":run["id"]}),
+        )
+        .await;
+        assert!(
+            result(&view)["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|node| node["id"] == cairn_installation::nodes::LOCAL_NODE_ID)
+        );
+        let (_,saved)=node_management_call(&app,endpoint,token,"configure_conversation_placement",json!({"runId":run["id"],"selection":{"pinnedNodeId":null,"preferredNodeId":cairn_installation::nodes::LOCAL_NODE_ID}})).await;
+        assert_eq!(
+            result(&saved)["preferredNodeId"],
+            cairn_installation::nodes::LOCAL_NODE_ID
+        );
+        let (_, missing) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "release_node_reservation",
+            json!({"reservationId":uuid::Uuid::new_v4()}),
+        )
+        .await;
+        assert_eq!(missing["result"]["isError"], true);
+    }
+    for (name, args) in [
+        (
+            "configure_conversation_placement",
+            json!({"runId":run["id"],"selection":{"pinnedNodeId":null,"preferredNodeId":null}}),
+        ),
+        (
+            "move_to_node",
+            json!({"runId":run["id"],"nodeId":cairn_installation::nodes::LOCAL_NODE_ID}),
+        ),
+        (
+            "release_node_reservation",
+            json!({"reservationId":uuid::Uuid::new_v4()}),
+        ),
+    ] {
+        let (_, denied) = node_management_call(&app, "/mcp", &read_token, name, args).await;
+        assert_eq!(denied["result"]["isError"], true, "{denied}");
+    }
+    s.agent_fixture(
+        json!({"access":{"installation":false}}),
+        Some(MAIN_AGENT_ID),
+    )
+    .await
+    .unwrap();
+    let (status, denied) = node_management_call(
+        &app,
+        "/mcp-installation",
+        agent_token,
+        "configure_conversation_placement",
+        json!({"runId":run["id"],"selection":{"pinnedNodeId":null,"preferredNodeId":null}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+    assert!(denied["error"].is_string());
+    assert_eq!(
+        s.store.run(run["id"].as_str().unwrap()).await.unwrap()["preferredNodeId"],
+        cairn_installation::nodes::LOCAL_NODE_ID
+    );
 }

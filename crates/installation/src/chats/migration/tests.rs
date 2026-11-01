@@ -7,7 +7,7 @@ const CHAT: &str = "00000000-0000-4000-8000-000000000001";
 // Exact affected version-14 DDL from 57855b96, the last pre-A7 main. Other
 // domain tables retain their current schemas, matching the inventory migration's fixture.
 pub(crate) fn version14(db: &Connection) {
-    crate::runs::projections::tests::restore_legacy_columns(db);
+    crate::placement_migration_fixture::previous_layout(db);
     db.execute_batch("DROP TABLE plugin_hook_receipts; DROP TABLE plugin_hook_events; DROP TABLE account_dismissals; DROP TABLE account_reads; DROP TABLE account_read_starts; DROP TABLE attachment_reservations; DROP TABLE attachments; DROP TABLE attachment_quotas; DROP TABLE question_legacy_answer_items; DROP TABLE question_answer_choices; DROP TABLE question_answers; DROP TABLE question_answer_deliveries; DROP TABLE question_options; DROP TABLE question_fields; DROP TABLE question_import_metadata; DROP TABLE chat_questions; DROP TABLE wait_conditions; DROP TABLE durable_wakeups; DROP TABLE conversation_lineage;
 
 DROP TABLE conversation_engine_switches; DROP TABLE message_attachments; DROP TABLE chat_messages; DROP TABLE conversations; DROP TABLE conversation_retention;
@@ -583,7 +583,7 @@ async fn engine_switch_retains_current_progress_and_all_receipt_lifetimes() {
     let root = tempfile::tempdir().unwrap();
     let db = database(root.path()).await;
     seed(&db);
-    // This scenario is a version-14 input, before the current wait tables exist.
+    // Historical version-14 input predates typed waits and placements.
     db.execute("INSERT INTO runs(id,task_id,status,created_at,recovery_pending,resume_available,resume_count,boundary) VALUES('saved-run','chat','failed',1,0,0,0,'{}')", []).unwrap();
     let expires = crate::config::now() + 500_000;
     let first = json!({"chatId":CHAT,"requestId":"first","runId":"saved-run","turnId":"turn-1","provider":"codex"});
@@ -695,6 +695,13 @@ fn snapshot(db: &Connection) -> Value {
         "kv",
         "records",
     ] {
+        if table == "runs" {
+            state.insert(
+                table.into(),
+                json!(crate::placement_migration_fixture::run_views(db)),
+            );
+            continue;
+        }
         let columns: Vec<String> = db
             .prepare(&format!("PRAGMA table_info({table})"))
             .unwrap()
@@ -820,7 +827,7 @@ async fn actual_version14_preserves_conversations_accounts_leases_and_credential
 }
 
 #[tokio::test]
-async fn version22_messages_gain_plan_requests_without_other_changes() {
+async fn version23_messages_gain_plan_requests_without_other_changes() {
     let root = tempfile::tempdir().unwrap();
     let db = database(root.path()).await;
     let chat = json!({"id": CHAT, "slug": "retained-plan", "paused": true});
@@ -850,10 +857,11 @@ async fn version22_messages_gain_plan_requests_without_other_changes() {
     db.pragma_update(None, "user_version", 20).unwrap();
     crate::worker::progress::upgrade(&mut db).unwrap();
     crate::timeline::migration::upgrade(&mut db).unwrap();
+    crate::nodes::attempts_migration::upgrade(&mut db).unwrap();
     assert_eq!(
         db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
             .unwrap(),
-        22
+        23
     );
     assert!(
         !db.prepare("SELECT 1 FROM pragma_table_info('chat_messages') WHERE name='plan'")

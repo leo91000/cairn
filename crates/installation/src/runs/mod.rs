@@ -45,6 +45,20 @@ pub const RUN_FIELDS: &[&str] = &[
 macro_rules! wire_fields {
     () => {
         r#"
+  '$.nodeId',placement_node_id,
+  '$.nodeState',placement_node_state,
+  '$.pinnedNodeId',placement_pinned_node_id,
+  '$.preferredNodeId',placement_preferred_node_id,
+  '$.targetNodeId',placement_target_node_id,
+  '$.requiredTags',json(placement_required_tags),
+  '$.resources',json(placement_resources),
+  '$.nativeMode',json(placement_native_mode),
+  '$.nativeModeInterruption',placement_native_mode_interruption,
+  '$.executionBackend',placement_execution_backend,
+  '$.moveRequest',json(placement_move_request),
+  '$.moveReservation',placement_move_reservation,
+  '$.movementError',placement_movement_error,
+  '$.suspendedByExclusive',json(placement_suspended_by_exclusive),
   '$.id',id,
   '$.taskId',task_id,
   '$.projectId',project_id,
@@ -94,6 +108,7 @@ FROM runs;"#
     };
 }
 
+#[cfg(test)]
 pub(crate) const PROJECTION_SCHEMA: &str = projection_schema!();
 
 pub(crate) const SCHEMA: &str = concat!(
@@ -134,10 +149,26 @@ pub(crate) const SCHEMA: &str = concat!(
   provider TEXT GENERATED ALWAYS AS (json_extract(snapshot,'$.agent.provider')) STORED,
   snapshot TEXT CHECK(snapshot IS NULL OR json_valid(snapshot)),
   boundary TEXT NOT NULL CHECK(json_valid(boundary) AND json_type(boundary)='object' AND json_type(boundary,'$.snapshot') IS NULL),
+  placement_node_id TEXT,
+  placement_node_state TEXT CHECK(placement_node_state IN ('pausing','saving','restoring','resuming','updating','waiting-for-node')),
+  placement_pinned_node_id TEXT,
+  placement_preferred_node_id TEXT,
+  placement_target_node_id TEXT,
+  placement_required_tags TEXT CHECK(placement_required_tags IS NULL OR (json_valid(placement_required_tags) AND json_type(placement_required_tags)='array')),
+  placement_resources TEXT CHECK(placement_resources IS NULL OR json_valid(placement_resources)),
+  placement_native_mode TEXT CHECK(placement_native_mode IS NULL OR json_valid(placement_native_mode)),
+  placement_native_mode_interruption TEXT,
+  placement_execution_backend TEXT CHECK(placement_execution_backend IN ('native','firecracker')),
+  placement_move_request TEXT CHECK(placement_move_request IS NULL OR json_valid(placement_move_request)),
+  placement_move_reservation TEXT REFERENCES attempts(id) DEFERRABLE INITIALLY DEFERRED,
+  placement_movement_error TEXT,
+  placement_suspended_by_exclusive TEXT CHECK(placement_suspended_by_exclusive IS NULL OR json_valid(placement_suspended_by_exclusive)),
   dedupe TEXT UNIQUE,
   CHECK((retry_attempt IS NULL AND retry_limit IS NULL AND retry_cause IS NULL AND retry_next_at IS NULL AND retry_started_at IS NULL AND retry_deadline_at IS NULL) OR (retry_attempt IS NOT NULL AND retry_limit IS NOT NULL AND retry_cause IS NOT NULL)),
   CHECK(retry_deadline_at IS NULL OR retry_started_at IS NULL OR retry_deadline_at>=retry_started_at)
 );
+CREATE INDEX runs_placement_node ON runs(placement_node_id);
+CREATE INDEX runs_placement_move_reservation ON runs(placement_move_reservation) WHERE placement_move_reservation IS NOT NULL;
 CREATE INDEX runs_status ON runs(status,created_at);
 CREATE INDEX runs_agent ON runs(json_extract(snapshot,'$.agent.id'));
 CREATE INDEX runs_task ON runs(task_id,created_at DESC);
@@ -147,6 +178,8 @@ CREATE UNIQUE INDEX runs_active_task ON runs(task_id) WHERE status IN ('queued',
     projection_schema!()
 );
 
+pub(crate) const REBUILD_PROJECTIONS: &str = concat!("DROP VIEW run_views;", projection_schema!());
+
 const STATE_COLUMNS: &str = "id,task_id,project_id,status,trigger,created_at,started_at,finished_at,summary,error,session_id,workspace,workspace_cleaned_at,recovery_pending,resume_available,resume_count,cancel_requested_at,account_id,account_name,account_wait_reason,account_required,capacity_wait_until,retry_attempt,retry_limit,retry_next_at,retry_started_at,retry_deadline_at,retry_cause,requested_by";
 
 pub(crate) struct RunRecord {
@@ -154,6 +187,7 @@ pub(crate) struct RunRecord {
     pub snapshot: Option<String>,
     pub boundary: Value,
     pub wakeup: Option<cairn_contracts::ChatWakeup>,
+    pub placement: Box<crate::nodes::run_placement::RunPlacement>,
 }
 
 impl RunRecord {
@@ -163,6 +197,10 @@ impl RunRecord {
             unreachable!("RunState serializes to an object")
         };
         value.as_object_mut().unwrap().extend(fields);
+        let Value::Object(placement) = serde_json::to_value(self.placement)? else {
+            unreachable!("RunPlacement serializes to an object")
+        };
+        value.as_object_mut().unwrap().extend(placement);
         value["snapshot"] = self
             .snapshot
             .as_deref()
@@ -245,6 +283,7 @@ fn record_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunRecord> {
     Ok(RunRecord {
         wakeup: None,
         state: state_row(row)?,
+        placement: Box::new(crate::nodes::run_placement::row(row, 31)?),
         snapshot: row.get(29)?,
         boundary: serde_json::from_str(&boundary).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
@@ -293,7 +332,8 @@ impl Db<'_> {
         let mut record = self
             .0
             .prepare_cached(&format!(
-                "SELECT {STATE_COLUMNS},snapshot,boundary FROM runs WHERE id=?"
+                "SELECT {STATE_COLUMNS},snapshot,boundary,{} FROM runs WHERE id=?",
+                crate::nodes::run_placement::COLUMNS
             ))?
             .query_row([id], record_row)
             .optional()?;
@@ -315,7 +355,7 @@ impl Db<'_> {
                 'accountWaitReason',account_wait_reason, 'accountRequired',account_required,
                 'snapshot',json_object('agent',json_object('provider',provider)),
                 'contextUsage',json(boundary -> '$.contextUsage'),
-                'suspendedByExclusive',json(boundary -> '$.suspendedByExclusive'),
+                'suspendedByExclusive',json(placement_suspended_by_exclusive),
                 'restoredAt',json(boundary -> '$.restoredAt'),
                 'chatExecution',json_object(
                     'operation',json_extract(boundary,'$.chatExecution.operation'),
@@ -335,7 +375,9 @@ impl Db<'_> {
             .json_rows(
                 "SELECT json_set(boundary,
                 '$.id',id, '$.status',status, '$.finishedAt',finished_at,
-                '$.recoveryPending',json(CASE WHEN recovery_pending THEN 'true' ELSE 'false' END)
+                '$.recoveryPending',json(CASE WHEN recovery_pending THEN 'true' ELSE 'false' END),
+                '$.nodeId',placement_node_id, '$.nodeState',placement_node_state,
+                '$.moveRequest',json(placement_move_request), '$.moveReservation',placement_move_reservation
              ) FROM runs WHERE id=?",
                 [id],
             )?
@@ -360,7 +402,7 @@ impl Db<'_> {
             tx.commit()?;
             return Ok(result);
         }
-        let mut records=self.0.prepare_cached(&format!("SELECT {STATE_COLUMNS},snapshot,boundary FROM runs WHERE status=? ORDER BY created_at"))?.query_map([status.as_str()],record_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut records=self.0.prepare_cached(&format!("SELECT {STATE_COLUMNS},snapshot,boundary,{} FROM runs WHERE status=? ORDER BY created_at",crate::nodes::run_placement::COLUMNS))?.query_map([status.as_str()],record_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
         let mut wakeups = self.wakeups(false, None)?;
         for record in &mut records {
             record.wakeup = wakeups.remove(&record.state.id);
@@ -391,6 +433,15 @@ impl Db<'_> {
         {
             return Err(Error::bad("Run payload contains lifecycle fields"));
         }
+        let mut boundary = boundary.clone();
+        let mut placement = serde_json::Map::new();
+        for field in crate::nodes::run_placement::FIELDS {
+            if let Some(value) = boundary.as_object_mut().unwrap().remove(*field) {
+                placement.insert((*field).into(), value);
+            }
+        }
+        let placement: crate::nodes::run_placement::RunPlacement =
+            serde_json::from_value(Value::Object(placement))?;
         self.0.prepare_cached("INSERT INTO runs(id,task_id,project_id,status,trigger,created_at,started_at,finished_at,summary,error,session_id,workspace,workspace_cleaned_at,recovery_pending,resume_available,resume_count,cancel_requested_at,account_id,account_name,account_wait_reason,account_required,capacity_wait_until,retry_attempt,retry_limit,retry_next_at,retry_started_at,retry_deadline_at,retry_cause,requested_by,snapshot,boundary,dedupe) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")?.execute(params![
             state.id,
             state.task_id,
@@ -422,9 +473,12 @@ impl Db<'_> {
             state.retry.as_ref().map(|r| serde_json::to_string(&r.cause)).transpose()?,
             state.requested_by.as_ref().map(serde_json::to_string).transpose()?,
             snapshot.map(serde_json::to_string).transpose()?,
-            serde_json::to_string(boundary)?,
+            serde_json::to_string(&boundary)?,
             dedupe
         ])?;
+        if placement != crate::nodes::run_placement::RunPlacement::default() {
+            self.save_run_placement(&state.id, &placement)?;
+        }
         required(self.run(&state.id)?, "Run not found")
     }
 
@@ -449,7 +503,12 @@ impl Db<'_> {
             let previous_state = required(self.run_state(id)?, "Run not found")?;
             let mut state = previous_state.clone();
             let wakeup = change.wakeup.clone();
+            let mut change = change;
+            let placement_change = change.placement.take();
             let (snapshot, boundary) = change.apply(&mut state);
+            if let Some(change) = placement_change {
+                self.change_run_placement(id, *change)?;
+            }
             if let Some(snapshot) = snapshot {
                 self.0.execute(
                     "UPDATE runs SET snapshot=? WHERE id=?",
@@ -521,25 +580,27 @@ impl Db<'_> {
 
     // Temporary adapter for unconverted chat/node/plugin domains (A6-A13/A18).
     // It cannot merge decisions owned by the run lifecycle.
-    pub fn update_run_boundary(&self, id: &str, patch: &Value) -> Result<Value> {
+    pub fn update_run_boundary(&self, id: &str, patch: &Value) -> Result<()> {
         if self.0.is_autocommit() {
             let tx = rusqlite::Transaction::new_unchecked(
                 self.0,
                 rusqlite::TransactionBehavior::Immediate,
             )?;
-            let result = Db(&tx).update_run_boundary(id, patch)?;
+            Db(&tx).update_run_boundary(id, patch)?;
             tx.commit()?;
-            return Ok(result);
+            return Ok(());
         }
-        self.write_run_boundary(id, patch)?;
-        required(self.run(id)?, "Run not found")
+        self.write_run_boundary(id, patch)
     }
 
     fn write_run_boundary(&self, id: &str, patch: &Value) -> Result<()> {
         let fields = patch
             .as_object()
             .ok_or_else(|| Error::bad("Expected a domain payload object"))?;
-        if fields.keys().any(|key| RUN_FIELDS.contains(&key.as_str())) {
+        if fields.keys().any(|key| {
+            RUN_FIELDS.contains(&key.as_str())
+                || crate::nodes::run_placement::FIELDS.contains(&key.as_str())
+        }) {
             return Err(Error::bad("Use typed run transitions for lifecycle fields"));
         }
         let boundary: String =
@@ -583,8 +644,11 @@ impl Store {
 
     pub async fn update_run_boundary(&self, id: &str, patch: Value) -> Result<Value> {
         let id = id.to_owned();
-        self.transaction(move |db| db.update_run_boundary(&id, &patch))
-            .await
+        self.transaction(move |db| {
+            db.update_run_boundary(&id, &patch)?;
+            required(db.run(&id)?, "Run not found")
+        })
+        .await
     }
 }
 

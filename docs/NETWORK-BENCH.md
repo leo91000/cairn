@@ -14,7 +14,7 @@ both real binaries and uses an in-memory email adapter. Agent workers are disabl
 
 ```sh
 pnpm install --frozen-lockfile
-CARGO_PROFILE_DEV_DEBUG=0 CARGO_BUILD_JOBS=4 cargo build --locked --workspace --bin cairn --bin cairn-beacon --example network_direct_client --example network_qualification --example network_stun_server
+CARGO_PROFILE_DEV_DEBUG=0 CARGO_BUILD_JOBS=4 cargo build --locked --workspace --bin cairn --bin cairn-beacon --example network_direct_client --example network_qualification --example network_stun_server --example beacon_sql_fixture
 pnpm build
 pnpm exec vite build --config tests/network-qualification.vite.ts
 pnpm exec playwright install --with-deps chromium

@@ -1,5 +1,7 @@
 //! Snapshot produced by the previous real Service, with synthetic uploads and secrets.
 mod common;
+#[path = "common/placement_migration_fixture.rs"]
+mod placement_migration_fixture;
 
 use cairn_installation::{service::Service, store::Store};
 use rusqlite::{Connection, types::Value as SqlValue};
@@ -24,21 +26,28 @@ fn snapshot(db: &Connection) -> BTreeMap<String, (String, Vec<Vec<SqlValue>>)> {
         .unwrap();
     tables
         .into_iter()
+        .filter(|(name, _)| name != "runs")
         .map(|(name, sql)| {
-            let mut statement = db
-                .prepare(&format!("SELECT * FROM \"{}\"", name.replace('"', "\"\"")))
-                .unwrap();
+            // A10 changes these physical layouts after the attachment upgrade.
+            // Preserve their logical values while all other tables retain exact DDL.
+            let (schema, query) = match name.as_str() {
+                "nodes" => {
+                    let columns: Vec<String> = db.prepare("SELECT name FROM pragma_table_info('nodes') WHERE name!='exclusive_reservation' ORDER BY cid")
+                        .unwrap().query_map([], |row| row.get(0)).unwrap()
+                        .collect::<rusqlite::Result<_>>().unwrap();
+                    let fields = columns.iter().map(|column| format!("\"{column}\"")).collect::<Vec<_>>().join(",");
+                    (format!("retained node columns: {columns:?}"), format!("SELECT {fields} FROM nodes ORDER BY id"))
+                }
+                "records" => ("record rows".to_owned(), "SELECT * FROM records ORDER BY id".to_owned()),
+                _ => (sql, format!("SELECT * FROM \"{}\"", name.replace('"', "\"\""))),
+            };
+            let mut statement = db.prepare(&query).unwrap();
             let count = statement.column_count();
-            let rows = statement
-                .query_map([], |r| {
-                    (0..count)
-                        .map(|i| r.get(i))
-                        .collect::<rusqlite::Result<Vec<_>>>()
-                })
-                .unwrap()
-                .collect::<rusqlite::Result<_>>()
-                .unwrap();
-            (name, (sql, rows))
+            let rows: Vec<Vec<SqlValue>> = statement
+                .query_map([], |row| {
+                    (0..count).map(|i| row.get(i)).collect::<rusqlite::Result<Vec<SqlValue>>>()
+                }).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+            (name, (schema, rows))
         })
         .collect()
 }
@@ -49,7 +58,8 @@ async fn real_v16_upgrade_preserves_metadata_files_quota_and_every_unrelated_tab
     std::fs::create_dir_all(root.path().join("data")).unwrap();
     let db = previous(root.path());
     let before = snapshot(&db);
-    let runs_before = common::run_fixture::projection_rows(&db);
+    let runs_before = placement_migration_fixture::run_views(&db);
+    let run_columns_before = placement_migration_fixture::retained_run_columns(&db);
     let uploads: Vec<Value> = db
         .prepare("SELECT data FROM kv WHERE key LIKE 'chat-attachment:%' ORDER BY key")
         .unwrap()
@@ -88,7 +98,11 @@ async fn real_v16_upgrade_preserves_metadata_files_quota_and_every_unrelated_tab
         assert_eq!(serde_json::to_value(saved.metadata).unwrap(), a);
     }
     let after = snapshot(&db);
-    assert_eq!(common::run_fixture::projection_rows(&db), runs_before);
+    assert_eq!(placement_migration_fixture::run_views(&db), runs_before);
+    assert_eq!(
+        placement_migration_fixture::retained_run_columns(&db),
+        run_columns_before
+    );
     for (name, old) in &before {
         if matches!(name.as_str(), "chat_messages" | "chat_questions") {
             // The later Plan migration adds only a false flag to existing rows.
@@ -103,7 +117,7 @@ async fn real_v16_upgrade_preserves_metadata_files_quota_and_every_unrelated_tab
                 assert_eq!(row.pop(), Some(SqlValue::Integer(0)));
             }
             assert_eq!(previous, old.1, "previous rows {name}");
-        } else if name != "kv" && name != "runs" {
+        } else if name != "kv" {
             assert_eq!(after.get(name), Some(old), "unrelated table {name}");
         }
     }
@@ -130,10 +144,15 @@ async fn real_v16_upgrade_preserves_metadata_files_quota_and_every_unrelated_tab
     drop(store);
     drop(Store::open(&root.path().join("data")).unwrap());
     assert_eq!(snapshot(&db), stable);
+    assert_eq!(placement_migration_fixture::run_views(&db), runs_before);
+    assert_eq!(
+        placement_migration_fixture::retained_run_columns(&db),
+        run_columns_before
+    );
     assert_eq!(
         db.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
             .unwrap(),
-        23
+        24
     );
     let s = Service::new(common::config(root.path())).await.unwrap();
     let proof = s.store.kv("d2-fixture-proof").await.unwrap().unwrap();

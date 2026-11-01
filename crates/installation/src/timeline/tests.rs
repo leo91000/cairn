@@ -34,34 +34,37 @@ fn previous(root: &std::path::Path) -> Connection {
     db
 }
 
-/// Every row of every table, except the projection this version adds.
+/// Retained rows outside timeline/A10 layouts, plus exact retained run columns
+/// and both complete wire projections. A10's own migration tests qualify the
+/// converted attempt/reservation rows and counters.
 fn tables(db: &Connection) -> BTreeMap<String, Vec<String>> {
     let names = db
-        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'timeline_%' ORDER BY name")
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'timeline_%' AND name NOT IN ('runs','placements','attempts','exclusive_reservations','exclusive_members','exclusive_paused_runs','exclusive_sequence') ORDER BY name")
         .unwrap()
         .query_map([], |row| row.get::<_, String>(0))
         .unwrap()
         .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap();
-    names
+    let mut snapshot: BTreeMap<String, Vec<String>> = names
         .into_iter()
         .map(|name| {
-            // Plan23 adds only these false-default flags; existing timeline payloads stay unchanged.
-            let projection = if matches!(name.as_str(), "chat_messages" | "chat_questions") {
-                db.prepare(&format!("PRAGMA table_info({name})"))
-                    .unwrap()
-                    .query_map([], |row| row.get::<_, String>(1))
-                    .unwrap()
-                    .collect::<rusqlite::Result<Vec<_>>>()
-                    .unwrap()
-                    .into_iter()
-                    .filter(|column| column != "plan")
-                    .map(|column| format!("\"{column}\""))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            } else {
-                "*".to_owned()
-            };
+            // Compare retained columns across both placement23 and Plan24 migrations.
+            let projection =
+                if matches!(name.as_str(), "chat_messages" | "chat_questions" | "nodes") {
+                    db.prepare(&format!("PRAGMA table_info({name})"))
+                        .unwrap()
+                        .query_map([], |row| row.get::<_, String>(1))
+                        .unwrap()
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                        .unwrap()
+                        .into_iter()
+                        .filter(|column| column != "plan" && column != "exclusive_reservation")
+                        .map(|column| format!("\"{column}\""))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                } else {
+                    "*".to_owned()
+                };
             let mut statement = db
                 .prepare(&format!("SELECT {projection} FROM \"{name}\""))
                 .unwrap();
@@ -84,7 +87,22 @@ fn tables(db: &Connection) -> BTreeMap<String, Vec<String>> {
             rows.sort();
             (name, rows)
         })
-        .collect()
+        .collect();
+    snapshot.insert(
+        "retained run columns".into(),
+        vec![format!(
+            "{:?}",
+            crate::placement_migration_fixture::retained_run_columns(db)
+        )],
+    );
+    snapshot.insert(
+        "complete run projections".into(),
+        crate::placement_migration_fixture::run_views(db)
+            .into_iter()
+            .map(|value| value.to_string())
+            .collect(),
+    );
+    snapshot
 }
 
 fn version(db: &Connection) -> i64 {

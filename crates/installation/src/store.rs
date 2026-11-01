@@ -36,7 +36,7 @@ struct Pool {
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-pub(crate) const DATABASE_VERSION: i64 = 23;
+pub(crate) const DATABASE_VERSION: i64 = 24;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -190,12 +190,16 @@ impl Store {
             version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
         }
         if !fresh && version == 22 {
+            crate::nodes::attempts_migration::upgrade(&mut writer)?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        }
+        if !fresh && version == 23 {
             crate::chats::migration::plan_requests(&mut writer)?;
         }
         if fresh {
             let tx = writer.transaction()?;
             tx.execute_batch(
-            "CREATE TABLE IF NOT EXISTS records(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind NOT IN ('agentAccounts','chats','nodes','projects','agents','tasks','mcps','plugin-connections','plugin-packages','plugin-requests','plugin-activity','plugin-timers','plugin-events','plugin-deliveries','plugin-storage','plugin-http-receipts')),data TEXT NOT NULL,updated_at INTEGER NOT NULL);
+            "CREATE TABLE IF NOT EXISTS records(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind NOT IN ('node-attempts','node-exclusive-requests','agentAccounts','chats','nodes','projects','agents','tasks','mcps','plugin-connections','plugin-packages','plugin-requests','plugin-activity','plugin-timers','plugin-events','plugin-deliveries','plugin-storage','plugin-http-receipts')),data TEXT NOT NULL,updated_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS records_kind ON records(kind,updated_at DESC);
 CREATE INDEX IF NOT EXISTS records_node_backups_run ON records(json_extract(data,'$.runId')) WHERE kind='node-backups';
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,created_at INTEGER NOT NULL CHECK(created_at BETWEEN 0 AND 9007199254740991),type TEXT NOT NULL CHECK(length(type)>0),text TEXT NOT NULL,payload TEXT CHECK(payload IS NULL OR json_valid(payload)));
@@ -217,6 +221,8 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
             tx.execute_batch(crate::nodes::journal_acknowledgements::SCHEMA)?;
             tx.execute_batch(crate::projects::SCHEMA)?;
             tx.execute_batch(crate::nodes::inventory::SCHEMA)?;
+            tx.execute_batch(crate::nodes::attempts::SCHEMA)?;
+            tx.execute_batch(crate::nodes::exclusive_state::SCHEMA)?;
             tx.execute_batch(crate::agents::SCHEMA)?;
             tx.execute_batch(crate::mcps::sql::SCHEMA)?;
             tx.execute_batch(crate::plugins::instances::SCHEMA)?;
@@ -586,6 +592,8 @@ impl Db<'_> {
             kind,
             "agentAccounts"
                 | "chats"
+                | "node-attempts"
+                | "node-exclusive-requests"
                 | "nodes"
                 | "projects"
                 | "agents"
@@ -1424,13 +1432,30 @@ mod schema_tests {
         }
     }
 
+    // Reconstruct the released layout from a real previous writer's database,
+    // rather than changing the version of today's placement tables.
+    fn version_nineteen_database(root: &Path) -> Connection {
+        let mut db = Connection::open(root.join("manager.db")).unwrap();
+        db.execute_batch(include_str!("../tests/fixtures/placements-v15.sql"))
+            .unwrap();
+        db.pragma_update(None, "foreign_keys", true).unwrap();
+        crate::chats::question_migration::upgrade(&mut db).unwrap();
+        crate::attachments::migration::upgrade(&mut db).unwrap();
+        crate::reads::migration::upgrade(&mut db).unwrap();
+        crate::runs::projections::upgrade(&mut db).unwrap();
+        db
+    }
+
     #[test]
     fn version_nineteen_upgrade_adds_hook_queues_without_touching_existing_work() {
         let root = tempfile::tempdir().unwrap();
-        drop(Store::open(root.path()).unwrap());
         let file = root.path().join("manager.db");
-        let db = Connection::open(&file).unwrap();
-        db.execute_batch("DROP TABLE timeline_entries; DROP TABLE timeline_state; DROP TABLE run_progress; ALTER TABLE chat_messages DROP COLUMN plan; ALTER TABLE chat_questions DROP COLUMN plan; DROP TABLE plugin_hook_receipts; DROP TABLE plugin_hook_events; PRAGMA user_version=19; INSERT INTO kv(key,data) VALUES('hook-upgrade-fixture','true');").unwrap();
+        let db = version_nineteen_database(root.path());
+        db.execute(
+            "INSERT INTO kv(key,data) VALUES('hook-upgrade-fixture','true')",
+            [],
+        )
+        .unwrap();
         drop(db);
         drop(Store::open(root.path()).unwrap());
         drop(Store::open(root.path()).unwrap());
@@ -1456,9 +1481,10 @@ mod schema_tests {
     #[test]
     fn version_twenty_upgrade_preserves_hook_schema_and_persisted_work() {
         let root = tempfile::tempdir().unwrap();
-        drop(Store::open(root.path()).unwrap());
         let file = root.path().join("manager.db");
-        let db = Connection::open(&file).unwrap();
+        let db = version_nineteen_database(root.path());
+        db.execute_batch(crate::plugins::hooks::SCHEMA).unwrap();
+        db.pragma_update(None, "user_version", 20).unwrap();
         let hook_schema = |db: &Connection| -> Vec<String> {
             db.prepare(
                 "SELECT sql FROM sqlite_schema WHERE name LIKE 'plugin_hook_%' ORDER BY name",
@@ -1470,7 +1496,11 @@ mod schema_tests {
             .unwrap()
         };
         let retained = hook_schema(&db);
-        db.execute_batch("DROP TABLE timeline_entries; DROP TABLE timeline_state; DROP TABLE run_progress; ALTER TABLE chat_messages DROP COLUMN plan; ALTER TABLE chat_questions DROP COLUMN plan; PRAGMA user_version=20; INSERT INTO kv(key,data) VALUES('progress-upgrade-fixture','true');").unwrap();
+        db.execute(
+            "INSERT INTO kv(key,data) VALUES('progress-upgrade-fixture','true')",
+            [],
+        )
+        .unwrap();
         drop(db);
         drop(Store::open(root.path()).unwrap());
         drop(Store::open(root.path()).unwrap());
@@ -1546,7 +1576,7 @@ mod schema_tests {
 
     #[test]
     fn existing_other_versions_fail_without_changing_the_database() {
-        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 24, 99] {
+        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, DATABASE_VERSION + 1, 99] {
             let root = tempfile::tempdir().unwrap();
             let db = Connection::open(root.path().join("manager.db")).unwrap();
             db.pragma_update(None, "user_version", version).unwrap();

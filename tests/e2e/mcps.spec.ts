@@ -1,4 +1,3 @@
-import { setTimeout } from 'node:timers/promises'
 import { mcpProvider } from '../fixtures/mcp-provider'
 import {
   signIn as authenticateWorkspace,
@@ -10,6 +9,12 @@ import {
   useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
+
+type OAuthDepartureProbe = { kind: 'background' } | { kind: 'offer', closed: boolean }
+
+declare global {
+  interface Window { cairnOAuthProbe: (probe: OAuthDepartureProbe) => Promise<void> }
+}
 
 test('failed saves keep feedback visible above a scrolled MCP form', async ({ page }) => {
   await useRelayForHttpMocks(page)
@@ -44,49 +49,160 @@ test('failed saves keep feedback visible above a scrolled MCP form', async ({ pa
   expect(saves).toBe(1)
 })
 
-test('OAuth navigation does not leave background polls running in the departing page', async ({ page, workspace }) => {
-  // Keep the cross-origin navigation pending across the shell's initial poll.
-  const authorizing = Promise.withResolvers<void>()
-  const provider = await mcpProvider({
-    beforeAuthorize: async () => {
-      authorizing.resolve()
-      await setTimeout(4000)
-    },
-  })
-  const errors: string[] = []
-  page.on('pageerror', error => errors.push(error.message))
-  try {
-    await workspace.api('/api/mcps', 'POST', {
-      name: 'Slow OAuth',
-      transport: 'http',
-      url: `${provider.origin}/mcp`,
-      auth: 'oauth',
-      allowPrivateNetwork: true,
+for (const pending of ['authorization', 'offer'] as const) {
+  test(`OAuth navigation does not leave background polls running in the departing page (${pending} pending)`, async ({ page, workspace, browserName }) => {
+    const name = `Slow OAuth (${pending})`
+    let backgroundRequests = 0
+    const closedOffers: boolean[] = []
+    const offerCompleted = Promise.withResolvers<void>()
+    await page.exposeFunction('cairnOAuthProbe', (probe: OAuthDepartureProbe) => {
+      if (probe.kind === 'background') {
+        backgroundRequests++
+        return
+      }
+
+      closedOffers.push(probe.closed)
+      offerCompleted.resolve()
     })
-    const direct = Promise.withResolvers<void>()
-    await page.route('**/direct/authorize', async (route) => {
-      const response = await route.fetch()
-      direct.resolve()
+    await page.clock.install()
+    await page.addInitScript((holdOffer) => {
+      let departing = false
+      const request = window.fetch
+      window.fetch = (...args) => {
+        const path = args[0]
+        if (typeof path === 'string' && path.endsWith('/direct/authorize')) {
+          const signal = args[1]?.signal
+          if (signal?.aborted) {
+            departing = true
+          }
+          else {
+            signal?.addEventListener('abort', () => {
+              departing = true
+            }, { once: true })
+          }
+        }
+
+        const background = typeof path === 'string' && (path === '/api/installations' || path.endsWith('/tasks/activity') || path.endsWith('/direct/authorize'))
+        if (background && departing)
+          void window.cairnOAuthProbe({ kind: 'background' })
+        return request(...args)
+      }
+
+      if (!holdOffer || !location.pathname.endsWith('/mcps'))
+        return
+
+      const heldOffers = new WeakMap<RTCPeerConnection, () => void>()
+      const close = RTCPeerConnection.prototype.close
+      Object.defineProperty(RTCPeerConnection.prototype, 'close', {
+        value(this: RTCPeerConnection) {
+          Reflect.apply(close, this, [])
+          const release = heldOffers.get(this)
+          if (!release)
+            return
+          heldOffers.delete(this)
+          departing = true
+          release()
+        },
+      })
+      const createOffer = RTCPeerConnection.prototype.createOffer
+      Object.defineProperty(RTCPeerConnection.prototype, 'createOffer', {
+        async value(this: RTCPeerConnection, options?: RTCOfferOptions) {
+          const offer = await Reflect.apply(createOffer, this, [options])
+          const peerClosed = () => this.connectionState === 'closed'
+          if (peerClosed())
+            return offer
+
+          const released = new Promise<void>(resolve => heldOffers.set(this, resolve))
+          document.documentElement.dataset.offerReady = 'true'
+          await released
+          void window.cairnOAuthProbe({ kind: 'offer', closed: peerClosed() })
+          return offer
+        },
+      })
+    }, pending === 'offer')
+
+    const authorizing = Promise.withResolvers<void>()
+    const authorized = Promise.withResolvers<void>()
+    const provider = await mcpProvider({
+      beforeAuthorize: async () => {
+        authorizing.resolve()
+        await authorized.promise
+      },
+    })
+    const errors: string[] = []
+    page.on('pageerror', error => errors.push(error.message))
+    try {
+      await workspace.api('/api/mcps', 'POST', {
+        name,
+        transport: 'http',
+        url: `${provider.origin}/mcp`,
+        auth: 'oauth',
+        allowPrivateNetwork: true,
+      })
+
+      const direct = Promise.withResolvers<void>()
+      const directCompleted = Promise.withResolvers<void>()
+      let directCancelled = false
+      page.on('requestfailed', (request) => {
+        if (request.url().endsWith('/direct/authorize'))
+          directCancelled = true
+      })
+      if (pending === 'authorization') {
+        await page.route('**/direct/authorize', async (route) => {
+          const response = await route.fetch()
+          direct.resolve()
+          await authorizing.promise
+          // The departing transport has canceled this held authorization.
+          await route.fulfill({ response }).catch(() => {})
+          directCompleted.resolve()
+        })
+      }
+
+      await page.goto(workspacePath('/mcps'))
+      await authenticateWorkspace(page)
+      if (pending === 'offer')
+        await page.waitForFunction(() => document.documentElement.dataset.offerReady === 'true')
+      else
+        await direct.promise
+
+      const card = page.locator('.mcp-card').filter({ hasText: name })
+      const connecting = card.getByRole('button', { name: 'Connect', exact: true }).click()
       await authorizing.promise
-      // Navigation cancels the held authorization when the transport stops.
-      await route.fulfill({ response }).catch(() => {})
-    })
-    await page.goto(workspacePath('/mcps'))
-    await authenticateWorkspace(page)
-    await direct.promise
-    const card = page.locator('.mcp-card').filter({ hasText: 'Slow OAuth' })
-    await card.getByRole('button', { name: 'Connect', exact: true }).click()
-    // The provider deliberately delays navigation; check connection readiness after its return.
-    await page.waitForURL(url => url.pathname.endsWith('/mcps/callback'))
-    await expect(card.getByText('Connected', { exact: true })).toBeVisible()
-    expect(provider.exchanges).toBe(1)
-    expect(errors).toEqual([])
-  }
-  finally {
-    authorizing.resolve()
-    await provider.close()
-  }
-})
+      if (pending === 'authorization')
+        await directCompleted.promise
+      else
+        await offerCompleted.promise
+
+      // Closing the real peer releases its deferred native offer before navigation
+      // commits. WebKit also lets us advance the departing page across the initial
+      // 3s and recurring 30s shell polls; Chromium holds evaluations until commit.
+      if (browserName === 'webkit')
+        await page.clock.runFor(31000)
+
+      authorized.resolve()
+      await connecting
+      await page.waitForURL(url => url.pathname.endsWith('/mcps/callback'))
+      await expect(card.getByText('Connected', { exact: true })).toBeVisible()
+      expect(provider.exchanges).toBe(1)
+      expect(backgroundRequests).toBe(0)
+      if (pending === 'offer')
+        expect(closedOffers).toEqual([true])
+      else
+        expect(directCancelled).toBe(true)
+      expect(errors).toEqual([])
+    }
+    finally {
+      authorizing.resolve()
+      authorized.resolve()
+      try {
+        await page.unrouteAll({ behavior: 'wait' })
+      }
+      finally {
+        await provider.close()
+      }
+    }
+  })
+}
 
 test('manages MCP connections, OAuth consent, tools and agent access on desktop and mobile', async ({ page, workspace }, testInfo) => {
   const provider = await mcpProvider()
