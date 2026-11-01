@@ -94,7 +94,7 @@ impl Worker {
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
-        self.resume_selected_authorized(s, id, None, None, None, authorize)
+        self.resume_selected_authorized(s, id, None, None, None, None, authorize)
             .await
     }
 
@@ -106,6 +106,7 @@ impl Worker {
         expected_turn_id: Option<String>,
         selection: Option<ResumeExecutionSelection>,
         selected_provider: Option<crate::provider::Provider>,
+        saved_auto_catalog: Option<Value>,
         authorize: F,
     ) -> Result<Value>
     where
@@ -139,6 +140,7 @@ impl Worker {
                     expected_turn_id.as_deref(),
                     selection.as_ref(),
                     selected_provider,
+                    saved_auto_catalog.as_ref(),
                 )
             })
             .await?;
@@ -275,6 +277,7 @@ fn requeue(
     expected_turn_id: Option<&str>,
     selection: Option<&ResumeExecutionSelection>,
     selected_provider: Option<crate::provider::Provider>,
+    saved_auto_catalog: Option<&Value>,
 ) -> Result<Value> {
     let record = required(db.run_record(id)?, "Run not found")?;
     let state = record.state.clone();
@@ -334,6 +337,7 @@ fn requeue(
             "Wait for the provider switch to finish before resuming without a model selection.",
         ));
     }
+    crate::resume_selection::validate_saved_opencode_auto_catalog(&run, saved_auto_catalog)?;
     let selected_snapshot = if let Some(selection) = selection {
         if !resumable {
             return Err(Error::conflict(

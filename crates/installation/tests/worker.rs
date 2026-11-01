@@ -5931,7 +5931,7 @@ async fn chat_resume_selection_resolves_opencode_catalog_default_before_adapter_
 }
 
 #[tokio::test]
-async fn chat_resume_rejects_hidden_opencode_auto_without_blocking_pinned_provider_route() {
+async fn opencode_hidden_auto_resume_rejects_omission_and_selection_but_keeps_pinned_route() {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     let mut fixture =
@@ -6079,6 +6079,22 @@ async fn chat_resume_rejects_hidden_opencode_auto_without_blocking_pinned_provid
         .await
         .unwrap();
 
+    // The run began on a pinned route; model the saved Auto parent after all of its
+    // current provider routes have since become deprecated, without changing the
+    // preserved turn, session, workspace or checkpoint.
+    let mut hidden_snapshot = cancelled["snapshot"].clone();
+    hidden_snapshot["agent"]["model"] = "auto/retired-model".into();
+    s.store
+        .change_run(
+            &run_id,
+            cairn_installation::runs::RunChanges {
+                snapshot: Some(serde_json::from_value(hidden_snapshot).unwrap()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
     let before_rejection = s.store.run(&run_id).await.unwrap();
     let attempts_before = s
         .store
@@ -6097,8 +6113,60 @@ async fn chat_resume_rejects_hidden_opencode_auto_without_blocking_pinned_provid
         .count();
     assert_eq!(before_rejection["status"], RunStatus::Failed);
     assert_eq!(before_rejection["resumeAvailable"], true);
+    assert_eq!(
+        before_rejection["snapshot"]["agent"]["model"],
+        "auto/retired-model"
+    );
 
     let app = common::relay_fixture::router(s.clone()).await.unwrap();
+    for (label, path, body) in [
+        (
+            "omitted run resume",
+            format!("/api/runs/{run_id}/resume"),
+            json!({ "turnId": turn_id }),
+        ),
+        (
+            "omitted chat resume",
+            format!("/api/chats/{chat_id}/resume"),
+            json!({ "runId": run_id, "turnId": turn_id }),
+        ),
+    ] {
+        let (status, response) = api_post(&app, &relay_token, &path, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{label}: {response}");
+        assert_eq!(
+            s.store.run(&run_id).await.unwrap(),
+            before_rejection,
+            "{label}"
+        );
+        assert_eq!(
+            fixture.checkpoint(&run_id).await,
+            checkpoint_before,
+            "{label}"
+        );
+        assert_eq!(
+            s.store
+                .attempts_fixture()
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|attempt| attempt["runId"] == run_id)
+                .count(),
+            attempts_before,
+            "{label} must not create an attempt",
+        );
+        assert_eq!(
+            controller
+                .plans
+                .lock()
+                .await
+                .iter()
+                .filter(|plan| plan["runId"] == run_id)
+                .count(),
+            plans_before,
+            "{label} must not reach the worker",
+        );
+    }
+
     for (label, model) in [
         ("hidden default", ""),
         ("explicit hidden Auto", "auto/retired-model"),
@@ -6169,7 +6237,7 @@ async fn chat_resume_rejects_hidden_opencode_auto_without_blocking_pinned_provid
     .await;
     assert_eq!(status, StatusCode::OK, "{response}");
     let queued = s.store.run(&run_id).await.unwrap();
-    let mut expected_snapshot = cancelled["snapshot"].clone();
+    let mut expected_snapshot = before_rejection["snapshot"].clone();
     expected_snapshot["agent"]["model"] = "opencode/retired-model".into();
     expected_snapshot["agent"]["reasoning"] = "".into();
     expected_snapshot["agent"]["speed"] = "".into();

@@ -8,6 +8,52 @@ use crate::{
 use cairn_contracts::ResumeExecutionSelection;
 use serde_json::Value;
 
+/// Only a saved OpenCode Auto parent can become unroutable when every provider route
+/// is deprecated. A missing row is not enough evidence to reject the ordinary retry.
+pub(crate) fn has_saved_opencode_auto(run: &Value) -> bool {
+    matches!(text(run, "status"), "failed" | "interrupted" | "cancelled")
+        && run["resumeAvailable"] == true
+        && run["workspaceCleanedAt"].is_null()
+        && !run["backendMigration"].is_object()
+        && text(run, "trigger") == "chat"
+        && text(&run["snapshot"]["agent"], "provider") == "opencode"
+        && text(&run["snapshot"]["agent"], "model").starts_with(crate::opencode::AUTO)
+}
+
+/// Load catalog evidence before requeueing a saved OpenCode Auto parent. Discovery can
+/// fail independently of the saved execution; in that case keep the established retry
+/// behavior and let normal account admission report its own wait or failure.
+pub(crate) async fn saved_opencode_auto_catalog(s: &Service, run: &Value) -> Option<Value> {
+    if !has_saved_opencode_auto(run) {
+        return None;
+    }
+    Provider::Opencode.adapter().model_catalog(s).await.ok()
+}
+
+/// Reject only when the current catalog explicitly marks the saved Auto parent hidden.
+/// This is checked again inside the requeue transaction against its current snapshot.
+pub(crate) fn validate_saved_opencode_auto_catalog(
+    run: &Value,
+    catalog: Option<&Value>,
+) -> Result<()> {
+    let model = text(&run["snapshot"]["agent"], "model");
+    if has_saved_opencode_auto(run)
+        && catalog.is_some_and(|catalog| opencode_auto_is_hidden(catalog, model))
+    {
+        return Err(hidden_auto_error());
+    }
+    Ok(())
+}
+
+fn opencode_auto_is_hidden(catalog: &Value, model: &str) -> bool {
+    model.starts_with(crate::opencode::AUTO)
+        && model_row(catalog, model).is_some_and(|(entry, _)| entry["hidden"] == true)
+}
+
+fn hidden_auto_error() -> Error {
+    Error::bad("Choose a model from this coding agent's current model catalog.")
+}
+
 pub(crate) async fn validate(
     s: &Service,
     run: &Value,
@@ -148,13 +194,8 @@ fn validate_catalog(
     // `hidden` is picker presentation metadata, not a general authorization rule:
     // explicit provider/model routes remain pinned even when deprecated. OpenCode's
     // `auto/` parent is different: with no visible routes it cannot be routed at all.
-    if provider == Provider::Opencode
-        && selected_name.starts_with(crate::opencode::AUTO)
-        && model["hidden"] == true
-    {
-        return Err(Error::bad(
-            "Choose a model from this coding agent's current model catalog.",
-        ));
+    if provider == Provider::Opencode && opencode_auto_is_hidden(catalog, &selected_name) {
+        return Err(hidden_auto_error());
     }
     if selection.model.is_empty() && !selection.preserve_model {
         selection.model.clone_from(&selected_name);
@@ -189,6 +230,35 @@ fn validate_catalog(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn omitted_resume_rejects_only_a_catalog_hidden_saved_opencode_auto_model() {
+        let run = serde_json::json!({
+            "status": "cancelled",
+            "trigger": "chat",
+            "resumeAvailable": true,
+            "workspaceCleanedAt": null,
+            "snapshot": { "agent": { "provider": "opencode", "model": "auto/retired-model" } },
+        });
+        let hidden = serde_json::json!({
+            "models": [{ "model": "auto/retired-model", "hidden": true }],
+        });
+        let visible = serde_json::json!({
+            "models": [{ "model": "auto/retired-model", "hidden": false }],
+        });
+        let missing = serde_json::json!({ "models": [] });
+
+        assert!(has_saved_opencode_auto(&run));
+        assert!(validate_saved_opencode_auto_catalog(&run, Some(&hidden)).is_err());
+        assert!(validate_saved_opencode_auto_catalog(&run, Some(&visible)).is_ok());
+        assert!(validate_saved_opencode_auto_catalog(&run, Some(&missing)).is_ok());
+        assert!(validate_saved_opencode_auto_catalog(&run, None).is_ok());
+
+        let mut prelaunch = run;
+        prelaunch["resumeAvailable"] = false.into();
+        assert!(!has_saved_opencode_auto(&prelaunch));
+        assert!(validate_saved_opencode_auto_catalog(&prelaunch, Some(&hidden)).is_ok());
+    }
 
     #[test]
     fn opencode_catalog_route_ids_keep_provider_validation_and_bounds() {

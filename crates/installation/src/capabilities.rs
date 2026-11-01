@@ -86,18 +86,23 @@ impl ResumeRun {
             }
         };
         let mut selection = input.selection;
-        let run = if selection.is_some() {
-            let authorize_id = id.clone();
-            let authorize_origin = origin.clone();
-            s.store
-                .read(move |db| {
-                    let run = crate::error::required(db.run(&authorize_id)?, "Run not found")?;
+        let selected_resume = selection.is_some();
+        let authorize_id = id.clone();
+        let authorize_origin = origin.clone();
+        let run = s
+            .store
+            .read(move |db| {
+                let run = crate::error::required(db.run(&authorize_id)?, "Run not found")?;
+                if selected_resume || crate::resume_selection::has_saved_opencode_auto(&run) {
                     policy::run_grant(db, &run, &authorize_origin)?;
-                    Ok(run)
-                })
-                .await?
+                }
+                Ok(run)
+            })
+            .await?;
+        let saved_auto_catalog = if !selected_resume {
+            crate::resume_selection::saved_opencode_auto_catalog(s, &run).await
         } else {
-            s.store.run(&id).await?
+            None
         };
         let selected_provider = if let Some(selection) = selection.as_mut() {
             let expected_turn_id = input.turn_id.as_deref().ok_or_else(|| {
@@ -118,6 +123,7 @@ impl ResumeRun {
                 input.turn_id,
                 selection,
                 selected_provider,
+                saved_auto_catalog,
                 move |db: &Db<'_>| {
                     if let Some(bearer) = &bearer {
                         crate::installation_mcp::authorize_in(db, bearer)?;

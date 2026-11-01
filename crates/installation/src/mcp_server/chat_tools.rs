@@ -414,7 +414,23 @@ pub(crate) async fn invoke(
                 Ok(run_id)
             })
             .await?;
-        let run = s.store.run(&run_id).await?;
+        let selected_resume = selection.is_some();
+        let mut run = s.store.run(&run_id).await?;
+        let saved_auto_catalog =
+            if !selected_resume && crate::resume_selection::has_saved_opencode_auto(&run) {
+                let preflight_id = run_id.clone();
+                let preflight_authority = authorize.clone();
+                run = s
+                    .store
+                    .read(move |db| {
+                        preflight_authority(db)?;
+                        required(db.run(&preflight_id)?, "Run not found")
+                    })
+                    .await?;
+                crate::resume_selection::saved_opencode_auto_catalog(s, &run).await
+            } else {
+                None
+            };
         let selected_provider = if let Some(selection) = selection.as_mut() {
             let expected_turn_id = expected_turn_id.as_deref().ok_or_else(|| {
                 Error::bad("A turn identifier is required when selecting a model for resume.")
@@ -432,6 +448,7 @@ pub(crate) async fn invoke(
                 expected_turn_id,
                 selection,
                 selected_provider,
+                saved_auto_catalog,
                 move |db: &Db<'_>| {
                     commit_authority(db)?;
                     let chat = required(
