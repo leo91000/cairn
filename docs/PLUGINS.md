@@ -1360,6 +1360,14 @@ by revision checks. Deleting the requester stops its current delegated turns and
 pauses their queued follow-ups. A later authorized continuation uses the task's own
 agent access, without reviving the deleted requester's execution grants.
 
+Accepted management jobs, including portraits and backend migration, may outlive
+normal completion of the requesting turn. They retain its initiating agent and
+requester/delegation ceiling, captured at acceptance and rechecked against current
+rights before subsequent effects and publication. Cancellation, deletion and
+grant reductions still revoke the job; normal completion alone does not. This is
+private job authority, never a broader tool grant or a fallback to another agent,
+and does not extend bounded deferred resource operations.
+
 Ticket F must call `plugins::grant_authorization::authorize_hook_delivery` with
 the execution agent, instance, declared hook name and payload before delivery; a
 refusal means no delivery. It does not consume or recreate A's durable queue.

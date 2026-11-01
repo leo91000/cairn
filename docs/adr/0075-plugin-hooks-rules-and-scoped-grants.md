@@ -106,6 +106,18 @@ s’il attend une reprise automatique, et laisse en pause les demandes déjà en
 Une fois cette conversation supprimée, toute
 nouvelle reprise de la tâche déléguée exige l’accès à son propre agent.
 
+Un traitement de gestion déjà accepté à la demande d’un agent (portrait, migration
+de backend…) peut continuer après la fin normale de son tour. Il conserve les
+droits limités de l’agent initiateur et le plafond de son demandeur capturés lors de
+l’acceptation, revérifiés avant chaque nouvel effet et chaque publication. La fin
+normale du tour seule ne le révoque pas. L’annulation, la suppression de la
+conversation initiatrice ou demandeuse, et le retrait ou la réduction des droits
+restent révocatoires, y compris après une attente asynchrone ou un changement de
+hiérarchie chez le service. Ce traitement n’acquiert ni les droits d’un autre agent,
+ni un pouvoir de gestion plus large ou irrévocable. Cette autorisation interne ne
+prolonge pas les lectures différées de ressources, qui gardent leurs propres
+bornes et contrôles d’origine.
+
 ### Accès des comptes aux agents
 
 Un membre ne démarre, ne poursuit, n’oriente, ne lance à la main, ne répond aux
