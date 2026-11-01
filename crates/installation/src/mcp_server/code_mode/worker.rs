@@ -67,6 +67,17 @@ fn evaluate(code: &str, input: &Value, names: &[String]) -> Result<Completed, St
     let context = Context::full(&runtime).map_err(|_| "Cannot create code context.")?;
 
     context.with(|ctx| {
+        // Borrow the serialized value while validating the complete document.
+        // Oversized successful values do not need a second parsed allocation or
+        // an oversized IPC frame, and their effects must never be repeated.
+        #[derive(Deserialize)]
+        struct Envelope<'a> {
+            ok: bool,
+            #[serde(borrow, default, deserialize_with = "present_value")]
+            value: Option<&'a RawValue>,
+            message: Option<String>,
+        }
+
         let bridge = Function::new(ctx.clone(), |name: String, args: String| host(name, &args))
             .map_err(|_| "Cannot create code bridge.")?;
         ctx.globals()
@@ -119,16 +130,6 @@ fn evaluate(code: &str, input: &Value, names: &[String]) -> Result<Completed, St
         let output: String = promise.finish()
             .map_err(|_| "JavaScript execution failed or exceeded its limits.")?;
 
-        // Borrow the serialized value while validating the complete document.
-        // Oversized successful values do not need a second parsed allocation or
-        // an oversized IPC frame, and their effects must never be repeated.
-        #[derive(Deserialize)]
-        struct Envelope<'a> {
-            ok: bool,
-            #[serde(borrow, default, deserialize_with = "present_value")]
-            value: Option<&'a RawValue>,
-            message: Option<String>,
-        }
         let envelope: Envelope<'_> = serde_json::from_str(&output)
             .map_err(|_| "Code must return a JSON value.")?;
         if !envelope.ok {
