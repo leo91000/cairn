@@ -564,7 +564,13 @@ test('legacy account, recovery, and reason context without a trusted class stays
     { accountRequired: 'opencode', recoveryPending: 0, waitReason: 'Waiting for a free account slot.' },
   ]
   for (const extra of contexts) {
-    const row = { id: 'run-one', status: 'queued', attemptId: 'attempt-one', activeMessageId: 'input-one', ...extra }
+    const row = {
+      id: 'run-one',
+      status: 'queued',
+      attemptId: 'attempt-one',
+      activeMessageId: 'input-one',
+      ...extra,
+    }
     let result = old
     for (let minute = 13; minute <= 15; minute++) {
       result = observeAdmissionWaits(sample(origin + minute * 60000, [row]), result.state)
