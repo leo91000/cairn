@@ -323,13 +323,12 @@ async fn historical_rotation_fixture(aggregate: bool) {
         };
         let mut child = Supervised::exited_fixture();
         let mut log_total = 0;
-        let (_, result) = tokio::join!(
+        let ((), result) = tokio::join!(
             produce,
             execution.wait(&mut child, &mut events, &mut log_total, false)
         );
-        let error = match result {
-            Err(error) => error,
-            Ok(_) => panic!("the explicit wait boundary must fail"),
+        let Err(error) = result else {
+            panic!("the explicit wait boundary must fail");
         };
         drop(execution);
         // Even the failing fixture joins both real readers before the outer
