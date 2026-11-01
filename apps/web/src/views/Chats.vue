@@ -797,9 +797,12 @@ async function resumeQuota() {
         catalogPresent: catalog.length > 0,
       })
       const selectedModel = model.value || savedAgent?.model || catalog.find(item => item.isDefault)?.model || ''
-      const selectedReasoning = reasoning.value || (!model.value ? savedAgent?.reasoning : '') || ''
       const modelRow = (name: string) => catalog.find(item => item.model === name || item.routes?.some(route => route.model === name))
         || (!name ? catalog.find(item => item.isDefault) : undefined)
+      const selectedReasoning = reasoning.value
+        || (!model.value ? savedAgent?.reasoning : '')
+        || modelRow(selectedModel)?.defaultReasoningEffort
+        || ''
       const selectedDisplayedSpeed = savedAgent
         ? pickerAppliedSpeed(chosenProvider.value, modelRow(selectedModel), speed.value, savedAgent.speed)
         : ''

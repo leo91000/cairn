@@ -276,8 +276,8 @@ abstract class BackgroundWaitCases {
         }
 
     @Test
-    fun savedCodexQuotaResumeSubmitsDisplayedDefaultModelAndAppliedSelection() =
-        conversation("failed", quota = true, resumeSelection = true) { server ->
+    fun savedCodexQuotaResumeSubmitsChangedModelDefaultEffort() =
+        conversation("failed", quota = true, resumeChangedModel = true) { server ->
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
             compose.waitUntil(10000) {
                 compose.onAllNodesWithText("GPT-6 Sol").fetchSemanticsNodes().isNotEmpty()
@@ -286,13 +286,8 @@ abstract class BackgroundWaitCases {
             compose
                 .onNode(hasText("Modèle de la conversation") and isSelectable())
                 .assertIsSelected()
-            compose.onNodeWithText("GPT-6 Sol", substring = true).assertExists()
-            compose.onNodeWithTag("reasoning-slider").performSemanticsAction(
-                androidx.compose.ui.semantics.SemanticsActions.SetProgress
-            ) {
-                it(0f)
-            }
-            compose.onNodeWithText("Standard").assertExists()
+            compose.onNodeWithText("GPT-6 Luna", exact = true).performScrollTo().performClick()
+            compose.onNodeWithTag("reasoning-slider").assert(hasStateDescription("Faible"))
             compose.onNodeWithText("Terminé").performClick()
             compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
 
@@ -312,11 +307,11 @@ abstract class BackgroundWaitCases {
             org.junit.Assert.assertEquals(SAVED_RUN_ID, body["runId"]!!.jsonPrimitive.content)
             org.junit.Assert.assertEquals("quota-turn", body["turnId"]!!.jsonPrimitive.content)
             org.junit.Assert.assertEquals(
-                "gpt-6-sol",
+                "gpt-6-luna",
                 body["selection"]!!.jsonObject["model"]!!.jsonPrimitive.content,
             )
             org.junit.Assert.assertEquals(
-                "medium",
+                "low",
                 body["selection"]!!.jsonObject["reasoning"]!!.jsonPrimitive.content,
             )
             org.junit.Assert.assertEquals(
@@ -735,6 +730,7 @@ abstract class BackgroundWaitCases {
         conditional: Boolean = false,
         quota: Boolean = false,
         resumeSelection: Boolean = false,
+        resumeChangedModel: Boolean = false,
         resumeRouteSelection: Boolean = false,
         resumePinnedRouteSelection: Boolean = false,
         resumableTurn: Boolean = false,
@@ -748,7 +744,7 @@ abstract class BackgroundWaitCases {
     ) {
         MockWebServer().use { server ->
             val now = System.currentTimeMillis()
-            val hasResumeSelection = resumeSelection || resumeRouteSelection
+            val hasResumeSelection = resumeSelection || resumeChangedModel || resumeRouteSelection
             val hasSavedTurn = hasResumeSelection || resumableTurn
             val chat =
                 Chat(
@@ -787,22 +783,30 @@ abstract class BackgroundWaitCases {
                                                 ),
                                             provider =
                                                 if (resumeRouteSelection) "opencode"
-                                                else if (quota && !resumeSelection) "claude"
+                                                else if (
+                                                    quota && !resumeSelection && !resumeChangedModel
+                                                )
+                                                    "claude"
                                                 else "codex",
                                             model =
                                                 when {
                                                     resumePinnedRouteSelection ->
                                                         "opencode/ling-3.1-flash-free"
                                                     resumeRouteSelection -> "auto/sonnet"
+                                                    resumeChangedModel -> "gpt-6-sol"
                                                     else -> ""
                                                 },
                                             reasoning =
                                                 when {
                                                     resumeRouteSelection -> "medium"
                                                     resumeSelection -> "high"
+                                                    resumeChangedModel -> "high"
                                                     else -> ""
                                                 },
-                                            speed = if (resumeSelection) "priority" else "",
+                                            speed =
+                                                if (resumeSelection || resumeChangedModel)
+                                                    "priority"
+                                                else "",
                                         ),
                                     task =
                                         build.cairn.contracts.RunTaskSnapshot(
@@ -971,6 +975,10 @@ abstract class BackgroundWaitCases {
                                                         ),
                                                     id = MAIN_AGENT_ID,
                                                     name = "Agent principal",
+                                                    model =
+                                                        if (resumeChangedModel) "gpt-6-sol" else "",
+                                                    reasoning =
+                                                        if (resumeChangedModel) "high" else "",
                                                 )
                                             )
                                         )
@@ -1000,7 +1008,20 @@ abstract class BackgroundWaitCases {
                                                             ),
                                                         serviceTiers = emptyList(),
                                                     ),
-                                                    CodingAgentModel(model = "gpt-6-luna"),
+                                                    CodingAgentModel(
+                                                        model = "gpt-6-luna",
+                                                        displayName = "GPT-6 Luna",
+                                                        defaultReasoningEffort = "low",
+                                                        supportedReasoningEfforts =
+                                                            listOf(
+                                                                ReasoningOption(
+                                                                    reasoningEffort = "low"
+                                                                ),
+                                                                ReasoningOption(
+                                                                    reasoningEffort = "high"
+                                                                ),
+                                                            ),
+                                                    ),
                                                 ),
                                             checkedAt = now,
                                         )

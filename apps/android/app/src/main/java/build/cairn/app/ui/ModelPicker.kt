@@ -67,6 +67,14 @@ internal fun effortLabel(value: String): String =
         else -> value
     }
 
+internal fun pickerAppliedReasoning(
+    selectedModel: CodingAgentModel?,
+    reasoning: String,
+    inheritedReasoning: String,
+): String = reasoning.ifBlank {
+    inheritedReasoning.ifBlank { selectedModel?.defaultReasoningEffort.orEmpty() }
+}
+
 internal fun providerLabel(value: String) = codingAgent(value).label
 
 internal fun selectedModel(
@@ -200,7 +208,7 @@ fun ModelPicker(
         if (inherit && model.isBlank())
             defaultReasoning.ifBlank { selected?.defaultReasoningEffort.orEmpty() }
         else selected?.defaultReasoningEffort.orEmpty()
-    val effectiveEffort = reasoning.ifBlank { inheritedEffort }
+    val effectiveEffort = pickerAppliedReasoning(selected, reasoning, inheritedEffort)
     // Speeds Codex names in this catalog, to label a saved speed the selected model lacks.
     val knownTiers = catalog.models.flatMap { it.serviceTiers.orEmpty() }
     val inheritedSpeed = if (inherit) defaultSpeed else ""
@@ -894,7 +902,7 @@ internal fun ReasoningControl(
                     if (rank < 0) Int.MAX_VALUE else rank
                 }
             }
-    val effective = value.ifBlank { default }
+    val effective = pickerAppliedReasoning(model, value, default)
     val index = efforts.indexOfFirst { it.reasoningEffort == effective }
     val haptic = LocalHapticFeedback.current
     val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl

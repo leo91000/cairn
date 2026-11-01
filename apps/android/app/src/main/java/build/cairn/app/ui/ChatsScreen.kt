@@ -1388,14 +1388,6 @@ internal fun ChatPage(
                                                                 ) {
                                                                     val savedAgent =
                                                                         run.snapshot?.agent
-                                                                    val selectedReasoning =
-                                                                        reasoning.ifBlank {
-                                                                            if (model.isBlank())
-                                                                                savedAgent
-                                                                                    ?.reasoning
-                                                                                    .orEmpty()
-                                                                            else ""
-                                                                        }
                                                                     val selection =
                                                                         if (
                                                                             savedAgent != null &&
@@ -1416,6 +1408,18 @@ internal fun ChatPage(
                                                                                     model,
                                                                                     savedAgent
                                                                                         .model,
+                                                                                )
+                                                                            val selectedReasoning =
+                                                                                pickerAppliedReasoning(
+                                                                                    selectedRow,
+                                                                                    reasoning,
+                                                                                    if (
+                                                                                        model
+                                                                                            .isBlank()
+                                                                                    )
+                                                                                        savedAgent
+                                                                                            .reasoning
+                                                                                    else "",
                                                                                 )
                                                                             val selectedModelName =
                                                                                 resumeSelectionModelId(

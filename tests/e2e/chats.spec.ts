@@ -1,3 +1,5 @@
+import type { Page } from '@playwright/test'
+import type { Workspace } from './fixtures'
 import { randomUUID } from 'node:crypto'
 import {
   signIn as authenticateWorkspace,
@@ -21,6 +23,47 @@ interface ResumeDiagnosticRecord {
 type ResumeDiagnosticWindow = Window & {
   __cairnTestResumeDiagnostic?: (record: ResumeDiagnosticRecord) => void
   __cairnTestResumeDiagnosticRecords?: ResumeDiagnosticRecord[]
+}
+
+async function installResumeDiagnosticProbe(page: Page) {
+  await page.addInitScript(() => {
+    const records: ResumeDiagnosticRecord[] = []
+    const diagnosticWindow = window as ResumeDiagnosticWindow
+    diagnosticWindow.__cairnTestResumeDiagnosticRecords = records
+    diagnosticWindow.__cairnTestResumeDiagnostic = (record) => {
+      if (records.length < 16)
+        records.push({ ...record })
+    }
+  })
+}
+
+async function createFailedCodexQuotaChat(
+  workspace: Workspace,
+  agentSettings: { model: string, reasoning: string, speed: string },
+) {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  const turnId = randomUUID()
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: turnId, text: 'Keep this Codex turn and session' })
+  await expect.poll(() => workspace.service.chats.detail(chat.id).run?.status).toBe('succeeded')
+  const before = workspace.service.chats.detail(chat.id).run!
+  workspace.service.store.updateRun(before.id, {
+    status: 'failed',
+    error: 'Usage limit has been reached',
+    resumeAvailable: true,
+    snapshot: {
+      ...before.snapshot,
+      agent: {
+        ...before.snapshot.agent,
+        provider: 'codex',
+        ...agentSettings,
+      },
+    },
+  })
+  workspace.service.store.put('chats', { ...workspace.service.store.get('chats', chat.id)!, paused: true })
+  workspace.service.store.event(before.id, 'turn.failed', 'Usage limit has been reached', { type: 'turn.failed' })
+  workspace.service.store.event(before.id, 'status', 'failed')
+
+  return { chat, before, turnId }
 }
 
 test('expired environments retain the conversation and explain fresh resumption and cleanup retries', async ({ page, workspace }) => {
@@ -1350,15 +1393,7 @@ test('same-provider quota resume submits the saved turn with the picker-applied 
     },
   }))
   const resumeRequests: Record<string, unknown>[] = []
-  await page.addInitScript(() => {
-    const records: ResumeDiagnosticRecord[] = []
-    const diagnosticWindow = window as ResumeDiagnosticWindow
-    diagnosticWindow.__cairnTestResumeDiagnosticRecords = records
-    diagnosticWindow.__cairnTestResumeDiagnostic = (record) => {
-      if (records.length < 16)
-        records.push({ ...record })
-    }
-  })
+  await installResumeDiagnosticProbe(page)
   await page.route(`**/chats/${chat.id}/resume`, async (route) => {
     expect(route.request().method()).toBe('POST')
     resumeRequests.push(route.request().postDataJSON())
@@ -1395,6 +1430,122 @@ test('same-provider quota resume submits the saved turn with the picker-applied 
     selection: { model: 'fixture-deep', reasoning: 'ultra', speed: 'standard' },
   })
   expect(workspace.service.store.chatMessages(chat.id).map(message => message.id)).toContain(turnId)
+})
+
+test('same-provider quota resume submits the changed model default and unchanged saved effort', async ({ page, workspace }) => {
+  const changed = await createFailedCodexQuotaChat(workspace, {
+    model: 'fixture-fast',
+    reasoning: 'low',
+    speed: 'priority',
+  })
+  const unchanged = await createFailedCodexQuotaChat(workspace, {
+    model: 'fixture-fast',
+    reasoning: 'high',
+    speed: 'priority',
+  })
+  await page.route('**/codex/models', route => route.fulfill({
+    json: {
+      models: [
+        {
+          model: 'fixture-fast',
+          displayName: 'Quick coder',
+          description: 'Fast everyday coding',
+          hidden: false,
+          isDefault: true,
+          defaultReasoningEffort: 'low',
+          supportedReasoningEfforts: [
+            { reasoningEffort: 'low', description: '' },
+            { reasoningEffort: 'high', description: '' },
+          ],
+          routes: [],
+          serviceTiers: [{ id: 'priority', name: 'Priority' }],
+          defaultServiceTier: null,
+          resolvedModel: null,
+        },
+        {
+          model: 'fixture-deep',
+          displayName: 'Deep thinker',
+          description: 'Complex investigations',
+          hidden: false,
+          isDefault: false,
+          defaultReasoningEffort: 'high',
+          supportedReasoningEfforts: [
+            { reasoningEffort: 'low', description: '' },
+            { reasoningEffort: 'high', description: '' },
+          ],
+          routes: [],
+          serviceTiers: [],
+          defaultServiceTier: null,
+          resolvedModel: null,
+        },
+      ],
+      checkedAt: Date.now(),
+      stale: false,
+      error: '',
+    },
+  }))
+  const changedRequests: Record<string, unknown>[] = []
+  const unchangedRequests: Record<string, unknown>[] = []
+  await installResumeDiagnosticProbe(page)
+  await page.route(`**/chats/${changed.chat.id}/resume`, async (route) => {
+    changedRequests.push(route.request().postDataJSON())
+    await route.fulfill({ json: { ...changed.before, status: 'queued', resumeAvailable: false } })
+  })
+  await page.route(`**/chats/${unchanged.chat.id}/resume`, async (route) => {
+    unchangedRequests.push(route.request().postDataJSON())
+    await route.fulfill({ json: { ...unchanged.before, status: 'queued', resumeAvailable: false } })
+  })
+
+  await page.goto(workspacePath(`/chats/${changed.chat.id}`))
+  await authenticateWorkspace(page)
+  const changedCard = page.getByRole('status', { name: 'Coding agent quota reached' })
+  await expect(changedCard).toBeVisible()
+  const picker = page.getByRole('button', { name: /^Agent, model, reasoning and speed/ })
+  await picker.click()
+  const menu = page.getByRole('dialog', { name: 'Agent & model' })
+  const selectedModel = menu.getByRole('radio', { name: 'Deep thinker', exact: true })
+  await selectedModel.click()
+  const changedDefault = menu.getByRole('radiogroup', { name: 'Reasoning' })
+    .getByRole('radio', { name: 'Model default · High', exact: true })
+  await expect(changedDefault).toHaveAttribute('aria-checked', 'true')
+  await menu.getByRole('button', { name: 'Close', exact: true }).click()
+  await expect(picker).toHaveAccessibleName(/Deep thinker · High reasoning/)
+  await changedCard.getByRole('button', { name: 'Resume conversation', exact: true }).click()
+  await expect.poll(async () => ({
+    requests: changedRequests.length,
+    stages: await page.evaluate(() => (window as ResumeDiagnosticWindow).__cairnTestResumeDiagnosticRecords ?? []),
+  })).toMatchObject({ requests: 1 })
+  expect(changedRequests[0]).toMatchObject({
+    chatId: changed.chat.id,
+    runId: changed.before.id,
+    turnId: changed.turnId,
+    selection: { model: 'fixture-deep', reasoning: 'high', speed: 'standard' },
+  })
+
+  await page.goto(workspacePath(`/chats/${unchanged.chat.id}`))
+  const unchangedCard = page.getByRole('status', { name: 'Coding agent quota reached' })
+  await expect(unchangedCard).toBeVisible()
+  const inheritedPicker = page.getByRole('button', { name: /^Agent, model, reasoning and speed/ })
+  await expect(inheritedPicker).toHaveAccessibleName(/Quick coder · High reasoning/)
+  await inheritedPicker.click()
+  const inheritedMenu = page.getByRole('dialog', { name: 'Agent & model' })
+  const savedDefault = inheritedMenu.getByRole('radiogroup', { name: 'Reasoning' })
+    .getByRole('radio', { name: 'Conversation default · High', exact: true })
+  await expect(savedDefault).toHaveAttribute('aria-checked', 'true')
+  await inheritedMenu.getByRole('radiogroup', { name: 'Speed' }).getByRole('radio', { name: 'Standard', exact: true }).click()
+  await inheritedMenu.getByRole('button', { name: 'Close', exact: true }).click()
+  await expect(inheritedPicker).toHaveAccessibleName(/Quick coder · High reasoning/)
+  await unchangedCard.getByRole('button', { name: 'Resume conversation', exact: true }).click()
+  await expect.poll(async () => ({
+    requests: unchangedRequests.length,
+    stages: await page.evaluate(() => (window as ResumeDiagnosticWindow).__cairnTestResumeDiagnosticRecords ?? []),
+  })).toMatchObject({ requests: 1 })
+  expect(unchangedRequests[0]).toMatchObject({
+    chatId: unchanged.chat.id,
+    runId: unchanged.before.id,
+    turnId: unchanged.turnId,
+    selection: { model: 'fixture-fast', reasoning: 'high', speed: 'standard' },
+  })
 })
 
 test('starts project chats, steers, edits the queue and preserves a compact mobile composer', async ({ page, workspace }) => {

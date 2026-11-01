@@ -327,6 +327,13 @@ fn requeue(
             "This run has no saved conversation available to resume.",
         ));
     }
+    let pending_switch =
+        state.trigger == "chat" && crate::chats::coding_agent::pending_for_run(db, id)?;
+    if pending_switch && selection.is_none() {
+        return Err(Error::conflict(
+            "Wait for the provider switch to finish before resuming without a model selection.",
+        ));
+    }
     let selected_snapshot = if let Some(selection) = selection {
         if !resumable {
             return Err(Error::conflict(
@@ -366,7 +373,7 @@ fn requeue(
     // A manual resume may arrive before chat_tick observes the terminal turn.
     // Its scheduled continuation must not survive into the resumed execution.
     crate::chats::continuation::cancel_for_run(db, id)?;
-    if state.trigger == "chat" {
+    if pending_switch && selection.is_some() {
         crate::chats::coding_agent::cancel_in(db, id)?;
     }
     if let Some(mut checkpoint) = checkpoint {

@@ -6026,6 +6026,42 @@ async fn chat_resume_selection_keeps_saved_identity_and_reaches_the_worker_plan(
     )
     .await;
     assert_eq!(switch_retry_status, StatusCode::OK);
+    let before_legacy_resume = s.store.run(&run_id).await.unwrap();
+    let checkpoint_before_legacy_resume = fixture.checkpoint(&run_id).await;
+    let (legacy_resume_status, legacy_resume_response) = api_post(
+        &app,
+        relay_token,
+        &format!("/api/chats/{chat_id}/resume"),
+        json!({ "runId": run_id, "turnId": turn_id }),
+    )
+    .await;
+    assert_eq!(
+        legacy_resume_status,
+        StatusCode::CONFLICT,
+        "{legacy_resume_response}"
+    );
+    assert_eq!(s.store.run(&run_id).await.unwrap(), before_legacy_resume);
+    assert_eq!(
+        fixture.checkpoint(&run_id).await,
+        checkpoint_before_legacy_resume
+    );
+    let preserved_switch = s
+        .store
+        .read({
+            let chat_id = chat_id.to_owned();
+            move |db| db.engine_switch(&chat_id)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&preserved_switch).unwrap(),
+        serde_json::to_value(&staged).unwrap()
+    );
+    assert_eq!(preserved_switch.request_id, switch_id);
+    assert_eq!(preserved_switch.provider, "claude");
+    assert!(preserved_switch.pending);
+
     let resume_body = json!({
         "runId": run_id,
         "turnId": turn_id,

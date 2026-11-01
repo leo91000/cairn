@@ -40,6 +40,30 @@ class ModelPickerTest : ModelPickerCases() {
     }
 
     @Test
+    fun resumeSelectionUsesModelDefaultAfterChangeAndKeepsSavedEffortWhenUnchanged() {
+        val catalog =
+            ModelCatalog(
+                models =
+                    listOf(
+                        CodingAgentModel(
+                            model = "gpt-6-sol",
+                            isDefault = true,
+                            defaultReasoningEffort = "medium",
+                        ),
+                        CodingAgentModel(
+                            model = "gpt-6-luna",
+                            defaultReasoningEffort = "low",
+                        ),
+                    )
+            )
+        val changedModel = selectedModel(catalog, "gpt-6-luna", "gpt-6-sol")
+        val unchangedModel = selectedModel(catalog, "", "gpt-6-sol")
+
+        assertEquals("low", pickerAppliedReasoning(changedModel, "", ""))
+        assertEquals("high", pickerAppliedReasoning(unchangedModel, "", "high"))
+    }
+
+    @Test
     fun resumeSelectionPreservesExplicitGroupedRouteIds() {
         val catalog =
             ModelCatalog(
