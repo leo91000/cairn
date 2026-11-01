@@ -117,10 +117,20 @@ scope/end facts. No optional caller callback is needed for that preservation.
 Legacy three-part occurrences remain exact for unresolved history;
 only a positively fresh observation receives a new discriminator.
 
+A fresh validated queued-capacity row also carries `currentCapacity: true` in
+its observation, independently of `status`, scope, clock and episode identity.
+This bit is current gate evidence, never a healthy/bad/mature result or an
+occurrence. Ambiguous duplicate rows and unknown gates cannot establish it; it
+is not recovered from historical state. The persisted history shape and bounds
+are unchanged.
+
 Persist a valid current capacity episode's identity in the existing bounded caller
-map before its age matures. A known current capacity observation stops a recovery
-clear streak even while its duration is still pending; this neither deletes sent
-evidence nor certifies health. Retain outbox, ownership and historical evidence
+map before its age matures. Independently, an unknown observation with
+`currentCapacity: true` must interrupt the recovery-clear counter even when no
+usable identity exists. The caller may use its rearm-only `pending` status for
+that purpose without writing an episode or emitting an alert. One following
+known-end observation is then one good sample, not the completion of an old
+clear streak. This neither deletes sent evidence nor certifies health. Retain outbox, ownership and historical evidence
 independently of helper-history eviction. A caller resolving absent identities
 must use the returned `complete` flag, not an unvalidated inventory flag.
 Reconcile bounded coordinator-only admission IDs too: complete absence or a known

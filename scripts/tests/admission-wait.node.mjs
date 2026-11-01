@@ -672,3 +672,37 @@ test('canonical account exception needs complete valid snapshot context and exac
     }), null)
   }
 })
+
+test('current capacity remains a distinct fact when scope, clock or allocation cannot establish an episode', () => {
+  const old = mature()
+  const ended = observeAdmissionWaits(sample(origin + 12 * 60000, [capacity('run-one', { waitClass: 'account' })]), old.state)
+  const noScope = capacity('run-one', { attemptId: null, activeMessageId: null })
+  const missing = observeAdmissionWaits(sample(origin + 13 * 60000, [noScope], false), ended.state)
+  assert.equal(observation(missing).status, 'unknown')
+  assert.equal(observation(missing).currentCapacity, true)
+  assert.equal(observation(missing).occurrence, undefined)
+  assert.equal(missing.state.waits[0].since, null)
+  assert.deepEqual(Object.keys(missing.state).sort(), ['limited', 'observedAt', 'version', 'waits'])
+  const badClock = observeAdmissionWaits(sample(Number.NaN, [noScope], false), ended.state)
+  assert.equal(observation(badClock).status, 'unknown')
+  assert.equal(observation(badClock).currentCapacity, true)
+  assert.equal(observation(badClock).occurrence, undefined)
+  const scopedClock = observeAdmissionWaits(sample(Number.NaN, [capacity()], false), ended.state)
+  assert.equal(observation(scopedClock).status, 'unknown')
+  assert.equal(observation(scopedClock).currentCapacity, true)
+  assert.equal(observation(scopedClock).occurrence, undefined)
+  const failedAllocation = observeAdmissionWaits(sample(origin + 13 * 60000, [capacity('run-one', { activeMessageId: 'new-turn' })]), ended.state, undefined, () => {
+    throw new Error('fixture allocation')
+  })
+  assert.equal(observation(failedAllocation).status, 'unknown')
+  assert.equal(observation(failedAllocation).currentCapacity, true)
+  assert.equal(observation(failedAllocation).occurrence, undefined)
+  for (const result of [
+    observeAdmissionWaits(sample(origin + 14 * 60000, [{ ...noScope, waitClass: null }], false), ended.state),
+    observeAdmissionWaits(sample(origin + 14 * 60000, [], false), missing.state),
+    observeAdmissionWaits(sample(origin + 14 * 60000, [noScope, { ...noScope, waitClass: 'account' }], false), ended.state),
+  ]) {
+    assert.equal(observation(result).status, 'unknown')
+    assert.equal(observation(result).currentCapacity, undefined)
+  }
+})

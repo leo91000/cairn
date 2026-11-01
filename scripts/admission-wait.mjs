@@ -143,6 +143,7 @@ function endedWait(runId, currentScope, observedAt) {
 export function observeAdmissionWaits(sample, previous, retainedEpisode, createEpisodeId = randomUUID) {
   const now = timestamp(sample?.at) ? sample.at : null
   const observations = new Map()
+  const capacityRuns = new Set()
   const next = new Map()
   const history = previousWaits(previous)
   const prior = history.waits
@@ -183,6 +184,8 @@ export function observeAdmissionWaits(sample, previous, retainedEpisode, createE
     // Scope, gate and clock are independent facts. An unknown gate cannot
     // reinstall an older turn; only a known capacity gate can age the wait.
     const capacity = knownStatus && run.status === 'queued' && run.waitClass === 'capacity'
+    if (capacity)
+      capacityRuns.add(run.id)
     const currentScope = scope(run)
     if (currentScope === null) {
       complete = false
@@ -280,6 +283,7 @@ export function observeAdmissionWaits(sample, previous, retainedEpisode, createE
   }
 
   for (const runId of duplicates) {
+    capacityRuns.delete(runId)
     next.delete(runId)
     observations.set(runId, { id: `admission-wait:${runId}`, runId, status: 'unknown' })
   }
@@ -311,7 +315,11 @@ export function observeAdmissionWaits(sample, previous, retainedEpisode, createE
       // identities already evicted from the bounded history.
       limited: limited || (history.limited && !complete),
     },
-    observations: [...observations.values()],
+    // Gate evidence is current, not recovered from history. Scope/time failures
+    // cannot erase it, and ambiguous duplicate rows cannot establish it.
+    observations: [...observations.values()].map(value => capacityRuns.has(value.runId)
+      ? { ...value, currentCapacity: true }
+      : value),
     complete,
   }
 }
