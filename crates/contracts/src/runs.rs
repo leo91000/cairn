@@ -192,20 +192,16 @@ pub struct Run {
     #[ts(optional = nullable)]
     pub dismissal: Option<crate::OutcomeDismissal>,
     #[serde(default)]
-    #[schemars(with = "Option<crate::NodeResources>")]
     #[ts(optional = nullable)]
-    #[ts(type = "import('../../nodes').NodeResources | null")]
-    pub resources: Option<serde_json::Value>,
+    pub resources: Option<crate::ExecutionResources>,
     #[serde(default)]
     #[schemars(with = "Option<crate::NativeModeRequest>")]
     #[ts(optional = nullable)]
     #[ts(type = "import('../../nodes').NativeModeRequest | null")]
     pub native_mode: Option<serde_json::Value>,
     #[serde(default)]
-    #[schemars(with = "Option<std::collections::BTreeMap<String, serde_json::Value>>", extend("x-kotlin-type" = "ExclusiveReservation"))]
     #[ts(optional = nullable)]
-    #[ts(type = "import('../../nodes').ExclusiveReservation | null")]
-    pub suspended_by_exclusive: Option<serde_json::Value>,
+    pub suspended_by_exclusive: Option<crate::ExclusiveReservation>,
     #[serde(default)]
     #[schemars(with = "Option<std::collections::BTreeMap<String, serde_json::Value>>", extend("x-kotlin-type" = "NodeBackup"))]
     #[ts(optional = nullable)]

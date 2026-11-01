@@ -147,6 +147,8 @@ describe('the Fil', () => {
     ownerRunId: 'owner',
     reason: 'Compile',
     state: 'acquired',
+    renewalPending: false,
+    error: null,
     createdAt: 1,
     expiresAt: 1000,
     waitUntil: 1000,

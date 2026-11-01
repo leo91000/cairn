@@ -155,6 +155,13 @@ pub async fn configuration(
     mut body: Value,
 ) -> Result<Value> {
     let parts: Vec<_> = path.trim_start_matches("/api/").split('/').collect();
+    if parts.len() == 3
+        && parts[0] == "nodes"
+        && parts[1] == "placement"
+        && body.get("selection").is_none()
+    {
+        return Ok(json!({"selection":body}));
+    }
     if parts.len() == 2
         && parts[0] == "nodes"
         && body.is_object()

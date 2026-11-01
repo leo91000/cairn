@@ -307,6 +307,7 @@ fn main() {
     export::<NodeConfiguration>(root, &mut generator, Contract::Deserialize);
     export::<NodeCapabilities>(root, &mut generator, Contract::Deserialize);
     export::<NodeResources>(root, &mut generator, Contract::Deserialize);
+    export::<ExecutionResources>(root, &mut generator, Contract::Serialize);
     export::<NativeModeRequest>(root, &mut generator, Contract::Deserialize);
     export::<NativeModeObserved>(root, &mut generator, Contract::Deserialize);
     export::<NativeModeProposal>(root, &mut generator, Contract::Deserialize);
@@ -440,7 +441,25 @@ fn main() {
         serde_json::to_string_pretty(&chat_clients).unwrap() + "\n",
     )
     .unwrap();
+
+    export::<GetPlacementInput>(root, &mut generator, Contract::Deserialize);
+    export::<ConfigurePlacementInput>(root, &mut generator, Contract::Deserialize);
+    export::<ConversationPlacement>(root, &mut generator, Contract::Serialize);
+    export::<MoveToNodeInput>(root, &mut generator, Contract::Deserialize);
+    export::<MoveToNodeOutput>(root, &mut generator, Contract::Serialize);
+    export::<NodeMoveStarted>(root, &mut generator, Contract::Serialize);
+    export::<NodeMoveOperationInput>(root, &mut generator, Contract::Deserialize);
+    export::<NodeMoveOperation>(root, &mut generator, Contract::Serialize);
+    export::<ReleaseExclusiveInput>(root, &mut generator, Contract::Deserialize);
+    export::<AcquireExclusiveInput>(root, &mut generator, Contract::Deserialize);
+    export::<ExclusiveReservation>(root, &mut generator, Contract::Serialize);
+    export::<ExclusiveStatusOutput>(root, &mut generator, Contract::Serialize);
     let node_clients = serde_json::json!([
+        {"name":"getConversationPlacement", "input":"GetPlacementInput", "output":"ConversationPlacement", "method":"GET", "path":"/nodes/placement/{runId}"},
+        {"name":"configureConversationPlacement", "input":"ConfigurePlacementInput", "output":"ConversationPlacement", "method":"PUT", "path":"/nodes/placement/{runId}"},
+        {"name":"moveConversationToNode", "input":"MoveToNodeInput", "output":"MoveToNodeOutput", "method":"POST", "path":"/nodes/placement/{runId}/move"},
+        {"name":"releaseNodeReservation", "input":"ReleaseExclusiveInput", "output":"ExclusiveReservation", "method":"POST", "path":"/nodes/reservations/exclusive/{reservationId}/release"},
+
         {"name":"createNodeEnrollment", "input":"CreateNodeEnrollmentInput", "output":"NodeEnrollment", "method":"POST", "path":"/nodes/enrollments"},
         {"name":"updateNodeStorage", "input":"UpdateNodeStorageInput", "output":"ExecutionNode", "method":"PUT", "path":"/nodes/{nodeId}/storage"},
         {"name":"revokeNode", "input":"RevokeNodeInput", "output":"NodeRevocation", "method":"POST", "path":"/nodes/{nodeId}/revoke"}
@@ -1160,6 +1179,7 @@ fn main() {
     }
     let mut node_decoder = SchemaSettings::draft07().for_deserialize().into_generator();
     node_decoder.subschema_for::<ExecutionNode>();
+    node_decoder.subschema_for::<ConversationPlacement>();
     for (name, schema) in node_decoder.take_definitions(true) {
         definitions.insert(name, schema);
     }

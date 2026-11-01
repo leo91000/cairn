@@ -16,7 +16,7 @@ export const suites = {
   backend: [['pnpm', 'test:backend'], ['pnpm', 'test:backend', '--doc']],
   android: [['apps/android/gradlew', '-p', 'apps/android', 'spotlessCheck', 'testDebugUnitTest', 'lintDebug', '--no-daemon']],
   browser: [
-    ['cargo', 'build', '--locked', '--bin', 'cairn', '--bin', 'cairn-beacon', '--example', 'worker_fixture', '--example', 'browser_fixture'],
+    ['cargo', 'build', '--locked', '--bin', 'cairn', '--bin', 'cairn-beacon', '--example', 'worker_fixture', '--example', 'browser_fixture', '--example', 'beacon_sql_fixture'],
     ['pnpm', 'build'],
     ['pnpm', 'test:e2e'],
   ],

@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "platform": {
+    "id": "ubuntu",
+    "version": "24.04",
+    "architecture": "amd64",
+    "libcMinimum": "2.34",
+    "loader": "/lib64/ld-linux-x86-64.so.2"
+  },
+  "provenance": {
+    "snapshot": "20261025T000000Z",
+    "archiveFingerprint": "F6ECB3762474EDA9D21B7022871920D1991BC93C",
+    "inReleaseURL": "https://archive.ubuntu.com/ubuntu/dists/noble/InRelease",
+    "inReleaseSHA256": "cdb2f31d809f589719a53c6ad15f255b27569c4059542ada282aaa21b8e164b0",
+    "packagesSHA256": "2a6a199e1031a5c279cb346646d594993f35b1c03dd4a82aaa0323980dd92451"
+  },
+  "packages": [
+    {
+      "name": "libmnl0",
+      "version": "1.0.5-2build1",
+      "minimumVersion": "1.0.3-4~",
+      "architecture": "amd64",
+      "filename": "libmnl0_1.0.5-2build1_amd64.deb",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20261025T000000Z/pool/main/libm/libmnl/libmnl0_1.0.5-2build1_amd64.deb",
+      "bytes": 12272,
+      "sha256": "5170658bf0eaf54a8c7d53061ca6b47a6cf33a83543a75fa521de7046cb7197a",
+      "depends": "libc6 (>= 2.14)"
+    },
+    {
+      "name": "libnfnetlink0",
+      "version": "1.0.2-2build1",
+      "minimumVersion": "1.0.2",
+      "architecture": "amd64",
+      "filename": "libnfnetlink0_1.0.2-2build1_amd64.deb",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20261025T000000Z/pool/main/libn/libnfnetlink/libnfnetlink0_1.0.2-2build1_amd64.deb",
+      "bytes": 14810,
+      "sha256": "f557a287af2ca00df5dbf632c6b77d77479139ffb51c83e3de9766eb609b5d63",
+      "depends": "libc6 (>= 2.14)"
+    },
+    {
+      "name": "libnetfilter-conntrack3",
+      "version": "1.0.9-6build1",
+      "minimumVersion": "1.0.9",
+      "architecture": "amd64",
+      "filename": "libnetfilter-conntrack3_1.0.9-6build1_amd64.deb",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20261025T000000Z/pool/main/libn/libnetfilter-conntrack/libnetfilter-conntrack3_1.0.9-6build1_amd64.deb",
+      "bytes": 45218,
+      "sha256": "6d32a4c4618eb7d6c0d989591d28637a9acdfa86dfe22e42e9ac9cc25d882a97",
+      "depends": "libc6 (>= 2.14), libmnl0 (>= 1.0.3-4~), libnfnetlink0 (>= 1.0.2)"
+    },
+    {
+      "name": "conntrack",
+      "version": "1:1.4.8-1ubuntu1",
+      "minimumVersion": "1:1.4.8-1ubuntu1",
+      "architecture": "amd64",
+      "filename": "conntrack_1.4.8-1ubuntu1_amd64.deb",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20261025T000000Z/pool/main/c/conntrack-tools/conntrack_1.4.8-1ubuntu1_amd64.deb",
+      "bytes": 37856,
+      "sha256": "60b9d00b3382fab1d71b7f1ec0a33b21bee6f3a5fbd875fd1aa6e0bf7608fc19",
+      "depends": "libc6 (>= 2.34), libmnl0 (>= 1.0.3-4~), libnetfilter-conntrack3 (>= 1.0.9)"
+    }
+  ]
+}

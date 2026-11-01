@@ -3,27 +3,6 @@ use crate::store::Store;
 use serde_json::json;
 
 const PREVIOUS: &str = include_str!("../../../tests/fixtures/personal-state-v17.sql");
-const LEGACY_COLUMNS: &str = include_str!("../../../tests/fixtures/run-projection-columns-v18.sql");
-
-/// Older domain fixtures start from a current Store, then restore their domain.
-/// The run layout must also represent the historical version they advertise.
-pub(crate) fn restore_legacy_columns(connection: &Connection) {
-    connection
-        .execute_batch("DROP TABLE IF EXISTS timeline_entries; DROP TABLE IF EXISTS timeline_state; DROP TABLE IF EXISTS run_progress;")
-        .unwrap();
-    let current: bool = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='view' AND name='run_views')",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    if !current {
-        return;
-    }
-    connection.execute_batch("DROP VIEW run_views").unwrap();
-    connection.execute_batch(LEGACY_COLUMNS).unwrap();
-}
 
 fn previous(root: &std::path::Path) -> Connection {
     let mut connection = Connection::open(root.join("manager.db")).unwrap();
@@ -74,17 +53,26 @@ fn retained_schema(connection: &Connection) -> Vec<String> {
 #[test]
 fn version_eighteen_upgrade_preserves_exact_wire_projection_and_reopens() {
     let root = tempfile::tempdir().unwrap();
-    let connection = previous(root.path());
+    let mut connection = previous(root.path());
     assert_eq!(version(&connection), 18);
     let expected = projections(&connection, "runs");
     let schema_before = retained_schema(&connection);
+    upgrade(&mut connection).unwrap();
+    assert_eq!(version(&connection), 19);
+    assert_eq!(retained_schema(&connection), schema_before);
+    assert_eq!(projections(&connection, "run_views"), expected);
+    upgrade(&mut connection).unwrap();
+    assert_eq!(projections(&connection, "run_views"), expected);
+    let expected_current = crate::placement_migration_fixture::run_views(&connection);
     drop(connection);
 
     let store = Store::open(root.path()).unwrap();
     let connection = Connection::open(root.path().join("manager.db")).unwrap();
     assert_eq!(version(&connection), crate::store::DATABASE_VERSION);
-    assert_eq!(retained_schema(&connection), schema_before);
-    assert_eq!(projections(&connection, "run_views"), expected);
+    assert_eq!(
+        crate::placement_migration_fixture::run_views(&connection),
+        expected_current
+    );
     let removed: i64 = connection
         .query_row(
             "SELECT count(*) FROM pragma_table_xinfo('runs') WHERE name IN ('data','summary_data')",
@@ -108,7 +96,10 @@ fn version_eighteen_upgrade_preserves_exact_wire_projection_and_reopens() {
     );
     drop(store);
     let reopened = Store::open(root.path()).unwrap();
-    assert_eq!(projections(&connection, "run_views"), expected);
+    assert_eq!(
+        crate::placement_migration_fixture::run_views(&connection),
+        expected_current
+    );
     drop(reopened);
 }
 
@@ -168,7 +159,7 @@ fn an_unexpected_legacy_projection_is_rejected_before_mutation() {
 fn concurrent_startups_converge_on_one_preserved_projection() {
     let root = tempfile::tempdir().unwrap();
     let connection = previous(root.path());
-    let expected = projections(&connection, "runs");
+    let expected = crate::placement_migration_fixture::run_views(&connection);
     drop(connection);
     let handles = (0..2)
         .map(|_| {
@@ -182,7 +173,10 @@ fn concurrent_startups_converge_on_one_preserved_projection() {
         .collect::<Vec<_>>();
     let connection = Connection::open(root.path().join("manager.db")).unwrap();
     assert_eq!(version(&connection), crate::store::DATABASE_VERSION);
-    assert_eq!(projections(&connection, "run_views"), expected);
+    assert_eq!(
+        crate::placement_migration_fixture::run_views(&connection),
+        expected
+    );
     drop(stores);
 }
 
@@ -192,7 +186,7 @@ fn startup_waits_for_a_rollback_journal_writer_and_preserves_projection() {
 
     let root = tempfile::tempdir().unwrap();
     let mut connection = previous(root.path());
-    let expected = projections(&connection, "runs");
+    let expected = crate::placement_migration_fixture::run_views(&connection);
     assert_eq!(
         connection
             .pragma_query_value::<String, _>(None, "journal_mode", |row| row.get(0))
@@ -225,7 +219,10 @@ fn startup_waits_for_a_rollback_journal_writer_and_preserves_projection() {
     };
     starter.join().unwrap();
     assert_eq!(version(&connection), crate::store::DATABASE_VERSION);
-    assert_eq!(projections(&connection, "run_views"), expected);
+    assert_eq!(
+        crate::placement_migration_fixture::run_views(&connection),
+        expected
+    );
     assert_eq!(
         connection
             .query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))

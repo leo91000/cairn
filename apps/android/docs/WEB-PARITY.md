@@ -467,3 +467,28 @@ use the same bounded manager operations on web, Android and both tools. The apps
 keep their existing busy states while generated calls poll the result; failures
 retain their HTTP status, including revision conflicts. Tools receive an operation
 id and use `get_plugin_operation`/`cancel_plugin_operation`. No layout change.
+
+A10 (#411): conversation placement read/configuration, movement and exclusive
+reservation release use the same Rust-generated models and clients in both apps.
+Web keeps its existing chips/dialogs; Android keeps its native placement sheet and
+node cards. Omitted movement tags retain existing conversation constraints. No new
+visual flow or platform-specific capability is introduced. HTTP, public MCP and
+`cairn_installation` share the placement capability registry and current scopes;
+execution-scoped exclusivity still requires the owner's existing agent grant.
+
+Both apps await the existing HTTP movement result. Public MCP and
+`cairn_installation` start a caller-private movement operation, then poll
+`get_node_move_operation` in separate calls so a capacity wait can exceed the
+bounded code worker's 30 seconds. Both use the same admission, live grants and
+native provenance. `cancel_node_move_operation` cancels waiting admission;
+admitted movement retains its existing fencing/recovery. Abandoning an HTTP or
+workspace capacity wait clears its pending marker and unclaimed reservation.
+The polling models are generated in Rust/TS/Kotlin; app presentation is unchanged.
+
+Execution allowances use the generated ExecutionResources model in both apps,
+including native disk allowances of 0/116/120 MiB after reserves. Configured node
+budgets keep their separate generated NodeResources model and 128 MiB minimum.
+
+The generated exclusive-status object envelope is shared by Rust, TS and Kotlin;
+run-scoped MCP status returns `reservations` in the existing order. This protocol
+shape correction adds no app interaction or platform difference.

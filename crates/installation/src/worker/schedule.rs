@@ -100,7 +100,7 @@ impl Worker {
             .write(|db| {
                 db.0.execute("DELETE FROM kv WHERE expires IS NOT NULL AND expires<=?", [now()])?;
                 db.0.execute("DELETE FROM audit WHERE created_at<?", [now() - 90 * DAY_MS])?;
-                db.0.execute("DELETE FROM records WHERE kind='node-exclusive-requests' AND json_extract(data,'$.state') IN ('released','failed','expired') AND json_extract(data,'$.createdAt')<?", [now() - 30 * DAY_MS])?;
+                db.0.execute("DELETE FROM exclusive_reservations WHERE state IN ('released','failed','expired') AND created_at<?", [now() - 30 * DAY_MS])?;
                 db.0.execute("DELETE FROM events WHERE created_at<? AND run_id IN (SELECT id FROM runs WHERE status NOT IN ('queued','running','waiting') AND trigger!='chat')", [now() - 30 * DAY_MS])?;
                 // Timeline cards read their source event; a card whose source expired goes with it.
                 db.0.execute("DELETE FROM timeline_entries WHERE run_id IN (SELECT id FROM runs WHERE status NOT IN ('queued','running','waiting') AND trigger!='chat') AND NOT EXISTS(SELECT 1 FROM events e WHERE e.id=timeline_entries.source)", [])?;
@@ -532,7 +532,12 @@ fn migrate_legacy_provider_retry_in(
     Ok(Some(saved))
 }
 
-fn controller_budget_exhausted(saved: &RunCheckpoint, state: &RunState, run: &Value) -> bool {
+fn controller_budget_exhausted(
+    saved: &RunCheckpoint,
+    state: &RunState,
+    native_mode_interruption: bool,
+    move_requested: bool,
+) -> bool {
     if !saved.managed() || saved.terminal_code() == Some(0) || provider_retry_paid(saved, state) {
         return false;
     }
@@ -567,8 +572,8 @@ fn controller_budget_exhausted(saved: &RunCheckpoint, state: &RunState, run: &Va
     let exception = (saved
         .prepared()
         .is_some_and(|prepared| prepared["backend"] == "native")
-        && run["nativeModeInterruption"].is_string())
-        || run["moveRequest"].is_object();
+        && native_mode_interruption)
+        || move_requested;
     if exception && saved.has_controller_recovery_reservation() {
         return false;
     }
@@ -594,7 +599,12 @@ fn recovery_cannot_replay(
             || saved.settled().is_some_and(|settled| {
                 matches!(settled.status, RunStatus::Failed | RunStatus::Cancelled)
             })
-            || controller_budget_exhausted(saved, state, run)
+            || controller_budget_exhausted(
+                saved,
+                state,
+                run["nativeModeInterruption"].is_string(),
+                run["moveRequest"].is_object(),
+            )
     })
 }
 
@@ -1074,7 +1084,14 @@ pub(super) fn finish_recovery(
             db.change_run(id, patch)?;
             return Ok(false);
         }
-        if !provider_paid && controller_budget_exhausted(checkpoint, current, &record.boundary) {
+        if !provider_paid
+            && controller_budget_exhausted(
+                checkpoint,
+                current,
+                record.placement.native_mode_interruption.is_some(),
+                record.placement.move_request.is_some(),
+            )
+        {
             let expired = matches!(checkpoint.remaining_ms, None | Some(Some(i64::MIN..=0)));
             let message = if expired {
                 "Run exceeded its time limit."
@@ -1173,6 +1190,9 @@ async fn requeue_after_error(store: &Store, run_id: &str, lease: Option<Lease>) 
         })
         .await
 }
+
+#[cfg(test)]
+use crate::attempt_fixture::*;
 
 #[cfg(test)]
 use crate::run_fixture::DbRunFixture;
@@ -1410,10 +1430,10 @@ mod tests {
         saved.store(&service.store, &run).await.unwrap();
         service
             .store
-            .put(
-                "node-attempts",
-                json!({"id":held,"runId":run,"nodeId":"destination","released":false}),
-            )
+            .put_attempt_fixture(json!({
+                "id": held, "runId": run,
+                "nodeId": crate::nodes::LOCAL_NODE_ID, "released": false,
+            }))
             .await
             .unwrap();
         service
@@ -1421,9 +1441,12 @@ mod tests {
             .change_run(
                 &run,
                 crate::runs::RunChanges {
-                    boundary: Some(
-                        json!({"moveRequest":null,"moveReservation":held,"nodeState":"resuming"}),
-                    ),
+                    placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {
+                        move_request: Some(None),
+                        move_reservation: Some(Some(held.clone())),
+                        node_state: Some(Some("resuming".into())),
+                        ..Default::default()
+                    })),
                     ..Default::default()
                 },
             )
@@ -1433,12 +1456,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            service
-                .store
-                .get("node-attempts", &held)
-                .await
-                .unwrap()
-                .unwrap()["released"],
+            service.store.attempt_fixture(&held).await.unwrap().unwrap()["released"],
             true
         );
         let current = service.store.run(&run).await.unwrap();
@@ -1448,10 +1466,10 @@ mod tests {
             let held = crate::config::id();
             service
                 .store
-                .put(
-                    "node-attempts",
-                    json!({"id":held,"runId":run,"nodeId":"destination","released":false}),
-                )
+                .put_attempt_fixture(json!({
+                    "id": held, "runId": run,
+                    "nodeId": crate::nodes::LOCAL_NODE_ID, "released": false,
+                }))
                 .await
                 .unwrap();
             let cause = crate::run_retry::Cause::classify(
@@ -1473,7 +1491,11 @@ mod tests {
                         cancel_requested_at: Some(None),
                         recovery_pending: Some(false),
                         retry: Some(Some(retry)),
-                        boundary: Some(json!({"moveReservation":held,"nodeState":"resuming"})),
+                        placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {
+                            move_reservation: Some(Some(held.clone())),
+                            node_state: Some(Some("resuming".into())),
+                            ..Default::default()
+                        })),
                         ..Default::default()
                     },
                 )
@@ -1485,12 +1507,7 @@ mod tests {
                 assert!(super::super::retry::expire(&service, &run).await.unwrap());
             }
             assert_eq!(
-                service
-                    .store
-                    .get("node-attempts", &held)
-                    .await
-                    .unwrap()
-                    .unwrap()["released"],
+                service.store.attempt_fixture(&held).await.unwrap().unwrap()["released"],
                 true
             );
             assert!(service.store.run(&run).await.unwrap()["moveReservation"].is_null());
@@ -2403,7 +2420,17 @@ mod tests {
                     crate::runs::RunChanges {
                         status: Some(RunStatus::Queued),
                         cancel_requested_at: Some(cancelled.then(now)),
-                        boundary: Some(json!({ "moveRequest": { "nodeId": "destination", "idle": idle, "automatic": false } })),
+                        placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {
+                            move_request: Some(Some(
+                                serde_json::from_value(json!({
+                                    "nodeId": "destination", "reservation": "pending-destination",
+                                    "idle": idle, "automatic": false,
+                                    "resources": { "cpu": 1, "memoryMiB": 128, "diskMiB": 128 },
+                                }))
+                                .unwrap(),
+                            )),
+                            ..Default::default()
+                        })),
                         ..Default::default()
                     },
                 )
@@ -2775,9 +2802,13 @@ mod tests {
                             status: Some(RunStatus::Queued),
                             retry: Some(Some(retry)),
                             cancel_requested_at: Some(cancelled.then(now)),
-                            boundary: Some(
-                                json!({ "nativeModeInterruption": null, "moveRequest": null }),
-                            ),
+                            placement: Some(Box::new(
+                                crate::nodes::run_placement::PlacementChanges {
+                                    native_mode_interruption: Some(None),
+                                    move_request: Some(None),
+                                    ..Default::default()
+                                },
+                            )),
                             ..Default::default()
                         },
                     )?;
@@ -2821,24 +2852,46 @@ mod tests {
         let (_root, service, _chat, run, _workspace) = fixture().await;
         for (movement, same_attempt) in [(true, true), (false, true), (true, false)] {
             let id = run.clone();
-            service.store.transaction(move |db| {
-                db.change_run(&id, crate::runs::RunChanges {
-                    status: Some(RunStatus::Queued), cancel_requested_at: Some(None),
-                    boundary: Some(json!({ "moveRequest": movement.then(|| json!({ "nodeId": "destination" })) })),
-                    ..Default::default()
-                })?;
-                let saved = RunCheckpoint::from_value(json!({
-                    "prepared": { "backend": "firecracker", "isolated": true },
-                    "runnerId": if same_attempt { "attempt" } else { "replacement" },
-                    "completed": false, "terminalCode": 75, "remainingMs": null,
-                    "controllerRecoveries": 4, "controllerRecoveryReservation": "attempt",
-                }))?;
-                saved.store_in(db, &id)?;
-                assert_eq!(finish_recovery(db, &id, Some(&saved))?, movement && same_attempt);
-                let durable = RunCheckpoint::load_in(db, &id)?.unwrap();
-                assert_eq!(durable.controller_recoveries(), 4);
-                Ok(())
-            }).await.unwrap();
+            service
+                .store
+                .transaction(move |db| {
+                    db.change_run(
+                        &id,
+                        crate::runs::RunChanges {
+                            status: Some(RunStatus::Queued),
+                            cancel_requested_at: Some(None),
+                            placement: Some(Box::new(
+                                crate::nodes::run_placement::PlacementChanges {
+                                    move_request: Some(movement.then(|| {
+                                        serde_json::from_value(json!({
+                            "nodeId": "destination",
+                            "reservation": "pending-destination",
+                            "resources": { "cpu": 1, "memoryMiB": 128, "diskMiB": 128 },
+                        })).unwrap()
+                                    })),
+                                    ..Default::default()
+                                },
+                            )),
+                            ..Default::default()
+                        },
+                    )?;
+                    let saved = RunCheckpoint::from_value(json!({
+                        "prepared": { "backend": "firecracker", "isolated": true },
+                        "runnerId": if same_attempt { "attempt" } else { "replacement" },
+                        "completed": false, "terminalCode": 75, "remainingMs": null,
+                        "controllerRecoveries": 4, "controllerRecoveryReservation": "attempt",
+                    }))?;
+                    saved.store_in(db, &id)?;
+                    assert_eq!(
+                        finish_recovery(db, &id, Some(&saved))?,
+                        movement && same_attempt
+                    );
+                    let durable = RunCheckpoint::load_in(db, &id)?.unwrap();
+                    assert_eq!(durable.controller_recoveries(), 4);
+                    Ok(())
+                })
+                .await
+                .unwrap();
         }
         service.shutdown.cancel();
     }
@@ -2862,7 +2915,12 @@ mod tests {
                         crate::runs::RunChanges {
                             status: Some(RunStatus::Queued),
                             cancel_requested_at: Some(cancelled.then(now)),
-                            boundary: Some(json!({ "moveRequest": null })),
+                            placement: Some(Box::new(
+                                crate::nodes::run_placement::PlacementChanges {
+                                    move_request: Some(None),
+                                    ..Default::default()
+                                },
+                            )),
                             ..Default::default()
                         },
                     )?;
@@ -2909,29 +2967,66 @@ mod tests {
                 (true, false, true),
             ] {
                 let id = run.clone();
-                service.store.transaction(move |db| {
-                    db.change_run(&id, crate::runs::RunChanges {
-                        status: Some(RunStatus::Queued), session_id: Some(None),
-                        cancel_requested_at: Some(cancelled.then(now)),
-                        boundary: Some(json!({ "nativeModeInterruption": mode.then(crate::config::id) })),
-                        ..Default::default()
-                    })?;
-                    let saved = RunCheckpoint::from_value(json!({
-                        "prepared": { "backend": "native", "isolated": true },
-                        "runnerId": "attempt", "completed": false, "terminalCode": 75,
-                        "remainingMs": if expired { Some(0) } else { None },
-                        "controllerRecoveries": count, "controllerRecoveryReservation": "attempt",
-                    }))?;
-                    saved.store_in(db, &id)?;
-                    let admitted = finish_recovery(db, &id, Some(&saved))?;
-                    assert_eq!(admitted, mode && !cancelled && !expired || count == 3 && !cancelled && !expired,
-                               "count={count}, mode={mode}, cancelled={cancelled}, expired={expired}");
-                    let current = db.run_state(&id)?.unwrap();
-                    if cancelled { assert_eq!(current.status, RunStatus::Cancelled); }
-                    if expired && !cancelled { assert_eq!(current.status, RunStatus::Failed); }
-                    if admitted { assert!(RunCheckpoint::load_in(db, &id)?.unwrap().has_controller_recovery_reservation()); }
-                    Ok(())
-                }).await.unwrap();
+                service
+                    .store
+                    .transaction(move |db| {
+                        db.change_run(
+                            &id,
+                            crate::runs::RunChanges {
+                                status: Some(RunStatus::Queued),
+                                session_id: Some(None),
+                                cancel_requested_at: Some(cancelled.then(now)),
+                                placement: Some(Box::new(
+                                    crate::nodes::run_placement::PlacementChanges {
+                                        native_mode_interruption: Some(
+                                            mode.then(crate::config::id),
+                                        ),
+                                        ..Default::default()
+                                    },
+                                )),
+                                ..Default::default()
+                            },
+                        )?;
+
+                        let saved = RunCheckpoint::from_value(json!({
+                            "prepared": {
+                                "backend": "native",
+                                "isolated": true,
+                            },
+                            "runnerId": "attempt",
+                            "completed": false,
+                            "terminalCode": 75,
+                            "remainingMs": if expired { Some(0) } else { None },
+                            "controllerRecoveries": count,
+                            "controllerRecoveryReservation": "attempt",
+                        }))?;
+                        saved.store_in(db, &id)?;
+
+                        let admitted = finish_recovery(db, &id, Some(&saved))?;
+                        let should_admit = (mode || count == 3) && !cancelled && !expired;
+                        assert_eq!(
+                            admitted, should_admit,
+                            "count={count}, mode={mode}, cancelled={cancelled}, expired={expired}"
+                        );
+
+                        let current = db.run_state(&id)?.unwrap();
+                        if cancelled {
+                            assert_eq!(current.status, RunStatus::Cancelled);
+                        }
+                        if expired && !cancelled {
+                            assert_eq!(current.status, RunStatus::Failed);
+                        }
+                        if admitted {
+                            assert!(
+                                RunCheckpoint::load_in(db, &id)?
+                                    .unwrap()
+                                    .has_controller_recovery_reservation()
+                            );
+                        }
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
             }
         }
         service.shutdown.cancel();
@@ -3553,7 +3648,7 @@ mod tests {
             config.runner_url = format!("http://{address}");
             config.public_url = config.runner_url.clone();
             let node = if remote {
-                "offline-node"
+                "00000000-0000-4000-8000-0000000000ef"
             } else {
                 crate::nodes::LOCAL_NODE_ID
             };
@@ -3595,15 +3690,24 @@ mod tests {
             }))
             .unwrap();
             checkpoint.store(&service.store, &run_id).await.unwrap();
+            if remote {
+                use crate::node_fixture::StoreNodeFixture;
+
+                service
+                    .store
+                    .put_node_fixture(json!({
+                        "id": node, "accepting": false, "lastSeen": 0,
+                        "capabilities": { "backend": "native", "kvm": false },
+                    }))
+                    .await
+                    .unwrap();
+            }
             service
                 .store
-                .put(
-                    "node-attempts",
-                    json!({
-                        "id": "old-attempt", "runId": run_id,
-                        "nodeId": node, "released": false,
-                    }),
-                )
+                .put_attempt_fixture(json!({
+                    "id": "old-attempt", "runId": run_id,
+                    "nodeId": node, "released": false,
+                }))
                 .await
                 .unwrap();
 
@@ -3624,7 +3728,7 @@ mod tests {
             assert_eq!(requests.load(Ordering::Relaxed), 1);
             let attempt = service
                 .store
-                .get("node-attempts", "old-attempt")
+                .attempt_fixture("old-attempt")
                 .await
                 .unwrap()
                 .unwrap();

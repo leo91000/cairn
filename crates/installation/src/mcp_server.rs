@@ -709,16 +709,16 @@ pub(crate) async fn operation(
             .await;
     }
     if let Some(op) = crate::capabilities::node_operation(name) {
-        return op
-            .invoke(
-                s,
-                args,
-                crate::capabilities::ResumeContext::Public(
-                    scopes.to_vec(),
-                    credential.map(str::to_owned),
-                ),
-            )
-            .await;
+        // Keep placement futures from inflating every public RPC stack frame.
+        return Box::pin(op.invoke(
+            s,
+            args,
+            crate::capabilities::ResumeContext::Public(
+                scopes.to_vec(),
+                credential.map(str::to_owned),
+            ),
+        ))
+        .await;
     }
     if let Some(op) = crate::capabilities::resource_operation(name) {
         return op

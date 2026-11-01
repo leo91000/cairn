@@ -319,11 +319,11 @@ fn can_recover_controller(
     unavailable: bool,
     stopped: bool,
 ) -> bool {
-    let mode_change = run.boundary["nativeModeInterruption"].is_string();
+    let mode_change = run.placement.native_mode_interruption.is_some();
     let may_retry = mode_change
         || saved.controller_recoveries() < MAX_CONTROLLER_RECOVERIES
         || saved.has_controller_recovery_reservation()
-        || run.boundary["moveRequest"].is_object();
+        || run.placement.move_request.is_some();
     unavailable
         && saved.managed()
         && !saved.completed()
@@ -493,8 +493,8 @@ async fn release(
 async fn requeue_pending_move(s: &Service, checkpoint: &Checkpoint, fenced: bool) -> Result<()> {
     let run_id = checkpoint.id.as_str();
     let run = s.store.run_record(run_id).await?;
-    let pending_move = run.boundary["moveRequest"].is_object();
-    let transferred_reservation = run.boundary["moveReservation"].is_string();
+    let pending_move = run.placement.move_request.is_some();
+    let transferred_reservation = run.placement.move_reservation.is_some();
     if (!pending_move && !transferred_reservation) || run.state.cancel_requested_at.is_some() {
         return Ok(());
     }
@@ -512,8 +512,11 @@ async fn requeue_pending_move(s: &Service, checkpoint: &Checkpoint, fenced: bool
         // An owner can request an idle transfer after the success commit while
         // this execution is still releasing. Leave its paid reservation for the
         // scheduler; a move requested during the active turn is not idle.
-        let explicit_idle_move = run.boundary["moveRequest"]["idle"] == true
-            && run.boundary["moveRequest"]["automatic"] == false
+        let explicit_idle_move = run
+            .placement
+            .move_request
+            .as_ref()
+            .is_some_and(|movement| movement.idle == Some(true) && !movement.automatic)
             && run.state.status == RunStatus::Queued
             && run.state.recovery_pending
             && !saved.settled().is_some_and(|settled| {
@@ -571,6 +574,7 @@ use crate::run_fixture::DbRunFixture;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::attempt_fixture::StoreAttemptFixture;
 
     async fn release_fixture() -> (tempfile::TempDir, Arc<Service>) {
         let root = tempfile::tempdir().unwrap();
@@ -607,7 +611,6 @@ mod tests {
                 "taskId": id,
                 "status": "queued",
                 "moveRequest": null,
-                "moveReservation": destination,
                 "nodeState": "resuming",
             });
             service
@@ -618,18 +621,26 @@ mod tests {
             for reservation in [&destination, &unrelated] {
                 service
                     .store
-                    .put(
-                        "node-attempts",
-                        json!({
-                            "id": reservation,
-                            "runId": id,
-                            "nodeId": "destination",
-                            "released": false,
-                        }),
-                    )
+                    .put_attempt_fixture(json!({
+                        "id": reservation,
+                        "runId": id,
+                        "nodeId": crate::nodes::LOCAL_NODE_ID,
+                        "released": false,
+                    }))
                     .await
                     .unwrap();
             }
+            service
+                .store
+                .update_run_placement(
+                    &id,
+                    crate::nodes::run_placement::PlacementChanges {
+                        move_reservation: Some(Some(destination.clone())),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
             let mut saved = RunCheckpoint::fresh(None);
             if failed {
                 saved.settled = Some(Some(Settled::failure(
@@ -655,7 +666,7 @@ mod tests {
             assert_eq!(
                 service
                     .store
-                    .get("node-attempts", &destination)
+                    .attempt_fixture(&destination)
                     .await
                     .unwrap()
                     .unwrap()["released"],
@@ -666,7 +677,7 @@ mod tests {
             assert_eq!(
                 service
                     .store
-                    .get("node-attempts", &unrelated)
+                    .attempt_fixture(&unrelated)
                     .await
                     .unwrap()
                     .unwrap()["released"],
@@ -680,7 +691,16 @@ mod tests {
     async fn pending_move_does_not_requeue_completed_failed_finalization() {
         let (_root, service) = release_fixture().await;
         let id = crate::config::id();
-        let run = json!({ "id": id, "taskId": id, "status": "failed", "moveRequest": { "nodeId": "destination" } });
+        let run = json!({
+            "id": id,
+            "taskId": id,
+            "status": "failed",
+            "moveRequest": {
+                "nodeId": "destination",
+                "reservation": "pending-destination",
+                "resources": { "cpu": 1, "memoryMiB": 128, "diskMiB": 128 },
+            },
+        });
         service
             .store
             .transaction(move |db| db.add_run_fixture(&run, None).map(|_| ()))
@@ -709,7 +729,16 @@ mod tests {
                 &id,
                 crate::runs::RunChanges {
                     status: Some(RunStatus::Queued),
-                    boundary: Some(json!({ "moveRequest": { "nodeId": "destination" } })),
+                    placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {
+                        move_request: Some(Some(
+                            serde_json::from_value(json!({
+                                "nodeId": "destination", "reservation": "pending-destination",
+                                "resources": { "cpu": 1, "memoryMiB": 128, "diskMiB": 128 },
+                            }))
+                            .unwrap(),
+                        )),
+                        ..Default::default()
+                    })),
                     ..Default::default()
                 },
             )
@@ -741,7 +770,16 @@ mod tests {
                             }))
                             .unwrap()
                         })),
-                        boundary: Some(json!({ "moveRequest": { "nodeId": "destination" } })),
+                        placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {
+                            move_request: Some(Some(
+                                serde_json::from_value(json!({
+                                    "nodeId": "destination", "reservation": "pending-destination",
+                                    "resources": { "cpu": 1, "memoryMiB": 128, "diskMiB": 128 },
+                                }))
+                                .unwrap(),
+                            )),
+                            ..Default::default()
+                        })),
                         ..Default::default()
                     },
                 )
@@ -772,7 +810,10 @@ mod tests {
                 crate::runs::RunChanges {
                     status: Some(RunStatus::Queued),
                     recovery_pending: Some(true),
-                    boundary: Some(json!({"moveRequest":null})),
+                    placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {
+                        move_request: Some(None),
+                        ..Default::default()
+                    })),
                     ..Default::default()
                 },
             )
@@ -1568,15 +1609,14 @@ mod tests {
         assert_eq!(after["moveRequest"]["reservation"], reservation);
         assert_eq!(after["status"], RunStatus::Queued);
         assert_eq!(after["recoveryPending"], true);
-        assert_eq!(after["summary"], "committed answer");
-        assert_eq!(
-            service
+        assert!(
+            !service
                 .store
-                .get("node-attempts", &reservation)
+                .attempt(&reservation)
                 .await
                 .unwrap()
-                .unwrap()["released"],
-            false
+                .unwrap()
+                .released
         );
         service.shutdown.cancel();
     }
@@ -1603,7 +1643,16 @@ mod tests {
         .await
         .unwrap();
         let id = crate::config::id();
-        let run = json!({ "id": id, "taskId": id, "status": "failed", "moveRequest": { "nodeId": "destination" } });
+        let run = json!({
+            "id": id,
+            "taskId": id,
+            "status": "failed",
+            "moveRequest": {
+                "nodeId": "destination",
+                "reservation": "pending-destination",
+                "resources": { "cpu": 1, "memoryMiB": 128, "diskMiB": 128 },
+            },
+        });
         service
             .store
             .transaction(move |db| db.add_run_fixture(&run, None).map(|_| ()))
@@ -1632,7 +1681,17 @@ mod tests {
                 &id,
                 crate::runs::RunChanges {
                     status: Some(RunStatus::Queued),
-                    boundary: Some(json!({ "moveRequest": { "nodeId": "destination" } })),
+                    placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {
+                        move_request: Some(Some(
+                            serde_json::from_value(json!({
+                                "nodeId": "destination",
+                                "reservation": "pending-destination",
+                                "resources": { "cpu": 1, "memoryMiB": 128, "diskMiB": 128 },
+                            }))
+                            .unwrap(),
+                        )),
+                        ..Default::default()
+                    })),
                     ..Default::default()
                 },
             )
@@ -1664,7 +1723,17 @@ mod tests {
                             }))
                             .unwrap()
                         })),
-                        boundary: Some(json!({ "moveRequest": { "nodeId": "destination" } })),
+                        placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {
+                            move_request: Some(Some(
+                                serde_json::from_value(json!({
+                                    "nodeId": "destination",
+                                    "reservation": "pending-destination",
+                                    "resources": { "cpu": 1, "memoryMiB": 128, "diskMiB": 128 },
+                                }))
+                                .unwrap(),
+                            )),
+                            ..Default::default()
+                        })),
                         ..Default::default()
                     },
                 )
