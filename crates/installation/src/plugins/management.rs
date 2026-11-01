@@ -345,6 +345,7 @@ pub(crate) async fn invoke(
                 instance.as_deref().unwrap(),
                 &data,
                 authorize.clone(),
+                authority.clone(),
             )
             .await?;
             Output::Enabled { instance: value }
@@ -355,6 +356,7 @@ pub(crate) async fn invoke(
                 &plugin,
                 instance.as_deref().unwrap(),
                 authorize.clone(),
+                authority.clone(),
             )
             .await?;
             Output::Deleted { deleted: true }
@@ -467,6 +469,7 @@ pub(crate) async fn invoke(
                         &plugin,
                         instance.as_deref().unwrap(),
                         authorize.clone(),
+                        authority.clone(),
                     )
                     .await?;
                     Output::Disconnected {

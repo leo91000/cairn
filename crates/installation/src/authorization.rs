@@ -248,4 +248,183 @@ mod tests {
         assert_eq!(f.s.store.run(&f.run).await.unwrap()["status"], "running");
         f.s.shutdown.cancel();
     }
+
+    async fn oauth_instance(f: &Fixture) -> crate::plugins::connections::Connection {
+        let id = crate::config::id();
+        let mut connection = crate::plugins::connections::Connection::draft(
+            &id,
+            "gmail",
+            json!({ "clientId": "fixture-client" }),
+            Vec::new(),
+        );
+        connection.enabled = true;
+        connection.name = "Fixture OAuth account".into();
+        connection.revision = crate::config::id();
+        let saved = connection.clone();
+        f.s.store
+            .transaction(move |db| db.save_plugin_instance(&saved))
+            .await
+            .unwrap();
+        f.s.vault
+            .set(
+                &crate::plugins::connections::credential_key(&id),
+                &json!({ "token": "synthetic-credential" }),
+            )
+            .await
+            .unwrap();
+        connection
+    }
+
+    #[tokio::test]
+    async fn plugin_lifecycle_mutations_recheck_live_delegation_before_publication() {
+        for kind in ["enabled", "delete"] {
+            let (f, bearer) = delegated().await;
+            let connection = oauth_instance(&f).await;
+            let before = serde_json::to_value(&connection).unwrap();
+            let (_, authority) = crate::installation_mcp::authorize_with_authority(&f.s, &bearer)
+                .await
+                .unwrap();
+            // The initial semantic check succeeds, then the external hierarchy
+            // changes without a local grant, package or instance revision.
+            let moved = f.moved_parent.clone();
+            let authority = authority.with_recheck_guard(move |_| {
+                moved.store(true, Ordering::SeqCst);
+                Box::pin(async { Ok(()) })
+            });
+            let mut input = json!({
+                "kind": kind,
+                "pluginId": "gmail",
+                "instanceId": connection.id,
+            });
+            if kind == "enabled" {
+                input["data"] = json!({ "enabled": false });
+            }
+            let error = crate::plugins::management::invoke(
+                &f.s,
+                serde_json::from_value(input).unwrap(),
+                Some(&bearer),
+                false,
+                Some(authority),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.status, 403);
+            let after = f.s.store.plugin_instance(&connection.id).await.unwrap();
+            assert_eq!(
+                after.map(|v| serde_json::to_value(v).unwrap()),
+                Some(before),
+                "{kind} changed a plugin instance after delegation ceased to cover it"
+            );
+            assert!(
+                f.s.vault
+                    .get(&crate::plugins::connections::credential_key(&connection.id))
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            f.s.shutdown.cancel();
+        }
+    }
+
+    #[tokio::test]
+    async fn oauth_disconnect_rechecks_live_delegation_after_the_instance_lock() {
+        let (f, bearer) = delegated().await;
+        let connection = oauth_instance(&f).await;
+        let before = serde_json::to_value(&connection).unwrap();
+        let checked = Arc::new(tokio::sync::Notify::new());
+        let completed = checked.clone();
+        let (_, authority) = crate::installation_mcp::authorize_with_authority(&f.s, &bearer)
+            .await
+            .unwrap();
+        let authority = authority.with_recheck_guard(move |_| {
+            completed.notify_one();
+            Box::pin(async { Ok(()) })
+        });
+        let instance_lock = f.s.plugins.oauth_flows.lock(&connection.id);
+        let guard = instance_lock.lock().await;
+        let service = f.s.clone();
+        let input = serde_json::from_value(json!({
+            "kind": "disconnect", "pluginId": "gmail", "instanceId": connection.id,
+        }))
+        .unwrap();
+        let disconnect = tokio::spawn(async move {
+            crate::plugins::management::invoke(
+                &service,
+                input,
+                Some(&bearer),
+                false,
+                Some(authority),
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), checked.notified())
+            .await
+            .unwrap();
+        f.moved_parent.store(true, Ordering::SeqCst);
+        drop(guard);
+        let error = disconnect.await.unwrap().unwrap_err();
+        assert_eq!(error.status, 403);
+        let after = f.s.store.plugin_instance(&connection.id).await.unwrap();
+        assert_eq!(
+            after.map(|v| serde_json::to_value(v).unwrap()),
+            Some(before),
+            "disconnect changed the instance before its final authority refusal"
+        );
+        assert!(
+            f.s.vault
+                .get(&crate::plugins::connections::credential_key(&connection.id))
+                .await
+                .unwrap()
+                .is_some(),
+            "disconnect deleted the credential after losing delegation coverage"
+        );
+        f.s.shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn oauth_disconnect_keeps_the_instance_mutex_free_during_live_checks() {
+        let (f, bearer) = delegated().await;
+        let connection = oauth_instance(&f).await;
+        let (_, authority) = crate::installation_mcp::authorize_with_authority(&f.s, &bearer)
+            .await
+            .unwrap();
+        let instance = connection.id.clone();
+        let authority = authority.with_recheck_guard(move |s| {
+            let instance = instance.clone();
+            Box::pin(async move {
+                // A hierarchy resolver may need this same account's OAuth
+                // token. It must be able to acquire the refresh mutex.
+                let lock = s.plugins.oauth_flows.lock(&instance);
+                let _guard = lock.lock().await;
+                Ok(())
+            })
+        });
+        let input = serde_json::from_value(json!({
+            "kind": "disconnect", "pluginId": "gmail", "instanceId": connection.id,
+        }))
+        .unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            crate::plugins::management::invoke(&f.s, input, Some(&bearer), false, Some(authority)),
+        )
+        .await
+        .expect("live resource checks deadlocked on the OAuth mutex")
+        .unwrap();
+        assert!(
+            !f.s.store
+                .plugin_instance(&connection.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .enabled
+        );
+        assert!(
+            f.s.vault
+                .get(&crate::plugins::connections::credential_key(&connection.id))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        f.s.shutdown.cancel();
+    }
 }

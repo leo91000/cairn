@@ -634,12 +634,11 @@ pub(crate) async fn disconnect<F>(
     plugin: &str,
     instance: &str,
     authorize: F,
+    management: Option<super::management::Authority>,
 ) -> Result<Value>
 where
     F: Fn(&crate::store::Db<'_>) -> Result<()> + Send + Sync + 'static,
 {
-    let lock = s.plugins.oauth_flows.lock(instance);
-    let _guard = lock.lock().await;
     let package = registry::active(s, plugin).await?;
     let oauth = package
         .manifest
@@ -648,10 +647,26 @@ where
         .and_then(|c| c.oauth.as_ref())
         .ok_or_else(|| Error::bad("This plugin has no OAuth account."))?;
     let connection = connections::get(s, plugin, instance).await?;
-    let key = connections::credential_key(instance);
-    let saved = s.vault.get(&key).await?;
+    let lock = s.plugins.oauth_flows.lock(instance);
+    let guard = loop {
+        let guard = lock.lock().await;
+        let Some(authority) = &management else {
+            break guard;
+        };
+        // Resource ancestry may itself refresh this account. Never resolve it
+        // while holding its OAuth mutex. If someone acquires the lock during
+        // that check, wait and recheck again before the mutation.
+        drop(guard);
+        authority.recheck(s).await?;
+        if let Ok(guard) = lock.try_lock() {
+            break guard;
+        }
+    };
     let expected = connection.clone();
-    s.store
+    let expected_package = package.clone();
+    let vault = s.vault.clone();
+    let saved = s
+        .store
         .transaction(move |db| {
             authorize(db)?;
             let mut current = db.plugin_instance(&expected.id)?.ok_or_else(expired)?;
@@ -660,6 +675,22 @@ where
                     "This account changed. Reload it before disconnecting.",
                 ));
             }
+            if !expected_package.builtin {
+                let package = db.plugin_package(&expected_package.manifest.id)?;
+                if package.active.as_deref() != Some(&expected_package.manifest.version)
+                    || package.approvals.get(&expected_package.manifest.version)
+                        != Some(&expected_package.digest)
+                {
+                    return Err(Error::conflict(
+                        "The plugin package changed. Retry disconnecting.",
+                    ));
+                }
+            }
+            let key = connections::credential_key(&expected.id);
+            let saved = db
+                .kv(&format!("mcp-secret:{key}"))?
+                .map(|value| vault.decrypt(&key, &value))
+                .transpose()?;
             current.enabled = false;
             current.revision = id();
             current.updated_at = now();
@@ -676,9 +707,11 @@ where
             db.audit(
                 "plugin.oauth.disconnected",
                 &json!({ "instance": expected.id, "plugin": expected.plugin_id }),
-            )
+            )?;
+            Ok(saved)
         })
         .await?;
+    drop(guard);
     s.plugins.changed.notify_one();
     s.plugins.files.forget(instance);
     s.plugins.program_caches.forget(instance);
@@ -690,6 +723,9 @@ where
         if let Some(token) = token {
             let endpoint = target(s, &package.manifest, endpoint, "https")?;
             let body = serde_urlencoded::to_string([("token", token)]).map_err(Error::internal)?;
+            if let Some(authority) = &management {
+                authority.recheck(s).await?;
+            }
             revoked = Some(
                 s.plugins
                     .http

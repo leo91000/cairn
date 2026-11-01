@@ -1152,7 +1152,7 @@ pub async fn get(s: &Service, plugin_id: &str, connection_id: &str) -> Result<Co
 }
 
 pub async fn remove(s: &Service, plugin_id: &str, connection_id: &str) -> Result<Value> {
-    remove_authorized(s, plugin_id, connection_id, |_| Ok(())).await
+    remove_authorized(s, plugin_id, connection_id, |_| Ok(()), None).await
 }
 
 pub(crate) async fn remove_authorized<F>(
@@ -1160,6 +1160,7 @@ pub(crate) async fn remove_authorized<F>(
     plugin_id: &str,
     connection_id: &str,
     authorize_management: F,
+    management: Option<super::management::Authority>,
 ) -> Result<Value>
 where
     F: Fn(&Db<'_>) -> Result<()> + Send + Sync + 'static,
@@ -1167,6 +1168,9 @@ where
     get(s, plugin_id, connection_id).await?;
     let forgotten_instance = connection_id.to_owned();
     let connection_id = connection_id.to_owned();
+    if let Some(authority) = &management {
+        authority.recheck(s).await?;
+    }
     s.store
         .transaction(move |db| {
             authorize_management(db)?;
@@ -1246,7 +1250,7 @@ pub async fn set_enabled(
     id: &str,
     input: &cairn_contracts::PluginEnabledInput,
 ) -> Result<cairn_contracts::PluginConnection> {
-    set_enabled_authorized(s, plugin_id, id, input, |_| Ok(())).await
+    set_enabled_authorized(s, plugin_id, id, input, |_| Ok(()), None).await
 }
 
 pub(crate) async fn set_enabled_authorized<F>(
@@ -1255,6 +1259,7 @@ pub(crate) async fn set_enabled_authorized<F>(
     id: &str,
     input: &cairn_contracts::PluginEnabledInput,
     authorize_management: F,
+    management: Option<super::management::Authority>,
 ) -> Result<cairn_contracts::PluginConnection>
 where
     F: Fn(&Db<'_>) -> Result<()> + Send + Sync + 'static,
@@ -1272,6 +1277,9 @@ where
         false
     };
     let id = id.to_owned();
+    if let Some(authority) = &management {
+        authority.recheck(s).await?;
+    }
     let value = s
         .store
         .transaction(move |db| {
