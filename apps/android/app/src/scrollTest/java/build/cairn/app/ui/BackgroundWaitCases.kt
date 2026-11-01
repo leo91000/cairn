@@ -1297,6 +1297,7 @@ abstract class BackgroundWaitCases {
                                                                     reasoningEffort = "high"
                                                                 ),
                                                             ),
+                                                        serviceTiers = emptyList(),
                                                     ),
                                                 ),
                                             checkedAt = now,

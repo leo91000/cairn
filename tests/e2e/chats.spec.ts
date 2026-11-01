@@ -1376,6 +1376,7 @@ test('failed replies show the current error instead of an old answer and can be 
 })
 
 test('same-provider quota resume submits the saved turn with the picker-applied speed', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
   const chat = await workspace.api('/api/chats', 'POST', {})
   const turnId = randomUUID()
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: turnId, text: 'Keep this Codex turn and session' })
@@ -1477,6 +1478,7 @@ test('same-provider quota resume submits the saved turn with the picker-applied 
 })
 
 test('same-provider quota resume submits the changed model default and unchanged saved effort', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
   const changed = await createFailedCodexQuotaChat(workspace, {
     model: 'fixture-fast',
     reasoning: 'low',
