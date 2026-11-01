@@ -5,8 +5,13 @@ import kotlinx.serialization.Serializable
 
 @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
-data class ResumeRunInput(val runId: String) {
-
+data class ResumeRunInput(
+    val runId: String,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val selection: ResumeExecutionSelection? = null,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val turnId: String? = null,
+) {
     init {
         java.util.UUID.fromString(runId)
     }

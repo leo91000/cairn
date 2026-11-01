@@ -4296,6 +4296,131 @@ async fn resume_run_is_one_capability_on_http_public_and_installation() {
 }
 
 #[tokio::test]
+async fn installation_resume_selection_authorizes_target_before_catalog_discovery() {
+    let root = TempDir::new().unwrap();
+    std::fs::create_dir(root.path().join("home")).unwrap();
+    let config = cairn_installation::config::Config {
+        codex_bin: common::fixture("codex.mjs"),
+        ..common::config(root.path())
+    };
+    let s = Service::new(config).await.unwrap();
+    common::relay_fixture::claimed(&s).await.unwrap();
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
+
+    let caller_agent = enabled_main(&s).await;
+    let (_, caller_configuration) = active_run(&s, &caller_agent).await;
+    let caller_token = text(&caller_configuration["env"], "CAIRN_MCP_RUN_TOKEN");
+
+    let target_agent = s
+        .agent_fixture(
+            json!({
+                "name": "Native resume target",
+                "provider": "codex",
+                "access": {
+                    "backend": "auto",
+                    "nodes": [cairn_installation::nodes::LOCAL_NODE_ID],
+                },
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let chat = s
+        .chat_create(json!({ "agentId": target_agent["id"] }))
+        .await
+        .unwrap();
+    let chat_id = text(&chat, "id").to_owned();
+    let turn_id = uuid::Uuid::new_v4().to_string();
+    s.chat_send(
+        &chat_id,
+        json!({
+            "id": turn_id,
+            "text": "Keep the existing native session",
+            "provider": "codex",
+            "model": "fixture-fast",
+            "reasoning": "high",
+            "speed": "priority",
+        }),
+    )
+    .await
+    .unwrap();
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let conversation = s.chat_detail(&chat_id).await.unwrap();
+    let target_id = text(&conversation, "runId").to_owned();
+    let queued = s.store.run(&target_id).await.unwrap();
+    assert_eq!(queued["trigger"], "chat");
+    assert_eq!(queued["chatExecution"]["messageId"], turn_id);
+    assert_eq!(
+        queued["snapshot"]["agent"]["access"]["nodes"],
+        json!([cairn_installation::nodes::LOCAL_NODE_ID]),
+        "the saved target must retain its authorized execution node",
+    );
+
+    let mut snapshot = queued["snapshot"].clone();
+    snapshot["agent"]["access"]["backend"] = "native".into();
+    snapshot["agent"]["access"]["nodes"] = json!([]);
+    s.store
+        .change_run(
+            &target_id,
+            cairn_installation::runs::RunChanges {
+                snapshot: Some(serde_json::from_value(snapshot).unwrap()),
+                status: Some(RunStatus::Cancelled),
+                resume_available: Some(true),
+                session_id: Some(Some("retained-native-session".into())),
+                workspace: Some(Some("/saved/native/workspace".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    common::set_checkpoint(
+        &s.store,
+        &target_id,
+        json!({
+            "launched": true,
+            "prepared": { "cwd": "/saved/native/workspace" },
+            "generation": "retained-generation",
+        }),
+    )
+    .await;
+    let before = s.store.run(&target_id).await.unwrap();
+
+    // A cache miss must stay untouched when the valid caller token cannot direct this target.
+    s.store.delete("codex-models:").await.unwrap();
+    let discovery_log = s.config.home.join(".codex/fixture-lifecycle.jsonl");
+    std::fs::create_dir_all(discovery_log.parent().unwrap()).unwrap();
+    std::fs::write(&discovery_log, "").unwrap();
+    assert!(s.store.kv("codex-models:").await.unwrap().is_none());
+
+    let (status, denied) = node_management_call(
+        &app,
+        "/mcp-installation",
+        caller_token,
+        "resume_run",
+        json!({
+            "runId": target_id,
+            "turnId": turn_id,
+            "selection": {
+                "model": "fixture-fast",
+                "reasoning": "high",
+                "speed": "priority",
+            },
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{denied}");
+    assert_eq!(denied["result"]["isError"], true, "{denied}");
+    let after = s.store.run(&target_id).await.unwrap();
+    assert_eq!(after["snapshot"], before["snapshot"]);
+    assert_eq!(after["status"], before["status"]);
+    assert_eq!(after, before);
+    assert!(std::fs::read_to_string(discovery_log).unwrap().is_empty());
+    assert!(s.store.kv("codex-models:").await.unwrap().is_none());
+}
+
+#[tokio::test]
 async fn concurrent_resume_run_publishes_once_and_a_revoked_grant_cannot_resume() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;

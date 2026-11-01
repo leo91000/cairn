@@ -8,7 +8,7 @@ use crate::{
     store::Db,
     validation::text,
 };
-use cairn_contracts::EventKind;
+use cairn_contracts::{EventKind, ResumeExecutionSelection};
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
@@ -94,6 +94,35 @@ impl Worker {
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        self.resume_selected_authorized(s, id, None, None, None, None, authorize)
+            .await
+    }
+
+    /// Resume a stopped run after checking the exact turn and the selected coding agent.
+    pub(crate) async fn resume_selected_authorized<F>(
+        &self,
+        s: &Service,
+        id: &str,
+        expected_turn_id: Option<String>,
+        selection: Option<ResumeExecutionSelection>,
+        selected_provider: Option<crate::provider::Provider>,
+        saved_auto_catalog: Option<Value>,
+        authorize: F,
+    ) -> Result<Value>
+    where
+        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+    {
+        if selection.is_some()
+            && expected_turn_id
+                .as_deref()
+                .is_none_or(|turn| turn.is_empty() || turn.chars().count() > 200)
+        {
+            return Err(Error::bad(
+                "A valid turn identifier is required when selecting a model for resume.",
+            ));
+        }
+        let preparation = self.run_preparation_lock(id).await;
+        let _preparation = preparation.lock_owned().await;
         let active = self.active.lock().await;
         if active.contains_key(id) {
             return Err(Error::conflict(
@@ -105,7 +134,14 @@ impl Worker {
             .store
             .transaction(move |db| {
                 authorize(db)?;
-                requeue(db, &id)
+                requeue(
+                    db,
+                    &id,
+                    expected_turn_id.as_deref(),
+                    selection.as_ref(),
+                    selected_provider,
+                    saved_auto_catalog.as_ref(),
+                )
             })
             .await?;
         self.notify();
@@ -235,10 +271,33 @@ fn request_cancel(db: &Db<'_>, id: &str, is_active: bool) -> Result<()> {
 }
 
 /// Queues a stopped run to continue its saved conversation.
-fn requeue(db: &Db<'_>, id: &str) -> Result<Value> {
+fn requeue(
+    db: &Db<'_>,
+    id: &str,
+    expected_turn_id: Option<&str>,
+    selection: Option<&ResumeExecutionSelection>,
+    selected_provider: Option<crate::provider::Provider>,
+    saved_auto_catalog: Option<&Value>,
+) -> Result<Value> {
     let record = required(db.run_record(id)?, "Run not found")?;
     let state = record.state.clone();
     let run = record.wire()?;
+    let turn_mismatch = if selection.is_some() {
+        expected_turn_id.is_none_or(|expected| {
+            text(&run, "trigger") != "chat"
+                || run["chatExecution"]["messageId"].as_str() != Some(expected)
+        })
+    } else {
+        expected_turn_id.is_some_and(|expected| {
+            run["chatExecution"]["messageId"].as_str() != Some(expected)
+                && run["missionTurnId"].as_str() != Some(expected)
+        })
+    };
+    if turn_mismatch {
+        return Err(Error::conflict(
+            "This turn changed before it could be resumed. Refresh the conversation.",
+        ));
+    }
     if run["backendMigration"].is_object() {
         return Err(Error::conflict(
             "Wait for the backend migration to finish before resuming.",
@@ -271,6 +330,42 @@ fn requeue(db: &Db<'_>, id: &str) -> Result<Value> {
             "This run has no saved conversation available to resume.",
         ));
     }
+    let pending_switch =
+        state.trigger == "chat" && crate::chats::coding_agent::pending_for_run(db, id)?;
+    if pending_switch && selection.is_none() {
+        return Err(Error::conflict(
+            "Wait for the provider switch to finish before resuming without a model selection.",
+        ));
+    }
+    crate::resume_selection::validate_saved_opencode_auto_catalog(&run, saved_auto_catalog)?;
+    let selected_snapshot = if let Some(selection) = selection {
+        if !resumable {
+            return Err(Error::conflict(
+                "A model can only be selected for a saved conversation resume.",
+            ));
+        }
+        let provider = crate::provider::Provider::of_run(&run)?;
+        if selected_provider != Some(provider) {
+            return Err(Error::conflict(
+                "The saved coding agent changed before it could be resumed. Refresh the conversation.",
+            ));
+        }
+        crate::resume_selection::validate_preserved_model(&run, selection)?;
+        let mut snapshot: cairn_contracts::RunSnapshot =
+            serde_json::from_value(run["snapshot"].clone())?;
+        if !selection.preserve_model {
+            snapshot.agent.settings.model.clone_from(&selection.model);
+        }
+        snapshot
+            .agent
+            .settings
+            .reasoning
+            .clone_from(&selection.reasoning);
+        snapshot.agent.settings.speed.clone_from(&selection.speed);
+        Some(snapshot)
+    } else {
+        None
+    };
     if db
         .active_run_states()?
         .iter()
@@ -285,6 +380,9 @@ fn requeue(db: &Db<'_>, id: &str) -> Result<Value> {
     // A manual resume may arrive before chat_tick observes the terminal turn.
     // Its scheduled continuation must not survive into the resumed execution.
     crate::chats::continuation::cancel_for_run(db, id)?;
+    if pending_switch && selection.is_some() {
+        crate::chats::coding_agent::cancel_in(db, id)?;
+    }
     if let Some(mut checkpoint) = checkpoint {
         checkpoint.remaining_ms = Some(crate::run_limits::budget_ms(&run["snapshot"]["agent"]));
         checkpoint.controller_recoveries = None;
@@ -319,6 +417,7 @@ fn requeue(db: &Db<'_>, id: &str) -> Result<Value> {
     }
     let wait_reason = (!before_launch).then_some("Resuming saved conversation.");
     let mut patch = crate::runs::RunChanges {
+        snapshot: selected_snapshot,
         status: Some(RunStatus::Queued),
         error: Some(None),
         recovery_pending: Some(true),
@@ -437,7 +536,24 @@ pub async fn routes(s: &Arc<Service>, input: &crate::http::Input) -> Option<Resu
         }
         ["runs", id, "resume"] => {
             async {
-                let command = crate::capabilities::RESUME_RUN.decode(json!({ "runId": id }))?;
+                let mut body = if input.body.is_null() {
+                    json!({})
+                } else {
+                    input.body.clone()
+                };
+                let Some(fields) = body.as_object_mut() else {
+                    return Err(Error::bad("Resume input must be an object."));
+                };
+                if fields
+                    .get("runId")
+                    .is_some_and(|requested| requested.as_str() != Some(id))
+                {
+                    return Err(Error::conflict(
+                        "Resume runId must match the run in the request path.",
+                    ));
+                }
+                fields.insert("runId".into(), (*id).into());
+                let command = crate::capabilities::RESUME_RUN.decode(body)?;
                 let context = crate::capabilities::ResumeContext::http(input)?;
                 let output = crate::capabilities::RESUME_RUN
                     .invoke(s, command, context)
@@ -458,6 +574,210 @@ use crate::run_fixture::DbRunFixture;
 mod tests {
     use super::*;
 
+    async fn chat_resume_store() -> (tempfile::TempDir, crate::store::Store) {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                db.add_run_fixture(
+                    &json!({
+                        "id": "chat-run",
+                        "taskId": "chat-task",
+                        "status": "failed",
+                        "trigger": "chat",
+                        "createdAt": 0,
+                        "resumeAvailable": true,
+                        "sessionId": "saved-session",
+                        "chatExecution": { "messageId": "chat-turn" },
+                        "snapshot": {
+                            "agent": {
+                                "id": crate::config::MAIN_AGENT_ID,
+                                "provider": "codex",
+                                "model": "",
+                                "reasoning": "low",
+                                "speed": "",
+                            },
+                        },
+                    }),
+                    None,
+                )?;
+                db.save_checkpoint_boundary(
+                    "chat-run",
+                    &json!({
+                        "launched": true,
+                        "prepared": { "cwd": "/workspace" },
+                        "generation": "saved-generation",
+                    }),
+                )?;
+                let chat = serde_json::from_value::<crate::chats::Conversation>(json!({
+                    "id": "chat",
+                    "agentId": crate::config::MAIN_AGENT_ID,
+                    "runId": "chat-run",
+                    "createdAt": 0,
+                    "updatedAt": 0,
+                }))
+                .unwrap();
+                db.save_conversation(&chat)?;
+                db.save_engine_switch(&crate::chats::engine_switch::EngineSwitch {
+                    chat_id: "chat".into(),
+                    request_id: "switch-request".into(),
+                    run_id: "chat-run".into(),
+                    turn_id: "chat-turn".into(),
+                    provider: "claude".into(),
+                    model: "claude-sonnet".into(),
+                    pending: true,
+                    error: None,
+                    retry_at: None,
+                    receipt_expires_at: crate::config::now() + 86_400_000,
+                    current_expires_at: None,
+                })?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        (root, store)
+    }
+
+    #[tokio::test]
+    async fn preserve_model_rechecks_current_snapshot_before_requeue_mutations() {
+        let (_root, store) = chat_resume_store().await;
+        let selection = ResumeExecutionSelection {
+            model: String::new(),
+            preserve_model: true,
+            reasoning: "high".into(),
+            speed: "standard".into(),
+        };
+        let preflight_run = store.read(|db| db.run("chat-run")).await.unwrap().unwrap();
+        crate::resume_selection::validate_preserved_model(&preflight_run, &selection).unwrap();
+
+        store
+            .transaction(|db| {
+                let mut snapshot = db.run("chat-run")?.unwrap()["snapshot"].clone();
+                snapshot["agent"]["model"] = "gpt-6-luna".into();
+                db.change_run(
+                    "chat-run",
+                    crate::runs::RunChanges {
+                        snapshot: Some(serde_json::from_value(snapshot)?),
+                        ..Default::default()
+                    },
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let before_run = store.read(|db| db.run("chat-run")).await.unwrap().unwrap();
+        let before_checkpoint = store
+            .read(|db| db.checkpoint_boundary("chat-run"))
+            .await
+            .unwrap()
+            .unwrap();
+        let before_switch = store
+            .read(|db| db.engine_switch("chat"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(before_run["snapshot"]["agent"]["model"], "gpt-6-luna");
+        assert!(before_switch.pending);
+
+        let rejected = store
+            .transaction(move |db| {
+                requeue(
+                    db,
+                    "chat-run",
+                    Some("chat-turn"),
+                    Some(&selection),
+                    Some(crate::provider::Provider::Codex),
+                )
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(rejected.status, 400);
+        assert!(rejected.message.contains("Preserving the saved model"));
+
+        let after_run = store.read(|db| db.run("chat-run")).await.unwrap().unwrap();
+        let after_checkpoint = store
+            .read(|db| db.checkpoint_boundary("chat-run"))
+            .await
+            .unwrap()
+            .unwrap();
+        let after_switch = store
+            .read(|db| db.engine_switch("chat"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after_run, before_run);
+        assert_eq!(after_checkpoint, before_checkpoint);
+        assert_eq!(
+            serde_json::to_value(after_switch).unwrap(),
+            serde_json::to_value(before_switch).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn preserve_model_blank_and_explicit_model_requeue_controls() {
+        let (_blank_root, blank_store) = chat_resume_store().await;
+        let preserve = ResumeExecutionSelection {
+            model: String::new(),
+            preserve_model: true,
+            reasoning: "high".into(),
+            speed: "standard".into(),
+        };
+        let blank_before = blank_store
+            .read(|db| db.run("chat-run"))
+            .await
+            .unwrap()
+            .unwrap();
+        crate::resume_selection::validate_preserved_model(&blank_before, &preserve).unwrap();
+        let blank_after = blank_store
+            .transaction(move |db| {
+                requeue(
+                    db,
+                    "chat-run",
+                    Some("chat-turn"),
+                    Some(&preserve),
+                    Some(crate::provider::Provider::Codex),
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(blank_after["status"], "queued");
+        assert_eq!(blank_after["snapshot"]["agent"]["model"], "");
+        assert_eq!(blank_after["snapshot"]["agent"]["reasoning"], "high");
+        assert_eq!(blank_after["snapshot"]["agent"]["speed"], "standard");
+        let cancelled_switch = blank_store
+            .read(|db| db.engine_switch("chat"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!cancelled_switch.pending);
+
+        let (_explicit_root, explicit_store) = chat_resume_store().await;
+        let explicit = ResumeExecutionSelection {
+            model: "gpt-6-luna".into(),
+            preserve_model: false,
+            reasoning: "xhigh".into(),
+            speed: "standard".into(),
+        };
+        let explicit_after = explicit_store
+            .transaction(move |db| {
+                requeue(
+                    db,
+                    "chat-run",
+                    Some("chat-turn"),
+                    Some(&explicit),
+                    Some(crate::provider::Provider::Codex),
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(explicit_after["status"], "queued");
+        assert_eq!(explicit_after["snapshot"]["agent"]["model"], "gpt-6-luna");
+        assert_eq!(explicit_after["snapshot"]["agent"]["reasoning"], "xhigh");
+        assert_eq!(explicit_after["snapshot"]["agent"]["speed"], "standard");
+    }
+
     #[tokio::test]
     async fn manual_mission_resume_changes_completed_turn_identity_but_keeps_interrupted_turns() {
         for completed in [false, true] {
@@ -473,7 +793,7 @@ mod tests {
                     db.save_checkpoint_boundary("mission", &json!({
                     "completed": completed, "outputInterrupted": true, "launched": true, "prepared": { "cwd": "/workspace" },
                 }))?;
-                    let resumed = requeue(db, "mission")?;
+                    let resumed = requeue(db, "mission", None, None, None)?;
                     assert_eq!(resumed["status"], "queued");
                     let checkpoint = db.checkpoint_boundary("mission")?.unwrap();
                     assert!(checkpoint["outputInterrupted"].is_null());

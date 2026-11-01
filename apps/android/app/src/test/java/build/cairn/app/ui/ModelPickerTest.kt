@@ -9,6 +9,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.*
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
+import org.junit.Assert.assertEquals
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -22,6 +23,115 @@ class ModelPickerTest : ModelPickerCases() {
     override fun captureReasoning() = capture("reasoning")
 
     override fun captureDefaultModel() = capture("claude-default")
+
+    @Test
+    fun resumeSelectionUsesTheDisplayedDefaultModelId() {
+        val catalog =
+            ModelCatalog(
+                models =
+                    listOf(
+                        CodingAgentModel(model = "gpt-6-sol", isDefault = true),
+                        CodingAgentModel(model = "gpt-6-luna"),
+                    )
+            )
+        val selected = selectedModel(catalog, "", "")
+
+        assertEquals("gpt-6-sol", resumeSelectionModelId(selected, "", ""))
+    }
+
+    @Test
+    fun resumeSelectionUsesModelDefaultAfterChangeAndKeepsSavedEffortWhenUnchanged() {
+        val catalog =
+            ModelCatalog(
+                models =
+                    listOf(
+                        CodingAgentModel(
+                            model = "gpt-6-sol",
+                            isDefault = true,
+                            defaultReasoningEffort = "medium",
+                        ),
+                        CodingAgentModel(
+                            model = "gpt-6-luna",
+                            defaultReasoningEffort = "low",
+                        ),
+                    )
+            )
+        val changedModel = selectedModel(catalog, "gpt-6-luna", "gpt-6-sol")
+        val unchangedModel = selectedModel(catalog, "", "gpt-6-sol")
+
+        assertEquals("low", pickerAppliedReasoning(changedModel, "", ""))
+        assertEquals("high", pickerAppliedReasoning(unchangedModel, "", "high"))
+    }
+
+    @Test
+    fun resumeSelectionKeepsUntouchedAndExplicitReasoningIntentsDistinct() {
+        assertEquals(
+            "",
+            resumeSelectionReasoning(ResumeReasoningIntent.Untouched, "", "", false, "low"),
+        )
+        assertEquals(
+            "high",
+            resumeSelectionReasoning(ResumeReasoningIntent.Untouched, "", "high", false, "low"),
+        )
+        assertEquals(
+            "low",
+            resumeSelectionReasoning(ResumeReasoningIntent.Untouched, "", "high", true, "low"),
+        )
+        assertEquals(
+            "low",
+            resumeSelectionReasoning(ResumeReasoningIntent.ModelDefault, "", "high", false, "low"),
+        )
+        assertEquals(
+            "xhigh",
+            resumeSelectionReasoning(
+                ResumeReasoningIntent.Effort("xhigh"),
+                "",
+                "high",
+                true,
+                "low",
+            ),
+        )
+        assertEquals(
+            "medium",
+            resumeSelectionReasoning(
+                ResumeReasoningIntent.Untouched,
+                "medium",
+                "high",
+                true,
+                "low",
+            ),
+        )
+    }
+
+    @Test
+    fun resumeSelectionPreservesExplicitGroupedRouteIds() {
+        val catalog =
+            ModelCatalog(
+                models =
+                    listOf(
+                        CodingAgentModel(
+                            model = "auto/sonnet",
+                            isDefault = true,
+                            routes =
+                                listOf(
+                                    ModelRoute(model = "opencode/sonnet"),
+                                    ModelRoute(model = "opencode-go/sonnet"),
+                                ),
+                        )
+                    )
+            )
+        val selected = selectedModel(catalog, "opencode/sonnet", "auto/sonnet")
+
+        assertEquals(
+            "opencode/sonnet",
+            resumeSelectionModelId(selected, "opencode/sonnet", "auto/sonnet"),
+        )
+        assertEquals(
+            "opencode/sonnet",
+            resumeSelectionModelId(selected, "", "opencode/sonnet"),
+        )
+        assertEquals("auto/sonnet", resumeSelectionModelId(selected, "", ""))
+    }
 
     private fun capture(name: String, tag: String = "model-settings-sheet") {
         val file = java.io.File("build/reports/model-picker/$name.png")
