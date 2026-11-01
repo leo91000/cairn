@@ -746,6 +746,9 @@ mod authorization_tests {
         for scoped in [false, true] {
             for original in ["owner", "other_agent", "caller"] {
                 let f = Fixture::new().await;
+                f.s.agent_fixture(json!({ "plugins": [f.instance] }), Some(MAIN_AGENT_ID))
+                    .await
+                    .unwrap();
                 let context = transfer_context(&f, MAIN_AGENT_ID, false).await;
                 let bytes = json!({ "data": "synthetic original bytes", "encoding": "text" });
                 let file = match original {
@@ -820,8 +823,11 @@ mod authorization_tests {
 
     #[tokio::test]
     async fn concurrent_appends_keep_all_origins_and_refuse_stale_reads_and_mime_inputs() {
-        use crate::config::MAIN_AGENT_ID;
+        use crate::{agent_fixture::AgentFixture, config::MAIN_AGENT_ID};
         let f = Fixture::new().await;
+        f.s.agent_fixture(json!({ "plugins": [f.instance] }), Some(MAIN_AGENT_ID))
+            .await
+            .unwrap();
         let first = transfer_context(&f, MAIN_AGENT_ID, true).await;
         let mut second = transfer_context(&f, MAIN_AGENT_ID, false).await;
         let snapshot = second.management.as_ref().unwrap().snapshot().unwrap();

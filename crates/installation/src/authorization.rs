@@ -272,7 +272,7 @@ mod tests {
             )
             .await
             .unwrap();
-        connection
+        f.s.store.plugin_instance(&id).await.unwrap().unwrap()
     }
 
     #[tokio::test]
