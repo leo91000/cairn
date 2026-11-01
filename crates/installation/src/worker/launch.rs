@@ -38,6 +38,10 @@ const SUMMARY_LIMIT: usize = 100_000;
 const HISTORY_LIMIT: usize = 16_000;
 const RESUME_PROMPT: &str = "Continue the same task from the saved conversation and current workspace. Execution was interrupted. Resume the original task from its last completed step. Preserve completed work and verify external effects before repeating any action.";
 
+#[cfg(test)]
+#[path = "launch_stream_tests.rs"]
+mod stream_tests;
+
 /// Runs `run` until it finishes, retrying on another account when usage runs out.
 pub(super) async fn execute(
     s: &Arc<Service>,
@@ -78,6 +82,8 @@ async fn execute_inner(
         sensitive,
         attempt_id: String::new(),
         reservation: None,
+        #[cfg(test)]
+        output_probe: None,
     };
     execution.mark_running().await?;
     timing.next("access");
@@ -136,6 +142,8 @@ struct Execution<'a> {
     directory: PathBuf,
     attempt_id: String,
     reservation: Option<(String, Value)>,
+    #[cfg(test)]
+    output_probe: Option<stream_tests::OutputProbe>,
 }
 
 /// The prepared execution environment shared by every launch attempt.
@@ -1106,6 +1114,10 @@ impl Execution<'_> {
                         }
                         if output.kind == output::OutputKind::Stdout {
                             activity.output();
+                            #[cfg(test)]
+                            if let Some(probe) = &self.output_probe {
+                                probe.canonical();
+                            }
                         }
                         crate::performance::wait("refresh_redactions", self.refresh_redactions()).await?;
                         exit.exhausted |= crate::performance::wait("persist_output", output::record(
@@ -1128,6 +1140,17 @@ impl Execution<'_> {
 
     /// Account credentials may rotate while the process runs.
     async fn refresh_redactions(&mut self) -> Result<()> {
+        #[cfg(test)]
+        if let Some(probe) = &self.output_probe {
+            probe.refresh().await;
+            if !self
+                .sensitive
+                .iter()
+                .any(|value| value == "rotated-test-secret")
+            {
+                self.sensitive.push("rotated-test-secret".into());
+            }
+        }
         let Some(account) = self.account.as_ref() else {
             return Ok(());
         };
@@ -1441,6 +1464,7 @@ mod tests {
                     directory: root.path().into(),
                     attempt_id: String::new(),
                     reservation: None,
+                    output_probe: None,
                 };
                 let workspace = Workspace {
                     prepared: json!({ "output": root.path().join("missing-result").to_string_lossy() }),
