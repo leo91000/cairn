@@ -24,6 +24,10 @@
     "architecture": "X64",
     "buildRun": "41265275077"
   },
+  "binarySha256": {
+    "cairn": "0d013b5cdd2115ce3f9fb6f418ed0a74ea4b88e97e89b2f06991056e6b2b00a4",
+    "examples/native_storage_qualifier": "915d21758599b073e7b8da16cc03c043d42d3aa463a7146fe3272253bc9223d1"
+  },
   "productionFiles": [
     "crates/installation/src/native/block.rs",
     "crates/installation/src/native/block/closing.rs",

@@ -425,7 +425,7 @@ def main():
                 self.end_headers()
                 self.wfile.write(response)
 
-        def start(run, long=True, lease=90000, expected='changed', measure=None, docker_script='', sandbox='workspace-write', close_repro=False):
+        def start(run, long=True, lease=90000, expected='changed', measure=None, docker_script='', sandbox='workspace-write', close_repro=False, diagnostic=None):
             seed(run)
             channel = data / 'runs' / run / 'home/cairn-mcp.sock'
             if run in mcp_servers:
@@ -517,18 +517,31 @@ def main():
             image.chmod(0o600)
             (data / 'runner-plans' / (attempt + '.json')).write_text(json.dumps(plan))
             manager('checkpoint', run=run, attempt=attempt)
-            api('/runs/' + attempt + '/lease', {'remainingMs': lease})
+            startup_deadline = time.monotonic() + 60
+            if diagnostic:
+                diagnostic.arm(attempt, lease, time.monotonic() + 180)
+            else:
+                api('/runs/' + attempt + '/lease', {'remainingMs': lease})
             startup = time.perf_counter()
-            api('/runs/' + attempt)
+            if diagnostic:
+                diagnostic.api('/runs/' + attempt, deadline=startup_deadline, stage='startup')
+            else:
+                api('/runs/' + attempt)
             def execution_ready():
                 if (state / (attempt + '.exit')).exists():
                     return True
                 # A preceding short execution can retain its readiness file.
                 return (managed(run) / 'ready').read_text() == attempt
 
-            eventually(execution_ready, timeout=600 if docker_script else 60)
+            if diagnostic:
+                diagnostic.until(execution_ready, startup_deadline, 'startup_readiness')
+            else:
+                eventually(execution_ready, timeout=600 if docker_script else 60)
             startup_ms = (time.perf_counter() - startup) * 1000
             if (state / (attempt + '.exit')).exists() and read_controller_result(state / (attempt + '.exit'))['StatusCode'] != 0:
+                if diagnostic:
+                    from native_close_repro import Inconclusive
+                    raise Inconclusive('startup_provider_completion')
                 for record in (state / (attempt + '.log')).read_text().splitlines():
                     event = json.loads(record)
                     if event.get('data'):
@@ -653,20 +666,35 @@ def main():
             events = Path('/sys/fs/cgroup') / group.lstrip('/') / 'cgroup.events'
             return not events.exists() or 'populated 1' not in events.read_text().splitlines()
 
-        def fenced(run, attempt, timeout=90, expect_flush_failure=False):
-            eventually(lambda: (state / (attempt + '.exit')).exists(), timeout=timeout)
-            # Completion writes the exit marker before retiring admission. Use
-            # the runner wait protocol to observe the entire ordered release.
-            result = api('/runs/' + attempt + '/wait')
+        def verify_terminal(run, attempt, result, expect_flush_failure=False, deadline=None):
             exit_file = state / (attempt + '.exit')
             if expect_flush_failure:
                 metrics['nativeFlushFailure'] = require_finalization_failure(exit_file, result)
             else:
                 match_controller_result(exit_file, result)
             assert not (state / (attempt + '.active')).exists()
-            active = command('systemctl', 'show', 'cairn-native-' + attempt + '.service', '--property=ActiveState', '--value').stdout.strip()
+            arguments = ['systemctl', 'show', 'cairn-native-' + attempt + '.service', '--property=ActiveState', '--value']
+            if deadline is None:
+                active = command(*arguments).stdout.strip()
+            else:
+                from native_close_repro import Inconclusive
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise Inconclusive('terminal_systemd_observation')
+                try:
+                    active = subprocess.run(arguments, capture_output=True, text=True,
+                                            check=True, timeout=remaining).stdout.strip()
+                except subprocess.TimeoutExpired:
+                    raise Inconclusive('terminal_systemd_observation') from None
             assert active not in ('active', 'activating'), 'Descendant escaped cgroup fencing.'
             assert not (state / 'native' / run / 'data/workspaces/seed').exists(), 'Stopped conversation filesystem is still mounted.'
+
+        def fenced(run, attempt, timeout=90, expect_flush_failure=False):
+            eventually(lambda: (state / (attempt + '.exit')).exists(), timeout=timeout)
+            # Completion writes the exit marker before retiring admission. Use
+            # the runner wait protocol to observe the entire ordered release.
+            result = api('/runs/' + attempt + '/wait')
+            verify_terminal(run, attempt, result, expect_flush_failure)
             snapshot = api('/disks/' + run + '/snapshot-completed')
             assert snapshot['manifest']['kind'] == 'native-ext4-v1'
             assert snapshot['manifest']['onDemand'] is True
@@ -678,9 +706,10 @@ def main():
             other = create()
             start_controller()
             if os.environ.get('CAIRN_NATIVE_CLOSE_REPRO') == '1':
-                from native_close_repro import qualify
+                from native_close_repro import Client, qualify
                 evidence = Path(os.environ.get('NATIVE_STORAGE_EVIDENCE_DIR', str(root / 'evidence')))
-                qualify(state, run, start, api, fenced, managed, metrics, evidence)
+                qualify(state, run, start, verify_terminal, managed, metrics, evidence,
+                        lambda: Client(state, token))
                 print('PASS: bounded native close stress; production cause remains unproved.')
                 return
             first = start(run, lease=45000, measure='nativeRetained')

@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 import urllib.error
 import urllib.request
@@ -112,7 +113,18 @@ def binary_proof(manifest, directory):
     fetch_archive(repository, artifact, archive)
     expected = {'cairn', 'examples/native_storage_qualifier', 'revision.json'}
     with zipfile.ZipFile(archive) as zipped:
-        files = [entry for entry in zipped.infolist() if not entry.is_dir()]
+        entries = zipped.infolist()
+        names = [entry.filename for entry in entries]
+        assert len(names) == len(set(names)), 'Duplicate ZIP member.'
+        for entry in entries:
+            kind = stat.S_IFMT(entry.external_attr >> 16)
+            if entry.is_dir():
+                assert entry.filename == 'examples/' and kind in (0, stat.S_IFDIR)
+            else:
+                assert entry.filename in expected and kind in (0, stat.S_IFREG)
+                assert not entry.external_attr & 0x10, 'Unexpected DOS directory member.'
+            assert not entry.flag_bits & 1, 'Encrypted ZIP member.'
+        files = [entry for entry in entries if not entry.is_dir()]
         assert len(files) == len(expected) and {entry.filename for entry in files} == expected
         assert sum(entry.file_size for entry in files) <= 1024 * 1024 * 1024
         for entry in files:
@@ -129,6 +141,7 @@ def binary_proof(manifest, directory):
         assert revision[key] == manifest['build'][key], key
     assert revision['image'] == manifest['build']['imageVersion']
     assert set(revision['sha256']) == expected - {'revision.json'}
+    assert revision['sha256'] == manifest['binarySha256']
     for name, checksum in revision['sha256'].items():
         assert len(checksum) == 64 and hashlib.sha256((directory / name).read_bytes()).hexdigest() == checksum
         (directory / name).chmod(0o700)

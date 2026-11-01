@@ -30,6 +30,17 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Initialize a content-free inconclusive setup report
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          root = Path(os.environ['NATIVE_STORAGE_EVIDENCE_DIR'])
+          root.mkdir(mode=0o700, parents=True, exist_ok=True)
+          report = root / 'native-close-repro.json'
+          report.write_text(json.dumps(dict(schemaVersion=1, status='inconclusive', stage='setup', samples=[])) + '\n')
+          report.chmod(0o600)
+          PY
       - name: Require the exact reviewed fixture and pinned source objects
         timeout-minutes: 3
         env:
@@ -64,6 +75,22 @@ jobs:
         timeout-minutes: 10
         run: |
           sudo env PATH="$PWD/.native-s3-test/bin:$PATH" CAIRN_NATIVE_DISPOSABLE_HOST=1 CAIRN_NATIVE_CLOSE_REPRO=1 PYTHONDONTWRITEBYTECODE=1 NATIVE_STORAGE_EVIDENCE_DIR="$NATIVE_STORAGE_EVIDENCE_DIR" .native-s3-test/bin/python scripts/tests/node_s3_test.py --native-runtime native-close-evidence/runtime/cairn --qualifier native-close-evidence/runtime/examples/native_storage_qualifier
+      - name: Return ownership of only the fixed technical report to the uploader
+        if: always()
+        run: |
+          sudo python3 - "$NATIVE_STORAGE_EVIDENCE_DIR/native-close-repro.json" "$(id -u)" "$(id -g)" <<'PY'
+          import os, stat, sys
+          try:
+              descriptor = os.open(sys.argv[1], os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+          except FileNotFoundError:
+              raise SystemExit(0)
+          try:
+              metadata = os.fstat(descriptor)
+              assert stat.S_ISREG(metadata.st_mode) and metadata.st_size <= 1024 * 1024
+              os.fchown(descriptor, int(sys.argv[2]), int(sys.argv[3]))
+          finally:
+              os.close(descriptor)
+          PY
       - name: Upload content-free diagnostic proof, never binaries or raw logs
         if: always()
         uses: actions/upload-artifact@v7.0.1
