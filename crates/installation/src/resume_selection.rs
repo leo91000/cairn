@@ -58,7 +58,10 @@ fn validate_shape(selection: &ResumeExecutionSelection) -> Result<()> {
     Ok(())
 }
 
-fn validate_preserved_model(run: &Value, selection: &ResumeExecutionSelection) -> Result<()> {
+pub(crate) fn validate_preserved_model(
+    run: &Value,
+    selection: &ResumeExecutionSelection,
+) -> Result<()> {
     if selection.preserve_model
         && (!selection.model.is_empty() || !text(&run["snapshot"]["agent"], "model").is_empty())
     {

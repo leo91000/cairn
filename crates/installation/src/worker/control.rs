@@ -346,6 +346,7 @@ fn requeue(
                 "The saved coding agent changed before it could be resumed. Refresh the conversation.",
             ));
         }
+        crate::resume_selection::validate_preserved_model(&run, selection)?;
         let mut snapshot: cairn_contracts::RunSnapshot =
             serde_json::from_value(run["snapshot"].clone())?;
         if !selection.preserve_model {
@@ -568,6 +569,210 @@ use crate::run_fixture::DbRunFixture;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn chat_resume_store() -> (tempfile::TempDir, crate::store::Store) {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                db.add_run_fixture(
+                    &json!({
+                        "id": "chat-run",
+                        "taskId": "chat-task",
+                        "status": "failed",
+                        "trigger": "chat",
+                        "createdAt": 0,
+                        "resumeAvailable": true,
+                        "sessionId": "saved-session",
+                        "chatExecution": { "messageId": "chat-turn" },
+                        "snapshot": {
+                            "agent": {
+                                "id": crate::config::MAIN_AGENT_ID,
+                                "provider": "codex",
+                                "model": "",
+                                "reasoning": "low",
+                                "speed": "",
+                            },
+                        },
+                    }),
+                    None,
+                )?;
+                db.save_checkpoint_boundary(
+                    "chat-run",
+                    &json!({
+                        "launched": true,
+                        "prepared": { "cwd": "/workspace" },
+                        "generation": "saved-generation",
+                    }),
+                )?;
+                let chat = serde_json::from_value::<crate::chats::Conversation>(json!({
+                    "id": "chat",
+                    "agentId": crate::config::MAIN_AGENT_ID,
+                    "runId": "chat-run",
+                    "createdAt": 0,
+                    "updatedAt": 0,
+                }))
+                .unwrap();
+                db.save_conversation(&chat)?;
+                db.save_engine_switch(&crate::chats::engine_switch::EngineSwitch {
+                    chat_id: "chat".into(),
+                    request_id: "switch-request".into(),
+                    run_id: "chat-run".into(),
+                    turn_id: "chat-turn".into(),
+                    provider: "claude".into(),
+                    model: "claude-sonnet".into(),
+                    pending: true,
+                    error: None,
+                    retry_at: None,
+                    receipt_expires_at: crate::config::now() + 86_400_000,
+                    current_expires_at: None,
+                })?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        (root, store)
+    }
+
+    #[tokio::test]
+    async fn preserve_model_rechecks_current_snapshot_before_requeue_mutations() {
+        let (_root, store) = chat_resume_store().await;
+        let selection = ResumeExecutionSelection {
+            model: String::new(),
+            preserve_model: true,
+            reasoning: "high".into(),
+            speed: "standard".into(),
+        };
+        let preflight_run = store.read(|db| db.run("chat-run")).await.unwrap().unwrap();
+        crate::resume_selection::validate_preserved_model(&preflight_run, &selection).unwrap();
+
+        store
+            .transaction(|db| {
+                let mut snapshot = db.run("chat-run")?.unwrap()["snapshot"].clone();
+                snapshot["agent"]["model"] = "gpt-6-luna".into();
+                db.change_run(
+                    "chat-run",
+                    crate::runs::RunChanges {
+                        snapshot: Some(serde_json::from_value(snapshot)?),
+                        ..Default::default()
+                    },
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let before_run = store.read(|db| db.run("chat-run")).await.unwrap().unwrap();
+        let before_checkpoint = store
+            .read(|db| db.checkpoint_boundary("chat-run"))
+            .await
+            .unwrap()
+            .unwrap();
+        let before_switch = store
+            .read(|db| db.engine_switch("chat"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(before_run["snapshot"]["agent"]["model"], "gpt-6-luna");
+        assert!(before_switch.pending);
+
+        let rejected = store
+            .transaction(move |db| {
+                requeue(
+                    db,
+                    "chat-run",
+                    Some("chat-turn"),
+                    Some(&selection),
+                    Some(crate::provider::Provider::Codex),
+                )
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(rejected.status, 400);
+        assert!(rejected.message.contains("Preserving the saved model"));
+
+        let after_run = store.read(|db| db.run("chat-run")).await.unwrap().unwrap();
+        let after_checkpoint = store
+            .read(|db| db.checkpoint_boundary("chat-run"))
+            .await
+            .unwrap()
+            .unwrap();
+        let after_switch = store
+            .read(|db| db.engine_switch("chat"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after_run, before_run);
+        assert_eq!(after_checkpoint, before_checkpoint);
+        assert_eq!(
+            serde_json::to_value(after_switch).unwrap(),
+            serde_json::to_value(before_switch).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn preserve_model_blank_and_explicit_model_requeue_controls() {
+        let (_blank_root, blank_store) = chat_resume_store().await;
+        let preserve = ResumeExecutionSelection {
+            model: String::new(),
+            preserve_model: true,
+            reasoning: "high".into(),
+            speed: "standard".into(),
+        };
+        let blank_before = blank_store
+            .read(|db| db.run("chat-run"))
+            .await
+            .unwrap()
+            .unwrap();
+        crate::resume_selection::validate_preserved_model(&blank_before, &preserve).unwrap();
+        let blank_after = blank_store
+            .transaction(|db| {
+                requeue(
+                    db,
+                    "chat-run",
+                    Some("chat-turn"),
+                    Some(&preserve),
+                    Some(crate::provider::Provider::Codex),
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(blank_after["status"], "queued");
+        assert_eq!(blank_after["snapshot"]["agent"]["model"], "");
+        assert_eq!(blank_after["snapshot"]["agent"]["reasoning"], "high");
+        assert_eq!(blank_after["snapshot"]["agent"]["speed"], "standard");
+        let cancelled_switch = blank_store
+            .read(|db| db.engine_switch("chat"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!cancelled_switch.pending);
+
+        let (_explicit_root, explicit_store) = chat_resume_store().await;
+        let explicit = ResumeExecutionSelection {
+            model: "gpt-6-luna".into(),
+            preserve_model: false,
+            reasoning: "xhigh".into(),
+            speed: "standard".into(),
+        };
+        let explicit_after = explicit_store
+            .transaction(|db| {
+                requeue(
+                    db,
+                    "chat-run",
+                    Some("chat-turn"),
+                    Some(&explicit),
+                    Some(crate::provider::Provider::Codex),
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(explicit_after["status"], "queued");
+        assert_eq!(explicit_after["snapshot"]["agent"]["model"], "gpt-6-luna");
+        assert_eq!(explicit_after["snapshot"]["agent"]["reasoning"], "xhigh");
+        assert_eq!(explicit_after["snapshot"]["agent"]["speed"], "standard");
+    }
 
     #[tokio::test]
     async fn manual_mission_resume_changes_completed_turn_identity_but_keeps_interrupted_turns() {
