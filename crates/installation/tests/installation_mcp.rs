@@ -5964,7 +5964,12 @@ async fn skill_source_without_instance_uses_an_instance_granted_for_that_source(
     );
     github.respond(
         &format!("repos/fixture/skills/commits/{version}"),
-        &json!({ "sha": version, "commit": { "tree": { "sha": tree } } }),
+        &json!({
+            "sha": version,
+            "commit": {
+                "tree": { "sha": tree },
+            },
+        }),
     );
     github.respond(
         &format!("repos/fixture/skills/git/trees/{tree}?recursive=1"),
@@ -5981,7 +5986,10 @@ async fn skill_source_without_instance_uses_an_instance_granted_for_that_source(
     );
     github.respond(
         &format!("repos/fixture/skills/git/blobs/{blob}"),
-        &json!({ "content": STANDARD.encode(manifest), "encoding": "base64" }),
+        &json!({
+            "content": STANDARD.encode(manifest),
+            "encoding": "base64",
+        }),
     );
 
     let (_, configuration) = active_run(&s, &main).await;

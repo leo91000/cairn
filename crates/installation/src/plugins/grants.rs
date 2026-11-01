@@ -1173,6 +1173,7 @@ mod migration_tests {
     #[tokio::test]
     async fn revoked_public_authority_cannot_widen_grants_after_the_publication_lock() {
         use axum::{Json, Router, routing::post};
+        use std::os::unix::fs::PermissionsExt;
         use std::sync::{
             Arc,
             atomic::{AtomicBool, Ordering},
@@ -1221,6 +1222,12 @@ mod migration_tests {
                 "token": "fixture-only",
             }))
             .unwrap(),
+        )
+        .await
+        .unwrap();
+        tokio::fs::set_permissions(
+            identity.join("identity.json"),
+            std::fs::Permissions::from_mode(0o600),
         )
         .await
         .unwrap();
