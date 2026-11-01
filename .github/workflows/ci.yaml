@@ -1,4 +1,4 @@
-name: Native 571 close diagnostic (manual, disposable, no build)
+name: Native 571 close diagnostic (manual, disposable, no Rust/runtime build)
 # Diagnostic branch only. Never merge this replacement into the product branch.
 
 on:
@@ -17,8 +17,8 @@ jobs:
   close-diagnostic:
     if: github.repository == 'leo91000/cairn' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/test/native-571-retirement-repro'
     runs-on: ubuntu-24.04
-    # No compile: artifact verification, disposable dependency setup and six
-    # existing 90-second terminal-evidence bounds fit within this job budget.
+    # Reuse the pinned Rust/runtime binaries. The unchanged fixture C probe may
+    # compile; setup and six 90-second terminal bounds fit within this job budget.
     timeout-minutes: 25
     env:
       CAIRN_NATIVE_DISPOSABLE_HOST: '1'

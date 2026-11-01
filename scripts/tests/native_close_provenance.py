@@ -144,9 +144,26 @@ def binary_proof(manifest, directory):
     assert revision['sha256'] == manifest['binarySha256']
     for name, checksum in revision['sha256'].items():
         assert len(checksum) == 64 and hashlib.sha256((directory / name).read_bytes()).hexdigest() == checksum
-        (directory / name).chmod(0o700)
+    execution_files = {}
+    for name, mode, role in (
+        ('cairn', 0o755, 'protected_entrypoint'),
+        ('examples/native_storage_qualifier', 0o700, 'root_only_manager'),
+    ):
+        target = directory / name
+        target.chmod(mode)
+        metadata = target.lstat()
+        regular = stat.S_ISREG(metadata.st_mode)
+        actual_mode = stat.S_IMODE(metadata.st_mode)
+        owner_matches = metadata.st_uid == os.geteuid()
+        unprivileged_read_execute = actual_mode & 0o055 == 0o055
+        required_access = unprivileged_read_execute if name == 'cairn' else actual_mode == 0o700
+        assert regular and owner_matches and actual_mode == mode and required_access
+        execution_files[name] = dict(role=role, type='regular', mode=f'{actual_mode:04o}',
+            ownerMatchesHostedRunner=owner_matches,
+            unprivilegedReadExecute=unprivileged_read_execute, requiredRoleAccess=required_access)
     return dict(artifact=artifact, revision=revision, buildJob=build['id'],
-                referenceQualificationStep='success', runtimeSourceIsDeployedBinary=False)
+                referenceQualificationStep='success', runtimeSourceIsDeployedBinary=False,
+                executionFiles=execution_files)
 
 
 def main():

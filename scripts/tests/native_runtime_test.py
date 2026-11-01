@@ -538,7 +538,23 @@ def main():
             else:
                 eventually(execution_ready, timeout=600 if docker_script else 60)
             startup_ms = (time.perf_counter() - startup) * 1000
-            if (state / (attempt + '.exit')).exists() and read_controller_result(state / (attempt + '.exit'))['StatusCode'] != 0:
+            exit_file = state / (attempt + '.exit')
+            exit_result = None
+            if exit_file.exists():
+                if diagnostic:
+                    from native_close_repro import Inconclusive, exit_metadata
+                    try:
+                        value = json.loads(exit_file.read_text())
+                    except json.JSONDecodeError:
+                        diagnostic.startup_exit = dict(schemaValid=False)
+                        raise Inconclusive('startup_exit_metadata') from None
+                    diagnostic.startup_exit = exit_metadata(value)
+                    if not diagnostic.startup_exit['schemaValid']:
+                        raise Inconclusive('startup_exit_metadata')
+                    exit_result = controller_result(value)
+                else:
+                    exit_result = read_controller_result(exit_file)
+            if exit_result is not None and exit_result['StatusCode'] != 0:
                 if diagnostic:
                     from native_close_repro import Inconclusive
                     raise Inconclusive('startup_provider_completion')

@@ -21,6 +21,21 @@ class Rejected(Exception):
         self.code = code
 
 
+def exit_metadata(value):
+    """Only fixed numeric/bool controller fields; never retain unknown content."""
+    if type(value) is int:
+        code, flags = value, {}
+    elif isinstance(value, dict):
+        code, flags = value.get('StatusCode'), value
+    else:
+        return dict(schemaValid=False)
+    if type(code) is not int or not 0 <= code <= 255:
+        return dict(schemaValid=False)
+    return dict(schemaValid=True, StatusCode=code,
+                FinalizationFailed=flags.get('FinalizationFailed') is True and code == 70,
+                PhysicalFinalized=flags.get('PhysicalFinalized') is True)
+
+
 class BufferedResponse:
     def __init__(self, data):
         self.data = data
@@ -50,6 +65,7 @@ class Client:
         self.active = set()
         self.lease_enabled, self.renewal = False, None
         self.lease_ack, self.lease_count = None, 0
+        self.startup_exit = None
 
     def request(self, path, body=None, *, deadline, stage):
         request = Request(path, deadline, stage)
@@ -327,6 +343,9 @@ def qualify(state, run, start, verify_terminal, managed, metrics, evidence, clie
                 sample['stage'] = stage
                 save()
                 result = client.api('/runs/' + attempt + '/wait', deadline=deadline, stage=stage)
+                sample['terminalResult'] = exit_metadata(result)
+                if not sample['terminalResult']['schemaValid']:
+                    raise Inconclusive('terminal_exit_metadata')
                 if stop_reason():
                     raise Inconclusive('workload_stopped')
                 if result['StatusCode'] != 0:
@@ -379,6 +398,8 @@ def qualify(state, run, start, verify_terminal, managed, metrics, evidence, clie
                 if attempt:
                     sample['attempt'] = attempt
                 sample['ownedRequestsRemaining'] = len(client.active)
+                if client.startup_exit is not None:
+                    sample['startupExit'] = client.startup_exit
                 sample['stopReason'] = stop_reason()
                 if attempt:
                     sample.update(activePresent=(state / (attempt + '.active')).exists(),
