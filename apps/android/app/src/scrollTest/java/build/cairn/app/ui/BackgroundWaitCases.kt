@@ -1417,7 +1417,10 @@ abstract class BackgroundWaitCases {
                                                                 ),
                                                             ),
                                                         serviceTiers =
-                                                            if (resumeBlankModelSpeedOnly)
+                                                            if (
+                                                                resumeBlankModelSpeedOnly ||
+                                                                    resumeResetIntent
+                                                            )
                                                                 listOf(
                                                                     ServiceTier(
                                                                         id = "priority",
