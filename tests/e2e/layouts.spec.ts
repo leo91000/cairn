@@ -55,7 +55,12 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
 
   // The rail (desktop) or the dock (phone) leads to the Fil, Missions and the Atelier.
   async function navigate(url: string) {
-    const documentStarted = await page.evaluate(() => performance.timeOrigin)
+    const documentIdentity = randomUUID()
+    await page.evaluate((identity) => {
+      const pageWindow = window as Window & { __cairnLayoutDocumentIdentity?: string }
+      pageWindow.__cairnLayoutDocumentIdentity = identity
+    }, documentIdentity)
+
     const destination = url.startsWith('/runs/') ? '/runs' : url === '/settings/installation' ? '/settings' : url
     const place = destination === '/' ? 'Fil' : destination === '/tasks' ? 'Missions' : 'Atelier'
     const navigation = page.getByRole('navigation', { name: /^(Workspace|Quick) navigation$/ }).filter({ visible: true })
@@ -103,7 +108,11 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
       await expect(page.locator('.run-title-meta')).toBeVisible()
     }
 
-    expect(await page.evaluate(() => performance.timeOrigin), 'Workspace navigation keeps the current document and its background polls').toBe(documentStarted)
+    const currentDocumentIdentity = await page.evaluate(() => {
+      const pageWindow = window as Window & { __cairnLayoutDocumentIdentity?: string }
+      return pageWindow.__cairnLayoutDocumentIdentity
+    })
+    expect(currentDocumentIdentity, 'Workspace navigation keeps the current document and its background polls').toBe(documentIdentity)
   }
 
   const screenshot = (name: string) => screenshotLayout(page, testInfo, name, colorScheme)
