@@ -1,5 +1,5 @@
 name: Cache compiled Rust targets
-description: Share one Rust cache, refreshed by the backend test job after source changes.
+description: Share one Rust cache, refreshed by the fixture build job after source changes.
 inputs:
   save:
     description: Whether this job owns cache publication.
