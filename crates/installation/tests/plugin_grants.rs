@@ -694,6 +694,100 @@ async fn legacy_full_grant_sync_clears_supplier_across_package_without_run_crede
 }
 
 #[tokio::test]
+async fn empty_explicit_supplier_choice_survives_later_legacy_profile_saves() {
+    let f = Fixture::new().await;
+    let without_credentials = common::package_install(
+        &f.s,
+        &json!({
+            "manifest": {
+                "id": "grant-probe",
+                "name": "Grant probe",
+                "version": "2",
+                "apiVersion": 2,
+                "capabilities": [],
+                "agentAccess": {},
+                "instructions": "Probe instructions",
+            },
+            "source": "return {}",
+        }),
+    )
+    .await
+    .unwrap();
+    common::package_approve(
+        &f.s,
+        "grant-probe",
+        "2",
+        text(&without_credentials, "digest"),
+    )
+    .await
+    .unwrap();
+
+    let current = f
+        .api("GET", json!({ "agentId": MAIN_AGENT_ID }))
+        .await
+        .unwrap();
+    f.api(
+        "PUT",
+        json!({
+            "agentId": MAIN_AGENT_ID,
+            "revision": current["revision"],
+            "grants": [{
+                "instanceId": f.instance,
+                "access": {
+                    "type": "selected",
+                    "contributions": [{
+                        "kind": "instructions",
+                        "name": "",
+                        "resources": [],
+                    }],
+                },
+            }],
+            "runCredentialInstances": [],
+        }),
+    )
+    .await
+    .unwrap();
+
+    let with_credentials = common::package_install(
+        &f.s,
+        &json!({
+            "manifest": {
+                "id": "grant-probe",
+                "name": "Grant probe",
+                "version": "3",
+                "apiVersion": 2,
+                "capabilities": [],
+                "agentAccess": {},
+                "runCredentials": {
+                    "files": [{
+                        "path": ".config/probe/value",
+                        "content": "reintroduced",
+                    }],
+                },
+            },
+            "source": "return {}",
+        }),
+    )
+    .await
+    .unwrap();
+    common::package_approve(&f.s, "grant-probe", "3", text(&with_credentials, "digest"))
+        .await
+        .unwrap();
+
+    f.s.agent_fixture(json!({ "plugins": [f.instance] }), Some(MAIN_AGENT_ID))
+        .await
+        .unwrap();
+    assert!(
+        cairn_installation::plugins::run_credentials::for_run(&f.s, MAIN_AGENT_ID, &[])
+            .await
+            .unwrap()
+            .files
+            .is_empty(),
+        "legacy profile saves must retain the explicit empty supplier choice"
+    );
+}
+
+#[tokio::test]
 async fn legacy_full_grant_sync_preserves_supplier_while_package_is_unavailable() {
     let f = Fixture::new().await;
     let profile = json!({ "plugins": [f.instance] });

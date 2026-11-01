@@ -665,6 +665,13 @@ pub(crate) async fn replace(
             }
 
             db.0.execute("UPDATE plugin_credential_suppliers SET instance_id=NULL WHERE agent_id=?", [&id])?;
+            for grant in &input.grants {
+                let (instance, _) = &packages[&grant.instance_id.to_string()];
+                db.0.execute(
+                    "INSERT OR IGNORE INTO plugin_credential_suppliers VALUES(?,?,NULL)",
+                    params![id, instance.plugin_id],
+                )?;
+            }
             for supplier in &input.run_credential_instances {
                 let (instance, _) = &packages[&supplier.to_string()];
                 db.0.execute(
