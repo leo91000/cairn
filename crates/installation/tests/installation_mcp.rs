@@ -3547,6 +3547,19 @@ async fn code_mode_truncates_one_completed_result_without_repeating_its_effect()
     )
     .await;
     assert_eq!(response["id"], 1);
+    let after = call(&s, &configuration, "list_chats", json!({})).await;
+    assert_eq!(
+        result(&after)["chats"].as_array().unwrap().len(),
+        before + 1,
+        "The oversized-result operation must have executed exactly once",
+    );
+    if response["result"]["isError"] == true {
+        assert_eq!(
+            response["result"]["content"][0]["text"],
+            "Code result exceeds 1 MiB. Filter results or read bounded pages.",
+            "Only the known result-budget failure qualifies the reference RED",
+        );
+    }
     assert_ne!(
         response["result"]["isError"], true,
         "A completed operation must not become a tool error because its result is large",
@@ -3561,11 +3574,6 @@ async fn code_mode_truncates_one_completed_result_without_repeating_its_effect()
             .contains("truncated")
     );
 
-    let after = call(&s, &configuration, "list_chats", json!({})).await;
-    assert_eq!(
-        result(&after)["chats"].as_array().unwrap().len(),
-        before + 1
-    );
     let next = call(
         &s,
         &configuration,
