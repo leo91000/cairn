@@ -348,12 +348,20 @@ impl Fixture {
     }
 
     async fn with_concurrency(concurrency: usize) -> Self {
+        Self::with_opencode_bin(concurrency, "opencode".into()).await
+    }
+
+    async fn with_opencode() -> Self {
+        Self::with_opencode_bin(2, common::fixture("opencode.mjs")).await
+    }
+
+    async fn with_opencode_bin(concurrency: usize, opencode_bin: String) -> Self {
         let root = TempDir::new().unwrap();
         std::fs::create_dir(root.path().join("home")).unwrap();
         let config = Config {
             codex_bin: common::fixture("codex.mjs"),
             claude_bin: common::fixture("claude.mjs"),
-            opencode_bin: "opencode".into(),
+            opencode_bin,
             opencode_go_usage_url: cairn_installation::accounts::opencode::USAGE_URL.into(),
             concurrency,
             worker_enabled: true,
@@ -5226,6 +5234,231 @@ async fn manual_resume_cancels_a_staged_switch_during_worker_fencing() {
     assert_eq!(receipt.request_id, switch_id);
     assert!(!receipt.pending);
 
+    fixture.stop(false).await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn chat_resume_selection_resolves_opencode_catalog_default_before_adapter_validation() {
+    use std::sync::atomic::AtomicBool;
+
+    let mut fixture = Fixture::with_opencode().await;
+    fixture.stop(false).await;
+    let data_dir = fixture.service.config.data_dir.clone();
+    let controller = Arc::new(Controller {
+        data: data_dir,
+        plans: tokio::sync::Mutex::new(Vec::new()),
+        failures: 0,
+        slots: 4,
+        hold: AtomicBool::new(true),
+    });
+    let app = Router::new()
+        .fallback(any(serve_controller))
+        .with_state(controller.clone());
+    let (listener, address) = common::bind().await;
+    common::reconfigure(&mut fixture.service, |config| {
+        config.runner_url = format!("http://{address}");
+    })
+    .await;
+    let s = fixture.service.clone();
+    let server = common::serve(listener, app);
+    let account = s
+        .accounts
+        .connect_api_key(
+            &s,
+            Provider::Opencode,
+            "OpenCode Zen",
+            "opencode",
+            "synthetic-resume-selection-key",
+            None,
+        )
+        .await
+        .unwrap();
+    let account_id = account.id.to_string();
+    let catalog = s.opencode.models(&s).await.unwrap();
+    let default_model = "auto/ling-3-1-flash-free";
+    assert_eq!(
+        catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["isDefault"] == true)
+            .unwrap()["model"],
+        default_model
+    );
+
+    let mut agent = s.agent_snapshot(MAIN_AGENT_ID).await.unwrap();
+    agent["id"] = id().into();
+    agent["name"] = "OpenCode resume fixture".into();
+    agent["provider"] = "opencode".into();
+    agent["model"] = "opencode/ling-3.1-flash-free".into();
+    agent["reasoning"] = "high".into();
+    agent["speed"] = "".into();
+    agent["access"]["sandbox"] = "yolo".into();
+    let agent = s.store.put_agent_fixture(agent).await.unwrap();
+    let chat = s
+        .chat_create(json!({ "agentId": text(&agent, "id") }))
+        .await
+        .unwrap();
+    let chat_id = text(&chat, "id").to_owned();
+    let mut sent = message("fixture:opencode-hang");
+    sent["provider"] = "opencode".into();
+    sent["model"] = "opencode/ling-3.1-flash-free".into();
+    sent["reasoning"] = "high".into();
+    let turn_id = text(&sent, "id").to_owned();
+    s.chat_send(&chat_id, sent).await.unwrap();
+    fixture.start().await;
+    let run_id = fixture.chat_run(&chat_id).await;
+    let running = fixture
+        .until(&run_id, |run| {
+            run["status"] == RunStatus::Running && run["sessionId"].is_string()
+        })
+        .await;
+    eventually(
+        Duration::from_secs(20),
+        Duration::from_millis(30),
+        async || {
+            controller
+                .plans
+                .lock()
+                .await
+                .iter()
+                .any(|plan| plan["runId"] == run_id)
+                .then_some(())
+        },
+    )
+    .await;
+    assert_eq!(running["snapshot"]["agent"]["provider"], "opencode");
+    assert_eq!(running["snapshot"]["agent"]["access"]["sandbox"], "yolo");
+
+    let session = common::relay_fixture::context(&s).await;
+    let client = reqwest::Client::new();
+    let relay_token = text(&session, "value").to_owned();
+    let resume = |selection: Value| {
+        client
+            .post(format!("{}/api/chats/{chat_id}/resume", fixture.url))
+            .header("x-test-relay-token", &relay_token)
+            .json(&json!({
+                "runId": run_id,
+                "turnId": turn_id,
+                "selection": selection,
+            }))
+    };
+    let stopped = client
+        .post(format!("{}/api/chats/{chat_id}/stop", fixture.url))
+        .header("x-test-relay-token", &relay_token)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    stopped.error_for_status().unwrap();
+    let cancelled = fixture
+        .until(&run_id, |run| {
+            run["status"] == RunStatus::Cancelled && run["resumeAvailable"] == true
+        })
+        .await;
+    let checkpoint_before = fixture.checkpoint(&run_id).await;
+    fixture.stop(false).await;
+    s.store
+        .change_run(
+            &run_id,
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Failed),
+                finished_at: Some(Some(now())),
+                error: Some(Some("Usage limit has been reached".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    for model in ["not-a-model", "openrouter/unlisted-model"] {
+        let response = resume(json!({ "model": model, "reasoning": "high", "speed": "" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{model}");
+        let unchanged = s.store.run(&run_id).await.unwrap();
+        assert_eq!(unchanged["status"], RunStatus::Failed);
+        assert_eq!(unchanged["snapshot"], cancelled["snapshot"]);
+    }
+
+    common::account_fixture::update_account_fixture(&s, &account_id, &json!({ "enabled": false }))
+        .await
+        .unwrap();
+    let no_default = resume(json!({ "model": "", "reasoning": "high", "speed": "" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_default.status(), StatusCode::BAD_REQUEST);
+    let unchanged = s.store.run(&run_id).await.unwrap();
+    assert_eq!(unchanged["status"], RunStatus::Failed);
+    assert_eq!(unchanged["snapshot"], cancelled["snapshot"]);
+    common::account_fixture::update_account_fixture(&s, &account_id, &json!({ "enabled": true }))
+        .await
+        .unwrap();
+
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
+    let (resume_status, resume_response) = api_post(
+        &app,
+        &relay_token,
+        &format!("/api/chats/{chat_id}/resume"),
+        json!({
+            "runId": run_id,
+            "turnId": turn_id,
+            "selection": { "model": "", "reasoning": "high", "speed": "" },
+        }),
+    )
+    .await;
+    assert_eq!(resume_status, StatusCode::OK, "{resume_response}");
+    let mut expected_snapshot = cancelled["snapshot"].clone();
+    expected_snapshot["agent"]["model"] = default_model.into();
+    expected_snapshot["agent"]["reasoning"] = "high".into();
+    expected_snapshot["agent"]["speed"] = "".into();
+    let queued = s.store.run(&run_id).await.unwrap();
+    assert_eq!(queued["status"], RunStatus::Queued);
+    assert_eq!(queued["snapshot"], expected_snapshot);
+    assert_eq!(queued["snapshot"]["agent"]["provider"], "opencode");
+    assert_eq!(queued["chatExecution"]["messageId"], turn_id);
+    assert_eq!(queued["sessionId"], cancelled["sessionId"]);
+    assert_eq!(queued["workspace"], cancelled["workspace"]);
+
+    controller
+        .hold
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    fixture.start().await;
+    let completed = fixture.until_finished(&run_id).await;
+    assert_eq!(completed["status"], RunStatus::Succeeded, "{completed}");
+    assert_eq!(completed["snapshot"], expected_snapshot);
+    for field in ["id", "taskId", "workspace", "sessionId", "chatExecution"] {
+        assert_eq!(completed[field], cancelled[field], "{field}");
+    }
+    assert_eq!(completed["id"], run_id);
+    assert_eq!(completed["chatExecution"]["messageId"], turn_id);
+    assert_eq!(
+        fixture.checkpoint(&run_id).await["generation"],
+        checkpoint_before["generation"]
+    );
+    let selected_plan = controller
+        .plans
+        .lock()
+        .await
+        .iter()
+        .find(|plan| {
+            plan["runId"] == run_id
+                && plan["chat"]["provider"] == "opencode"
+                && plan["chat"]["model"] == default_model
+                && plan["chat"]["execution"]["messageId"] == turn_id
+        })
+        .cloned()
+        .expect("the catalog-default OpenCode selection must reach the worker plan");
+    assert_eq!(selected_plan["sandbox"], "yolo");
+    assert_eq!(selected_plan["chat"]["sessionId"], cancelled["sessionId"]);
+    assert_eq!(selected_plan["chat"]["execution"]["messageId"], turn_id);
+    assert_eq!(
+        selected_plan["chat"]["execution"]["attachments"],
+        cancelled["chatExecution"]["attachments"]
+    );
     fixture.stop(false).await;
     server.abort();
 }

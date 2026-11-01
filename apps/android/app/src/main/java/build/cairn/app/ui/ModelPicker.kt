@@ -83,7 +83,7 @@ internal fun resumeSelectionModelId(
     selectedModel: CodingAgentModel?,
     model: String,
     savedModel: String,
-): String = selectedModel?.model ?: model.ifBlank { savedModel }
+): String = model.ifBlank { savedModel.ifBlank { selectedModel?.model.orEmpty() } }
 
 internal fun billingLabel(value: String) =
     when (value) {

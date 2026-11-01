@@ -39,6 +39,36 @@ class ModelPickerTest : ModelPickerCases() {
         assertEquals("gpt-6-sol", resumeSelectionModelId(selected, "", ""))
     }
 
+    @Test
+    fun resumeSelectionPreservesExplicitGroupedRouteIds() {
+        val catalog =
+            ModelCatalog(
+                models =
+                    listOf(
+                        CodingAgentModel(
+                            model = "auto/sonnet",
+                            isDefault = true,
+                            routes =
+                                listOf(
+                                    ModelRoute(model = "opencode/sonnet"),
+                                    ModelRoute(model = "opencode-go/sonnet"),
+                                ),
+                        )
+                    )
+            )
+        val selected = selectedModel(catalog, "opencode/sonnet", "auto/sonnet")
+
+        assertEquals(
+            "opencode/sonnet",
+            resumeSelectionModelId(selected, "opencode/sonnet", "auto/sonnet"),
+        )
+        assertEquals(
+            "opencode/sonnet",
+            resumeSelectionModelId(selected, "", "opencode/sonnet"),
+        )
+        assertEquals("auto/sonnet", resumeSelectionModelId(selected, "", ""))
+    }
+
     private fun capture(name: String, tag: String = "model-settings-sheet") {
         val file = java.io.File("build/reports/model-picker/$name.png")
         file.parentFile!!.mkdirs()

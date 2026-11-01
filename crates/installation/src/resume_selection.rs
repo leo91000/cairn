@@ -30,22 +30,17 @@ pub(crate) async fn validate(
         selection.speed = text(&run["snapshot"]["agent"], "speed").to_owned();
     }
     validate_shape(selection)?;
-    crate::models::validate_speed(&selection.speed)?;
+    validate_provider_speed(provider, &selection.speed)?;
+
+    let catalog = provider.adapter().model_catalog(s).await?;
+    validate_catalog(selection, &catalog)?;
+    validate_shape(selection)?;
 
     let mut agent = run["snapshot"]["agent"].clone();
     agent["model"] = selection.model.clone().into();
     agent["reasoning"] = selection.reasoning.clone().into();
     agent["speed"] = selection.speed.clone().into();
     provider.adapter().validate_agent(&agent)?;
-
-    let catalog = provider.adapter().model_catalog(s).await?;
-    let model_is_default = selection.model.is_empty();
-    validate_catalog(provider, selection, &catalog)?;
-    if model_is_default {
-        validate_shape(selection)?;
-        agent["model"] = selection.model.clone().into();
-        provider.adapter().validate_agent(&agent)?;
-    }
     Ok(provider)
 }
 
@@ -68,6 +63,16 @@ fn valid_effort(value: &str) -> bool {
             }))
 }
 
+fn validate_provider_speed(provider: Provider, speed: &str) -> Result<()> {
+    crate::models::validate_speed(speed)?;
+    if !speed.is_empty() && provider != Provider::Codex {
+        return Err(Error::bad(
+            "Speed applies only to Codex. Remove it or choose Codex for this resume.",
+        ));
+    }
+    Ok(())
+}
+
 fn model_row<'a>(catalog: &'a Value, model: &str) -> Option<(&'a Value, Option<&'a Value>)> {
     for row in catalog["models"].as_array()? {
         if row["model"] == model {
@@ -82,11 +87,7 @@ fn model_row<'a>(catalog: &'a Value, model: &str) -> Option<(&'a Value, Option<&
     None
 }
 
-fn validate_catalog(
-    provider: Provider,
-    selection: &mut ResumeExecutionSelection,
-    catalog: &Value,
-) -> Result<()> {
+fn validate_catalog(selection: &mut ResumeExecutionSelection, catalog: &Value) -> Result<()> {
     let selected_name = if selection.model.is_empty() {
         catalog["models"]
             .as_array()
@@ -129,11 +130,6 @@ fn validate_catalog(
         ));
     }
 
-    if !selection.speed.is_empty() && provider != Provider::Codex {
-        return Err(Error::bad(
-            "Speed applies only to Codex. Remove it or choose Codex for this resume.",
-        ));
-    }
     if !selection.speed.is_empty() && selection.speed != crate::models::STANDARD_SPEED {
         if let Some(tiers) = model["serviceTiers"].as_array()
             && !tiers.iter().any(|tier| tier["id"] == selection.speed)
@@ -173,7 +169,7 @@ mod tests {
                 }],
             }],
         });
-        validate_catalog(Provider::Opencode, &mut selection, &catalog).unwrap();
+        validate_catalog(&mut selection, &catalog).unwrap();
 
         let mut oversized = selection.clone();
         oversized.model = "m".repeat(121);
@@ -182,7 +178,7 @@ mod tests {
         let mut unlisted = selection.clone();
         unlisted.model = "openrouter/unlisted@revision+vision".into();
         assert!(validate_shape(&unlisted).is_ok());
-        assert!(validate_catalog(Provider::Opencode, &mut unlisted, &catalog).is_err());
+        assert!(validate_catalog(&mut unlisted, &catalog).is_err());
 
         let mut invalid_effort = selection;
         invalid_effort.reasoning = "2xhigh".into();
@@ -204,8 +200,27 @@ mod tests {
             }],
         });
 
-        validate_catalog(Provider::Codex, &mut selection, &catalog).unwrap();
+        validate_catalog(&mut selection, &catalog).unwrap();
 
         assert_eq!(selection.model, "gpt-6-sol");
+    }
+
+    #[test]
+    fn empty_model_selection_requires_a_catalog_default() {
+        let mut selection = ResumeExecutionSelection {
+            model: String::new(),
+            reasoning: String::new(),
+            speed: String::new(),
+        };
+        let catalog = serde_json::json!({
+            "models": [{
+                "model": "opencode/sonnet",
+                "isDefault": false,
+                "supportedReasoningEfforts": [{ "reasoningEffort": "high" }],
+            }],
+        });
+
+        assert!(validate_catalog(&mut selection, &catalog).is_err());
+        assert!(selection.model.is_empty());
     }
 }

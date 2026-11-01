@@ -306,6 +306,72 @@ abstract class BackgroundWaitCases {
         }
 
     @Test
+    fun savedOpenCodeGroupedRouteResumeSubmitsTheExplicitRouteId() =
+        conversation("failed", quota = true, resumeRouteSelection = true) { server ->
+            compose.onNodeWithTag("chat-quota").assertIsDisplayed()
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("Sonnet").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithTag("model-picker").performClick()
+            compose.onNodeWithText("OpenCode Zen · Crédits").performScrollTo().performClick()
+            compose.onNodeWithText("Terminé").performClick()
+            compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
+
+            val request = generateSequence {
+                server.takeRequest(5, TimeUnit.SECONDS)
+            }
+                .first {
+                    it.method == "POST" &&
+                        it.path?.endsWith("/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume") ==
+                            true
+                }
+            val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+            org.junit.Assert.assertEquals(
+                "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                body["chatId"]!!.jsonPrimitive.content,
+            )
+            org.junit.Assert.assertEquals(SAVED_RUN_ID, body["runId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("quota-turn", body["turnId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals(
+                "opencode/ling-3.1-flash-free",
+                body["selection"]!!.jsonObject["model"]!!.jsonPrimitive.content,
+            )
+        }
+
+    @Test
+    fun savedOpenCodeAutoRouteResumeSubmitsTheGroupedModelId() =
+        conversation("failed", quota = true, resumeRouteSelection = true) { server ->
+            compose.onNodeWithTag("chat-quota").assertIsDisplayed()
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("Sonnet").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithTag("model-picker").performClick()
+            compose.onNodeWithText("Auto").performClick()
+            compose.onNodeWithText("Terminé").performClick()
+            compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
+
+            val request = generateSequence {
+                server.takeRequest(5, TimeUnit.SECONDS)
+            }
+                .first {
+                    it.method == "POST" &&
+                        it.path?.endsWith("/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume") ==
+                            true
+                }
+            val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+            org.junit.Assert.assertEquals(
+                "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                body["chatId"]!!.jsonPrimitive.content,
+            )
+            org.junit.Assert.assertEquals(SAVED_RUN_ID, body["runId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("quota-turn", body["turnId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals(
+                "auto/sonnet",
+                body["selection"]!!.jsonObject["model"]!!.jsonPrimitive.content,
+            )
+        }
+
+    @Test
     fun relayedBackgroundWaitReplacesWorking() =
         conversation("running") {
             compose.onNodeWithTag("agent-waiting").assertExists()
@@ -643,6 +709,7 @@ abstract class BackgroundWaitCases {
         conditional: Boolean = false,
         quota: Boolean = false,
         resumeSelection: Boolean = false,
+        resumeRouteSelection: Boolean = false,
         codingAgentChoices: Boolean = false,
         initialAlternatives: String? = null,
         rejectSwitch: Boolean = false,
@@ -653,6 +720,7 @@ abstract class BackgroundWaitCases {
     ) {
         MockWebServer().use { server ->
             val now = System.currentTimeMillis()
+            val hasResumeSelection = resumeSelection || resumeRouteSelection
             val chat =
                 Chat(
                     id = "6cc6efab-10af-54c7-a91b-dcff664166a1",
@@ -666,10 +734,10 @@ abstract class BackgroundWaitCases {
                             id = SAVED_RUN_ID,
                             status = status,
                             startedAt = now - 60_000,
-                            resumeAvailable = resumeSelection,
-                            sessionId = if (resumeSelection) "saved-session" else null,
+                            resumeAvailable = hasResumeSelection,
+                            sessionId = if (hasResumeSelection) "saved-session" else null,
                             chatExecution =
-                                if (resumeSelection) ChatExecution(messageId = "quota-turn")
+                                if (hasResumeSelection) ChatExecution(messageId = "quota-turn")
                                 else null,
                             snapshot =
                                 Snapshot(
@@ -690,10 +758,16 @@ abstract class BackgroundWaitCases {
                                                     mcps = null,
                                                 ),
                                             provider =
-                                                if (quota && !resumeSelection) "claude"
+                                                if (resumeRouteSelection) "opencode"
+                                                else if (quota && !resumeSelection) "claude"
                                                 else "codex",
-                                            model = "",
-                                            reasoning = if (resumeSelection) "high" else "",
+                                            model = if (resumeRouteSelection) "auto/sonnet" else "",
+                                            reasoning =
+                                                when {
+                                                    resumeRouteSelection -> "medium"
+                                                    resumeSelection -> "high"
+                                                    else -> ""
+                                                },
                                             speed = if (resumeSelection) "priority" else "",
                                         ),
                                     task =
@@ -811,11 +885,11 @@ abstract class BackgroundWaitCases {
                                         """{"runId":"$SAVED_RUN_ID","turnId":"quota-turn","provider":"claude","choices":[{"provider":"codex","label":"$label"}]$progress}"""
                                 )
                         }
-                        if (resumeSelection && path.endsWith("/coding-agent"))
+                        if (hasResumeSelection && path.endsWith("/coding-agent"))
                             return MockResponse()
                                 .setHeader("Content-Type", "application/json")
                                 .setBody(
-                                    """{"runId":"$SAVED_RUN_ID","turnId":"quota-turn","provider":"codex","choices":[]}"""
+                                    """{"runId":"$SAVED_RUN_ID","turnId":"quota-turn","provider":"${if (resumeRouteSelection) "opencode" else "codex"}","choices":[]}"""
                                 )
 
                         if (
@@ -893,6 +967,68 @@ abstract class BackgroundWaitCases {
                                                         serviceTiers = emptyList(),
                                                     ),
                                                     CodingAgentModel(model = "gpt-6-luna"),
+                                                ),
+                                            checkedAt = now,
+                                        )
+                                    )
+                                "/api/installations/fixture/api/opencode/models" ->
+                                    wireJson.encodeToString(
+                                        ModelCatalog(
+                                            models =
+                                                listOf(
+                                                    CodingAgentModel(
+                                                        model = "auto/sonnet",
+                                                        displayName = "Sonnet",
+                                                        isDefault = true,
+                                                        supportedReasoningEfforts =
+                                                            listOf(
+                                                                ReasoningOption(
+                                                                    reasoningEffort = "medium"
+                                                                ),
+                                                                ReasoningOption(
+                                                                    reasoningEffort = "high"
+                                                                ),
+                                                            ),
+                                                        routes =
+                                                            listOf(
+                                                                ModelRoute(
+                                                                    model =
+                                                                        "opencode/ling-3.1-flash-free",
+                                                                    provider = "opencode",
+                                                                    providerName = "OpenCode Zen",
+                                                                    billing = "credits",
+                                                                    supportedReasoningEfforts =
+                                                                        listOf(
+                                                                            ReasoningOption(
+                                                                                reasoningEffort =
+                                                                                    "medium"
+                                                                            ),
+                                                                            ReasoningOption(
+                                                                                reasoningEffort =
+                                                                                    "high"
+                                                                            ),
+                                                                        ),
+                                                                ),
+                                                                ModelRoute(
+                                                                    model =
+                                                                        "opencode-go/ling-3.1-flash-free",
+                                                                    provider = "opencode-go",
+                                                                    providerName = "OpenCode Go",
+                                                                    billing = "subscription",
+                                                                    supportedReasoningEfforts =
+                                                                        listOf(
+                                                                            ReasoningOption(
+                                                                                reasoningEffort =
+                                                                                    "medium"
+                                                                            ),
+                                                                            ReasoningOption(
+                                                                                reasoningEffort =
+                                                                                    "high"
+                                                                            ),
+                                                                        ),
+                                                                ),
+                                                            ),
+                                                    )
                                                 ),
                                             checkedAt = now,
                                         )
