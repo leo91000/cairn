@@ -13,6 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       android: ${{ steps.scope.outputs.android }}
+      browser: ${{ steps.scope.outputs.browser }}
       contracts: ${{ steps.scope.outputs.contracts }}
     steps:
       - uses: actions/checkout@v7.0.1
@@ -31,8 +32,8 @@ jobs:
             ? ['ls-tree', '-r', '--name-only', '-z', process.env.HEAD]
             : ['diff', '--name-only', '-z', process.env.BASE, process.env.HEAD]
           const files = execFileSync('git', args, { encoding: 'utf8' }).split('\0')
-          const { android, contracts } = validationScope(files)
-          appendFileSync(process.env.GITHUB_OUTPUT, `android=${android}\ncontracts=${contracts}\n`)
+          const { android, browser, contracts } = validationScope(files)
+          appendFileSync(process.env.GITHUB_OUTPUT, `android=${android}\nbrowser=${browser}\ncontracts=${contracts}\n`)
           JS
   quality:
     runs-on: ubuntu-latest
@@ -81,25 +82,84 @@ jobs:
       - uses: gradle/actions/setup-gradle@v5
       - run: sdkmanager 'platforms;android-37.0' 'build-tools;36.0.0'
       - run: pnpm validate:pr android
+  browser:
+    name: browser (same-provider resume)
+    needs: scope
+    if: needs.scope.outputs.browser == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
+      CAIRN_BEACON_TEST_DATABASE_URL: postgres://cairn:test-only@postgres:5432/cairn_beacon_test
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+        env:
+          POSTGRES_USER: cairn
+          POSTGRES_PASSWORD: test-only
+          POSTGRES_DB: cairn_beacon_test
+        options: >-
+          --health-cmd "pg_isready -U cairn -d cairn_beacon_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    container:
+      image: mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27
+      options: --init --ipc=host
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: ./.github/actions/setup-pnpm
+        with:
+          cache: true
+      - name: Check browser image version
+        run: |
+          node --input-type=module <<'JS'
+          import { readFileSync } from 'node:fs'
+          const installed = JSON.parse(readFileSync('node_modules/@playwright/test/package.json', 'utf8')).version
+          const preinstalled = JSON.parse(readFileSync('/ms-playwright/.docker-info', 'utf8')).driverVersion
+          if (installed !== preinstalled)
+            throw new Error(`Update the pinned browser image: Playwright package ${installed}, image ${preinstalled}`)
+          JS
+      - name: Install the pinned Rust toolchain and build dependencies
+        run: |
+          apt-get update -qq
+          apt-get install -y --no-install-recommends build-essential curl libclang-dev libssl-dev pkg-config
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.97.1
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Build the manager fixtures and web assets
+        run: |
+          cargo build --locked -p cairn-installation --bin cairn --example worker_fixture --example browser_fixture
+          cargo build --locked -p cairn-beacon --bin cairn-beacon --example beacon_sql_fixture
+          VITE_CAIRN_TEST_RESUME_DIAGNOSTICS=true pnpm exec vite build --config apps/web/vite.config.ts
+      - name: Qualify the isolated Postgres fixture
+        run: pnpm exec tsx scripts/qualify-beacon-sql-fixture.ts
+      - name: Run the saved-chat resume journey
+        timeout-minutes: 10
+        run: pnpm test:e2e --project=journeys-chats tests/e2e/chats.spec.ts --grep 'same-provider quota resume' --workers=1 --fail-on-flaky-tests
+      - uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: browser-resume-selection-evidence
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 14
   required:
     name: PR validation required
-    needs: [scope, quality, contracts, android]
+    needs: [scope, quality, contracts, android, browser]
     if: always()
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
       - name: Require every selected check to pass
         env:
           RESULTS: ${{ toJSON(needs) }}
-        run: |
-          node --input-type=module <<'JS'
-          const jobs = JSON.parse(process.env.RESULTS)
-          for (const name of ['scope', 'quality']) {
-            if (jobs[name].result !== 'success')
-              throw new Error(`${name} did not pass`)
-          }
-          for (const name of ['contracts', 'android']) {
-            const expected = jobs.scope.outputs[name] === 'true' ? 'success' : 'skipped'
-            if (jobs[name].result !== expected)
-              throw new Error(`${name}: expected ${expected}, got ${jobs[name].result}`)
-          }
-          JS
+        run: node scripts/pr-validation-required.mjs

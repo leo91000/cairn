@@ -239,6 +239,8 @@ class AndroidTestFailureSummary : TestListener {
             var causesTruncated = false
             var framesTruncated = false
             var messagesTruncated = false
+            val resumeSourceLines = sortedSetOf<Int>()
+            var resumeSourceLinesTruncated = false
             var sdkFetch = false
             var io = false
             var timeout = false
@@ -263,6 +265,18 @@ class AndroidTestFailureSummary : TestListener {
                 val error = pending.removeFirst()
                 val frames = error.stackTrace
                 framesTruncated = framesTruncated || frames.size > 256
+                for (frame in frames.take(256)) {
+                    if (
+                        frame.fileName == "BackgroundWaitCases.kt" &&
+                            (frame.lineNumber in 270..489 ||
+                                frame.lineNumber in 491..621 ||
+                                frame.lineNumber in 637..742) &&
+                            frame.lineNumber !in resumeSourceLines
+                    ) {
+                        if (resumeSourceLines.size < 3) resumeSourceLines.add(frame.lineNumber)
+                        else resumeSourceLinesTruncated = true
+                    }
+                }
                 sdkFetch =
                     sdkFetch ||
                         frames.take(256).any {
@@ -290,7 +304,9 @@ class AndroidTestFailureSummary : TestListener {
                 "timeout=$timeout unknownHost=$unknownHost tlsHandshake=$tlsHandshake " +
                 "connection=$connection httpStatuses=${statuses.joinToString(",")} " +
                 "causesTruncated=$causesTruncated framesTruncated=$framesTruncated " +
-                "messagesTruncated=$messagesTruncated"
+                "messagesTruncated=$messagesTruncated " +
+                "resumeSourceLines=${resumeSourceLines.joinToString(",")} " +
+                "resumeSourceLinesTruncated=$resumeSourceLinesTruncated"
         }
 
         fun verify() {
@@ -311,15 +327,188 @@ class AndroidTestFailureSummary : TestListener {
             val wrapped = ExecutionException(AssertionError(fetch))
             check(
                 summarize(listOf(wrapped)) ==
-                    "CAIRN_ANDROID_TEST_FAILURE sdkFetch=true io=true timeout=false unknownHost=false tlsHandshake=true connection=false httpStatuses=503 causesTruncated=false framesTruncated=false messagesTruncated=false"
+                    "CAIRN_ANDROID_TEST_FAILURE sdkFetch=true io=true timeout=false unknownHost=false tlsHandshake=true connection=false httpStatuses=503 causesTruncated=false framesTruncated=false messagesTruncated=false resumeSourceLines= resumeSourceLinesTruncated=false"
             ) {
                 "Nested SDK failure summary did not match the fixed-field contract"
             }
             check(
                 summarize(listOf(AssertionError("private fixture 429"))) ==
-                    "CAIRN_ANDROID_TEST_FAILURE sdkFetch=false io=false timeout=false unknownHost=false tlsHandshake=false connection=false httpStatuses= causesTruncated=false framesTruncated=false messagesTruncated=false"
+                    "CAIRN_ANDROID_TEST_FAILURE sdkFetch=false io=false timeout=false unknownHost=false tlsHandshake=false connection=false httpStatuses= causesTruncated=false framesTruncated=false messagesTruncated=false resumeSourceLines= resumeSourceLinesTruncated=false"
             ) {
                 "Unstructured messages must not become diagnostics"
+            }
+            val resumeFailure = AssertionError("private assertion text")
+            resumeFailure.stackTrace =
+                arrayOf(
+                    StackTraceElement(
+                        "fixture.PrivateTest",
+                        "privateMethod",
+                        "BackgroundWaitCases.kt",
+                        400,
+                    ),
+                    StackTraceElement(
+                        "fixture.PrivateTest",
+                        "privateMethod",
+                        "BackgroundWaitCases.kt",
+                        270,
+                    ),
+                    StackTraceElement(
+                        "fixture.PrivateTest",
+                        "privateMethod",
+                        "BackgroundWaitCases.kt",
+                        399,
+                    ),
+                    StackTraceElement(
+                        "fixture.PrivateTest",
+                        "privateMethod",
+                        "BackgroundWaitCases.kt",
+                        300,
+                    ),
+                    StackTraceElement(
+                        "fixture.PrivateTest",
+                        "privateMethod",
+                        "OtherFixture.kt",
+                        280,
+                    ),
+                    StackTraceElement(
+                        "fixture.PrivateTest",
+                        "privateMethod",
+                        "BackgroundWaitCases.kt",
+                        269,
+                    ),
+                    StackTraceElement(
+                        "fixture.PrivateTest",
+                        "privateMethod",
+                        "BackgroundWaitCases.kt",
+                        401,
+                    ),
+                )
+            val resumeSummary = summarize(listOf(resumeFailure))
+            check(
+                resumeSummary.contains(
+                    "resumeSourceLines=270,399,400 resumeSourceLinesTruncated=true"
+                )
+            ) {
+                "Only three sorted in-range resume test lines may be retained"
+            }
+            check(
+                listOf(
+                        "fixture.PrivateTest",
+                        "privateMethod",
+                        "OtherFixture.kt",
+                        "private assertion text",
+                    )
+                    .none { value -> resumeSummary.contains(value) }
+            ) {
+                "Resume test diagnostics must not include frame or assertion details"
+            }
+            val addedResumeRange = AssertionError("private assertion text")
+            addedResumeRange.stackTrace =
+                arrayOf(
+                    StackTraceElement(
+                        "fixture.PrivateTest",
+                        "privateMethod",
+                        "BackgroundWaitCases.kt",
+                        491,
+                    ),
+                    StackTraceElement(
+                        "fixture.PrivateTest",
+                        "privateMethod",
+                        "BackgroundWaitCases.kt",
+                        621,
+                    ),
+                    StackTraceElement(
+                        "fixture.PrivateTest",
+                        "privateMethod",
+                        "BackgroundWaitCases.kt",
+                        490,
+                    ),
+                    StackTraceElement(
+                        "fixture.PrivateTest",
+                        "privateMethod",
+                        "BackgroundWaitCases.kt",
+                        622,
+                    ),
+                )
+            val addedResumeSummary = summarize(listOf(addedResumeRange))
+            check(
+                addedResumeSummary.contains(
+                    "resumeSourceLines=491,621 resumeSourceLinesTruncated=false"
+                )
+            ) {
+                "Added resume case lines must stay in range without admitting adjacent tests"
+            }
+            check(
+                listOf("fixture.PrivateTest", "privateMethod", "private assertion text").none {
+                    value ->
+                    addedResumeSummary.contains(value)
+                }
+            ) {
+                "Added resume diagnostics must keep the line-only privacy contract"
+            }
+            val latestResumeRange = AssertionError("private assertion text")
+            latestResumeRange.stackTrace =
+                arrayOf(
+                    StackTraceElement(
+                        "fixture.PrivateTest",
+                        "privateMethod",
+                        "BackgroundWaitCases.kt",
+                        742,
+                    ),
+                    StackTraceElement(
+                        "fixture.PrivateTest",
+                        "privateMethod",
+                        "BackgroundWaitCases.kt",
+                        636,
+                    ),
+                    StackTraceElement(
+                        "fixture.PrivateTest",
+                        "privateMethod",
+                        "BackgroundWaitCases.kt",
+                        743,
+                    ),
+                )
+            val latestResumeSummary = summarize(listOf(latestResumeRange))
+            check(
+                latestResumeSummary.contains(
+                    "resumeSourceLines=742 resumeSourceLinesTruncated=false"
+                )
+            ) {
+                "The latest saved-resume cases must be in range without admitting adjacent tests"
+            }
+            val outsideResumeRange = AssertionError("private assertion text")
+            outsideResumeRange.stackTrace =
+                arrayOf(
+                    StackTraceElement(
+                        "fixture.PrivateTest",
+                        "privateMethod",
+                        "BackgroundWaitCases.kt",
+                        269,
+                    ),
+                    StackTraceElement(
+                        "fixture.PrivateTest",
+                        "privateMethod",
+                        "BackgroundWaitCases.kt",
+                        490,
+                    ),
+                    StackTraceElement(
+                        "fixture.PrivateTest",
+                        "privateMethod",
+                        "BackgroundWaitCases.kt",
+                        743,
+                    ),
+                    StackTraceElement(
+                        "fixture.PrivateTest",
+                        "privateMethod",
+                        "OtherFixture.kt",
+                        300,
+                    ),
+                )
+            check(
+                summarize(listOf(outsideResumeRange))
+                    .contains("resumeSourceLines= resumeSourceLinesTruncated=false")
+            ) {
+                "Other files and out-of-range test lines must be omitted"
             }
             val statusBoundaries =
                 IOException(
