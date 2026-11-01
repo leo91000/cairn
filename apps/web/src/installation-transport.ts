@@ -295,6 +295,8 @@ export class InstallationTransport {
           this.failed()
       }, 30000)
       const offer = await peer.createOffer({ iceRestart })
+      if (!current())
+        return
       const fingerprint = /^a=fingerprint:(sha-256 [A-Fa-f0-9:]+)\r?$/m.exec(offer.sdp || '')?.[1]?.toUpperCase().replace('SHA-256', 'sha-256')
       if (!fingerprint)
         throw new Error('Missing DTLS fingerprint')
