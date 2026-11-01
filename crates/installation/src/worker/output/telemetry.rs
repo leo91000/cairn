@@ -385,7 +385,7 @@ impl Reporter {
                 }
                 snapshot = *receiver.borrow_and_update();
             }
-            if !crate::performance::enabled() {
+            if snapshot.recognized_records == 0 || !crate::performance::enabled() {
                 if snapshot.reader_closed {
                     return;
                 }

@@ -348,3 +348,26 @@ async fn redaction_failure_has_only_a_static_fail_closed_diagnostic() {
     assert!(!output.contains("recognized_records"));
     service.shutdown.cancel();
 }
+
+#[tokio::test]
+async fn unsupported_only_stream_never_performs_a_duplicate_redaction_lookup() {
+    let _registration = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let (_root, service) = service().await;
+    let (mut publisher, receiver) = publisher_fixture();
+    assert!(!publisher.observe(&started("other-method")));
+    publisher.finish(true);
+    let reporter = reporter(service.clone(), receiver);
+    let (capture, dispatch) = capture();
+    let refreshed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed = refreshed.clone();
+    reporter
+        .run(move || {
+            observed.store(true, std::sync::atomic::Ordering::Relaxed);
+            async { Ok(Vec::new()) }
+        })
+        .with_subscriber(dispatch)
+        .await;
+    assert!(!refreshed.load(std::sync::atomic::Ordering::Relaxed));
+    assert!(capture.0.lock().unwrap().is_empty());
+    service.shutdown.cancel();
+}
