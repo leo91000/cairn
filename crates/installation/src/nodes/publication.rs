@@ -1391,66 +1391,69 @@ pub(crate) async fn read_manifest_block(
     .await
 }
 
-pub(crate) async fn read_manifest_block_authorized(
-    s: &Service,
-    backup: &Value,
-    block: &Value,
-    authorize: &crate::authorization::Authorization,
-) -> Result<Vec<u8>> {
-    let hash = text(block, "hash");
-    let object = text(block, "object");
-    crate::validation::uuid(object)?;
-    if !snapshots::valid_hash(hash) {
-        return Err(Error::bad("Invalid backup block."));
-    }
-
-    let envelope = block["envelope"].as_u64().unwrap_or(2);
-    let scope = shared_blocks::object_key(envelope, hash, object);
-    let storage = storage_for(s, backup)?;
-    let result = async {
-        let permit = s.hot_s3.block_codec.read_permit().await?;
-        let encoded = storage
-            .download_bytes_authorized(
-                &scope,
-                crate::storage::block_codec::MAX_ENCODED_BYTES,
-                authorize,
-            )
-            .await?;
-        let size = block["size"]
-            .as_u64()
-            .ok_or_else(|| Error::conflict("Recovery block size mismatch."))?;
-        let bytes = if envelope == 3 {
-            // Explicit compatibility/conversion callers only. Ordinary node reads
-            // receive a direct ticket in restore::handle, never these payloads.
-            let key = s.vault.storage_object_key(&scope);
-            let (scope, hash) = (scope.clone(), hash.to_owned());
-            diagnostic::blocking(move || {
-                let _permit = permit;
-                crate::storage::block_codec::decode_direct(&key, &scope, &hash, size, &encoded)
-                    .map_err(|_| Error::conflict("Recovery block integrity check failed."))
-            })
-            .await
-            .map_err(Error::internal)??
-        } else {
-            decode_scoped_block(s, &scope, hash, Some(size), encoded, permit).await?
-        };
-        Ok(bytes)
-    }
-    .await;
-    if result
-        .as_ref()
-        .is_err_and(|error: &Error| matches!(error.status, 400 | 409))
-    {
-        if envelope == 3 {
-            // Conversion readers observe the same shared v3 dependency as a
-            // direct node. Fence every ambiguous ACK before invalidating it.
-            super::journal_acknowledgements::quarantine(s, object).await?;
-        } else {
-            shared_blocks::invalidate(s, object).await?;
-            forget_baseline(s, text(backup, "runId")).await?;
+// Keep SDK and codec future frames off nested restore callers' layouts.
+pub(crate) fn read_manifest_block_authorized<'a>(
+    s: &'a Service,
+    backup: &'a Value,
+    block: &'a Value,
+    authorize: &'a crate::authorization::Authorization,
+) -> futures_util::future::BoxFuture<'a, Result<Vec<u8>>> {
+    Box::pin(async move {
+        let hash = text(block, "hash");
+        let object = text(block, "object");
+        crate::validation::uuid(object)?;
+        if !snapshots::valid_hash(hash) {
+            return Err(Error::bad("Invalid backup block."));
         }
-    }
-    result
+
+        let envelope = block["envelope"].as_u64().unwrap_or(2);
+        let scope = shared_blocks::object_key(envelope, hash, object);
+        let storage = storage_for(s, backup)?;
+        let result = async {
+            let permit = s.hot_s3.block_codec.read_permit().await?;
+            let encoded = storage
+                .download_bytes_authorized(
+                    &scope,
+                    crate::storage::block_codec::MAX_ENCODED_BYTES,
+                    authorize,
+                )
+                .await?;
+            let size = block["size"]
+                .as_u64()
+                .ok_or_else(|| Error::conflict("Recovery block size mismatch."))?;
+            let bytes = if envelope == 3 {
+                // Explicit compatibility/conversion callers only. Ordinary node reads
+                // receive a direct ticket in restore::handle, never these payloads.
+                let key = s.vault.storage_object_key(&scope);
+                let (scope, hash) = (scope.clone(), hash.to_owned());
+                diagnostic::blocking(move || {
+                    let _permit = permit;
+                    crate::storage::block_codec::decode_direct(&key, &scope, &hash, size, &encoded)
+                        .map_err(|_| Error::conflict("Recovery block integrity check failed."))
+                })
+                .await
+                .map_err(Error::internal)??
+            } else {
+                decode_scoped_block(s, &scope, hash, Some(size), encoded, permit).await?
+            };
+            Ok(bytes)
+        }
+        .await;
+        if result
+            .as_ref()
+            .is_err_and(|error: &Error| matches!(error.status, 400 | 409))
+        {
+            if envelope == 3 {
+                // Conversion readers observe the same shared v3 dependency as a
+                // direct node. Fence every ambiguous ACK before invalidating it.
+                super::journal_acknowledgements::quarantine(s, object).await?;
+            } else {
+                shared_blocks::invalidate(s, object).await?;
+                forget_baseline(s, text(backup, "runId")).await?;
+            }
+        }
+        result
+    })
 }
 
 async fn decode_scoped_block(
