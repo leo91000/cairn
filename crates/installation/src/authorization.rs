@@ -486,4 +486,85 @@ mod tests {
         );
         f.s.shutdown.cancel();
     }
+
+    #[tokio::test]
+    async fn delegated_selected_oauth_disconnect_revokes_before_its_own_revision_change() {
+        use axum::{
+            Router,
+            http::StatusCode,
+            routing::{get, post},
+        };
+        use std::sync::atomic::AtomicUsize;
+        let (f, bearer) = delegated().await;
+        let connection = oauth_instance(&f).await;
+        let run = crate::installation_mcp::authorize(&f.s, &bearer)
+            .await
+            .unwrap();
+        for agent in [
+            crate::config::MAIN_AGENT_ID,
+            text(&run["snapshot"]["agent"], "id"),
+        ] {
+            let current = f.api("GET", json!({ "agentId": agent })).await.unwrap();
+            let mut grants = current["grants"].as_array().unwrap().clone();
+            grants.push(json!({ "instanceId": connection.id, "access": {
+                "type": "selected", "contributions": [{ "kind": "instructions", "name": "", "resources": [] }],
+            } }));
+            f.api(
+                "PUT",
+                json!({ "agentId": agent, "revision": current["revision"],
+                    "grants": grants, "runCredentialInstances": [],
+                }),
+            )
+            .await
+            .unwrap();
+        }
+        let revocations = Arc::new(AtomicUsize::new(0));
+        let count = revocations.clone();
+        let (origin, server) = crate::common::serve_locally(
+            Router::new()
+                .route("/effect", get(|| async { "ok" }))
+                .route(
+                    "/revoke",
+                    post(move || {
+                        let count = count.clone();
+                        async move {
+                            count.fetch_add(1, Ordering::SeqCst);
+                            StatusCode::OK
+                        }
+                    }),
+                ),
+        )
+        .await;
+        f.s.plugins.route_http_to(Some(origin));
+        let (_, authority) = crate::installation_mcp::authorize_with_authority(&f.s, &bearer)
+            .await
+            .unwrap();
+        let input = serde_json::from_value(
+            json!({ "kind": "disconnect", "pluginId": "gmail", "instanceId": connection.id }),
+        )
+        .unwrap();
+        let result =
+            crate::plugins::management::invoke(&f.s, input, Some(&bearer), false, Some(authority))
+                .await
+                .unwrap();
+        assert_eq!(serde_json::to_value(result).unwrap()["revoked"], true);
+        assert_eq!(revocations.load(Ordering::SeqCst), 1);
+        assert!(
+            !f.s.store
+                .plugin_instance(&connection.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .enabled
+        );
+        assert!(
+            f.s.vault
+                .get(&crate::plugins::connections::credential_key(&connection.id))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        server.abort();
+        f.s.shutdown.cancel();
+    }
 }

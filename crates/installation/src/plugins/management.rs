@@ -530,7 +530,16 @@ pub(crate) async fn invoke(
     ) {
         s.store.read(move |db| authorize(db)).await?;
     }
-    if let Some(preparation) = authority
+    // Lifecycle writers already check the complete proof in their final effect
+    // transaction. Their intentional instance revision change cannot be checked
+    // against the pre-mutation proof afterward. Read results still recheck.
+    if !matches!(
+        &result,
+        Output::Saved { .. }
+            | Output::Enabled { .. }
+            | Output::Deleted { .. }
+            | Output::Disconnected { .. }
+    ) && let Some(preparation) = authority
         .as_ref()
         .and_then(|authority| authority.preparation.as_ref())
     {

@@ -664,57 +664,39 @@ where
     };
     let expected = connection.clone();
     let expected_package = package.clone();
+    let check = std::sync::Arc::new(move |db: &crate::store::Db<'_>| {
+        authorize(db)?;
+        let current = db.plugin_instance(&expected.id)?.ok_or_else(expired)?;
+        if current.revision != expected.revision {
+            return Err(Error::conflict(
+                "This account changed. Reload it before disconnecting.",
+            ));
+        }
+        if !expected_package.builtin {
+            let package = db.plugin_package(&expected_package.manifest.id)?;
+            if package.active.as_deref() != Some(&expected_package.manifest.version)
+                || package.approvals.get(&expected_package.manifest.version)
+                    != Some(&expected_package.digest)
+            {
+                return Err(Error::conflict(
+                    "The plugin package changed. Retry disconnecting.",
+                ));
+            }
+        }
+        Ok(current)
+    });
+    let read = check.clone();
     let vault = s.vault.clone();
     let saved = s
         .store
-        .transaction(move |db| {
-            authorize(db)?;
-            let mut current = db.plugin_instance(&expected.id)?.ok_or_else(expired)?;
-            if current.revision != expected.revision {
-                return Err(Error::conflict(
-                    "This account changed. Reload it before disconnecting.",
-                ));
-            }
-            if !expected_package.builtin {
-                let package = db.plugin_package(&expected_package.manifest.id)?;
-                if package.active.as_deref() != Some(&expected_package.manifest.version)
-                    || package.approvals.get(&expected_package.manifest.version)
-                        != Some(&expected_package.digest)
-                {
-                    return Err(Error::conflict(
-                        "The plugin package changed. Retry disconnecting.",
-                    ));
-                }
-            }
-            let key = connections::credential_key(&expected.id);
-            let saved = db
-                .kv(&format!("mcp-secret:{key}"))?
+        .read(move |db| {
+            let current = read(db)?;
+            let key = connections::credential_key(&current.id);
+            db.kv(&format!("mcp-secret:{key}"))?
                 .map(|value| vault.decrypt(&key, &value))
-                .transpose()?;
-            current.enabled = false;
-            current.revision = id();
-            current.updated_at = now();
-            db.save_plugin_instance(&current)?;
-            db.delete(&format!(
-                "mcp-secret:{}",
-                connections::credential_key(&expected.id)
-            ))?;
-            db.set_plugin_status(
-                &current.id,
-                &current.revision,
-                &cairn_contracts::PluginStatus::default(),
-            )?;
-            db.audit(
-                "plugin.oauth.disconnected",
-                &json!({ "instance": expected.id, "plugin": expected.plugin_id }),
-            )?;
-            Ok(saved)
+                .transpose()
         })
         .await?;
-    drop(guard);
-    s.plugins.changed.notify_one();
-    s.plugins.files.forget(instance);
-    s.plugins.program_caches.forget(instance);
     let mut revoked = None;
     if let (Some(endpoint), Some(saved)) = (&oauth.revocation_url, saved) {
         let token = saved["oauth"]["refreshToken"]
@@ -723,9 +705,12 @@ where
         if let Some(token) = token {
             let endpoint = target(s, &package.manifest, endpoint, "https")?;
             let body = serde_urlencoded::to_string([("token", token)]).map_err(Error::internal)?;
-            if let Some(authority) = &management {
-                authority.recheck(s).await?;
-            }
+            // Revoke under the pre-mutation proof. Disabling this instance first
+            // would invalidate its own delegated coverage and lose the token.
+            // Semantic checks ran before try_lock; only local fences run while
+            // holding the refresh mutex, so a resolver cannot deadlock on it.
+            let before_send = check.clone();
+            s.store.read(move |db| before_send(db).map(|_| ())).await?;
             revoked = Some(
                 s.plugins
                     .http
@@ -739,6 +724,33 @@ where
             );
         }
     }
+    s.store
+        .transaction(move |db| {
+            let mut current = check(db)?;
+            current.enabled = false;
+            current.revision = id();
+            current.updated_at = now();
+            db.save_plugin_instance(&current)?;
+            db.delete(&format!(
+                "mcp-secret:{}",
+                connections::credential_key(&current.id)
+            ))?;
+            db.set_plugin_status(
+                &current.id,
+                &current.revision,
+                &cairn_contracts::PluginStatus::default(),
+            )?;
+            db.audit(
+                "plugin.oauth.disconnected",
+                &json!({ "instance": current.id, "plugin": current.plugin_id }),
+            )?;
+            Ok(())
+        })
+        .await?;
+    drop(guard);
+    s.plugins.changed.notify_one();
+    s.plugins.files.forget(instance);
+    s.plugins.program_caches.forget(instance);
     Ok(
         json!({ "disconnected": true, "revoked": revoked, "message": if revoked == Some(false) {
         "Disconnected locally. The service could not confirm revocation; remove the app from your provider's connected applications if needed."
