@@ -86,6 +86,8 @@ class SpeedsTest {
         assertTrue(needsResumeSelection("deep", "high", STANDARD_SPEED, "deep", "high", "priority"))
         assertFalse(needsResumeSelection("fast", "high", "priority", "fast", "high", "priority"))
         assertFalse(needsResumeSelection("fast", "high", STANDARD_SPEED, "fast", "high", ""))
+        assertFalse(needsResumeSelection("fast", "", "priority", "fast", "", "priority"))
+        assertTrue(needsResumeSelection("fast", "", STANDARD_SPEED, "fast", "", "priority"))
         assertTrue(needsResumeSelection("new", "high", "priority", "fast", "high", "priority"))
     }
 

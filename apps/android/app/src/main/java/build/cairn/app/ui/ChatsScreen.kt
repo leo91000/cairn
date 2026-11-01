@@ -1409,18 +1409,30 @@ internal fun ChatPage(
                                                                                     savedAgent
                                                                                         .model,
                                                                                 )
-                                                                            val selectedReasoning =
-                                                                                pickerAppliedReasoning(
-                                                                                    selectedRow,
-                                                                                    reasoning,
-                                                                                    if (
-                                                                                        model
-                                                                                            .isBlank()
-                                                                                    )
+                                                                            val selectedModelChanged =
+                                                                                model
+                                                                                    .isNotBlank() &&
+                                                                                    model !=
                                                                                         savedAgent
-                                                                                            .reasoning
-                                                                                    else "",
-                                                                                )
+                                                                                            .model
+                                                                            val selectedReasoning =
+                                                                                if (
+                                                                                    reasoning
+                                                                                        .isNotBlank()
+                                                                                ) {
+                                                                                    reasoning
+                                                                                } else if (
+                                                                                    selectedModelChanged
+                                                                                ) {
+                                                                                    pickerAppliedReasoning(
+                                                                                        selectedRow,
+                                                                                        reasoning,
+                                                                                        "",
+                                                                                    )
+                                                                                } else {
+                                                                                    savedAgent
+                                                                                        .reasoning
+                                                                                }
                                                                             val selectedModelName =
                                                                                 resumeSelectionModelId(
                                                                                     selectedRow,

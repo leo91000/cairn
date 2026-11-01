@@ -114,6 +114,8 @@ describe('codex speeds', () => {
     expect(needsResumeSelection('deep', 'high', 'standard', 'deep', 'high', 'priority')).toBe(true)
     expect(needsResumeSelection('fast', 'high', 'priority', 'fast', 'high', 'priority')).toBe(false)
     expect(needsResumeSelection('fast', 'high', 'standard', 'fast', 'high', '')).toBe(false)
+    expect(needsResumeSelection('fast', '', 'priority', 'fast', '', 'priority')).toBe(false)
+    expect(needsResumeSelection('fast', '', 'standard', 'fast', '', 'priority')).toBe(true)
     expect(needsResumeSelection('new', 'high', 'priority', 'fast', 'high', 'priority')).toBe(true)
   })
 

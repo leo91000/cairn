@@ -1487,6 +1487,16 @@ test('same-provider quota resume submits the changed model default and unchanged
     reasoning: 'high',
     speed: 'priority',
   })
+  const inheritedNoChange = await createFailedCodexQuotaChat(workspace, {
+    model: 'fixture-fast',
+    reasoning: '',
+    speed: '',
+  })
+  const inheritedSpeedOnly = await createFailedCodexQuotaChat(workspace, {
+    model: 'fixture-fast',
+    reasoning: '',
+    speed: 'priority',
+  })
   await page.route('**/codex/models', route => route.fulfill({
     json: {
       models: [
@@ -1530,6 +1540,8 @@ test('same-provider quota resume submits the changed model default and unchanged
   }))
   const changedRequests: Record<string, unknown>[] = []
   const unchangedRequests: Record<string, unknown>[] = []
+  const inheritedNoChangeRequests: Record<string, unknown>[] = []
+  const inheritedSpeedRequests: Record<string, unknown>[] = []
   await installResumeDiagnosticProbe(page)
   await page.route(`**/chats/${changed.chat.id}/resume`, async (route) => {
     changedRequests.push(route.request().postDataJSON())
@@ -1538,6 +1550,14 @@ test('same-provider quota resume submits the changed model default and unchanged
   await page.route(`**/chats/${unchanged.chat.id}/resume`, async (route) => {
     unchangedRequests.push(route.request().postDataJSON())
     await route.fulfill({ json: { ...unchanged.before, status: 'queued', resumeAvailable: false } })
+  })
+  await page.route(`**/chats/${inheritedNoChange.chat.id}/resume`, async (route) => {
+    inheritedNoChangeRequests.push(route.request().postDataJSON())
+    await route.fulfill({ json: { ...inheritedNoChange.before, status: 'queued', resumeAvailable: false } })
+  })
+  await page.route(`**/chats/${inheritedSpeedOnly.chat.id}/resume`, async (route) => {
+    inheritedSpeedRequests.push(route.request().postDataJSON())
+    await route.fulfill({ json: { ...inheritedSpeedOnly.before, status: 'queued', resumeAvailable: false } })
   })
 
   await page.goto(workspacePath(`/chats/${changed.chat.id}`))
@@ -1583,6 +1603,43 @@ test('same-provider quota resume submits the changed model default and unchanged
     runId: unchanged.before.id,
     turnId: unchanged.turnId,
     selection: { model: 'fixture-fast', reasoning: 'high', speed: 'standard' },
+  })
+
+  await page.goto(workspacePath(`/chats/${inheritedNoChange.chat.id}`))
+  const inheritedNoChangeCard = page.getByRole('status', { name: 'Coding agent quota reached' })
+  await expect(inheritedNoChangeCard).toBeVisible()
+  const inheritedNoChangePicker = page.getByRole('button', { name: /^Agent, model, reasoning and speed/ })
+  await expect(inheritedNoChangePicker).toHaveAccessibleName(/Quick coder · Low reasoning/)
+  await inheritedNoChangeCard.getByRole('button', { name: 'Resume conversation', exact: true }).click()
+  await expectSingleResumeRequest(page, () => inheritedNoChangeRequests.length)
+  expect(inheritedNoChangeRequests[0]).toMatchObject({
+    chatId: inheritedNoChange.chat.id,
+    runId: inheritedNoChange.before.id,
+    turnId: inheritedNoChange.turnId,
+  })
+  expect(inheritedNoChangeRequests[0]).not.toHaveProperty('selection')
+
+  await page.goto(workspacePath(`/chats/${inheritedSpeedOnly.chat.id}`))
+  const inheritedSpeedCard = page.getByRole('status', { name: 'Coding agent quota reached' })
+  await expect(inheritedSpeedCard).toBeVisible()
+  const inheritedSpeedPicker = page.getByRole('button', { name: /^Agent, model, reasoning and speed/ })
+  await expect(inheritedSpeedPicker).toHaveAccessibleName(/Quick coder · Low reasoning/)
+  await inheritedSpeedPicker.click()
+  const inheritedSpeedMenu = page.getByRole('dialog', { name: 'Agent & model' })
+  const inheritedEffort = inheritedSpeedMenu.getByRole('radiogroup', { name: 'Reasoning' })
+    .getByRole('radio', { name: 'Conversation default · Low', exact: true })
+  await expect(inheritedEffort).toHaveAttribute('aria-checked', 'true')
+  await inheritedSpeedMenu.getByRole('radiogroup', { name: 'Speed' }).getByRole('radio', { name: 'Standard', exact: true }).click()
+  await expect(inheritedEffort).toHaveAttribute('aria-checked', 'true')
+  await inheritedSpeedMenu.getByRole('button', { name: 'Close', exact: true }).click()
+  await expect(inheritedSpeedPicker).toHaveAccessibleName(/Quick coder · Low reasoning/)
+  await inheritedSpeedCard.getByRole('button', { name: 'Resume conversation', exact: true }).click()
+  await expectSingleResumeRequest(page, () => inheritedSpeedRequests.length)
+  expect(inheritedSpeedRequests[0]).toMatchObject({
+    chatId: inheritedSpeedOnly.chat.id,
+    runId: inheritedSpeedOnly.before.id,
+    turnId: inheritedSpeedOnly.turnId,
+    selection: { model: 'fixture-fast', reasoning: '', speed: 'standard' },
   })
 })
 

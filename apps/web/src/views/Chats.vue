@@ -799,9 +799,11 @@ async function resumeQuota() {
       const selectedModel = model.value || savedAgent?.model || catalog.find(item => item.isDefault)?.model || ''
       const modelRow = (name: string) => catalog.find(item => item.model === name || item.routes?.some(route => route.model === name))
         || (!name ? catalog.find(item => item.isDefault) : undefined)
+      // A catalog default stays display-only until the picker changes the model draft.
+      const selectedModelChanged = !!model.value && model.value !== (savedAgent?.model || '')
       const selectedReasoning = reasoning.value
-        || (!model.value ? savedAgent?.reasoning : '')
-        || modelRow(selectedModel)?.defaultReasoningEffort
+        || (!selectedModelChanged ? savedAgent?.reasoning : '')
+        || (selectedModelChanged ? modelRow(selectedModel)?.defaultReasoningEffort : '')
         || ''
       const selectedDisplayedSpeed = savedAgent
         ? pickerAppliedSpeed(chosenProvider.value, modelRow(selectedModel), speed.value, savedAgent.speed)
