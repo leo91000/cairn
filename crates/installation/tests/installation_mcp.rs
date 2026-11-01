@@ -5892,6 +5892,118 @@ async fn resource_sources_require_the_calling_agents_existing_instance_grant() {
     assert!(s.store.projects().await.unwrap().is_empty());
 }
 
+#[tokio::test]
+async fn skill_source_without_instance_uses_an_instance_granted_for_that_source() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use common::github::{self, Github};
+
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let github = Github::start(root.path()).await;
+    github.attach(&s);
+    let main = enabled_main(&s).await;
+    let unused = github::instance(
+        &s,
+        "A enabled but ungranted account",
+        "synthetic-unused-secret",
+        &[],
+    )
+    .await;
+    let granted = github::instance(
+        &s,
+        "Z source account",
+        "synthetic-source-secret",
+        &[MAIN_AGENT_ID],
+    )
+    .await;
+    assert_ne!(unused, granted);
+
+    let grant_path = format!("/api/agents/{MAIN_AGENT_ID}/plugin-grants");
+    let current =
+        common::owner_api_route(&s, "GET", &grant_path, json!({ "agentId": MAIN_AGENT_ID }))
+            .await
+            .unwrap();
+    common::owner_api_route(
+        &s,
+        "PUT",
+        &grant_path,
+        json!({
+            "agentId": MAIN_AGENT_ID,
+            "revision": current["revision"],
+            "grants": [{
+                "instanceId": granted,
+                "access": {
+                    "type": "selected",
+                    "contributions": [{
+                        "kind": "skillSource",
+                        "name": "repository",
+                        "resources": [],
+                    }],
+                },
+            }],
+            "runCredentialInstances": [],
+        }),
+    )
+    .await
+    .unwrap();
+
+    let version = "1".repeat(40);
+    let tree = "2".repeat(40);
+    let blob = "a".repeat(40);
+    let manifest = b"---\nname: review\ndescription: Review source\n---\nReview.";
+    github.respond(
+        "repos/fixture/skills/commits/main",
+        &json!({
+            "sha": version,
+            "commit": {
+                "tree": { "sha": tree },
+                "message": "Release",
+                "committer": { "date": "2026-10-01" },
+            },
+        }),
+    );
+    github.respond(
+        &format!("repos/fixture/skills/commits/{version}"),
+        &json!({ "sha": version, "commit": { "tree": { "sha": tree } } }),
+    );
+    github.respond(
+        &format!("repos/fixture/skills/git/trees/{tree}?recursive=1"),
+        &json!({
+            "tree": [{
+                "path": "SKILL.md",
+                "type": "blob",
+                "mode": "100644",
+                "sha": blob,
+                "size": manifest.len(),
+            }],
+            "truncated": false,
+        }),
+    );
+    github.respond(
+        &format!("repos/fixture/skills/git/blobs/{blob}"),
+        &json!({ "content": STANDARD.encode(manifest), "encoding": "base64" }),
+    );
+
+    let (_, configuration) = active_run(&s, &main).await;
+    let imported = call(
+        &s,
+        &configuration,
+        "import_skill",
+        json!({
+            "source": "plugin",
+            "scope": "global",
+            "pluginId": "github",
+            "skillSource": "repository",
+            "location": { "repository": "fixture/skills", "ref": "main" },
+        }),
+    )
+    .await;
+
+    assert_ne!(imported["result"]["isError"], true, "{imported}");
+    assert_eq!(result(&imported)["imported"]["name"], "review");
+    assert!(!imported.to_string().contains("synthetic-source-secret"));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_tools_share_status_updates_and_fence_instance_revocation_during_download() {
     use base64::{Engine, engine::general_purpose::STANDARD};

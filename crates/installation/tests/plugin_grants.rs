@@ -578,6 +578,47 @@ async fn credential_supplier_is_explicit_and_reductions_never_select_another() {
 }
 
 #[tokio::test]
+async fn resource_grants_reject_an_unmatched_ancestor_in_a_batch() {
+    let f = Fixture::new().await;
+    let channels = json!([
+        { "resourceType": "channel", "id": "support" },
+        { "resourceType": "channel", "id": "general" },
+    ]);
+    f.set(json!([
+        contribution("tool", "grant_probe_post", channels.clone()),
+        contribution("hook", "message", channels),
+    ]))
+    .await;
+    let input = json!({
+        "items": [
+            { "channel": "support" },
+            { "channel": "general" },
+        ],
+        "thread": "support-thread",
+    });
+
+    assert!(
+        agents::call_tool(&f.s, &f.bearer, "grant_probe_post", &input)
+            .await
+            .is_err(),
+        "the unrelated general channel must not be accepted with support-thread"
+    );
+    assert!(
+        grant_authorization::authorize_hook_delivery(
+            &f.s,
+            MAIN_AGENT_ID,
+            &f.instance,
+            "message",
+            &input,
+        )
+        .await
+        .is_err(),
+        "hook delivery must reject the same contradictory hierarchy"
+    );
+    assert_eq!(f.posts.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn legacy_full_grant_sync_clears_supplier_across_package_without_run_credentials() {
     let f = Fixture::new().await;
     f.s.agent_fixture(json!({ "plugins": [f.instance] }), Some(MAIN_AGENT_ID))
@@ -616,10 +657,6 @@ async fn legacy_full_grant_sync_clears_supplier_across_package_without_run_crede
     .await
     .unwrap();
 
-    f.s.agent_fixture(json!({ "plugins": [f.instance] }), Some(MAIN_AGENT_ID))
-        .await
-        .unwrap();
-
     let with_credentials = common::package_install(
         &f.s,
         &json!({
@@ -646,9 +683,6 @@ async fn legacy_full_grant_sync_clears_supplier_across_package_without_run_crede
         .await
         .unwrap();
 
-    f.s.agent_fixture(json!({ "plugins": [f.instance] }), Some(MAIN_AGENT_ID))
-        .await
-        .unwrap();
     assert!(
         cairn_installation::plugins::run_credentials::for_run(&f.s, MAIN_AGENT_ID, &[])
             .await

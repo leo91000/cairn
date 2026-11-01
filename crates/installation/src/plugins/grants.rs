@@ -168,6 +168,14 @@ impl Db<'_> {
         Ok(self.0.query_row("SELECT instance_id FROM plugin_credential_suppliers WHERE agent_id=? AND plugin_id=?", params![agent,plugin], |r| r.get(0)).optional()?.flatten())
     }
 
+    pub(crate) fn clear_plugin_credential_suppliers(&self, plugin: &str) -> Result<()> {
+        self.0.execute(
+            "UPDATE plugin_credential_suppliers SET instance_id=NULL WHERE plugin_id=?",
+            [plugin],
+        )?;
+        Ok(())
+    }
+
     /// Legacy owner editors explicitly add full access. Only the first choice can
     /// initialize a supplier; a revoked choice cannot be replaced by this path.
     pub(crate) fn sync_full_plugin_grants(&self, agent: &str, instances: &[String]) -> Result<()> {

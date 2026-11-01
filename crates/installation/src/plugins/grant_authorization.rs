@@ -659,6 +659,27 @@ impl ResourceAuthorization<'_> {
                 }
             }
         }
+        for reference in &references {
+            let descendant_chains = resolved
+                .iter()
+                .filter(|((kind, _), _)| {
+                    reference.resource_type != *kind
+                        && descendant(&package.manifest, kind, &reference.resource_type)
+                })
+                .map(|(_, chain)| chain)
+                .collect::<Vec<_>>();
+            if descendant_chains.is_empty() {
+                continue;
+            }
+            let appears_in_descendant = descendant_chains.iter().any(|chain| {
+                chain.iter().any(|ancestor| {
+                    ancestor.resource_type == reference.resource_type && ancestor.id == reference.id
+                })
+            });
+            if !appears_in_descendant {
+                return Err(denied());
+            }
+        }
         Ok(())
     }
 }

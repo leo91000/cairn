@@ -568,6 +568,7 @@ async fn set_active(
         package.digest.clone(),
         reviewed_digest.is_some(),
     );
+    let has_run_credentials = package.manifest.run_credentials.is_some();
     s.store
         .transaction(move |db| {
             authority.authorize(db)?;
@@ -581,6 +582,9 @@ async fn set_active(
                 return Err(Error::forbidden("This version is no longer approved."));
             }
             db.activate_plugin_version(&plugin, &version, &digest, approve)?;
+            if !has_run_credentials {
+                db.clear_plugin_credential_suppliers(&plugin)?;
+            }
             db.invalidate_plugin_hooks(&plugin, &digest)?;
             db.audit(
                 if approve {

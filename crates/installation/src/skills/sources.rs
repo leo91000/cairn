@@ -84,42 +84,69 @@ async fn origin(
     if package.manifest.skill_source(source).is_none() {
         return Err(Error::bad("This plugin has no such skill source."));
     }
-    let connection = match instance.filter(|id| !id.is_empty()) {
+    let explicit_instance = match instance.filter(|id| !id.is_empty()) {
         Some(id) => {
             uuid(id)?;
-            connections::get(s, plugin, id).await.ok()
+            connections::get(s, plugin, id)
+                .await
+                .ok()
+                .filter(|connection| connection.enabled)
         }
         None => None,
     };
-    // A removed instance falls back to another enabled instance of the same plugin.
-    let connection = match connection.filter(|connection| connection.enabled) {
-        Some(connection) => connection,
-        None => {
-            let mut instances = s
-                .store
-                .plugin_instances()
-                .await?
-                .into_iter()
-                .filter(|connection| connection.plugin_id == plugin && connection.enabled)
-                .collect::<Vec<_>>();
-            instances.sort_by(|a, b| a.name.cmp(&b.name));
-            instances.into_iter().next().ok_or_else(|| {
-                Error::bad(format!(
+    let (connection, authority) = if let Some(connection) = explicit_instance {
+        let authority = authority
+            .instance(
+                s,
+                &connection,
+                &package,
+                cairn_contracts::PluginContributionKind::SkillSource,
+                source,
+            )
+            .await?;
+        (connection, authority)
+    } else {
+        let mut instances = s
+            .store
+            .plugin_instances()
+            .await?
+            .into_iter()
+            .filter(|connection| connection.plugin_id == plugin && connection.enabled)
+            .collect::<Vec<_>>();
+        instances.sort_by(|a, b| a.name.cmp(&b.name));
+
+        let mut selected = None;
+        let mut denied = None;
+        for connection in instances {
+            match authority
+                .instance(
+                    s,
+                    &connection,
+                    &package,
+                    cairn_contracts::PluginContributionKind::SkillSource,
+                    source,
+                )
+                .await
+            {
+                Ok(bound_authority) => {
+                    selected = Some((connection, bound_authority));
+                    break;
+                }
+                Err(error) if error.status == 403 => denied = Some(error),
+                Err(error) => return Err(error),
+            }
+        }
+        match selected {
+            Some(selected) => selected,
+            None if let Some(error) = denied => return Err(error),
+            None => {
+                return Err(Error::bad(format!(
                     "Connect an enabled {} instance to use this skill source.",
                     package.manifest.name
-                ))
-            })?
+                )));
+            }
         }
     };
-    let authority = authority
-        .instance(
-            s,
-            &connection,
-            &package,
-            cairn_contracts::PluginContributionKind::SkillSource,
-            source,
-        )
-        .await?;
     Ok(Origin {
         package,
         source: source.to_owned(),
