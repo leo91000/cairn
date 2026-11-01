@@ -6,6 +6,7 @@ import { parse } from 'yaml'
 const quality = parse(readFileSync(new URL('../../.github/workflows/ci.yaml', import.meta.url), 'utf8'))
 const android = parse(readFileSync(new URL('../../.github/workflows/android.yaml', import.meta.url), 'utf8'))
 const pr = parse(readFileSync(new URL('../../.github/workflows/pr.yaml', import.meta.url), 'utf8'))
+const chatJourneySource = readFileSync(new URL('../../tests/e2e/chats.spec.ts', import.meta.url), 'utf8')
 
 describe('parallel CI coverage', () => {
   it.each(['image', 'beacon-image'])('exports %s layers for main and version tags without giving PR refs a cache writer', (name) => {
@@ -74,10 +75,29 @@ describe('parallel CI coverage', () => {
     expect(journey['timeout-minutes']).toBe(10)
     expect(journey.run).toBe('pnpm test:e2e --project=journeys-chats tests/e2e/chats.spec.ts --grep \'same-provider quota resume\' --workers=1 --fail-on-flaky-tests')
     const grep = journey.run.match(/--grep '([^']+)'/)?.[1]
+    const project = journey.run.match(/--project=([^ ]+)/)?.[1]
+    const testFile = journey.run.match(/ (tests\/e2e\/chats\.spec\.ts) --grep/)?.[1]
     expect(grep).toBe('same-provider quota resume')
+    expect(project).toBe('journeys-chats')
+    expect(testFile).toBe('tests/e2e/chats.spec.ts')
+
+    const resumeTitles = [...chatJourneySource.matchAll(/^test\('([^']+)'/gm)]
+      .map(([, title]) => title)
+      .filter(title => title.startsWith('same-provider quota resume'))
+    expect(resumeTitles).toEqual([
+      'same-provider quota resume submits the saved turn with the picker-applied speed',
+      'same-provider quota resume retries a prelaunch turn without selection',
+      'same-provider quota resume preserves an inherited blank model',
+      'same-provider quota resume submits the changed model default and unchanged saved effort',
+    ])
+
     const matches = new RegExp(grep)
-    expect(matches.test('journeys-chats chats.spec.ts same-provider quota resume submits the changed model default')).toBe(true)
-    expect(matches.test('journeys-chats chats.spec.ts unrelated chat case')).toBe(false)
+    for (const title of resumeTitles) {
+      const combinedTitle = `${project} ${testFile} ${title}`
+      expect(matches.test(combinedTitle), title).toBe(true)
+    }
+
+    expect(matches.test(`${project} ${testFile} unrelated chat case`)).toBe(false)
 
     const uploads = browser.steps.filter(step => step.uses?.startsWith('actions/upload-artifact@'))
     expect(uploads).toHaveLength(1)

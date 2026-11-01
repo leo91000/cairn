@@ -1477,7 +1477,7 @@ test('same-provider quota resume submits the saved turn with the picker-applied 
   expect(workspace.service.store.chatMessages(chat.id).map(message => message.id)).toContain(turnId)
 })
 
-test('same-provider quota prelaunch retry resumes the saved turn without selection', async ({ page, workspace }) => {
+test('same-provider quota resume retries a prelaunch turn without selection', async ({ page, workspace }) => {
   const failed = await createFailedCodexQuotaChat(workspace, {
     model: '',
     reasoning: '',
