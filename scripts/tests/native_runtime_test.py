@@ -425,7 +425,7 @@ def main():
                 self.end_headers()
                 self.wfile.write(response)
 
-        def start(run, long=True, lease=90000, expected='changed', measure=None, docker_script='', sandbox='workspace-write'):
+        def start(run, long=True, lease=90000, expected='changed', measure=None, docker_script='', sandbox='workspace-write', close_repro=False):
             seed(run)
             channel = data / 'runs' / run / 'home/cairn-mcp.sock'
             if run in mcp_servers:
@@ -478,6 +478,9 @@ def main():
             script += docker_script
             if sandbox != 'read-only':
                 script += f'printf %s {attempt} > ready\n'
+            if close_repro:
+                from native_close_repro import workload
+                script += workload(attempt)
             if measure:
                 script += "while ! test -e measure-go; do sleep 0.05; done\n/usr/bin/python3 - <<'MEASURE' > measure.json\n" + MEASURE + '\nMEASURE\n'
                 script += 'printf measured > measure-ready\n'
@@ -674,6 +677,12 @@ def main():
             run = create()
             other = create()
             start_controller()
+            if os.environ.get('CAIRN_NATIVE_CLOSE_REPRO') == '1':
+                from native_close_repro import qualify
+                evidence = Path(os.environ.get('NATIVE_STORAGE_EVIDENCE_DIR', str(root / 'evidence')))
+                qualify(state, run, start, api, fenced, managed, metrics, evidence)
+                print('PASS: bounded native close stress; production cause remains unproved.')
+                return
             first = start(run, lease=45000, measure='nativeRetained')
             fenced(run, first)
             # A terminal ext4 flush failure must retain a crash prefix and finish
