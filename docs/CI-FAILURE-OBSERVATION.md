@@ -53,26 +53,65 @@ failure codes. The example is not included in production binaries or images.
 Each shard first qualifies the actual helper and artifact against disposable
 Postgres 17; see [the fixture contract](../tests/e2e/README.md).
 
-Network and Android jobs run `prepare-network-tools.mjs` before their existing
-qualification. Its CLI refuses invocation outside GitHub CI. It checks actual
-executable tools under the privileged PATH,
-including cleanup's external `kill`, and records bounded numeric versions,
-iptables backend and the noninteractive sudo/namespace-list checks. Complete
-hosts make no APT calls. Missing tools select only packages from the fixed map;
-installation errors and unsuccessful final probes stop preparation. Before,
-APT-stage and ready records are uploaded with the existing evidence artifacts.
-The tool-version probes have a bounded ten-second read; qualification and package
-installation keep the existing job deadlines without added retries.
+Network and Android jobs run `prepare-network-tools.mjs` before qualification.
+Its CLI refuses invocation outside GitHub CI. The supported host is Ubuntu 24.04
+amd64 with the six core tools already installed: `ip`, `tc`, `iptables`,
+`setpriv`, `sysctl` and external `kill`. Actual privileged PATH/version probes,
+iptables backend, noninteractive sudo and namespace-list checks remain required.
+An unexpected missing core tool fails closed instead of refreshing all configured
+APT repositories. All network groups additionally require `conntrack`: their
+unchanged shared suite uses its real CLI even for selected NAT scenarios. Android
+does not require it. Complete hosts make no package installation calls.
 
-All network groups still require `conntrack`: their unchanged shared test suite
-uses its real CLI even when selected NAT scenarios do not. Android's selected
-scenarios do not require that CLI. The checks do not claim to prove namespace
-creation, packet routing or cleanup; the subsequent real qualification does that.
+For missing conntrack, [the fixed manifest](../scripts/ci-network-packages.json)
+contains four original Ubuntu Noble amd64 packages, totaling 110,156 bytes.
+The dependency closure is conntrack, libmnl, libnetfilter-conntrack and
+libnfnetlink; libc and its loader remain host prerequisites, never replaced.
+Readelf inspection found only those SONAMEs and glibc symbols through GLIBC_2.34.
+The conntrack package has no maintainer scripts; the libraries only declare
+standard ldconfig triggers, which normal dpkg installation preserves.
 
-This avoids a needless package-manager dependency on already complete hosts. It
-does not repair the mirror or identify the silent historical APT subphase. Missing
-packages still need acquisition, and network jobs retain Playwright's separate
-`install --with-deps chromium` path. The workflow is not universally APT-free.
+The manifest hashes were verified through Ubuntu's signed Noble InRelease and
+Packages index using the documented archive signing key fingerprint
+`F6ECB3762474EDA9D21B7022871920D1991BC93C`. The
+[archive verification contract](https://documentation.ubuntu.com/security/software-integrity/archive-verification/)
+and [documented signing key](https://ubuntu.com/chisel/docs/v1.3.0/reference/security/)
+explain that provenance. `ci-network-package-closure.mjs acquire` downloads each
+fixed official Snapshot object once in the existing build job, checks its size
+and SHA256, then uploads a one-day same-workflow artifact. Network consumers
+verify that artifact against the committed manifest, including original package
+control identity, and use only local `dpkg --install` paths. Already configured
+libraries satisfying the dependency versions remain untouched; incompatible or
+unconfigured packages, wrong ABI, corrupted/missing archives or failed post-install
+probes stop the job. No solver, mirror fallback, downgrade, libc replacement or
+network acquisition runs in the consumer. Real loader verification and the
+unchanged common netlink tests qualify the executable on the disposable host.
+
+Refresh is deliberate source maintenance: verify the new Ubuntu InRelease
+signature and Packages digest, then exact package versions, hashes, dependency
+and ELF closure, scripts, licenses and supported host ABI before reviewing the
+manifest change. Check all same-workflow consumers on the new pinned objects;
+never silently refresh or fall back during qualification. The
+[Snapshot service](https://snapshot.ubuntu.com/) intends at least two years of
+availability, so the dated manifest also requires maintenance before aging out.
+
+The observed historical 876-second wait was in broad APT metadata refresh;
+its internal acquire-versus-lock cause remains unknown. This removes that broad
+prerequisite and package acquisition from network qualification consumers, but
+four finite HTTPS requests remain in build. Source outages still fail build.
+Unrelated libclang APT and Playwright's `install --with-deps chromium` remain;
+the whole workflow is not APT-free. No retry, concurrency or job deadline changes
+were made. Phase/version/package evidence stays bounded and accompanies the
+existing qualification artifacts. Probes alone do not prove routing or cleanup;
+the subsequent real qualification remains responsible for those behaviors.
+
+Diagram geometry assertions resolve the persistent app root and look up current
+SVG descendants inside one synchronous callback. Font loading can legitimately
+replace an SVG between a browser locator's resolution and evaluation; detached
+frames have zero screen bounds. A real-font transition regression acquires the
+target before redraw and keeps the exact two-frame, strict ordering assertion.
+This changes test measurement lifetime, without changing renderer behavior,
+timeouts or test retries.
 
 ## Native admission diagnostics
 

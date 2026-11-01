@@ -141,6 +141,23 @@ describe('parallel CI coverage', () => {
     expect(network.run).toContain('python3 tests/stun_docker_test.py')
   })
 
+  it('delivers the pinned local package closure from this build before network preparation', () => {
+    const build = quality.jobs.build.steps
+    const acquire = build.findIndex(step => step.run === 'node scripts/ci-network-package-closure.mjs acquire target/ci-network-tools')
+    const upload = build.findIndex(step => step.with?.name === 'network-tools-noble-amd64-v1')
+    expect(acquire).toBeGreaterThan(-1)
+    expect(upload).toBeGreaterThan(acquire)
+    expect(build[upload].with).toMatchObject({ 'path': 'target/ci-network-tools/', 'retention-days': 1 })
+    const consumer = quality.jobs['network-bench']
+    expect(consumer.needs).toContain('build')
+    const download = consumer.steps.findIndex(step => step.with?.name === 'network-tools-noble-amd64-v1')
+    const prepare = consumer.steps.findIndex(step => step.run === 'node scripts/prepare-network-tools.mjs network-bench')
+    expect(download).toBeGreaterThan(-1)
+    expect(download).toBeLessThan(prepare)
+    expect(consumer.steps[download].with).toEqual({ name: 'network-tools-noble-amd64-v1', path: 'target/ci-network-tools/' })
+    expect(quality.jobs['android-direct'].steps.some(step => step.with?.name === 'network-tools-noble-amd64-v1')).toBe(false)
+  })
+
   it('runs every native network scenario once with one shared APK producer', () => {
     const build = quality.jobs['android-direct-build']
     const device = quality.jobs['android-direct']

@@ -86,6 +86,13 @@ jobs:
       - uses: ./.github/actions/setup-pnpm
         with:
           cache: true
+      - name: Acquire the pinned Ubuntu network package closure
+        run: node scripts/ci-network-package-closure.mjs acquire target/ci-network-tools
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: network-tools-noble-amd64-v1
+          path: target/ci-network-tools/
+          retention-days: 1
       - run: rustup toolchain install 1.97.1 --profile minimal && rustup default 1.97.1
       - name: Install bindings toolchain for the required ublk transport
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev
@@ -646,6 +653,10 @@ jobs:
         with:
           cache: true
       - run: rustup toolchain install 1.97.1 --profile minimal && rustup default 1.97.1
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: network-tools-noble-amd64-v1
+          path: target/ci-network-tools/
       - name: Prepare the complete network-suite toolchain
         run: node scripts/prepare-network-tools.mjs network-bench
       - run: pnpm exec playwright install --with-deps chromium
