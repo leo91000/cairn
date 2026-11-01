@@ -191,17 +191,48 @@ async fn delegated_native_child_cannot_make_its_requester_depend_on_it() {
 }
 
 #[tokio::test]
-async fn a_self_directing_call_cannot_persist_a_self_edge_on_either_backend() {
+async fn self_direction_keeps_existing_ancestry_on_either_backend() {
     for backend in ["native", "firecracker"] {
         let f = fixture(backend).await;
-        let actor = root(&f).await;
-        let message = id();
-        let before = messages(&f, &actor).await;
-        let response = send(&f, &actor, &actor, &message).await;
-        assert_eq!(response["result"]["isError"], true, "{backend}: {response}");
-        let saved = f.service.store.run(text(&actor.run, "id")).await.unwrap();
-        assert!(saved["nativeParentRunId"].is_null());
-        assert_eq!(messages(&f, &actor).await, before);
+        let parent = root(&f).await;
+        let child = delegated(&f, &parent).await;
+        assert!(parent.run["nativeParentRunId"].is_null());
+        assert_eq!(child.run["nativeParentRunId"], parent.run["id"]);
+        for actor in [&parent, &child] {
+            let run_id = text(&actor.run, "id");
+            let before_run = f.service.store.run(run_id).await.unwrap();
+            let before_chat = f
+                .service
+                .conversation_boundary(text(&actor.chat, "id"))
+                .await
+                .unwrap();
+            let before_messages = messages(&f, actor).await;
+            let message = id();
+            let response = send(&f, actor, actor, &message).await;
+            assert_ne!(response["result"]["isError"], true, "{backend}: {response}");
+            let saved_run = f.service.store.run(run_id).await.unwrap();
+            let saved_chat = f
+                .service
+                .conversation_boundary(text(&actor.chat, "id"))
+                .await
+                .unwrap();
+            assert_ne!(saved_run["nativeParentRunId"], run_id);
+            for field in [
+                "nativePrincipals",
+                "nativeAuthorityNodes",
+                "nativeParentRunId",
+                "nativeParentAccess",
+                "nativeProvenanceUnknown",
+                "nativePluginGrants",
+            ] {
+                assert_eq!(saved_run[field], before_run[field], "{backend}: {field}");
+                assert_eq!(saved_chat[field], before_chat[field], "{backend}: {field}");
+            }
+            let saved_messages = messages(&f, actor).await;
+            assert_eq!(saved_messages.len(), before_messages.len() + 1);
+            assert!(saved_messages.contains(&message));
+            assert!(before_messages.iter().all(|id| saved_messages.contains(id)));
+        }
     }
 }
 
