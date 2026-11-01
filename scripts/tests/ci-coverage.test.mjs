@@ -76,7 +76,8 @@ describe('parallel CI coverage', () => {
     expect(legacy.if).toContain('steps.bootstrap.outputs.needed == \'true\'')
     expect(legacy.with.path.trim().split('\n').map(line => line.trim())).toEqual(['~/.cargo/registry/', '~/.cargo/git/', 'target/'])
     const owners = Object.entries(quality.jobs).filter(([, job]) => job.steps?.some(step => step.uses === './.github/actions/cache-rust' && step.with?.save === true))
-    expect(owners.map(([name]) => name)).toEqual(['backend'])
+    // Keep cache publication out of the long-running backend qualification.
+    expect(owners.map(([name]) => name)).toEqual(['build'])
   })
 
   it('gives installer and update fixtures their own database and web assets', () => {
