@@ -28,7 +28,11 @@ Directing an existing conversation also checks the prospective native parent
 chain against the destination run before committing the directing effect. The
 check runs in the same writer transaction as the grant and message/control, so
 opposing requests cannot both create a cycle. This applies to VM conversations
-that retain native provenance too. A cyclic directing effect is refused without
+that retain native provenance too. Backend migration validates its destination
+grant at both the initial and final writer transaction; a stored pending
+migration is rechecked before source reads and destination admission. Admission
+of a prospective run includes that run's identity instead of following its old
+stored authority. A cyclic directing effect is refused without
 discarding a saved revocation edge or rewriting existing authority. Delegated
 reports remain readable through `task_status`; they do not require the requester
 to acquire its child's authority as a parent. Existing malformed lineages remain

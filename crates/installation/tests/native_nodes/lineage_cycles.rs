@@ -73,11 +73,15 @@ async fn delegated(f: &Fixture, parent: &Actor) -> Actor {
 }
 
 async fn managed(f: &Fixture, parent: &Actor) -> Actor {
+    managed_as(f, parent, text(&f.agent, "id")).await
+}
+
+async fn managed_as(f: &Fixture, parent: &Actor, agent: &str) -> Actor {
     let created = delegated_call(
         f,
         &parent.configuration,
         "create_chat",
-        json!({ "agentId": f.agent["id"] }),
+        json!({ "agentId": agent }),
     )
     .await;
     assert_ne!(created["result"]["isError"], true, "{created}");
@@ -202,6 +206,199 @@ async fn a_longer_management_chain_cannot_be_closed_into_a_cycle() {
 }
 
 #[tokio::test]
+async fn a_vm_descendant_cannot_poison_its_root_native_provenance() {
+    let f = fixture("firecracker").await;
+    let parent = root(&f).await;
+    let child = managed(&f, &parent).await;
+    assert_eq!(child.run["nativeParentRunId"], parent.run["id"]);
+    let before_parent = f.service.store.run(text(&parent.run, "id")).await.unwrap();
+    let before_chat = f
+        .service
+        .conversation_boundary(text(&parent.chat, "id"))
+        .await
+        .unwrap();
+    let before_messages = messages(&f, &parent).await;
+    let response = send(&f, &child, &parent, &id()).await;
+    assert_eq!(response["result"]["isError"], true, "{response}");
+    assert!(
+        response["result"]
+            .to_string()
+            .contains("cyclic native authority lineage")
+    );
+    assert_eq!(
+        f.service.store.run(text(&parent.run, "id")).await.unwrap(),
+        before_parent
+    );
+    assert_eq!(
+        f.service
+            .conversation_boundary(text(&parent.chat, "id"))
+            .await
+            .unwrap(),
+        before_chat
+    );
+    assert_eq!(messages(&f, &parent).await, before_messages);
+}
+
+#[tokio::test]
+async fn migrating_an_expired_vm_requester_cannot_adopt_its_native_child() {
+    let mut f = fixture("auto").await;
+    let vm = f.vm_node().await;
+    f.agent["access"]["nodes"] = json!([vm["id"], f.node["id"]]);
+    f.service
+        .store
+        .put_agent_fixture(f.agent.clone())
+        .await
+        .unwrap();
+    f.node["nativeAccounts"] = json!([TRUSTED, OTHER]);
+    f.service
+        .store
+        .put_node_fixture(f.node.clone())
+        .await
+        .unwrap();
+    let parent = root(&f).await;
+    let mut snapshot = parent.run["snapshot"].clone();
+    snapshot["agent"]["access"]["backend"] = "firecracker".into();
+    f.service
+        .store
+        .change_run(
+            text(&parent.run, "id"),
+            cairn_installation::runs::RunChanges {
+                snapshot: Some(serde_json::from_value(snapshot).unwrap()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let parent = running(&f, parent.chat).await;
+    let native_agent = f
+        .service
+        .agent_fixture(
+            json!({
+                "name": "Native migration reviewer",
+                "access": { "backend": "native", "nodes": [f.node["id"]], "installation": true },
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let child = managed_as(&f, &parent, text(&native_agent, "id")).await;
+    assert_eq!(child.run["nativeParentRunId"], parent.run["id"]);
+    assert!(allowed(&f, &child).await);
+
+    // Model the normal terminal expiration state without creating/converting a
+    // disk. The public migration call below must reject before any conversion.
+    let (chat_id, run_id) = (
+        text(&parent.chat, "id").to_owned(),
+        text(&parent.run, "id").to_owned(),
+    );
+    f.service
+        .store
+        .transaction(move |db| {
+            for mut message in db.messages(&chat_id)? {
+                message["status"] = "delivered".into();
+                db.put_message(&message)?;
+            }
+            db.change_run(
+                &run_id,
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Succeeded),
+                    recovery_pending: Some(false),
+                    resume_available: Some(false),
+                    boundary: Some(json!({
+                        "environmentState": "expired",
+                        "environmentExpiredAt": now(),
+                        "nodeId": null,
+                        "isolated": false,
+                    })),
+                    ..Default::default()
+                },
+            )?;
+            db.save_checkpoint_boundary(&run_id, &json!({ "completed": true }))?;
+            db.revoke_mcp_run(&run_id)?;
+            let mut chat = db.conversation_boundary(&chat_id)?.unwrap();
+            chat["environmentState"] = "expired".into();
+            chat["environmentExpiredAt"] = now().into();
+            chat["paused"] = true.into();
+            db.save_conversation_boundary(&chat)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(allowed(&f, &child).await);
+    let before_run = f.service.store.run(text(&parent.run, "id")).await.unwrap();
+    let before_chat = f
+        .service
+        .conversation_boundary(text(&parent.chat, "id"))
+        .await
+        .unwrap();
+    let before_checkpoint = f
+        .service
+        .store
+        .checkpoint_boundary(text(&parent.run, "id"))
+        .await
+        .unwrap();
+    let before_messages = messages(&f, &parent).await;
+    let response = delegated_call(
+        &f,
+        &child.configuration,
+        "migrate_chat_backend",
+        json!({
+            "chatId": parent.chat["id"],
+            "nodeId": f.node["id"],
+            "backend": "native",
+            "confirm": true,
+        }),
+    )
+    .await;
+    assert_eq!(response["result"]["isError"], true, "{response}");
+    assert!(
+        response["result"]
+            .to_string()
+            .contains("cyclic native authority lineage")
+    );
+    assert_eq!(
+        f.service.store.run(text(&parent.run, "id")).await.unwrap(),
+        before_run
+    );
+    assert_eq!(
+        f.service
+            .conversation_boundary(text(&parent.chat, "id"))
+            .await
+            .unwrap(),
+        before_chat
+    );
+    assert_eq!(
+        f.service
+            .store
+            .checkpoint_boundary(text(&parent.run, "id"))
+            .await
+            .unwrap(),
+        before_checkpoint
+    );
+    assert_eq!(messages(&f, &parent).await, before_messages);
+    assert!(allowed(&f, &child).await);
+
+    // A verified installation owner can still explicitly adopt this expired
+    // environment; that operation never acquires the child's reverse edge.
+    let (status, result) = f
+        .owner_call(
+            "POST",
+            &format!(
+                "/api/nodes/placement/{}/backend-migration",
+                text(&parent.run, "id")
+            ),
+            json!({ "nodeId": f.node["id"], "backend": "native", "confirm": true }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    let adopted = f.service.store.run(text(&parent.run, "id")).await.unwrap();
+    assert!(adopted["nativeParentRunId"].is_null());
+    assert_eq!(adopted["nativePrincipals"], json!([OTHER]));
+    assert_eq!(adopted["snapshot"]["agent"]["access"]["backend"], "native");
+    assert!(allowed(&f, &child).await);
+}
+
+#[tokio::test]
 async fn concurrent_opposing_directions_commit_only_one_acyclic_effect() {
     let f = fixture("native").await;
     let a = root(&f).await;
@@ -221,6 +418,76 @@ async fn concurrent_opposing_directions_commit_only_one_acyclic_effect() {
     assert_eq!(saved_b["nativeParentRunId"].is_null(), b_ok);
     assert!(allowed(&f, &a).await);
     assert!(allowed(&f, &b).await);
+}
+
+#[tokio::test]
+async fn directing_authority_keeps_the_sixteen_scope_depth_bound_on_both_backends() {
+    for backend in ["native", "firecracker"] {
+        let f = fixture(backend).await;
+        let accepted = root(&f).await;
+        let refused = root(&f).await;
+        let mut previous = Value::Null;
+        let mut last = Value::Null;
+        // The destination plus fifteen stored ancestors is sixteen scopes.
+        for _ in 0..15 {
+            let mut run = f.run();
+            run["status"] = "running".into();
+            run["nativeParentRunId"] = previous;
+            run["nativeParentAccess"] = "installation".into();
+            common::add_run(&f.service.store, &run).await;
+            previous = run["id"].clone();
+            last = run;
+        }
+        let configuration = f
+            .service
+            .mcps
+            .run_configuration(&f.service, &last)
+            .await
+            .unwrap();
+        let caller = Actor {
+            chat: Value::Null,
+            run: last,
+            configuration,
+        };
+        let response = send(&f, &caller, &accepted, &id()).await;
+        assert_ne!(response["result"]["isError"], true, "{backend}: {response}");
+        let saved = f
+            .service
+            .store
+            .run(text(&accepted.run, "id"))
+            .await
+            .unwrap();
+        assert_eq!(saved["nativeParentRunId"], caller.run["id"]);
+        if backend == "native" {
+            assert!(allowed(&f, &accepted).await);
+        }
+
+        let mut extra = f.run();
+        extra["status"] = "running".into();
+        extra["nativeParentRunId"] = caller.run["id"].clone();
+        extra["nativeParentAccess"] = "installation".into();
+        common::add_run(&f.service.store, &extra).await;
+        let configuration = f
+            .service
+            .mcps
+            .run_configuration(&f.service, &extra)
+            .await
+            .unwrap();
+        let over_limit = Actor {
+            chat: Value::Null,
+            run: extra,
+            configuration,
+        };
+        let before = f.service.store.run(text(&refused.run, "id")).await.unwrap();
+        let before_messages = messages(&f, &refused).await;
+        let response = send(&f, &over_limit, &refused, &id()).await;
+        assert_eq!(response["result"]["isError"], true, "{backend}: {response}");
+        assert_eq!(
+            f.service.store.run(text(&refused.run, "id")).await.unwrap(),
+            before
+        );
+        assert_eq!(messages(&f, &refused).await, before_messages);
+    }
 }
 
 #[tokio::test]

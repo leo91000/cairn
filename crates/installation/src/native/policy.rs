@@ -396,6 +396,11 @@ fn allows_agent(
     }
     let mut scope = run.clone();
     let mut seen = std::collections::HashSet::new();
+    if let Some(id) = run["id"].as_str() {
+        // A prospective destination may not yet have this grant in storage.
+        // Do not validate a back edge by loading its old parentless version.
+        seen.insert(id.to_owned());
+    }
     for _ in 0..MAX_AUTHORITY_DEPTH {
         if scope["nativeProvenanceUnknown"] == true
             || !explicit(&scope["nativeAuthorityNodes"], text(node, "id"))
@@ -474,7 +479,7 @@ pub(crate) fn authorize_origin(db: &Db<'_>, agent: &Value, source: &Origin) -> R
 /// committing it. Traversing only the old stored graph misses an edge back to
 /// a currently parentless destination. The writer transaction serializes these
 /// checks with the grant and directing effect, including opposing requests.
-fn require_acyclic_parent(db: &Db<'_>, destination: &str, grant: &Value) -> Result<()> {
+pub(crate) fn require_acyclic_parent(db: &Db<'_>, destination: &str, grant: &Value) -> Result<()> {
     if destination.is_empty() {
         // A conversation without a run receives a fresh run identity later.
         return Ok(());
