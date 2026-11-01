@@ -202,6 +202,8 @@ jobs:
         if: inputs.backend-only == true
         run: pnpm validate:pr rust
       - name: Run backend tests across binaries with isolated credentials
+        # Leave time within the unchanged 40-minute job for interrupted traces.
+        timeout-minutes: 30
         run: |
           set -o pipefail
           node scripts/test-backend.mjs --nextest --test-threads 8 --no-fail-fast --color never --status-level all 2>&1 | tee backend-tests.log
