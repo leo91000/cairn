@@ -163,6 +163,17 @@ pub(super) async fn reconcile(
     .await
 }
 
+#[cfg(test)]
+pub(super) async fn record_failure_fixture(
+    s: &Service,
+    checkpoint: &Checkpoint,
+    cancel: &CancellationToken,
+    error: &Error,
+    sensitive: &[String],
+) -> Result<()> {
+    record_failure(s, checkpoint, cancel, error, sensitive).await
+}
+
 async fn record_failure(
     s: &Service,
     checkpoint: &Checkpoint,

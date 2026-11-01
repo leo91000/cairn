@@ -7,13 +7,34 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub(super) struct OutputProbe {
     refreshes: Arc<AtomicU64>,
     before_canonical: Arc<AtomicU64>,
+    history: Option<Arc<credential_history::PrivacyProbe>>,
 }
 
 impl OutputProbe {
     pub(super) async fn refresh(&self) {
         self.refreshes.fetch_add(1, Ordering::Relaxed);
+        if self.history.is_some() {
+            return;
+        }
         // Model repeated sub-threshold account/Store work deterministically.
         tokio::time::sleep(Duration::from_millis(12)).await;
+    }
+
+    pub(super) fn before_record(&self, output: &output::Output) -> Result<()> {
+        if let Some(history) = &self.history {
+            history.before_record(output)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn recorded(&self, output: &output::Output) {
+        if let Some(history) = &self.history {
+            history.recorded(output);
+        }
+    }
+
+    pub(super) fn supplies_flood_marker(&self) -> bool {
+        self.history.is_none()
     }
 
     pub(super) fn canonical(&self) {
@@ -37,6 +58,10 @@ async fn rpc_flood_fixture() {
 }
 
 async fn service_fixture() -> (tempfile::TempDir, Arc<Service>) {
+    service_with_codex("unused").await
+}
+
+async fn service_with_codex(codex: &str) -> (tempfile::TempDir, Arc<Service>) {
     let root = tempfile::tempdir().unwrap();
     let service = Service::new(crate::config::Config {
         data_dir: root.path().join("data"),
@@ -45,7 +70,7 @@ async fn service_fixture() -> (tempfile::TempDir, Arc<Service>) {
         public_url: "http://localhost:4310".into(),
         host: "127.0.0.1".into(),
         port: 0,
-        codex_bin: "unused".into(),
+        codex_bin: codex.into(),
         claude_bin: "unused".into(),
         opencode_bin: "unused".into(),
         opencode_go_usage_url: crate::accounts::opencode::USAGE_URL.into(),
@@ -79,6 +104,7 @@ async fn rpc_flood_on_service(root: tempfile::TempDir, service: Arc<Service>) {
     let probe = OutputProbe {
         refreshes: Arc::new(AtomicU64::new(0)),
         before_canonical: Arc::new(AtomicU64::new(u64::MAX)),
+        history: None,
     };
     let mut execution = Execution {
         s: &service,
@@ -299,3 +325,6 @@ async fn saturated_summary_sink_child() {
     drop(release);
     assert!(crate::performance::flush(Duration::from_secs(5)));
 }
+
+#[path = "launch_credential_history_tests.rs"]
+mod credential_history;

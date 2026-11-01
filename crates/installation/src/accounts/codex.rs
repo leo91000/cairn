@@ -303,6 +303,13 @@ async fn capture(s: &Service, id: &str, home: &Path) -> Result<()> {
     Ok(())
 }
 
+// Test adapter only: initialize through the real capture/identity/write path.
+#[cfg(test)]
+pub(crate) async fn capture_fixture(s: &Service, id: &str, home: &Path) -> Result<()> {
+    let _guard = s.accounts.lock(id).await;
+    capture(s, id, home).await
+}
+
 /// Writes the vault credentials into a manager-only Codex home.
 async fn materialize(s: &Service, id: &str, home: &Path) -> Result<()> {
     // A previous process may have refreshed just before a crash or a failed vault write.

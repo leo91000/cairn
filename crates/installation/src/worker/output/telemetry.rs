@@ -130,6 +130,8 @@ pub(in crate::worker) struct Publisher {
     attempt: String,
     dispatch: tracing::Dispatch,
     rejected_reports: u64,
+    #[cfg(test)]
+    accepted: Option<tokio_util::sync::CancellationToken>,
 }
 
 impl Publisher {
@@ -143,7 +145,18 @@ impl Publisher {
             attempt: crate::performance::identity(attempt).to_owned(),
             dispatch: tracing::dispatcher::get_default(Clone::clone),
             rejected_reports: 0,
+            #[cfg(test)]
+            accepted: None,
         }
+    }
+
+    /// Acknowledge classification at the actual reader seam, without redaction effects.
+    #[cfg(test)]
+    pub(in crate::worker) fn accepted_fixture(
+        &mut self,
+        accepted: tokio_util::sync::CancellationToken,
+    ) {
+        self.accepted = Some(accepted);
     }
 
     pub(in crate::worker) fn observe(&mut self, line: &str) -> bool {
@@ -194,6 +207,10 @@ impl Publisher {
             }
         }
         self.report_if_due();
+        #[cfg(test)]
+        if let Some(accepted) = &self.accepted {
+            accepted.cancel();
+        }
         true
     }
 

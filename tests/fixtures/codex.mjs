@@ -5,6 +5,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs'
 import path from 'node:path'
@@ -83,7 +84,22 @@ async function main() {
         continue
       }
 
-      if (request.method === 'account/read' && request.params?.refreshToken && auth) {
+      // One-use exact replacement for generation-history privacy regressions.
+      // Existing refresh fixtures keep their original suffix behavior.
+      const rotationPath = path.join(process.env.CODEX_HOME, 'fixture-token-rotation.json')
+      const rotation = existsSync(rotationPath) ? JSON.parse(readFileSync(rotationPath, 'utf8')) : null
+      if (request.method === 'account/read' && auth && rotation
+        && Boolean(request.params?.refreshToken) === rotation.refreshToken) {
+        for (const field of ['access_token', 'refresh_token', 'id_token']) {
+          if (typeof rotation.tokens?.[field] !== 'string' || !rotation.tokens[field])
+            throw new Error('Expected complete synthetic rotation credentials')
+          auth.tokens[field] = rotation.tokens[field]
+        }
+
+        unlinkSync(rotationPath)
+        writeFileSync(authPath, JSON.stringify(auth))
+      }
+      else if (request.method === 'account/read' && request.params?.refreshToken && auth) {
         auth.tokens.access_token += '-refreshed'
         auth.tokens.refresh_token += '-rotated'
         writeFileSync(authPath, JSON.stringify(auth))

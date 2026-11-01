@@ -1121,6 +1121,10 @@ impl Execution<'_> {
                             }
                         }
                         crate::performance::wait("refresh_redactions", self.refresh_redactions()).await?;
+                        #[cfg(test)]
+                        if let Some(probe) = &self.output_probe {
+                            probe.before_record(&output)?;
+                        }
                         exit.exhausted |= crate::performance::wait("persist_output", output::record(
                             s,
                             &output,
@@ -1130,6 +1134,10 @@ impl Execution<'_> {
                             log_total,
                             &mut activity,
                         )).await?;
+                        #[cfg(test)]
+                        if let Some(probe) = &self.output_probe {
+                            probe.recorded(&output);
+                        }
                     }
                     None => open = false,
                 },
@@ -1144,10 +1152,11 @@ impl Execution<'_> {
         #[cfg(test)]
         if let Some(probe) = &self.output_probe {
             probe.refresh().await;
-            if !self
-                .sensitive
-                .iter()
-                .any(|value| value == "rotated-test-secret")
+            if probe.supplies_flood_marker()
+                && !self
+                    .sensitive
+                    .iter()
+                    .any(|value| value == "rotated-test-secret")
             {
                 self.sensitive.push("rotated-test-secret".into());
             }
