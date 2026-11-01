@@ -94,8 +94,7 @@ fn validate_catalog(selection: &mut ResumeExecutionSelection, catalog: &Value) -
             .into_iter()
             .flatten()
             .find(|model| model["isDefault"] == true)
-            .map(|model| text(model, "model"))
-            .unwrap_or("")
+            .map_or("", |model| text(model, "model"))
             .to_owned()
     } else {
         selection.model.clone()
@@ -130,12 +129,12 @@ fn validate_catalog(selection: &mut ResumeExecutionSelection, catalog: &Value) -
         ));
     }
 
-    if !selection.speed.is_empty() && selection.speed != crate::models::STANDARD_SPEED {
-        if let Some(tiers) = model["serviceTiers"].as_array()
-            && !tiers.iter().any(|tier| tier["id"] == selection.speed)
-        {
-            return Err(Error::bad("Choose a speed offered for this model."));
-        }
+    if !selection.speed.is_empty()
+        && selection.speed != crate::models::STANDARD_SPEED
+        && let Some(tiers) = model["serviceTiers"].as_array()
+        && !tiers.iter().any(|tier| tier["id"] == selection.speed)
+    {
+        return Err(Error::bad("Choose a speed offered for this model."));
     }
     Ok(())
 }

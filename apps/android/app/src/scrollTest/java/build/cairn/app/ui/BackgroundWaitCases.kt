@@ -210,7 +210,7 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun savedQuotaFailureOffersManualResumeInsteadOfPromisingAutomaticRecovery() =
-        conversation("failed", quota = true) { server ->
+        conversation("failed", quota = true, resumableTurn = true) { server ->
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
             compose.onNodeWithText("Reprendre la conversation").assertExists()
             compose
@@ -231,6 +231,7 @@ abstract class BackgroundWaitCases {
                 .assertIsDisplayed()
                 .performClick()
             val effects = mutableListOf<String>()
+            var resumeBody: JsonObject? = null
             compose.waitUntil(10000) {
                 compose.waitForIdle()
                 var request = server.takeRequest(0, TimeUnit.MILLISECONDS)
@@ -240,21 +241,37 @@ abstract class BackgroundWaitCases {
                         request.method == "POST" &&
                             path in
                                 listOf(
-                                    "/api/installations/fixture/api/runs/$SAVED_RUN_ID/resume",
+                                    "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume",
                                     "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/pause",
                                 )
-                    )
+                    ) {
                         effects.add(path)
+                        if (path.endsWith("/resume")) {
+                            resumeBody = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+                        }
+                    }
                     request = server.takeRequest(0, TimeUnit.MILLISECONDS)
                 }
                 effects.size == 2
             }
             org.junit.Assert.assertEquals(
                 listOf(
-                    "/api/installations/fixture/api/runs/$SAVED_RUN_ID/resume",
+                    "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume",
                     "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/pause",
                 ),
                 effects,
+            )
+            org.junit.Assert.assertEquals(
+                "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                resumeBody!!["chatId"]!!.jsonPrimitive.content,
+            )
+            org.junit.Assert.assertEquals(
+                SAVED_RUN_ID,
+                resumeBody!!["runId"]!!.jsonPrimitive.content,
+            )
+            org.junit.Assert.assertEquals(
+                "quota-turn",
+                resumeBody!!["turnId"]!!.jsonPrimitive.content,
             )
         }
 
@@ -266,11 +283,14 @@ abstract class BackgroundWaitCases {
                 compose.onAllNodesWithText("GPT-6 Sol").fetchSemanticsNodes().isNotEmpty()
             }
             compose.onNodeWithTag("model-picker").performClick()
-            compose.onNode(hasText("GPT-6 Sol") and isSelectable()).assertIsSelected()
+            compose
+                .onNode(hasText("Modèle de la conversation") and isSelectable())
+                .assertIsSelected()
+            compose.onNodeWithText("GPT-6 Sol", substring = true).assertExists()
             compose.onNodeWithTag("reasoning-slider").performSemanticsAction(
                 androidx.compose.ui.semantics.SemanticsActions.SetProgress
             ) {
-                it(1f)
+                it(0f)
             }
             compose.onNodeWithText("Standard").assertExists()
             compose.onNodeWithText("Terminé").performClick()
@@ -296,7 +316,7 @@ abstract class BackgroundWaitCases {
                 body["selection"]!!.jsonObject["model"]!!.jsonPrimitive.content,
             )
             org.junit.Assert.assertEquals(
-                "high",
+                "medium",
                 body["selection"]!!.jsonObject["reasoning"]!!.jsonPrimitive.content,
             )
             org.junit.Assert.assertEquals(
@@ -340,13 +360,19 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun savedOpenCodeAutoRouteResumeSubmitsTheGroupedModelId() =
-        conversation("failed", quota = true, resumeRouteSelection = true) { server ->
+        conversation(
+            "failed",
+            quota = true,
+            resumeRouteSelection = true,
+            resumePinnedRouteSelection = true,
+        ) { server ->
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
             compose.waitUntil(10000) {
                 compose.onAllNodesWithText("Sonnet").fetchSemanticsNodes().isNotEmpty()
             }
             compose.onNodeWithTag("model-picker").performClick()
-            compose.onNodeWithText("Auto").performClick()
+            compose.onAllNodes(hasText("Auto") and hasClickAction()).assertCountEquals(1)
+            compose.onNode(hasText("Auto") and hasClickAction()).performClick()
             compose.onNodeWithText("Terminé").performClick()
             compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
 
@@ -710,6 +736,8 @@ abstract class BackgroundWaitCases {
         quota: Boolean = false,
         resumeSelection: Boolean = false,
         resumeRouteSelection: Boolean = false,
+        resumePinnedRouteSelection: Boolean = false,
+        resumableTurn: Boolean = false,
         codingAgentChoices: Boolean = false,
         initialAlternatives: String? = null,
         rejectSwitch: Boolean = false,
@@ -721,6 +749,7 @@ abstract class BackgroundWaitCases {
         MockWebServer().use { server ->
             val now = System.currentTimeMillis()
             val hasResumeSelection = resumeSelection || resumeRouteSelection
+            val hasSavedTurn = hasResumeSelection || resumableTurn
             val chat =
                 Chat(
                     id = "6cc6efab-10af-54c7-a91b-dcff664166a1",
@@ -734,11 +763,10 @@ abstract class BackgroundWaitCases {
                             id = SAVED_RUN_ID,
                             status = status,
                             startedAt = now - 60_000,
-                            resumeAvailable = hasResumeSelection,
-                            sessionId = if (hasResumeSelection) "saved-session" else null,
+                            resumeAvailable = hasSavedTurn,
+                            sessionId = if (hasSavedTurn) "saved-session" else null,
                             chatExecution =
-                                if (hasResumeSelection) ChatExecution(messageId = "quota-turn")
-                                else null,
+                                if (hasSavedTurn) ChatExecution(messageId = "quota-turn") else null,
                             snapshot =
                                 Snapshot(
                                     agent =
@@ -761,7 +789,13 @@ abstract class BackgroundWaitCases {
                                                 if (resumeRouteSelection) "opencode"
                                                 else if (quota && !resumeSelection) "claude"
                                                 else "codex",
-                                            model = if (resumeRouteSelection) "auto/sonnet" else "",
+                                            model =
+                                                when {
+                                                    resumePinnedRouteSelection ->
+                                                        "opencode/ling-3.1-flash-free"
+                                                    resumeRouteSelection -> "auto/sonnet"
+                                                    else -> ""
+                                                },
                                             reasoning =
                                                 when {
                                                     resumeRouteSelection -> "medium"
