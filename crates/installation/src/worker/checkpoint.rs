@@ -906,6 +906,42 @@ mod tests {
     use crate::run_fixture::DbRunFixture;
     use serde_json::json;
 
+    /// Diagnostic-branch-only bridge from real controller evidence to the
+    /// production checkpoint guard. This does not run a mission or replay it.
+    #[test]
+    #[ignore = "requires the explicitly disposable CI shutdown matrix"]
+    fn classify_native_shutdown_matrix_with_production_guard() {
+        let path = std::env::var_os("CAIRN_NATIVE_SHUTDOWN_EVIDENCE").unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(bytes.len() <= 65_536);
+        let mut evidence: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(evidence["schemaVersion"], 1);
+        let cases = evidence["cases"].as_array_mut().unwrap();
+        assert_eq!(cases.len(), 7);
+        for case in cases {
+            let attempt = case["attempt"].as_str().unwrap();
+            assert!(case["providerCompleted"].is_boolean());
+            assert!(case["FinalizationFailed"].is_boolean());
+            let status = case["StatusCode"].as_i64().unwrap();
+            assert!((0..=255).contains(&status));
+            let failed = case["FinalizationFailed"] == true;
+            assert!(!failed || status == 70);
+            let checkpoint = RunCheckpoint::from_value(json!({
+                "runnerId": attempt,
+                "prepared": { "backend": "native", "isolated": true },
+                "completed": case["providerCompleted"],
+                "terminalCode": status,
+                "finalizationFailureAttempt": failed.then_some(attempt),
+            }))
+            .unwrap();
+            case["managerGuard"] = json!({
+                "finalizationRejected": checkpoint.finalization_error().is_some(),
+                "scope": "actual checkpoint guard; not a mission driver or live run transition",
+            });
+        }
+        std::fs::write(path, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
+    }
+
     #[tokio::test]
     async fn node_ownership_reads_nullable_ids_without_prepared_execution_data() {
         let root = tempfile::tempdir().unwrap();

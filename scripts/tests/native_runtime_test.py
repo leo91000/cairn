@@ -425,7 +425,7 @@ def main():
                 self.end_headers()
                 self.wfile.write(response)
 
-        def start(run, long=True, lease=90000, expected='changed', measure=None, docker_script='', sandbox='workspace-write'):
+        def start(run, long=True, lease=90000, expected='changed', measure=None, docker_script='', sandbox='workspace-write', shutdown_case=None):
             seed(run)
             channel = data / 'runs' / run / 'home/cairn-mcp.sock'
             if run in mcp_servers:
@@ -478,6 +478,10 @@ def main():
             script += docker_script
             if sandbox != 'read-only':
                 script += f'printf %s {attempt} > ready\n'
+            if shutdown_case is not None:
+                from native_shutdown_observer import workload
+                assert os.environ.get('CAIRN_NATIVE_SHUTDOWN_MATRIX') == '1' and not long
+                script += workload(shutdown_case)
             if measure:
                 script += "while ! test -e measure-go; do sleep 0.05; done\n/usr/bin/python3 - <<'MEASURE' > measure.json\n" + MEASURE + '\nMEASURE\n'
                 script += 'printf measured > measure-ready\n'
@@ -526,6 +530,8 @@ def main():
             eventually(execution_ready, timeout=600 if docker_script else 60)
             startup_ms = (time.perf_counter() - startup) * 1000
             if (state / (attempt + '.exit')).exists() and read_controller_result(state / (attempt + '.exit'))['StatusCode'] != 0:
+                if shutdown_case is not None:
+                    raise RuntimeError('Shutdown fixture failed before readiness; no raw diagnostic export.')
                 for record in (state / (attempt + '.log')).read_text().splitlines():
                     event = json.loads(record)
                     if event.get('data'):
@@ -671,6 +677,20 @@ def main():
 
         command('useradd', '--system', '--no-create-home', '--shell', '/usr/sbin/nologin', user)
         try:
+            if os.environ.get('CAIRN_NATIVE_SHUTDOWN_MATRIX') == '1':
+                from native_shutdown_observer import run_matrix
+                evidence = Path(os.environ['NATIVE_STORAGE_EVIDENCE_DIR'])
+                evidence.mkdir(parents=True, exist_ok=True)
+                result = run_matrix(create=create, start=start, managed=managed, api=api, fenced=fenced,
+                    manager=manager, state=state, eventually=eventually, command=command, evidence=evidence,
+                    start_controller=start_controller)
+                (evidence / 'native-shutdown-matrix.json').write_text(json.dumps(result, indent=2) + '\n')
+                for current in runs:
+                    manager('purge', run=current)
+                    api('/disks/' + current + '/delete')
+                advance_fixture_garbage_clock(root)
+                manager('purge', run=runs[-1])
+                return
             run = create()
             other = create()
             start_controller()
