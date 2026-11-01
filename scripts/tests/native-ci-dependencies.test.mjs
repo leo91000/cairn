@@ -15,7 +15,7 @@ const root = new URL('../../', import.meta.url)
 const workflow = parse(readFileSync(new URL('.github/workflows/ci.yaml', root), 'utf8'))
 const setup = workflow.jobs.backend.steps.find(step => step.name === 'Install native test dependencies')
 
-async function executeSetup(fault = '', { closeOutput = false, throwingMarker = false } = {}) {
+async function executeSetup(fault = '', { closeOutput = false, blockedOutput = false, throwingMarker = false } = {}) {
   const directory = mkdtempSync(path.join(os.tmpdir(), 'cairn-native-dependencies-'))
   const history = path.join(directory, 'calls.jsonl')
   writeFileSync(history, '')
@@ -31,10 +31,12 @@ appendFileSync(${JSON.stringify(history)}, JSON.stringify({ phase, pid: process.
 const fault = ${JSON.stringify(fault)}
 if (phase === fault) {
   setInterval(() => {}, 1000)
-} else if (phase === 'update' && ['hard-stall', 'orphan-stall'].includes(fault)) {
+} else if (phase === 'update' && ['hard-stall', 'orphan-stall', 'fail-descendant', 'success-descendant'].includes(fault)) {
   if (fault === 'hard-stall') process.on('SIGTERM', () => {})
   const child = spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], { stdio: 'inherit' })
   appendFileSync(${JSON.stringify(history)}, JSON.stringify({ phase: 'descendant', pid: child.pid }) + '\\n')
+  if (fault === 'fail-descendant') process.exit(42)
+  if (fault === 'success-descendant') process.exit(0)
   setInterval(() => {}, 1000)
 } else if (phase === 'update' || phase === 'install') {
   process.exit(fault === 'fail-' + phase ? 42 : 0)
@@ -49,7 +51,8 @@ if (phase === fault) {
     writeFileSync(path.join(directory, name), fixture, { mode: 0o700 })
 
   const started = Date.now()
-  const driver = `import { installNativeCiDependencies } from ${JSON.stringify(new URL('scripts/install-native-ci-dependencies.mjs', root).href)}; process.exitCode = installNativeCiDependencies({ phaseSeconds: { update: 0.15, install: 0.15 }, entryAllowanceSeconds: 0.65, killAfterSeconds: 0.4${throwingMarker ? ', write: () => { throw new Error("fixture marker failure") }' : ''} });`
+  const fillOutput = `let full = false; const bytes = Buffer.alloc(64 * 1024); for (let i = 0; i < 256; i++) { try { writeSync(process.stdout.fd, bytes); } catch (error) { full = error.code === 'EAGAIN'; break; } } appendFileSync(${JSON.stringify(history)}, JSON.stringify({ phase: 'blocked-output', pid: process.pid, full }) + '\\n');`
+  const driver = `import { writeSync, appendFileSync } from 'node:fs'; import { installNativeCiDependencies } from ${JSON.stringify(new URL('scripts/install-native-ci-dependencies.mjs', root).href)}; ${blockedOutput ? fillOutput : ''} process.exitCode = installNativeCiDependencies({ phaseSeconds: { update: 0.15, install: 0.15 }, entryAllowanceSeconds: 0.65, killAfterSeconds: 0.4${throwingMarker ? ', write: () => { throw new Error("fixture marker failure") }' : ''} });`
   const command = fault || closeOutput || throwingMarker ? process.execPath : '/bin/bash'
   const args = fault || closeOutput || throwingMarker
     ? ['--input-type=module', '-e', driver]
@@ -65,6 +68,11 @@ if (phase === fault) {
   child.stderr.on('data', bytes => output += bytes)
   if (closeOutput)
     child.stdout.destroy()
+  if (blockedOutput) {
+    child.stdout.pause()
+    child.on('exit', () => child.stdout.destroy())
+  }
+
   let harnessKilled = false
   const timer = setTimeout(() => {
     harnessKilled = true
@@ -161,18 +169,35 @@ describe('native CI dependency setup', () => {
     expect(result.survivingFixturePids).toEqual([])
   })
 
-  it.each(['fail-update', 'update', 'orphan-stall'])('preserves %s classification with closed marker output', async (fault) => {
+  it.each(['fail-descendant', 'success-descendant'])('cleans ordinary %s leader exit before returning its original status', async (fault) => {
+    const result = await executeSetup(fault)
+    expect(result.harnessKilled).toBe(false)
+    expect(result.status).toBe(fault === 'fail-descendant' ? 42 : 0)
+    expect(result.calls.filter(call => call.phase === 'install')).toHaveLength(fault === 'fail-descendant' ? 0 : 1)
+    expect(result.survivingFixturePids).toEqual([])
+  })
+
+  it.each(['fail-update', 'update', 'orphan-stall', 'fail-descendant'])('preserves %s classification with closed marker output', async (fault) => {
     const result = await executeSetup(fault, { closeOutput: true })
     expect(result.harnessKilled).toBe(false)
-    expect(result.status).toBe(fault === 'fail-update' ? 42 : 124)
+    expect(result.status).toBe(['fail-update', 'fail-descendant'].includes(fault) ? 42 : 124)
     expect(result.calls.filter(call => call.phase === 'install')).toHaveLength(0)
     expect(result.survivingFixturePids).toEqual([])
   })
 
-  it.each(['fail-update', 'hard-stall', 'orphan-stall'])('preserves %s and process cleanup when a marker writer throws', async (fault) => {
+  it.each(['fail-update', 'hard-stall', 'orphan-stall', 'fail-descendant'])('preserves %s and process cleanup when a marker writer throws', async (fault) => {
     const result = await executeSetup(fault, { throwingMarker: true })
     expect(result.harnessKilled).toBe(false)
-    expect(result.status).toBe(fault === 'fail-update' ? 42 : 124)
+    expect(result.status).toBe(['fail-update', 'fail-descendant'].includes(fault) ? 42 : 124)
+    expect(result.calls.filter(call => call.phase === 'install')).toHaveLength(0)
+    expect(result.survivingFixturePids).toEqual([])
+  })
+
+  it.each(['fail-update', 'update', 'fail-descendant'])('preserves %s under diagnostic output backpressure', async (fault) => {
+    const result = await executeSetup(fault, { blockedOutput: true })
+    expect(result.calls.find(call => call.phase === 'blocked-output')?.full).toBe(true)
+    expect(result.harnessKilled).toBe(false)
+    expect(result.status).toBe(fault === 'update' ? 124 : 42)
     expect(result.calls.filter(call => call.phase === 'install')).toHaveLength(0)
     expect(result.survivingFixturePids).toEqual([])
   })
