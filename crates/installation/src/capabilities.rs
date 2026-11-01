@@ -50,6 +50,18 @@ impl ResumeRun {
         input: ResumeRunInput,
         context: ResumeContext,
     ) -> Result<ResumeRunOutput> {
+        if input
+            .turn_id
+            .as_ref()
+            .is_some_and(|turn| turn.is_empty() || turn.chars().count() > 200)
+        {
+            return Err(Error::bad("Invalid turn identifier."));
+        }
+        if input.selection.is_some() && input.turn_id.is_none() {
+            return Err(Error::bad(
+                "A turn identifier is required when selecting a model for resume.",
+            ));
+        }
         let id = input.run_id.to_string();
         let (origin, bearer) = match context {
             ResumeContext::Human(account) => (Origin::Human(account), None),
@@ -73,18 +85,54 @@ impl ResumeRun {
                 (Origin::Run(caller), Some(bearer))
             }
         };
-        let run = s.store.run(&id).await?;
+        let mut selection = input.selection;
+        let selected_resume = selection.is_some();
+        let authorize_id = id.clone();
+        let authorize_origin = origin.clone();
+        let run = s
+            .store
+            .read(move |db| {
+                let run = crate::error::required(db.run(&authorize_id)?, "Run not found")?;
+                if selected_resume || crate::resume_selection::has_saved_opencode_auto(&run) {
+                    policy::run_grant(db, &run, &authorize_origin)?;
+                }
+                Ok(run)
+            })
+            .await?;
+        let saved_auto_catalog = if !selected_resume {
+            crate::resume_selection::saved_opencode_auto_catalog(s, &run).await
+        } else {
+            None
+        };
+        let selected_provider = if let Some(selection) = selection.as_mut() {
+            let expected_turn_id = input.turn_id.as_deref().ok_or_else(|| {
+                Error::bad("A turn identifier is required when selecting a model for resume.")
+            })?;
+            Some(crate::resume_selection::validate(s, &run, selection, expected_turn_id).await?)
+        } else {
+            None
+        };
         if origin.known() && policy::supports(&run["snapshot"]["agent"], "native") {
             policy::refresh_for(s, &run["snapshot"]["agent"]).await?;
         }
         let commit_id = id.clone();
         s.worker
-            .resume_authorized(s, &id, move |db: &Db<'_>| {
-                if let Some(bearer) = &bearer {
-                    crate::installation_mcp::authorize_in(db, bearer)?;
-                }
-                policy::authorize_run_in(db, &commit_id, &origin)
-            })
+            .resume_selected_authorized(
+                s,
+                &id,
+                crate::worker::ResumeSelectionContext {
+                    expected_turn_id: input.turn_id,
+                    selection,
+                    selected_provider,
+                    saved_auto_catalog,
+                },
+                move |db: &Db<'_>| {
+                    if let Some(bearer) = &bearer {
+                        crate::installation_mcp::authorize_in(db, bearer)?;
+                    }
+                    policy::authorize_run_in(db, &commit_id, &origin)
+                },
+            )
             .await?;
         Ok(ResumeRunOutput {
             run_id: input.run_id,

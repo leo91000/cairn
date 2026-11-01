@@ -6,6 +6,7 @@ import { parse } from 'yaml'
 const quality = parse(readFileSync(new URL('../../.github/workflows/ci.yaml', import.meta.url), 'utf8'))
 const android = parse(readFileSync(new URL('../../.github/workflows/android.yaml', import.meta.url), 'utf8'))
 const pr = parse(readFileSync(new URL('../../.github/workflows/pr.yaml', import.meta.url), 'utf8'))
+const chatJourneySource = readFileSync(new URL('../../tests/e2e/chats.spec.ts', import.meta.url), 'utf8')
 
 describe('parallel CI coverage', () => {
   it.each(['image', 'beacon-image'])('exports %s layers for main and version tags without giving PR refs a cache writer', (name) => {
@@ -43,12 +44,71 @@ describe('parallel CI coverage', () => {
     expect(Object.keys(pr.on).sort()).toEqual(['pull_request', 'push'])
     expect(pr.on.push.branches).toEqual(['main'])
     expect(pr.jobs.required.if).toBe('always()')
-    expect(pr.jobs.required.needs).toEqual(['scope', 'quality', 'contracts', 'android'])
+    expect(pr.jobs.required.needs).toEqual(['scope', 'quality', 'contracts', 'android', 'browser'])
     expect(pr.jobs.quality.steps.some(step => step.run === 'pnpm validate:pr quality')).toBe(true)
     expect(pr.jobs.contracts.steps.some(step => step.run === 'pnpm validate:pr contracts')).toBe(true)
     expect(pr.jobs.android.steps.some(step => step.run === 'pnpm validate:pr android')).toBe(true)
     expect(quality.jobs.quality.steps.some(step => step.run === 'pnpm validate:pr quality')).toBe(true)
     expect(quality.jobs.quality.steps.some(step => step.run === 'pnpm validate:pr contracts')).toBe(true)
+  })
+
+  it('keeps the PR browser lane conditional, read-only and limited to the saved-chat journey', () => {
+    const browser = pr.jobs.browser
+    expect(browser.needs).toBe('scope')
+    expect(browser.if).toBe('needs.scope.outputs.browser == \'true\'')
+    expect(browser.permissions).toEqual({ contents: 'read' })
+    expect(browser.services.postgres.image).toBe('postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24')
+    expect(browser.services.postgres.env).toEqual({
+      POSTGRES_USER: 'cairn',
+      POSTGRES_PASSWORD: 'test-only',
+      POSTGRES_DB: 'cairn_beacon_test',
+    })
+    expect(browser.container.image).toBe('mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27')
+
+    const build = browser.steps.find(step => step.name === 'Build the manager fixtures and web assets')
+    expect(build.run.trim().split('\n').map(line => line.trim())).toEqual([
+      'cargo build --locked -p cairn-installation --bin cairn --example worker_fixture --example browser_fixture',
+      'cargo build --locked -p cairn-beacon --bin cairn-beacon --example beacon_sql_fixture',
+      'VITE_CAIRN_TEST_RESUME_DIAGNOSTICS=true pnpm exec vite build --config apps/web/vite.config.ts',
+    ])
+    const journey = browser.steps.find(step => step.name === 'Run the saved-chat resume journey')
+    expect(journey['timeout-minutes']).toBe(10)
+    expect(journey.run).toBe('pnpm test:e2e --project=journeys-chats tests/e2e/chats.spec.ts --grep \'same-provider quota resume\' --workers=1 --fail-on-flaky-tests')
+    const grep = journey.run.match(/--grep '([^']+)'/)?.[1]
+    const project = journey.run.match(/--project=([^ ]+)/)?.[1]
+    const testFile = journey.run.match(/ (tests\/e2e\/chats\.spec\.ts) --grep/)?.[1]
+    expect(grep).toBe('same-provider quota resume')
+    expect(project).toBe('journeys-chats')
+    expect(testFile).toBe('tests/e2e/chats.spec.ts')
+
+    const resumeTitles = [...chatJourneySource.matchAll(/^test\('([^']+)'/gm)]
+      .map(([, title]) => title)
+      .filter(title => title.startsWith('same-provider quota resume'))
+    expect(resumeTitles).toEqual([
+      'same-provider quota resume submits the saved turn with the picker-applied speed',
+      'same-provider quota resume retries a prelaunch turn without selection',
+      'same-provider quota resume preserves an inherited blank model',
+      'same-provider quota resume submits the changed model default and unchanged saved effort',
+    ])
+
+    const matches = new RegExp(grep)
+    for (const title of resumeTitles) {
+      const combinedTitle = `${project} ${testFile} ${title}`
+      expect(matches.test(combinedTitle), title).toBe(true)
+    }
+
+    expect(matches.test(`${project} ${testFile} unrelated chat case`)).toBe(false)
+
+    const uploads = browser.steps.filter(step => step.uses?.startsWith('actions/upload-artifact@'))
+    expect(uploads).toHaveLength(1)
+    expect(uploads[0].if).toBe('always()')
+    expect(uploads[0].with.path.trim().split('\n').map(path => path.trim())).toEqual([
+      'playwright-report/',
+      'test-results/',
+    ])
+    expect(uploads[0].with['retention-days']).toBe(14)
+    expect(browser.steps.some(step => step.uses?.startsWith('docker/build-push-action@'))).toBe(false)
+    expect(browser.environment).toBeUndefined()
   })
 
   it('keeps every split validation in the image publication gate', () => {
