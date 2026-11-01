@@ -578,6 +578,88 @@ async fn credential_supplier_is_explicit_and_reductions_never_select_another() {
 }
 
 #[tokio::test]
+async fn legacy_full_grant_sync_clears_supplier_across_package_without_run_credentials() {
+    let f = Fixture::new().await;
+    f.s.agent_fixture(json!({ "plugins": [f.instance] }), Some(MAIN_AGENT_ID))
+        .await
+        .unwrap();
+
+    let selected = cairn_installation::plugins::run_credentials::for_run(&f.s, MAIN_AGENT_ID, &[])
+        .await
+        .unwrap();
+    assert_eq!(
+        selected.files,
+        vec![(".config/probe/value".into(), "first".into())]
+    );
+
+    let without_credentials = common::package_install(
+        &f.s,
+        &json!({
+            "manifest": {
+                "id": "grant-probe",
+                "name": "Grant probe",
+                "version": "2",
+                "apiVersion": 2,
+                "capabilities": [],
+            },
+            "source": "return {}",
+        }),
+    )
+    .await
+    .unwrap();
+    common::package_approve(
+        &f.s,
+        "grant-probe",
+        "2",
+        text(&without_credentials, "digest"),
+    )
+    .await
+    .unwrap();
+
+    f.s.agent_fixture(json!({ "plugins": [f.instance] }), Some(MAIN_AGENT_ID))
+        .await
+        .unwrap();
+
+    let with_credentials = common::package_install(
+        &f.s,
+        &json!({
+            "manifest": {
+                "id": "grant-probe",
+                "name": "Grant probe",
+                "version": "3",
+                "apiVersion": 2,
+                "capabilities": [],
+                "agentAccess": {},
+                "runCredentials": {
+                    "files": [{
+                        "path": ".config/probe/value",
+                        "content": "reintroduced",
+                    }],
+                },
+            },
+            "source": "return {}",
+        }),
+    )
+    .await
+    .unwrap();
+    common::package_approve(&f.s, "grant-probe", "3", text(&with_credentials, "digest"))
+        .await
+        .unwrap();
+
+    f.s.agent_fixture(json!({ "plugins": [f.instance] }), Some(MAIN_AGENT_ID))
+        .await
+        .unwrap();
+    assert!(
+        cairn_installation::plugins::run_credentials::for_run(&f.s, MAIN_AGENT_ID, &[])
+            .await
+            .unwrap()
+            .files
+            .is_empty(),
+        "restoring runCredentials must not silently reuse the prior supplier"
+    );
+}
+
+#[tokio::test]
 async fn installation_can_narrow_a_resource_to_its_descendant_but_cannot_reverse_it() {
     let f = Fixture::new().await;
     let before = f

@@ -507,13 +507,24 @@ mod tests {
         ] {
             let current = f.api("GET", json!({ "agentId": agent })).await.unwrap();
             let mut grants = current["grants"].as_array().unwrap().clone();
-            grants.push(json!({ "instanceId": connection.id, "access": {
-                "type": "selected", "contributions": [{ "kind": "instructions", "name": "", "resources": [] }],
-            } }));
+            grants.push(json!({
+                "instanceId": connection.id,
+                "access": {
+                    "type": "selected",
+                    "contributions": [{
+                        "kind": "instructions",
+                        "name": "",
+                        "resources": [],
+                    }],
+                },
+            }));
             f.api(
                 "PUT",
-                json!({ "agentId": agent, "revision": current["revision"],
-                    "grants": grants, "runCredentialInstances": [],
+                json!({
+                    "agentId": agent,
+                    "revision": current["revision"],
+                    "grants": grants,
+                    "runCredentialInstances": [],
                 }),
             )
             .await

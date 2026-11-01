@@ -194,7 +194,7 @@ impl Db<'_> {
             // Even a package without credentials gets an empty choice: adding
             // credentials in a later version must not silently select an instance.
             self.0.execute(
-                "INSERT OR IGNORE INTO plugin_credential_suppliers VALUES(?,?,?)",
+                "INSERT INTO plugin_credential_suppliers VALUES(?,?,?) ON CONFLICT(agent_id,plugin_id) DO UPDATE SET instance_id=NULL WHERE excluded.instance_id IS NULL",
                 params![agent, connection.plugin_id, choice],
             )?;
         }
