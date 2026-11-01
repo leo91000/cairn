@@ -1477,6 +1477,153 @@ test('same-provider quota resume submits the saved turn with the picker-applied 
   expect(workspace.service.store.chatMessages(chat.id).map(message => message.id)).toContain(turnId)
 })
 
+test('same-provider quota prelaunch retry resumes the saved turn without selection', async ({ page, workspace }) => {
+  const failed = await createFailedCodexQuotaChat(workspace, {
+    model: '',
+    reasoning: '',
+    speed: '',
+  })
+  workspace.service.store.updateRun(failed.before.id, { resumeAvailable: false })
+  await useRelayForHttpMocks(page)
+
+  const requests: Record<string, unknown>[] = []
+  await page.route(`**/chats/${failed.chat.id}/resume`, async (route) => {
+    requests.push(route.request().postDataJSON())
+    await route.fulfill({ json: { ...failed.before, status: 'queued', resumeAvailable: false } })
+  })
+  await page.route(`**/chats/${failed.chat.id}/pause`, async (route) => {
+    await route.fulfill({ json: { paused: false } })
+  })
+
+  await page.goto(workspacePath(`/chats/${failed.chat.id}`))
+  await authenticateWorkspace(page)
+  const card = page.getByRole('status', { name: 'Coding agent quota reached' })
+  await expect(card).toBeVisible()
+  await card.getByRole('button', { name: 'Resume conversation', exact: true }).click()
+  await expectSingleResumeRequest(page, () => requests.length)
+
+  expect(requests[0]).toMatchObject({
+    chatId: failed.chat.id,
+    runId: failed.before.id,
+    turnId: failed.turnId,
+  })
+  expect(requests[0]).not.toHaveProperty('selection')
+})
+
+test('same-provider quota resume preserves an inherited blank model', async ({ page, workspace }) => {
+  const unchanged = await createFailedCodexQuotaChat(workspace, {
+    model: '',
+    reasoning: '',
+    speed: '',
+  })
+  const speedOnly = await createFailedCodexQuotaChat(workspace, {
+    model: '',
+    reasoning: '',
+    speed: 'priority',
+  })
+  const reasoningOnly = await createFailedCodexQuotaChat(workspace, {
+    model: '',
+    reasoning: '',
+    speed: '',
+  })
+  await useRelayForHttpMocks(page)
+  await page.route('**/codex/models', route => route.fulfill({
+    json: {
+      models: [
+        {
+          model: 'fixture-fast',
+          displayName: 'Quick coder',
+          description: 'Fast everyday coding',
+          hidden: false,
+          isDefault: true,
+          defaultReasoningEffort: 'low',
+          supportedReasoningEfforts: [
+            { reasoningEffort: 'low', description: '' },
+            { reasoningEffort: 'high', description: '' },
+          ],
+          routes: [],
+          serviceTiers: [{ id: 'priority', name: 'Priority' }],
+          defaultServiceTier: null,
+          resolvedModel: null,
+        },
+      ],
+      checkedAt: Date.now(),
+      stale: false,
+      error: '',
+    },
+  }))
+
+  const requests = new Map<string, Record<string, unknown>[]>()
+  for (const saved of [unchanged, speedOnly, reasoningOnly]) {
+    const body: Record<string, unknown>[] = []
+    requests.set(saved.chat.id, body)
+    await page.route(`**/chats/${saved.chat.id}/resume`, async (route) => {
+      body.push(route.request().postDataJSON())
+      await route.fulfill({ json: { ...saved.before, status: 'queued', resumeAvailable: false } })
+    })
+  }
+
+  await page.goto(workspacePath(`/chats/${unchanged.chat.id}`))
+  await authenticateWorkspace(page)
+  const unchangedCard = page.getByRole('status', { name: 'Coding agent quota reached' })
+  await expect(unchangedCard).toBeVisible()
+  await unchangedCard.getByRole('button', { name: 'Resume conversation', exact: true }).click()
+  await expectSingleResumeRequest(page, () => requests.get(unchanged.chat.id)!.length)
+  expect(requests.get(unchanged.chat.id)![0]).not.toHaveProperty('selection')
+
+  await page.goto(workspacePath(`/chats/${speedOnly.chat.id}`))
+  await authenticateWorkspace(page)
+  const speedCard = page.getByRole('status', { name: 'Coding agent quota reached' })
+  await expect(speedCard).toBeVisible()
+  await page.getByRole('button', { name: /^Agent, model, reasoning and speed/ }).click()
+  const speedMenu = page.getByRole('dialog', { name: 'Agent & model' })
+  const inheritedModel = speedMenu.getByRole('radiogroup', { name: 'Model' })
+    .getByRole('radio', { name: 'Conversation model', exact: true })
+  await expect(inheritedModel).toHaveAttribute('aria-checked', 'true')
+  await expect(inheritedModel).toContainText('Quick coder')
+  await speedMenu.getByRole('radiogroup', { name: 'Speed' })
+    .getByRole('radio', { name: 'Standard', exact: true })
+    .click()
+  await speedMenu.getByRole('button', { name: 'Close', exact: true }).click()
+  await speedCard.getByRole('button', { name: 'Resume conversation', exact: true }).click()
+  await expectSingleResumeRequest(page, () => requests.get(speedOnly.chat.id)!.length)
+  expect(requests.get(speedOnly.chat.id)![0]).toMatchObject({
+    chatId: speedOnly.chat.id,
+    runId: speedOnly.before.id,
+    turnId: speedOnly.turnId,
+    selection: {
+      model: '',
+      preserveModel: true,
+      reasoning: '',
+      speed: 'standard',
+    },
+  })
+
+  await page.goto(workspacePath(`/chats/${reasoningOnly.chat.id}`))
+  await authenticateWorkspace(page)
+  const reasoningCard = page.getByRole('status', { name: 'Coding agent quota reached' })
+  await expect(reasoningCard).toBeVisible()
+  await page.getByRole('button', { name: /^Agent, model, reasoning and speed/ }).click()
+  const reasoningMenu = page.getByRole('dialog', { name: 'Agent & model' })
+  await reasoningMenu.getByRole('radiogroup', { name: 'Reasoning' })
+    .getByRole('radio', { name: 'High', exact: true })
+    .click()
+  await reasoningMenu.getByRole('button', { name: 'Close', exact: true }).click()
+  await reasoningCard.getByRole('button', { name: 'Resume conversation', exact: true }).click()
+  await expectSingleResumeRequest(page, () => requests.get(reasoningOnly.chat.id)!.length)
+  expect(requests.get(reasoningOnly.chat.id)![0]).toMatchObject({
+    chatId: reasoningOnly.chat.id,
+    runId: reasoningOnly.before.id,
+    turnId: reasoningOnly.turnId,
+    selection: {
+      model: '',
+      preserveModel: true,
+      reasoning: 'high',
+      speed: 'standard',
+    },
+  })
+})
+
 test('same-provider quota resume submits the changed model default and unchanged saved effort', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
   const changed = await createFailedCodexQuotaChat(workspace, {

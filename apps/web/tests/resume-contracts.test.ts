@@ -71,7 +71,12 @@ describe('generated resume contracts', () => {
       chatId: corpus.valid[0].id,
       runId: corpus.valid[0].id,
       turnId: 'turn-current',
-      selection: { model: 'gpt-6-luna', reasoning: 'xhigh', speed: '' },
+      selection: {
+        model: '',
+        preserveModel: true,
+        reasoning: '',
+        speed: 'standard',
+      },
     }
 
     await resumeChat(request, input)

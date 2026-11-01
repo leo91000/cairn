@@ -268,7 +268,9 @@ class AndroidTestFailureSummary : TestListener {
                 for (frame in frames.take(256)) {
                     if (
                         frame.fileName == "BackgroundWaitCases.kt" &&
-                            (frame.lineNumber in 270..489 || frame.lineNumber in 491..621) &&
+                            (frame.lineNumber in 270..489 ||
+                                frame.lineNumber in 491..621 ||
+                                frame.lineNumber in 637..742) &&
                             frame.lineNumber !in resumeSourceLines
                     ) {
                         if (resumeSourceLines.size < 3) resumeSourceLines.add(frame.lineNumber)
@@ -429,14 +431,50 @@ class AndroidTestFailureSummary : TestListener {
                     ),
                 )
             val addedResumeSummary = summarize(listOf(addedResumeRange))
-            check(addedResumeSummary.contains("resumeSourceLines=491,621 resumeSourceLinesTruncated=false")) {
+            check(
+                addedResumeSummary.contains(
+                    "resumeSourceLines=491,621 resumeSourceLinesTruncated=false"
+                )
+            ) {
                 "Added resume case lines must stay in range without admitting adjacent tests"
             }
             check(
-                listOf("fixture.PrivateTest", "privateMethod", "private assertion text")
-                    .none { value -> addedResumeSummary.contains(value) }
+                listOf("fixture.PrivateTest", "privateMethod", "private assertion text").none {
+                    value ->
+                    addedResumeSummary.contains(value)
+                }
             ) {
                 "Added resume diagnostics must keep the line-only privacy contract"
+            }
+            val latestResumeRange = AssertionError("private assertion text")
+            latestResumeRange.stackTrace =
+                arrayOf(
+                    StackTraceElement(
+                        "fixture.PrivateTest",
+                        "privateMethod",
+                        "BackgroundWaitCases.kt",
+                        742,
+                    ),
+                    StackTraceElement(
+                        "fixture.PrivateTest",
+                        "privateMethod",
+                        "BackgroundWaitCases.kt",
+                        636,
+                    ),
+                    StackTraceElement(
+                        "fixture.PrivateTest",
+                        "privateMethod",
+                        "BackgroundWaitCases.kt",
+                        743,
+                    ),
+                )
+            val latestResumeSummary = summarize(listOf(latestResumeRange))
+            check(
+                latestResumeSummary.contains(
+                    "resumeSourceLines=742 resumeSourceLinesTruncated=false"
+                )
+            ) {
+                "The latest saved-resume cases must be in range without admitting adjacent tests"
             }
             val outsideResumeRange = AssertionError("private assertion text")
             outsideResumeRange.stackTrace =
@@ -451,19 +489,13 @@ class AndroidTestFailureSummary : TestListener {
                         "fixture.PrivateTest",
                         "privateMethod",
                         "BackgroundWaitCases.kt",
-                        401,
-                    ),
-                    StackTraceElement(
-                        "fixture.PrivateTest",
-                        "privateMethod",
-                        "BackgroundWaitCases.kt",
                         490,
                     ),
                     StackTraceElement(
                         "fixture.PrivateTest",
                         "privateMethod",
                         "BackgroundWaitCases.kt",
-                        622,
+                        743,
                     ),
                     StackTraceElement(
                         "fixture.PrivateTest",

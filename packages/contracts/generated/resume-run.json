@@ -1,5 +1,5 @@
 {
-  "description": "Resume an existing stopped chat run with its saved workspace, session and checkpoint. An optional selection changes only the model, reasoning and speed for this same coding agent; turnId is required and guards against a stale selection. For Codex, an empty selection speed inherits the saved request and standard explicitly selects Standard. Mission runs retain their existing resume behavior without model selection. This does not create a new run (unlike run_task or retry).",
+  "description": "Resume an existing stopped chat run with its saved workspace, session and checkpoint. An optional selection changes only the model, reasoning and speed for this same coding agent; turnId is required and guards against a stale selection. An empty model resolves to the current catalog default unless preserveModel is true, in which case the saved model must also be blank and remains unchanged. For Codex, an empty selection speed inherits the saved request and standard explicitly selects Standard. Mission runs retain their existing resume behavior without model selection. This does not create a new run (unlike run_task or retry).",
   "id": "resume_run",
   "path": "/runs/{runId}/resume",
   "scope": "run"

@@ -7,6 +7,8 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class ResumeExecutionSelection(
     val model: String,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val preserveModel: Boolean = false,
     val reasoning: String,
     val speed: String,
 ) {

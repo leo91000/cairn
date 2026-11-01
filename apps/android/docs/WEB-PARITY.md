@@ -151,6 +151,13 @@ and `accountRequired` in HTTP, public MCP and `cairn_installation`; existing gra
 are unchanged. Validation: Signal presentation tests, browser Fil quota journey,
 and Android Signal journey.
 
+For a manual stopped-chat resume, both clients keep an untouched blank model as
+inherited, including when only speed changes. `preserveModel` distinguishes that
+request from the existing empty-model request that resolves to the catalog
+default. Failed turns that stopped before process launch use ordinary resume
+without a model selection. Web keeps its picker dialog; Android uses a Material
+bottom sheet.
+
 ## Feature map
 
 Automatic agent placement: both apps offer VM only, native only and automatic

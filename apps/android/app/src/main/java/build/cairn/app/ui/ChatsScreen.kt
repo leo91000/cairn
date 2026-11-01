@@ -1425,7 +1425,6 @@ internal fun ChatPage(
                                                                 val run = current.run
                                                                 if (
                                                                     run != null &&
-                                                                        run.resumeAvailable &&
                                                                         run.status in
                                                                             setOf(
                                                                                 "failed",
@@ -1437,7 +1436,9 @@ internal fun ChatPage(
                                                                         run.snapshot?.agent
                                                                     val selection =
                                                                         if (
-                                                                            savedAgent != null &&
+                                                                            run.resumeAvailable &&
+                                                                                savedAgent !=
+                                                                                    null &&
                                                                                 chosenProvider ==
                                                                                     savedAgent
                                                                                         .provider &&
@@ -1480,6 +1481,15 @@ internal fun ChatPage(
                                                                                     savedAgent
                                                                                         .model,
                                                                                 )
+                                                                            val preserveModel =
+                                                                                savedAgent.model
+                                                                                    .isEmpty() &&
+                                                                                    model.isBlank()
+                                                                            val selectionModelName =
+                                                                                if (preserveModel)
+                                                                                    savedAgent.model
+                                                                                else
+                                                                                    selectedModelName
                                                                             val selectedDisplayedSpeed =
                                                                                 pickerAppliedSpeed(
                                                                                     chosenProvider,
@@ -1498,7 +1508,7 @@ internal fun ChatPage(
                                                                                 )
                                                                             if (
                                                                                 needsResumeSelection(
-                                                                                    selectedModelName,
+                                                                                    selectionModelName,
                                                                                     selectedReasoning,
                                                                                     selectedDisplayedSpeed,
                                                                                     savedAgent
@@ -1511,11 +1521,13 @@ internal fun ChatPage(
                                                                             ) {
                                                                                 ResumeExecutionSelection(
                                                                                     model =
-                                                                                        selectedModelName,
+                                                                                        selectionModelName,
                                                                                     reasoning =
                                                                                         selectedReasoning,
                                                                                     speed =
                                                                                         selectedSpeed,
+                                                                                    preserveModel =
+                                                                                        preserveModel,
                                                                                 )
                                                                             } else null
                                                                         } else null

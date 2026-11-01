@@ -348,7 +348,9 @@ fn requeue(
         }
         let mut snapshot: cairn_contracts::RunSnapshot =
             serde_json::from_value(run["snapshot"].clone())?;
-        snapshot.agent.settings.model.clone_from(&selection.model);
+        if !selection.preserve_model {
+            snapshot.agent.settings.model.clone_from(&selection.model);
+        }
         snapshot
             .agent
             .settings

@@ -2158,10 +2158,24 @@ async fn serve_controller(State(state): State<Arc<Controller>>, request: Request
     }
     let attempt = path.split('/').nth(2).unwrap();
     if path.ends_with("/logs") {
-        let mut output =
-            String::from("{\"type\":\"thread.started\",\"thread_id\":\"fixture-session\"}\n");
         let plans = state.plans.lock().await;
         let plan = plans.iter().find(|plan| plan["id"] == attempt).unwrap();
+        // OpenCode validates saved session IDs when resuming; keep the Codex fixture value intact.
+        let provider = cairn_installation::microvm::plan::Plan::new(plan.clone())
+            .chat_provider()
+            .unwrap();
+        let session_id = if provider == Some(Provider::Opencode) {
+            "ses_fixture_session"
+        } else {
+            "fixture-session"
+        };
+        let mut output = format!(
+            "{}\n",
+            json!({
+                "type": "thread.started",
+                "thread_id": session_id,
+            })
+        );
         if plan["chat"]["execution"]["messageId"].is_string() {
             let delivered = json!({
                 "type": "chat.delivered",
@@ -2216,6 +2230,104 @@ async fn serve_controller(State(state): State<Arc<Controller>>, request: Request
         .await
         .push(serde_json::from_slice(&bytes).unwrap());
     Json(json!({})).into_response()
+}
+
+async fn report_opencode_resume_wait_state(
+    fixture: &Fixture,
+    run_id: &str,
+    test: &'static str,
+    wait: &'static str,
+    plan_received: &std::sync::atomic::AtomicBool,
+    log_request_seen: &std::sync::atomic::AtomicBool,
+) {
+    let run = fixture.service.store.run(run_id).await.ok();
+    let status = run
+        .as_ref()
+        .and_then(RunStatus::of)
+        .map_or("other", |status| status.as_str());
+    let session_present = run.as_ref().is_some_and(|run| run["sessionId"].is_string());
+    // The initial session ID is persisted only when the manager accepts `thread.started`.
+    let thread_started_observed = session_present;
+    let resume_available = run
+        .as_ref()
+        .is_some_and(|run| run["resumeAvailable"] == true);
+    let error_present = run.as_ref().is_some_and(|run| !run["error"].is_null());
+    let plan_received = plan_received.load(std::sync::atomic::Ordering::Relaxed);
+    let log_request_observed = log_request_seen.load(std::sync::atomic::Ordering::Relaxed);
+    eprintln!(
+        "CAIRN_RESUME_TEST_DIAGNOSTIC test={test} wait={wait} status={status} sessionPresent={session_present} resumeAvailable={resume_available} errorPresent={error_present} planReceived={plan_received} logRequestObserved={log_request_observed} threadStartedObserved={thread_started_observed}"
+    );
+}
+
+async fn await_opencode_resume_setup(
+    fixture: &Fixture,
+    run_id: &str,
+    test: &'static str,
+    plan_received: &std::sync::atomic::AtomicBool,
+    log_request_seen: &std::sync::atomic::AtomicBool,
+) -> Value {
+    eprintln!("CAIRN_RESUME_TEST_PHASE test={test} phase=initial_run_wait_before");
+    let running = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let run = fixture.service.store.run(run_id).await.unwrap();
+            if run["status"] == RunStatus::Running && run["sessionId"].is_string() {
+                return run;
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    })
+    .await;
+    if running.is_err() {
+        report_opencode_resume_wait_state(
+            fixture,
+            run_id,
+            test,
+            "initial_run_wait",
+            plan_received,
+            log_request_seen,
+        )
+        .await;
+        eprintln!(
+            "CAIRN_RESUME_TEST_PHASE test={test} phase=initial_run_wait_after result=timeout"
+        );
+    } else {
+        eprintln!(
+            "CAIRN_RESUME_TEST_PHASE test={test} phase=initial_run_wait_after result=success"
+        );
+    }
+    let running = running.expect("the awaited condition never held");
+
+    eprintln!("CAIRN_RESUME_TEST_PHASE test={test} phase=controller_plan_wait_before");
+    let plan_wait = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if plan_received.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    })
+    .await;
+    if plan_wait.is_err() {
+        report_opencode_resume_wait_state(
+            fixture,
+            run_id,
+            test,
+            "controller_plan_wait",
+            plan_received,
+            log_request_seen,
+        )
+        .await;
+        eprintln!(
+            "CAIRN_RESUME_TEST_PHASE test={test} phase=controller_plan_wait_after result=timeout"
+        );
+    } else {
+        eprintln!(
+            "CAIRN_RESUME_TEST_PHASE test={test} phase=controller_plan_wait_after result=success"
+        );
+    }
+    plan_wait.expect("the awaited condition never held");
+
+    running
 }
 
 #[tokio::test]
@@ -5097,11 +5209,21 @@ async fn manual_resume_cancels_a_staged_switch_during_worker_fencing() {
                 status: Some(RunStatus::Failed),
                 finished_at: Some(Some(now())),
                 error: Some(Some("Usage limit has been reached".into())),
+                cancel_requested_at: Some(None),
                 ..Default::default()
             },
         )
         .await
         .unwrap();
+    let failed_quota_run = s.store.run(&run_id).await.unwrap();
+    assert_eq!(failed_quota_run["status"], RunStatus::Failed);
+    assert_eq!(failed_quota_run["cancelRequestedAt"], Value::Null);
+    assert!(
+        failed_quota_run["error"]
+            .as_str()
+            .unwrap()
+            .contains("Usage limit")
+    );
 
     let mut alternative = serde_json::to_value(
         s.accounts
@@ -5240,7 +5362,7 @@ async fn manual_resume_cancels_a_staged_switch_during_worker_fencing() {
 
 #[tokio::test]
 async fn chat_resume_selection_resolves_opencode_catalog_default_before_adapter_validation() {
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     let mut fixture = Fixture::with_opencode().await;
     fixture.stop(false).await;
@@ -5252,8 +5374,32 @@ async fn chat_resume_selection_resolves_opencode_catalog_default_before_adapter_
         slots: 4,
         hold: AtomicBool::new(true),
     });
+    let log_request_seen = Arc::new(AtomicBool::new(false));
+    let plan_received = Arc::new(AtomicBool::new(false));
     let app = Router::new()
-        .fallback(any(serve_controller))
+        .fallback(any({
+            let log_request_seen = log_request_seen.clone();
+            let plan_received = plan_received.clone();
+            move |state: State<Arc<Controller>>, request: Request| {
+                let log_request_seen = log_request_seen.clone();
+                let plan_received = plan_received.clone();
+                async move {
+                    let path = request.uri().path();
+                    if path.starts_with("/runs/") && path.ends_with("/logs") {
+                        log_request_seen.store(true, Ordering::Relaxed);
+                    }
+                    let is_plan_post = request.method() == axum::http::Method::POST
+                        && path
+                            .strip_prefix("/runs/")
+                            .is_some_and(|attempt| !attempt.is_empty() && !attempt.contains('/'));
+                    let response = serve_controller(state, request).await;
+                    if is_plan_post && response.status().is_success() {
+                        plan_received.store(true, Ordering::Relaxed);
+                    }
+                    response
+                }
+            }
+        }))
         .with_state(controller.clone());
     let (listener, address) = common::bind().await;
     common::reconfigure(&mut fixture.service, |config| {
@@ -5309,24 +5455,12 @@ async fn chat_resume_selection_resolves_opencode_catalog_default_before_adapter_
     s.chat_send(&chat_id, sent).await.unwrap();
     fixture.start().await;
     let run_id = fixture.chat_run(&chat_id).await;
-    eprintln!("CAIRN_RESUME_TEST_PHASE test=opencode_catalog_default phase=initial_running");
-    let running = fixture
-        .until(&run_id, |run| {
-            run["status"] == RunStatus::Running && run["sessionId"].is_string()
-        })
-        .await;
-    eventually(
-        Duration::from_secs(20),
-        Duration::from_millis(30),
-        async || {
-            controller
-                .plans
-                .lock()
-                .await
-                .iter()
-                .any(|plan| plan["runId"] == run_id)
-                .then_some(())
-        },
+    let running = await_opencode_resume_setup(
+        &fixture,
+        &run_id,
+        "opencode_catalog_default",
+        &plan_received,
+        &log_request_seen,
     )
     .await;
     assert_eq!(running["snapshot"]["agent"]["provider"], "opencode");
@@ -5471,7 +5605,7 @@ async fn chat_resume_selection_resolves_opencode_catalog_default_before_adapter_
 
 #[tokio::test]
 async fn chat_resume_rejects_hidden_opencode_auto_without_blocking_pinned_provider_route() {
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     let mut fixture =
         Fixture::with_opencode_bin(2, common::fixture("opencode-hidden-default.mjs")).await;
@@ -5484,8 +5618,32 @@ async fn chat_resume_rejects_hidden_opencode_auto_without_blocking_pinned_provid
         slots: 4,
         hold: AtomicBool::new(true),
     });
+    let log_request_seen = Arc::new(AtomicBool::new(false));
+    let plan_received = Arc::new(AtomicBool::new(false));
     let runner = Router::new()
-        .fallback(any(serve_controller))
+        .fallback(any({
+            let log_request_seen = log_request_seen.clone();
+            let plan_received = plan_received.clone();
+            move |state: State<Arc<Controller>>, request: Request| {
+                let log_request_seen = log_request_seen.clone();
+                let plan_received = plan_received.clone();
+                async move {
+                    let path = request.uri().path();
+                    if path.starts_with("/runs/") && path.ends_with("/logs") {
+                        log_request_seen.store(true, Ordering::Relaxed);
+                    }
+                    let is_plan_post = request.method() == axum::http::Method::POST
+                        && path
+                            .strip_prefix("/runs/")
+                            .is_some_and(|attempt| !attempt.is_empty() && !attempt.contains('/'));
+                    let response = serve_controller(state, request).await;
+                    if is_plan_post && response.status().is_success() {
+                        plan_received.store(true, Ordering::Relaxed);
+                    }
+                    response
+                }
+            }
+        }))
         .with_state(controller.clone());
     let (listener, address) = common::bind().await;
     common::reconfigure(&mut fixture.service, |config| {
@@ -5543,24 +5701,12 @@ async fn chat_resume_rejects_hidden_opencode_auto_without_blocking_pinned_provid
     s.chat_send(&chat_id, sent).await.unwrap();
     fixture.start().await;
     let run_id = fixture.chat_run(&chat_id).await;
-    eprintln!("CAIRN_RESUME_TEST_PHASE test=opencode_hidden_auto phase=initial_running");
-    let running = fixture
-        .until(&run_id, |run| {
-            run["status"] == RunStatus::Running && run["sessionId"].is_string()
-        })
-        .await;
-    eventually(
-        Duration::from_secs(20),
-        Duration::from_millis(30),
-        async || {
-            controller
-                .plans
-                .lock()
-                .await
-                .iter()
-                .any(|plan| plan["runId"] == run_id)
-                .then_some(())
-        },
+    let running = await_opencode_resume_setup(
+        &fixture,
+        &run_id,
+        "opencode_hidden_auto",
+        &plan_received,
+        &log_request_seen,
     )
     .await;
     assert_eq!(
@@ -6267,6 +6413,7 @@ async fn chat_resume_selection_keeps_saved_identity_and_reaches_the_worker_plan(
     controller
         .hold
         .store(false, std::sync::atomic::Ordering::Relaxed);
+    let standard_plan_boundary = controller.plans.lock().await.len();
     let (standard_resume, standard_snapshot) = (
         resume(json!({
             "runId": run_id,
@@ -6305,6 +6452,7 @@ async fn chat_resume_selection_keeps_saved_identity_and_reaches_the_worker_plan(
         .lock()
         .await
         .iter()
+        .skip(standard_plan_boundary)
         .find(|plan| {
             plan["runId"] == run_id
                 && plan["chat"]["execution"]["messageId"] == later_turn_id
@@ -6617,6 +6765,121 @@ async fn chat_resume_selection_keeps_saved_identity_and_reaches_the_worker_plan(
     assert_eq!(default_model_plan["chat"]["model"], "gpt-6-sol");
     assert_eq!(default_model_plan["chat"]["reasoning"], "high");
     assert_eq!(default_model_plan["chat"]["serviceTier"], "default");
+
+    controller
+        .hold
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let preserved_model_chat = s.chat_create(json!({})).await.unwrap();
+    let preserved_model_chat_id = text(&preserved_model_chat, "id").to_owned();
+    let mut preserved_model_message = message("fixture:chat-hang");
+    preserved_model_message["provider"] = "codex".into();
+    preserved_model_message["model"] = "".into();
+    preserved_model_message["reasoning"] = "".into();
+    preserved_model_message["speed"] = "priority".into();
+    let preserved_model_turn_id = text(&preserved_model_message, "id").to_owned();
+    s.chat_send(&preserved_model_chat_id, preserved_model_message)
+        .await
+        .unwrap();
+    let preserved_model_run_id = fixture.chat_run(&preserved_model_chat_id).await;
+    let preserved_model_running = fixture
+        .until(&preserved_model_run_id, |run| {
+            run["status"] == RunStatus::Running && run["sessionId"].is_string()
+        })
+        .await;
+    assert_eq!(preserved_model_running["snapshot"]["agent"]["model"], "");
+    let stopped = client
+        .post(format!(
+            "{}/api/chats/{preserved_model_chat_id}/stop",
+            fixture.url
+        ))
+        .header("x-test-relay-token", relay_token)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    stopped.error_for_status().unwrap();
+    let preserved_model_before = fixture
+        .until(&preserved_model_run_id, |run| {
+            run["status"] == RunStatus::Cancelled && run["resumeAvailable"] == true
+        })
+        .await;
+    let preserved_checkpoint_before = fixture.checkpoint(&preserved_model_run_id).await;
+    let preserved_generation_before = preserved_checkpoint_before.get("generation").cloned();
+    let (preserve_status, preserve_response) = api_post(
+        &app,
+        relay_token,
+        &format!("/api/chats/{preserved_model_chat_id}/resume"),
+        json!({
+            "runId": preserved_model_run_id,
+            "turnId": preserved_model_turn_id,
+            "selection": {
+                "model": "",
+                "preserveModel": true,
+                "reasoning": "high",
+                "speed": "standard",
+            },
+        }),
+    )
+    .await;
+    assert_eq!(preserve_status, StatusCode::OK, "{preserve_response}");
+    let preserved_queued = s.store.run(&preserved_model_run_id).await.unwrap();
+    assert_eq!(preserved_queued["status"], RunStatus::Queued);
+    assert_eq!(preserved_queued["snapshot"]["agent"]["model"], "");
+    assert_eq!(preserved_queued["snapshot"]["agent"]["reasoning"], "high");
+    assert_eq!(preserved_queued["snapshot"]["agent"]["speed"], "standard");
+    for field in ["id", "taskId", "workspace", "sessionId", "chatExecution"] {
+        assert_eq!(
+            preserved_queued[field], preserved_model_before[field],
+            "{field}"
+        );
+    }
+    controller
+        .hold
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    let preserved_completed = fixture.until_finished(&preserved_model_run_id).await;
+    assert_eq!(preserved_completed["status"], RunStatus::Succeeded);
+    assert_eq!(preserved_completed["snapshot"]["agent"]["model"], "");
+    assert_eq!(
+        preserved_completed["snapshot"]["agent"]["reasoning"],
+        "high"
+    );
+    assert_eq!(
+        preserved_completed["snapshot"]["agent"]["speed"],
+        "standard"
+    );
+    assert_eq!(
+        fixture
+            .checkpoint(&preserved_model_run_id)
+            .await
+            .get("generation")
+            .cloned(),
+        preserved_generation_before
+    );
+    let preserved_plan = controller
+        .plans
+        .lock()
+        .await
+        .iter()
+        .find(|plan| {
+            plan["runId"] == preserved_model_run_id
+                && plan["chat"]["execution"]["messageId"] == preserved_model_turn_id
+                && plan["chat"]["serviceTier"] == "default"
+        })
+        .cloned()
+        .expect(
+            "the preserved blank model and explicit Standard must reach the resumed worker plan",
+        );
+    assert_eq!(preserved_plan["chat"]["model"], "");
+    assert_eq!(preserved_plan["chat"]["reasoning"], "high");
+    assert_eq!(preserved_plan["chat"]["serviceTier"], "default");
+    assert_eq!(
+        preserved_plan["chat"]["sessionId"],
+        preserved_model_before["sessionId"]
+    );
+    assert_eq!(
+        preserved_plan["chat"]["execution"]["attachments"],
+        preserved_model_before["chatExecution"]["attachments"]
+    );
 
     fixture.stop(false).await;
     server.abort();

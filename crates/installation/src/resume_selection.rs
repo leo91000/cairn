@@ -26,6 +26,7 @@ pub(crate) async fn validate(
         ));
     }
     let provider = Provider::of_run(run)?;
+    validate_preserved_model(run, selection)?;
     if provider == Provider::Codex && selection.speed.is_empty() {
         selection.speed = text(&run["snapshot"]["agent"], "speed").to_owned();
     }
@@ -37,7 +38,9 @@ pub(crate) async fn validate(
     validate_shape(selection)?;
 
     let mut agent = run["snapshot"]["agent"].clone();
-    agent["model"] = selection.model.clone().into();
+    if !selection.preserve_model {
+        agent["model"] = selection.model.clone().into();
+    }
     agent["reasoning"] = selection.reasoning.clone().into();
     agent["speed"] = selection.speed.clone().into();
     provider.adapter().validate_agent(&agent)?;
@@ -50,6 +53,17 @@ fn validate_shape(selection: &ResumeExecutionSelection) -> Result<()> {
     if !valid_model || !valid_effort(&selection.reasoning) || !valid_effort(&selection.speed) {
         return Err(Error::bad(
             "Choose a valid model, reasoning level and speed.",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_preserved_model(run: &Value, selection: &ResumeExecutionSelection) -> Result<()> {
+    if selection.preserve_model
+        && (!selection.model.is_empty() || !text(&run["snapshot"]["agent"], "model").is_empty())
+    {
+        return Err(Error::bad(
+            "Preserving the saved model requires an empty model selection and a blank saved model.",
         ));
     }
     Ok(())
@@ -125,7 +139,7 @@ fn validate_catalog(
             "Choose a model from this coding agent's current model catalog.",
         ));
     }
-    if selection.model.is_empty() {
+    if selection.model.is_empty() && !selection.preserve_model {
         selection.model.clone_from(&selected_name);
     }
 
@@ -163,6 +177,7 @@ mod tests {
     fn opencode_catalog_route_ids_keep_provider_validation_and_bounds() {
         let mut selection = ResumeExecutionSelection {
             model: "openrouter/model@revision+vision".into(),
+            preserve_model: false,
             reasoning: "xhigh".into(),
             speed: String::new(),
         };
@@ -204,6 +219,7 @@ mod tests {
     fn model_shape_limit_counts_unicode_scalar_values() {
         let mut selection = ResumeExecutionSelection {
             model: "m".repeat(120),
+            preserve_model: false,
             reasoning: String::new(),
             speed: String::new(),
         };
@@ -223,6 +239,7 @@ mod tests {
     fn empty_model_selection_resolves_the_catalog_default() {
         let mut selection = ResumeExecutionSelection {
             model: String::new(),
+            preserve_model: false,
             reasoning: "high".into(),
             speed: String::new(),
         };
@@ -240,9 +257,54 @@ mod tests {
     }
 
     #[test]
+    fn preserve_model_keeps_blank_codex_model_and_checks_selection_capabilities() {
+        let mut selection = ResumeExecutionSelection {
+            model: String::new(),
+            preserve_model: true,
+            reasoning: "high".into(),
+            speed: "standard".into(),
+        };
+        let catalog = serde_json::json!({
+            "models": [{
+                "model": "gpt-6-sol",
+                "isDefault": true,
+                "supportedReasoningEfforts": [{ "reasoningEffort": "high" }],
+                "serviceTiers": [],
+            }],
+        });
+
+        validate_catalog(Provider::Codex, &mut selection, &catalog).unwrap();
+
+        assert!(selection.model.is_empty());
+        assert!(selection.preserve_model);
+    }
+
+    #[test]
+    fn preserve_model_rejects_nonempty_selected_or_saved_models() {
+        let blank_run = serde_json::json!({ "snapshot": { "agent": { "model": "" } } });
+        let mut selection = ResumeExecutionSelection {
+            model: String::new(),
+            preserve_model: true,
+            reasoning: String::new(),
+            speed: String::new(),
+        };
+        validate_preserved_model(&blank_run, &selection).unwrap();
+
+        selection.model = "gpt-6-sol".into();
+        assert!(validate_preserved_model(&blank_run, &selection).is_err());
+
+        selection.model.clear();
+        let saved_model_run = serde_json::json!({
+            "snapshot": { "agent": { "model": "gpt-6-sol" } },
+        });
+        assert!(validate_preserved_model(&saved_model_run, &selection).is_err());
+    }
+
+    #[test]
     fn empty_model_selection_requires_a_catalog_default() {
         let mut selection = ResumeExecutionSelection {
             model: String::new(),
+            preserve_model: false,
             reasoning: String::new(),
             speed: String::new(),
         };
@@ -275,6 +337,7 @@ mod tests {
         });
         let mut inherited = ResumeExecutionSelection {
             model: String::new(),
+            preserve_model: false,
             reasoning: String::new(),
             speed: String::new(),
         };
@@ -283,6 +346,7 @@ mod tests {
 
         let mut automatic = ResumeExecutionSelection {
             model: "auto/retired-model".into(),
+            preserve_model: false,
             reasoning: String::new(),
             speed: String::new(),
         };
@@ -290,6 +354,7 @@ mod tests {
 
         let mut pinned = ResumeExecutionSelection {
             model: "opencode/retired-model".into(),
+            preserve_model: false,
             reasoning: String::new(),
             speed: String::new(),
         };
@@ -306,6 +371,7 @@ mod tests {
         });
         let mut codex = ResumeExecutionSelection {
             model: "gpt-6-sol".into(),
+            preserve_model: false,
             reasoning: String::new(),
             speed: String::new(),
         };

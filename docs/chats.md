@@ -71,6 +71,8 @@ All executions, including missions, use the chat protocol. Codex uses app-server
 
 Messages use client-generated IDs. Requests can be retried without duplicating submissions. On recovery, Codex's persisted user-message client IDs reconcile accepted messages, using paginated turn history when required. A completed saved reply is recovered without another model turn. Interrupted replies continue with the existing workspace and conversation. Failures pause follow-ups for review. Usage exhaustion follows the existing account failover path.
 
+A stopped chat can resume its saved run with a same-provider model, reasoning or Codex speed choice. An untouched blank model remains blank in the saved request, even while the picker displays the catalog default. If reasoning or speed changes, `preserveModel: true` keeps that blank model instead of replacing it with the displayed default. An empty model without that flag keeps its existing API meaning and resolves to the current catalog default. Failed turns that ended before process launch can also be retried without a saved session or selection.
+
 SQLite schema version 4 adds indexed chat messages; records and task runs are preserved. Chat events are excluded from the normal 30-day task-event pruning and event-count cap. Workspace cleanup disables further messages in that conversation.
 
 Validation includes authenticated API boundaries, restricted project access, live steering, queue editing and deduplication, model overrides, account-backed isolated execution, restart and lost-completion recovery, process disconnection, and Chromium/WebKit journeys with desktop/mobile light/dark screenshots.

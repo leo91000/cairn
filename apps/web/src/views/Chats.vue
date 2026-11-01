@@ -821,47 +821,58 @@ async function resumeQuota() {
       resumeAvailable: run?.resumeAvailable === true,
       provider: resumeDiagnosticProvider(diagnosticProvider),
     })
-    if (run && run.resumeAvailable && ['failed', 'interrupted', 'cancelled'].includes(run.status)) {
-      reportResumeDiagnostic({ stage: 'selection-start' })
-      const savedAgent = run.snapshot?.agent
-      const catalog = modelCatalogs[chosenProvider.value].catalog.models
-      reportResumeDiagnostic({
-        stage: 'catalog-state',
-        catalogPresent: catalog.length > 0,
-      })
-      const selectedModel = model.value || savedAgent?.model || catalog.find(item => item.isDefault)?.model || ''
-      const modelRow = (name: string) => catalog.find(item => item.model === name || item.routes?.some(route => route.model === name))
-        || (!name ? catalog.find(item => item.isDefault) : undefined)
-      // A catalog default stays display-only until the picker changes the model draft.
-      const selectedModelChanged = !!model.value && model.value !== (savedAgent?.model || '')
-      const selectedReasoning = resumeSelectionReasoning(
-        resumeReasoningIntent.value,
-        reasoning.value,
-        savedAgent?.reasoning || '',
-        selectedModelChanged,
-        modelRow(selectedModel)?.defaultReasoningEffort || '',
-      )
-      const selectedDisplayedSpeed = savedAgent
-        ? pickerAppliedSpeed(chosenProvider.value, modelRow(selectedModel), speed.value, savedAgent.speed)
-        : ''
-      const selectedSpeed = savedAgent
-        ? resumeSelectionSpeed(chosenProvider.value, modelRow(selectedModel), speed.value, savedAgent.speed)
-        : ''
-      const turnId = run.chatExecution?.messageId
-      const selection: ResumeExecutionSelection | undefined = savedAgent
-        && chosenProvider.value === savedAgent.provider
-        && !!turnId
-        && needsResumeSelection(
-          selectedModel,
-          selectedReasoning,
-          selectedDisplayedSpeed,
-          savedAgent.model,
-          savedAgent.reasoning,
-          savedAgent.speed,
+    if (run && ['failed', 'interrupted', 'cancelled'].includes(run.status)) {
+      let selection: ResumeExecutionSelection | undefined
+      if (run.resumeAvailable) {
+        reportResumeDiagnostic({ stage: 'selection-start' })
+        const savedAgent = run.snapshot?.agent
+        const catalog = modelCatalogs[chosenProvider.value].catalog.models
+        reportResumeDiagnostic({
+          stage: 'catalog-state',
+          catalogPresent: catalog.length > 0,
+        })
+        const selectedModel = model.value || savedAgent?.model || catalog.find(item => item.isDefault)?.model || ''
+        const modelRow = (name: string) => catalog.find(item => item.model === name || item.routes?.some(route => route.model === name))
+          || (!name ? catalog.find(item => item.isDefault) : undefined)
+        // A catalog default stays display-only until the picker changes the model draft.
+        const selectedModelChanged = !!model.value && model.value !== (savedAgent?.model || '')
+        const selectedReasoning = resumeSelectionReasoning(
+          resumeReasoningIntent.value,
+          reasoning.value,
+          savedAgent?.reasoning || '',
+          selectedModelChanged,
+          modelRow(selectedModel)?.defaultReasoningEffort || '',
         )
-        ? { model: selectedModel, reasoning: selectedReasoning, speed: selectedSpeed }
-        : undefined
-      reportResumeDiagnostic({ stage: 'selection-ready' })
+        const selectedDisplayedSpeed = savedAgent
+          ? pickerAppliedSpeed(chosenProvider.value, modelRow(selectedModel), speed.value, savedAgent.speed)
+          : ''
+        const selectedSpeed = savedAgent
+          ? resumeSelectionSpeed(chosenProvider.value, modelRow(selectedModel), speed.value, savedAgent.speed)
+          : ''
+        const preserveModel = savedAgent?.model === '' && !model.value
+        const selectionModel = preserveModel ? savedAgent.model : selectedModel
+        const turnId = run.chatExecution?.messageId
+        selection = savedAgent
+          && chosenProvider.value === savedAgent.provider
+          && !!turnId
+          && needsResumeSelection(
+            selectionModel,
+            selectedReasoning,
+            selectedDisplayedSpeed,
+            savedAgent.model,
+            savedAgent.reasoning,
+            savedAgent.speed,
+          )
+          ? {
+              model: selectionModel,
+              reasoning: selectedReasoning,
+              speed: selectedSpeed,
+              ...(preserveModel ? { preserveModel: true } : {}),
+            }
+          : undefined
+        reportResumeDiagnostic({ stage: 'selection-ready' })
+      }
+
       reportResumeDiagnostic({ stage: 'resume-attempt' })
       await resumeChat(api, {
         chatId: chat.id,

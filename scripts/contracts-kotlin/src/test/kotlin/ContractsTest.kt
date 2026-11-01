@@ -21,6 +21,19 @@ class ContractsTest {
         val inherited = ResumeExecutionSelection(model = "gpt-6-sol", reasoning = "", speed = "")
         assertEquals("", inherited.reasoning)
         assertEquals("", inherited.speed)
+        assertFalse(inherited.preserveModel)
+        assertFalse(json.encodeToJsonElement(inherited).jsonObject.containsKey("preserveModel"))
+
+        val preserved =
+            ResumeExecutionSelection(
+                model = "",
+                preserveModel = true,
+                reasoning = "high",
+                speed = "standard",
+            )
+        assertTrue(
+            json.encodeToJsonElement(preserved).jsonObject["preserveModel"] == JsonPrimitive(true)
+        )
 
         val standard =
             ResumeExecutionSelection(

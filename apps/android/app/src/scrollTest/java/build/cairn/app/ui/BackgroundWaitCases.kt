@@ -13,6 +13,7 @@ import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
+import build.cairn.contracts.ServiceTier
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.*
@@ -634,6 +635,113 @@ abstract class BackgroundWaitCases {
         }
 
     @Test
+    fun prelaunchQuotaFailureUsesOrdinaryResumeWithoutSavedSelection() =
+        conversation("failed", quota = true, resumePrelaunch = true) { server ->
+            compose.onNodeWithTag("chat-quota").assertIsDisplayed()
+            compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
+
+            val request = generateSequence {
+                server.takeRequest(5, TimeUnit.SECONDS)
+            }
+                .first {
+                    it.method == "POST" &&
+                        it.path?.endsWith("/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume") ==
+                            true
+                }
+            val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+            org.junit.Assert.assertEquals(
+                "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                body["chatId"]!!.jsonPrimitive.content,
+            )
+            org.junit.Assert.assertEquals(SAVED_RUN_ID, body["runId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("quota-turn", body["turnId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertFalse(body.containsKey("selection"))
+        }
+
+    @Test
+    fun savedCodexResumeKeepsUntouchedBlankModelWhenNothingChanges() =
+        conversation("failed", quota = true, resumeBlankModelNoChange = true) { server ->
+            compose.onNodeWithTag("chat-quota").assertIsDisplayed()
+            compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
+
+            val request = generateSequence {
+                server.takeRequest(5, TimeUnit.SECONDS)
+            }
+                .first {
+                    it.method == "POST" &&
+                        it.path?.endsWith("/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume") ==
+                            true
+                }
+            val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+            org.junit.Assert.assertEquals(SAVED_RUN_ID, body["runId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("quota-turn", body["turnId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertFalse(body.containsKey("selection"))
+        }
+
+    @Test
+    fun savedCodexResumePreservesBlankModelForSpeedOnlyChange() =
+        conversation("failed", quota = true, resumeBlankModelSpeedOnly = true) { server ->
+            compose.onNodeWithTag("chat-quota").assertIsDisplayed()
+            compose.onNodeWithTag("model-picker").performClick()
+            compose
+                .onNode(hasText("Modèle de la conversation") and isSelectable())
+                .assertIsSelected()
+            compose
+                .onNode(hasText("Standard") and hasAnyAncestor(hasTestTag("speed-options")))
+                .performClick()
+            compose.onNodeWithText("Terminé").performClick()
+            compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
+
+            val request = generateSequence {
+                server.takeRequest(5, TimeUnit.SECONDS)
+            }
+                .first {
+                    it.method == "POST" &&
+                        it.path?.endsWith("/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume") ==
+                            true
+                }
+            val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+            val selection = body["selection"]!!.jsonObject
+            org.junit.Assert.assertEquals("", selection["model"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals(true, selection["preserveModel"]!!.jsonPrimitive.boolean)
+            org.junit.Assert.assertEquals("", selection["reasoning"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("standard", selection["speed"]!!.jsonPrimitive.content)
+        }
+
+    @Test
+    fun savedCodexResumePreservesBlankModelForReasoningOnlyChange() =
+        conversation("failed", quota = true, resumeBlankModelReasoning = true) { server ->
+            compose.onNodeWithTag("chat-quota").assertIsDisplayed()
+            compose.onNodeWithTag("model-picker").performClick()
+            compose
+                .onNode(hasText("Modèle de la conversation") and isSelectable())
+                .assertIsSelected()
+            compose.onNodeWithTag("reasoning-slider").performSemanticsAction(
+                SemanticsActions.SetProgress
+            ) {
+                it(2f)
+            }
+            compose.onNodeWithTag("reasoning-slider").assert(hasStateDescription("Élevé"))
+            compose.onNodeWithText("Terminé").performClick()
+            compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
+
+            val request = generateSequence {
+                server.takeRequest(5, TimeUnit.SECONDS)
+            }
+                .first {
+                    it.method == "POST" &&
+                        it.path?.endsWith("/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume") ==
+                            true
+                }
+            val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+            val selection = body["selection"]!!.jsonObject
+            org.junit.Assert.assertEquals("", selection["model"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals(true, selection["preserveModel"]!!.jsonPrimitive.boolean)
+            org.junit.Assert.assertEquals("high", selection["reasoning"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("standard", selection["speed"]!!.jsonPrimitive.content)
+        }
+
+    @Test
     fun relayedBackgroundWaitReplacesWorking() =
         conversation("running") {
             compose.onNodeWithTag("agent-waiting").assertExists()
@@ -977,6 +1085,10 @@ abstract class BackgroundWaitCases {
         resumeSameModelDefault: Boolean = false,
         resumeExplicitEffort: Boolean = false,
         resumeResetIntent: Boolean = false,
+        resumeBlankModelNoChange: Boolean = false,
+        resumeBlankModelSpeedOnly: Boolean = false,
+        resumeBlankModelReasoning: Boolean = false,
+        resumePrelaunch: Boolean = false,
         resumeRouteSelection: Boolean = false,
         resumePinnedRouteSelection: Boolean = false,
         resumableTurn: Boolean = false,
@@ -997,8 +1109,11 @@ abstract class BackgroundWaitCases {
                     resumeSameModelDefault ||
                     resumeExplicitEffort ||
                     resumeResetIntent ||
+                    resumeBlankModelNoChange ||
+                    resumeBlankModelSpeedOnly ||
+                    resumeBlankModelReasoning ||
                     resumeRouteSelection
-            val hasSavedTurn = hasResumeSelection || resumableTurn
+            val hasSavedTurn = hasResumeSelection || resumableTurn || resumePrelaunch
             val chat =
                 Chat(
                     id = "6cc6efab-10af-54c7-a91b-dcff664166a1",
@@ -1012,8 +1127,9 @@ abstract class BackgroundWaitCases {
                             id = SAVED_RUN_ID,
                             status = status,
                             startedAt = now - 60_000,
-                            resumeAvailable = hasSavedTurn,
-                            sessionId = if (hasSavedTurn) "saved-session" else null,
+                            resumeAvailable = hasSavedTurn && !resumePrelaunch,
+                            sessionId =
+                                if (hasSavedTurn && !resumePrelaunch) "saved-session" else null,
                             chatExecution =
                                 if (hasSavedTurn) ChatExecution(messageId = "quota-turn") else null,
                             snapshot =
@@ -1038,12 +1154,16 @@ abstract class BackgroundWaitCases {
                                                 if (resumeRouteSelection) "opencode"
                                                 else if (
                                                     quota &&
+                                                        !resumePrelaunch &&
                                                         !resumeSelection &&
                                                         !resumeChangedModel &&
                                                         !resumeInheritedEffort &&
                                                         !resumeSameModelDefault &&
                                                         !resumeExplicitEffort &&
-                                                        !resumeResetIntent
+                                                        !resumeResetIntent &&
+                                                        !resumeBlankModelNoChange &&
+                                                        !resumeBlankModelSpeedOnly &&
+                                                        !resumeBlankModelReasoning
                                                 )
                                                     "claude"
                                                 else "codex",
@@ -1076,7 +1196,8 @@ abstract class BackgroundWaitCases {
                                                         resumeInheritedSpeed ||
                                                         resumeSameModelDefault ||
                                                         resumeExplicitEffort ||
-                                                        resumeResetIntent
+                                                        resumeResetIntent ||
+                                                        resumeBlankModelSpeedOnly
                                                 )
                                                     "priority"
                                                 else "",
@@ -1282,7 +1403,15 @@ abstract class BackgroundWaitCases {
                                                                     reasoningEffort = "high"
                                                                 ),
                                                             ),
-                                                        serviceTiers = emptyList(),
+                                                        serviceTiers =
+                                                            if (resumeBlankModelSpeedOnly)
+                                                                listOf(
+                                                                    ServiceTier(
+                                                                        id = "priority",
+                                                                        name = "Priority",
+                                                                    )
+                                                                )
+                                                            else emptyList(),
                                                     ),
                                                     CodingAgentModel(
                                                         model = "gpt-6-luna",

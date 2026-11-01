@@ -139,6 +139,27 @@ abstract class ModelPickerCases {
     }
 
     @Test
+    fun inheritedBlankModelStaysBlankWhileNonInheritingPickerSelectsCatalogDefault() {
+        var inheritedModel by mutableStateOf("")
+        var explicitModel by mutableStateOf("")
+        compose.setContent {
+            androidx.compose.foundation.layout.Column {
+                ModelPicker(catalog, inheritedModel, "", inherit = true) { model, _ ->
+                    inheritedModel = model
+                }
+                ModelPicker(catalog, explicitModel, "", inherit = false) { model, _ ->
+                    explicitModel = model
+                }
+            }
+        }
+
+        compose.waitForIdle()
+
+        assertEquals("", inheritedModel)
+        assertEquals("large", explicitModel)
+    }
+
+    @Test
     fun claudeDefaultAliasIsMergedIntoTheDefaultRow() {
         val claude =
             ModelCatalog(

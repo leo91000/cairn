@@ -160,7 +160,7 @@ const choices = computed(() => [
 ])
 
 watch([provider, () => catalog.value.models, () => props.defaultModel], () => {
-  if (current.value.requiresModel && !model.value && !(props.inherit && props.defaultModel)) {
+  if (current.value.requiresModel && !model.value && !props.inherit) {
     model.value = catalog.value.models.find(item => item.isDefault && !item.hidden)?.model
       || catalog.value.models.find(item => !item.hidden)?.model || ''
   }

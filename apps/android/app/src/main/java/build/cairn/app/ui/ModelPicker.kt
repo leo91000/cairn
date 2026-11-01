@@ -173,7 +173,7 @@ private val OpenCodeMark by lazy {
  * across model changes.
  */
 @Composable
-fun ModelPicker(
+internal fun ModelPicker(
     catalog: ModelCatalog,
     model: String,
     reasoning: String,
@@ -218,11 +218,7 @@ fun ModelPicker(
         route?.let { chosen.copy(supportedReasoningEfforts = it.supportedReasoningEfforts) }
             ?: chosen
     LaunchedEffect(provider, catalog.models, model, defaultModel, inherit) {
-        if (
-            codingAgent(provider).requiresModel &&
-                model.isBlank() &&
-                !(inherit && defaultModel.isNotBlank())
-        ) {
+        if (codingAgent(provider).requiresModel && model.isBlank() && !inherit) {
             onReasoningIntent(ResumeReasoningIntent.Untouched)
             val next =
                 catalog.models.find { it.isDefault && !it.hidden }
