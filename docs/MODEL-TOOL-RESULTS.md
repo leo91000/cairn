@@ -40,7 +40,7 @@ Cairn does not manufacture a replacement challenge or infer new permissions.
 
 ## Discovery compatibility
 
-Owned output schemas advertise an original-or-truncated union. The seven
+Owned output schemas advertise an original-or-truncated union. The twelve
 workspace schemas use the verified generated draft07 profile: root
 `definitions` and `$schema` stay at the root, preserving their local
 `#/definitions/...` references. Search and execute have simple object schemas.

@@ -600,12 +600,21 @@ mod tests {
             crate::chats::questions::list_tool(),
             crate::chats::questions::cancel_tool(),
             crate::waits::tool(&[], false),
+            crate::nodes::moves::tool(),
+            crate::nodes::exclusive::acquire_tool(),
+            crate::nodes::exclusive::release_tool(),
+            crate::nodes::exclusive::status_tool(),
+            crate::nodes::exclusive::renew_tool(),
         ]);
         tools.extend(
             crate::delegation::tools()
                 .into_iter()
                 .filter(|tool| tool.get("outputSchema").is_some()),
         );
+        let placement: Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/placement-contracts.json"
+        ))
+        .unwrap();
         for original in tools {
             let schema = &original["outputSchema"];
             // The two hand-authored schemas have no dialect/ref machinery.
@@ -629,6 +638,13 @@ mod tests {
                     "fields": [],
                 }),
                 "wait_for" => json!({ "deferred": true }),
+                "move_to_node" => {
+                    json!({ "status": "moved", "nodeId": "00000000-0000-4000-8000-000000000002" })
+                }
+                "acquire_exclusive" | "release_exclusive" | "renew_exclusive" => {
+                    placement["views"][0].clone()
+                }
+                "exclusive_status" => json!({ "reservations": [] }),
                 "task_status" => json!({ "tasks": [] }),
                 "delegate_task" | "task_cancel" => json!({
                     "chatId": "chat",
