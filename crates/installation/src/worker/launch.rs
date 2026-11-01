@@ -1466,10 +1466,16 @@ mod tests {
     async fn preparation_fixture(root: &Path) -> (Arc<Service>, Value) {
         use crate::run_fixture::DbRunFixture;
         let config = serde_json::from_value(json!({
-            "dataDir": root.join("data"), "home": root.join("home"),
-            "workspaceRoots": [root], "publicUrl": "http://localhost:4310",
-            "host": "127.0.0.1", "port": 0, "codexBin": "false",
-            "concurrency": 1, "logger": false, "workerEnabled": false,
+            "dataDir": root.join("data"),
+            "home": root.join("home"),
+            "workspaceRoots": [root],
+            "publicUrl": "http://localhost:4310",
+            "host": "127.0.0.1",
+            "port": 0,
+            "codexBin": "false",
+            "concurrency": 1,
+            "logger": false,
+            "workerEnabled": false,
             "runnerUrl": "http://runner.invalid",
         }))
         .unwrap();

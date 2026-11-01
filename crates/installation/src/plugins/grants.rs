@@ -1018,8 +1018,10 @@ mod migration_tests {
                 .await
                 .unwrap();
         let input = serde_json::from_value(json!({
-            "agentId": target_id, "revision": before.revision,
-            "grants": [], "runCredentialInstances": [],
+            "agentId": target_id,
+            "revision": before.revision,
+            "grants": [],
+            "runCredentialInstances": [],
         }))
         .unwrap();
         let checked = Arc::new(tokio::sync::Notify::new());
@@ -1156,10 +1158,17 @@ mod migration_tests {
         };
         let root = tempfile::tempdir().unwrap();
         let config = serde_json::from_value(json!({
-            "dataDir": root.path().join("data"), "home": root.path().join("home"),
-            "workspaceRoots": [root.path()], "publicUrl": "http://localhost:4310",
-            "host": "127.0.0.1", "port": 0, "codexBin": "unused", "concurrency": 1,
-            "logger": false, "workerEnabled": false, "runnerUrl": "",
+            "dataDir": root.path().join("data"),
+            "home": root.path().join("home"),
+            "workspaceRoots": [root.path()],
+            "publicUrl": "http://localhost:4310",
+            "host": "127.0.0.1",
+            "port": 0,
+            "codexBin": "unused",
+            "concurrency": 1,
+            "logger": false,
+            "workerEnabled": false,
+            "runnerUrl": "",
         }))
         .unwrap();
         let s = crate::service::Service::new(config).await.unwrap();
@@ -1216,8 +1225,12 @@ mod migration_tests {
             .await
             .unwrap();
         let input = serde_json::from_value(json!({
-            "agentId": agent, "revision": before.revision,
-            "grants": [{ "instanceId": instance, "access": { "type": "full" } }],
+            "agentId": agent,
+            "revision": before.revision,
+            "grants": [{
+                "instanceId": instance,
+                "access": { "type": "full" },
+            }],
             "runCredentialInstances": [instance],
         }))
         .unwrap();

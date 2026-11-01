@@ -403,11 +403,19 @@ mod tests {
             );
         }
         let config: Config = serde_json::from_value(serde_json::json!({
-            "dataDir": root.path().join("data"), "home": root.path(), "workspaceRoots": [root.path()],
-            "publicUrl": "http://localhost:4310", "host": "127.0.0.1", "port": 0,
-            "codexBin": "false", "concurrency": 1, "logger": false,
-            "workerEnabled": false, "runnerUrl": "",
-        })).unwrap();
+            "dataDir": root.path().join("data"),
+            "home": root.path(),
+            "workspaceRoots": [root.path()],
+            "publicUrl": "http://localhost:4310",
+            "host": "127.0.0.1",
+            "port": 0,
+            "codexBin": "false",
+            "concurrency": 1,
+            "logger": false,
+            "workerEnabled": false,
+            "runnerUrl": "",
+        }))
+        .unwrap();
         let calls = AtomicUsize::new(0);
         let result = clone_authorized(
             &source,

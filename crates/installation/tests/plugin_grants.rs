@@ -1167,8 +1167,10 @@ async fn instruction_only_packages_cannot_shadow_a_granted_tool() {
     f.api(
         "PUT",
         json!({
-            "agentId": MAIN_AGENT_ID, "revision": current["revision"],
-            "grants": grants, "runCredentialInstances": [],
+            "agentId": MAIN_AGENT_ID,
+            "revision": current["revision"],
+            "grants": grants,
+            "runCredentialInstances": [],
         }),
     )
     .await
