@@ -14,8 +14,16 @@ const NOTICE: &str = "Tool result truncated to the 1 MiB encoded response budget
 
 pub(super) const POLICY: &str = " Cairn limits each complete encoded tool result to 1 MiB. Large completed results are visibly truncated without repeating the operation; the original success/error outcome is preserved and omitted data is not retained.";
 
+#[cfg(test)]
+thread_local! {
+    static MEASURED_ENCODED_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn size(value: &Value) -> usize {
-    encoded_size(value).expect("JSON values serialize into a byte counter")
+    let bytes = encoded_size(value).expect("JSON values serialize into a byte counter");
+    #[cfg(test)]
+    MEASURED_ENCODED_BYTES.with(|measured| measured.set(measured.get() + bytes));
+    bytes
 }
 
 fn marker() -> Value {
@@ -64,27 +72,32 @@ pub(super) fn finish(mut result: Value) -> Result<Value> {
 
     prune_metadata(&mut result)?;
 
-    for block in content {
-        result["content"].as_array_mut().unwrap().push(block);
-        if size(&result) <= LIMIT {
+    let mut result_bytes = size(&result);
+    for mut block in content {
+        // The notice is always the first block, so each additional complete
+        // block contributes exactly its encoded bytes plus one array comma.
+        let Some(available_block_bytes) = LIMIT.checked_sub(result_bytes + 1) else {
+            break;
+        };
+        let block_bytes = size(&block);
+        if block_bytes <= available_block_bytes {
+            result["content"].as_array_mut().unwrap().push(block);
+            result_bytes += block_bytes + 1;
             continue;
         }
 
-        let mut block = result["content"].as_array_mut().unwrap().pop().unwrap();
         if block["type"] == "text"
             && let Some(Value::String(text)) =
                 block.as_object_mut().and_then(|block| block.remove("text"))
         {
             block["text"] = "".into();
-            result["content"].as_array_mut().unwrap().push(block);
-            if size(&result) > LIMIT {
-                result["content"].as_array_mut().unwrap().pop();
+            if size(&block) > available_block_bytes {
                 break;
             }
 
-            // Search UTF-8 boundaries, sizing the whole encoded envelope at
-            // every step. Escaping can cost six bytes per source byte.
-            let index = result["content"].as_array().unwrap().len() - 1;
+            // Search UTF-8 boundaries against the remaining encoded block
+            // budget. Escaping can cost six bytes per source byte. Earlier
+            // retained blocks are never serialized again during the search.
             let mut low = 0;
             let mut high = text.len();
             while low < high {
@@ -95,19 +108,24 @@ pub(super) fn finish(mut result: Value) -> Result<Value> {
                 if end == low {
                     break;
                 }
-                result["content"][index]["text"] = text[..end].into();
-                if size(&result) <= LIMIT {
+                block["text"] = text[..end].into();
+                if size(&block) <= available_block_bytes {
                     low = end;
                 } else {
                     high = end - 1;
                 }
             }
-            result["content"][index]["text"] = text[..low].into();
+            block["text"] = text[..low].into();
+            result_bytes += size(&block) + 1;
+            result["content"].as_array_mut().unwrap().push(block);
         }
         // Binary/media/resource blocks are retained whole or omitted. A text
         // prefix is explicitly only a preview, never a sliced JSON document.
         break;
     }
+    let final_bytes = size(&result);
+    debug_assert_eq!(result_bytes, final_bytes);
+    debug_assert!(final_bytes <= LIMIT);
     Ok(result)
 }
 
@@ -315,6 +333,41 @@ mod tests {
         assert_eq!(result["content"][1], small);
         assert_eq!(result["content"].as_array().unwrap().len(), 2);
         assert_eq!(result["structuredContent"]["retained"], false);
+    }
+
+    #[test]
+    fn many_small_blocks_have_linear_encoded_sizing_work() {
+        let block = json!({ "type": "text", "text": "" });
+        let original = json!({
+            "content": vec![block.clone(); 60_000],
+            "structuredContent": { "value": "completed" },
+        });
+        let wire = json!({ "jsonrpc": "2.0", "id": 1, "result": original });
+        let wire_bytes = serde_json::to_vec(&wire).unwrap().len();
+        assert!(wire_bytes > LIMIT);
+        assert!(
+            wire_bytes < 2_000_000,
+            "The fixture must fit the existing stdio wire guard"
+        );
+
+        // Count actual bytes traversed by the production sizing function,
+        // without a wall-time assertion or a production telemetry path. The
+        // previous growing-envelope loop scans tens of GB for this valid input.
+        MEASURED_ENCODED_BYTES.with(|measured| measured.set(0));
+        let result = finish(original).unwrap();
+        let measured = MEASURED_ENCODED_BYTES.with(std::cell::Cell::get);
+        assert!(
+            measured < 4 * wire_bytes,
+            "Encoded sizing revisited {measured} bytes for a {wire_bytes}-byte wire fixture"
+        );
+        assert!(serde_json::to_vec(&result).unwrap().len() <= LIMIT);
+        assert_eq!(result["structuredContent"]["truncated"], true);
+        assert_eq!(result["structuredContent"]["retained"], false);
+        let content = result["content"].as_array().unwrap();
+        assert!(content.len() > 1);
+        for kept in &content[1..] {
+            assert_eq!(kept, &block);
+        }
     }
 
     #[test]

@@ -651,9 +651,13 @@ createInterface({ input: process.stdin }).on('line', line => {
     } else if (request.method === 'tools/call') {
         appendFileSync(process.env.TEST_COUNTER, 'call\n');
         const mode = request.params.arguments.mode;
-        result = mode === 'error'
-            ? { content: [{ type: 'text', text: 'error: ' + 'x'.repeat(1100000) }], isError: true, _meta: { 'mcp/www_authenticate': 'Bearer scope="read"' } }
-            : { content: [{ type: 'text', text: 'completed' }], structuredContent: { value: mode === 'large' ? 'x'.repeat(1100000) : 'granted-credential-fixture' } };
+        if (mode === 'many') {
+            result = { content: Array.from({ length: 60000 }, () => ({ type: 'text', text: '' })), structuredContent: { value: 'completed' } };
+        } else {
+            result = mode === 'error'
+                ? { content: [{ type: 'text', text: 'error: ' + 'x'.repeat(1100000) }], isError: true, _meta: { 'mcp/www_authenticate': 'Bearer scope="read"' } }
+                : { content: [{ type: 'text', text: 'completed' }], structuredContent: { value: mode === 'large' ? 'x'.repeat(1100000) : 'granted-credential-fixture' } };
+        }
     } else {
         result = {};
     }
@@ -722,7 +726,10 @@ async fn gateway_bounds_completed_results_without_changing_schemas_grants_or_eff
             .contains("omits the upstream outputSchema")
     );
 
-    for (index, mode) in ["small", "large", "error", "small"].into_iter().enumerate() {
+    for (index, mode) in ["small", "large", "many", "error", "small"]
+        .into_iter()
+        .enumerate()
+    {
         let response = request(
             "tools/call",
             json!({ "name": "bounded_fixture", "arguments": { "mode": mode } }),
@@ -782,7 +789,7 @@ async fn gateway_bounds_completed_results_without_changing_schemas_grants_or_eff
     assert_eq!(revoked.status(), reqwest::StatusCode::UNAUTHORIZED);
     assert_eq!(
         std::fs::read_to_string(&counter).unwrap().lines().count(),
-        4
+        5
     );
     server.abort();
 }
