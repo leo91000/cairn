@@ -10,6 +10,7 @@ pub mod codex;
 pub(crate) mod lenient;
 pub(crate) mod migration;
 pub mod opencode;
+pub(crate) mod output_redactions;
 mod record;
 mod sign_in;
 pub mod sql;
@@ -157,6 +158,7 @@ impl Provider {
 
 #[derive(Default)]
 pub struct Accounts {
+    output_credentials: output_redactions::Registry,
     locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     initialized: OnceCell<()>,
     attempted: Mutex<HashMap<String, i64>>,

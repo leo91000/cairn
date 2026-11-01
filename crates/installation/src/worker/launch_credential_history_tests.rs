@@ -207,11 +207,29 @@ async fn historical_rotation_fixture(aggregate: bool) {
         })
         .await
         .unwrap();
-    let mut sensitive = service.accounts.redactions(&service, &lease).await.unwrap();
-    assert!(values(&a).iter().all(|value| sensitive.contains(value)));
-    let broker = crate::accounts::broker::serve(&service, &lease)
-        .await
-        .unwrap();
+    let sensitive = History::default();
+    sensitive.extend(service.accounts.redactions(&service, &lease).await.unwrap());
+    assert!(
+        values(&a)
+            .iter()
+            .all(|value| sensitive.snapshot().contains(value))
+    );
+    let observation = if aggregate {
+        service
+            .accounts
+            .observe_output_credentials(&service, &lease, &crate::config::id(), sensitive.clone())
+            .await
+            .unwrap()
+    } else {
+        None
+    };
+    let broker = match &observation {
+        Some(observation) => {
+            crate::accounts::broker::serve_observed(&service, &lease, observation.handle()).await
+        }
+        None => crate::accounts::broker::serve(&service, &lease).await,
+    }
+    .unwrap();
     let mut client = crate::accounts::codex::Client::from_socket(
         lease.home.join(crate::accounts::broker::SOCKET),
     )
@@ -249,7 +267,8 @@ async fn historical_rotation_fixture(aggregate: bool) {
             preparation: None,
             cancel: &cancel,
             checkpoint: &checkpoint,
-            sensitive: &mut sensitive,
+            sensitive: &sensitive,
+            observation: None,
             provider: Provider::Codex,
             directory: root.path().into(),
             attempt_id: crate::config::id(),
@@ -325,12 +344,16 @@ async fn historical_rotation_fixture(aggregate: bool) {
         let mut log_total = 0;
         let ((), result) = tokio::join!(
             produce,
-            execution.wait(&mut child, &mut events, &mut log_total, false)
+            execution.wait(&mut child, &mut events, &mut log_total, false, None)
         );
         let Err(error) = result else {
             panic!("the explicit wait boundary must fail");
         };
         drop(execution);
+        if let Some(observation) = &observation {
+            observation.revoke();
+        }
+        broker.close().await;
         // Even the failing fixture joins both real readers before the outer
         // failure publication. Production lifecycle/revocation needs its own tests.
         out.await.unwrap();
@@ -342,7 +365,7 @@ async fn historical_rotation_fixture(aggregate: bool) {
             &checkpoint,
             &cancel,
             &error,
-            &sensitive,
+            &sensitive.snapshot(),
         )
         .await
         .unwrap();
@@ -390,7 +413,6 @@ async fn historical_rotation_fixture(aggregate: bool) {
     }
     .with_subscriber(dispatch)
     .await;
-    drop(broker);
     assert!(!lease.home.join(crate::accounts::broker::SOCKET).exists());
     service.shutdown.cancel();
     let (canonical, diagnostic, unknown, outer) = observations;

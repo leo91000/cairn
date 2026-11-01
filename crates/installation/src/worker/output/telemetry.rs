@@ -130,6 +130,7 @@ pub(in crate::worker) struct Publisher {
     attempt: String,
     dispatch: tracing::Dispatch,
     rejected_reports: u64,
+    reports: Option<tokio::sync::watch::Sender<Option<Snapshot>>>,
     #[cfg(test)]
     accepted: Option<tokio_util::sync::CancellationToken>,
 }
@@ -145,9 +146,24 @@ impl Publisher {
             attempt: crate::performance::identity(attempt).to_owned(),
             dispatch: tracing::dispatcher::get_default(Clone::clone),
             rejected_reports: 0,
+            reports: None,
             #[cfg(test)]
             accepted: None,
         }
+    }
+
+    pub(in crate::worker) fn channel(run: &str, attempt: &str) -> (Self, Reports) {
+        let mut publisher = Self::new(run, attempt);
+        let (sender, receiver) = tokio::sync::watch::channel(None);
+        publisher.reports = Some(sender);
+        let reports = Reports {
+            receiver,
+            run: publisher.run.clone(),
+            attempt: publisher.attempt.clone(),
+            dispatch: publisher.dispatch.clone(),
+            rejected_reports: 0,
+        };
+        (publisher, reports)
     }
 
     /// Acknowledge classification at the actual reader seam, without redaction effects.
@@ -228,34 +244,17 @@ impl Publisher {
         }
         self.snapshot.local_reader_elapsed_ms =
             self.started.elapsed().as_millis().min(u64::MAX.into()) as u64;
-        // This record contains only managed UUIDs, static labels, local event
-        // counts and a host-monotonic reader duration. Child numeric payloads
-        // cannot bypass rotated-secret redaction: none are retained or emitted.
-        // Unknown records still use the original fresh-redacted output path.
-        let dispatch = self.dispatch.clone();
-        let accepted = tracing::dispatcher::with_default(&dispatch, || {
-            if !crate::performance::enabled() {
-                return None;
-            }
-            let summary = serde_json::json!({
-                "runId": self.run,
-                "attemptId": self.attempt,
-                "snapshot": self.snapshot,
-                "rejectedReports": self.rejected_reports,
-                "counts": "local observations of untrusted schema declarations; overflow means lower bounds",
-                "timing": "host-monotonic elapsed since reader observer creation; child RPC timings and IDs are discarded",
-                "coverage": "cumulative reader observations, not authoritative agent progress",
-            }).to_string();
-            Some(crate::performance::try_record(move |delivery| {
-                tracing::info!(target: "cairn_performance", parent: None,
-                    operation = "agent_rpc_summary", source = "agent_process",
-                    record = %summary, diagnostics_queue_us = delivery.queue_us,
-                    dropped_reports_total = delivery.dropped_reports_total);
-            }))
-        });
-        if accepted == Some(false) {
-            add(&mut self.rejected_reports, 1, &mut self.snapshot.overflow);
+        if let Some(reports) = &self.reports {
+            let _ = reports.send_replace(Some(self.snapshot));
+            return;
         }
+        publish(
+            &self.run,
+            &self.attempt,
+            self.snapshot,
+            &self.dispatch,
+            &mut self.rejected_reports,
+        );
     }
 
     pub(in crate::worker) fn finish(&mut self, eof: bool) {
@@ -265,6 +264,72 @@ impl Publisher {
         self.snapshot.reader_closed = true;
         self.snapshot.eof = eof;
         self.report();
+    }
+}
+
+/// One cumulative fixed-size watch value; coalescing summaries never loses
+/// canonical frames or claimed coverage. Only the worker admits sink work.
+pub(in crate::worker) struct Reports {
+    receiver: tokio::sync::watch::Receiver<Option<Snapshot>>,
+    run: String,
+    attempt: String,
+    dispatch: tracing::Dispatch,
+    rejected_reports: u64,
+}
+
+impl Reports {
+    pub(in crate::worker) async fn changed(&mut self) -> bool {
+        self.receiver.changed().await.is_ok()
+    }
+
+    pub(in crate::worker) fn publish_latest(&mut self) {
+        let snapshot = *self.receiver.borrow_and_update();
+        if let Some(snapshot) = snapshot {
+            publish(
+                &self.run,
+                &self.attempt,
+                snapshot,
+                &self.dispatch,
+                &mut self.rejected_reports,
+            );
+        }
+    }
+}
+
+fn publish(
+    run: &str,
+    attempt: &str,
+    snapshot: Snapshot,
+    dispatch: &tracing::Dispatch,
+    rejected_reports: &mut u64,
+) {
+    // This record contains only managed UUIDs, static labels, local event
+    // counts and a host-monotonic reader duration. Child numeric payloads
+    // cannot bypass rotated-secret redaction: none are retained or emitted.
+    // Unknown records still use the original fresh-redacted output path.
+    let dispatch = dispatch.clone();
+    let accepted = tracing::dispatcher::with_default(&dispatch, || {
+        if !crate::performance::enabled() {
+            return None;
+        }
+        let summary = serde_json::json!({
+            "runId": run,
+            "attemptId": attempt,
+            "snapshot": snapshot,
+            "rejectedReports": *rejected_reports,
+            "counts": "local observations of untrusted schema declarations; overflow means lower bounds",
+            "timing": "host-monotonic elapsed since reader observer creation; child RPC timings and IDs are discarded",
+            "coverage": "cumulative reader observations, not authoritative agent progress",
+        }).to_string();
+        Some(crate::performance::try_record(move |delivery| {
+            tracing::info!(target: "cairn_performance", parent: None,
+                operation = "agent_rpc_summary", source = "agent_process",
+                record = %summary, diagnostics_queue_us = delivery.queue_us,
+                dropped_reports_total = delivery.dropped_reports_total);
+        }))
+    });
+    if accepted == Some(false) {
+        *rejected_reports = rejected_reports.saturating_add(1);
     }
 }
 

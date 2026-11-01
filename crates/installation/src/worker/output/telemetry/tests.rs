@@ -393,3 +393,35 @@ async fn unsupported_only_child() {
     .await;
     assert!(flushed(&capture).is_empty());
 }
+
+#[tokio::test]
+async fn cumulative_watch_retains_final_coverage_without_an_output_queue_or_reporter_task() {
+    let (mut publisher, mut reports) = Publisher::channel(RUN, ATTEMPT);
+    for _ in 0..6090 {
+        assert!(publisher.observe(&started("thread/items/list")));
+        assert!(publisher.observe(&completed(1, true)));
+    }
+    publisher.finish(true);
+    drop(publisher);
+    // Sender is already gone: the final unseen value must still be available.
+    assert!(reports.changed().await);
+    let latest = reports.receiver.borrow_and_update().unwrap();
+    assert_eq!(latest.recognized_records, 12180);
+    assert_eq!(latest.items.started_records, 6090);
+    assert_eq!(latest.items.completed_records, 6090);
+    assert!(latest.reader_closed && latest.eof);
+    assert!(!reports.changed().await);
+    assert!(std::mem::size_of::<Snapshot>() < 1024);
+}
+
+#[tokio::test]
+async fn dropped_reader_observer_does_not_upgrade_partial_coverage_to_eof() {
+    let (mut publisher, mut reports) = Publisher::channel(RUN, ATTEMPT);
+    publisher.observe(&started("thread/items/list"));
+    drop(publisher);
+    assert!(reports.changed().await);
+    let latest = reports.receiver.borrow_and_update().unwrap();
+    assert_eq!(latest.recognized_records, 1);
+    assert!(!latest.reader_closed && !latest.eof);
+    assert!(!reports.changed().await);
+}

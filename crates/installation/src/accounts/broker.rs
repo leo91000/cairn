@@ -1,7 +1,10 @@
 //! Run-scoped credential broker. Only the manager holds refresh credentials: a run asks this
 //! private socket for access-only credentials, one JSON line per connection, and never writes
 //! credentials back.
-use super::Lease;
+use super::{
+    Lease,
+    output_redactions::{Delivery, Handle},
+};
 use crate::{
     error::{Error, Result},
     service::Service,
@@ -36,17 +39,80 @@ pub struct Request {
 pub struct Broker {
     stop: CancellationToken,
     path: PathBuf,
+    task: Option<tokio::task::JoinHandle<()>>,
+    observed: bool,
 }
 
 impl Drop for Broker {
     fn drop(&mut self) {
         self.stop.cancel();
+        if self.observed
+            && let Some(task) = &self.task
+        {
+            task.abort();
+        }
         let _ = std::fs::remove_file(&self.path);
     }
 }
 
+impl Broker {
+    /// Completion barrier: no accepted response can write after this returns.
+    /// Cancelling the caller never cancels an already queued Store commit.
+    pub(crate) async fn close(mut self) {
+        self.stop.cancel();
+        if let Some(task) = self.task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+}
+
+pub(crate) async fn serve_observed(s: &Service, lease: &Lease, scope: Handle) -> Result<Broker> {
+    serve_inner(
+        s,
+        lease,
+        Some(scope),
+        #[cfg(test)]
+        None,
+    )
+    .await
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct DeliveryProbe {
+    pub(crate) selected: CancellationToken,
+    pub(crate) resume: CancellationToken,
+}
+
+#[cfg(test)]
+pub(crate) async fn serve_observed_fixture(
+    s: &Service,
+    lease: &Lease,
+    scope: Handle,
+    probe: std::sync::Arc<DeliveryProbe>,
+) -> Result<Broker> {
+    serve_inner(s, lease, Some(scope), Some(probe)).await
+}
+
 /// Serves the lease's account in its run home until the broker is dropped.
 pub async fn serve(s: &Service, lease: &Lease) -> Result<Broker> {
+    serve_inner(
+        s,
+        lease,
+        None,
+        #[cfg(test)]
+        None,
+    )
+    .await
+}
+
+async fn serve_inner(
+    s: &Service,
+    lease: &Lease,
+    scope: Option<Handle>,
+    #[cfg(test)] probe: Option<std::sync::Arc<DeliveryProbe>>,
+) -> Result<Broker> {
     use std::os::unix::fs::PermissionsExt;
     private_dir(&lease.home).await?;
     let path = lease.home.join(SOCKET);
@@ -59,34 +125,58 @@ pub async fn serve(s: &Service, lease: &Lease) -> Result<Broker> {
     let stopping = stop.clone();
     let service = s.clone();
     let lease = lease.clone();
-    tokio::spawn(async move {
+    let observed = scope.is_some();
+    let task = tokio::spawn(async move {
         loop {
             tokio::select! {
                 () = stopping.cancelled() => break,
                 () = service.shutdown.cancelled() => break,
                 accepted = listener.accept() => {
                     let Ok((stream, _)) = accepted else { break };
-                    // One request at a time per run. Never cancel a token rotation between
-                    // the provider's response and durable storage.
-                    let _ = respond(&service, &lease, stream).await;
+                    // One request at a time per run. Scope close can abort this
+                    // future, but never an already queued durable Store commit.
+                    // Any interrupted manager auth file is recovered by materialize.
+                    let _ = respond(&service, &lease, stream, scope.as_ref(), #[cfg(test)] probe.as_deref()).await;
                 }
             }
         }
     });
-    Ok(Broker { stop, path })
+    Ok(Broker {
+        stop,
+        path,
+        task: Some(task),
+        observed,
+    })
 }
 
-async fn respond(s: &Service, lease: &Lease, stream: UnixStream) -> Result<()> {
+async fn respond(
+    s: &Service,
+    lease: &Lease,
+    stream: UnixStream,
+    scope: Option<&Handle>,
+    #[cfg(test)] probe: Option<&DeliveryProbe>,
+) -> Result<()> {
     let mut stream = BufReader::new(stream);
     let request = tokio::time::timeout(Duration::from_secs(2), line(&mut stream))
         .await
         .map_err(|_| Error::bad("Account request timed out."))??;
+    if let Some(scope) = scope {
+        scope.check(lease)?;
+    }
     // Neither provider errors nor credentials enter events or logs.
     let response = s.accounts.access(s, lease, &request).await.unwrap_or_else(|_| {
         json!({
             "error": "Account authentication is unavailable. Reconnect the account after its runs finish."
         })
     });
+    #[cfg(test)]
+    if let Some(probe) = probe {
+        probe.selected.cancel();
+        probe.resume.cancelled().await;
+    }
+    let _delivery: Option<Delivery> = scope
+        .map(|scope| scope.admit(lease, super::codex::delivered_redactions(&response)))
+        .transpose()?;
     let mut bytes = serde_json::to_vec(&response)?;
     bytes.push(b'\n');
     stream.get_mut().write_all(&bytes).await?;

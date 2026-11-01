@@ -4,7 +4,7 @@ use super::{
     launch,
 };
 use crate::{
-    accounts::Lease,
+    accounts::{Lease, output_redactions::History},
     config::now,
     error::{Error, Result},
     provider::Provider,
@@ -43,7 +43,7 @@ pub(super) async fn execute(
         checkpoint.clone(),
         stop_heartbeat.clone(),
     ));
-    let mut sensitive = Vec::new();
+    let sensitive = History::default();
     let result = launch::execute(
         s,
         &mut run,
@@ -51,11 +51,11 @@ pub(super) async fn execute(
         &cancel,
         &checkpoint,
         existing,
-        &mut sensitive,
+        &sensitive,
     )
     .await;
     if let Err(error) = result {
-        record_failure(s, &checkpoint, &cancel, &error, &sensitive).await?;
+        record_failure(s, &checkpoint, &cancel, &error, &sensitive.snapshot()).await?;
     }
     let fenced = fence(s, &checkpoint).await?;
     stop_heartbeat.cancel();

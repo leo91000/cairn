@@ -99,7 +99,7 @@ async fn rpc_flood_on_service(root: tempfile::TempDir, service: Arc<Service>) {
     );
     let mut run = service.store.run(&id).await.unwrap();
     let mut account = None;
-    let mut sensitive = Vec::new();
+    let sensitive = History::default();
     let cancel = CancellationToken::new();
     let probe = OutputProbe {
         refreshes: Arc::new(AtomicU64::new(0)),
@@ -114,7 +114,8 @@ async fn rpc_flood_on_service(root: tempfile::TempDir, service: Arc<Service>) {
         preparation: None,
         cancel: &cancel,
         checkpoint: &checkpoint,
-        sensitive: &mut sensitive,
+        sensitive: &sensitive,
+        observation: None,
         provider: Provider::Codex,
         directory: root.path().into(),
         attempt_id: "fixture-attempt".into(),
@@ -132,7 +133,7 @@ async fn rpc_flood_on_service(root: tempfile::TempDir, service: Arc<Service>) {
         "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":4,\"output_tokens\":2}}\n",
     );
     let (sender, mut events) = mpsc::channel(32);
-    let telemetry = output::Publisher::new(&id, &crate::config::id());
+    let (telemetry, reports) = output::Publisher::channel(&id, &crate::config::id());
     let diagnostics_sender = sender.clone();
     let diagnostics = tokio::spawn(async move {
         output::read_agent_diagnostics(stderr.as_bytes(), diagnostics_sender, telemetry).await;
@@ -153,6 +154,7 @@ async fn rpc_flood_on_service(root: tempfile::TempDir, service: Arc<Service>) {
             &mut events,
             &mut 0,
             false,
+            Some(reports),
         )
         .await
         .unwrap();
@@ -206,7 +208,7 @@ async fn canonical_refresh_preserves_account_rotations_on_retained_output_path()
     };
     let key = format!("codex-account:{}", lease.account_id);
     let mut account = Some(lease);
-    let mut sensitive = Vec::new();
+    let sensitive = History::default();
     let checkpoint = Checkpoint::new(
         service.store.clone(),
         id.clone(),
@@ -222,7 +224,8 @@ async fn canonical_refresh_preserves_account_rotations_on_retained_output_path()
         preparation: None,
         cancel: &cancel,
         checkpoint: &checkpoint,
-        sensitive: &mut sensitive,
+        sensitive: &sensitive,
+        observation: None,
         provider: Provider::Codex,
         directory: root.path().into(),
         attempt_id: crate::config::id(),
@@ -237,9 +240,10 @@ async fn canonical_refresh_preserves_account_rotations_on_retained_output_path()
             .unwrap();
         execution.refresh_redactions().await.unwrap();
     }
-    let observed: Vec<_> = execution.sensitive.iter().map(String::as_str).collect();
+    let snapshot = execution.sensitive.snapshot();
+    let observed: Vec<_> = snapshot.iter().map(String::as_str).collect();
     assert_eq!(observed, ["8471", "17381", "19873"]);
-    let retained = run_output::redact("8471 17381 19873", execution.sensitive);
+    let retained = run_output::redact("8471 17381 19873", &execution.sensitive.snapshot());
     assert_eq!(retained, "[redacted] [redacted] [redacted]");
     service.shutdown.cancel();
 }
@@ -328,3 +332,58 @@ async fn saturated_summary_sink_child() {
 
 #[path = "launch_credential_history_tests.rs"]
 mod credential_history;
+
+#[tokio::test]
+async fn output_reader_failure_and_cancelled_join_leave_no_detached_reader() {
+    struct Closed(CancellationToken);
+    impl Drop for Closed {
+        fn drop(&mut self) {
+            self.0.cancel();
+        }
+    }
+    for abort_join in [false, true] {
+        let (stdout, stdout_reader) = tokio::io::duplex(128);
+        let (stderr, stderr_reader) = tokio::io::duplex(128);
+        let (sender, _events) = mpsc::channel(32);
+        let out_started = CancellationToken::new();
+        let err_started = CancellationToken::new();
+        let out_closed = CancellationToken::new();
+        let err_closed = CancellationToken::new();
+        let start = out_started.clone();
+        let closed = out_closed.clone();
+        let out_sender = sender.clone();
+        let out = AbortOnDropHandle::new(tokio::spawn(async move {
+            let _closed = Closed(closed);
+            start.cancel();
+            output::read_output(
+                stdout_reader,
+                false,
+                out_sender,
+                vec!["synthetic-history".into()],
+            )
+            .await;
+        }));
+        let start = err_started.clone();
+        let closed = err_closed.clone();
+        let err = AbortOnDropHandle::new(tokio::spawn(async move {
+            let _closed = Closed(closed);
+            start.cancel();
+            output::read_output(stderr_reader, true, sender, Vec::new()).await;
+        }));
+        out_started.cancelled().await;
+        err_started.cancelled().await;
+        if abort_join {
+            // Cleanup's caller is cancelled while normal EOF is still pending.
+            let join = tokio::spawn(close_output_readers(out, err, false));
+            join.abort();
+            assert!(join.await.unwrap_err().is_cancelled());
+        } else {
+            close_output_readers(out, err, true).await;
+        }
+        out_closed.cancelled().await;
+        err_closed.cancelled().await;
+        // Both writers are deliberately still open. Reader termination came
+        // from ownership cleanup, not a lucky EOF or a timeout.
+        drop((stdout, stderr));
+    }
+}

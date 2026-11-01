@@ -11,7 +11,7 @@ use tokio::{
 
 mod telemetry;
 
-pub(super) use telemetry::Publisher;
+pub(super) use telemetry::{Publisher, Reports};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum OutputKind {
