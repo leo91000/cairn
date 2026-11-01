@@ -1,12 +1,15 @@
 #!/usr/bin/env node
 import { Buffer } from 'node:buffer'
+import { once } from 'node:events'
 import {
   appendFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs'
+import { connect } from 'node:net'
 import path from 'node:path'
 import process from 'node:process'
 import { createInterface } from 'node:readline'
@@ -20,6 +23,20 @@ async function main() {
   }
 
   if (args.includes('app-server')) {
+    // Private test sockets expose real session phases without timing sleeps or
+    // credential values. Existing fixtures have no controls and keep defaults.
+    const closeControl = path.join(process.env.CODEX_HOME, 'fixture-session-close-gate.json')
+    if (existsSync(closeControl)) {
+      const control = JSON.parse(readFileSync(closeControl, 'utf8'))
+      const socket = connect(control.socket)
+      await once(socket, 'connect')
+      socket.write(`${JSON.stringify({ event: 'started', pid: process.pid })}\n`)
+      process.on('SIGTERM', () => {
+        socket.write(`${JSON.stringify({ event: 'terminating', pid: process.pid })}\n`)
+      })
+      socket.once('data', () => process.exit(0))
+    }
+
     const launchRecord = path.join(process.env.CODEX_HOME, 'fixture-launch-args.json')
     if (existsSync(launchRecord))
       writeFileSync(launchRecord, JSON.stringify(args))
@@ -83,10 +100,35 @@ async function main() {
         continue
       }
 
-      if (request.method === 'account/read' && request.params?.refreshToken && auth) {
+      // One-use exact replacement for generation-history privacy regressions.
+      // Existing refresh fixtures keep their original suffix behavior.
+      const rotationPath = path.join(process.env.CODEX_HOME, 'fixture-token-rotation.json')
+      const rotation = existsSync(rotationPath) ? JSON.parse(readFileSync(rotationPath, 'utf8')) : null
+      if (request.method === 'account/read' && auth && rotation
+        && Boolean(request.params?.refreshToken) === rotation.refreshToken) {
+        for (const field of ['access_token', 'refresh_token', 'id_token']) {
+          if (typeof rotation.tokens?.[field] !== 'string' || !rotation.tokens[field])
+            throw new Error('Expected complete synthetic rotation credentials')
+          auth.tokens[field] = rotation.tokens[field]
+        }
+
+        unlinkSync(rotationPath)
+        writeFileSync(authPath, JSON.stringify(auth))
+      }
+      else if (request.method === 'account/read' && request.params?.refreshToken && auth) {
         auth.tokens.access_token += '-refreshed'
         auth.tokens.refresh_token += '-rotated'
         writeFileSync(authPath, JSON.stringify(auth))
+      }
+
+      const readGate = path.join(process.env.CODEX_HOME, 'fixture-account-read-gate.json')
+      if (request.method === 'account/read' && request.params?.refreshToken && existsSync(readGate)) {
+        const control = JSON.parse(readFileSync(readGate, 'utf8'))
+        const socket = connect(control.socket)
+        await once(socket, 'connect')
+        socket.write(`${JSON.stringify({ event: 'refresh_ready', pid: process.pid })}\n`)
+        await once(socket, 'data')
+        socket.end()
       }
 
       if (request.method === 'account/login/start') {

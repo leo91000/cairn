@@ -197,13 +197,39 @@ fn apply(credentials: &mut Value, rotated: RefreshResponse) {
     }
 }
 
+#[cfg(test)]
+pub(crate) struct RotationProbe {
+    pub(crate) endpoint: String,
+    pub(crate) before_persist: tokio_util::sync::CancellationToken,
+    pub(crate) resume: tokio_util::sync::CancellationToken,
+}
+
 /// Rotates the login when it is about to expire. The caller holds the account lock through
 /// persistence, so concurrent runs share one rotation.
 async fn access_at(home: &Path, endpoint: &str) -> Result<Value> {
+    access_at_inner(
+        home,
+        endpoint,
+        #[cfg(test)]
+        None,
+    )
+    .await
+}
+
+async fn access_at_inner(
+    home: &Path,
+    endpoint: &str,
+    #[cfg(test)] probe: Option<&RotationProbe>,
+) -> Result<Value> {
     let mut value = credentials(home).await?;
     let oauth = OAuth::of(&value);
     if oauth.expires_within(300_000) && !oauth.refresh_token.is_empty() {
         apply(&mut value, rotate(&oauth, endpoint).await?);
+        #[cfg(test)]
+        if let Some(probe) = probe {
+            probe.before_persist.cancel();
+            probe.resume.cancelled().await;
+        }
         atomic_write(&home.join(CREDENTIALS), &serde_json::to_vec(&value)?).await?;
         tokio::fs::File::open(home).await?.sync_all().await?;
     }
@@ -681,6 +707,24 @@ impl Driver for Claude {
         _request: &broker::Request,
     ) -> Result<Value> {
         let _rotation = s.accounts.lock(&lease.account_id).await;
+        #[cfg(test)]
+        let probe = {
+            s.accounts
+                .claude_rotation_probes
+                .lock()
+                .unwrap()
+                .get(&lease.account_id)
+                .cloned()
+        };
+        #[cfg(test)]
+        if let Some(probe) = probe {
+            return access_at_inner(
+                &account_home(&s.config, &lease.account_id),
+                &probe.endpoint,
+                Some(&probe),
+            )
+            .await;
+        }
         access_at(&account_home(&s.config, &lease.account_id), TOKEN_URL).await
     }
 
