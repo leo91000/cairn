@@ -185,9 +185,23 @@ async fn lightweight_cards_match_full_execution_metadata() {
                         "id": id, "taskId": id, "status": status, "sessionId": "saved",
                         "finishedAt": 123, "accountWaitReason": "fixture wait", "accountRequired": "codex",
                     }))?;
+                    let reservation = (!fresh).then(|| cairn_contracts::ExclusiveReservation {
+                        id: format!("reservation-{id}"),
+                        node_id: crate::nodes::LOCAL_NODE_ID.into(),
+                        owner_run_id: id.clone(),
+                        reason: "fixture".into(),
+                        state: cairn_contracts::ExclusiveState::Acquired,
+                        created_at: 0,
+                        expires_at: Some(1_000),
+                        renewal_pending: false,
+                        wait_until: 1,
+                        paused_run_ids: vec![],
+                        minimum_available_memory_mi_b: 0,
+                        error: None,
+                    });
                     db.admit_run(&state, None, &json!({
                         "contextUsage": { "contextTokens": 42, "contextWindow": 100, "estimated": true },
-                        "restoredAt": 1, "suspendedByExclusive": if fresh { json!(false) } else { json!({ "reason": "fixture" }) },
+                        "restoredAt": 1, "suspendedByExclusive": reservation,
                         "chatExecution": { "operation": if index == 1 { "compact" } else { "message" } },
                     }), None)?;
                     db.0.execute("UPDATE runs SET snapshot=? WHERE id=?", rusqlite::params![

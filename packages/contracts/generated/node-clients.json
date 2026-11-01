@@ -1,5 +1,33 @@
 [
   {
+    "input": "GetPlacementInput",
+    "method": "GET",
+    "name": "getConversationPlacement",
+    "output": "ConversationPlacement",
+    "path": "/nodes/placement/{runId}"
+  },
+  {
+    "input": "ConfigurePlacementInput",
+    "method": "PUT",
+    "name": "configureConversationPlacement",
+    "output": "ConversationPlacement",
+    "path": "/nodes/placement/{runId}"
+  },
+  {
+    "input": "MoveToNodeInput",
+    "method": "POST",
+    "name": "moveConversationToNode",
+    "output": "MoveToNodeOutput",
+    "path": "/nodes/placement/{runId}/move"
+  },
+  {
+    "input": "ReleaseExclusiveInput",
+    "method": "POST",
+    "name": "releaseNodeReservation",
+    "output": "ExclusiveReservation",
+    "path": "/nodes/reservations/exclusive/{reservationId}/release"
+  },
+  {
     "input": "CreateNodeEnrollmentInput",
     "method": "POST",
     "name": "createNodeEnrollment",

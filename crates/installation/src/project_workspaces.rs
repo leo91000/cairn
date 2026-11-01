@@ -246,7 +246,9 @@ async fn call_tool(s: &Service, bearer: &str, name: &str, args: &Value) -> Resul
         }
         "move_to_node" => {
             let run = authorize(s, bearer).await?;
-            let result = crate::nodes::moves::request_by_agent(s, &run, args).await;
+            let authorize = crate::nodes::moves::Authorization::workspace(bearer, &run);
+            let result =
+                crate::nodes::moves::request_by_agent_authorized(s, &run, args, authorize).await;
             ToolResult::from_result(result, summary)
         }
         "ask_questions" => ToolResult::from_result(
