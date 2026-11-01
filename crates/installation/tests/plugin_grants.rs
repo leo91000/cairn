@@ -1380,9 +1380,22 @@ async fn merge_rechecks_previously_resolved_instances_before_publication() {
         ),
     ] {
         let before = f.api("GET", json!({ "agentId": agent })).await.unwrap();
-        let grants = [&first, &last].into_iter().map(|instance| json!({
-            "instanceId": instance, "access": { "type": "selected", "contributions": [contribution("tool", "grant_probe_post", roots.clone())] },
-        })).collect::<Vec<_>>();
+        let grants = [&first, &last]
+            .into_iter()
+            .map(|instance| {
+                json!({
+                    "instanceId": instance,
+                    "access": {
+                        "type": "selected",
+                        "contributions": [contribution(
+                            "tool",
+                            "grant_probe_post",
+                            roots.clone(),
+                        )],
+                    },
+                })
+            })
+            .collect::<Vec<_>>();
         f.api(
             "PUT",
             json!({
@@ -1453,13 +1466,22 @@ async fn gateway_reresolves_external_ancestry_after_discovery_without_a_local_re
                 }
                 json!({ "content": [] })
             };
-            Json(json!({ "jsonrpc": "2.0", "id": request["id"], "result": result }))
+            Json(json!({
+                "jsonrpc": "2.0",
+                "id": request["id"],
+                "result": result,
+            }))
         }
     }));
     let (origin, server) = common::serve_locally(app).await;
     let remote =
         f.s.mcp_fixture(
-            json!({ "name": "Remote", "url": origin, "auth": "none", "allowPrivateNetwork": true }),
+            json!({
+                "name": "Remote",
+                "url": origin,
+                "auth": "none",
+                "allowPrivateNetwork": true,
+            }),
             None,
         )
         .await

@@ -516,9 +516,18 @@ mod tests {
         for change in ["complete", "ancestry", "grant", "delete", "delivery"] {
             let (f, bearer) = Fixture::delegated_manager().await;
             let installed = crate::common::package_install(&f.s, &json!({
-                "manifest": { "id": "retained-source", "name": "Retained source", "version": "1", "apiVersion": 2,
-                    "agentAccess": {}, "capabilities": ["http"], "hosts": ["service.example.test"],
-                    "projectSources": [{ "name": "repositories", "title": "Repositories" }],
+                "manifest": {
+                    "id": "retained-source",
+                    "name": "Retained source",
+                    "version": "1",
+                    "apiVersion": 2,
+                    "agentAccess": {},
+                    "capabilities": ["http"],
+                    "hosts": ["service.example.test"],
+                    "projectSources": [{
+                        "name": "repositories",
+                        "title": "Repositories",
+                    }],
                 },
                 "source": r#"return { projects = function(input)
                     cairn.http.request({instance=input.instance.id,url="https://service.example.test/hold"})

@@ -493,7 +493,11 @@ mod tests {
         let source = root.path().join("source");
         std::fs::create_dir(&source).unwrap();
         std::fs::write(source.join("private.txt"), "private project").unwrap();
-        let project = json!({ "id": crate::config::id(), "path": source, "sourceMode": "remote" });
+        let project = json!({
+            "id": crate::config::id(),
+            "path": source,
+            "sourceMode": "remote",
+        });
         let index = service
             .config
             .data_dir

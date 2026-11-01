@@ -6976,7 +6976,12 @@ async fn resource_handlers_do_not_send_after_grant_revocation_during_oauth_refre
             args["id"] = json!("repo");
         }
         if operation == "import_project" {
-            args = json!({"pluginId":"resource-refresh","source":"repositories","instance":instance,"id":"repo"});
+            args = json!({
+                "pluginId": "resource-refresh",
+                "source": "repositories",
+                "instance": instance,
+                "id": "repo",
+            });
         }
         let invoke = async {
             if operation == "run_credentials_fetch" {
@@ -6986,9 +6991,15 @@ async fn resource_handlers_do_not_send_after_grant_revocation_during_oauth_refre
                         .unwrap();
                 assert!(empty.git.is_empty());
                 assert_eq!(refresh_calls.load(Ordering::SeqCst), 0);
-                let result = cairn_installation::plugins::run_credentials::for_execution(&s, &run, &[json!({
-                    "id": uuid::Uuid::new_v4().to_string(), "origin": "https://api.example.test/repo.git",
-                })]).await;
+                let result = cairn_installation::plugins::run_credentials::for_execution(
+                    &s,
+                    &run,
+                    &[json!({
+                        "id": uuid::Uuid::new_v4().to_string(),
+                        "origin": "https://api.example.test/repo.git",
+                    })],
+                )
+                .await;
                 return json!({ "result": { "isError": result.is_err() } });
             }
             let started = call(&s, &configuration, operation, args).await;

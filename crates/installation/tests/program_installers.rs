@@ -1389,7 +1389,17 @@ async fn revoked_agent_first_use_cannot_download_or_publish_a_program() {
                 .await
                 .map(|_| ())
             } else {
-                agents::command(&s, &bearer, &json!({ "plugin": "onepassword", "command": "vaults", "args": ["--account", instance] })).await.map(|_| ())
+                agents::command(
+                    &s,
+                    &bearer,
+                    &json!({
+                        "plugin": "onepassword",
+                        "command": "vaults",
+                        "args": ["--account", instance],
+                    }),
+                )
+                .await
+                .map(|_| ())
             }
         });
         let requests = if metadata { 1 } else { 2 };

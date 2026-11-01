@@ -766,48 +766,95 @@ mod tests {
     async fn a_second_granted_instance_cannot_publish_the_revoked_observers_result() {
         let root = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(root.path()).unwrap();
-        store.transaction(|db| {
-            let agent = "00000000-0000-4000-8000-000000000011";
-            let first = "00000000-0000-4000-8000-000000000012";
-            let second = "00000000-0000-4000-8000-000000000013";
-            let mut profile = crate::agent_fixture::profile(json!({ "id": agent }))?;
-            profile.settings.plugins = vec![first.into(), second.into()];
-            db.save_plugin_version("fixture", "1", &"0".repeat(64))?;
-            let mut observed_instance = None;
-            for id in [first, second] {
-                let mut instance = Connection::draft(id, "fixture", json!({}), vec![]);
-                instance.name = id.into();
-                instance.revision = "r1".into();
-                instance.enabled = true;
-                db.save_plugin_instance(&instance)?;
-                if id == first { observed_instance = Some(instance); }
-            }
-            db.save_agent(&profile)?;
-            let run = json!({ "id": "run", "taskId": "task", "status": "succeeded", "createdAt": now(),
-                "snapshot": { "agent": { "id": agent } }, "chatExecution": { "messageId": "message" } });
-            db.add_run_fixture(&run, None)?;
-            let run = db.run("run")?.unwrap();
-            db.save_conversation_boundary(&json!({ "id": "chat", "agentId": agent, "runId": "run",
-                "wakeup": { "id": "fixture-wait", "messageId": "message", "wakeAt": now()+60_000,
-                    "reason": "Fixture", "seconds": 60, "createdAt": now(),
-                    "condition": { "type": "plugin", "conditionType": "fixture_ready", "pluginId": "fixture", "input": {} } }
-            }))?;
-            let instance = observed_instance.unwrap();
-            let scope = scope::Scope::Agent { agent_id: agent.into(), instances: vec![instance.clone()] };
-            let publication = crate::capabilities::plugin_packages::Authority::default().with_guard(move |db| scope::authorize_in(db, &scope));
-            let mut revoked = instance;
-            revoked.enabled = false;
-            revoked.revision = "r2".into();
-            db.save_plugin_instance(&revoked)?;
-            let owner = crate::waits::Owner::conversation(db.conversation("chat")?.unwrap());
-            let condition = crate::waits::condition_wire(owner.wakeup.as_ref().unwrap().condition.as_ref().unwrap());
-            assert!(crate::waits::access(db, &run, &condition).is_ok(), "the other instance still grants the condition");
-            record_authorized(db, vec![(owner.into(), run.into(), None)], Ok((Observed {
-                result: Some(json!({ "state": "completed" })), display: None, check_after: None,
-            }, publication)), "run")?;
-            assert_eq!(db.conversation_boundary("chat")?.unwrap()["wakeup"]["observation"]["state"], "unavailable");
-            Ok(())
-        }).await.unwrap();
+        store
+            .transaction(|db| {
+                let agent = "00000000-0000-4000-8000-000000000011";
+                let first = "00000000-0000-4000-8000-000000000012";
+                let second = "00000000-0000-4000-8000-000000000013";
+                let mut profile = crate::agent_fixture::profile(json!({ "id": agent }))?;
+                profile.settings.plugins = vec![first.into(), second.into()];
+                db.save_plugin_version("fixture", "1", &"0".repeat(64))?;
+                let mut observed_instance = None;
+                for id in [first, second] {
+                    let mut instance = Connection::draft(id, "fixture", json!({}), vec![]);
+                    instance.name = id.into();
+                    instance.revision = "r1".into();
+                    instance.enabled = true;
+                    db.save_plugin_instance(&instance)?;
+                    if id == first {
+                        observed_instance = Some(instance);
+                    }
+                }
+                db.save_agent(&profile)?;
+                let run = json!({
+                    "id": "run",
+                    "taskId": "task",
+                    "status": "succeeded",
+                    "createdAt": now(),
+                    "snapshot": { "agent": { "id": agent } },
+                    "chatExecution": { "messageId": "message" },
+                });
+                db.add_run_fixture(&run, None)?;
+                let run = db.run("run")?.unwrap();
+                db.save_conversation_boundary(&json!({
+                    "id": "chat",
+                    "agentId": agent,
+                    "runId": "run",
+                    "wakeup": {
+                        "id": "fixture-wait",
+                        "messageId": "message",
+                        "wakeAt": now() + 60_000,
+                        "reason": "Fixture",
+                        "seconds": 60,
+                        "createdAt": now(),
+                        "condition": {
+                            "type": "plugin",
+                            "conditionType": "fixture_ready",
+                            "pluginId": "fixture",
+                            "input": {},
+                        },
+                    },
+                }))?;
+                let instance = observed_instance.unwrap();
+                let scope = scope::Scope::Agent {
+                    agent_id: agent.into(),
+                    instances: vec![instance.clone()],
+                };
+                let publication = crate::capabilities::plugin_packages::Authority::default()
+                    .with_guard(move |db| scope::authorize_in(db, &scope));
+                let mut revoked = instance;
+                revoked.enabled = false;
+                revoked.revision = "r2".into();
+                db.save_plugin_instance(&revoked)?;
+                let owner = crate::waits::Owner::conversation(db.conversation("chat")?.unwrap());
+                let condition = crate::waits::condition_wire(
+                    owner.wakeup.as_ref().unwrap().condition.as_ref().unwrap(),
+                );
+                assert!(
+                    crate::waits::access(db, &run, &condition).is_ok(),
+                    "the other instance still grants the condition"
+                );
+                record_authorized(
+                    db,
+                    vec![(owner.into(), run.into(), None)],
+                    Ok((
+                        Observed {
+                            result: Some(json!({ "state": "completed" })),
+                            display: None,
+                            check_after: None,
+                        },
+                        publication,
+                    )),
+                    "run",
+                )?;
+                assert_eq!(
+                    db.conversation_boundary("chat")?.unwrap()["wakeup"]["observation"]["state"],
+                    "unavailable"
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 
     #[test]

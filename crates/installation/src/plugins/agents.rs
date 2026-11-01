@@ -263,7 +263,11 @@ pub async fn tools(s: &Service, bearer: &str) -> Result<Vec<Value>> {
             .await?
             .is_empty()
             {
-                output.push(json!({ "name": tool.name, "description": tool.description, "inputSchema": tool.input_schema }));
+                output.push(json!({
+                    "name": tool.name,
+                    "description": tool.description,
+                    "inputSchema": tool.input_schema,
+                }));
             }
         }
     }

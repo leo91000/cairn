@@ -540,9 +540,11 @@ mod tests {
         let (_, authority) = crate::installation_mcp::authorize_with_authority(&f.s, &bearer)
             .await
             .unwrap();
-        let input = serde_json::from_value(
-            json!({ "kind": "disconnect", "pluginId": "gmail", "instanceId": connection.id }),
-        )
+        let input = serde_json::from_value(json!({
+            "kind": "disconnect",
+            "pluginId": "gmail",
+            "instanceId": connection.id,
+        }))
         .unwrap();
         let result =
             crate::plugins::management::invoke(&f.s, input, Some(&bearer), false, Some(authority))

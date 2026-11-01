@@ -1085,11 +1085,25 @@ mod migration_tests {
                 .await
                 .unwrap();
         let input = serde_json::from_value(json!({
-            "agentId": target_id, "revision": before.revision,
-            "grants": [{ "instanceId": f.instance, "access": { "type": "selected", "contributions": [
-                contribution("tool", "grant_probe_post", json!([{ "resourceType": "thread", "id": "support-thread" }]))
-            ] } }], "runCredentialInstances": [],
-        })).unwrap();
+            "agentId": target_id,
+            "revision": before.revision,
+            "grants": [{
+                "instanceId": f.instance,
+                "access": {
+                    "type": "selected",
+                    "contributions": [contribution(
+                        "tool",
+                        "grant_probe_post",
+                        json!([{
+                            "resourceType": "thread",
+                            "id": "support-thread",
+                        }]),
+                    )],
+                },
+            }],
+            "runCredentialInstances": [],
+        }))
+        .unwrap();
         let checked = Arc::new(tokio::sync::Notify::new());
         let completed = checked.clone();
         let resolved = f.posts.clone();
