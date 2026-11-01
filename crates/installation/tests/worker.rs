@@ -5713,6 +5713,12 @@ async fn chat_resume_selection_resolves_opencode_catalog_default_before_adapter_
     .await;
     let s = fixture.service.clone();
     let server = common::serve(listener, app);
+    tokio::fs::write(
+        s.config.data_dir.join("storage-s3.json"),
+        json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
+    )
+    .await
+    .unwrap();
     let account = s
         .accounts
         .connect_api_key(
@@ -5957,6 +5963,12 @@ async fn chat_resume_rejects_hidden_opencode_auto_without_blocking_pinned_provid
     .await;
     let s = fixture.service.clone();
     let server = common::serve(listener, runner);
+    tokio::fs::write(
+        s.config.data_dir.join("storage-s3.json"),
+        json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
+    )
+    .await
+    .unwrap();
     s.accounts
         .connect_api_key(
             &s,
