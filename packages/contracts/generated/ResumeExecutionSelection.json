@@ -6,10 +6,10 @@
       "maxLength": 120,
       "type": "string"
     },
-        "preserveModel": {
-          "default": false,
-          "type": "boolean"
-        },
+    "preserveModel": {
+      "default": false,
+      "type": "boolean"
+    },
     "reasoning": {
       "maxLength": 40,
       "pattern": "^(?:[a-z][a-z0-9_-]*)?$",

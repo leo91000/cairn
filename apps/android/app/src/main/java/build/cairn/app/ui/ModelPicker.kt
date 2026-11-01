@@ -306,6 +306,7 @@ internal fun ModelPicker(
                     inheritedEffort,
                     enabled,
                     onReasoningIntent,
+                    hasExplicitModelSelection = model.isNotBlank(),
                 ) {
                     change(model, it)
                 }
@@ -927,6 +928,7 @@ internal fun ReasoningControl(
     default: String,
     enabled: Boolean,
     onIntent: (ResumeReasoningIntent) -> Unit = {},
+    hasExplicitModelSelection: Boolean = model != null,
     change: (String) -> Unit,
 ) {
     val order = listOf("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
@@ -1070,7 +1072,7 @@ internal fun ReasoningControl(
         Modifier.testTag("reasoning-default"),
     ) {
         onIntent(
-            if (model.isNotBlank()) ResumeReasoningIntent.ModelDefault
+            if (hasExplicitModelSelection) ResumeReasoningIntent.ModelDefault
             else ResumeReasoningIntent.Untouched
         )
         change("")

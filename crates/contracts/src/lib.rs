@@ -25,7 +25,6 @@ pub struct ResumeExecutionSelection {
     pub model: String,
     #[serde(default, skip_serializing_if = "is_false")]
     #[schemars(default)]
-    #[ts(optional)]
     pub preserve_model: bool,
     #[schemars(length(max = 40), pattern(r"^(?:[a-z][a-z0-9_-]*)?$"))]
     pub reasoning: String,

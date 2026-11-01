@@ -160,6 +160,41 @@ abstract class ModelPickerCases {
     }
 
     @Test
+    fun inheritedDisplayedDefaultAndExplicitDefaultUseDifferentReasoningIntents() {
+        var model by mutableStateOf("")
+        var reasoning by mutableStateOf("")
+        var intent by mutableStateOf<ResumeReasoningIntent>(ResumeReasoningIntent.Untouched)
+        compose.setContent {
+            ModelPicker(
+                catalog,
+                model,
+                reasoning,
+                defaultModel = "large",
+                defaultReasoning = "high",
+                inherit = true,
+                onReasoningIntent = { intent = it },
+            ) { selectedModel, selectedReasoning ->
+                model = selectedModel
+                reasoning = selectedReasoning
+            }
+        }
+
+        compose.onNodeWithTag("model-picker").assertTextContains("Grand modèle").performClick()
+        compose.onNodeWithTag("reasoning-default").performScrollTo().performClick()
+        compose.runOnIdle {
+            assertEquals("", model)
+            assertEquals(ResumeReasoningIntent.Untouched, intent)
+        }
+
+        compose.onNode(hasText("Grand modèle") and isSelectable()).performClick()
+        compose.onNodeWithTag("reasoning-default").performScrollTo().performClick()
+        compose.runOnIdle {
+            assertEquals("large", model)
+            assertEquals(ResumeReasoningIntent.ModelDefault, intent)
+        }
+    }
+
+    @Test
     fun claudeDefaultAliasIsMergedIntoTheDefaultRow() {
         val claude =
             ModelCatalog(
