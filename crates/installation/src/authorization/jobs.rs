@@ -551,12 +551,42 @@ mod tests {
             ] {
                 let current = f.api("GET", json!({ "agentId": agent })).await.unwrap();
                 let mut grants = current["grants"].as_array().unwrap().clone();
-                grants.push(json!({ "instanceId": instance["id"], "access": { "type": "selected", "contributions": [contribution("projectSource", "repositories", json!([]))] } }));
-                f.api("PUT", json!({ "agentId": agent, "revision": current["revision"], "grants": grants, "runCredentialInstances": [] })).await.unwrap();
+                grants.push(json!({
+                    "instanceId": instance["id"],
+                    "access": {
+                        "type": "selected",
+                        "contributions": [contribution(
+                            "projectSource",
+                            "repositories",
+                            json!([]),
+                        )],
+                    },
+                }));
+                f.api(
+                    "PUT",
+                    json!({
+                        "agentId": agent,
+                        "revision": current["revision"],
+                        "grants": grants,
+                        "runCredentialInstances": [],
+                    }),
+                )
+                .await
+                .unwrap();
             }
-            let pending = crate::capabilities::resource_operation("list_source_projects").unwrap()
-                .invoke(&f.s, json!({ "pluginId": "retained-source", "source": "repositories", "instance": instance["id"] }),
-                    crate::capabilities::ResumeContext::Installation(bearer.clone())).await.unwrap();
+            let pending = crate::capabilities::resource_operation("list_source_projects")
+                .unwrap()
+                .invoke(
+                    &f.s,
+                    json!({
+                        "pluginId": "retained-source",
+                        "source": "repositories",
+                        "instance": instance["id"],
+                    }),
+                    crate::capabilities::ResumeContext::Installation(bearer.clone()),
+                )
+                .await
+                .unwrap();
             tokio::time::timeout(std::time::Duration::from_secs(10), f.entered.notified())
                 .await
                 .unwrap();

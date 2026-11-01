@@ -147,7 +147,12 @@ async fn grant_replacement_is_revision_guarded_public_manage_and_installation_re
     let before = f
         .set(json!([contribution("tool", "grant_probe_post", support())]))
         .await;
-    let body = json!({"agentId":MAIN_AGENT_ID,"revision":before["revision"],"grants":[{"instanceId":f.instance,"access":{"type":"full"}}],"runCredentialInstances":[]});
+    let body = json!({
+        "agentId": MAIN_AGENT_ID,
+        "revision": before["revision"],
+        "grants": [{ "instanceId": f.instance, "access": { "type": "full" } }],
+        "runCredentialInstances": [],
+    });
     let denied = f
         .mcp(
             "/mcp-installation",
@@ -183,7 +188,19 @@ async fn grant_replacement_is_revision_guarded_public_manage_and_installation_re
         .await;
     assert_ne!(read["result"]["isError"], true, "{read}");
     let current = f.api("GET", json!({})).await.unwrap();
-    let reduced=f.mcp("/mcp-installation",&f.bearer,"replace_agent_plugin_grants",json!({"agentId":MAIN_AGENT_ID,"revision":current["revision"],"grants":[],"runCredentialInstances":[]})).await;
+    let reduced = f
+        .mcp(
+            "/mcp-installation",
+            &f.bearer,
+            "replace_agent_plugin_grants",
+            json!({
+                "agentId": MAIN_AGENT_ID,
+                "revision": current["revision"],
+                "grants": [],
+                "runCredentialInstances": [],
+            }),
+        )
+        .await;
     assert_ne!(reduced["result"]["isError"], true, "{reduced}");
     assert!(
         f.api("GET", json!({})).await.unwrap()["grants"]
@@ -205,10 +222,40 @@ async fn instances_are_filtered_when_another_grants_a_different_contribution() {
     .await
     .unwrap();
     let current = f.api("GET", json!({})).await.unwrap();
-    f.api("PUT",json!({"agentId":MAIN_AGENT_ID,"revision":current["revision"],"grants":[
-        {"instanceId":f.instance,"access":{"type":"selected","contributions":[contribution("tool","grant_probe_post",support())]}},
-        {"instanceId":second["id"],"access":{"type":"selected","contributions":[contribution("instructions","",json!([]))]}}
-    ],"runCredentialInstances":[]})).await.unwrap();
+    f.api(
+        "PUT",
+        json!({
+            "agentId": MAIN_AGENT_ID,
+            "revision": current["revision"],
+            "grants": [
+                {
+                    "instanceId": f.instance,
+                    "access": {
+                        "type": "selected",
+                        "contributions": [contribution(
+                            "tool",
+                            "grant_probe_post",
+                            support(),
+                        )],
+                    },
+                },
+                {
+                    "instanceId": second["id"],
+                    "access": {
+                        "type": "selected",
+                        "contributions": [contribution(
+                            "instructions",
+                            "",
+                            json!([]),
+                        )],
+                    },
+                },
+            ],
+            "runCredentialInstances": [],
+        }),
+    )
+    .await
+    .unwrap();
     let effects = f.posts.load(Ordering::SeqCst);
     assert!(
         agents::call_tool(
@@ -527,7 +574,14 @@ async fn transfer_reads_reauthorize_the_producing_contribution_and_resources() {
     .await
     .unwrap()
     .unwrap();
-    let transfer = json!({ "plugin": "grant-probe", "file": { "method": "read", "instance": f.instance, "id": response["file"]["id"] } });
+    let transfer = json!({
+        "plugin": "grant-probe",
+        "file": {
+            "method": "read",
+            "instance": f.instance,
+            "id": response["file"]["id"],
+        },
+    });
     let read = agents::command(&f.s, &f.bearer, &transfer).await.unwrap();
     assert_eq!(read["value"]["data"], "b2s");
     f.set(json!([contribution(
@@ -555,11 +609,33 @@ async fn unavailable_existing_grants_and_their_supplier_survive_other_reductions
     .unwrap();
     let full = |id: &Value| json!({ "instanceId": id, "access": { "type": "full" } });
     let current = f.api("GET", json!({})).await.unwrap();
-    let saved = f.api("PUT", json!({ "agentId": MAIN_AGENT_ID, "revision": current["revision"], "grants": [full(&json!(f.instance)), full(&second["id"])], "runCredentialInstances": [f.instance] })).await.unwrap();
+    let saved = f
+        .api(
+            "PUT",
+            json!({
+                "agentId": MAIN_AGENT_ID,
+                "revision": current["revision"],
+                "grants": [full(&json!(f.instance)), full(&second["id"])],
+                "runCredentialInstances": [f.instance],
+            }),
+        )
+        .await
+        .unwrap();
     let path = f.s.config.data_dir.join("plugins/grant-probe/1/main.luau");
     let original = std::fs::read(&path).unwrap();
     std::fs::write(&path, "return {} -- awaiting review").unwrap();
-    let reduced = f.api("PUT", json!({ "agentId": MAIN_AGENT_ID, "revision": saved["revision"], "grants": [full(&json!(f.instance))], "runCredentialInstances": [f.instance] })).await.unwrap();
+    let reduced = f
+        .api(
+            "PUT",
+            json!({
+                "agentId": MAIN_AGENT_ID,
+                "revision": saved["revision"],
+                "grants": [full(&json!(f.instance))],
+                "runCredentialInstances": [f.instance],
+            }),
+        )
+        .await
+        .unwrap();
     assert_eq!(reduced["runCredentialInstances"], json!([f.instance]));
     assert_eq!(reduced["grants"].as_array().unwrap().len(), 1);
     std::fs::write(&path, original).unwrap();
@@ -576,7 +652,19 @@ async fn unavailable_existing_grants_and_their_supplier_survive_other_reductions
 #[tokio::test]
 async fn legacy_full_grants_without_run_credentials_round_trip_without_a_supplier() {
     let f = Fixture::new().await;
-    common::save_plugin(&f.s, "onepassword", &json!({ "name": "Fixture", "enabled": true, "secrets": { "token": "ops_fixture" }, "agentIds": [MAIN_AGENT_ID] }), None).await.unwrap();
+    common::save_plugin(
+        &f.s,
+        "onepassword",
+        &json!({
+            "name": "Fixture",
+            "enabled": true,
+            "secrets": { "token": "ops_fixture" },
+            "agentIds": [MAIN_AGENT_ID],
+        }),
+        None,
+    )
+    .await
+    .unwrap();
     let current = f.api("GET", json!({})).await.unwrap();
     assert_eq!(current["runCredentialInstances"], json!([]));
     let saved = f.api("PUT", current).await.unwrap();
@@ -667,7 +755,18 @@ async fn deferred_resource_effects_retain_the_delegation_resource_ceiling() {
     .unwrap();
     let child_token = running_conversation(&f.s, text(&task, "chatId")).await;
     f.pause.store(true, Ordering::SeqCst);
-    let started = f.mcp("/mcp-installation", &child_token, "list_plugin_resources", json!({ "pluginId": "grant-probe", "instanceId": f.instance, "resourceType": "channel" })).await;
+    let started = f
+        .mcp(
+            "/mcp-installation",
+            &child_token,
+            "list_plugin_resources",
+            json!({
+                "pluginId": "grant-probe",
+                "instanceId": f.instance,
+                "resourceType": "channel",
+            }),
+        )
+        .await;
     assert_ne!(started["result"]["isError"], true, "{started}");
     let operation = text(
         &started["result"]["structuredContent"]["result"],
@@ -818,7 +917,14 @@ async fn appending_a_protected_transfer_retains_its_source_authority() {
     .await
     .unwrap()
     .unwrap();
-    let request = json!({ "plugin": "grant-probe", "file": { "method": "read", "instance": f.instance, "id": copied["id"] } });
+    let request = json!({
+        "plugin": "grant-probe",
+        "file": {
+            "method": "read",
+            "instance": f.instance,
+            "id": copied["id"],
+        },
+    });
     assert_eq!(
         agents::command(&f.s, &f.bearer, &request).await.unwrap()["value"]["data"],
         "b2s"
@@ -1277,7 +1383,17 @@ async fn merge_rechecks_previously_resolved_instances_before_publication() {
         let grants = [&first, &last].into_iter().map(|instance| json!({
             "instanceId": instance, "access": { "type": "selected", "contributions": [contribution("tool", "grant_probe_post", roots.clone())] },
         })).collect::<Vec<_>>();
-        f.api("PUT", json!({ "agentId": agent, "revision": before["revision"], "grants": grants, "runCredentialInstances": [] })).await.unwrap();
+        f.api(
+            "PUT",
+            json!({
+                "agentId": agent,
+                "revision": before["revision"],
+                "grants": grants,
+                "runCredentialInstances": [],
+            }),
+        )
+        .await
+        .unwrap();
     }
     f.pause.store(true, Ordering::SeqCst);
     let s = f.s.clone();
@@ -1327,9 +1443,14 @@ async fn gateway_reresolves_external_ancestry_after_discovery_without_a_local_re
         async move {
             let result = if request["method"] == "server/discover" {
                 moved.store(true, Ordering::SeqCst);
-                json!({ "supportedVersions": [cairn_installation::mcp_client::MODERN], "capabilities": { "tools": {} } })
+                json!({
+                    "supportedVersions": [cairn_installation::mcp_client::MODERN],
+                    "capabilities": { "tools": {} },
+                })
             } else {
-                if request["method"] == "tools/call" { count.fetch_add(1, Ordering::SeqCst); }
+                if request["method"] == "tools/call" {
+                    count.fetch_add(1, Ordering::SeqCst);
+                }
                 json!({ "content": [] })
             };
             Json(json!({ "jsonrpc": "2.0", "id": request["id"], "result": result }))
@@ -1372,7 +1493,16 @@ async fn gateway_reresolves_external_ancestry_after_discovery_without_a_local_re
     let app = common::relay_fixture::router(f.s.clone()).await.unwrap();
     let request = common::request("POST", &format!("/mcp-gateway/{}", text(&remote, "id")))
         .header("authorization", format!("Bearer {token}"))
-        .body(Body::from(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "mutate", "arguments": {} } }).to_string())).unwrap();
+        .body(Body::from(
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": { "name": "mutate", "arguments": {} },
+            })
+            .to_string(),
+        ))
+        .unwrap();
     let response = common::send(&app, request).await;
     assert!(
         f.moved_parent.load(Ordering::SeqCst),
