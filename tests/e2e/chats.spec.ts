@@ -1945,6 +1945,7 @@ test('starts project chats, steers, edits the queue and preserves a compact mobi
 })
 
 test('withdraws an obsolete question without sending an answer on desktop and mobile', async ({ page, workspace }) => {
+  await workspace.restart()
   for (const width of [1440, 390]) {
     const chat = await workspace.api('/api/chats', 'POST', {})
     await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'fixture:cairn-question' })
