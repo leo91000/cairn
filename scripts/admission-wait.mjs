@@ -94,10 +94,12 @@ function previousWaits(previous) {
 
   const waits = new Map()
   for (const wait of previous.waits) {
-    if (!record(wait) || !identity(wait.runId) || !validScope(wait.scope)
+    if (!record(wait) || !identity(wait.runId) || (!validScope(wait.scope) && !(wait.ended === true && wait.scope === null))
       || (wait.firstObservedAt !== null && !timestamp(wait.firstObservedAt))
       || (wait.lastObservedAt !== null && !timestamp(wait.lastObservedAt))
       || (wait.episodeId != null && (!episodeIdentity(wait.episodeId) || wait.firstObservedAt === null))
+      || (wait.ended !== undefined && typeof wait.ended !== 'boolean')
+      || (wait.ended === true && wait.transition !== true)
       || (wait.transition !== undefined && typeof wait.transition !== 'boolean')
       || (wait.transition === true && (wait.firstObservedAt !== null || wait.episodeId != null || wait.since !== null))
       || (wait.since !== null && (!timestamp(wait.since)
@@ -113,12 +115,26 @@ function previousWaits(previous) {
       firstObservedAt: wait.firstObservedAt,
       episodeId: wait.episodeId ?? null,
       transition: wait.transition === true,
+      ended: wait.ended === true,
       lastObservedAt: wait.lastObservedAt,
       since: wait.since,
     })
   }
 
   return { waits, limited: previous.limited === true }
+}
+
+function endedWait(runId, currentScope, observedAt) {
+  return {
+    runId,
+    scope: currentScope,
+    firstObservedAt: null,
+    episodeId: null,
+    transition: true,
+    ended: true,
+    lastObservedAt: observedAt,
+    since: null,
+  }
 }
 
 // The caller supplies a fresh bounded manager probe on each invocation. An
@@ -157,6 +173,9 @@ export function observeAdmissionWaits(sample, previous, retainedEpisode, createE
 
     const ended = knownStatus && (run.status !== 'queued' || ['account', 'recovery', 'other'].includes(run.waitClass))
     if (ended) {
+      // A per-run positive end must survive unrelated bounded-history loss.
+      // Its next episode is fresh even without an external identity callback.
+      next.set(run.id, endedWait(run.id, scope(run) ?? prior.get(run.id)?.scope ?? null, now))
       observations.set(run.id, { id, runId: run.id, status: 'good' })
       continue
     }
@@ -173,7 +192,7 @@ export function observeAdmissionWaits(sample, previous, retainedEpisode, createE
 
     const old = prior.get(run.id)
     const sameEpisode = old?.scope === currentScope
-    let retained = old && !sameEpisode ? { fresh: true } : null
+    let retained = old && (old.ended || old.transition || !sameEpisode) ? { fresh: true } : null
     if (retained === null && retainedEpisode !== undefined) {
       try {
         retained = typeof retainedEpisode === 'function' ? retainedEpisode(run.id, currentScope) : { unknown: true }
@@ -271,13 +290,15 @@ export function observeAdmissionWaits(sample, previous, retainedEpisode, createE
       continue
     if (!seen.has(runId) && complete) {
       observations.set(runId, { id: `admission-wait:${runId}`, runId, status: 'good' })
+      if (next.size < admissionWaitLimits.entries)
+        next.set(runId, endedWait(runId, old.scope, now))
       continue
     }
 
     observations.set(runId, { id: `admission-wait:${runId}`, runId, status: 'unknown' })
     if (next.size < admissionWaitLimits.entries)
       next.set(runId, { ...old, since: null })
-    else
+    else if (!old.ended)
       limited = true
   }
 

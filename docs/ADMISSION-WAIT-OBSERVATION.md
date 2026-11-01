@@ -26,7 +26,11 @@ unknown observations for deduplication; unknown never certifies recovery or
 rearms a notification. Validated run/turn scope is independent of the gate,
 clock and identity allocation: an unknown gate/status cannot restore a positively
 ended turn. A present valid row can still be observed in a partial inventory. Known noncapacity state or absence from a complete active inventory
-ends only this capacity-wait observation. That does not prove physical cleanup,
+ends only this capacity-wait observation. Its per-run positive end remains in the
+same bounded helper history, allowing a new episode even while unrelated evicted
+runs remain uncertain and no optional callback is installed. End facts do not
+require a usable clock or scope; their next episode still needs valid current
+scope and timing before it can age. That does not prove physical cleanup,
 successful execution, working admission, backup integrity or a repaired node.
 
 The state contains at most 200 metadata entries, matching the bounded active plus
@@ -48,7 +52,9 @@ clock; it is never subtracted to calculate wait duration. A lost history entry
 without identity reconciliation remains unknown and carries no new occurrence.
 An active coordinator owner alone may no longer prove whether a later same-scope
 wait ended after local history loss: the caller must keep that case unknown,
-rather than transfer old ownership to a possibly new episode.
+rather than transfer old ownership to a possibly new episode. Inspect every
+occurrence within the caller's bounded owner registry: silently dropping later
+occurrences must never become positive evidence that a turn is new.
 
 Fresh observed episodes have a UUID discriminator independent of the wall clock.
 It is allocated once, persisted with the helper state, and retained through

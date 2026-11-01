@@ -94,7 +94,8 @@ test('complete inventory absence ends this capacity observation without claiming
   const old = mature()
   const result = observeAdmissionWaits(sample(origin + 12 * 60000, []), old.state)
   assert.equal(observation(result).status, 'good')
-  assert.deepEqual(result.state.waits, [])
+  assert.equal(result.state.waits[0].ended, true)
+  assert.equal(result.state.waits[0].since, null)
   assert.equal(observation(result).physicalFinalized, undefined)
 })
 
@@ -111,7 +112,8 @@ test('account/recovery/other waits and known nonqueued statuses end only the cap
     const old = mature()
     const result = observeAdmissionWaits(sample(origin + 12 * 60000, [capacity('run-one', extra)]), old.state)
     assert.equal(observation(result).status, 'good')
-    assert.deepEqual(result.state.waits, [])
+    assert.equal(result.state.waits[0].ended, true)
+    assert.equal(result.state.waits[0].since, null)
     const again = observeAdmissionWaits(sample(origin + 13 * 60000, [capacity()]), result.state)
     assert.equal(observation(again).status, 'unknown')
     assert.notEqual(observation(again).occurrence, observation(old).occurrence)
@@ -373,7 +375,8 @@ test('invalid clock preserves positive scope and known-end facts without measuri
   assert.notEqual(observation(returned).occurrence, observation(first).occurrence)
   const ended = observeAdmissionWaits(sample(Number.NaN, [capacity('run-one', { waitClass: 'account' })]), first.state)
   assert.equal(observation(ended).status, 'good')
-  assert.equal(ended.state.waits.length, 0)
+  assert.equal(ended.state.waits[0].ended, true)
+  assert.equal(ended.state.waits[0].since, null)
   const afterEnd = observeAdmissionWaits(sample(origin, [capacity()]), JSON.parse(JSON.stringify(ended.state)))
   assert.notEqual(observation(afterEnd).occurrence, observation(first).occurrence)
 })
@@ -469,4 +472,48 @@ test('unknown status preserves a validated changed scope without aging it', () =
   assert.equal(observation(unknown).observedSince, null)
   const returned = observeAdmissionWaits(sample(origin + 120000, [capacity()]), unknown.state)
   assert.notEqual(observation(returned).occurrence, observation(first).occurrence)
+})
+
+test('per-run known end survives unrelated history loss without an optional reconciler', () => {
+  for (const complete of [false, true]) {
+    let state
+    for (let minute = 0; minute < 3; minute++) {
+      const rows = Array.from({ length: 100 }, (_, index) => capacity(index ? `batch-${minute}-${index}` : 'target'))
+      state = observeAdmissionWaits(sample(origin + minute * 60000, rows, false), state?.state)
+    }
+
+    const previousOccurrence = observation(state, 'target').occurrence
+    assert.equal(state.state.limited, true)
+    state = observeAdmissionWaits(sample(origin + 3 * 60000, [capacity('target', { waitClass: 'account' })], false), state.state)
+    assert.equal(observation(state, 'target').status, 'good')
+    state = observeAdmissionWaits({ at: origin + 4 * 60000, manager: { ok: false } }, JSON.parse(JSON.stringify(state.state)))
+    for (let minute = 5; minute <= 21; minute++)
+      state = observeAdmissionWaits(sample(origin + minute * 60000, [capacity('target')], complete), JSON.parse(JSON.stringify(state.state)))
+    assert.equal(observation(state, 'target').status, 'bad')
+    assert.notEqual(observation(state, 'target').occurrence, previousOccurrence)
+    if (!complete) {
+      assert.equal(state.state.limited, true)
+      const forgotten = observeAdmissionWaits(sample(origin + 22 * 60000, [capacity('batch-0-99')], false), state.state)
+      assert.equal(observation(forgotten, 'batch-0-99').occurrence, undefined)
+      assert.equal(observation(forgotten, 'batch-0-99').status, 'unknown')
+    }
+  }
+})
+
+test('a known end without scope or clock remains a per-run fact under limited history', () => {
+  const lost = {
+    version: 1,
+    observedAt: origin,
+    waits: [],
+    limited: true,
+  }
+  const ended = observeAdmissionWaits(sample(Number.NaN, [capacity('run-one', { waitClass: 'account', attemptId: null, activeMessageId: null })], false), lost)
+  assert.equal(observation(ended).status, 'good')
+  assert.equal(ended.state.limited, true)
+  let state = JSON.parse(JSON.stringify(ended.state))
+  for (let minute = 1; minute <= 12; minute++)
+    state = observeAdmissionWaits(sample(origin + minute * 60000, [capacity()], false), state.state ?? state)
+  assert.equal(observation(state).status, 'bad')
+  assert(readAdmissionOccurrence(observation(state).occurrence))
+  assert.equal(state.state.limited, true)
 })
