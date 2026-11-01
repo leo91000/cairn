@@ -171,7 +171,7 @@ impl ResourceOperation {
             ResumeContext::Public(..) => Audience::Public,
             ResumeContext::Installation(bearer) => Audience::from_bearer(Some(bearer), false),
         };
-        let authority = Authority::new(s, context, self.scope).await?;
+        let authority = Authority::new(s, context, self.scope, self.deferred()).await?;
         if self.deferred() {
             let service = s.clone();
             let name = self.name;

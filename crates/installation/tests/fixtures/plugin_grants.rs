@@ -411,6 +411,19 @@ return {
         self.set_for(MAIN_AGENT_ID, contributions).await
     }
 
+    pub(crate) async fn remove_for(&self, agent: &str) -> Value {
+        let current = self.api("GET", json!({ "agentId": agent })).await.unwrap();
+        self.api(
+            "PUT",
+            json!({
+                "agentId": agent, "revision": current["revision"],
+                "grants": [], "runCredentialInstances": [],
+            }),
+        )
+        .await
+        .unwrap()
+    }
+
     pub(crate) async fn set_for(&self, agent: &str, contributions: Value) -> Value {
         let current = self.api("GET", json!({"agentId":agent})).await.unwrap();
         self.api("PUT",json!({"agentId":agent,"revision":current["revision"],"grants":[{"instanceId":self.instance,"access":{"type":"selected","contributions":contributions}}],"runCredentialInstances":[]})).await.unwrap()

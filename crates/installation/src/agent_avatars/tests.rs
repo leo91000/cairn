@@ -777,7 +777,7 @@ async fn accepted_portraits_survive_normal_completion_but_not_revocation_before_
             "ancestry" => grants.moved_parent.store(true, Ordering::SeqCst),
             "grant" => {
                 grants
-                    .set_for(text(&caller["snapshot"]["agent"], "id"), json!([]))
+                    .remove_for(text(&caller["snapshot"]["agent"], "id"))
                     .await;
             }
             "delete" => {
@@ -861,4 +861,76 @@ async fn revoked_portrait_waiting_for_a_slot_consumes_no_provider_quota() {
     f.wait(crate::config::MAIN_AGENT_ID, "failed").await;
     f.s.avatars.close().await;
     assert!(f.requests.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn automatic_creation_portrait_keeps_its_initiating_ceiling_after_the_request_returns() {
+    for revoked in [false, true] {
+        let (grants, bearer) = crate::plugin_grant_fixture::Fixture::delegated_manager().await;
+        let mut f = Fixture::with_service(true, Some(grants.s.clone())).await;
+        let caller = crate::installation_mcp::authorize(&f.s, &bearer)
+            .await
+            .unwrap();
+        let authority = crate::installation_mcp::management_authorization(&f.s, Some(&bearer))
+            .await
+            .unwrap();
+        let mut settings =
+            f.s.store
+                .agent(crate::config::MAIN_AGENT_ID)
+                .await
+                .unwrap()
+                .unwrap()
+                .settings;
+        settings.name = "Accepted automatic portrait".into();
+        settings.plugins.clear();
+        settings.exclusive_nodes.clear();
+        settings.access = cairn_contracts::AccessPolicy {
+            projects: Some(Vec::new()),
+            skills: Some(Vec::new()),
+            mcps: Some(Vec::new()),
+            nodes: Some(Vec::new()),
+            ..Default::default()
+        };
+        let agent =
+            f.s.save_profile_live(
+                crate::agents::SaveProfile::Create(cairn_contracts::CreateAgentInput {
+                    creation_id: None,
+                    settings,
+                    review: Default::default(),
+                }),
+                crate::service::AgentEditor::Installation,
+                authority,
+            )
+            .await
+            .unwrap();
+        let (_, reply) = f.next().await;
+        f.s.store
+            .change_run(
+                text(&caller, "id"),
+                crate::runs::RunChanges {
+                    status: Some(crate::run_status::RunStatus::Succeeded),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        f.s.mcps
+            .revoke_run(&f.s, text(&caller, "id"))
+            .await
+            .unwrap();
+        if revoked {
+            grants
+                .remove_for(text(&caller["snapshot"]["agent"], "id"))
+                .await;
+        }
+        let _ = reply.send(generated(png([51, 63, 81])));
+        let finished = f
+            .wait(
+                &agent.id.to_string(),
+                if revoked { "failed" } else { "ready" },
+            )
+            .await;
+        assert_eq!(finished["avatar"]["url"].is_string(), !revoked);
+        f.s.avatars.close().await;
+    }
 }

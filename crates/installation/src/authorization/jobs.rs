@@ -133,6 +133,19 @@ fn revoked() -> Error {
 }
 
 impl Accepted {
+    pub(crate) fn agent_id(&self) -> &str {
+        &self.profile.id
+    }
+
+    pub(crate) fn requester_profile(&self) -> Option<(String, String)> {
+        self.requester.as_ref().map(|requester| {
+            (
+                requester.profile.id.clone(),
+                requester.profile.revision.clone(),
+            )
+        })
+    }
+
     pub(crate) async fn capture(s: &Service, bearer: &str) -> Result<Arc<Self>> {
         let bearer = bearer.to_owned();
         let job = s
@@ -384,8 +397,7 @@ mod tests {
             complete(&f, &run).await;
             match change {
                 "child" => {
-                    f.set_for(text(&run["snapshot"]["agent"], "id"), json!([]))
-                        .await;
+                    f.remove_for(text(&run["snapshot"]["agent"], "id")).await;
                 }
                 "requester" => {
                     f.set(json!([contribution(
@@ -497,5 +509,114 @@ mod tests {
             403
         );
         f.s.shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn accepted_source_jobs_keep_the_original_invocation_after_normal_completion() {
+        for change in ["complete", "ancestry", "grant", "delete"] {
+            let (f, bearer) = Fixture::delegated_manager().await;
+            let installed = crate::common::package_install(&f.s, &json!({
+                "manifest": { "id": "retained-source", "name": "Retained source", "version": "1", "apiVersion": 2,
+                    "agentAccess": {}, "capabilities": ["http"], "hosts": ["service.example.test"],
+                    "projectSources": [{ "name": "repositories", "title": "Repositories" }],
+                },
+                "source": r#"return { projects = function(input)
+                    cairn.http.request({instance=input.instance.id,url="https://service.example.test/hold"})
+                    cairn.http.request({instance=input.instance.id,url="https://service.example.test/upload"})
+                    return {items=cairn.array({})}
+                end }"#,
+            })).await.unwrap();
+            crate::common::package_approve(
+                &f.s,
+                "retained-source",
+                "1",
+                text(&installed, "digest"),
+            )
+            .await
+            .unwrap();
+            let instance = crate::common::save_plugin(
+                &f.s,
+                "retained-source",
+                &json!({ "name": "Source", "enabled": true }),
+                None,
+            )
+            .await
+            .unwrap();
+            let caller = crate::installation_mcp::authorize(&f.s, &bearer)
+                .await
+                .unwrap();
+            for agent in [
+                crate::config::MAIN_AGENT_ID,
+                text(&caller["snapshot"]["agent"], "id"),
+            ] {
+                let current = f.api("GET", json!({ "agentId": agent })).await.unwrap();
+                let mut grants = current["grants"].as_array().unwrap().clone();
+                grants.push(json!({ "instanceId": instance["id"], "access": { "type": "selected", "contributions": [contribution("projectSource", "repositories", json!([]))] } }));
+                f.api("PUT", json!({ "agentId": agent, "revision": current["revision"], "grants": grants, "runCredentialInstances": [] })).await.unwrap();
+            }
+            let pending = crate::capabilities::resource_operation("list_source_projects").unwrap()
+                .invoke(&f.s, json!({ "pluginId": "retained-source", "source": "repositories", "instance": instance["id"] }),
+                    crate::capabilities::ResumeContext::Installation(bearer.clone())).await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(10), f.entered.notified())
+                .await
+                .unwrap();
+            complete(&f, &caller).await;
+            match change {
+                "ancestry" => f.moved_parent.store(true, Ordering::SeqCst),
+                "grant" => {
+                    f.remove_for(text(&caller["snapshot"]["agent"], "id")).await;
+                }
+                "delete" => {
+                    let run_id = text(&caller, "id").to_owned();
+                    let chat =
+                        f.s.store
+                            .read(move |db| db.conversation_for_run(&run_id))
+                            .await
+                            .unwrap()
+                            .unwrap();
+                    f.s.chat_trash_live(
+                        &chat.requested_by.unwrap().chat_id,
+                        true,
+                        Authorization::default(),
+                    )
+                    .await
+                    .unwrap();
+                }
+                _ => {}
+            }
+            f.release.notify_one();
+            let operation = text(&pending, "operation");
+            let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    let result = f.s.plugins.operations.get(operation).unwrap();
+                    if result["state"] != "running" {
+                        break result;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                result["state"],
+                if change == "complete" {
+                    "completed"
+                } else {
+                    "failed"
+                },
+                "{change}: {result}"
+            );
+            assert_eq!(
+                f.uploads.load(Ordering::SeqCst),
+                usize::from(change == "complete"),
+                "{change}"
+            );
+            assert!(
+                crate::installation_mcp::authorize(&f.s, &bearer)
+                    .await
+                    .is_err()
+            );
+            f.s.shutdown.cancel();
+        }
     }
 }

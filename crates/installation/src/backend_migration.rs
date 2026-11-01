@@ -980,4 +980,105 @@ mod tests {
             Ok(())
         }).await.unwrap();
     }
+
+    #[tokio::test]
+    async fn migration_rechecks_retained_authority_after_storage_wait_before_staging_cleanup() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        for change in ["complete", "ancestry", "stop"] {
+            let (f, bearer) = crate::plugin_grant_fixture::Fixture::delegated_manager().await;
+            let caller = crate::installation_mcp::authorize(&f.s, &bearer)
+                .await
+                .unwrap();
+            let source = text(&caller, "id").to_owned();
+            let chat =
+                f.s.store
+                    .read({
+                        let source = source.clone();
+                        move |db| db.conversation_for_run(&source)
+                    })
+                    .await
+                    .unwrap()
+                    .unwrap();
+            let job = crate::installation_mcp::management_authorization(&f.s, Some(&bearer))
+                .await
+                .unwrap()
+                .accepted()
+                .await
+                .unwrap();
+            f.s.store
+                .change_run(
+                    &source,
+                    crate::runs::RunChanges {
+                        status: Some(RunStatus::Succeeded),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            f.s.mcps.revoke_run(&f.s, &source).await.unwrap();
+            let staging = f.s.config.data_dir.join("backend-migration-staging");
+            std::fs::create_dir(&staging).unwrap();
+            let marker = staging.join("existing-source");
+            std::fs::write(&marker, b"source must survive revocation").unwrap();
+            let storage = f.s.conversation_storage_lock.clone().lock_owned().await;
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let signal = entered.clone();
+            let calls = AtomicUsize::new(0);
+            let job = job.with_guard(move |_| {
+                // The final local fence of the initial recheck has completed;
+                // the next authorization fence follows the held storage lock.
+                if calls.fetch_add(1, Ordering::SeqCst) == 1 {
+                    signal.notify_one();
+                }
+                Ok(())
+            });
+            let service = f.s.clone();
+            let target = chat.id.clone();
+            let migration = tokio::spawn(async move {
+                service
+                    .convert_chat_live(&target, "not-admitted", json!({}), Origin::Run(source), job)
+                    .await
+            });
+            tokio::time::timeout(Duration::from_secs(10), entered.notified())
+                .await
+                .unwrap();
+            match change {
+                "ancestry" => f.moved_parent.store(true, Ordering::SeqCst),
+                "stop" => {
+                    f.s.worker
+                        .stop_chat_live(
+                            &f.s,
+                            &chat.id,
+                            crate::authorization::Authorization::default(),
+                        )
+                        .await
+                        .unwrap();
+                }
+                _ => {}
+            }
+            drop(storage);
+            let error = tokio::time::timeout(Duration::from_secs(10), migration)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap_err();
+            if change == "complete" {
+                assert_eq!(error.status, 409, "{error:?}");
+                assert!(
+                    !marker.exists(),
+                    "normal completion must permit the accepted staging operation"
+                );
+            } else {
+                assert_eq!(error.status, 403, "{change}: {error:?}");
+                assert_eq!(
+                    std::fs::read(&marker).unwrap(),
+                    b"source must survive revocation"
+                );
+            }
+            f.s.shutdown.cancel();
+        }
+    }
 }

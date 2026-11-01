@@ -91,7 +91,7 @@ pub(crate) fn plugin_package_operation(name: &str) -> Option<&'static PluginPack
 #[derive(Clone, Default)]
 pub(crate) struct Authority {
     pub bearer: Option<String>,
-    accepted_activation: Option<Arc<crate::authorization::Accepted>>,
+    accepted_job: Option<Arc<crate::authorization::Accepted>>,
     owner: Option<cairn_protocol::TaskAuthorGrant>,
     public_credential: Option<String>,
     public_scope: Option<&'static str>,
@@ -114,6 +114,24 @@ struct ExecutionPlugin {
 }
 
 impl Authority {
+    /// Built only at a known management-job handoff, before composing any
+    /// operation-specific guards. The token remains identity, not a renewable
+    /// transport credential; admission and polling still require a live bearer.
+    pub(crate) async fn accepted_management(s: &Service, bearer: &str) -> Result<Self> {
+        let (_, live) = crate::installation_mcp::authorize_with_authority(s, bearer).await?;
+        let job = crate::authorization::Accepted::capture(s, bearer).await?;
+        live.recheck(s).await?;
+        Ok(Self {
+            bearer: Some(bearer.to_owned()),
+            accepted_job: Some(job),
+            ..Default::default()
+        })
+    }
+
+    pub(crate) fn accepted_job(&self) -> Option<Arc<crate::authorization::Accepted>> {
+        self.accepted_job.clone()
+    }
+
     /// Freeze the complete plugin authority used to prepare and launch a turn,
     /// including disabled/inactive grants that must not become live mid-prepare.
     pub(crate) async fn for_run(s: &Service, run: &Value) -> Result<Self> {
@@ -284,7 +302,7 @@ impl Authority {
         }
         Ok(Self {
             bearer: None,
-            accepted_activation: None,
+            accepted_job: None,
             owner: Some(policy.owner),
             public_credential: None,
             public_scope: None,
@@ -295,7 +313,7 @@ impl Authority {
     }
 
     pub(crate) async fn recheck(&self, s: &Service) -> Result<()> {
-        if let Some(job) = &self.accepted_activation {
+        if let Some(job) = &self.accepted_job {
             job.recheck(s).await?;
         }
         if let Some(credential) = &self.public_credential {
@@ -332,7 +350,7 @@ impl Authority {
         if let Some(guard) = &self.guard {
             guard(db)?;
         }
-        if let Some(job) = &self.accepted_activation {
+        if let Some(job) = &self.accepted_job {
             job.authorize(db)?;
         } else if let Some(bearer) = &self.bearer {
             crate::installation_mcp::authorize_in(db, bearer)?;
@@ -427,16 +445,7 @@ impl PluginPackageOperation {
                 let (_, live) =
                     crate::installation_mcp::authorize_with_authority(s, &bearer).await?;
                 if self.name == "activate_plugin_package" {
-                    let job = crate::authorization::Accepted::capture(s, &bearer).await?;
-                    live.recheck(s).await?;
-                    // The accepted activation keeps its initiating identity and
-                    // polling audience, but its private execution proof outlives
-                    // normal turn completion. This is not a resource-read proof.
-                    Authority {
-                        bearer: Some(bearer),
-                        accepted_activation: Some(job),
-                        ..Default::default()
-                    }
+                    Authority::accepted_management(s, &bearer).await?
                 } else {
                     live
                 }

@@ -24,6 +24,7 @@ impl Authority {
         s: &Service,
         context: ResumeContext,
         required_scope: &str,
+        accepted: bool,
     ) -> Result<Self> {
         let preparation = match context {
             ResumeContext::Human(account) if required_scope == "manage" => {
@@ -31,9 +32,13 @@ impl Authority {
             }
             ResumeContext::Human(_) => plugin_packages::Authority::default(),
             ResumeContext::Installation(bearer) => {
-                crate::installation_mcp::authorize_with_authority(s, &bearer)
-                    .await?
-                    .1
+                if accepted {
+                    plugin_packages::Authority::accepted_management(s, &bearer).await?
+                } else {
+                    crate::installation_mcp::authorize_with_authority(s, &bearer)
+                        .await?
+                        .1
+                }
             }
             ResumeContext::Public(scopes, credential) => {
                 if !scopes.iter().any(|scope| scope == required_scope) {
@@ -94,12 +99,17 @@ impl Authority {
             ));
         }
         if let Some(bearer) = &self.preparation.bearer {
-            let run = crate::installation_mcp::authorize(s, bearer).await?;
-            let agent = crate::validation::text(&run["snapshot"]["agent"], "id");
-            let snapshot = crate::plugins::grant_authorization::Snapshot::capture_installation(
-                s, agent, bearer, package,
-            )
-            .await?;
+            let snapshot = if let Some(job) = self.preparation.accepted_job() {
+                crate::plugins::grant_authorization::Snapshot::for_accepted_job(s, job, package)
+                    .await?
+            } else {
+                let run = crate::installation_mcp::authorize(s, bearer).await?;
+                let agent = crate::validation::text(&run["snapshot"]["agent"], "id");
+                crate::plugins::grant_authorization::Snapshot::capture_installation(
+                    s, agent, bearer, package,
+                )
+                .await?
+            };
             let invocation = crate::plugins::grant_authorization::Invocation::prepare(
                 s,
                 snapshot.clone(),

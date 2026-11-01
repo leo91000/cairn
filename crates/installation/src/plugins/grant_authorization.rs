@@ -29,6 +29,7 @@ fn package_changed() -> Error {
 pub(crate) struct Snapshot {
     pub agent: String,
     revision: String,
+    job: Option<Arc<crate::authorization::Accepted>>,
     requester: Option<(String, String)>,
     bearer: Option<(String, bool)>,
     run_id: Option<(String, Value)>,
@@ -53,6 +54,19 @@ impl Snapshot {
         package: &Package,
     ) -> Result<Self> {
         Self::capture_with(s, agent, Some(bearer), true, package).await
+    }
+
+    pub(crate) async fn for_accepted_job(
+        s: &Service,
+        job: Arc<crate::authorization::Accepted>,
+        package: &Package,
+    ) -> Result<Self> {
+        Box::pin(job.recheck(s)).await?;
+        let mut snapshot = Self::capture(s, job.agent_id(), None, package).await?;
+        snapshot.requester = job.requester_profile();
+        snapshot.job = Some(job);
+        snapshot.recheck(s).await?;
+        Ok(snapshot)
     }
 
     async fn capture_with(
@@ -84,6 +98,7 @@ impl Snapshot {
                 Ok(Self {
                     agent,
                     revision: profile.revision,
+                    job: None,
                     requester,
                     bearer,
                     run_id: None,
@@ -132,6 +147,9 @@ impl Snapshot {
     }
 
     pub(crate) async fn recheck(&self, s: &Service) -> Result<()> {
+        if let Some(job) = &self.job {
+            Box::pin(job.recheck(s)).await?;
+        }
         let expected = self.clone();
         s.store.read(move |db| expected.authorize(db)).await?;
         let coverage = if let Some((requester, _)) = &self.requester {
@@ -159,6 +177,9 @@ impl Snapshot {
     }
 
     pub(crate) fn authorize(&self, db: &Db<'_>) -> Result<()> {
+        if let Some(job) = &self.job {
+            job.authorize(db)?;
+        }
         if required(db.agent(&self.agent)?, "Agent not found")?.revision != self.revision {
             return Err(denied());
         }
