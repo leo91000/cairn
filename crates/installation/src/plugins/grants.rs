@@ -1257,7 +1257,7 @@ mod migration_tests {
         .unwrap();
         let publication = s.plugins.package_publication.lock().await;
         let service = s.clone();
-        let change = tokio::spawn(async move {
+        let mut change = tokio::spawn(async move {
             replace(
                 &service,
                 input,
@@ -1269,9 +1269,17 @@ mod migration_tests {
             )
             .await
         });
-        tokio::time::timeout(std::time::Duration::from_secs(10), checked.notified())
-            .await
-            .unwrap();
+        let handshake = checked.notified();
+        tokio::pin!(handshake);
+        tokio::select! {
+            () = &mut handshake => {}
+            result = &mut change => {
+                panic!("Grant replacement finished before its revocation check: {result:?}");
+            }
+            () = tokio::time::sleep(std::time::Duration::from_secs(30)) => {
+                panic!("Grant replacement did not reach the revocation check within 30 seconds.");
+            }
+        }
         live.store(false, Ordering::SeqCst);
         drop(publication);
         let error = change.await.unwrap().unwrap_err();
