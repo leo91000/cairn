@@ -1154,13 +1154,17 @@ async fn instruction_only_packages_cannot_shadow_a_granted_tool() {
         )
         .await
         .unwrap();
+        let contributions = if plugin == "foo" {
+            vec![contribution("instructions", "", json!([]))]
+        } else {
+            vec![contribution("tool", "foo_bar_read", json!([]))]
+        };
         grants.push(json!({
             "instanceId": instance["id"],
-            "access": { "type": "selected", "contributions": if plugin == "foo" {
-                json!([contribution("instructions", "", json!([]))])
-            } else {
-                json!([contribution("tool", "foo_bar_read", json!([]))])
-            } },
+            "access": {
+                "type": "selected",
+                "contributions": contributions,
+            },
         }));
     }
     let current = f.api("GET", json!({})).await.unwrap();
