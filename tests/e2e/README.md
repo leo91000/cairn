@@ -14,8 +14,8 @@ pnpm test:e2e
 
 Set `CAIRN_BEACON_TEST_DATABASE_URL` to a disposable Postgres database.
 
-The network bench writes a bounded `*.phases.json` journal beside each scenario's
-report. `testPhase` identifies the last entered operation; `cleanupPhase` and
+The relay/NAT browser scenarios write a bounded `*.phases.json` journal beside
+their reports. `testPhase` identifies the last entered operation; `cleanupPhase` and
 browser lifecycle events are recorded separately. An entered phase does not
 prove that operation completed. These fixed labels and elapsed times survive
 Playwright timeout cleanup, which can remove all Pages before transport evidence

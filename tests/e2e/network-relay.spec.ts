@@ -6,7 +6,7 @@ import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import process from 'node:process'
 import { chromium, expect, test } from '@playwright/test'
-import { networkPhaseDiagnostics } from '../../scripts/network-phase-diagnostics.mjs'
+import { closeNetworkFixture, networkPhaseDiagnostics } from '../../scripts/network-phase-diagnostics.mjs'
 import { beaconRelayFixture } from './beacon-relay-fixture'
 import { captureNetworkTransport, networkTransportDiagnostics } from './network-transport-diagnostics'
 
@@ -574,22 +574,18 @@ test('authenticated browser and Rust client keep using the observed route under 
     phases.enter('complete')
   }
   finally {
-    phases.cleanup('capture-transport')
-    try {
-      const output = process.env.CAIRN_NETWORK_OUTPUT
-      if (browser && output) {
-        const diagnostics = await Promise.all(browser.contexts().flatMap(context => context.pages())
-          .map(page => networkTransportDiagnostics(page).catch(() => [])))
-        const diagnosticsOutput = output.endsWith('.json') ? `${output.slice(0, -5)}.transport.json` : `${output}.transport.json`
-        await writeFile(diagnosticsOutput, `${JSON.stringify(diagnostics)}\n`)
-      }
-    }
-    finally {
-      phases.cleanup('browser-close')
-      await browser?.close()
-      phases.cleanup('fixture-close')
-      await fixture.close()
-      phases.cleanup('complete')
-    }
+    await closeNetworkFixture(phases, {
+      browser,
+      fixture,
+      captureTransport: async () => {
+        const output = process.env.CAIRN_NETWORK_OUTPUT
+        if (browser && output) {
+          const diagnostics = await Promise.all(browser.contexts().flatMap(context => context.pages())
+            .map(page => networkTransportDiagnostics(page).catch(() => [])))
+          const diagnosticsOutput = output.endsWith('.json') ? `${output.slice(0, -5)}.transport.json` : `${output}.transport.json`
+          await writeFile(diagnosticsOutput, `${JSON.stringify(diagnostics)}\n`)
+        }
+      },
+    })
   }
 })

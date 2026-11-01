@@ -41,3 +41,17 @@ it('bounds retained phases and refuses arbitrary diagnostic content', () => {
     rmSync(directory, { recursive: true, force: true })
   }
 })
+
+it('defers lifecycle write failures until resource cleanup can report them', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'cairn-network-phases-'))
+  try {
+    const phases = networkPhaseDiagnostics(join(directory, 'scenario.json'))
+    phases.enter('browser-page')
+    rmSync(directory, { recursive: true })
+    expect(() => phases.event('page-closed')).not.toThrow()
+    expect(() => phases.finish()).toThrow('Network lifecycle journal persistence failed')
+  }
+  finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})

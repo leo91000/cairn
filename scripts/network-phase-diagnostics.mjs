@@ -46,6 +46,7 @@ export function networkPhaseDiagnostics(output) {
   const entered = []
   let testPhase
   let cleanupPhase
+  let lifecyclePersistenceFailed = false
 
   function persist(entry) {
     entered.push({ ...entry, elapsedMs: Math.round(performance.now() - started) })
@@ -75,8 +76,52 @@ export function networkPhaseDiagnostics(output) {
     if (!lifecycleEvents.has(event))
       throw new Error('Unknown network qualification lifecycle event')
 
-    persist({ event })
+    try {
+      persist({ event })
+    }
+    catch {
+      // Event listeners must not interrupt browser/context disposal. Report the
+      // failure after every resource has had its cleanup attempted instead.
+      lifecyclePersistenceFailed = true
+    }
   }
 
-  return { enter, cleanup: phase => enter(phase, true), event }
+  function finish() {
+    if (lifecyclePersistenceFailed)
+      throw new Error('Network lifecycle journal persistence failed')
+  }
+
+  return {
+    enter,
+    cleanup: phase => enter(phase, true),
+    event,
+    finish,
+  }
+}
+
+export async function closeNetworkFixture(phases, { captureTransport, browser, fixture }) {
+  const errors = []
+
+  async function attempt(operation) {
+    try {
+      await operation()
+    }
+    catch (error) {
+      errors.push(error)
+    }
+  }
+
+  const steps = [
+    ['capture-transport', captureTransport],
+    ['browser-close', () => browser?.close()],
+    ['fixture-close', () => fixture.close()],
+    ['complete', () => phases.finish()],
+  ]
+  for (const [phase, operation] of steps) {
+    await attempt(() => phases.cleanup(phase))
+    await attempt(operation)
+  }
+
+  if (errors.length)
+    throw new AggregateError(errors, 'Network qualification cleanup failed')
 }

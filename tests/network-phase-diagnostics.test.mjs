@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import {
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs'
+import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import process from 'node:process'
@@ -13,6 +15,8 @@ import process from 'node:process'
 // eslint-disable-next-line test/no-import-node-test
 import { test as nodeTest } from 'node:test'
 import { fileURLToPath } from 'node:url'
+import { chromium } from '@playwright/test'
+import { closeNetworkFixture, networkPhaseDiagnostics } from '../scripts/network-phase-diagnostics.mjs'
 import { isolateTestCredentials } from '../scripts/test-environment.mjs'
 
 isolateTestCredentials()
@@ -71,3 +75,58 @@ nodeTest('phase evidence survives a real Playwright timeout that removes every P
     rmSync(directory, { recursive: true, force: true })
   }
 })
+
+for (const failedMarker of ['capture-transport', 'browser-close', 'fixture-close']) {
+  nodeTest(`journal failure at ${failedMarker} still disposes the browser and fixture`, async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'cairn-network-cleanup-'))
+    const journalDirectory = join(directory, 'journal')
+    mkdirSync(journalDirectory)
+    const phases = networkPhaseDiagnostics(join(journalDirectory, 'scenario.json'))
+    const fixture = createServer()
+    fixture.unref()
+    await new Promise(resolve => fixture.listen(0, '127.0.0.1', resolve))
+    let browser
+    try {
+      browser = await chromium.launch({ timeout: 10000 })
+      const page = await browser.newPage()
+      browser.on('disconnected', () => phases.event('browser-disconnected'))
+      page.on('close', () => phases.event('page-closed'))
+      page.context().on('close', () => phases.event('context-closed'))
+      phases.enter('browser-page')
+      const removeJournal = () => rmSync(journalDirectory, { recursive: true, force: true })
+      if (failedMarker === 'capture-transport')
+        removeJournal()
+
+      const cleanup = closeNetworkFixture(phases, {
+        captureTransport: async () => {
+          if (failedMarker === 'browser-close')
+            removeJournal()
+        },
+        browser: {
+          close: async () => {
+            if (failedMarker === 'fixture-close')
+              removeJournal()
+            await browser.close()
+          },
+        },
+        fixture: {
+          close: () => new Promise((resolve, reject) => fixture.close(error => error ? reject(error) : resolve())),
+        },
+      })
+      await assert.rejects(cleanup, (error) => {
+        assert.equal(error.name, 'AggregateError')
+        assert.equal(error.message, 'Network qualification cleanup failed')
+        assert.equal(error.errors.some(cause => cause.code === 'ENOENT'), true)
+        return true
+      })
+      assert.equal(browser.isConnected(), false, 'journal failure must not retain the actual browser')
+      assert.equal(fixture.listening, false, 'journal failure must not retain the actual fixture listener')
+    }
+    finally {
+      await browser?.close().catch(() => {})
+      if (fixture.listening)
+        await new Promise(resolve => fixture.close(resolve))
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+}
