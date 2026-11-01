@@ -5780,17 +5780,6 @@ async fn chat_resume_selection_resolves_opencode_catalog_default_before_adapter_
     let session = common::relay_fixture::context(&s).await;
     let client = reqwest::Client::new();
     let relay_token = text(&session, "value").to_owned();
-    let fixture_url = fixture.url.clone();
-    let resume = |selection: Value| {
-        client
-            .post(format!("{fixture_url}/api/chats/{chat_id}/resume"))
-            .header("x-test-relay-token", &relay_token)
-            .json(&json!({
-                "runId": run_id,
-                "turnId": turn_id,
-                "selection": selection,
-            }))
-    };
     let stopped = client
         .post(format!("{}/api/chats/{chat_id}/stop", fixture.url))
         .header("x-test-relay-token", &relay_token)
@@ -5820,12 +5809,20 @@ async fn chat_resume_selection_resolves_opencode_catalog_default_before_adapter_
         .await
         .unwrap();
 
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
     for model in ["not-a-model", "openrouter/unlisted-model"] {
-        let response = resume(json!({ "model": model, "reasoning": "high", "speed": "" }))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{model}");
+        let (status, response) = api_post(
+            &app,
+            &relay_token,
+            &format!("/api/chats/{chat_id}/resume"),
+            json!({
+                "runId": run_id,
+                "turnId": turn_id,
+                "selection": { "model": model, "reasoning": "high", "speed": "" },
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{model}: {response}");
         let unchanged = s.store.run(&run_id).await.unwrap();
         assert_eq!(unchanged["status"], RunStatus::Failed);
         assert_eq!(unchanged["snapshot"], cancelled["snapshot"]);
@@ -5834,11 +5831,22 @@ async fn chat_resume_selection_resolves_opencode_catalog_default_before_adapter_
     common::account_fixture::update_account_fixture(&s, &account_id, &json!({ "enabled": false }))
         .await
         .unwrap();
-    let no_default = resume(json!({ "model": "", "reasoning": "high", "speed": "" }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(no_default.status(), StatusCode::BAD_REQUEST);
+    let (no_default_status, no_default_response) = api_post(
+        &app,
+        &relay_token,
+        &format!("/api/chats/{chat_id}/resume"),
+        json!({
+            "runId": run_id,
+            "turnId": turn_id,
+            "selection": { "model": "", "reasoning": "high", "speed": "" },
+        }),
+    )
+    .await;
+    assert_eq!(
+        no_default_status,
+        StatusCode::BAD_REQUEST,
+        "{no_default_response}"
+    );
     let unchanged = s.store.run(&run_id).await.unwrap();
     assert_eq!(unchanged["status"], RunStatus::Failed);
     assert_eq!(unchanged["snapshot"], cancelled["snapshot"]);
@@ -5846,7 +5854,6 @@ async fn chat_resume_selection_resolves_opencode_catalog_default_before_adapter_
         .await
         .unwrap();
 
-    let app = common::relay_fixture::router(s.clone()).await.unwrap();
     let (resume_status, resume_response) = api_post(
         &app,
         &relay_token,
