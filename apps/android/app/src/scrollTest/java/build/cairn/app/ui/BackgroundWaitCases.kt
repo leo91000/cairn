@@ -287,7 +287,7 @@ abstract class BackgroundWaitCases {
                 .onNode(hasText("Modèle de la conversation") and isSelectable())
                 .assertIsSelected()
                 .assert(hasText("GPT-6 Sol", substring = true))
-            compose.onNodeWithText("GPT-6 Luna", exact = true).performScrollTo().performClick()
+            compose.onNodeWithText("GPT-6 Luna").performScrollTo().performClick()
             compose.onNodeWithTag("reasoning-slider").assert(hasStateDescription("Faible"))
             compose.onNodeWithText("Terminé").performClick()
             compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
