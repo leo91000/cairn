@@ -4,7 +4,10 @@ use super::{
     output,
 };
 use crate::{
-    accounts::{Lease, broker},
+    accounts::{
+        Lease, broker,
+        output_redactions::{History, Observation},
+    },
     config::now,
     error::{Error, Result},
     execution,
@@ -29,7 +32,7 @@ use std::{
     time::Duration,
 };
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use tracing::Instrument;
 
 /// Exit code reported for processes the worker had to stop.
@@ -37,6 +40,10 @@ const STOPPED: i32 = 143;
 const SUMMARY_LIMIT: usize = 100_000;
 const HISTORY_LIMIT: usize = 16_000;
 const RESUME_PROMPT: &str = "Continue the same task from the saved conversation and current workspace. Execution was interrupted. Resume the original task from its last completed step. Preserve completed work and verify external effects before repeating any action.";
+
+#[cfg(test)]
+#[path = "launch_stream_tests.rs"]
+mod stream_tests;
 
 /// Runs `run` until it finishes, retrying on another account when usage runs out.
 pub(super) async fn execute(
@@ -46,7 +53,7 @@ pub(super) async fn execute(
     cancel: &CancellationToken,
     checkpoint: &Checkpoint,
     existing: bool,
-    sensitive: &mut Vec<String>,
+    sensitive: &History,
 ) -> Result<()> {
     let span = tracing::info_span!(target: "cairn_performance", "agent_execution", run_id = text(run, "id"));
     execute_inner(s, run, admission, cancel, checkpoint, existing, sensitive)
@@ -61,7 +68,7 @@ async fn execute_inner(
     cancel: &CancellationToken,
     checkpoint: &Checkpoint,
     existing: bool,
-    sensitive: &mut Vec<String>,
+    sensitive: &History,
 ) -> Result<()> {
     let id = text(run, "id").to_owned();
     let mut timing = Operation::new("agent_prepare", &id, "mark_running");
@@ -76,8 +83,11 @@ async fn execute_inner(
         cancel,
         checkpoint,
         sensitive,
+        observation: None,
         attempt_id: String::new(),
         reservation: None,
+        #[cfg(test)]
+        output_probe: None,
     };
     execution.mark_running().await?;
     timing.next("access");
@@ -131,11 +141,14 @@ struct Execution<'a> {
     preparation: Option<tokio::sync::OwnedMutexGuard<()>>,
     cancel: &'a CancellationToken,
     checkpoint: &'a Checkpoint,
-    sensitive: &'a mut Vec<String>,
+    sensitive: &'a History,
+    observation: Option<Observation>,
     provider: Provider,
     directory: PathBuf,
     attempt_id: String,
     reservation: Option<(String, Value)>,
+    #[cfg(test)]
+    output_probe: Option<stream_tests::OutputProbe>,
 }
 
 /// The prepared execution environment shared by every launch attempt.
@@ -337,11 +350,7 @@ impl Execution<'_> {
         let mut timing = Operation::new("workspace_prepare", &self.id, "execution");
         let (prepared, credentials) = self.prepare_execution(existing).await?;
         // Plugin credentials written into the run are masked wherever they appear.
-        for secret in &credentials.secrets {
-            if !self.sensitive.contains(secret) {
-                self.sensitive.push(secret.clone());
-            }
-        }
+        self.sensitive.extend(credentials.secrets.iter().cloned());
         timing.next("account_home");
         let state_home = self.prepare_state_home(&prepared).await?;
         let patch = crate::runs::RunChanges {
@@ -572,48 +581,80 @@ impl Execution<'_> {
             args: Vec::new(),
             prompt: self.prompt(resume).await?,
         };
-        let auth_broker = match self.account.as_ref() {
-            Some(account) => Some(broker::serve(s, account).await?),
+        self.observation = match self.account.as_ref() {
+            Some(account) => {
+                s.accounts
+                    .observe_output_credentials(
+                        s,
+                        account,
+                        &self.attempt_id,
+                        self.sensitive.clone(),
+                    )
+                    .await?
+            }
             None => None,
         };
-        // A VM reaches its run-scoped MCP only through this channel.
-        let granted = workspace.mcp["env"]
-            .get(crate::mcps::RUN_TOKEN_ENV)
-            .is_some();
-        let mcp_channel = if workspace.isolated() && granted {
-            let home = self.directory.join("home");
-            Some(crate::mcps::channel::serve(s, &home, &self.id).await?)
-        } else {
-            None
+        let broker_result = match self.account.as_ref() {
+            Some(account) => match &self.observation {
+                Some(observation) => broker::serve_observed(s, account, observation.handle())
+                    .await
+                    .map(Some),
+                None => broker::serve(s, account).await.map(Some),
+            },
+            None => Ok(None),
         };
-        let chat = self.chat_plan(workspace, resume, &mut launch).await?;
-        if workspace.isolated() {
-            self.prepare_runner(workspace, resume, chat, &mut launch)
-                .await?;
-        }
-        let mut exit = self.supervise(workspace, launch, log_total).await?;
-        self.checkpoint
-            .update(|c| {
-                c.process = Some(None);
-                // The runner client can return zero only after parsing a healthy
-                // controller result. Nonzero process statuses are ambiguous: local
-                // errors, panics, signals and worker stops share the same channel.
-                // Only a read of this attempt can establish their provenance.
-                c.terminal_code = (exit.code == Some(0)).then_some(Some(0));
-            })
-            .await?;
-        if exit.code != Some(0) && !exit.timed_out {
-            super::execution::reconcile(s, self.checkpoint, self.cancel).await?;
-            if let Some(code) = self.checkpoint.snapshot().await.terminal_code() {
-                exit.code = Some(if code == STOPPED && !self.cancel.is_cancelled() {
-                    crate::runner::CONTROLLER_INTERRUPTED
-                } else {
-                    code
-                });
+        let auth_broker = match broker_result {
+            Ok(broker) => broker,
+            Err(error) => {
+                self.observation.take();
+                return Err(error);
             }
+        };
+        // Capture every result, including preparation/wait/reconcile failures,
+        // before completing the account-scope and broker cleanup barrier.
+        let result = async {
+            // A VM reaches its run-scoped MCP only through this channel.
+            let granted = workspace.mcp["env"]
+                .get(crate::mcps::RUN_TOKEN_ENV)
+                .is_some();
+            let mcp_channel = if workspace.isolated() && granted {
+                let home = self.directory.join("home");
+                Some(crate::mcps::channel::serve(s, &home, &self.id).await?)
+            } else {
+                None
+            };
+            let chat = self.chat_plan(workspace, resume, &mut launch).await?;
+            if workspace.isolated() {
+                self.prepare_runner(workspace, resume, chat, &mut launch)
+                    .await?;
+            }
+            let mut exit = self.supervise(workspace, launch, log_total).await?;
+            self.checkpoint
+                .update(|c| {
+                    c.process = Some(None);
+                    // The runner client can return zero only after parsing a healthy
+                    // controller result. Nonzero process statuses are ambiguous: local
+                    // errors, panics, signals and worker stops share the same channel.
+                    // Only a read of this attempt can establish their provenance.
+                    c.terminal_code = (exit.code == Some(0)).then_some(Some(0));
+                })
+                .await?;
+            if exit.code != Some(0) && !exit.timed_out {
+                super::execution::reconcile(s, self.checkpoint, self.cancel).await?;
+                if let Some(code) = self.checkpoint.snapshot().await.terminal_code() {
+                    exit.code = Some(if code == STOPPED && !self.cancel.is_cancelled() {
+                        crate::runner::CONTROLLER_INTERRUPTED
+                    } else {
+                        code
+                    });
+                }
+            }
+            drop(mcp_channel);
+            Ok::<_, Error>(exit)
         }
-        drop(auth_broker);
-        drop(mcp_channel);
+        .await;
+        self.close_account_output(auth_broker).await;
+        let exit = result?;
         let saved = self.checkpoint.snapshot().await;
         let observation_pending = saved.managed() && saved.terminal_code.is_none();
         if s.shutdown.is_cancelled()
@@ -1041,28 +1082,59 @@ impl Execution<'_> {
         }
         let stdout = child.child.stdout.take().unwrap();
         let stderr = child.child.stderr.take().unwrap();
+        let (telemetry, reports) = output::Publisher::channel(&self.id, &self.attempt_id);
         let (tx, mut events) = mpsc::channel(32);
-        let out = tokio::spawn(output::read_output(
+        let out = AbortOnDropHandle::new(tokio::spawn(output::read_output(
             stdout,
             false,
             tx.clone(),
-            self.sensitive.to_vec(),
-        ));
-        let err = tokio::spawn(output::read_output(stderr, true, tx, Vec::new()));
+            self.sensitive.snapshot().as_ref().clone(),
+        )));
+        let observed = self.observation.as_ref().is_some_and(Observation::active);
+        let err = AbortOnDropHandle::new(tokio::spawn(async move {
+            if observed {
+                output::read_agent_diagnostics(stderr, tx, telemetry).await;
+            } else {
+                output::read_output(stderr, true, tx, Vec::new()).await;
+            }
+        }));
         if let Err(error) = child.start(launch.prompt).await {
+            self.revoke_output_scope();
             child.stop().await;
-            out.abort();
-            err.abort();
+            close_output_readers(out, err, true).await;
             return Err(error);
         }
         let span = tracing::info_span!(target: "cairn_performance", "agent_attempt", run_id = self.id, attempt_id = self.attempt_id);
-        let exit = self
-            .wait(&mut child, &mut events, log_total, previously_launched)
+        let result = self
+            .wait(
+                &mut child,
+                &mut events,
+                log_total,
+                previously_launched,
+                observed.then_some(reports),
+            )
             .instrument(span)
-            .await?;
-        let _ = out.await;
-        let _ = err.await;
-        Ok(exit)
+            .await;
+        if result.is_err() {
+            self.revoke_output_scope();
+            child.stop().await;
+        }
+        close_output_readers(out, err, result.is_err()).await;
+        result
+    }
+
+    async fn close_account_output(&mut self, broker: Option<broker::Broker>) {
+        self.revoke_output_scope();
+        if let Some(broker) = broker {
+            broker.close().await;
+        }
+        self.observation.take();
+    }
+
+    fn revoke_output_scope(&self) {
+        if let Some(observation) = &self.observation {
+            observation.revoke();
+        }
     }
 
     async fn wait(
@@ -1071,6 +1143,7 @@ impl Execution<'_> {
         events: &mut mpsc::Receiver<output::Output>,
         log_total: &mut usize,
         previously_launched: bool,
+        mut reports: Option<output::Reports>,
     ) -> Result<Exit> {
         let s = self.s;
         let cancel = self.cancel;
@@ -1080,14 +1153,16 @@ impl Execution<'_> {
         let mut heartbeat = crate::performance::heartbeat();
         let mut timeout = tokio::time::interval(Duration::from_millis(250));
         timeout.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        while exit.code.is_none() || open {
+        while exit.code.is_none() || open || reports.is_some() {
             let running = exit.code.is_none();
             tokio::select! {
                 () = cancel.cancelled(), if running => {
+                    self.revoke_output_scope();
                     child.stop().await;
                     exit.code = Some(STOPPED);
                 }
                 () = s.shutdown.cancelled(), if running => {
+                    self.revoke_output_scope();
                     child.stop().await;
                     exit.code = Some(STOPPED);
                 }
@@ -1099,6 +1174,7 @@ impl Execution<'_> {
                         && self.checkpoint.expired()
                     {
                         exit.timed_out = true;
+                        self.revoke_output_scope();
                         child.stop().await;
                         exit.code = Some(STOPPED);
                     }
@@ -1107,6 +1183,14 @@ impl Execution<'_> {
                     exit.code = Some(code?.code().unwrap_or(STOPPED));
                 }
                 _ = heartbeat.tick() => activity.heartbeat("receive_output"),
+                changed = async { reports.as_mut().unwrap().changed().await }, if reports.is_some() => {
+                    if changed {
+                        // Credential generations already join the shared history
+                        // synchronously before persistence/delivery. There is no
+                        // per-metric Store lookup, output slot or detached reporter.
+                        reports.as_mut().unwrap().publish_latest();
+                    } else { reports = None; }
+                }
                 event = events.recv(), if open => match event {
                     Some(output) => {
                         let queue_ms = output.received.elapsed().as_millis() as u64;
@@ -1115,17 +1199,29 @@ impl Execution<'_> {
                         }
                         if output.kind == output::OutputKind::Stdout {
                             activity.output();
+                            #[cfg(test)]
+                            if let Some(probe) = &self.output_probe {
+                                probe.canonical();
+                            }
                         }
                         crate::performance::wait("refresh_redactions", self.refresh_redactions()).await?;
+                        #[cfg(test)]
+                        if let Some(probe) = &self.output_probe {
+                            probe.before_record(&output)?;
+                        }
                         exit.exhausted |= crate::performance::wait("persist_output", output::record(
                             s,
                             &output,
                             self.checkpoint,
                             previously_launched,
-                            self.sensitive,
+                            &self.sensitive.snapshot(),
                             log_total,
                             &mut activity,
                         )).await?;
+                        #[cfg(test)]
+                        if let Some(probe) = &self.output_probe {
+                            probe.recorded(&output);
+                        }
                     }
                     None => open = false,
                 },
@@ -1137,14 +1233,18 @@ impl Execution<'_> {
 
     /// Account credentials may rotate while the process runs.
     async fn refresh_redactions(&mut self) -> Result<()> {
+        #[cfg(test)]
+        if let Some(probe) = &self.output_probe {
+            probe.refresh().await;
+            if probe.supplies_flood_marker() {
+                self.sensitive.extend(["rotated-test-secret".into()]);
+            }
+        }
         let Some(account) = self.account.as_ref() else {
             return Ok(());
         };
-        for secret in self.s.accounts.redactions(self.s, account).await? {
-            if !self.sensitive.contains(&secret) {
-                self.sensitive.push(secret);
-            }
-        }
+        self.sensitive
+            .extend(self.s.accounts.redactions(self.s, account).await?);
         Ok(())
     }
 
@@ -1282,14 +1382,15 @@ impl Execution<'_> {
         } else {
             saved.last_message()
         };
-        let summary = run_output::redact(summary, self.sensitive)
+        let summary = run_output::redact(summary, &self.sensitive.snapshot())
             .chars()
             .take(SUMMARY_LIMIT)
             .collect::<String>();
         let resume_available = (status != RunStatus::Succeeded
             || self.run["chatExecution"].is_object())
             && has_session;
-        let error = (!error.is_empty()).then(|| run_output::redact(&error, self.sensitive));
+        let error =
+            (!error.is_empty()).then(|| run_output::redact(&error, &self.sensitive.snapshot()));
         // A failed run's final status says why it ended when no earlier event did.
         let details = error
             .as_ref()
@@ -1380,6 +1481,17 @@ impl Execution<'_> {
     }
 }
 
+/// Join on ordinary EOF; abort AND join on failure. Abort-on-drop ownership also
+/// covers cancellation of this cleanup future itself, unlike bare JoinHandles.
+async fn close_output_readers(out: AbortOnDropHandle<()>, err: AbortOnDropHandle<()>, abort: bool) {
+    if abort {
+        out.abort();
+        err.abort();
+    }
+    let _ = out.await;
+    let _ = err.await;
+}
+
 fn controller_name(run: &Value) -> &'static str {
     if crate::native::policy::native(&run["snapshot"]["agent"]) {
         "Native controller"
@@ -1436,7 +1548,7 @@ mod tests {
                 let mut run = service.store.run(&id).await.unwrap();
                 let mut account = None;
                 let cancel = CancellationToken::new();
-                let mut sensitive = Vec::new();
+                let sensitive = History::default();
                 let execution = Execution {
                     s: &service,
                     id: id.clone(),
@@ -1445,11 +1557,13 @@ mod tests {
                     preparation: None,
                     cancel: &cancel,
                     checkpoint: &checkpoint,
-                    sensitive: &mut sensitive,
+                    sensitive: &sensitive,
+                    observation: None,
                     provider: Provider::Codex,
                     directory: root.path().into(),
                     attempt_id: String::new(),
                     reservation: None,
+                    output_probe: None,
                 };
                 let workspace = Workspace {
                     prepared: json!({ "output": root.path().join("missing-result").to_string_lossy() }),
