@@ -159,7 +159,7 @@ abstract class NodePlacementCases {
                                     // The next listing inserts a machine ahead of the open card.
                                     val prefix =
                                         if (failed.get())
-                                            """{"id":"00000000-0000-4000-8000-000000000001","name":"Autre machine","status":"online"},"""
+                                            """{"id":"00000000-0000-4000-8000-000000000001","name":"Autre machine","status":"online","accepting":true,"executionReady":true,"slots":4,"availableSlots":0,"occupiedSlots":1,"capabilities":{"kvm":true},"agents":[{"id":"builder","name":"Builder"}]},"""
                                         else ""
                                     """[$prefix{"id":"aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503","name":"Machine jetable","status":"online","accepting":true,"slots":2,"capabilities":{"backend":"native","nativeModeProtocol":1},"nativeModeObserved":{"mode":"protected","status":"$status"}$requested}]"""
                                 }
@@ -260,6 +260,9 @@ abstract class NodePlacementCases {
                     .isNotEmpty()
             }
             compose.onNodeWithText("Natif protégé").performScrollTo().assertExists()
+            // Zero available slots does not imply every slot is occupied.
+            compose.onNodeWithText("Aucun slot disponible").performScrollTo().assertExists()
+            compose.onNodeWithText("0 slots libres sur 4 · 1 occupés").assertExists()
             compose
                 .onNodeWithText("privilèges actuels non confirmés", substring = true)
                 .performScrollTo()

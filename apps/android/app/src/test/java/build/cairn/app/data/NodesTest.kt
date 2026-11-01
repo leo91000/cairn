@@ -52,6 +52,10 @@ class NodesTest {
             NodeHealthState.FULL,
             nodeHealth(ready.copy(availableSlots = 0, occupiedSlots = 4)).state,
         )
+        assertEquals(
+            NodeHealth(NodeHealthState.FULL, "Pleine", "Aucun slot disponible"),
+            nodeHealth(ready.copy(availableSlots = 0, occupiedSlots = 1)),
+        )
         assertEquals(NodeHealthState.REVOKED, nodeHealth(ready.copy(revoked = true)).state)
         assertEquals(
             NodeHealth(NodeHealthState.OFFLINE, "Hors ligne", "Dernier contact il y a 3 h"),

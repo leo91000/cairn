@@ -187,7 +187,8 @@ fun NodesScreen(
                         }
                         if (
                             health.state != NodeHealthState.READY &&
-                                health.state != NodeHealthState.FULL
+                                (health.state != NodeHealthState.FULL ||
+                                    node.occupiedSlots < slotCapacity(node))
                         )
                             Text(
                                 "${freeSlots(node)} slots libres sur ${slotCapacity(node)} · ${node.occupiedSlots} occupés",
