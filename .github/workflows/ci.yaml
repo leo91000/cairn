@@ -655,6 +655,7 @@ jobs:
           python3 tests/network_probe_test.py
           python3 tests/network_bench_test.py
           python3 tests/stun_docker_test.py
+          node --test tests/network-phase-diagnostics.test.mjs
           for scenario in $NETWORK_SCENARIOS; do
             python3 tests/network-bench.py "$scenario" --output "test-results/network/$scenario.json"
           done

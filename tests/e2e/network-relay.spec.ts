@@ -6,11 +6,14 @@ import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import process from 'node:process'
 import { chromium, expect, test } from '@playwright/test'
+import { networkPhaseDiagnostics } from '../../scripts/network-phase-diagnostics.mjs'
 import { beaconRelayFixture } from './beacon-relay-fixture'
 import { captureNetworkTransport, networkTransportDiagnostics } from './network-transport-diagnostics'
 
 test('authenticated browser and Rust client keep using the observed route under network constraints', async () => {
   test.setTimeout(240000)
+  const phases = networkPhaseDiagnostics(process.env.CAIRN_NETWORK_OUTPUT)
+  phases.enter('fixture-start')
   const fixture = await beaconRelayFixture(4398, '198.18.103.1', process.env.CAIRN_NETWORK_FIXTURE_DIRECTORY)
   const {
     root,
@@ -51,14 +54,21 @@ test('authenticated browser and Rust client keep using the observed route under 
   }
 
   try {
+    phases.enter('beacon-start')
     let service = beacon()
     // Exercise numeric ICE paths deterministically; the separate mDNS-only client
     // case preserves Chromium's default privacy behavior and expects the relay.
+    phases.enter('browser-launch')
     browser = await chromium.launch({
       executablePath: process.env.CAIRN_NETWORK_CHROMIUM,
       args: process.env.CAIRN_NETWORK_SCENARIO === 'mdns-only-client' ? [] : ['--disable-features=WebRtcHideLocalIpsWithMdns'],
     })
+    browser.on('disconnected', () => phases.event('browser-disconnected'))
+    phases.enter('browser-page')
     const page = await browser.newPage()
+    page.context().on('close', () => phases.event('context-closed'))
+    page.on('close', () => phases.event('page-closed'))
+    page.on('crash', () => phases.event('page-crashed'))
     const leases: string[] = []
     page.on('response', async (response) => {
       if (response.url().endsWith('/direct/authorize') && response.ok()) {
@@ -89,6 +99,7 @@ test('authenticated browser and Rust client keep using the observed route under 
       })
     }
 
+    phases.enter('capture-transport')
     await capture(page)
     if (process.env.CAIRN_NETWORK_SCENARIO === 'same-server') {
       // Slow outbound trickle signaling while the browser's UDP checks keep
@@ -130,24 +141,33 @@ test('authenticated browser and Rust client keep using the observed route under 
     const expected = process.env.CAIRN_NETWORK_EXPECT_ROUTE || 'relay'
     let releaseDirect: () => void = () => {}
     const authorizationGate = new Promise<void>(resolve => releaseDirect = resolve)
+    phases.enter('route-setup')
     await page.route('**/direct/authorize', async (route) => {
       await authorizationGate
       await route.continue()
     })
+    phases.enter('beacon-health')
     await expect.poll(() => {
       expect(service.exitCode, 'beacon binary must remain running').toBeNull()
       return fetch(`${url}/health`).then(response => response.ok).catch(() => false)
     }).toBe(true)
+    phases.enter('beacon-stun')
     await expect.poll(() => fetch(`${url}/health`).then(response => response.json()).then(health => health.stun.status)).toBe('running')
+    phases.enter('page-navigate')
     await page.goto(url)
     const ownerEmail = `network-${process.env.CAIRN_NETWORK_SCENARIO}-${Date.now()}@example.test`
+    phases.enter('login-email')
     await page.getByLabel('Email address').fill(ownerEmail)
     await page.getByRole('button', { name: 'Send code', exact: true }).click()
     await expect.poll(() => messages.length).toBe(1)
+    phases.enter('login-code')
     await page.getByLabel('Email code').fill(messages[0]!.match(/\b\d{8}\b/)![0])
+    phases.enter('login-submit')
     await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+    phases.enter('claim-open')
     await page.getByRole('button', { name: 'Add an installation', exact: true }).click()
     const code = await page.getByLabel('Installation claim code').inputValue()
+    phases.enter('installation-start')
     const installation = start('target/debug/cairn', {
       DATA_DIR: join(root, 'data'),
       AGENT_HOME: join(root, 'home'),
@@ -161,11 +181,13 @@ test('authenticated browser and Rust client keep using the observed route under 
       CAIRN_INSTALLATION_NAME: 'Network bench installation',
     })
     const bootstrapStart = performance.now()
+    phases.enter('installation-bootstrap')
     await expect(async () => {
       expect(installation.exitCode).toBeNull()
       await page.getByRole('button', { name: 'Refresh installations', exact: true }).click()
       await expect(page).toHaveURL(/\/installations\/[^/]+\/$/)
     }).toPass({ timeout: 30000 })
+    phases.enter('route-bootstrap')
     await expect(page.getByRole('link', { name: 'New conversation', exact: true }).first()).toBeVisible()
     await expect(page.getByRole('status', { name: 'Connection route' })).toHaveAttribute('data-transport-route', 'relay')
     await expect.poll(async () => (await observations()).some(item => item.route === 'relay' && item.method === 'GET')).toBe(true)
@@ -174,10 +196,12 @@ test('authenticated browser and Rust client keep using the observed route under 
     if (!packetLoss)
       releaseDirect()
     const installationKey = new URL(page.url()).pathname.split('/')[2]!
+    phases.enter('account-session')
     const account = await (await page.request.get(`${url}/api/account/session`)).json()
     const installationId = account.installations.find((item: { id: string, slug: string }) => item.id === installationKey || item.slug === installationKey)!.id
     const chatsPath = `/api/installations/${installationId}/api/chats`
     const marker = `Network scenario ${process.env.CAIRN_NETWORK_SCENARIO}`
+    phases.enter('conversation-open')
     if (packetLoss) {
       // Chat creation is not safely replayable after transport loss. Prepare it
       // on the authenticated relay, then exercise the idempotent message below.
@@ -199,7 +223,9 @@ test('authenticated browser and Rust client keep using the observed route under 
       await page.getByRole('link', { name: 'New conversation', exact: true }).first().click()
     }
 
+    phases.enter('message-fill')
     await page.getByLabel('Message', { exact: true }).fill(marker)
+    phases.enter('route-promote')
     if (packetLoss) {
       // This global schedule supplies no per-fragment delivery bound. Observe
       // promotion or a diagnosed failed opening inside the original window.
@@ -217,7 +243,9 @@ test('authenticated browser and Rust client keep using the observed route under 
     const before = (await observations()).length
     const responseObservationOptions = packetLoss ? { timeout: 35000 } : {}
     const started = performance.now()
+    phases.enter('message-send')
     await page.getByRole('button', { name: /^(Send|Queue)$/, exact: true }).click()
+    phases.enter('message-delivery')
     await expect.poll(async () => (await observations()).slice(before).some(item => item.method === 'POST' && item.path.endsWith('/messages')), responseObservationOptions).toBe(true)
     const sent = (await observations()).slice(before).find(item => item.method === 'POST' && item.path.endsWith('/messages'))!
     let fallbackReason: 'heartbeat-timeout' | 'opening-timeout' | 'peer-failed' | undefined
@@ -248,6 +276,7 @@ test('authenticated browser and Rust client keep using the observed route under 
 
     // The title is delivered asynchronously on the same reliable transport;
     // packet loss can delay it beyond 10 s without exceeding reassembly's 30 s.
+    phases.enter('message-heading')
     await expect(page.getByRole('heading', { name: marker, exact: true })).toBeVisible(responseObservationOptions)
     evidence.push({
       route: sent.route,
@@ -271,13 +300,18 @@ test('authenticated browser and Rust client keep using the observed route under 
     const cookies = await page.context().cookies()
     const cookie = cookies.map(value => `${value.name}=${value.value}`).join('; ')
     const samples = process.env.CAIRN_NETWORK_SCENARIO === 'packet-loss' ? 3 : 1
+    phases.enter('rust-read')
     for (let sample = 0; sample < samples; sample++)
       evidence.push({ ...await rustRequest(chatsPath, cookie, 200, marker), operation: sample ? `rust-read-${sample + 1}` : 'rust-read' })
+    phases.enter('anonymous-rust-read')
     await rustRequest(chatsPath, '', 401)
     // A loopback listener on the installation still refuses anonymous local access.
+    phases.enter('anonymous-local-read')
     const local = execFileSync(process.env.CAIRN_NETWORK_LOCAL_CLIENT!, ['http', '127.0.0.1:4399', '/api/chats', '401'], { input: '', encoding: 'utf8' })
     expect(JSON.parse(local).status).toBe(401)
+    phases.enter('owner-session')
     const session = await (await page.request.get(`${url}/api/account/session`)).json()
+    phases.enter('scenario-verification')
 
     if (process.env.CAIRN_NETWORK_SCENARIO === 'network-change') {
       const beforeChange = (await observations()).length
@@ -452,6 +486,7 @@ test('authenticated browser and Rust client keep using the observed route under 
       expect(mdnsCandidates.every(candidate => candidate.mdns && candidate.type === 'host')).toBe(true)
     }
 
+    phases.enter('report-write')
     const output = process.env.CAIRN_NETWORK_OUTPUT!
     const report = JSON.parse(await readFile(output, 'utf8'))
     const rustReads = evidence.filter(item => item.operation.startsWith('rust-read'))
@@ -500,6 +535,7 @@ test('authenticated browser and Rust client keep using the observed route under 
       })}\n`)
     }
 
+    phases.enter('route-check')
     for (const observation of evidence) {
       if (packetLossReads.includes(observation) && observation.route === 'relay') {
         // A timeout is measured only with proof of the unchanged shared budget.
@@ -528,12 +564,17 @@ test('authenticated browser and Rust client keep using the observed route under 
       expect(observation.route, `${observation.operation}: actual route`).toBe(route)
     }
 
+    phases.enter('logout-session')
     const finalSession = await (await page.request.get(`${url}/api/account/session`)).json()
+    phases.enter('logout')
     const logout = await page.request.post(`${url}/api/account/logout`, { headers: { 'origin': url, 'x-csrf-token': finalSession.csrf || session.csrf }, data: {} })
     expect([200, 204, 401]).toContain(logout.status())
+    phases.enter('logged-out-rust-read')
     await rustRequest(chatsPath, cookie, 401)
+    phases.enter('complete')
   }
   finally {
+    phases.cleanup('capture-transport')
     try {
       const output = process.env.CAIRN_NETWORK_OUTPUT
       if (browser && output) {
@@ -544,8 +585,11 @@ test('authenticated browser and Rust client keep using the observed route under 
       }
     }
     finally {
+      phases.cleanup('browser-close')
       await browser?.close()
+      phases.cleanup('fixture-close')
       await fixture.close()
+      phases.cleanup('complete')
     }
   }
 })
