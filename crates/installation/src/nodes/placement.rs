@@ -315,13 +315,30 @@ impl Candidate {
 
 /// Select within current grants and preserve the location of an existing environment.
 pub async fn reserve(s: &Service, run: &Value, attempt: &str) -> Result<Value> {
+    reserve_authorized(
+        s,
+        run,
+        attempt,
+        crate::authorization::Authorization::default(),
+    )
+    .await
+}
+
+pub(crate) async fn reserve_authorized(
+    s: &Service,
+    run: &Value,
+    attempt: &str,
+    authorize: crate::authorization::Authorization,
+) -> Result<Value> {
     // Placement falls back to the last recorded local runner state.
     let _ = super::refresh_local(s).await;
+    authorize.recheck().await?;
     let run = run.clone();
     let attempt = attempt.to_owned();
     let configured = !s.config.runner_url.is_empty();
     s.store
         .transaction(move |db| {
+            authorize.check_local(db)?;
             let result = match reserve_in(db, &run, &attempt, configured) {
                 Ok(placement) => Ok(placement),
                 Err(error) if is_no_capacity(&error) => Err(error),
@@ -829,9 +846,19 @@ pub(crate) fn release_in(db: &Db<'_>, attempt: &str) -> Result<()> {
 
 /// Once a controller may have created a disk, keep its allocation until explicit disk deletion.
 pub async fn materialize(s: &Service, attempt: &str) -> Result<()> {
+    materialize_authorized(s, attempt, crate::authorization::Authorization::default()).await
+}
+
+pub(crate) async fn materialize_authorized(
+    s: &Service,
+    attempt: &str,
+    authorize: crate::authorization::Authorization,
+) -> Result<()> {
+    authorize.recheck().await?;
     let attempt = attempt.to_owned();
     s.store
         .transaction(move |db| {
+            authorize.check_local(db)?;
             let mut record = db
                 .get("node-attempts", &attempt)?
                 .ok_or_else(|| Error::conflict("Missing disk allocation."))?;

@@ -81,7 +81,7 @@ pub(crate) async fn management_authorization(
     match bearer {
         Some(bearer) => {
             let (_, authority) = authorize_with_authority(s, bearer).await?;
-            Ok(crate::authorization::Authorization::live(s, authority))
+            Ok(crate::authorization::Authorization::installation_management(s, authority, bearer))
         }
         None => Ok(crate::authorization::Authorization::default()),
     }

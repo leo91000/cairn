@@ -38,6 +38,32 @@ pub(crate) struct Fixture {
 }
 
 impl Fixture {
+    pub(crate) async fn delegated_manager() -> (Self, String) {
+        let f = Self::new().await;
+        f.marker("live-parent").await;
+        f.set(json!([contribution("tool", "grant_probe_post", support())]))
+            .await;
+        let child =
+            f.s.agent_fixture(
+                json!({ "name": "Child", "access": { "installation": true } }),
+                None,
+            )
+            .await
+            .unwrap();
+        let child_id = text(&child, "id");
+        f.set_for(
+            child_id,
+            json!([contribution(
+                "tool",
+                "grant_probe_post",
+                json!([{ "resourceType": "thread", "id": "support-thread" }])
+            )]),
+        )
+        .await;
+        let (_, bearer) = f.delegated(MAIN_AGENT_ID, child_id).await;
+        (f, bearer)
+    }
+
     pub(crate) async fn new() -> Self {
         let root = TempDir::new().unwrap();
         std::fs::create_dir(root.path().join("home")).unwrap();

@@ -404,6 +404,7 @@ impl Service {
                 trash(db, &id, confirmed)
             })
             .await?;
+        self.accepted_jobs.revoke_chat(text(&result, "id"));
         if let Some(run) = result["runId"].as_str() {
             cancel.push(run.to_owned());
         }

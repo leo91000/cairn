@@ -14,6 +14,7 @@ use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
 pub struct Service {
+    pub(crate) accepted_jobs: Arc<crate::authorization::Jobs>,
     pub missions: Arc<crate::missions::Missions>,
     pub node_maintenance_tasks: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
     pub node_lease_deadlines:
@@ -61,6 +62,7 @@ impl Service {
         let vault = Vault::new(store.clone(), &config.data_dir)?;
         crate::nodes::connector::record_manager_origin(&config).await?;
         let service = Arc::new(Self {
+            accepted_jobs: Arc::default(),
             missions: Arc::default(),
             node_maintenance_tasks: Arc::default(),
             node_lease_deadlines: Arc::default(),
@@ -225,6 +227,11 @@ impl Service {
             crate::native::policy::refresh_for(self, &snapshot).await?;
         }
         authorize.recheck().await?;
+        let portrait_authorization = if creating {
+            Some(authorize.clone().accepted().await?)
+        } else {
+            None
+        };
         let (agent, created) = self.store.transaction(move |db| {
             authorize.authorize(db)?;
             let current = db.agent(&agent.id.to_string())?;
@@ -286,7 +293,7 @@ impl Service {
         if created && self.avatars.configured(self).await? {
             return Ok(self
                 .avatars
-                .generate(self, &agent.id.to_string())
+                .generate_live(self, &agent.id.to_string(), portrait_authorization.unwrap())
                 .await
                 .unwrap_or(agent));
         }

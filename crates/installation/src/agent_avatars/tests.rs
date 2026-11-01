@@ -51,6 +51,10 @@ impl Drop for Fixture {
 
 impl Fixture {
     async fn new(configured: bool) -> Self {
+        Self::with_service(configured, None).await
+    }
+
+    async fn with_service(configured: bool, service: Option<Arc<Service>>) -> Self {
         let root = TempDir::new().unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}/images", listener.local_addr().unwrap());
@@ -83,7 +87,14 @@ impl Fixture {
             "runnerUrl": "",
         }))
         .unwrap();
-        let s = Service::new(config).await.unwrap();
+        let s = match service {
+            Some(service) => {
+                let mut service = (*service).clone();
+                service.config.codex_bin = config.codex_bin;
+                Arc::new(service)
+            }
+            None => Service::new(config).await.unwrap(),
+        };
         s.accounts.initialize(&s).await.unwrap();
         if configured {
             let account = serde_json::to_value(
@@ -718,4 +729,136 @@ async fn foreground_queue_and_deployment_prevent_starting_a_portrait() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn accepted_portraits_survive_normal_completion_but_not_revocation_before_publication() {
+    use crate::plugin_grant_fixture::Fixture as Grants;
+    use crate::run_status::RunStatus;
+    use std::sync::atomic::Ordering;
+
+    for change in ["complete", "ancestry", "grant", "delete", "stop"] {
+        let (grants, bearer) = Grants::delegated_manager().await;
+        let mut f = Fixture::with_service(true, Some(grants.s.clone())).await;
+        let caller = crate::installation_mcp::authorize(&f.s, &bearer)
+            .await
+            .unwrap();
+        let source = text(&caller, "id").to_owned();
+        let chat =
+            f.s.store
+                .read({
+                    let source = source.clone();
+                    move |db| db.conversation_for_run(&source)
+                })
+                .await
+                .unwrap()
+                .unwrap();
+        let authority = crate::installation_mcp::management_authorization(&f.s, Some(&bearer))
+            .await
+            .unwrap();
+        let target = crate::config::MAIN_AGENT_ID;
+        f.s.avatars
+            .generate_live(&f.s, target, authority)
+            .await
+            .unwrap();
+        let (_, reply) = f.next().await;
+        f.s.store
+            .change_run(
+                &source,
+                crate::runs::RunChanges {
+                    status: Some(RunStatus::Succeeded),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        f.s.mcps.revoke_run(&f.s, &source).await.unwrap();
+        match change {
+            "ancestry" => grants.moved_parent.store(true, Ordering::SeqCst),
+            "grant" => {
+                grants
+                    .set_for(text(&caller["snapshot"]["agent"], "id"), json!([]))
+                    .await;
+            }
+            "delete" => {
+                f.s.chat_trash_live(
+                    &chat.requested_by.unwrap().chat_id,
+                    true,
+                    crate::authorization::Authorization::default(),
+                )
+                .await
+                .unwrap();
+            }
+            "stop" => {
+                f.s.worker
+                    .stop_chat_live(
+                        &f.s,
+                        &chat.id,
+                        crate::authorization::Authorization::default(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            _ => {}
+        }
+        // A cancelled RPC may already have dropped its receiver; useful bytes
+        // must never be published even if the provider completed the work.
+        let _ = reply.send(generated(png([17, 31, 47])));
+        let expected = if change == "complete" {
+            "ready"
+        } else {
+            "failed"
+        };
+        let finished = f.wait(target, expected).await;
+        assert_eq!(
+            finished["avatar"]["url"].is_string(),
+            change == "complete",
+            "{change}"
+        );
+        assert_eq!(
+            f.s.store
+                .read(move |db| Ok(db.kv(&format!("agent-avatar:{target}"))?.is_some()))
+                .await
+                .unwrap(),
+            change == "complete",
+            "{change}"
+        );
+        f.s.avatars.close().await;
+    }
+}
+
+#[tokio::test]
+async fn revoked_portrait_waiting_for_a_slot_consumes_no_provider_quota() {
+    let (grants, bearer) = crate::plugin_grant_fixture::Fixture::delegated_manager().await;
+    let mut f = Fixture::with_service(true, Some(grants.s.clone())).await;
+    let permits = f.s.avatars.slots.acquire_many(2).await.unwrap();
+    let caller = crate::installation_mcp::authorize(&f.s, &bearer)
+        .await
+        .unwrap();
+    let source = text(&caller, "id").to_owned();
+    let chat =
+        f.s.store
+            .read(move |db| db.conversation_for_run(&source))
+            .await
+            .unwrap()
+            .unwrap();
+    let authority = crate::installation_mcp::management_authorization(&f.s, Some(&bearer))
+        .await
+        .unwrap();
+    f.s.avatars
+        .generate_live(&f.s, crate::config::MAIN_AGENT_ID, authority)
+        .await
+        .unwrap();
+    f.s.worker
+        .stop_chat_live(
+            &f.s,
+            &chat.id,
+            crate::authorization::Authorization::default(),
+        )
+        .await
+        .unwrap();
+    drop(permits);
+    f.wait(crate::config::MAIN_AGENT_ID, "failed").await;
+    f.s.avatars.close().await;
+    assert!(f.requests.try_recv().is_err());
 }

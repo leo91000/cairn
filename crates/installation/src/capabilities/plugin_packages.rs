@@ -91,6 +91,7 @@ pub(crate) fn plugin_package_operation(name: &str) -> Option<&'static PluginPack
 #[derive(Clone, Default)]
 pub(crate) struct Authority {
     pub bearer: Option<String>,
+    accepted_activation: Option<Arc<crate::authorization::Accepted>>,
     owner: Option<cairn_protocol::TaskAuthorGrant>,
     public_credential: Option<String>,
     public_scope: Option<&'static str>,
@@ -283,6 +284,7 @@ impl Authority {
         }
         Ok(Self {
             bearer: None,
+            accepted_activation: None,
             owner: Some(policy.owner),
             public_credential: None,
             public_scope: None,
@@ -293,6 +295,9 @@ impl Authority {
     }
 
     pub(crate) async fn recheck(&self, s: &Service) -> Result<()> {
+        if let Some(job) = &self.accepted_activation {
+            job.recheck(s).await?;
+        }
         if let Some(credential) = &self.public_credential {
             let required_scope = self.public_scope.unwrap_or("manage");
             crate::relay::authorize_plugin_mcp_scope(s, credential, required_scope).await?;
@@ -327,7 +332,9 @@ impl Authority {
         if let Some(guard) = &self.guard {
             guard(db)?;
         }
-        if let Some(bearer) = &self.bearer {
+        if let Some(job) = &self.accepted_activation {
+            job.authorize(db)?;
+        } else if let Some(bearer) = &self.bearer {
             crate::installation_mcp::authorize_in(db, bearer)?;
         }
         Ok(())
@@ -417,9 +424,22 @@ impl PluginPackageOperation {
         };
         let mut authority = match context {
             ResumeContext::Installation(bearer) => {
-                crate::installation_mcp::authorize_with_authority(s, &bearer)
-                    .await?
-                    .1
+                let (_, live) =
+                    crate::installation_mcp::authorize_with_authority(s, &bearer).await?;
+                if self.name == "activate_plugin_package" {
+                    let job = crate::authorization::Accepted::capture(s, &bearer).await?;
+                    live.recheck(s).await?;
+                    // The accepted activation keeps its initiating identity and
+                    // polling audience, but its private execution proof outlives
+                    // normal turn completion. This is not a resource-read proof.
+                    Authority {
+                        bearer: Some(bearer),
+                        accepted_activation: Some(job),
+                        ..Default::default()
+                    }
+                } else {
+                    live
+                }
             }
             ResumeContext::Public(scopes, credential) => {
                 if !scopes.iter().any(|scope| scope == self.scope) {

@@ -39,6 +39,7 @@ impl Worker {
                 request_cancel(db, &run_id, is_active)
             })
             .await?;
+        s.accepted_jobs.revoke_run(id);
         if let Some(cancel) = active.get(id) {
             cancel.cancel();
         }
@@ -87,6 +88,7 @@ impl Worker {
                 required(db.conversation_boundary(&id)?, "Chat not found")
             })
             .await?;
+        s.accepted_jobs.revoke_chat(text(&chat, "id"));
         if let Some(cancel) = chat["runId"].as_str().and_then(|id| active.get(id)) {
             cancel.cancel();
         }

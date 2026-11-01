@@ -857,6 +857,42 @@ impl Storage {
         self.upload_bytes_checked(bytes, key, None).await
     }
 
+    pub(crate) async fn upload_bytes_authorized(
+        &self,
+        bytes: Vec<u8>,
+        key: &str,
+        authorize: &crate::authorization::Authorization,
+    ) -> Result<()> {
+        self.upload_bytes_checked(bytes, key, Some(authorize)).await
+    }
+
+    pub(crate) async fn upload_file_verified_authorized(
+        &self,
+        path: &Path,
+        key: &str,
+        authorize: &crate::authorization::Authorization,
+    ) -> Result<()> {
+        authorize.recheck().await?;
+        let bytes = tokio::fs::read(path).await?;
+        self.upload_bytes_checked(bytes, key, Some(authorize)).await
+    }
+
+    pub(crate) async fn download_bytes_authorized(
+        &self,
+        key: &str,
+        limit: u64,
+        authorize: &crate::authorization::Authorization,
+    ) -> Result<Vec<u8>> {
+        if !authorize.has_async_checks() {
+            return self.download_bytes(key, limit).await;
+        }
+        let bytes = self
+            .fetch_bytes_checked(key, limit, Some(authorize))
+            .await?;
+        authorize.recheck().await?;
+        Ok(bytes)
+    }
+
     async fn upload_bytes_checked(
         &self,
         bytes: Vec<u8>,

@@ -31,7 +31,25 @@ fn ready() -> Value {
 }
 
 pub async fn start(s: &Service, run: &Value, node: &str, backup: &Value) -> Result<()> {
+    start_authorized(
+        s,
+        run,
+        node,
+        backup,
+        crate::authorization::Authorization::default(),
+    )
+    .await
+}
+
+pub(crate) async fn start_authorized(
+    s: &Service,
+    run: &Value,
+    node: &str,
+    backup: &Value,
+    authorize: crate::authorization::Authorization,
+) -> Result<()> {
     let _operation = s.node_backup_operation.lock(text(run, "id")).await;
+    authorize.recheck().await?;
     let manifest = super::publication::manifest(s, backup).await?;
     let record = s.node_boundary(node).await?;
     let native = crate::native::policy::node_native(&record);
@@ -41,7 +59,8 @@ pub async fn start(s: &Service, run: &Value, node: &str, backup: &Value) -> Resu
         ));
     }
     let policy = crate::storage::policy::for_node(&record["storage"])?;
-    let grant = super::disk_grants::issue(s, run, node, backup).await?;
+    let grant =
+        super::disk_grants::issue_authorized(s, run, node, backup, authorize.clone()).await?;
     let request = RestoreRequest {
         manifest,
         // The local controller needs the internal origin. For a remote node,
@@ -51,6 +70,8 @@ pub async fn start(s: &Service, run: &Value, node: &str, backup: &Value) -> Resu
         backup_id: &backup["id"],
         policy,
     };
+    let secret = super::runner_secret(s).await?;
+    authorize.recheck().await?;
     let response = s
         .http
         .post(format!(
@@ -58,12 +79,13 @@ pub async fn start(s: &Service, run: &Value, node: &str, backup: &Value) -> Resu
             super::controller_url(s, node),
             text(run, "id")
         ))
-        .bearer_auth(super::runner_secret(s).await?)
+        .bearer_auth(secret)
         .json(&request)
         .timeout(Duration::from_secs(120))
         .send()
         .await
         .map_err(|_| Error::unavailable("VM restore connection interrupted."))?;
+    authorize.recheck().await?;
     if !response.status().is_success() {
         return Err(Error::unavailable(
             "Destination could not restore this VM runtime and disk.",

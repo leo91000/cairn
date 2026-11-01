@@ -11,12 +11,19 @@ use std::sync::{Arc, Mutex};
 
 type LocalGuard = dyn Fn(&Db<'_>) -> Result<()> + Send + Sync;
 
+mod jobs;
+
+pub(crate) use jobs::{Accepted, Jobs};
+
 #[derive(Clone)]
 pub(crate) struct Authorization {
     local: Arc<LocalGuard>,
+    admission: Option<Arc<LocalGuard>>,
     publication: Option<Arc<LocalGuard>>,
     service: Option<Arc<Service>>,
     live: Option<Authority>,
+    job: Option<Arc<jobs::Accepted>>,
+    job_bearer: Option<String>,
 }
 
 impl Default for Authorization {
@@ -33,9 +40,12 @@ impl Authorization {
         let authorize = Mutex::new(authorize);
         Self {
             local: Arc::new(move |db| (authorize.lock().unwrap())(db)),
+            admission: None,
             publication: None,
             service: None,
             live: None,
+            job: None,
+            job_bearer: None,
         }
     }
 
@@ -59,22 +69,32 @@ impl Authorization {
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
         let callback = Mutex::new(Some(authorize));
-        Self::local(move |db| {
+        let mut authority = Self::default();
+        authority.admission = Some(Arc::new(move |db| {
             let authorize = callback.lock().unwrap().take().ok_or_else(|| {
                 Error::forbidden("The publication authorization was already consumed.")
             })?;
             authorize(db)
-        })
+        }));
+        authority
     }
 
     pub(crate) fn live(s: &Service, authority: Authority) -> Self {
-        let local = authority.clone();
         Self {
-            local: Arc::new(move |db| local.authorize(db)),
+            local: Arc::new(|_| Ok(())),
+            admission: None,
             publication: None,
             service: Some(Arc::new(s.clone())),
             live: Some(authority),
+            job: None,
+            job_bearer: None,
         }
+    }
+
+    pub(crate) fn installation_management(s: &Service, authority: Authority, bearer: &str) -> Self {
+        let mut authorization = Self::live(s, authority);
+        authorization.job_bearer = Some(bearer.to_owned());
+        authorization
     }
 
     pub(crate) fn with_guard<F>(self, guard: F) -> Self
@@ -88,9 +108,12 @@ impl Authorization {
                 local(db)?;
                 (guard.lock().unwrap())(db)
             }),
+            admission: self.admission,
             publication: self.publication,
             service: self.service,
             live: self.live,
+            job: self.job,
+            job_bearer: self.job_bearer,
         }
     }
 
@@ -112,10 +135,24 @@ impl Authorization {
     }
 
     pub(crate) fn authorize(&self, db: &Db<'_>) -> Result<()> {
-        (self.local)(db)?;
+        self.check_local(db)?;
+        if let Some(admission) = &self.admission {
+            admission(db)?;
+        }
         if let Some(publish) = &self.publication {
             publish(db)?;
         }
+        Ok(())
+    }
+
+    pub(crate) fn check_local(&self, db: &Db<'_>) -> Result<()> {
+        if let Some(authority) = &self.live {
+            authority.authorize(db)?;
+        }
+        if let Some(job) = &self.job {
+            job.authorize(db)?;
+        }
+        (self.local)(db)?;
         Ok(())
     }
 
@@ -135,49 +172,71 @@ impl Authorization {
         // Live checks may resolve nested resources. Keep that state off the
         // effect caller's future frame; trusted local callbacks remain ready.
         Either::Right(Box::pin(async move {
-            let check = self.local.clone();
-            service.store.read(move |db| check(db)).await?;
+            let check = self.clone();
+            service.store.read(move |db| check.check_local(db)).await?;
             if let Some(authority) = &self.live {
                 authority.recheck(service).await?;
             }
-            let check = self.local.clone();
-            service.store.read(move |db| check(db)).await
+            if let Some(job) = &self.job {
+                job.recheck(service).await?;
+            }
+            let check = self.clone();
+            service.store.read(move |db| check.check_local(db)).await
         }))
+    }
+
+    /// Only a concrete accepted-job handoff may detach from the turn's bearer.
+    /// Extra guards and final-publication provenance remain attached.
+    pub(crate) async fn accepted(mut self) -> Result<Self> {
+        self.recheck().await?;
+        if let Some(bearer) = &self.job_bearer {
+            let service = self
+                .service
+                .as_ref()
+                .ok_or_else(|| Error::forbidden("Missing initiating service."))?;
+            let job = jobs::Accepted::capture(service, bearer).await?;
+            // A cancellation racing registration must also invalidate admission.
+            self.recheck().await?;
+            self.live = None;
+            self.job = Some(job);
+            self.job_bearer = None;
+        } else if self
+            .live
+            .as_ref()
+            .is_some_and(|authority| authority.bearer.is_some())
+        {
+            return Err(Error::forbidden(
+                "This authority cannot be retained as a management job.",
+            ));
+        }
+        // The request's one-shot callback still runs in its admission transaction.
+        // It is not a reusable background grant or a second publication callback.
+        self.admission = None;
+        Ok(self)
+    }
+
+    pub(crate) async fn cancelled(&self) {
+        match &self.job {
+            Some(job) => job.cancelled().await,
+            None => futures_util::future::pending().await,
+        }
+    }
+
+    pub(crate) fn has_async_checks(&self) -> bool {
+        self.service.is_some()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin_grant_fixture::{Fixture, contribution, support};
+    use crate::plugin_grant_fixture::Fixture;
     use crate::{agent_fixture::AgentFixture, mission_fixture::MissionFixture, validation::text};
     use serde_json::json;
     use std::sync::atomic::Ordering;
 
     async fn delegated() -> (Fixture, String) {
-        let f = Fixture::new().await;
-        f.marker("live-parent").await;
-        f.set(json!([contribution("tool", "grant_probe_post", support())]))
-            .await;
-        let child =
-            f.s.agent_fixture(
-                json!({ "name": "Child", "access": { "installation": true } }),
-                None,
-            )
-            .await
-            .unwrap();
-        let child_id = text(&child, "id");
-        f.set_for(
-            child_id,
-            json!([contribution(
-                "tool",
-                "grant_probe_post",
-                json!([{ "resourceType": "thread", "id": "support-thread" }])
-            )]),
-        )
-        .await;
-        let (_, bearer) = f.delegated(crate::config::MAIN_AGENT_ID, child_id).await;
-        (f, bearer)
+        Fixture::delegated_manager().await
     }
 
     #[tokio::test]
