@@ -1340,7 +1340,7 @@ fail before dispatch. Other types, such as a message's author, remain unrestrict
 An explicit `runCredentials` contribution must also be the package's chosen
 supplier; a full grant on another instance never supplies its credentials.
 
-The SQL schema advances from 22 to 23 after the timeline projection upgrade. Existing grants remain full access per
+The SQL schema advances from 23 to 24 after the timeline projection upgrade. Existing grants remain full access per
 instance. Migration retains the old enabled, name-ordered credential supplier of
 active packages that declare run credentials. Removing the selected instance or
 its credential grant leaves a cleared supplier, including across restart and

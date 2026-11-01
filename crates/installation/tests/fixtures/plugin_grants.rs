@@ -45,7 +45,10 @@ impl Fixture {
             .await;
         let child =
             f.s.agent_fixture(
-                json!({ "name": "Child", "access": { "installation": true } }),
+                json!({
+                    "name": "Child",
+                    "access": { "installation": true },
+                }),
                 None,
             )
             .await
@@ -282,17 +285,25 @@ return {
     end,
 }
 "#;
-        let installed =
-            common::package_install(&s, &json!({ "manifest": manifest, "source": source }))
-                .await
-                .unwrap();
+        let installed = common::package_install(
+            &s,
+            &json!({
+                "manifest": manifest,
+                "source": source,
+            }),
+        )
+        .await
+        .unwrap();
         common::package_approve(&s, "grant-probe", "1", text(&installed, "digest"))
             .await
             .unwrap();
         let instance = common::save_plugin(
             &s,
             "grant-probe",
-            &json!({"name":"Probe","enabled":true}),
+            &json!({
+                "name": "Probe",
+                "enabled": true,
+            }),
             None,
         )
         .await
@@ -302,7 +313,11 @@ return {
             .unwrap();
         let task = s
             .task_fixture(
-                json!({"name":"Probe","agentId":MAIN_AGENT_ID,"prompt":"Probe"}),
+                json!({
+                    "name": "Probe",
+                    "agentId": MAIN_AGENT_ID,
+                    "prompt": "Probe",
+                }),
                 None,
             )
             .await
@@ -355,7 +370,12 @@ return {
     pub(crate) async fn delegated(&self, requester: &str, target: &str) -> (String, String) {
         self.s
             .agent_fixture(
-                json!({ "access": { "delegation": true, "installation": true } }),
+                json!({
+                    "access": {
+                        "delegation": true,
+                        "installation": true,
+                    },
+                }),
                 Some(requester),
             )
             .await
@@ -369,7 +389,10 @@ return {
         self.s
             .chat_send(
                 parent_id,
-                json!({ "id": cairn_installation::config::id(), "text": "Delegate" }),
+                json!({
+                    "id": cairn_installation::config::id(),
+                    "text": "Delegate",
+                }),
             )
             .await
             .unwrap();
@@ -377,7 +400,10 @@ return {
         let task = cairn_installation::delegation::delegate(
             &self.s,
             &parent_token,
-            &json!({ "agentId": target, "task": "Scoped task" }),
+            &json!({
+                "agentId": target,
+                "task": "Scoped task",
+            }),
         )
         .await
         .unwrap();
@@ -497,7 +523,13 @@ pub(crate) async fn running_conversation(s: &Arc<Service>, chat: &str) -> String
         .unwrap();
     let config = s.mcps.run_configuration(s, &run).await.unwrap();
     s.store
-        .save_checkpoint_boundary(run_id, json!({ "completed": true, "launched": true }))
+        .save_checkpoint_boundary(
+            run_id,
+            json!({
+                "completed": true,
+                "launched": true,
+            }),
+        )
         .await
         .unwrap();
     text(&config["env"], "CAIRN_MCP_RUN_TOKEN").into()

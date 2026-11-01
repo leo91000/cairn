@@ -546,7 +546,10 @@ mod tests {
             let instance = crate::common::save_plugin(
                 &f.s,
                 "retained-source",
-                &json!({ "name": "Source", "enabled": true }),
+                &json!({
+                    "name": "Source",
+                    "enabled": true,
+                }),
                 None,
             )
             .await

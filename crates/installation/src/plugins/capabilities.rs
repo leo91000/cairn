@@ -750,7 +750,10 @@ mod authorization_tests {
                     .await
                     .unwrap();
                 let context = transfer_context(&f, MAIN_AGENT_ID, false).await;
-                let bytes = json!({ "data": "synthetic original bytes", "encoding": "text" });
+                let bytes = json!({
+                    "data": "synthetic original bytes",
+                    "encoding": "text",
+                });
                 let file = match original {
                     "owner" => {
                         f.s.plugins
@@ -864,7 +867,11 @@ mod authorization_tests {
             .call_authorized(
                 &first,
                 "files.append",
-                &json!({ "id": id, "offset": 0, "data": "A" }),
+                &json!({
+                    "id": id,
+                    "offset": 0,
+                    "data": "A",
+                }),
                 Some(&access_first),
             )
             .unwrap();
@@ -874,7 +881,11 @@ mod authorization_tests {
                 .call_authorized(
                     &second,
                     "files.append",
-                    &json!({ "id": id, "offset": 1, "data": "B" }),
+                    &json!({
+                        "id": id,
+                        "offset": 1,
+                        "data": "B",
+                    }),
                     Some(&stale_second)
                 )
                 .unwrap_err()
@@ -918,7 +929,11 @@ mod authorization_tests {
             .call_authorized(
                 &second,
                 "files.append",
-                &json!({ "id": id, "offset": 1, "data": "B" }),
+                &json!({
+                    "id": id,
+                    "offset": 1,
+                    "data": "B",
+                }),
                 Some(&access_second),
             )
             .unwrap();

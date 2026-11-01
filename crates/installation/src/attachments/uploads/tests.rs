@@ -511,7 +511,10 @@ async fn attachment_publication_rechecks_delegation_after_preparation() {
         .await;
     let child =
         f.s.agent_fixture(
-            json!({ "name": "Child", "access": { "installation": true } }),
+            json!({
+                "name": "Child",
+                "access": { "installation": true },
+            }),
             None,
         )
         .await

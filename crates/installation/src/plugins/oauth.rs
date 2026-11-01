@@ -768,7 +768,10 @@ where
             )?;
             db.audit(
                 "plugin.oauth.disconnected",
-                &json!({ "instance": current.id, "plugin": current.plugin_id }),
+                &json!({
+                    "instance": current.id,
+                    "plugin": current.plugin_id,
+                }),
             )?;
             Ok(())
         })

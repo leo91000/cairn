@@ -38,10 +38,17 @@ async fn tools_commands_and_hooks_resolve_every_designation_and_reject_contradic
         .unwrap();
     assert_eq!(agents::instructions(&f.s, &run).await.unwrap(), "");
     for input in [
-        json!({"channel":"support","author":"anyone"}),
+        json!({
+            "channel": "support",
+            "author": "anyone",
+        }),
         json!({"*":"support"}),
         json!({"thread":"support-thread"}),
-        json!({"channel":"support","thread":"support-thread","server":"guild"}),
+        json!({
+            "channel": "support",
+            "thread": "support-thread",
+            "server": "guild",
+        }),
         json!({"items":[{"channel":"support"}]}),
     ] {
         agents::call_tool(&f.s, &f.bearer, "grant_probe_post", &input)
@@ -62,10 +69,19 @@ async fn tools_commands_and_hooks_resolve_every_designation_and_reject_contradic
         json!({}),
         json!({"channel":"general"}),
         json!({"*":"general"}),
-        json!({"*":"support","items":[{"channel":"general"}]}),
+        json!({
+            "*": "support",
+            "items": [{"channel":"general"}],
+        }),
         json!({"thread":"general-thread"}),
-        json!({"channel":"support","thread":"general-thread"}),
-        json!({"channel":"support","server":"different"}),
+        json!({
+            "channel": "support",
+            "thread": "general-thread",
+        }),
+        json!({
+            "channel": "support",
+            "server": "different",
+        }),
         json!({"channel":"unknown"}),
         json!({"items":[{"channel":"support"},{"channel":"general"}]}),
         json!({"channel":""}),
@@ -98,7 +114,11 @@ async fn tools_commands_and_hooks_resolve_every_designation_and_reject_contradic
     agents::command(
         &f.s,
         &f.bearer,
-        &json!({"plugin":"grant-probe","command":"post","args":["support"]}),
+        &json!({
+            "plugin": "grant-probe",
+            "command": "post",
+            "args": ["support"],
+        }),
     )
     .await
     .unwrap();
@@ -106,7 +126,11 @@ async fn tools_commands_and_hooks_resolve_every_designation_and_reject_contradic
         agents::command(
             &f.s,
             &f.bearer,
-            &json!({"plugin":"grant-probe","command":"post","args":["general"]})
+            &json!({
+                "plugin": "grant-probe",
+                "command": "post",
+                "args": ["general"],
+            })
         )
         .await
         .is_err()
@@ -216,7 +240,10 @@ async fn instances_are_filtered_when_another_grants_a_different_contribution() {
     let second = common::save_plugin(
         &f.s,
         "grant-probe",
-        &json!({"name":"Second","enabled":true}),
+        &json!({
+            "name": "Second",
+            "enabled": true,
+        }),
         None,
     )
     .await
@@ -262,7 +289,10 @@ async fn instances_are_filtered_when_another_grants_a_different_contribution() {
             &f.s,
             &f.bearer,
             "grant_probe_post",
-            &json!({"channel":"support","instance":second["id"]})
+            &json!({
+                "channel": "support",
+                "instance": second["id"],
+            })
         )
         .await
         .is_err()
@@ -272,7 +302,10 @@ async fn instances_are_filtered_when_another_grants_a_different_contribution() {
         &f.s,
         &f.bearer,
         "grant_probe_post",
-        &json!({"channel":"support","instance":f.instance}),
+        &json!({
+            "channel": "support",
+            "instance": f.instance,
+        }),
     )
     .await
     .unwrap();
@@ -290,7 +323,10 @@ async fn revocation_during_io_withholds_the_result_and_prevents_the_next_effect(
             &s,
             &bearer,
             "grant_probe_post",
-            &json!({"channel":"support","two":true}),
+            &json!({
+                "channel": "support",
+                "two": true,
+            }),
         )
         .await
     });
@@ -309,7 +345,12 @@ async fn delegated_plugin_instructions_recheck_the_requesters_contribution_grant
     let f = Fixture::new().await;
     let requester =
         f.s.agent_fixture(
-            json!({ "access": { "delegation": true, "installation": true } }),
+            json!({
+                "access": {
+                    "delegation": true,
+                    "installation": true,
+                },
+            }),
             Some(MAIN_AGENT_ID),
         )
         .await
@@ -317,7 +358,10 @@ async fn delegated_plugin_instructions_recheck_the_requesters_contribution_grant
     let requester_id = text(&requester, "id");
     let child =
         f.s.agent_fixture(
-            json!({ "name": "Child", "access": { "installation": true } }),
+            json!({
+                "name": "Child",
+                "access": { "installation": true },
+            }),
             None,
         )
         .await
@@ -334,7 +378,10 @@ async fn delegated_plugin_instructions_recheck_the_requesters_contribution_grant
     let parent_id = text(&parent, "id");
     f.s.chat_send(
         parent_id,
-        json!({ "id": cairn_installation::config::id(), "text": "Delegate" }),
+        json!({
+            "id": cairn_installation::config::id(),
+            "text": "Delegate",
+        }),
     )
     .await
     .unwrap();
@@ -342,7 +389,10 @@ async fn delegated_plugin_instructions_recheck_the_requesters_contribution_grant
     let task = cairn_installation::delegation::delegate(
         &f.s,
         &parent_token,
-        &json!({ "agentId": child_id, "task": "Use the plugin" }),
+        &json!({
+            "agentId": child_id,
+            "task": "Use the plugin",
+        }),
     )
     .await
     .unwrap();
@@ -394,7 +444,10 @@ async fn delegated_descendant_grants_are_resolved_and_rechecked_after_requester_
     let parent_id = text(&parent, "id");
     f.s.chat_send(
         parent_id,
-        json!({"id":cairn_installation::config::id(),"text":"Delegate"}),
+        json!({
+            "id": cairn_installation::config::id(),
+            "text": "Delegate",
+        }),
     )
     .await
     .unwrap();
@@ -402,7 +455,10 @@ async fn delegated_descendant_grants_are_resolved_and_rechecked_after_requester_
     let task = cairn_installation::delegation::delegate(
         &f.s,
         &parent_token,
-        &json!({"agentId":child_id,"task":"Use support"}),
+        &json!({
+            "agentId": child_id,
+            "task": "Use support",
+        }),
     )
     .await
     .unwrap();
@@ -441,13 +497,22 @@ async fn credential_supplier_is_explicit_and_reductions_never_select_another() {
     let second = common::save_plugin(
         &f.s,
         "grant-probe",
-        &json!({"name":"Second","enabled":true,"settings":{"marker":"second"}}),
+        &json!({
+            "name": "Second",
+            "enabled": true,
+            "settings": { "marker": "second" },
+        }),
         None,
     )
     .await
     .unwrap();
     let current = f.api("GET", json!({})).await.unwrap();
-    let full = |id: &Value| json!({"instanceId":id,"access":{"type":"full"}});
+    let full = |id: &Value| {
+        json!({
+            "instanceId": id,
+            "access": { "type": "full" },
+        })
+    };
     let first = json!(f.instance);
     let saved = f
         .api(
@@ -569,7 +634,10 @@ async fn transfer_reads_reauthorize_the_producing_contribution_and_resources() {
         &f.s,
         &f.bearer,
         "grant_probe_post",
-        &json!({ "channel": "support", "download": true }),
+        &json!({
+            "channel": "support",
+            "download": true,
+        }),
     )
     .await
     .unwrap()
@@ -602,12 +670,20 @@ async fn unavailable_existing_grants_and_their_supplier_survive_other_reductions
     let second = common::save_plugin(
         &f.s,
         "grant-probe",
-        &json!({ "name": "Second", "enabled": true }),
+        &json!({
+            "name": "Second",
+            "enabled": true,
+        }),
         None,
     )
     .await
     .unwrap();
-    let full = |id: &Value| json!({ "instanceId": id, "access": { "type": "full" } });
+    let full = |id: &Value| {
+        json!({
+            "instanceId": id,
+            "access": { "type": "full" },
+        })
+    };
     let current = f.api("GET", json!({})).await.unwrap();
     let saved = f
         .api(
@@ -692,9 +768,11 @@ async fn merges_accept_semantically_covered_descendant_grants() {
     .await;
     let merged =
         f.s.merge_agents(
-            serde_json::from_value(
-                json!({ "sourceId": source_id, "targetId": MAIN_AGENT_ID, "confirm": true }),
-            )
+            serde_json::from_value(json!({
+                "sourceId": source_id,
+                "targetId": MAIN_AGENT_ID,
+                "confirm": true,
+            }))
             .unwrap(),
         )
         .await
@@ -718,7 +796,10 @@ async fn deferred_resource_effects_retain_the_delegation_resource_ceiling() {
     .unwrap();
     let child =
         f.s.agent_fixture(
-            json!({ "name": "Child", "access": { "installation": true } }),
+            json!({
+                "name": "Child",
+                "access": { "installation": true },
+            }),
             None,
         )
         .await
@@ -741,7 +822,10 @@ async fn deferred_resource_effects_retain_the_delegation_resource_ceiling() {
             .unwrap();
     f.s.chat_send(
         text(&parent, "id"),
-        json!({ "id": cairn_installation::config::id(), "text": "Delegate" }),
+        json!({
+            "id": cairn_installation::config::id(),
+            "text": "Delegate",
+        }),
     )
     .await
     .unwrap();
@@ -749,7 +833,10 @@ async fn deferred_resource_effects_retain_the_delegation_resource_ceiling() {
     let task = cairn_installation::delegation::delegate(
         &f.s,
         &parent_token,
-        &json!({ "agentId": child_id, "task": "Read resources" }),
+        &json!({
+            "agentId": child_id,
+            "task": "Read resources",
+        }),
     )
     .await
     .unwrap();
@@ -855,7 +942,10 @@ async fn nested_coverage_effects_stop_when_the_calling_token_is_revoked() {
     let f = Fixture::new().await;
     let child =
         f.s.agent_fixture(
-            json!({ "name": "Child", "access": { "installation": true } }),
+            json!({
+                "name": "Child",
+                "access": { "installation": true },
+            }),
             None,
         )
         .await
@@ -903,7 +993,10 @@ async fn appending_a_protected_transfer_retains_its_source_authority() {
         &f.s,
         &f.bearer,
         "grant_probe_post",
-        &json!({ "channel": "support", "download": true }),
+        &json!({
+            "channel": "support",
+            "download": true,
+        }),
     )
     .await
     .unwrap()
@@ -952,7 +1045,10 @@ async fn gateway_calls_recheck_the_requesters_resource_coverage() {
         .unwrap();
     let child =
         f.s.agent_fixture(
-            json!({ "name": "Child", "access": { "installation": true } }),
+            json!({
+                "name": "Child",
+                "access": { "installation": true },
+            }),
             None,
         )
         .await
@@ -990,7 +1086,13 @@ async fn gateway_calls_recheck_the_requesters_resource_coverage() {
     let request = common::request("POST", &format!("/mcp-gateway/{}", text(&remote, "id")))
         .header("authorization", format!("Bearer {token}"))
         .body(Body::from(
-            json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {} }).to_string(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/list",
+                "params": {},
+            })
+            .to_string(),
         ))
         .unwrap();
     let response = common::send(&app, request).await;
@@ -1050,7 +1152,10 @@ async fn condition_watchers_keep_distinct_requester_authority() {
             .unwrap();
     let child =
         f.s.agent_fixture(
-            json!({ "name": "Child", "access": { "installation": true } }),
+            json!({
+                "name": "Child",
+                "access": { "installation": true },
+            }),
             None,
         )
         .await
@@ -1149,7 +1254,10 @@ async fn instruction_only_packages_cannot_shadow_a_granted_tool() {
         let instance = common::save_plugin(
             &f.s,
             plugin,
-            &json!({ "name": plugin, "enabled": true }),
+            &json!({
+                "name": plugin,
+                "enabled": true,
+            }),
             None,
         )
         .await
@@ -1218,7 +1326,10 @@ async fn repeated_appends_preserve_the_supported_chunked_transfer_size() {
             &f.s,
             &f.bearer,
             "grant_probe_other",
-            &json!({ "chunks": 90, "target": target }),
+            &json!({
+                "chunks": 90,
+                "target": target,
+            }),
         )
         .await
         .unwrap()
@@ -1276,7 +1387,10 @@ async fn requester_deletion_stops_the_turn_without_blocking_a_fresh_authorized_t
     f.s.chat_pause(&child_chat, false).await.unwrap();
     f.s.chat_send(
         &child_chat,
-        json!({ "id": cairn_installation::config::id(), "text": "Continue with this agent" }),
+        json!({
+            "id": cairn_installation::config::id(),
+            "text": "Continue with this agent",
+        }),
     )
     .await
     .unwrap();
@@ -1312,7 +1426,10 @@ async fn deleting_an_idle_requester_pauses_its_unstarted_delegated_work() {
     let parent_id = text(&parent, "id");
     f.s.chat_send(
         parent_id,
-        json!({ "id": cairn_installation::config::id(), "text": "Delegate" }),
+        json!({
+            "id": cairn_installation::config::id(),
+            "text": "Delegate",
+        }),
     )
     .await
     .unwrap();
@@ -1320,7 +1437,10 @@ async fn deleting_an_idle_requester_pauses_its_unstarted_delegated_work() {
     let task = cairn_installation::delegation::delegate(
         &f.s,
         &token,
-        &json!({ "agentId": child["id"], "task": "Pending task" }),
+        &json!({
+            "agentId": child["id"],
+            "task": "Pending task",
+        }),
     )
     .await
     .unwrap();
@@ -1358,7 +1478,10 @@ async fn merge_rechecks_previously_resolved_instances_before_publication() {
     let second = common::save_plugin(
         &f.s,
         "grant-probe",
-        &json!({ "name": "Second", "enabled": true }),
+        &json!({
+            "name": "Second",
+            "enabled": true,
+        }),
         None,
     )
     .await
@@ -1494,7 +1617,10 @@ async fn gateway_reresolves_external_ancestry_after_discovery_without_a_local_re
         .unwrap();
     let child =
         f.s.agent_fixture(
-            json!({ "name": "Child", "access": { "installation": true } }),
+            json!({
+                "name": "Child",
+                "access": { "installation": true },
+            }),
             None,
         )
         .await
@@ -1575,7 +1701,10 @@ async fn consuming_a_transfer_rechecks_its_source_after_an_async_effect() {
         &f.s,
         &f.bearer,
         "grant_probe_post",
-        &json!({ "thread": "support-thread", "download": true }),
+        &json!({
+            "thread": "support-thread",
+            "download": true,
+        }),
     )
     .await
     .unwrap()

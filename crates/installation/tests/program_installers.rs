@@ -1341,7 +1341,11 @@ async fn revoked_agent_first_use_cannot_download_or_publish_a_program() {
         let task = f
             .service
             .task_fixture(
-                json!({ "name": "Probe", "agentId": MAIN_AGENT_ID, "prompt": "Probe" }),
+                json!({
+                    "name": "Probe",
+                    "agentId": MAIN_AGENT_ID,
+                    "prompt": "Probe",
+                }),
                 None,
             )
             .await
@@ -1384,7 +1388,10 @@ async fn revoked_agent_first_use_cannot_download_or_publish_a_program() {
                     &s,
                     &bearer,
                     "onepassword",
-                    &json!({ "operation": "vaults", "accountId": instance }),
+                    &json!({
+                        "operation": "vaults",
+                        "accountId": instance,
+                    }),
                 )
                 .await
                 .map(|_| ())
