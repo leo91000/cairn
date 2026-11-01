@@ -363,8 +363,35 @@ pub(crate) async fn capture_fixture(s: &Service, id: &str, home: &Path) -> Resul
     capture(s, id, home).await
 }
 
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct MaterializeProbe {
+    pub(crate) old_pid: std::sync::atomic::AtomicU32,
+    pub(crate) overlapped: std::sync::atomic::AtomicBool,
+    pub(crate) entries: std::sync::atomic::AtomicU64,
+}
+
 /// Writes the vault credentials into a manager-only Codex home.
 async fn materialize(s: &Service, id: &str, home: &Path) -> Result<()> {
+    #[cfg(test)]
+    let probe = {
+        s.accounts
+            .codex_materialize_probes
+            .lock()
+            .unwrap()
+            .get(id)
+            .cloned()
+    };
+    #[cfg(test)]
+    if let Some(probe) = probe {
+        use std::sync::atomic::Ordering;
+        let old = probe.old_pid.load(Ordering::Relaxed);
+        if old != 0 && unsafe { libc::kill(old as libc::pid_t, 0) } == 0 {
+            probe.overlapped.store(true, Ordering::Relaxed);
+        }
+        probe.entries.fetch_add(1, Ordering::Relaxed);
+    }
+
     // A previous process may have refreshed just before a crash or a failed vault write.
     // Recover that authoritative copy before overwriting it.
     if home.join("auth.json").exists() {

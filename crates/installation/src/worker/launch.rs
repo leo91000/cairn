@@ -653,12 +653,7 @@ impl Execution<'_> {
             Ok::<_, Error>(exit)
         }
         .await;
-        if let Some(observation) = self.observation.take() {
-            observation.revoke();
-        }
-        if let Some(broker) = auth_broker {
-            broker.close().await;
-        }
+        self.close_account_output(auth_broker).await;
         let exit = result?;
         let saved = self.checkpoint.snapshot().await;
         let observation_pending = saved.managed() && saved.terminal_code.is_none();
@@ -1126,6 +1121,14 @@ impl Execution<'_> {
         }
         close_output_readers(out, err, result.is_err()).await;
         result
+    }
+
+    async fn close_account_output(&mut self, broker: Option<broker::Broker>) {
+        self.revoke_output_scope();
+        if let Some(broker) = broker {
+            broker.close().await;
+        }
+        self.observation.take();
     }
 
     fn revoke_output_scope(&self) {

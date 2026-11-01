@@ -436,3 +436,93 @@ async fn v2_worker_reporting_child() {
         probe.snapshot()
     );
 }
+
+#[tokio::test]
+async fn actual_attempt_cleanup_precedes_same_account_refresh_and_real_account_switch() {
+    use crate::accounts::broker::tests::{active_codex, add_account, pending_once, seed_codex};
+    let mut active = active_codex().await;
+    let s = &active.fixture.service;
+    let old = &active.fixture.lease;
+    let second = add_account(s, Provider::Codex, "Second account").await;
+    seed_codex(s, &second, "C", "second-identity").await;
+    // Exclude the previous account deterministically even if the fixture's
+    // wall-clock reset timestamp advances during the metadata refresh.
+    let mut previous = s.accounts.account(s, &old.account_id).await.unwrap();
+    previous.enabled = false;
+    s.store.save_coding_account(&previous).await.unwrap();
+    let id = old.run_id.clone();
+    let row = json!({ "id": id, "taskId": id, "status": "running" });
+    s.store
+        .transaction(move |db| db.add_run_fixture(&row, None).map(|_| ()))
+        .await
+        .unwrap();
+    let mut run = s.store.run(&old.run_id).await.unwrap();
+    run["snapshot"]["agent"]["model"] = "fixture-fast".into();
+    let mut account = Some(old.clone());
+    let cancel = CancellationToken::new();
+    let checkpoint = Checkpoint::new(
+        s.store.clone(),
+        old.run_id.clone(),
+        RunCheckpoint::fresh(None),
+    );
+    let mut execution = Execution {
+        s,
+        id: old.run_id.clone(),
+        run: &mut run,
+        account: &mut account,
+        preparation: None,
+        cancel: &cancel,
+        checkpoint: &checkpoint,
+        sensitive: &active.history,
+        observation: Some(active.observation),
+        provider: Provider::Codex,
+        directory: s.config.data_dir.join("fixture-run"),
+        attempt_id: crate::config::id(),
+        reservation: None,
+        output_probe: None,
+    };
+    let mut cleanup = Box::pin(execution.close_account_output(Some(active.broker)));
+    assert!(pending_once(cleanup.as_mut()).await);
+    active.stopped.cancelled().await;
+    active.refresh_gate.release().await;
+    let closing = active.close_gate.event().await;
+    assert!(closing["event"] == "terminating" && closing["pid"] == active.pid);
+    assert!(
+        pending_once(cleanup.as_mut()).await,
+        "actual attempt cleanup must wait for actual session close"
+    );
+    assert_eq!(active.materialize.entries.load(Ordering::Relaxed), 1);
+    active.close_gate.release().await;
+    cleanup.await;
+    assert!(unsafe { libc::kill(active.pid as libc::pid_t, 0) } != 0);
+    assert!(execution.observation.is_none());
+    assert!(!old.home.join(crate::accounts::broker::SOCKET).exists());
+    let workspace = Workspace {
+        prepared: json!({ "isolated": false }),
+        state_home: old.home.clone(),
+        env: Environment::new(),
+        mcp: json!({}),
+    };
+    // The real switch releases the old lease, refreshes its codex-monitor home,
+    // acquires another eligible account and runs the actual adapter transition.
+    execution.switch_account(&workspace).await.unwrap();
+    assert!(!active.materialize.overlapped.load(Ordering::Relaxed));
+    assert!(active.materialize.entries.load(Ordering::Relaxed) >= 2);
+    assert!(
+        execution
+            .account
+            .as_ref()
+            .is_some_and(|lease| lease.account_id == second)
+    );
+    let current = execution.account.as_ref().unwrap().clone();
+    let expected = s.accounts.redactions(s, &current).await.unwrap();
+    assert!(
+        expected
+            .iter()
+            .all(|value| active.history.snapshot().contains(value))
+    );
+    drop(execution);
+    s.accounts.release(s, &current).await.unwrap();
+    assert!(active.request.await.unwrap().is_err());
+    s.shutdown.cancel();
+}

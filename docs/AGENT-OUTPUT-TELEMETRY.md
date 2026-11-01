@@ -70,16 +70,32 @@ publication protocol before it may enable this aggregation mode.
 ## Revoke and completion barrier
 
 Revoke synchronously closes **new** admission. A response admitted earlier may
-finish or be aborted while its guard/history is still owned. The async broker
-close aborts and joins the owned task; no delivery is possible after that
-completion barrier. It never waits for a detached Store commit guard to drop.
-The queued job already published its generations before admission and can finish
-independently. Reader handles abort on drop; ordinary EOF is joined, while wait
-errors/start failures abort and join both readers. All attempt preparation,
-wait and reconcile results pass through scope/broker cleanup before returning.
-The outer failure publisher then snapshots the same final history. No reader or broker may produce additional frames or credential deliveries
-after its completed cleanup barrier. Previously admitted fixed, nonsecret
-summary callbacks may drain later from the bounded diagnostic sink.
+finish socket I/O or be stopped while its guard/history is still owned. The
+broker NEVER aborts an admitted provider/credential operation. Its independent
+owner retains the existing account lock through provider rotation, actual
+Codex Session.close/process termination, capture and durable persistence. Stop
+is cooperative before admission and in socket reads/writes only. A partial
+socket write can stop without abandoning that earlier critical section.
+
+Async close signals stop and joins this owner, so no further socket write is
+possible after its completion barrier. If the close waiter or execution is
+cancelled, Drop signals stop but does not synchronously join or abort: the
+independent broker owner still completes the admitted critical section and
+releases its account lock only afterwards. Immediate same-account refresh/home
+reuse therefore remains serialized behind actual session termination and
+capture. Already-queued Store jobs keep their independent commit guards; there
+is no cancellation/rollback of their durable work. Normal legacy close now
+waits for an ongoing operation rather than merely dropping its listener. This
+can expose the existing provider RPC/filesystem/durability latency; no deadline
+or timeout is increased and no bounded total close latency is promised.
+
+Reader handles abort on drop; ordinary EOF is joined, while wait errors/start
+failures abort and join both readers. All attempt preparation, wait and reconcile
+results pass through scope/broker cleanup before returning. The outer failure
+publisher then snapshots the same final history. No reader or broker may produce
+additional frames or credential writes after its completed cleanup barrier.
+Previously admitted fixed, nonsecret summary callbacks may drain later from the
+bounded diagnostic sink.
 
 ## Regression and performance evidence
 
@@ -91,6 +107,15 @@ worker wait, Store and outer record_failure then check canonical text/payload,
 ordinary diagnostics, unknown performance and outer error separately. The outer
 conflict is intentionally injected at the actual wait boundary; this is not a
 provider/SQLite-failure cause reproduction. Legacy is a separate process control.
+
+Ownership regressions pause an actual local Claude provider exchange after its
+validated response and before atomic persistence, and a real fixture Codex
+manager session before its RPC response and during termination. Closing or
+abandoning the close waiter must retain the account guard; an immediate refresh
+must see the old PID gone before actual materialize/home reuse. Further tests
+exercise partial socket delivery and the production attempt cleanup helper
+followed by the real account-switch path. Private socket gates control phases;
+they do not add product sleeps, deadlines or a replacement credential pipeline.
 
 Additive isolated controls exercise the V2 channel -> Reports -> real bounded
 sink/Capture route: one controlled final-only numeric summary, and the actual
