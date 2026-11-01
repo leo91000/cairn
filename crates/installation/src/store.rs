@@ -36,7 +36,7 @@ struct Pool {
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-pub(crate) const DATABASE_VERSION: i64 = 22;
+pub(crate) const DATABASE_VERSION: i64 = 23;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -187,6 +187,10 @@ impl Store {
         }
         if !fresh && version == 21 {
             crate::timeline::migration::upgrade(&mut writer)?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        }
+        if !fresh && version == 22 {
+            crate::artifacts::migration::upgrade(&mut writer)?;
         }
         if fresh {
             let tx = writer.transaction()?;
@@ -197,7 +201,7 @@ CREATE INDEX IF NOT EXISTS records_node_backups_run ON records(json_extract(data
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,created_at INTEGER NOT NULL CHECK(created_at BETWEEN 0 AND 9007199254740991),type TEXT NOT NULL CHECK(length(type)>0),text TEXT NOT NULL,payload TEXT CHECK(payload IS NULL OR json_valid(payload)));
 CREATE TABLE run_checkpoints(run_id TEXT PRIMARY KEY NOT NULL REFERENCES runs(id) ON DELETE CASCADE,state TEXT NOT NULL CHECK(json_valid(state) AND json_type(state)='object'));
 CREATE INDEX IF NOT EXISTS events_run ON events(run_id,id);
-CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY CHECK(key NOT LIKE 'run-checkpoint:%' AND key NOT LIKE 'chat-coding-agent:%' AND key NOT LIKE 'chat-coding-agent-request:%' AND key NOT LIKE 'chat-question:%' AND key NOT LIKE 'chat-attachment:%' AND key!='conversation-expiration' AND key NOT LIKE 'read-since:%' AND key NOT LIKE 'read:%' AND key NOT LIKE 'dismissed:%'),data TEXT NOT NULL,expires INTEGER);
+CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY CHECK(key NOT LIKE 'run-checkpoint:%' AND key NOT LIKE 'chat-coding-agent:%' AND key NOT LIKE 'chat-coding-agent-request:%' AND key NOT LIKE 'chat-question:%' AND key NOT LIKE 'chat-attachment:%' AND key!='conversation-expiration' AND key NOT LIKE 'read-since:%' AND key NOT LIKE 'read:%' AND key NOT LIKE 'dismissed:%' AND key NOT GLOB 'artifact:*' AND key NOT GLOB 'artifact-share:*' AND key NOT GLOB 'skill-source:*'),data TEXT NOT NULL,expires INTEGER);
 CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT,created_at INTEGER NOT NULL,action TEXT NOT NULL,detail TEXT NOT NULL);",
         )?;
             tx.pragma_update(None, "user_version", DATABASE_VERSION)?;
@@ -226,6 +230,8 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
             tx.execute_batch(crate::chats::question_storage::SCHEMA)?;
             tx.execute_batch(crate::attachments::sql::SCHEMA)?;
             tx.execute_batch(crate::reads::sql::SCHEMA)?;
+            tx.execute_batch(crate::artifacts::sql::SCHEMA)?;
+            tx.execute_batch(crate::skills::sql::SCHEMA)?;
             tx.execute_batch(crate::waits::sql::SCHEMA)?;
             tx.execute_batch(crate::chats::engine_switch::SCHEMA)?;
             tx.execute_batch(crate::timeline::SCHEMA)?;
@@ -1426,7 +1432,7 @@ mod schema_tests {
         drop(Store::open(root.path()).unwrap());
         let file = root.path().join("manager.db");
         let db = Connection::open(&file).unwrap();
-        db.execute_batch("DROP TABLE timeline_entries; DROP TABLE timeline_state; DROP TABLE run_progress; DROP TABLE plugin_hook_receipts; DROP TABLE plugin_hook_events; PRAGMA user_version=19; INSERT INTO kv(key,data) VALUES('hook-upgrade-fixture','true');").unwrap();
+        db.execute_batch("DROP TABLE skill_source_refs; DROP TABLE skill_sources; DROP TABLE artifact_visibility; DROP TABLE artifact_versions; DROP TABLE artifacts; DROP TABLE timeline_entries; DROP TABLE timeline_state; DROP TABLE run_progress; DROP TABLE plugin_hook_receipts; DROP TABLE plugin_hook_events; PRAGMA user_version=19; INSERT INTO kv(key,data) VALUES('hook-upgrade-fixture','true');").unwrap();
         drop(db);
         drop(Store::open(root.path()).unwrap());
         drop(Store::open(root.path()).unwrap());
@@ -1466,7 +1472,7 @@ mod schema_tests {
             .unwrap()
         };
         let retained = hook_schema(&db);
-        db.execute_batch("DROP TABLE timeline_entries; DROP TABLE timeline_state; DROP TABLE run_progress; PRAGMA user_version=20; INSERT INTO kv(key,data) VALUES('progress-upgrade-fixture','true');").unwrap();
+        db.execute_batch("DROP TABLE skill_source_refs; DROP TABLE skill_sources; DROP TABLE artifact_visibility; DROP TABLE artifact_versions; DROP TABLE artifacts; DROP TABLE timeline_entries; DROP TABLE timeline_state; DROP TABLE run_progress; PRAGMA user_version=20; INSERT INTO kv(key,data) VALUES('progress-upgrade-fixture','true');").unwrap();
         drop(db);
         drop(Store::open(root.path()).unwrap());
         drop(Store::open(root.path()).unwrap());
@@ -1541,8 +1547,59 @@ mod schema_tests {
     }
 
     #[test]
+    fn startup_steps_accept_a_database_upgraded_by_another_startup() {
+        type Upgrade = fn(&mut Connection) -> Result<()>;
+        let steps: [(&str, Upgrade); 8] = [
+            ("accounts", crate::accounts::migration::upgrade),
+            ("conversations", crate::chats::migration::upgrade),
+            ("questions", crate::chats::question_migration::upgrade),
+            ("attachments", crate::attachments::migration::upgrade),
+            ("personal state", crate::reads::migration::upgrade),
+            ("progress", crate::worker::progress::upgrade),
+            ("timeline", crate::timeline::migration::upgrade),
+            ("deliverables", crate::artifacts::migration::upgrade),
+        ];
+        let root = tempfile::tempdir().unwrap();
+        drop(Store::open(root.path()).unwrap());
+        let mut db = Connection::open(root.path().join("manager.db")).unwrap();
+        db.execute("INSERT INTO kv VALUES('startup-sentinel','true',NULL)", [])
+            .unwrap();
+        let schema = |db: &Connection| {
+            db.prepare("SELECT name,sql FROM sqlite_schema ORDER BY name")
+                .unwrap()
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        let before = schema(&db);
+        // A startup may have observed an earlier version before it waited for
+        // another startup's immediate transaction. Completed steps must be no-ops.
+        for (name, upgrade) in steps {
+            upgrade(&mut db).unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(
+                db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                DATABASE_VERSION
+            );
+            assert_eq!(schema(&db), before, "{name}");
+            assert_eq!(
+                db.query_row(
+                    "SELECT data FROM kv WHERE key='startup-sentinel'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+                "true"
+            );
+        }
+    }
+
+    #[test]
     fn existing_other_versions_fail_without_changing_the_database() {
-        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 23, 99] {
+        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, DATABASE_VERSION + 1, 99] {
             let root = tempfile::tempdir().unwrap();
             let db = Connection::open(root.path().join("manager.db")).unwrap();
             db.pragma_update(None, "user_version", version).unwrap();

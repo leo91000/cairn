@@ -598,3 +598,7 @@ mod resources;
 pub(crate) use resources::{
     RESOURCE_OPERATIONS, ResourceOperation, resource_operation, stage_resource_upload,
 };
+
+pub(crate) mod artifacts;
+
+pub(crate) use artifacts::{ARTIFACT_OPERATIONS, artifact_operation};

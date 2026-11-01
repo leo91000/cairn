@@ -350,7 +350,7 @@ private fun FilePreviewPage(
     localPath: String? = null,
     previous: (() -> Unit)? = null,
     next: (() -> Unit)? = null,
-    version: Int? = null,
+    version: Long? = null,
     artifact: Deliverable? = null,
     active: Boolean = true,
     position: String? = null,

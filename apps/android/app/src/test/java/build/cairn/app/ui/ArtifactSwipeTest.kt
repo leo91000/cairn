@@ -243,10 +243,10 @@ class ArtifactSwipeTest {
     fun filesPanelUsesVisibleGroupOrderAndHidesSupersededVersions(): Unit = withFiles { vm ->
         val entries =
             listOf(
-                files[0].copy(group = "Plans"),
+                files[0].copy(group = "Plans", version = 2),
                 files[1].copy(group = "Photos"),
                 files[2].copy(group = "Plans"),
-                files[0].copy(id = "old", version = 0),
+                files[0].copy(id = "old", version = 1),
             )
         ArtifactsPanel(vm, entries)
     }

@@ -1,17 +1,8 @@
 //! Revocable per-version links, read only through the authenticated relay.
 use super::*;
 use crate::store::Db;
-use serde::Deserialize;
 
 const NOT_FOUND: &str = "Public file not found";
-
-/// A public link (`artifact-share:{token}`) to one artifact version.
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ShareLink {
-    run_id: String,
-    id: String,
-}
 
 fn checked(value: Option<&str>) -> Result<&str> {
     match value {
@@ -40,33 +31,29 @@ pub fn tool() -> Value {
     })
 }
 
-pub(super) fn apply(db: &Db<'_>, record: &mut Value, visibility: &str, origin: &str) -> Result<()> {
+pub(super) fn apply(
+    db: &Db<'_>,
+    record: &mut Deliverable,
+    visibility: &str,
+    origin: &str,
+) -> Result<()> {
     if visibility == "public" {
-        crate::conversation_lifecycle::require_active_run(db, text(record, "runId"))?;
-        let token = record["publicToken"]
-            .as_str()
-            .filter(|t| !t.is_empty())
-            .map_or_else(id, str::to_owned);
-        let link = ShareLink {
-            run_id: text(record, "runId").to_owned(),
-            id: text(record, "id").to_owned(),
-        };
-        db.set(
-            &format!("artifact-share:{token}"),
-            &serde_json::to_value(link)?,
-            None,
-        )?;
-        let origin = origin.trim_end_matches('/');
-        record["publicUrl"] = format!("{origin}/artifacts/{token}").into();
-        record["publicToken"] = token.into();
+        crate::conversation_lifecycle::require_active_run(db, &record.run_id)?;
+        let token = record
+            .public_token
+            .clone()
+            .filter(|token| !token.is_empty())
+            .unwrap_or_else(id);
+        record.public_url = Some(format!(
+            "{}/artifacts/{token}",
+            origin.trim_end_matches('/')
+        ));
+        record.public_token = Some(token);
     } else {
-        if let Some(token) = record["publicToken"].as_str() {
-            db.delete(&format!("artifact-share:{token}"))?;
-        }
-        record["publicToken"] = Value::Null;
-        record["publicUrl"] = Value::Null;
+        record.public_token = None;
+        record.public_url = None;
     }
-    record["visibility"] = visibility.into();
+    record.visibility = Some(visibility.to_owned());
     Ok(())
 }
 
@@ -79,27 +66,36 @@ pub async fn set(
 ) -> Result<Value> {
     let bearer = bearer.map(str::to_owned);
     let expected_run = run.to_owned();
-    set_authorized(s, run, artifact, value, move |db| {
-        if let Some(token) = bearer {
-            let authorized = crate::project_workspaces::authorize_in(db, &token)?;
-            if authorized["id"] != expected_run {
-                return Err(Error::forbidden("Artifact is outside this run."));
+    set_authorized(
+        s,
+        run,
+        artifact,
+        value,
+        std::future::ready(Ok(())),
+        move |db| {
+            if let Some(token) = bearer {
+                let authorized = crate::project_workspaces::authorize_in(db, &token)?;
+                if authorized["id"] != expected_run {
+                    return Err(Error::forbidden("Artifact is outside this run."));
+                }
             }
-        }
-        Ok(())
-    })
+            Ok(())
+        },
+    )
     .await
 }
 
-pub(crate) async fn set_authorized<F>(
+pub(crate) async fn set_authorized<F, R>(
     s: &Service,
     run: &str,
     artifact: &str,
     value: &str,
+    recheck: R,
     authorize: F,
 ) -> Result<Value>
 where
     F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+    R: std::future::Future<Output = Result<()>> + Send,
 {
     uuid(run)?;
     uuid(artifact)?;
@@ -111,15 +107,15 @@ where
     } else {
         String::new()
     };
+    recheck.await?;
     s.store
         .transaction(move |db| {
             authorize(db)?;
             required(db.run(&run)?, "Run not found")?;
-            let key = format!("artifact:{run}:{artifact}");
-            let mut record = required(db.kv(&key)?, "Artifact not found")?;
+            let mut record = required(db.artifact(&run, &artifact)?, "Artifact not found")?;
             apply(db, &mut record, &value, &origin)?;
-            db.set(&key, &record, None)?;
-            Ok(record)
+            db.save_artifact_visibility(&record)?;
+            Ok(serde_json::to_value(record)?)
         })
         .await
 }
@@ -150,14 +146,10 @@ pub async fn http(s: &Service, token: &str, request: Request) -> Result<Response
     let record = s
         .store
         .read(move |db| {
-            let share = required(db.kv(&format!("artifact-share:{token}"))?, NOT_FOUND)?;
-            let share = ShareLink::deserialize(&share)?;
-            required(db.run(&share.run_id)?, NOT_FOUND)?;
-            let key = format!("artifact:{}:{}", share.run_id, share.id);
-            let record = required(db.kv(&key)?, NOT_FOUND)?;
-            if record["visibility"] != "public" || record["publicToken"] != token {
-                return Err(Error::not_found("Public file not found."));
-            }
+            let record = required(db.public_artifact(&token)?, NOT_FOUND)?;
+            required(db.run(&record.run_id)?, NOT_FOUND)?;
+            crate::conversation_lifecycle::require_active_run(db, &record.run_id)
+                .map_err(|_| Error::not_found(NOT_FOUND))?;
             Ok(record)
         })
         .await?;

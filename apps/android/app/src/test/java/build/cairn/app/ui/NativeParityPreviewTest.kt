@@ -129,8 +129,8 @@ class NativeParityPreviewTest {
                 if (compact)
                     listOf(
                         Deliverable(
-                            "report",
-                            "run",
+                            id = "report",
+                            runId = "run",
                             key = "report",
                             messageId = "reply",
                             title = "Compte rendu de la version",
@@ -142,8 +142,8 @@ class NativeParityPreviewTest {
                             group = "Rapports",
                         ),
                         Deliverable(
-                            "notes",
-                            "run",
+                            id = "notes",
+                            runId = "run",
                             key = "notes",
                             messageId = "reply",
                             title = "Notes de validation",
@@ -155,8 +155,8 @@ class NativeParityPreviewTest {
                             group = "Rapports",
                         ),
                         Deliverable(
-                            "changes",
-                            "run",
+                            id = "changes",
+                            runId = "run",
                             key = "changes",
                             messageId = "reply",
                             title = "Détails des modifications",

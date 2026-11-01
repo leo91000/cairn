@@ -35,29 +35,11 @@ val Chat.exclusiveSuspended: Boolean
         (run?.status ?: status) in listOf("running", "queued") &&
             (suspendedByExclusive != null || run?.suspendedByExclusive != null)
 
-@Serializable
-data class Deliverable(
-    val id: String,
-    val runId: String,
-    val messageId: String? = null,
-    val key: String,
-    val version: Int = 1,
-    val title: String = "",
-    val name: String = "",
-    val group: String = "",
-    val kind: String = "file",
-    val mediaType: String = "application/octet-stream",
-    val size: Long = 0,
-    val createdAt: Long = 0,
-    val visibility: String = "private",
-    val publicUrl: String? = null,
-    val previewStatus: String = "none",
-    val excerpt: String? = null,
-) {
-    fun path(preview: Boolean = false) =
-        "/runs/${segment(runId)}/artifacts/${segment(id)}" +
-            if (preview) "?preview=1" else "?download=1"
-}
+typealias Deliverable = build.cairn.contracts.Deliverable
+
+fun Deliverable.path(preview: Boolean = false) =
+    "/runs/${segment(runId)}/artifacts/${segment(id)}" +
+        if (preview) "?preview=1" else "?download=1"
 
 fun latestArtifacts(items: List<Deliverable>) =
     items

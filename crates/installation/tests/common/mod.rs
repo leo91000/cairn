@@ -785,3 +785,15 @@ pub fn resource_output(value: &Value) -> Value {
     };
     value[field].clone()
 }
+
+/// Complete persisted metadata, with overrides for a behavior exercised by a test.
+pub fn deliverable(run: &str, id: &str, overrides: &Value) -> cairn_contracts::Deliverable {
+    let mut value = serde_json::json!({
+        "id": id, "runId": run, "messageId": null, "key": "report", "version": 1,
+        "title": "Report", "name": "report.md", "group": "", "kind": "markdown",
+        "mediaType": "text/markdown", "size": 0, "createdAt": 1, "url": "",
+        "previewStatus": "none", "visibility": "private",
+    });
+    cairn_installation::store::merge(&mut value, overrides);
+    serde_json::from_value(value).unwrap()
+}

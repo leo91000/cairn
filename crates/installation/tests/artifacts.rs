@@ -592,8 +592,7 @@ async fn rejected_metadata_commit_removes_the_durable_unpublished_file() {
     let database = rusqlite::Connection::open(f.s.config.data_dir.join("manager.db")).unwrap();
     database
         .execute_batch(
-            "CREATE TRIGGER reject_artifact BEFORE INSERT ON kv
-             WHEN NEW.key LIKE 'artifact:%'
+            "CREATE TRIGGER reject_artifact BEFORE INSERT ON artifact_versions
              BEGIN SELECT RAISE(ABORT, 'rejected artifact commit'); END;",
         )
         .unwrap();
@@ -622,12 +621,19 @@ async fn preview_is_prepared_asynchronously_or_reports_missing_optional_tools_wi
         .publish(&json!({ "path": "/tmp/preview.png", "title": "Preview", "key": "preview" }))
         .await
         .unwrap();
-    let key = format!("artifact:{}:{}", f.run, text(&artifact, "id"));
+    let artifact_id = text(&artifact, "id");
     let completed = eventually(
         Duration::from_secs(30),
         Duration::from_millis(50),
         async || {
-            let item = s.store.kv(&key).await.unwrap().unwrap();
+            let item = serde_json::to_value(
+                s.store
+                    .artifact(&f.run, artifact_id)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap();
             (item["previewStatus"] != "pending").then_some(item)
         },
     )

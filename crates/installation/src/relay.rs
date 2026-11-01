@@ -96,6 +96,28 @@ pub(crate) async fn authorize_plugin_mcp_scope(
     credential_digest: &str,
     scope: &str,
 ) -> Result<()> {
+    authorize_mcp(
+        service,
+        credential_digest,
+        scope,
+        "plugin-mcp-authorization",
+    )
+    .await
+}
+
+pub(crate) async fn authorize_read_mcp(
+    service: &crate::service::Service,
+    credential_digest: &str,
+) -> Result<()> {
+    authorize_mcp(service, credential_digest, "read", "mcp-authorization").await
+}
+
+async fn authorize_mcp(
+    service: &crate::service::Service,
+    credential_digest: &str,
+    scope: &str,
+    endpoint: &str,
+) -> Result<()> {
     let identity = read_identity(&service.config.data_dir.join("installation-relay"))
         .await?
         .ok_or_else(|| Error::unauthorized("A claimed installation is required."))?;
@@ -104,7 +126,7 @@ pub(crate) async fn authorize_plugin_mcp_scope(
         .post(
             origin(&identity.origin)?
                 .join(&format!(
-                    "api/relay/{}/plugin-mcp-authorization",
+                    "api/relay/{}/{endpoint}",
                     identity.installation_id
                 ))
                 .map_err(Error::internal)?,
