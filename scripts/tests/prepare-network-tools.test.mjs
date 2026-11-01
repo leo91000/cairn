@@ -12,6 +12,7 @@ function host({
   installFails = false,
   staysMissing = false,
   versionFails,
+  versions = {},
   sudoFails = false,
   netnsFails = false,
 } = {}) {
@@ -34,7 +35,7 @@ function host({
       return { status: absent.has(args.at(-1)) ? 1 : 0 }
     if (args.includes('netns'))
       return { status: netnsFails ? 1 : 0 }
-    return { status: args[2] === versionFails ? 2 : 0, stdout: 'fixture tool version 1.2.3 (nf_tables)' }
+    return { status: args[2] === versionFails ? 2 : 0, stdout: versions[args[2]] ?? 'fixture tool version 1.2.3 (nf_tables)' }
   }
 
   return {
@@ -63,6 +64,20 @@ describe('real CI network preparation seam', () => {
     expect(result.netnsList).toBe(true)
     expect(fixture.reports.map(report => report.phase)).toEqual(['before', 'ready'])
     expect(fixture.calls.some(call => call.args.join(' ') === '-n -- kill --version')).toBe(true)
+  })
+
+  it('retains the complete versions emitted by real iproute2, iptables and conntrack', () => {
+    const fixture = host({
+      versions: {
+        ip: 'ip utility, iproute2-6.1.0, libbpf 1.3.0',
+        iptables: 'iptables v1.8.10 (nf_tables)',
+        conntrack: 'conntrack v1.4.8 (conntrack-tools)',
+      },
+    })
+    const observed = prepareNetworkTools('network-bench', fixture).tools
+    expect(observed.find(tool => tool.tool === 'ip').version).toBe('6.1.0')
+    expect(observed.find(tool => tool.tool === 'iptables').version).toBe('1.8.10')
+    expect(observed.find(tool => tool.tool === 'conntrack').version).toBe('1.4.8')
   })
 
   it('installs only deduplicated packages for missing tools, then reprobes', () => {

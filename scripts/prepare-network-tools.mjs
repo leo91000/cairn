@@ -40,7 +40,7 @@ function inspect(tool, run) {
   return {
     tool: tool.name,
     present: true,
-    version: text.match(/\b\d+(?:\.\d+)+(?:[-+][\w.]+)?\b/)?.[0] ?? null,
+    version: text.match(/\d+(?:\.\d+)+(?:[-+][\w.]+)?/)?.[0] ?? null,
     ...(tool.name === 'iptables' ? { backend: text.includes('nf_tables') ? 'nf_tables' : text.includes('legacy') ? 'legacy' : 'unknown' } : {}),
   }
 }
