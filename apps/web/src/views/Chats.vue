@@ -822,6 +822,7 @@ async function resumeQuota() {
       provider: resumeDiagnosticProvider(diagnosticProvider),
     })
     if (run && ['failed', 'interrupted', 'cancelled'].includes(run.status)) {
+      const turnId = run.chatExecution?.messageId
       let selection: ResumeExecutionSelection | undefined
       if (run.resumeAvailable) {
         reportResumeDiagnostic({ stage: 'selection-start' })
@@ -851,7 +852,6 @@ async function resumeQuota() {
           : ''
         const preserveModel = savedAgent?.model === '' && !model.value
         const selectionModel = preserveModel ? savedAgent.model : selectedModel
-        const turnId = run.chatExecution?.messageId
         selection = savedAgent
           && chosenProvider.value === savedAgent.provider
           && !!turnId
