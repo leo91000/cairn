@@ -531,7 +531,8 @@ test('classification requires the actual node writer prefix and clear structured
   }
   assert.equal(classifyAdmissionWait(node), 'capacity')
   assert.equal(classifyAdmissionWait({ ...node, recoveryPending: false }), 'capacity')
-  assert.equal(classifyAdmissionWait({ ...node, accountRequired: 'codex' }), 'account')
+  for (const accountRequired of ['codex', 'claude', 'opencode'])
+    assert.equal(classifyAdmissionWait({ ...node, accountRequired }), 'account')
   assert.equal(classifyAdmissionWait({ ...node, recoveryPending: 1 }), 'recovery')
   assert.equal(classifyAdmissionWait({ ...node, recoveryPending: true }), 'recovery')
   for (const status of ['running', 'waiting', 'failed', 'unsupported', null])
@@ -559,4 +560,37 @@ test('missing or malformed producer gate facts never become node capacity', () =
   delete missingRecovery.recoveryPending
   for (const row of [null, undefined, [], 1, {}, missingAccount, missingRecovery, ...[undefined, false, 0, {}, [], '', ' '].map(accountRequired => ({ ...base, accountRequired })), ...[undefined, null, 'false', 2, {}, []].map(recoveryPending => ({ ...base, recoveryPending })), ...[undefined, null, {}, [], 3].map(waitReason => ({ ...base, waitReason }))])
     assert.equal(classifyAdmissionWait(row), null)
+})
+
+test('malformed account facts never establish any positive gate or bypass through a reason', () => {
+  const malformed = [undefined, '', ' ', '\t\n', 'not-a-provider', 'Codex', 'CODEX', 'Claude', 'OpenCode', ' codex', 'codex ', 'claude\n', 'opencode\0', false, true, 0, 1, -1, Number.NaN, Number.POSITIVE_INFINITY, 0n, Symbol('invalid-provider'), {}, [], ['codex'], new Object('codex'), () => 'codex']
+  for (const accountRequired of malformed) {
+    for (const extra of [
+      { waitReason: 'Waiting for capacity. Node unavailable.', recoveryPending: 0 },
+      { waitReason: 'Selected model is at capacity. Please try a different model.', recoveryPending: 0 },
+      { waitReason: 'Waiting for the previous VM to stop.', recoveryPending: 1 },
+    ])
+      assert.equal(classifyAdmissionWait({ status: 'queued', accountRequired, ...extra }), null)
+  }
+
+  const inherited = Object.assign(Object.create({ accountRequired: 'codex' }), { status: 'queued', waitReason: 'Waiting for capacity.', recoveryPending: 0 })
+  assert.equal(classifyAdmissionWait(inherited), null)
+  for (const waitReason of ['Selected model is at capacity. Please try a different model.', 'Waiting for the previous VM to stop.'])
+    assert.equal(classifyAdmissionWait({ status: 'queued', waitReason, recoveryPending: 1 }), null)
+})
+
+test('account attention accepts every canonical provider from the actual nullable store constraint', () => {
+  const store = readFileSync(new URL('../../crates/installation/src/runs/mod.rs', import.meta.url), 'utf8')
+  const constraint = store.match(/account_required TEXT CHECK\(account_required IN \(([^)]+)\)\)/)
+  assert(constraint)
+  const providers = [...constraint[1].matchAll(/'([^']+)'/g)].map(match => match[1])
+  assert(providers.length > 0)
+  for (const accountRequired of providers) {
+    assert.equal(classifyAdmissionWait({
+      status: 'queued',
+      accountRequired,
+      waitReason: null,
+      recoveryPending: null,
+    }), 'account')
+  }
 })

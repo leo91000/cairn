@@ -20,8 +20,12 @@ shared by node, account and recovery writers: a generic capacity word is not a
 node gate. Node capacity requires queued status, the exact node writer prefix
 `Waiting for capacity.`, explicit null `accountRequired`, and known-clear
 `recoveryPending`. Provider/model busy text, including Codex's model-at-capacity
-message, remains account wait. Explicit account attention and recovery facts take
-precedence over stale node text. Missing schema facts, malformed data and
+message, remains account wait. An own nullable `accountRequired` fact must be
+present and valid before any reason/recovery fallback is trusted: only the exact
+`codex`, `claude`, and `opencode` strings establish account attention. Missing
+fields and values outside null or that exact enum remain unknown and cannot end
+or rearm an unresolved episode. Valid explicit account attention and recovery
+facts take precedence over stale node text. Missing schema facts, malformed data and
 unrecognized reasons stay unknown; no raw reason crosses the producer projection.
 The producer reuses its existing bounded query, adding the optional account field;
 it adds no query, database write or wait-start inference.
