@@ -1,6 +1,7 @@
 mod chat_files;
 pub(crate) mod chat_tools;
 pub mod code_mode;
+mod model_result;
 
 use crate::{
     error::{Error, Result, required},
@@ -37,7 +38,7 @@ const CACHEABLE: [&str; 5] = [
     "prompts/list",
 ];
 
-// Leave ample headroom below the gateway's 8 MiB ceiling: MCP serializes the
+// Leave headroom below the model-facing 1 MiB result budget: MCP serializes the
 // result both as structured data and as escaped text for older clients.
 const RUN_PAGE_BYTES: usize = 256 * 1024;
 
@@ -335,11 +336,16 @@ async fn respond(s: &Arc<Service>, request: Request) -> Result<Response> {
             endpoint, connection_id, method, elapsed_ms = started.elapsed().as_millis() as u64,
             success = dispatched.is_ok());
     }
+    let dispatched = dispatched.and_then(|result| {
+        finish_result(
+            result,
+            method,
+            modern,
+            matches!(endpoint, Endpoint::Gateway(_)),
+        )
+    });
     let frame = match dispatched {
-        Ok(result) => Frame::strict(Message::Result {
-            id,
-            result: finish_result(result, method, modern),
-        }),
+        Ok(result) => Frame::strict(Message::Result { id, result }),
         Err(error) => {
             let code = if error.is_not_found() {
                 crate::rpc::jsonrpc::METHOD_NOT_FOUND
@@ -361,7 +367,12 @@ async fn respond(s: &Arc<Service>, request: Request) -> Result<Response> {
 }
 
 /// Adapts a result to the negotiated protocol's result metadata.
-fn finish_result(mut result: Value, method: &str, modern: bool) -> Value {
+fn finish_result(mut result: Value, method: &str, modern: bool, gateway: bool) -> Result<Value> {
+    if !result.is_object() {
+        return Err(Error::bad_gateway(
+            "MCP response result must be an object. Tool outcome is unknown; do not repeat the operation automatically.",
+        ));
+    }
     if modern && CACHEABLE.contains(&method) {
         result["ttlMs"] = 0.into();
         result["cacheScope"] = "private".into();
@@ -372,7 +383,13 @@ fn finish_result(mut result: Value, method: &str, modern: bool) -> Value {
     if !modern && let Some(object) = result.as_object_mut() {
         object.remove("resultType");
     }
-    result
+    if method == "tools/list" {
+        return model_result::advertise(result, gateway);
+    }
+    if method == "tools/call" {
+        return model_result::finish(result);
+    }
+    Ok(result)
 }
 
 async fn dispatch(
@@ -1156,12 +1173,15 @@ async fn proxy(
             _ => false,
         };
         let result = match method {
-            "tools/list" => client.discover().await.map(|tools| {
+            "tools/list" => client.discover().await.and_then(|tools| {
+                for tool in &tools {
+                    model_result::validate_descriptor(tool)?;
+                }
                 let tools = tools
                     .into_iter()
                     .filter(|tool| scope.allows(text(tool, "name")))
                     .collect::<Vec<_>>();
-                json!({ "tools": tools })
+                Ok(json!({ "tools": tools }))
             }),
             _ if unsupported => Ok(empty_listing(method).unwrap_or_default()),
             "tools/call"
