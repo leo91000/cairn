@@ -127,7 +127,9 @@ pub async fn effect(s: &Service, context: &Context, method: &str, args: Value) -
                 method,
                 "files.create" | "files.composeMime" | "files.append"
             ) {
-                s.plugins.files.bind(context, &result)?;
+                s.plugins
+                    .files
+                    .bind(context, &result, method != "files.append")?;
             }
             Ok(result)
         }
@@ -507,7 +509,7 @@ async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
             .plugins
             .files
             .response(&context.connection, spec, &body, media_type)?;
-        s.plugins.files.bind(context, &file)?;
+        s.plugins.files.bind(context, &file, true)?;
         return Ok(json!({ "status": status, "headers": headers, "file": file }));
     }
     let json = serde_json::from_slice::<Value>(&body).ok();
@@ -678,5 +680,129 @@ mod authorization_tests {
         );
         assert_eq!(result.unwrap_err().status, 403);
         f.s.shutdown.cancel();
+    }
+
+    async fn transfer_context(f: &Fixture, agent: &str, scoped: bool) -> Context {
+        let package = super::super::registry::active(&f.s, "grant-probe")
+            .await
+            .unwrap();
+        let connection =
+            f.s.store
+                .plugin_instance(&f.instance)
+                .await
+                .unwrap()
+                .unwrap();
+        let snapshot =
+            super::super::grant_authorization::Snapshot::capture(&f.s, agent, None, &package)
+                .await
+                .unwrap();
+        let invocation = if scoped {
+            Some(
+                super::super::grant_authorization::Invocation::prepare(
+                    &f.s,
+                    snapshot.clone(),
+                    connection.clone(),
+                    PluginContributionKind::Tool,
+                    "grant_probe_post",
+                    &json!({"channel":"support"}),
+                )
+                .await
+                .unwrap(),
+            )
+        } else {
+            None
+        };
+        Context {
+            management: Some(super::super::management::Authority::agent_action(
+                connection.clone(),
+                snapshot,
+                invocation,
+            )),
+            connection,
+            manifest: package.manifest.clone(),
+            package_digest: Some(package.digest),
+            event: Value::Null,
+            link: None,
+            draft: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn appends_preserve_raw_uploader_boundaries_even_when_adding_a_contribution_origin() {
+        use crate::{agent_fixture::AgentFixture, config::MAIN_AGENT_ID};
+
+        for scoped in [false, true] {
+            for original in ["owner", "other_agent", "caller"] {
+                let f = Fixture::new().await;
+                let context = transfer_context(&f, MAIN_AGENT_ID, false).await;
+                let bytes = json!({ "data": "synthetic original bytes", "encoding": "text" });
+                let file = match original {
+                    "owner" => {
+                        f.s.plugins
+                            .files
+                            .create(
+                                &context.connection,
+                                "owner.txt",
+                                "text/plain",
+                                b"synthetic original bytes",
+                            )
+                            .unwrap()
+                    }
+                    "other_agent" => {
+                        let other =
+                            f.s.agent_fixture(json!({ "name": "Other uploader" }), None)
+                                .await
+                                .unwrap();
+                        let agent = text(&other, "id");
+                        f.set_for(agent, json!([contribution("instructions", "", json!([]))]))
+                            .await;
+                        let other = transfer_context(&f, agent, false).await;
+                        effect(&f.s, &other, "files.create", bytes).await.unwrap()
+                    }
+                    _ => effect(&f.s, &context, "files.create", bytes).await.unwrap(),
+                };
+                let append_context = transfer_context(&f, MAIN_AGENT_ID, scoped).await;
+                effect(
+                    &f.s,
+                    &append_context,
+                    "files.append",
+                    json!({
+                        "id": file["id"], "offset": file["size"], "data": "", "encoding": "text",
+                    }),
+                )
+                .await
+                .unwrap();
+                let mut contributions = vec![contribution("instructions", "", json!([]))];
+                if scoped {
+                    contributions.push(contribution("tool", "grant_probe_post", support()));
+                }
+                f.set(json!(contributions)).await;
+                let reader = transfer_context(&f, MAIN_AGENT_ID, false).await;
+                let result = effect(&f.s, &reader, "files.read", json!({ "id": file["id"] })).await;
+                if original == "caller" {
+                    result.expect("a raw uploader lost access to its own bytes");
+                    if scoped {
+                        f.set(json!([contribution("instructions", "", json!([]))]))
+                            .await;
+                        let reader = transfer_context(&f, MAIN_AGENT_ID, false).await;
+                        assert_eq!(
+                            effect(&f.s, &reader, "files.read", json!({ "id": file["id"] }))
+                                .await
+                                .unwrap_err()
+                                .status,
+                            403,
+                            "own-upload access bypassed the appended contribution's revocation"
+                        );
+                    }
+                } else {
+                    assert_eq!(
+                        result.unwrap_err().status,
+                        403,
+                        "an append laundered {original} bytes (scoped={scoped})"
+                    );
+                }
+                f.s.shutdown.cancel();
+            }
+        }
     }
 }

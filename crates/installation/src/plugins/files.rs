@@ -31,6 +31,8 @@ struct File {
     expires: i64,
     origin: Option<Arc<super::grant_authorization::TransferOrigin>>,
     uploaded_by: Option<String>,
+    // Appending scoped bytes must preserve the original raw upload's boundary.
+    unscoped_bytes: bool,
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -201,16 +203,24 @@ impl Files {
         Ok(file.clone())
     }
 
-    pub(crate) fn bind(&self, context: &super::capabilities::Context, value: &Value) -> Result<()> {
+    pub(crate) fn bind(
+        &self,
+        context: &super::capabilities::Context,
+        value: &Value,
+        created: bool,
+    ) -> Result<()> {
         let file = self.get(&context.connection, text(value, "id"))?;
         let mut file = file.lock().unwrap();
         if let Some(authority) = &context.management {
             if let Some(origin) = authority.transfer_origin() {
                 file.origin = Some(origin);
             }
-            if file.origin.is_none() {
+            if created && file.origin.is_none() {
                 file.uploaded_by = authority.snapshot().map(|snapshot| snapshot.agent);
             }
+        }
+        if created {
+            file.unscoped_bytes = file.origin.is_none();
         }
         Ok(())
     }
@@ -222,20 +232,28 @@ impl Files {
         id: &str,
     ) -> Result<()> {
         let file = self.get(&context.connection, id)?;
-        let (origin, uploaded_by) = {
+        let (origin, uploaded_by, unscoped_bytes) = {
             let file = file.lock().unwrap();
-            (file.origin.clone(), file.uploaded_by.clone())
+            (
+                file.origin.clone(),
+                file.uploaded_by.clone(),
+                file.unscoped_bytes,
+            )
         };
         let snapshot = context
             .management
             .as_ref()
             .and_then(super::management::Authority::snapshot);
         if let Some(origin) = origin {
-            origin.authorize(s, &context.connection, snapshot).await?;
+            origin
+                .authorize(s, &context.connection, snapshot.clone())
+                .await?;
             if let Some(authority) = &context.management {
                 authority.remember_transfer(origin)?;
             }
-        } else if let Some(snapshot) = snapshot
+        }
+        if unscoped_bytes
+            && let Some(snapshot) = snapshot
             && uploaded_by.as_deref() != Some(snapshot.agent.as_str())
             && !context.connection.grants(&snapshot.agent)
         {
@@ -304,6 +322,7 @@ impl Files {
                 expires,
                 origin: None,
                 uploaded_by: None,
+                unscoped_bytes: true,
             })),
         );
         Ok(
