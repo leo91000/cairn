@@ -344,10 +344,29 @@ fn publish(
     // cannot bypass rotated-secret redaction: none are retained or emitted.
     // Unknown records still use the original fresh-redacted output path.
     let dispatch = dispatch.clone();
+    #[cfg(test)]
+    if let Some(probe) = probe {
+        probe.saved_capture_matches.store(
+            probe.matches_dispatch(&dispatch),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
     let accepted = tracing::dispatcher::with_default(&dispatch, || {
-        let enabled = crate::performance::enabled();
         #[cfg(test)]
         if let Some(probe) = probe {
+            let matches =
+                tracing::dispatcher::get_default(|current| probe.matches_dispatch(current));
+            probe
+                .current_capture_matches
+                .store(matches, std::sync::atomic::Ordering::Relaxed);
+        }
+        #[cfg(not(test))]
+        let enabled = crate::performance::enabled();
+        #[cfg(test)]
+        let (enabled, static_info, runtime_info, outcome) = crate::performance::observed_enabled();
+        #[cfg(test)]
+        if let Some(probe) = probe {
+            probe.enabled_observation(static_info, runtime_info, outcome);
             Probe::bump(&probe.enabled_attempts);
             Probe::bump(if enabled {
                 &probe.enabled_true
