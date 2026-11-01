@@ -632,6 +632,161 @@ async fn legacy_stdio_servers_can_exit_on_the_modern_probe() {
     client.close().await;
 }
 
+const BOUNDED_RESULT_SERVER: &str = r#"
+const { createInterface } = require('node:readline');
+const { appendFileSync } = require('node:fs');
+const schema = {
+    $schema: 'https://json-schema.org/draft/2020-12/schema',
+    type: 'object', properties: { value: { type: 'string' } }, required: ['value'],
+    $defs: { recursive: { $anchor: 'node', $ref: '#node' }, external: { $ref: 'https://invalid.example/do-not-fetch' } },
+};
+createInterface({ input: process.stdin }).on('line', line => {
+    const request = JSON.parse(line);
+    if (request.id === undefined) return;
+    let result;
+    if (request.method === 'server/discover') {
+        result = { supportedVersions: ['2026-07-28'], capabilities: { tools: {} } };
+    } else if (request.method === 'tools/list') {
+        result = { tools: [{ name: 'bounded_fixture', inputSchema: { type: 'object' }, outputSchema: schema }] };
+    } else if (request.method === 'tools/call') {
+        appendFileSync(process.env.TEST_COUNTER, 'call\n');
+        const mode = request.params.arguments.mode;
+        result = mode === 'error'
+            ? { content: [{ type: 'text', text: 'error: ' + 'x'.repeat(1100000) }], isError: true, _meta: { 'mcp/www_authenticate': 'Bearer scope="read"' } }
+            : { content: [{ type: 'text', text: 'completed' }], structuredContent: { value: mode === 'large' ? 'x'.repeat(1100000) : 'granted-credential-fixture' } };
+    } else {
+        result = {};
+    }
+    console.log(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }));
+});
+"#;
+
+#[tokio::test]
+async fn gateway_bounds_completed_results_without_changing_schemas_grants_or_effect_count() {
+    let root = TempDir::new().unwrap();
+    std::fs::create_dir(root.path().join("home")).unwrap();
+    let counter = root.path().join("counter");
+    let (s, origin, server) = served(&root).await;
+    let connection = s
+        .mcp_fixture(
+            json!({
+                "name": "Bounded result fixture", "transport": "stdio", "command": "node",
+                "args": ["-e", BOUNDED_RESULT_SERVER], "env": { "TEST_COUNTER": counter },
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let connection_id = connection["id"].as_str().unwrap();
+    s.mcps.test(&s, connection_id).await.unwrap();
+    let canonical = s.mcps.server(&s, connection_id).await.unwrap().tools;
+    assert!(canonical[0]["outputSchema"].is_object());
+    let run = manual_run(&s, "Bounded model results", "Fixture only").await;
+    let run_id = run["id"].as_str().unwrap();
+    s.store
+        .change_run(
+            run_id,
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Running),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let configuration = s.mcps.run_configuration(&s, &run).await.unwrap();
+    let token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
+        .as_str()
+        .unwrap();
+    let endpoint = format!("{origin}/mcp-gateway/{connection_id}");
+    let http = reqwest::Client::new();
+    let request = |method: &str, params: Value| {
+        http.post(&endpoint).bearer_auth(token)
+            .header("mcp-protocol-version", "2025-11-25")
+            .json(&json!({ "jsonrpc": "2.0", "id": "fixture-id", "method": method, "params": params }))
+    };
+    let catalog: Value = request("tools/list", json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let advertised = &catalog["result"]["tools"][0];
+    assert!(advertised.get("outputSchema").is_none());
+    assert_eq!(advertised["inputSchema"], canonical[0]["inputSchema"]);
+    assert_eq!(advertised["name"], canonical[0]["name"]);
+    assert!(
+        advertised["description"]
+            .as_str()
+            .unwrap()
+            .contains("omits the upstream outputSchema")
+    );
+
+    for (index, mode) in ["small", "large", "error", "small"].into_iter().enumerate() {
+        let response = request(
+            "tools/call",
+            json!({ "name": "bounded_fixture", "arguments": { "mode": mode } }),
+        )
+        .send()
+        .await
+        .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let bytes = response.bytes().await.unwrap();
+        assert!(bytes.len() <= 1024 * 1024 + 1024);
+        let response: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(response["id"], "fixture-id");
+        let result = &response["result"];
+        assert!(serde_json::to_vec(result).unwrap().len() <= 1024 * 1024);
+        assert_eq!(
+            std::fs::read_to_string(&counter).unwrap().lines().count(),
+            index + 1
+        );
+        if mode == "small" {
+            assert_eq!(
+                result["structuredContent"]["value"],
+                "granted-credential-fixture"
+            );
+            assert!(result["structuredContent"].get("truncated").is_none());
+        } else {
+            assert_eq!(result["structuredContent"]["truncated"], true);
+            assert_eq!(result["structuredContent"]["retained"], false);
+            assert!(
+                result["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("truncated")
+            );
+        }
+        if mode == "error" {
+            assert_eq!(result["isError"], true);
+            assert_eq!(
+                result["_meta"]["mcp/www_authenticate"],
+                "Bearer scope=\"read\""
+            );
+        } else {
+            assert_ne!(result["isError"], true);
+        }
+    }
+    assert_eq!(
+        s.mcps.server(&s, connection_id).await.unwrap().tools,
+        canonical
+    );
+    s.mcps.revoke_run(&s, run_id).await.unwrap();
+    let revoked = request(
+        "tools/call",
+        json!({ "name": "bounded_fixture", "arguments": { "mode": "small" } }),
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(revoked.status(), reqwest::StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        std::fs::read_to_string(&counter).unwrap().lines().count(),
+        4
+    );
+    server.abort();
+}
+
 async fn fetch_error(endpoint: &str, allow_private: bool) -> String {
     network::fetch(
         endpoint,

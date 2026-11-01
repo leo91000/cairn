@@ -1,0 +1,460 @@
+//! The model-facing budget is separate from activity previews and wire guards.
+//!
+//! This module only formats completed results. It never invokes an operation,
+//! retains its payload, follows a reference, or changes authorization.
+use crate::{
+    error::{Error, Result},
+    validation::encoded_size,
+};
+use serde_json::{Value, json};
+
+pub(super) const LIMIT: usize = 1024 * 1024;
+
+const NOTICE: &str = "Tool result truncated to the 1 MiB encoded response budget. The original tool outcome is preserved. Omitted data was not retained; do not repeat a side-effecting operation to recover it.";
+
+pub(super) const POLICY: &str = " Cairn limits each complete encoded tool result to 1 MiB. Large completed results are visibly truncated without repeating the operation; the original success/error outcome is preserved and omitted data is not retained.";
+
+fn size(value: &Value) -> usize {
+    encoded_size(value).expect("JSON values serialize into a byte counter")
+}
+
+fn marker() -> Value {
+    json!({
+        "truncated": true,
+        "retained": false,
+    })
+}
+
+/// A worker can discard an oversized completed value before sending its frame.
+/// Only that value's encoded size is known, not the final duplicated MCP size.
+pub(super) fn omitted_value(value_bytes: usize) -> Value {
+    let mut structured = marker();
+    structured["originalValueBytes"] = value_bytes.into();
+    json!({
+        "content": [{ "type": "text", "text": NOTICE }],
+        "structuredContent": structured,
+    })
+}
+
+/// Count the complete result after protocol adaptation, including escaping,
+/// duplicated representations and metadata. Below-budget authorized data is
+/// returned unchanged, including credentials delivered by granted tools.
+pub(super) fn finish(mut result: Value) -> Result<Value> {
+    let original_bytes = size(&result);
+    if original_bytes <= LIMIT {
+        return Ok(result);
+    }
+    if !result.is_object() {
+        return Err(Error::bad_gateway(
+            "Oversized MCP result is not an object. Tool outcome is unknown; do not repeat the operation automatically.",
+        ));
+    }
+
+    let content = match result
+        .as_object_mut()
+        .and_then(|object| object.remove("content"))
+    {
+        Some(Value::Array(content)) => content,
+        _ => Vec::new(),
+    };
+    let mut structured = marker();
+    structured["originalResultBytes"] = original_bytes.into();
+    result["structuredContent"] = structured;
+    result["content"] = json!([{ "type": "text", "text": NOTICE }]);
+
+    prune_metadata(&mut result)?;
+
+    for block in content {
+        result["content"].as_array_mut().unwrap().push(block);
+        if size(&result) <= LIMIT {
+            continue;
+        }
+
+        let mut block = result["content"].as_array_mut().unwrap().pop().unwrap();
+        if block["type"] == "text"
+            && let Some(Value::String(text)) =
+                block.as_object_mut().and_then(|block| block.remove("text"))
+        {
+            block["text"] = "".into();
+            result["content"].as_array_mut().unwrap().push(block);
+            if size(&result) > LIMIT {
+                result["content"].as_array_mut().unwrap().pop();
+                break;
+            }
+
+            // Search UTF-8 boundaries, sizing the whole encoded envelope at
+            // every step. Escaping can cost six bytes per source byte.
+            let index = result["content"].as_array().unwrap().len() - 1;
+            let mut low = 0;
+            let mut high = text.len();
+            while low < high {
+                let mut end = low + (high - low).div_ceil(2);
+                while !text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                if end == low {
+                    break;
+                }
+                result["content"][index]["text"] = text[..end].into();
+                if size(&result) <= LIMIT {
+                    low = end;
+                } else {
+                    high = end - 1;
+                }
+            }
+            result["content"][index]["text"] = text[..low].into();
+        }
+        // Binary/media/resource blocks are retained whole or omitted. A text
+        // prefix is explicitly only a preview, never a sliced JSON document.
+        break;
+    }
+    Ok(result)
+}
+
+/// Omit whole optional fields, largest first, retaining small complete auth
+/// metadata. Count each field once; many small extensions must not cause a
+/// quadratic series of whole-result serializations.
+fn prune_metadata(result: &mut Value) -> Result<()> {
+    if size(result) <= LIMIT {
+        return Ok(());
+    }
+    result["structuredContent"]["metadataOmitted"] = true.into();
+    let mut bytes = size(result);
+    let mut candidates = Vec::new();
+    for (key, value) in result.as_object().unwrap() {
+        if matches!(
+            key.as_str(),
+            "content" | "structuredContent" | "isError" | "resultType"
+        ) {
+            continue;
+        }
+        if key == "_meta"
+            && let Some(meta) = value.as_object()
+        {
+            for (key, value) in meta {
+                let field_bytes = size(&json!(key)) + 1 + size(value);
+                candidates.push((field_bytes, Some(key.clone()), "_meta".to_owned()));
+            }
+            continue;
+        }
+        let field_bytes = size(&json!(key)) + 1 + size(value);
+        candidates.push((field_bytes, None, key.clone()));
+    }
+    candidates.sort_unstable();
+    while bytes > LIMIT {
+        let Some((field_bytes, meta_key, key)) = candidates.pop() else {
+            return Err(Error::bad_gateway(
+                "Mandatory MCP result metadata exceeds the response budget. Tool outcome is unknown; do not repeat the operation automatically.",
+            ));
+        };
+        let object = if meta_key.is_some() {
+            result["_meta"].as_object_mut().unwrap()
+        } else {
+            result.as_object_mut().unwrap()
+        };
+        let comma_bytes = usize::from(object.len() > 1);
+        object.remove(meta_key.as_deref().unwrap_or(&key));
+        bytes -= field_bytes + comma_bytes;
+    }
+    debug_assert_eq!(bytes, size(result));
+    Ok(())
+}
+
+fn truncated_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "truncated": { "const": true },
+            "retained": { "const": false },
+            "originalResultBytes": { "type": "integer", "minimum": 0 },
+            "originalValueBytes": { "type": "integer", "minimum": 0 },
+            "metadataOmitted": { "type": "boolean" },
+        },
+        "required": ["truncated", "retained"],
+        "additionalProperties": false,
+    })
+}
+
+/// Only Cairn's source-owned schemas: draft07 generated definitions keep their
+/// original root location, so #/definitions/... references retain their meaning.
+/// Arbitrary external schemas use `describe_proxy` instead of being rewritten.
+pub(super) fn describe_owned(mut tool: Value) -> Value {
+    if let Some(mut schema) = tool
+        .as_object_mut()
+        .and_then(|tool| tool.remove("outputSchema"))
+    {
+        let mut advertised = json!({ "type": "object" });
+        for key in ["$schema", "definitions"] {
+            if let Some(value) = schema.as_object_mut().and_then(|schema| schema.remove(key)) {
+                advertised[key] = value;
+            }
+        }
+        advertised["anyOf"] = json!([schema, truncated_schema()]);
+        tool["outputSchema"] = advertised;
+    }
+    describe_policy(tool)
+}
+
+/// The gateway intentionally withdraws optional output-schema precision rather
+/// than relocating unknown dialects, root refs, anchors or external resources.
+/// This changes only the advertised copy, never stored/upstream descriptors.
+pub(super) fn describe_proxy(mut tool: Value) -> Value {
+    let had_schema = tool
+        .as_object_mut()
+        .and_then(|tool| tool.remove("outputSchema"))
+        .is_some();
+    let mut tool = describe_policy(tool);
+    if had_schema {
+        let description = tool["description"].as_str().unwrap_or_default();
+        tool["description"] = format!("{description} The gateway omits the upstream outputSchema because a truncated response has a different shape.").into();
+    }
+    tool
+}
+
+fn describe_policy(mut tool: Value) -> Value {
+    let description = tool["description"].as_str().unwrap_or_default();
+    tool["description"] = format!("{description}{POLICY}").into();
+    tool
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bounded(result: Value) -> Value {
+        let result = finish(result).unwrap();
+        assert!(size(&result) <= LIMIT);
+        serde_json::from_slice(&serde_json::to_vec(&result).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn complete_authorized_values_and_exact_limit_are_unchanged() {
+        let value = json!({
+            "content": [{ "type": "text", "text": "granted-credential-fixture" }],
+            "structuredContent": { "token": "granted-credential-fixture" },
+            "_meta": { "producer": "fixture" },
+        });
+        assert_eq!(bounded(value.clone()), value);
+
+        let mut exact = json!({ "content": [{ "type": "text", "text": "" }] });
+        let overhead = size(&exact);
+        exact["content"][0]["text"] = "a".repeat(LIMIT - overhead).into();
+        assert_eq!(size(&exact), LIMIT);
+        assert_eq!(bounded(exact.clone()), exact);
+        exact["content"][0]["text"] = "a".repeat(LIMIT - overhead + 1).into();
+        assert_eq!(bounded(exact)["structuredContent"]["truncated"], true);
+    }
+
+    #[test]
+    fn escaped_unicode_error_and_complete_auth_metadata_survive() {
+        let text = "\u{0}\"\\é🦀".repeat(LIMIT / 8);
+        let challenge = "Bearer error=\"insufficient_scope\", scope=\"read\"";
+        let original = json!({
+            "content": [{ "type": "text", "text": text }],
+            "structuredContent": { "large": text },
+            "isError": true,
+            "resultType": "complete",
+            "status": "failed",
+            "producerCallId": "fixture-call",
+            "_meta": { "mcp/www_authenticate": challenge },
+        });
+        let original_size = size(&original);
+        let result = bounded(original);
+        assert_eq!(result["isError"], true);
+        assert_eq!(result["resultType"], "complete");
+        assert_eq!(result["status"], "failed");
+        assert_eq!(result["producerCallId"], "fixture-call");
+        assert_eq!(result["_meta"]["mcp/www_authenticate"], challenge);
+        assert_eq!(
+            result["structuredContent"]["originalResultBytes"],
+            original_size
+        );
+        assert_eq!(result["structuredContent"]["retained"], false);
+        let preview = result["content"][1]["text"].as_str().unwrap();
+        assert!(text.starts_with(preview));
+        assert!(!preview.is_empty());
+        assert!(
+            result["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("truncated")
+        );
+    }
+
+    #[test]
+    fn oversized_optional_metadata_is_omitted_whole_without_losing_small_challenge() {
+        let result = bounded(json!({
+            "content": [{ "type": "text", "text": "completed" }],
+            "isError": true,
+            "resultType": "complete",
+            "extension": "x".repeat(LIMIT + 1),
+            "_meta": {
+                "mcp/www_authenticate": "Bearer scope=\"read\"",
+                "opaque": "y".repeat(LIMIT + 1),
+            },
+        }));
+        assert!(result.get("extension").is_none());
+        assert!(result["_meta"].get("opaque").is_none());
+        assert_eq!(
+            result["_meta"]["mcp/www_authenticate"],
+            "Bearer scope=\"read\""
+        );
+        assert_eq!(result["structuredContent"]["metadataOmitted"], true);
+        assert_eq!(result["isError"], true);
+    }
+
+    #[test]
+    fn complete_media_is_kept_or_omitted_never_sliced() {
+        let small = json!({ "type": "image", "mimeType": "image/png", "data": "aGVsbG8=" });
+        let large =
+            json!({ "type": "audio", "mimeType": "audio/wav", "data": "AAAA".repeat(LIMIT / 4) });
+        let result = bounded(json!({
+            "content": [small, large],
+            "structuredContent": { "large": "x".repeat(LIMIT) },
+        }));
+        assert_eq!(result["content"][1], small);
+        assert_eq!(result["content"].as_array().unwrap().len(), 2);
+        assert_eq!(result["structuredContent"]["retained"], false);
+    }
+
+    #[test]
+    fn opaque_mandatory_oversize_is_a_fixed_unknown_outcome_protocol_failure() {
+        let error = finish(json!({
+            "content": [],
+            "resultType": "x".repeat(LIMIT + 1),
+        }))
+        .unwrap_err();
+        assert!(error.message.contains("outcome is unknown"));
+        assert!(error.message.len() < 256);
+    }
+
+    fn assert_owned_schema_profile(value: &Value) {
+        match value {
+            Value::Object(object) => {
+                for (key, value) in object {
+                    assert!(!matches!(
+                        key.as_str(),
+                        "$id" | "$anchor" | "$dynamicRef" | "$recursiveRef" | "$defs"
+                    ));
+                    if key == "$ref" {
+                        assert!(value.as_str().unwrap().starts_with("#/definitions/"));
+                    }
+                    if key == "$schema" {
+                        assert_eq!(value, "http://json-schema.org/draft-07/schema#");
+                    }
+                    assert_owned_schema_profile(value);
+                }
+            }
+            Value::Array(array) => {
+                for value in array {
+                    assert_owned_schema_profile(value);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn all_owned_output_schema_unions_preserve_local_refs_and_accept_truncation() {
+        let mut tools = super::super::catalog();
+        tools.extend([
+            crate::chats::questions::ask_tool(),
+            crate::chats::questions::list_tool(),
+            crate::chats::questions::cancel_tool(),
+            crate::waits::tool(&[], false),
+        ]);
+        tools.extend(
+            crate::delegation::tools()
+                .into_iter()
+                .filter(|tool| tool.get("outputSchema").is_some()),
+        );
+        for original in tools {
+            let schema = &original["outputSchema"];
+            // The two hand-authored schemas have no dialect/ref machinery.
+            if original["name"] != "search" && original["name"] != "execute" {
+                assert_owned_schema_profile(schema);
+            }
+            let advertised = describe_owned(original.clone());
+            let validator = jsonschema::validator_for(&advertised["outputSchema"]).unwrap();
+            assert!(validator.is_valid(&marker()));
+            let complete = match original["name"].as_str().unwrap() {
+                "search" | "execute" => json!({ "result": null }),
+                "ask_questions" => json!({ "questionId": "fixture", "status": "pending" }),
+                "pending_questions" => json!({ "questions": [] }),
+                "withdraw_question" => json!({
+                    "id": "fixture",
+                    "chatId": "chat",
+                    "runId": "run",
+                    "blocking": false,
+                    "source": "cairn",
+                    "status": "cancelled",
+                    "fields": [],
+                }),
+                "wait_for" => json!({ "deferred": true }),
+                "task_status" => json!({ "tasks": [] }),
+                "delegate_task" | "task_cancel" => json!({
+                    "chatId": "chat",
+                    "title": "fixture",
+                    "agentId": "agent",
+                    "agentName": "fixture",
+                    "projectId": null,
+                    "provider": "codex",
+                    "model": null,
+                    "status": "idle",
+                    "lifecycle": "active",
+                    "finished": false,
+                    "paused": false,
+                    "error": null,
+                    "pendingQuestions": 0,
+                    "outcome": null,
+                    "runId": null,
+                    "finishedAt": null,
+                }),
+                _ => unreachable!("Add complete result coverage for new owned output schemas"),
+            };
+            assert!(
+                jsonschema::is_valid(schema, &complete),
+                "{}",
+                original["name"]
+            );
+            assert!(validator.is_valid(&complete), "{}", original["name"]);
+            let mut body = advertised["outputSchema"]["anyOf"][0].clone();
+            if let Some(definitions) = advertised["outputSchema"].get("definitions") {
+                body["definitions"] = definitions.clone();
+            }
+            if let Some(dialect) = advertised["outputSchema"].get("$schema") {
+                body["$schema"] = dialect.clone();
+            }
+            assert_eq!(body, *schema);
+            assert_eq!(original["inputSchema"], advertised["inputSchema"]);
+        }
+    }
+
+    #[test]
+    fn proxy_schema_withdrawal_is_scoped_and_does_not_resolve_or_rewrite_any_refs() {
+        for schema in [
+            json!({ "$ref": "#", "$defs": { "node": { "$ref": "#/$defs/node" } } }),
+            json!({ "$schema": "https://json-schema.org/draft/2020-12/schema", "$id": "https://invalid.example/schema", "$anchor": "result", "$dynamicRef": "#result" }),
+            json!({ "$schema": "http://json-schema.org/draft-07/schema#", "$recursiveRef": "#", "$ref": "https://invalid.example/do-not-fetch" }),
+            json!({ "$id": "relative/schema", "definitions": { "nested": { "$id": "nested", "$ref": "../other#anchor" } } }),
+        ] {
+            let canonical = json!({
+                "name": "fixture",
+                "inputSchema": { "type": "object" },
+                "outputSchema": schema,
+                "_meta": { "securitySchemes": [{ "type": "oauth2", "scopes": ["read"] }] },
+            });
+            let advertised = describe_proxy(canonical.clone());
+            assert!(advertised.get("outputSchema").is_none());
+            assert_eq!(canonical["outputSchema"], schema);
+            assert_eq!(advertised["inputSchema"], canonical["inputSchema"]);
+            assert_eq!(advertised["_meta"], canonical["_meta"]);
+            assert!(
+                advertised["description"]
+                    .as_str()
+                    .unwrap()
+                    .contains("omits the upstream outputSchema")
+            );
+        }
+    }
+}

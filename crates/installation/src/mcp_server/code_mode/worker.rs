@@ -1,13 +1,20 @@
 //! No manager state is linked into the script: only framed JSON host calls.
 mod isolation;
 
-use super::{Frame, MAX_FRAME, MAX_RESULT};
+use super::{Completed, Frame, MAX_FRAME, model_result};
 use rquickjs::{Context, Function, Promise, Runtime};
-use serde_json::{Value, json};
+use serde::Deserialize;
+use serde_json::{Value, json, value::RawValue};
 use std::{
     io::{BufRead, Read, Write},
     time::{Duration, Instant},
 };
+
+fn present_value<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<&'de RawValue>, D::Error> {
+    <&RawValue>::deserialize(deserializer).map(Some)
+}
 
 fn read(reader: &mut impl BufRead) -> Result<Frame, String> {
     let mut bytes = Vec::new();
@@ -51,7 +58,7 @@ fn host(name: String, args: &str) -> String {
         .to_string()
 }
 
-fn evaluate(code: &str, input: &Value, names: &[String]) -> Result<Value, String> {
+fn evaluate(code: &str, input: &Value, names: &[String]) -> Result<Completed, String> {
     let runtime = Runtime::new().map_err(|_| "Cannot create code runtime.")?;
     runtime.set_memory_limit(64 * 1024 * 1024);
     runtime.set_max_stack_size(512 * 1024);
@@ -112,19 +119,33 @@ fn evaluate(code: &str, input: &Value, names: &[String]) -> Result<Value, String
         let output: String = promise.finish()
             .map_err(|_| "JavaScript execution failed or exceeded its limits.")?;
 
-        if output.len() > MAX_RESULT + 64 {
-            return Err("Code result exceeds 1 MiB. Filter results or read bounded pages.".into());
+        // Borrow the serialized value while validating the complete document.
+        // Oversized successful values do not need a second parsed allocation or
+        // an oversized IPC frame, and their effects must never be repeated.
+        #[derive(Deserialize)]
+        struct Envelope<'a> {
+            ok: bool,
+            #[serde(borrow, default, deserialize_with = "present_value")]
+            value: Option<&'a RawValue>,
+            message: Option<String>,
         }
-        let envelope: Value = serde_json::from_str(&output)
+        let envelope: Envelope<'_> = serde_json::from_str(&output)
             .map_err(|_| "Code must return a JSON value.")?;
-        if envelope["ok"] != true {
-            let message = envelope["message"].as_str()
+        if !envelope.ok {
+            let message = envelope.message.as_deref()
                 .unwrap_or("JavaScript execution failed.");
             return Err(message.chars().take(4096).collect());
         }
 
-        envelope.get("value").cloned()
-            .ok_or_else(|| "Code must return a JSON value.".into())
+        let value = envelope.value.ok_or("Code must return a JSON value.")?;
+        if value.get().len() > model_result::LIMIT {
+            return Ok(Completed::Truncated {
+                value_bytes: value.get().len(),
+            });
+        }
+        serde_json::from_str(value.get())
+            .map(Completed::Value)
+            .map_err(|_| "Code must return a JSON value.".into())
     })
 }
 
@@ -135,7 +156,8 @@ pub fn run() -> Result<(), String> {
         return Err("Missing code request.".into());
     };
     let frame = match evaluate(&code, &input, &names) {
-        Ok(value) => Frame::Done { value },
+        Ok(Completed::Value(value)) => Frame::Done { value },
+        Ok(Completed::Truncated { value_bytes }) => Frame::Truncated { value_bytes },
         Err(message) => Frame::Failure { message },
     };
     write(&frame)

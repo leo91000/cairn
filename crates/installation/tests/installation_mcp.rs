@@ -3585,6 +3585,70 @@ async fn code_mode_truncates_one_completed_result_without_repeating_its_effect()
 }
 
 #[tokio::test]
+async fn code_mode_bounds_the_complete_encoded_response_and_preserves_null_results() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
+        .as_str()
+        .unwrap();
+    let app = cairn_installation::http::router(s.clone()).await.unwrap();
+    let (_, catalog) = request(&s, token, "tools/list", json!({})).await;
+    let schema = catalog["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "execute")
+        .unwrap()["outputSchema"]
+        .clone();
+
+    // The first two values fit the worker's single-value budget but exceed the
+    // final MCP budget after duplicated representations and JSON escaping.
+    for code in [
+        "return '\"'.repeat(400000);",
+        "return '🦀'.repeat(200000);",
+        "return '\\u0000'.repeat(200000);",
+        "return 'x'.repeat(9 * 1024 * 1024);",
+    ] {
+        let body = json!({
+            "jsonrpc": "2.0", "id": "encoded-fixture", "method": "tools/call",
+            "params": { "name": "execute", "arguments": { "code": code } },
+        });
+        let request = common::request("POST", "/mcp-installation")
+            .header("authorization", format!("Bearer {token}"))
+            .header("mcp-protocol-version", "2026-07-28")
+            .header("mcp-method", "tools/call")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = common::send(&app, request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024 + 1024)
+            .await
+            .unwrap();
+        let response: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(response["id"], "encoded-fixture");
+        let result = &response["result"];
+        assert_eq!(result["resultType"], "complete");
+        assert_ne!(result["isError"], true, "{code}");
+        assert!(serde_json::to_vec(result).unwrap().len() <= 1024 * 1024);
+        assert_eq!(result["structuredContent"]["truncated"], true);
+        assert_eq!(result["structuredContent"]["retained"], false);
+        assert!(jsonschema::is_valid(&schema, &result["structuredContent"]));
+    }
+
+    for code in ["return null;", "return undefined;", "return false;"] {
+        let response = call(&s, &configuration, "execute", json!({ "code": code })).await;
+        let expected = if code == "return false;" {
+            json!(false)
+        } else {
+            Value::Null
+        };
+        assert_eq!(result(&response), &expected);
+    }
+}
+
+#[tokio::test]
 async fn code_mode_isolates_scripts_bounds_resources_and_remains_usable_after_failure() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
@@ -3616,7 +3680,6 @@ async fn code_mode_isolates_scripts_bounds_resources_and_remains_usable_after_fa
         "return (", // Syntax errors cannot reach an operation.
         "return await import('node:fs');",
         "return () => 42;",
-        "return 'x'.repeat(1100000);",          // Result budget.
         "return 'x'.repeat(80 * 1024 * 1024);", // Heap budget.
         "for (;;) {}",                          // Process CPU budget.
         "for (let i = 0; i < 65; i++) await cairn.list_chats({}); return true;",
