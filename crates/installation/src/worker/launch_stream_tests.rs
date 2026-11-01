@@ -28,6 +28,15 @@ impl OutputProbe {
 
 #[tokio::test]
 async fn rpc_flood_does_not_hold_canonical_output_behind_redaction_work() {
+    rpc_flood_fixture().await;
+}
+
+async fn rpc_flood_fixture() {
+    let (root, service) = service_fixture().await;
+    rpc_flood_on_service(root, service).await;
+}
+
+async fn service_fixture() -> (tempfile::TempDir, Arc<Service>) {
     let root = tempfile::tempdir().unwrap();
     let service = Service::new(crate::config::Config {
         data_dir: root.path().join("data"),
@@ -47,6 +56,10 @@ async fn rpc_flood_does_not_hold_canonical_output_behind_redaction_work() {
     })
     .await
     .unwrap();
+    (root, service)
+}
+
+async fn rpc_flood_on_service(root: tempfile::TempDir, service: Arc<Service>) {
     let id = crate::config::id();
     let row = json!({ "id": id, "taskId": id, "status": "running" });
     service
@@ -93,9 +106,11 @@ async fn rpc_flood_does_not_hold_canonical_output_behind_redaction_work() {
         "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":4,\"output_tokens\":2}}\n",
     );
     let (sender, mut events) = mpsc::channel(32);
+    let (reporting, telemetry) =
+        output::Diagnostics::start(service.clone(), None, Vec::new(), &id, &crate::config::id());
     let diagnostics_sender = sender.clone();
     let diagnostics = tokio::spawn(async move {
-        output::read_output(stderr.as_bytes(), true, diagnostics_sender, Vec::new()).await;
+        output::read_agent_diagnostics(stderr.as_bytes(), diagnostics_sender, telemetry).await;
         // A child writing stderr before its first stdout frame must not be held
         // behind manager-side credential work by stderr pipe backpressure.
         output::read_output(stdout.as_bytes(), false, sender, Vec::new()).await;
@@ -113,6 +128,7 @@ async fn rpc_flood_does_not_hold_canonical_output_behind_redaction_work() {
             &mut events,
             &mut 0,
             false,
+            Some(&reporting),
         )
         .await
         .unwrap();
@@ -151,4 +167,163 @@ async fn rpc_flood_does_not_hold_canonical_output_behind_redaction_work() {
     );
     assert_eq!(refreshes, 3, "only canonical output needs account refresh");
     service.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn canonical_refresh_retains_intermediate_numeric_secret_for_summary_rotation() {
+    use std::sync::atomic::AtomicBool;
+    use tracing::instrument::WithSubscriber;
+    use tracing_subscriber::{Layer, layer::SubscriberExt};
+
+    #[derive(Default)]
+    struct Observed {
+        summaries: AtomicU64,
+        leaked: AtomicBool,
+        masked: AtomicBool,
+    }
+    struct Privacy(Arc<Observed>);
+    struct Record<'a>(&'a Observed);
+    impl tracing::field::Visit for Record<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() != "record" {
+                return;
+            }
+            let record = format!("{value:?}");
+            self.0.summaries.fetch_add(1, Ordering::Relaxed);
+            if record.contains("17381") || record.contains("19873") {
+                self.0.leaked.store(true, Ordering::Relaxed);
+            }
+            if record.contains("[redacted]") {
+                self.0.masked.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+    impl<S: tracing::Subscriber> Layer<S> for Privacy {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            event.record(&mut Record(&self.0));
+        }
+    }
+
+    let _registration = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let observed = Arc::new(Observed::default());
+    let dispatch =
+        tracing::Dispatch::new(tracing_subscriber::registry().with(Privacy(observed.clone())));
+    async {
+        let (root, service) = service_fixture().await;
+        let id = crate::config::id();
+        let lease = Lease {
+            account_id: crate::config::id(), run_id: id.clone(), provider: Provider::Codex,
+            home: root.path().into(), model: "fixture".into(),
+        };
+        let key = format!("codex-account:{}", lease.account_id);
+        service.vault.set(&key, &json!({ "tokens": { "access_token": "8471" } })).await.unwrap();
+        let mut account = Some(lease);
+        let mut sensitive = vec!["8471".into()];
+        let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), RunCheckpoint::fresh(None));
+        let cancel = CancellationToken::new();
+        let mut run = json!({ "id": id });
+        let mut execution = Execution {
+            s: &service, id: id.clone(), run: &mut run, account: &mut account,
+            preparation: None, cancel: &cancel, checkpoint: &checkpoint,
+            sensitive: &mut sensitive, provider: Provider::Codex, directory: root.path().into(),
+            attempt_id: crate::config::id(), reservation: None, output_probe: None,
+        };
+        let (mut diagnostics, mut publisher) = output::Diagnostics::start(
+            service.clone(), execution.account.clone(), execution.sensitive.to_vec(), &id, &execution.attempt_id,
+        );
+        service.vault.set(&key, &json!({ "tokens": { "access_token": "17381" } })).await.unwrap();
+        execution.refresh_redactions(Some(&diagnostics)).await.unwrap();
+        assert!(execution.sensitive.iter().any(|value| value == "17381"));
+        service.vault.set(&key, &json!({ "tokens": { "access_token": "19873" } })).await.unwrap();
+        for elapsed in [17381, 19873] {
+            assert!(publisher.observe(&format!("2026-11-01T00:19:49Z INFO cairn_performance: operation=\"codex_rpc\" method=\"thread/items/list\" request_id=1 event=\"completed\" elapsed_ms={elapsed} queue_ms=0 timeout_ms=20000 succeeded=true\n")));
+        }
+        publisher.finish(true);
+        diagnostics.completed().await;
+        service.shutdown.cancel();
+    }.with_subscriber(dispatch).await;
+    assert!(crate::performance::flush(Duration::from_secs(5)));
+    assert!(observed.summaries.load(Ordering::Relaxed) > 0);
+    assert!(observed.masked.load(Ordering::Relaxed));
+    assert!(!observed.leaked.load(Ordering::Relaxed));
+}
+
+#[tokio::test]
+async fn saturated_summary_sink_does_not_hold_canonical_output() {
+    use tracing::instrument::WithSubscriber;
+    use tracing_subscriber::{Layer, layer::SubscriberExt};
+
+    #[derive(Default)]
+    struct Gate {
+        entered: CancellationToken,
+        released: std::sync::Mutex<bool>,
+        changed: std::sync::Condvar,
+    }
+
+    struct Release(Arc<Gate>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            *self.0.released.lock().unwrap() = true;
+            self.0.changed.notify_all();
+        }
+    }
+
+    struct Operation(bool);
+    impl tracing::field::Visit for Operation {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            if field.name() == "operation" && value == "agent_rpc_summary" {
+                self.0 = true;
+            }
+        }
+
+        fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+    }
+
+    struct Sink(Arc<Gate>);
+    impl<S: tracing::Subscriber> Layer<S> for Sink {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut operation = Operation(false);
+            event.record(&mut operation);
+            if !operation.0 {
+                return;
+            }
+            self.0.entered.cancel();
+            let mut released = self.0.released.lock().unwrap();
+            while !*released {
+                released = self.0.changed.wait(released).unwrap();
+            }
+        }
+    }
+
+    let _registration = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let gate = Arc::new(Gate::default());
+    let release = Release(gate.clone());
+    let dispatch = tracing::Dispatch::new(tracing_subscriber::registry().with(Sink(gate.clone())));
+    async {
+        assert!(crate::performance::try_record(|_| {
+            tracing::info!(target: "cairn_performance", operation = "agent_rpc_summary");
+        }));
+        gate.entered.cancelled().await;
+        let mut rejected = 0;
+        for _ in 0..32 {
+            if !crate::performance::try_record(|_| {}) {
+                rejected += 1;
+            }
+        }
+        assert!(rejected > 0);
+        // Same real consumer, Store/checkpoint and exact canonical assertions.
+        rpc_flood_fixture().await;
+    }
+    .with_subscriber(dispatch)
+    .await;
+    drop(release);
+    assert!(crate::performance::flush(Duration::from_secs(5)));
 }
