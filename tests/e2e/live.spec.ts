@@ -22,6 +22,7 @@ function historyNoise(id: string) {
 }
 
 test('large timeline answers load completely through bounded content chunks', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
   const run = workspace.service.store.runs().find(run => run.status === 'succeeded' && run.trigger !== 'chat')!
   const answer = `${'bounded fragment '.repeat(18_000)}end of large answer`
   workspace.service.store.event(run.id, 'item.completed', '', {
