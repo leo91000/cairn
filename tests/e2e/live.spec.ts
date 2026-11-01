@@ -21,6 +21,23 @@ function historyNoise(id: string) {
   return Array.from({ length: 128 }, (_, index) => createHash('sha256').update(`${id}:${index}`).digest('hex')).join('')
 }
 
+test('large timeline answers load completely through bounded content chunks', async ({ page, workspace }) => {
+  const run = workspace.service.store.runs().find(run => run.status === 'succeeded' && run.trigger !== 'chat')!
+  const answer = `${'bounded fragment '.repeat(18_000)}end of large answer`
+  workspace.service.store.event(run.id, 'item.completed', '', {
+    item: { id: 'large-answer', type: 'agent_message', text: answer },
+  })
+  const chunks: number[] = []
+  page.on('response', (response) => {
+    if (response.url().includes('/timeline-content'))
+      chunks.push(response.status())
+  })
+  await page.goto(workspacePath(`${workspace.url}/runs/${run.id}`))
+  await authenticateWorkspace(page)
+  await expect(page.locator('.activity-message').filter({ hasText: 'end of large answer' })).toBeVisible()
+  expect(chunks.filter(status => status === 200).length).toBeGreaterThan(1)
+})
+
 test('chat groups visible calls despite diagnostics, updates and global event ID gaps', async ({ page, workspace }) => {
   const original = workspace.service.store.runs().find(run => run.status === 'succeeded')!
   const run = workspace.service.store.addRun({
@@ -518,7 +535,7 @@ test('cached history survives reload before a delayed stream, then clear on logo
     await page.reload()
     await expect(page.locator('.activity-message').filter({ hasText: 'Cache persistence proof' }).first()).toBeVisible()
     await expect.poll(() => requests.length).toBeGreaterThan(0)
-    expect(new URL(requests[0]).searchParams.get('history')).toMatch(/^v1:/)
+    expect(new URL(requests[0]).searchParams.get('history')).toMatch(/^v2:/)
     expect(Number(new URL(requests[0]).searchParams.get('after'))).toBeGreaterThan(0)
   }
   finally {
@@ -640,7 +657,7 @@ test('a cached run restores the reading offset while its stream is still connect
 test('following the latest output resumes a long backlog on the recent window, while a reader keeps its place', async ({ page, workspace }) => {
   // Each of the 560 durable fixture appends starts the real Rust helper. Keep
   // that setup time separate from the unchanged per-assertion response limits.
-  test.setTimeout(60_000)
+  test.setTimeout(120_000)
   await useRelayForHttpMocks(page)
   const run = workspace.service.store.runs()[0]
   const write = (from: number, to: number) => {
@@ -801,7 +818,7 @@ test('recent history loads older pages without moving the reader and survives a 
         const request = tx.objectStore('entries').getAll()
         request.onsuccess = () => resolve(request.result.some((entry) => {
           const saved = JSON.parse(entry.text)
-          return saved.state.run?.id === runId && saved.events.length >= 350 && saved.hasOlder === false
+          return saved.state.run?.id === runId && saved.entries.length >= 350 && saved.hasOlder === false
         }))
         tx.oncomplete = () => db.close()
       }
@@ -816,7 +833,7 @@ test('recent history loads older pages without moving the reader and survives a 
       const db = open.result
       const tx = db.transaction('entries')
       const request = tx.objectStore('entries').getAll()
-      request.onsuccess = () => resolve(Math.max(0, ...request.result.map(e => JSON.parse(e.text).events.length)))
+      request.onsuccess = () => resolve(Math.max(0, ...request.result.map(e => JSON.parse(e.text).entries.length)))
       tx.oncomplete = () => db.close()
     }
   }))).toBeGreaterThanOrEqual(350)

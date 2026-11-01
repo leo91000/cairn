@@ -130,6 +130,45 @@ it('renders through the relay while direct authorization is pending, then uses t
   await vi.waitFor(() => expect(state.transportRoute).toBe('direct'))
 })
 
+it('does not authorize an offer completed after redirecting', async () => {
+  const offered = Promise.withResolvers<Awaited<ReturnType<Peer['createOffer']>>>()
+  vi.spyOn(Peer.prototype, 'createOffer').mockImplementation(() => offered.promise)
+  const fetch = vi.fn(() => Promise.resolve(Response.json({ available: false })))
+  vi.stubGlobal('fetch', fetch)
+  const { redirect, state } = await import('../src/api')
+  state.authenticated = true
+  state.ready = true
+  await vi.waitFor(() => expect(Peer.all).toHaveLength(1))
+  const peer = Peer.all[0]
+  Object.assign(window.location, { assign: vi.fn() })
+
+  redirect('https://provider.test/authorize')
+  offered.resolve(peer.localDescription)
+  await vi.advanceTimersByTimeAsync(0)
+  expect(fetch).not.toHaveBeenCalled()
+  expect(peer.channel.readyState).toBe('closed')
+})
+
+it('does not authorize an old offer using a replacement connection controller', async () => {
+  const offered = Promise.withResolvers<Awaited<ReturnType<Peer['createOffer']>>>()
+  vi.spyOn(Peer.prototype, 'createOffer').mockImplementationOnce(() => offered.promise)
+  const fetch = vi.fn(() => Promise.resolve(Response.json({ available: false })))
+  vi.stubGlobal('fetch', fetch)
+  const { state } = await import('../src/api')
+  state.authenticated = true
+  state.ready = true
+  await vi.waitFor(() => expect(Peer.all).toHaveLength(1))
+  const previous = Peer.all[0]
+
+  state.ready = false
+  state.ready = true
+  await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce())
+  offered.resolve(previous.localDescription)
+  await vi.advanceTimersByTimeAsync(0)
+  expect(fetch).toHaveBeenCalledOnce()
+  expect(previous.channel.readyState).toBe('closed')
+})
+
 it('cancels pending direct authorization before redirecting and ignores its late response', async () => {
   let authorize: (value: Response) => void = () => {}
   const grant = () => Response.json({
@@ -378,6 +417,16 @@ it('retries interrupted reads on relay but leaves other mutations visibly failed
   await failed
   expect(state.toast).toBe('Connection unavailable. Please try again.')
   expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url).endsWith('/api/chats/c'))).toHaveLength(0)
+})
+
+it('replays an interrupted immutable timeline snapshot read on relay', async () => {
+  const { api, channel } = await direct()
+  const body = JSON.stringify({ snapshot: { id: 'message:1:a' }, offset: 0, sha256: null })
+  const read = api('/runs/r/timeline-content', { method: 'POST', body })
+  await vi.waitFor(() => expect(channel.packets.length).toBe(1))
+  channel.dispatchEvent(new Event('close'))
+  expect(await read).toEqual({ marker: 'relay' })
+  expect(fetch).toHaveBeenLastCalledWith('/api/installations/install/api/runs/r/timeline-content', expect.objectContaining({ method: 'POST', body }))
 })
 
 it('sends an unsent mutation through relay when the channel is closing', async () => {

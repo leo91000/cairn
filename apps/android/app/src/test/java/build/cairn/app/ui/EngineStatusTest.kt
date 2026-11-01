@@ -1,328 +1,102 @@
 package build.cairn.app.ui
 
 import build.cairn.app.data.*
+import build.cairn.contracts.EngineRetry
+import build.cairn.contracts.QuotaFailure
+import build.cairn.contracts.TimelineContent
+import build.cairn.contracts.UsageLimit
 import java.time.LocalDate
 import java.time.ZoneOffset
-import kotlinx.serialization.json.*
 import org.junit.Assert.*
 import org.junit.Test
 
-/** Mirrors the web engine-status cases: retries, usage limits and notices are not failures. */
+/** Mirrors the web engine-status cases: the server's engine cards are notices, not failures. */
 class EngineStatusTest {
-    private var serial = 0L
-
-    private fun event(type: String, body: JsonObjectBuilder.() -> Unit = {}): RunEvent {
-        val id = ++serial
-        return RunEvent(
-            id = id,
-            createdAt = id * 1000,
-            type = type,
-            text = "",
-            payload =
-                kotlinx.serialization.json.JsonObject(
-                    buildJsonObject {
-                        put("type", type)
-                        body()
-                    }
-                ),
-            runId = "run",
+    private val retry =
+        EngineRetry(
+            attempt = 2,
+            delayMs = 4000,
+            httpStatus = 529,
+            maxRetries = 10,
+            noResponse = false,
+            reason = "overloaded",
         )
-    }
 
-    private fun retry(attempt: Int) =
-        event("engine.retry") {
-            put("attempt", attempt)
-            put("maxRetries", 10)
-            put("delayMs", 4000)
-            put("status", 529)
-            put("reason", "overloaded")
-        }
+    private fun limit(status: String, blocked: Boolean = false, resetsAt: Long? = null) =
+        UsageLimit(blocked = blocked, resetsAt = resetsAt, status = status, window = "five_hour")
 
-    private fun limit(status: String, blocked: Boolean = false) =
-        event("provider.limit") {
-            put("status", status)
-            put("window", "five_hour")
-            put("blocked", blocked)
-        }
-
-    private fun notice(level: String) =
-        event("engine.notice") {
-            put("level", level)
-            put("message", "Context is almost full.")
-        }
-
-    private fun step() =
-        event("item.started") {
-            put(
-                "item",
-                buildJsonObject {
-                    put("id", "tool-$serial")
-                    put("type", "command_execution")
-                    put("command", "ls")
-                    put("status", "in_progress")
-                },
-            )
-        }
-
-    private fun reply(type: String, text: String) =
-        event(type) {
-            put(
-                "item",
-                buildJsonObject {
-                    put("id", "message-$serial")
-                    put("type", "agent_message")
-                    put("text", text)
-                },
-            )
-        }
-
-    private fun agent(type: String, resumed: Boolean = false) =
-        event(type) {
-            put(
-                "item",
-                buildJsonObject {
-                    put("id", "agent-1")
-                    put("type", "subagent")
-                    put("status", "in_progress")
-                    if (resumed) put("resumed", true)
-                },
-            )
-        }
-
-    private fun status(text: String) = event("status").copy(text = text)
-
-    private fun notices(events: List<RunEvent>) =
-        timelineEntries(events, chat = true).filter { it.notice }.map { it.events.single() }
+    private fun notice(code: String, prominent: Boolean = true) =
+        TimelineNotice(code = code, prominent = prominent, state = "info")
 
     @Test
     fun `presents the engine's retries, usage limit and notices without failing`() {
-        val retry = presentActivity(retry(2))
-        assertEquals("Claude Code relance la requête · tentative 2/10", retry.title)
+        val latest = presentNotice(notice("engineRetry").copy(engineRetry = retry))
+        assertEquals("Claude Code relance la requête · tentative 2/10", latest.title)
         assertEquals(
             "Serveurs surchargés · HTTP 529 · prochaine tentative dans 4 s",
-            retry.subtitle,
+            latest.subtitle,
         )
-        assertFalse(retry.failed)
-
-        val noResponse =
-            presentActivity(
-                event("engine.retry") {
-                    put("attempt", 1)
-                    put("noResponse", buildJsonObject { put("waitedMs", 30000) })
-                }
-            )
-        assertEquals("Aucune réponse de l’API", noResponse.subtitle)
+        assertFalse(latest.failed)
+        val recovered =
+            presentNotice(notice("engineRetry", false).copy(engineRetry = retry, recovered = true))
+        assertEquals(RECOVERED_STATE, recovered.state)
+        assertEquals(
+            "Aucune réponse de l’API",
+            engineRetryDetail(retry.copy(noResponse = true, httpStatus = null, delayMs = null)),
+        )
 
         assertEquals(
             "Limite de 5 heures bientôt atteinte",
-            presentActivity(limit("allowed_warning")).title,
+            usageLimitTitle(limit("allowed_warning")),
         )
         assertEquals(
             "Limite de 5 heures atteinte · utilisation supplémentaire en cours",
-            presentActivity(limit("rejected")).title,
+            usageLimitTitle(limit("rejected")),
         )
-        val blocked = presentActivity(limit("rejected", blocked = true))
+        val blocked = presentNotice(notice("usageLimit").copy(usageLimit = limit("rejected", true)))
         assertEquals("Limite de 5 heures atteinte", blocked.title)
         assertFalse(blocked.failed)
         assertEquals(
             "La limite d’utilisation ne s’applique plus",
-            presentActivity(limit("allowed")).title,
+            usageLimitTitle(limit("allowed")),
         )
 
-        val warning = presentActivity(notice("warning"))
+        val warning =
+            presentNotice(
+                notice("engineNotice").copy(level = "warning", detail = "Context is almost full.")
+            )
         assertEquals("Avertissement de Claude Code", warning.title)
         assertEquals("Context is almost full.", warning.output)
     }
 
     @Test
-    fun `a conversation shows the latest retry until work continues`() {
-        val first = retry(1)
-        val second = retry(2)
-        assertEquals(listOf(second.id), notices(listOf(first, second)).map { it.id })
-        assertTrue(notices(listOf(first, second, step())).isEmpty())
-        assertTrue(notices(listOf(first, event("turn.completed"))).isEmpty())
-        assertTrue(notices(listOf(first, reply("item.started", "Here"))).isEmpty())
-        // Starting a subagent is the agent's own tool starting.
-        assertTrue(notices(listOf(first, agent("item.started"))).isEmpty())
-
-        // The run log keeps every retry, marking the one work recovered from.
-        val log = timelineEntries(listOf(first, second, step())).flatMap { it.events }
-        val states = log.filter { it.type == "engine.retry" }.map { presentActivity(it).state }
-        assertEquals(listOf("Terminé", "Rétablie"), states)
+    fun `a usage limit stops showing once its window resets`() {
+        val now = 1_000_000L
+        val applies = notice("usageLimit").copy(usageLimit = limit("rejected", true, now + 60_000))
+        assertTrue(applies.shown(now))
+        assertFalse(applies.shown(now + 120_000))
+        assertFalse(applies.copy(prominent = false).shown(now))
     }
 
     @Test
-    fun `retries the engine gave up on are not recovered`() {
-        // Claude Code reports the last API error as a message, then the turn fails.
-        val last = retry(10)
-        val gaveUp = reply("item.completed", "API Error: 529 Overloaded")
-        val failed =
-            event("turn.failed") {
-                put("error", buildJsonObject { put("message", "API Error: 529 Overloaded") })
-            }
-        assertEquals(listOf(last.id), notices(listOf(last, gaveUp)).map { it.id })
-        assertFalse(last.id in notices(listOf(last, gaveUp, failed)).map { it.id })
-        assertTrue(recoveredEngineRetries(listOf(last, gaveUp, failed)).isEmpty())
-        val log = timelineEntries(listOf(last, gaveUp, failed)).flatMap { it.events }
-        assertNotEquals("Rétablie", presentActivity(log.first { it.id == last.id }).state)
-
-        // A subagent's progress, or its resumption, does not mean the agent's own request went
-        // through.
-        for (progress in listOf(agent("item.updated"), agent("item.started", resumed = true))) {
-            assertEquals(listOf(last.id), notices(listOf(last, progress)).map { it.id })
-        }
-    }
-
-    @Test
-    fun `retries end with a run that stops before its turn completes`() {
-        val ends =
-            listOf("cancelled", "interrupted", "failed").map { status(it) } +
-                event("runner.failed") {
-                    put("error", buildJsonObject { put("message", "Workspace sealing failed") })
-                }
-        for (end in ends) {
-            val last = retry(3)
-            assertFalse(last.id in notices(listOf(last, end)).map { it.id })
-            // A later execution's work does not recover the stopped run's retry.
-            assertTrue(recoveredEngineRetries(listOf(last, end, step())).isEmpty())
-        }
-    }
-
-    @Test
-    fun `a conversation shows the usage limit until it no longer applies, resets or its run ends`() {
-        val warning = limit("allowed_warning")
-        assertEquals(listOf(warning.id), notices(listOf(warning, step())).map { it.id })
-        assertTrue(notices(listOf(warning, limit("allowed"))).isEmpty())
-
-        // A limit no longer applies once its window resets, even when no later state says so.
-        fun resetting(resetsAt: Long) =
-            event("provider.limit") {
-                put("status", "allowed_warning")
-                put("window", "five_hour")
-                put("resetsAt", resetsAt)
-            }
-        val now = System.currentTimeMillis()
-        assertTrue(notices(listOf(resetting(now - 60_000))).isEmpty())
-        val upcoming = resetting(now + 3_600_000)
-        assertEquals(listOf(upcoming.id), notices(listOf(upcoming)).map { it.id })
-
-        // A limit belongs to the execution that reported it: a later one reports its own.
-        val attempt = event("status") { put("attempt", true) }.copy(text = "Preparing workspace")
-        for (end in
-            listOf(
-                listOf(event("turn.completed"), status("succeeded")),
-                listOf(status("cancelled")),
-                listOf(attempt),
-            )) {
-            assertFalse(warning.id in notices(listOf(warning, step()) + end).map { it.id })
-        }
-
-        val blocked = limit("rejected", blocked = true)
-        assertEquals(listOf(blocked.id), notices(listOf(blocked)).map { it.id })
-        val failed =
-            event("turn.failed") {
-                put(
-                    "error",
-                    buildJsonObject {
-                        put("message", "Your usage allowance is used up for now.")
-                        put("code", "usage_limit_reached")
-                    },
-                )
-            }
-        val shown = notices(listOf(blocked, failed)).map { it.id }
-        assertFalse(blocked.id in shown)
-    }
-
-    @Test
-    fun `informational notices stay in the run log`() {
-        val warning = notice("warning")
-        val info = notice("info")
-        val plain = notice("notice")
-        assertEquals(listOf(warning.id), notices(listOf(warning, info, plain)).map { it.id })
-        assertEquals(3, timelineEntries(listOf(warning, info, plain)).flatMap { it.events }.size)
-    }
-
-    @Test
-    fun `a conversation says a turn runs at Standard when Codex lacks the selected speed`() {
-        val fallback =
-            event("status") {
-                    put(
-                        "speed",
-                        buildJsonObject {
-                            put("requested", "priority")
-                            put("applied", "standard")
-                        },
-                    )
-                }
-                .copy(text = "Codex doesn’t offer the selected speed for this model here.")
-        assertEquals(listOf(fallback.id), notices(listOf(fallback, step())).map { it.id })
-        val shown = presentActivity(fallback)
-        assertEquals("Ce tour passe en vitesse Standard", shown.title)
+    fun `a conversation says how Codex handles the selected speed`() {
         assertEquals(
-            "Codex ne liste pas la vitesse choisie pour ce modèle ici : Cairn demande Standard",
-            shown.subtitle,
+            "Ce tour passe en vitesse Standard",
+            presentNotice(notice("speed").copy(speed = "standard")).title,
         )
-
-        val unconfirmed =
-            event("status") {
-                    put(
-                        "speed",
-                        buildJsonObject {
-                            put("requested", "priority")
-                            put("unconfirmed", true)
-                        },
-                    )
-                }
-                .copy(text = "The selected speed couldn’t be confirmed for this account and model.")
-        assertEquals(listOf(unconfirmed.id), notices(listOf(unconfirmed, step())).map { it.id })
-        assertEquals("Vitesse non confirmée pour ce tour", presentActivity(unconfirmed).title)
-
-        // A later attempt, on another account, gets the speed after all.
-        val confirmed =
-            event("status") {
-                    put(
-                        "speed",
-                        buildJsonObject {
-                            put("requested", "priority")
-                            put("confirmed", true)
-                        },
-                    )
-                }
-                .copy(text = "Codex now offers the selected speed.")
         assertEquals(
-            listOf(fallback.id, confirmed.id),
-            notices(listOf(fallback, confirmed)).map { it.id },
+            "Vitesse non confirmée pour ce tour",
+            presentNotice(notice("speed").copy(speed = "unconfirmed")).title,
         )
         assertEquals(
             "Vitesse choisie demandée pour ce tour",
-            presentActivity(confirmed).title,
+            presentNotice(notice("speed").copy(speed = "confirmed")).title,
         )
     }
 
     @Test
-    fun `the usage banner gives the reset the engine reported`() {
+    fun `the usage banner gives the reset the engine reported on the current failure`() {
         val resetsAt = 1_893_499_200_000L
-        val failed =
-            RunEvent(
-                id = 1,
-                createdAt = 1,
-                type = "turn.failed",
-                text = "",
-                payload =
-                    kotlinx.serialization.json.JsonObject(
-                        buildJsonObject {
-                            put(
-                                "error",
-                                buildJsonObject {
-                                    put("message", "Your usage allowance is used up for now.")
-                                    put("code", "usage_limit_reached")
-                                    put("resetsAt", resetsAt)
-                                },
-                            )
-                        }
-                    ),
-                runId = "run",
-            )
         val run =
             Run(
                 id = "run",
@@ -357,42 +131,37 @@ class EngineStatusTest {
                     ),
                 taskId = "",
             )
-        val quota = chatQuota(run, listOf(failed))!!
+        fun failure(current: Boolean) =
+            TimelineCard(
+                attempt = 0,
+                content =
+                    TimelineContent.C(
+                        TimelineNotice(
+                            code = "failure",
+                            prominent = false,
+                            quota =
+                                QuotaFailure(
+                                    current = current,
+                                    message = "Your usage allowance is used up for now.",
+                                    resetsAt = resetsAt,
+                                ),
+                            state = "error",
+                        )
+                    ),
+                createdAt = 1,
+                id = "notice:1",
+                position = 1,
+                revision = 1,
+                runId = "run",
+                source = 1,
+                turn = 1,
+                updatedAt = 1,
+            )
+        val quota = chatQuota(run, listOf(failure(true)))!!
         assertEquals("Your usage allowance is used up for now.", quota.message)
         assertEquals(limitReset(resetsAt), quota.reset)
-
-        // The runner repeats the failure without its reset, in wording the banner recognizes.
-        fun failure(id: Long, message: String, reset: Long? = null) =
-            RunEvent(
-                id = id,
-                createdAt = id,
-                type = "turn.failed",
-                text = "",
-                payload =
-                    kotlinx.serialization.json.JsonObject(
-                        buildJsonObject {
-                            put(
-                                "error",
-                                buildJsonObject {
-                                    put("message", message)
-                                    if (reset != null) {
-                                        put("code", "usage_limit_reached")
-                                        put("resetsAt", reset)
-                                    }
-                                },
-                            )
-                        }
-                    ),
-                runId = "run",
-            )
-        val known = "Claude AI usage limit reached"
-        val reported = failure(2, known, resetsAt)
-        assertEquals(
-            limitReset(resetsAt),
-            chatQuota(run, listOf(reported, failure(3, known)))!!.reset,
-        )
-        // A new failure without a reset does not inherit an earlier one.
-        assertNull(chatQuota(run, listOf(reported, failure(3, "You've hit your limit")))!!.reset)
+        // A limit from a turn the conversation moved past lends nothing to a later wait.
+        assertNull(chatQuota(run, listOf(failure(false)))!!.reset)
     }
 
     @Test

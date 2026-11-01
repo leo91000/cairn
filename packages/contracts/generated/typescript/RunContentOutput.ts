@@ -3,6 +3,7 @@
 export interface RunContentOutput {
   runId: string
   eventId: number | null
+  entryId?: string | null
   encoding: string
   format: string
   offset: number

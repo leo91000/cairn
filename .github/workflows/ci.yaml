@@ -194,10 +194,15 @@ jobs:
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
         with:
           tool: cargo-nextest@0.9.149
+      - name: Check all Rust targets for a backend-only qualification
+        if: inputs.backend-only == true
+        run: pnpm validate:pr rust
       - name: Run backend tests across binaries with isolated credentials
         run: |
           set -o pipefail
           node scripts/test-backend.mjs --nextest --test-threads 8 --no-fail-fast --color never --status-level pass 2>&1 | tee backend-tests.log
+      - name: Measure the bounded bootstrap observer without filesystem work
+        run: node scripts/test-backend.mjs -p cairn-installation --lib native::bootstrap::tests::observation_hot_path_measurement -- --exact --nocapture
       - name: Qualify native backend namespace isolation with ordinary private bind mounts
         run: node scripts/test-native-namespace.mjs --sudo
       - name: Check Rust documentation examples
@@ -550,7 +555,24 @@ jobs:
           path: target/debug/
       - run: chmod +x target/debug/examples/browser_fixture target/debug/cairn target/debug/cairn-beacon target/debug/examples/network_direct_client target/debug/examples/worker_fixture
       - name: Install Postgres client for beacon account fixtures
-        run: apt-get update -qq && apt-get install -y --no-install-recommends postgresql-client
+        timeout-minutes: 5
+        run: |
+          # A new APT process clears cached connection failures without retrying tests.
+          apt_options=(-o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20)
+          for attempt in 1 2 3; do
+            if apt-get "${apt_options[@]}" -o APT::Update::Error-Mode=any update -qq \
+              && apt-get "${apt_options[@]}" install -y --no-install-recommends postgresql-client; then
+              exit 0
+            else
+              status=$?
+            fi
+
+            if [[ "$attempt" == 3 ]]; then
+              exit "$status"
+            fi
+
+            sleep 2
+          done
       - name: Run browser shard
         timeout-minutes: 10
         run: |

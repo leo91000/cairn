@@ -441,25 +441,26 @@ internal fun ChatPage(
     }
     SideEffect { persistDraft() }
     DisposableEffect(draftKey) { onDispose { persistDraft() } }
-    LaunchedEffect(chat?.messages, live.events) {
+    LaunchedEffect(chat?.messages, live.entries) {
         outgoing?.let { pending ->
             if (
                 chat?.messages.orEmpty().any { it.id == pending.id && it.status == "delivered" } ||
-                    live.events.any {
-                        it.type == "chat.user" &&
-                            it.payload?.get("messageId")?.jsonPrimitive?.contentOrNull == pending.id
+                    live.entries.any {
+                        (it.content as? build.cairn.contracts.TimelineContent.A)?.messageId ==
+                            pending.id
                     }
             )
                 outgoing = null
         }
     }
     val timelineKeys = remember(id) { TimelineKeys() }
-    val quota = remember(chat?.run, live.events) { chatQuota(chat?.run, live.events) }
+    val quota = remember(chat?.run, live.entries) { chatQuota(chat?.run, live.entries) }
     // A failed or interrupted turn never resumes its wakeup, even when the record lingers.
     val pendingWakeup = liveWakeup(chat)
     val history =
         remember(
             live.events,
+            live.entries,
             live.state?.artifacts,
             pendingWakeup?.id,
             pendingWakeup?.observation,
@@ -467,16 +468,18 @@ internal fun ChatPage(
             deliveryTimeline(
                 timelineKeys.stabilize(
                     live.history,
-                    timelineEntries(live.events, chat = true, pendingWakeup = pendingWakeup),
+                    timelineEntries(
+                        live.events,
+                        chat = true,
+                        pendingWakeup = pendingWakeup,
+                        cards = live.entries,
+                    ),
                 ),
                 live.state?.artifacts.orEmpty(),
             )
         }
     val chats = conversations.state?.chats
-    val timeline =
-        remember(history, live.events, chats) {
-            quotaTimeline(history, live.events).followingDelegations(chats)
-        }
+    val timeline = remember(history, chats) { history.followingDelegations(chats) }
     var asking by remember { mutableStateOf<ChatQuestion?>(null) }
     var stopping by remember { mutableStateOf(false) }
     var removing by remember { mutableStateOf<ChatMessage?>(null) }
@@ -500,8 +503,8 @@ internal fun ChatPage(
     val active = chat?.run?.active == true
     val running = chat?.run?.status == "running" && quota == null
     val waitingTasks =
-        remember(live.events, running) {
-            if (running) backgroundWait(live.events) else null
+        remember(live.entries, running) {
+            if (running) backgroundWait(live.entries) else null
         }
     // A subagent's full activity opens in a sheet. The current request's subagents stay in sight
     // above the composer while one of them works.
@@ -540,14 +543,14 @@ internal fun ChatPage(
             else
                 waitingTasks?.let {
                     waitingStep(it)
-                        .copy(subagents = waitingForSubagents(live.events, currentSubagents))
+                        .copy(subagents = waitingForSubagents(it.taskIds, currentSubagents))
                 } ?: workingStep(live.events, chat?.agentName.orEmpty(), chat?.run?.startedAt)
         }
     val conversationError = conversationError(chat)
     val error = conversationError?.takeUnless {
         quota != null && (isQuotaMessage(it) || it == quota.message)
     }
-    val errorShown = remember(chat, live.events) { failureShown(chat, live.events) }
+    val errorShown = remember(chat, live.entries) { failureShown(chat, live.entries) }
     var errorDismissed by
         remember(error, chat?.id, chat?.run?.id, chat?.run?.finishedAt) { mutableStateOf(false) }
     val selectedAgent = state.agents.find { it.id == (chat?.agentId ?: agent) }
@@ -600,7 +603,7 @@ internal fun ChatPage(
             selectedAgent?.access?.projects == null ||
                 it.id in selectedAgent.access.projects.orEmpty()
         }
-    val delivery = chatDelivery(chat, live.events, outgoing)
+    val delivery = chatDelivery(chat, live.entries, outgoing)
     val pending = delivery.queued
     val questions = chat?.questions.orEmpty().filter { it.status == "pending" }
     // Files over the limits stay visible as refused cards; the others join the draft.
@@ -1402,31 +1405,15 @@ internal fun ChatPage(
                                     items(delivery.sending, key = { "sending:${it.message.id}" }) {
                                         sending ->
                                         Column {
-                                            EventRow(
+                                            MessageRow(
                                                 vm,
-                                                RunEvent(
-                                                    id = -1,
-                                                    createdAt = sending.message.createdAt,
-                                                    type = "chat.user",
-                                                    text = sending.message.text,
-                                                    payload =
-                                                        kotlinx.serialization.json.JsonObject(
-                                                            mapOf(
-                                                                "text" to
-                                                                    JsonPrimitive(
-                                                                        questionAnswerText(
-                                                                            sending.message.text,
-                                                                            sending.message
-                                                                                .questionId,
-                                                                        )
-                                                                    ),
-                                                                "attachments" to
-                                                                    wireJson.encodeToJsonElement(
-                                                                        sending.message.attachments
-                                                                    ),
-                                                            )
-                                                        ),
+                                                user = true,
+                                                questionAnswerText(
+                                                    sending.message.text,
+                                                    sending.message.questionId,
                                                 ),
+                                                sending.message.attachments,
+                                                sending.message.createdAt,
                                                 chat?.agentName ?: "Cairn",
                                             )
                                             Text(
