@@ -10,6 +10,8 @@ use common::StoreAgentFixture;
 use common::StoreMissionFixture;
 
 mod common;
+#[path = "native_nodes/lineage_cycles.rs"]
+mod lineage_cycles;
 
 use axum::{
     Router,
@@ -1559,132 +1561,6 @@ async fn delegated_native_administration_requires_the_requesters_current_review(
         !check(administrator).await.unwrap(),
         "Removing the requester's review revokes its child's administrator admission"
     );
-}
-
-#[tokio::test]
-async fn delegated_native_child_cannot_make_its_requester_depend_on_it() {
-    let mut f = Fixture::with_workspace(true).await;
-    f.agent["access"]["installation"] = true.into();
-    f.agent["access"]["delegation"] = true.into();
-    f.service
-        .store
-        .put_agent_fixture(f.agent.clone())
-        .await
-        .unwrap();
-    let (parent_chat, parent) = f.conversation().await;
-    let parent = f
-        .service
-        .store
-        .change_run(
-            text(&parent, "id"),
-            cairn_installation::runs::RunChanges {
-                status: Some(cairn_contracts::RunStatus::Running),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    let parent = f.service.store.run(&parent.id).await.unwrap();
-    let parent_configuration = f
-        .service
-        .mcps
-        .run_configuration(&f.service, &parent)
-        .await
-        .unwrap();
-    let delegated = cairn_installation::delegation::delegate(
-        &f.service,
-        text(&parent_configuration["env"], "CAIRN_MCP_RUN_TOKEN"),
-        &json!({ "task": "Review the requester's implementation" }),
-    )
-    .await
-    .unwrap();
-    f.service.chat_tick(&HashSet::new()).await.unwrap();
-    let child_chat = f
-        .service
-        .conversation_boundary(text(&delegated, "chatId"))
-        .await
-        .unwrap();
-    let child = f
-        .service
-        .store
-        .change_run(
-            text(&child_chat, "runId"),
-            cairn_installation::runs::RunChanges {
-                status: Some(cairn_contracts::RunStatus::Running),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    let child = f.service.store.run(&child.id).await.unwrap();
-    assert!(parent["nativeParentRunId"].is_null());
-    assert_eq!(child["nativeParentRunId"], parent["id"]);
-    assert_eq!(child["nativeParentAccess"], "delegation");
-    for run in [&parent, &child] {
-        let (run, node) = (run.clone(), f.node.clone());
-        assert!(
-            f.service
-                .store
-                .read(move |db| policy::allows(db, &run, &node))
-                .await
-                .unwrap(),
-            "Both native conversations must be admissible before the directing call"
-        );
-    }
-
-    let child_configuration = f
-        .service
-        .mcps
-        .run_configuration(&f.service, &child)
-        .await
-        .unwrap();
-    let message_id = id();
-    let response = delegated_call(
-        &f,
-        &child_configuration,
-        "send_chat_message",
-        json!({
-            "chatId": parent_chat["id"],
-            "message": { "id": message_id, "text": "Change the requester's work" },
-        }),
-    )
-    .await;
-    let saved_parent = f.service.store.run(text(&parent, "id")).await.unwrap();
-    assert!(
-        saved_parent["nativeParentRunId"].is_null(),
-        "A child's directing call must not commit a native parent cycle"
-    );
-    assert_eq!(response["result"]["isError"], true, "{response}");
-    let saved_chat = f
-        .service
-        .conversation_boundary(text(&parent_chat, "id"))
-        .await
-        .unwrap();
-    assert!(saved_chat["nativeParentRunId"].is_null());
-    let parent_chat_id = text(&parent_chat, "id").to_owned();
-    let saved_messages = f
-        .service
-        .store
-        .read(move |db| db.conversation_messages(&parent_chat_id))
-        .await
-        .unwrap();
-    assert!(
-        saved_messages
-            .iter()
-            .all(|message| message.content.id != message_id)
-    );
-    for run_id in [text(&parent, "id"), text(&child, "id")] {
-        let run = f.service.store.run(run_id).await.unwrap();
-        let node = f.node.clone();
-        assert!(
-            f.service
-                .store
-                .read(move |db| policy::allows(db, &run, &node))
-                .await
-                .unwrap(),
-            "Rejecting the cycle must preserve both conversations' native authority"
-        );
-    }
 }
 
 #[tokio::test]

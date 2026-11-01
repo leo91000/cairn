@@ -24,6 +24,17 @@ bounded, revocable agent delegation. Shared installation membership alone never
 grants native execution. Unknown historical/plugin provenance fails closed. The
 manager requires fresh Beacon membership evidence before extending host leases.
 
+Directing an existing conversation also checks the prospective native parent
+chain against the destination run before committing the directing effect. The
+check runs in the same writer transaction as the grant and message/control, so
+opposing requests cannot both create a cycle. This applies to VM conversations
+that retain native provenance too. A cyclic directing effect is refused without
+discarding a saved revocation edge or rewriting existing authority. Delegated
+reports remain readable through `task_status`; they do not require the requester
+to acquire its child's authority as a parent. Existing malformed lineages remain
+denied and require a separate authorized recovery, rather than an automatic
+provenance rewrite.
+
 Update, 2026-10-23: protected native conversations use distinct host accounts and disjoint
 subordinate UID/GID ranges. A RootlessKit enclave separates their network, PID and
 user namespaces; its immutable supervisor starts rootless Docker on demand.

@@ -7,6 +7,8 @@ use crate::{
 };
 use serde_json::{Value, json};
 
+const MAX_AUTHORITY_DEPTH: usize = 16;
+
 tokio::task_local! { pub static CALLER: Option<String>; }
 
 tokio::task_local! { pub(crate) static PARENT: String; }
@@ -394,7 +396,7 @@ fn allows_agent(
     }
     let mut scope = run.clone();
     let mut seen = std::collections::HashSet::new();
-    for _ in 0..16 {
+    for _ in 0..MAX_AUTHORITY_DEPTH {
         if scope["nativeProvenanceUnknown"] == true
             || !explicit(&scope["nativeAuthorityNodes"], text(node, "id"))
             || principals(&scope).as_array().is_none_or(Vec::is_empty)
@@ -465,6 +467,38 @@ pub(crate) fn authorize_origin(db: &Db<'_>, agent: &Value, source: &Origin) -> R
     }
     Err(Error::forbidden(
         "No native node is explicitly authorized for this agent and its originating callers.",
+    ))
+}
+
+/// A prospective grant must be checked against its destination identity before
+/// committing it. Traversing only the old stored graph misses an edge back to
+/// a currently parentless destination. The writer transaction serializes these
+/// checks with the grant and directing effect, including opposing requests.
+fn require_acyclic_parent(db: &Db<'_>, destination: &str, grant: &Value) -> Result<()> {
+    if destination.is_empty() {
+        // A conversation without a run receives a fresh run identity later.
+        return Ok(());
+    }
+    let mut seen = std::collections::HashSet::from([destination.to_owned()]);
+    let mut parent = grant["nativeParentRunId"].as_str().map(str::to_owned);
+    for _ in 0..MAX_AUTHORITY_DEPTH {
+        let Some(id) = parent else {
+            return Ok(());
+        };
+        if !seen.insert(id.clone()) {
+            return Err(Error::forbidden(
+                "This directing action would create a cyclic native authority lineage.",
+            ));
+        }
+        let Some(run) = db.run(&id)? else {
+            // A missing parent cannot introduce a cycle. Native authority still
+            // rejects it through the separate live admission checks.
+            return Ok(());
+        };
+        parent = run["nativeParentRunId"].as_str().map(str::to_owned);
+    }
+    Err(Error::forbidden(
+        "Native authority lineage is too deep to extend safely.",
     ))
 }
 
@@ -569,6 +603,7 @@ pub(crate) fn chat_grant(db: &Db<'_>, chat: &Value, source: &Origin) -> Result<V
     });
     grant["nativePluginGrants"] = incoming["nativePluginGrants"].clone();
     merge_plugin_grants(&mut grant, chat);
+    require_acyclic_parent(db, text(&run, "id"), &grant)?;
     if native(&effective) {
         let mut combined = json!({ "snapshot": { "agent": effective } });
         apply(&mut combined, &grant);
