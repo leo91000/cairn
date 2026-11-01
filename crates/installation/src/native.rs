@@ -24,6 +24,8 @@ mod workspace;
 pub(crate) use mode::matches as mode_matches;
 pub(crate) use service::native_budget;
 pub use service::serve;
+#[cfg(test)]
+pub(crate) use service::tests::output_limit_completion;
 pub use watchdog::serve as watchdog;
 
 pub fn enabled() -> bool {

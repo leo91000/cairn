@@ -935,6 +935,59 @@ mod tests {
         }).await.unwrap();
     }
 
+    #[tokio::test]
+    async fn native_output_limit_survives_authenticated_completion_and_store() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let attempt = crate::config::id();
+        let result = crate::native::output_limit_completion(&attempt).await;
+        assert_eq!(result.code, crate::runner::CONTROLLER_FAILED);
+        assert!(result.physical_finalized);
+        assert!(!result.finalization_failed);
+        let saved = RunCheckpoint::from_value(json!({
+            "prepared": { "backend": "native", "isolated": true },
+            "runnerId": attempt,
+            "remainingMs": null,
+        }))
+        .unwrap();
+        store
+            .transaction(|db| {
+                db.add_run_fixture(
+                    &json!({ "id": "output-limit", "taskId": "task", "status": "running" }),
+                    None,
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let checkpoint = Checkpoint::new(store.clone(), "output-limit".into(), saved);
+        checkpoint
+            .decide(move |saved, db| {
+                saved.record_controller_result(db, "output-limit", &attempt, Some(result))
+            })
+            .await
+            .unwrap();
+        let saved = RunCheckpoint::load(&store, "output-limit")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.terminal_code(), Some(70));
+        assert_eq!(
+            saved.last_error(),
+            "Native output exceeded its bounded log budget."
+        );
+        let events = store
+            .read(|db| db.events_fixture("output-limit", 0, 100))
+            .await
+            .unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| event["payload"]["error"]["code"] == "native_output_limit"),
+            "{events:#?}"
+        );
+    }
+
     #[test]
     fn round_trips_named_checkpoint_fields_and_preserves_null_versus_absent() {
         let stored = json!({

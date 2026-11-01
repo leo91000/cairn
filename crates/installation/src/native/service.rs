@@ -521,14 +521,7 @@ impl Controller {
                 // volume can be released to a following attempt.
                 let _ = protection.await;
             }
-            let mut code = match result {
-                Ok(code) => code,
-                Err(error) => {
-                    let message = format!("Native execution failed: {}\n", error.message);
-                    let _ = controller.append(&id, true, message.as_bytes()).await;
-                    crate::runner::CONTROLLER_FAILED
-                }
-            };
+            let mut code = controller.execution_status(&id, result).await;
             let mut finalization_failed = false;
             // Deliver the result path consumed by the node connector.
             let result = root.join("data/output/result.md");
@@ -675,6 +668,17 @@ impl Controller {
                 let _ = self.abort_disk(id).await;
             }
             break;
+        }
+    }
+
+    async fn execution_status(&self, id: &str, result: Result<i32>) -> i32 {
+        match result {
+            Ok(code) => code,
+            Err(error) => {
+                let message = format!("Native execution failed: {}\n", error.message);
+                let _ = self.append(id, true, message.as_bytes()).await;
+                crate::runner::CONTROLLER_FAILED
+            }
         }
     }
 
@@ -2499,8 +2503,46 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// Real output guard, completion-error branch and authenticated wait/client.
+    /// Sparse bytes model an exhausted journal without storing child payloads.
+    pub(crate) async fn output_limit_completion(attempt: &str) -> crate::runner::ControllerResult {
+        let (_root, controller) = fixture().await;
+        let log = controller.file(attempt, "log");
+        let file = tokio::fs::File::create(&log).await.unwrap();
+        file.set_len(MAX_LOG + 1).await.unwrap();
+        drop(file);
+        let output = b"{\"type\":\"turn.started\"}\n";
+        let result = controller.output(attempt, false, output.as_slice()).await;
+        assert!(
+            result.is_err(),
+            "fixture must exercise the real output guard"
+        );
+        let code = controller.execution_status(attempt, result).await;
+        assert_eq!(code, crate::runner::CONTROLLER_FAILED);
+        assert_eq!(tokio::fs::metadata(log).await.unwrap().len(), MAX_LOG + 1);
+        atomic_write(
+            &controller.file(attempt, "exit"),
+            exit_record(code, false).as_bytes(),
+        )
+        .await
+        .unwrap();
+        let router = Router::new().fallback(any(handler)).with_state(controller);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let url = format!("http://{address}/runs/{attempt}");
+        let http = reqwest::Client::new();
+        let unauthorized = http.post(format!("{url}/wait")).send().await.unwrap();
+        assert_eq!(unauthorized.status(), reqwest::StatusCode::UNAUTHORIZED);
+        let result =
+            crate::runner::wait_for_exit(&http, &url, "synthetic-private-controller-token").await;
+        server.abort();
+        let _ = server.await;
+        result.unwrap()
+    }
 
     #[tokio::test]
     async fn native_budget_validates_persisted_protocol_and_keeps_fresh_bootstrap() {
