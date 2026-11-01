@@ -33,8 +33,16 @@ const S3: &str = "s3";
 /// Current block format: shared immutable objects.
 const SHARED_V1: &str = "shared-v1";
 const DIRECT_PUBLICATIONS: usize = 16;
+// Refill freed global PUT capacity without an unbounded control/producer queue.
+// The terminal batch still waits for every earlier receipt to settle.
+const DIRECT_BATCH_WINDOW: usize = 2;
+const MAX_DIRECT_BATCH_WINDOW: usize = 2;
 
 mod direct_reader;
+mod direct_upload;
+
+#[cfg(test)]
+mod pipeline_tests;
 
 fn legacy_publication(run: &Value) -> bool {
     run["backup"]["id"].is_string() && run["backup"]["blockEnvelope"] != 3
@@ -813,7 +821,19 @@ impl Publication<'_> {
     }
 
     async fn transfer_direct(&self, objects: &[shared_blocks::Object]) -> Result<u64> {
-        use crate::storage::direct::{BATCH, Batch, Receipt, TRANSFER_SECONDS};
+        self.transfer_direct_window(objects, DIRECT_BATCH_WINDOW)
+            .await
+    }
+
+    async fn transfer_direct_window(
+        &self,
+        objects: &[shared_blocks::Object],
+        window: usize,
+    ) -> Result<u64> {
+        use crate::storage::direct::BATCH;
+        if !(1..=MAX_DIRECT_BATCH_WINDOW).contains(&window) {
+            return Err(Error::bad("Invalid direct publication window."));
+        }
         let missing = objects
             .iter()
             .filter(|object| !object.ready)
@@ -824,105 +844,58 @@ impl Publication<'_> {
         self.storage.require_direct().await?;
         let mut reader = direct_reader::Lease::open(self).await?;
         let mut uploaded = 0;
+        let mut uploads = JoinSet::<Result<u64>>::new();
+        let mut failure = None;
         let batches = missing.chunks(BATCH);
         let batch_count = batches.len();
         for (index, batch) in batches.enumerate() {
-            reader.check()?;
-            if self.snapshot["manifest"]["onDemand"] == true {
-                // Preserve the external native-policy refresh as well as the
-                // authoritative DB fence immediately before issuing capabilities.
-                super::disk_grants::authorize_id(self.s, text(self.snapshot, "grantId"))
-                    .await?
-                    .ok_or_else(|| {
-                        Error::forbidden("Disk publication authorization was revoked.")
-                    })?;
-            }
-            let mut plans = Vec::new();
-            for object in batch {
-                plans.push(
-                    self.storage
-                        .direct_upload(&self.s.vault, &object.hash, &object.id, object.size)
-                        .await?,
-                );
-            }
-            let ids = batch
-                .iter()
-                .map(|object| object.id.clone())
-                .collect::<Vec<_>>();
-            let until = plans.iter().map(|plan| plan.read.expires_at).max().unwrap()
-                + TRANSFER_SECONDS as i64 * 1000;
-            let retained = ids.clone();
-            let owner = self.owner();
-            self.s.store.transaction(move |db| {
-                owner.validate(db)?;
-                for object in retained {
-                    db.0.execute("INSERT INTO direct_storage_grants(object,expires_at,settled) VALUES(?1,?2,0) ON CONFLICT(object) DO UPDATE SET expires_at=MAX(expires_at,excluded.expires_at),settled=0", rusqlite::params![object, until])?;
-                }
-                Ok(())
-            }).await?;
-            let publication_id = self.snapshot_id.to_owned();
-            let headers = diagnostic::start(Stage::NodeHeaders);
-            let response = self
-                .s
-                .http
-                .post(format!(
-                    "{}/snapshots/{}/direct-upload",
-                    self.base, self.snapshot_id
-                ))
-                .bearer_auth(self.credential)
-                .json(&Batch {
-                    require_reader: true,
-                    publication_id: publication_id.clone(),
-                    objects: plans,
-                    diagnostics: diagnostic::request(index + 1 == batch_count),
-                })
-                .timeout(Duration::from_secs(TRANSFER_SECONDS + 60))
-                .send()
-                .await
-                .map_err(|_| {
-                    Error::unavailable("Direct publication interrupted; local journal retained.")
-                })?;
-            headers.finish(0);
-            if !response.status().is_success() {
-                if response.status().as_u16() == 400 {
-                    return Err(Error::bad(
-                        "Node rejected a direct publication block's integrity.",
-                    ));
-                }
-                return Err(Error::unavailable(
-                    "Node direct upload failed; no manager fallback, local journal retained.",
-                ));
-            }
-            let bytes = snapshots::response_block(response).await?;
-            let mut receipt: Receipt = serde_json::from_slice(&bytes)
-                .map_err(|_| Error::bad("Invalid direct publication receipt."))?;
-            let expected = batch.iter().map(|object| object.size).sum::<u64>();
-            let mut expected_ids = ids.clone();
-            receipt.objects.sort();
-            expected_ids.sort();
-            if receipt.publication_id != publication_id
-                || receipt.objects != expected_ids
-                || receipt.plaintext_bytes != expected
-                || receipt.encoded_bytes
-                    > batch.len() as u64 * crate::storage::block_codec::MAX_ENCODED_BYTES
-            {
-                return Err(Error::bad(
-                    "Direct publication receipt does not match its plan.",
-                ));
-            }
-            self.s
-                .store
-                .write(move |db| {
-                    for object in ids {
-                        db.0.execute(
-                            "UPDATE direct_storage_grants SET settled=1 WHERE object=?1",
-                            [object],
-                        )?;
+            let terminal = index + 1 == batch_count;
+            // The terminal request retains its existing quiescent-summary
+            // contract. Ordinary requests may reuse freed global PUT permits.
+            while !uploads.is_empty() && (uploads.len() >= window || terminal) {
+                match direct_upload::complete_one(&mut uploads).await {
+                    Ok(bytes) => uploaded += bytes,
+                    Err(error) => {
+                        failure = Some(error);
+                        break;
                     }
-                    Ok(())
-                })
-                .await?;
-            uploaded += receipt.plaintext_bytes;
+                }
+            }
+            if failure.is_some() {
+                break;
+            }
+            let prepared = match reader.check() {
+                Ok(()) => direct_upload::Prepared::new(self, batch, terminal).await,
+                Err(error) => Err(error),
+            };
+            match prepared {
+                Ok(prepared) => {
+                    uploads.spawn(diagnostic::scope(diagnostic::current(), prepared.upload()));
+                }
+                Err(error) => {
+                    failure = Some(error);
+                    break;
+                }
+            }
+        }
+        // Stop admitting after an observed failure and join every control task.
+        // HTTP failure can precede a detached node PUT's completion: unsettled
+        // grants and the node reader retain that ambiguous work. Success below
+        // still requires explicit reader/physical-owner close acknowledgement.
+        let drain = diagnostic::start(Stage::UploadDrain);
+        while !uploads.is_empty() {
+            match direct_upload::complete_one(&mut uploads).await {
+                Ok(bytes) => uploaded += bytes,
+                Err(error) => {
+                    if failure.is_none() {
+                        failure = Some(error);
+                    }
+                }
+            }
+        }
+        drain.finish(0);
+        if let Some(error) = failure {
+            return Err(error);
         }
         reader.close(self).await?;
         tracing::info!(target: "cairn_performance", operation = "disk_publication", id = self.run_id, transport = "direct", uploaded_bytes = uploaded, referenced_blocks = objects.len(), reused_blocks = objects.iter().filter(|object| object.ready).count());

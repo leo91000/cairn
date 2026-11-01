@@ -121,8 +121,11 @@ Each node runs at most four uploads and four reads concurrently, with separate
 budgets so waiting reads cannot starve uploads or deadlock replay verification.
 The encode/PUT budget is acquired after local production: cold base recovery
 does not occupy it. Normal publications admit at most sixteen readers, each
-with a four-block batch, bounding queued plaintext at 256 MiB per node in
-addition to the four encoding/PUT buffers. Publication reads have a 120-second
+with at most two overlapping four-block batches, bounding produced plaintext at
+32 MiB per publication and 512 MiB per node in addition to the four encoding/PUT
+buffers. The terminal batch waits for all earlier receipts to settle. See the
+[scheduling reference and controlled measurements](DIRECT-PUBLICATION-PERFORMANCE.md).
+These are payload bounds, not full-process RSS limits. Publication reads have a 120-second
 production deadline and inherit control-response cancellation, including while
 waiting behind a foreground read of the same cached hash. Cancellation drains
 the blocking read before releasing ownership and does not stop the VM's source.
@@ -231,8 +234,9 @@ Ordinary settled grants stop protecting the object after expiry and its bounded
 transfer window. An interrupted or failed batch can leave an earlier PUT with an
 unknown outcome. Its unused objects retain durable tombstones: collection deletes
 their payloads, retains their inventory and rechecks hourly. This covers a late
-PUT recreating a retired key after a prior DELETE. At most one batch of four
-objects per failed attempt is uncertain; prior successful batches are settled.
+PUT recreating a retired key after a prior DELETE. At most two overlapping
+batches of four objects per failed attempt are uncertain, for up to eight
+unsettled objects; prior successful batches are settled.
 These tombstones deliberately remain while the provider outcome cannot be proved;
 a negative HEAD or expired URL alone does not settle an already accepted PUT.
 
