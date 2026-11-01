@@ -63,10 +63,6 @@ impl ResumeRun {
             ));
         }
         let id = input.run_id.to_string();
-        let preauthorize_before_catalog = matches!(
-            &context,
-            ResumeContext::Human(_) | ResumeContext::Public(..)
-        );
         let (origin, bearer) = match context {
             ResumeContext::Human(account) => (Origin::Human(account), None),
             ResumeContext::Public(scopes, _) => {
@@ -90,7 +86,7 @@ impl ResumeRun {
             }
         };
         let selection = input.selection;
-        let run = if selection.is_some() && preauthorize_before_catalog {
+        let run = if selection.is_some() {
             let authorize_id = id.clone();
             let authorize_origin = origin.clone();
             s.store
