@@ -238,7 +238,7 @@ async fn legacy_rotation_persists_before_account_reuse_even_if_close_waiter_disa
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}/token", listener.local_addr().unwrap());
         let server = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
-            axum::serve(listener, router).await.unwrap()
+            axum::serve(listener, router).await.unwrap();
         }));
         let probe = Arc::new(claude::RotationProbe {
             endpoint,

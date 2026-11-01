@@ -102,7 +102,7 @@ impl Capture {
     ) -> (Self, tracing::Dispatch) {
         use tracing_subscriber::layer::SubscriberExt;
         let capture = Self {
-            reports: Default::default(),
+            reports: std::sync::Arc::default(),
             probe,
         };
         let dispatch = tracing::Dispatch::new(tracing_subscriber::registry().with(capture.clone()));
