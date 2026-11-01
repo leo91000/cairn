@@ -219,8 +219,10 @@ pub(super) fn advertise(listing: Value, gateway: bool) -> Result<Value> {
     Ok(Value::Object(listing))
 }
 
-fn describe(tool: Value, gateway: bool) -> Result<Value> {
-    let Value::Object(mut tool) = tool else {
+/// Shape-only validation shared with the gateway before grant filtering.
+/// Does not annotate, resolve schemas, change canonical data or infer access.
+pub(super) fn validate_descriptor(tool: &Value) -> Result<()> {
+    let Some(tool) = tool.as_object() else {
         return Err(invalid_catalog());
     };
     let valid_name = tool
@@ -232,6 +234,14 @@ fn describe(tool: Value, gateway: bool) -> Result<Value> {
     if !valid_name || !valid_input || !valid_description {
         return Err(invalid_catalog());
     }
+    Ok(())
+}
+
+fn describe(tool: Value, gateway: bool) -> Result<Value> {
+    validate_descriptor(&tool)?;
+    let Value::Object(mut tool) = tool else {
+        return Err(invalid_catalog());
+    };
 
     let description = tool
         .get("description")

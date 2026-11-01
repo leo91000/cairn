@@ -1,4 +1,5 @@
 use cairn_contracts::EventKind;
+use common::AgentFixture;
 use common::McpFixture;
 use common::MissionFixture;
 
@@ -650,7 +651,8 @@ createInterface({ input: process.stdin }).on('line', line => {
         if (process.env.TEST_DISCOVERY_COUNTER) appendFileSync(process.env.TEST_DISCOVERY_COUNTER, 'list\n');
         const mode = process.env.TEST_CATALOG_MODE ? readFileSync(process.env.TEST_CATALOG_MODE, 'utf8') : 'valid';
         const tool = { name: 'bounded_fixture', inputSchema: { type: 'object' }, outputSchema: schema };
-        const tools = mode === 'scalar' ? [42] : mode === 'array' ? [[]] : mode === 'mixed' ? [tool, 42, []] : [tool];
+        const other = { name: 'unlisted_fixture', inputSchema: { type: 'object' } };
+        const tools = mode === 'scalar' ? [42] : mode === 'array' ? [[]] : mode === 'mixed' ? [tool, 42, []] : mode === 'invalid_unlisted' ? [tool, { ...other, inputSchema: [] }] : [tool, other];
         result = { tools };
     } else if (request.method === 'tools/call') {
         appendFileSync(process.env.TEST_COUNTER, 'call\n');
@@ -832,7 +834,13 @@ async fn gateway_bounds_completed_results_without_changing_schemas_grants_or_eff
 }
 
 #[tokio::test]
-async fn unrestricted_gateway_rejects_malformed_advertisements_without_repeating_discovery() {
+async fn gateway_rejects_malformed_advertisements_under_both_grant_scopes() {
+    for restricted in [false, true] {
+        malformed_advertisement_scope(restricted).await;
+    }
+}
+
+async fn malformed_advertisement_scope(restricted: bool) {
     let root = TempDir::new().unwrap();
     std::fs::create_dir(root.path().join("home")).unwrap();
     let mode = root.path().join("catalog-mode");
@@ -855,6 +863,19 @@ async fn unrestricted_gateway_rejects_malformed_advertisements_without_repeating
     let connection_id = connection["id"].as_str().unwrap();
     s.mcps.test(&s, connection_id).await.unwrap();
     let canonical = s.mcps.server(&s, connection_id).await.unwrap().tools;
+    if restricted {
+        s.agent_fixture(
+            json!({
+                "access": {
+                    "mcps": [connection_id],
+                    "mcpTools": { connection_id: ["bounded_fixture"] },
+                },
+            }),
+            Some(MAIN_AGENT_ID),
+        )
+        .await
+        .unwrap();
+    }
     let run = manual_run(&s, "Malformed discovery", "Fixture only").await;
     let run_id = run["id"].as_str().unwrap();
     s.store
@@ -872,15 +893,14 @@ async fn unrestricted_gateway_rejects_malformed_advertisements_without_repeating
         .as_str()
         .unwrap();
     let (_, scope) = s.mcps.grant(&s, connection_id, token).await.unwrap();
-    assert!(
-        scope.tools.is_none(),
-        "Exercise unrestricted grant filtering"
-    );
+    let expected_tools = restricted.then(|| vec!["bounded_fixture".to_owned()]);
+    assert_eq!(scope.tools, expected_tools);
+    let original_scope = serde_json::to_value(&scope).unwrap();
     let endpoint = format!("{origin}/mcp-gateway/{connection_id}");
     let http = reqwest::Client::new();
     let mut calls = std::fs::read_to_string(&discovery).unwrap().lines().count();
     for version in ["2025-11-25", "2026-07-28"] {
-        for catalog_mode in ["scalar", "array", "mixed", "valid"] {
+        for catalog_mode in ["scalar", "array", "mixed", "invalid_unlisted", "valid"] {
             std::fs::write(&mode, catalog_mode).unwrap();
             let response = http.post(&endpoint).bearer_auth(token)
                 .header("mcp-protocol-version", version)
@@ -893,10 +913,22 @@ async fn unrestricted_gateway_rejects_malformed_advertisements_without_repeating
             let response: Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(response["id"], "catalog-id");
             if catalog_mode == "valid" {
+                assert_eq!(
+                    response["result"]["tools"].as_array().unwrap().len(),
+                    if restricted { 1 } else { 2 }
+                );
                 let advertised = &response["result"]["tools"][0];
                 assert_eq!(advertised["name"], canonical[0]["name"]);
                 assert_eq!(advertised["inputSchema"], canonical[0]["inputSchema"]);
                 assert!(advertised.get("outputSchema").is_none());
+                assert_eq!(
+                    advertised["description"]
+                        .as_str()
+                        .unwrap()
+                        .matches("Cairn limits each complete encoded tool result")
+                        .count(),
+                    1
+                );
             } else {
                 assert_eq!(response["error"]["code"], -32603);
                 assert_eq!(
@@ -904,6 +936,11 @@ async fn unrestricted_gateway_rejects_malformed_advertisements_without_repeating
                     "MCP server returned an invalid tool catalog."
                 );
                 assert!(response.get("result").is_none());
+                assert!(
+                    !std::str::from_utf8(&bytes)
+                        .unwrap()
+                        .contains("unlisted_fixture")
+                );
             }
             calls += 1;
             assert_eq!(
@@ -914,6 +951,8 @@ async fn unrestricted_gateway_rejects_malformed_advertisements_without_repeating
                 s.mcps.server(&s, connection_id).await.unwrap().tools,
                 canonical
             );
+            let (_, scope) = s.mcps.grant(&s, connection_id, token).await.unwrap();
+            assert_eq!(serde_json::to_value(scope).unwrap(), original_scope);
         }
     }
     s.mcps.revoke_run(&s, run_id).await.unwrap();

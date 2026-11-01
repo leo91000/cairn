@@ -1173,12 +1173,15 @@ async fn proxy(
             _ => false,
         };
         let result = match method {
-            "tools/list" => client.discover().await.map(|tools| {
+            "tools/list" => client.discover().await.and_then(|tools| {
+                for tool in &tools {
+                    model_result::validate_descriptor(tool)?;
+                }
                 let tools = tools
                     .into_iter()
                     .filter(|tool| scope.allows(text(tool, "name")))
                     .collect::<Vec<_>>();
-                json!({ "tools": tools })
+                Ok(json!({ "tools": tools }))
             }),
             _ if unsupported => Ok(empty_listing(method).unwrap_or_default()),
             "tools/call"

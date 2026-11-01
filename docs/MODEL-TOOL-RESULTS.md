@@ -65,6 +65,9 @@ object descriptors with nonempty string names, object input schemas and
 optional string descriptions. Malformed catalogs produce a fixed bounded
 protocol error rather than a partial advertisement. External output schemas
 remain opaque; this validation neither resolves them nor infers permissions.
+Gateway shape validation precedes the existing grant filter, so a malformed
+unlisted entry also rejects the catalog without revealing its name or details.
+Policy annotation and schema withdrawal occur only on the filtered response.
 
 ## Coverage
 
