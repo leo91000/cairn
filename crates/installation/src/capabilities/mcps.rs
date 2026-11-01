@@ -199,7 +199,28 @@ impl McpOperation {
                         if let Some(binding) = binding {
                             return s.mcps.finish_native_callback(s, &input.id, &binding).await;
                         }
-                        let status=s.store.read(move |db|{authorize.authorize(db)?;let server=crate::error::required(db.mcp_server(&input.id)?,"MCP connection not found.")?;let pending:bool=db.0.query_row("SELECT EXISTS(SELECT 1 FROM mcp_pending_oauth WHERE server_id=? AND expires_at>?)",rusqlite::params![input.id,crate::config::now()],|row|row.get(0))?;Ok(McpConnectionStatus{pending,result:Some(serde_json::to_value(server.state)?.as_str().unwrap().to_owned())})}).await?;
+                        let status = s
+                            .store
+                            .read(move |db| {
+                                authorize.authorize(db)?;
+                                let server = crate::error::required(
+                                    db.mcp_server(&input.id)?,
+                                    "MCP connection not found.",
+                                )?;
+                                let pending: bool = db.0.query_row(
+                                    "SELECT EXISTS(SELECT 1 FROM mcp_pending_oauth WHERE server_id=? AND expires_at>?)",
+                                    rusqlite::params![input.id, crate::config::now()],
+                                    |row| row.get(0),
+                                )?;
+                                let state_value = serde_json::to_value(server.state)?;
+                                let result = state_value.as_str().unwrap().to_owned();
+
+                                Ok(McpConnectionStatus {
+                                    pending,
+                                    result: Some(result),
+                                })
+                            })
+                            .await?;
                         Ok(serde_json::to_value(status)?)
                     }
                     "cancel_mcp_connection" => {
