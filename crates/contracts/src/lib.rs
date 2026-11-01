@@ -24,7 +24,7 @@ pub struct ResumeExecutionSelection {
     #[schemars(length(max = 120))]
     pub model: String,
     #[serde(default, skip_serializing_if = "is_false")]
-    #[schemars(default)]
+    #[schemars(default, extend("default" = false))]
     pub preserve_model: bool,
     #[schemars(length(max = 40), pattern(r"^(?:[a-z][a-z0-9_-]*)?$"))]
     pub reasoning: String,
@@ -137,6 +137,23 @@ mod tests {
     }
 
     #[test]
+    fn preserve_model_schema_is_optional_nonnullable_and_defaults_false() {
+        for contract in [Contract::Deserialize, Contract::Serialize] {
+            let schema = schema_for::<ResumeExecutionSelection>(contract);
+            let property = &schema["properties"]["preserveModel"];
+            assert_eq!(property["type"], "boolean");
+            assert_eq!(property["default"], false);
+            assert!(
+                !schema["required"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|field| field == "preserveModel")
+            );
+        }
+    }
+
+    #[test]
     fn resume_selection_preserve_model_is_optional_and_omitted_when_false() {
         let selection: ResumeExecutionSelection = serde_json::from_value(serde_json::json!({
             "model": "",
@@ -157,7 +174,7 @@ mod tests {
             "speed": "standard",
         }))
         .unwrap();
-        assert_eq!(selection.preserve_model, true);
+        assert!(selection.preserve_model);
         assert!(
             serde_json::from_value::<ResumeExecutionSelection>(serde_json::json!({
                 "model": "",

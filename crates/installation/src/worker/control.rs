@@ -727,7 +727,7 @@ mod tests {
             .unwrap();
         crate::resume_selection::validate_preserved_model(&blank_before, &preserve).unwrap();
         let blank_after = blank_store
-            .transaction(|db| {
+            .transaction(move |db| {
                 requeue(
                     db,
                     "chat-run",
@@ -757,7 +757,7 @@ mod tests {
             speed: "standard".into(),
         };
         let explicit_after = explicit_store
-            .transaction(|db| {
+            .transaction(move |db| {
                 requeue(
                     db,
                     "chat-run",
