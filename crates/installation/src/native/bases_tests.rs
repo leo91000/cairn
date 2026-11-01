@@ -306,8 +306,9 @@ async fn changed_cache_payload_is_rejected_before_a_conversation_can_claim_it() 
 
 #[test]
 fn background_preparation_yields_to_foreground_intent_and_then_finishes() {
-    crate::test_process::run_ignored(
+    crate::test_process::run_ignored_with_timeout(
         "native::bases_tests::background_preparation_yields_to_foreground_intent_and_then_finishes_child",
+        std::time::Duration::from_secs(90),
     );
 }
 
