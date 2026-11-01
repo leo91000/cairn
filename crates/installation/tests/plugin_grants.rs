@@ -402,7 +402,18 @@ async fn credential_supplier_is_explicit_and_reductions_never_select_another() {
     let current = f.api("GET", json!({})).await.unwrap();
     let full = |id: &Value| json!({"instanceId":id,"access":{"type":"full"}});
     let first = json!(f.instance);
-    let saved=f.api("PUT",json!({"agentId":MAIN_AGENT_ID,"revision":current["revision"],"grants":[full(&first),full(&second["id"])],"runCredentialInstances":[first]})).await.unwrap();
+    let saved = f
+        .api(
+            "PUT",
+            json!({
+                "agentId": MAIN_AGENT_ID,
+                "revision": current["revision"],
+                "grants": [full(&first), full(&second["id"])],
+                "runCredentialInstances": [first],
+            }),
+        )
+        .await
+        .unwrap();
     let read = cairn_installation::plugins::run_credentials::for_run(&f.s, MAIN_AGENT_ID, &[])
         .await
         .unwrap();
@@ -410,7 +421,18 @@ async fn credential_supplier_is_explicit_and_reductions_never_select_another() {
         read.files,
         vec![(".config/probe/value".into(), "first".into())]
     );
-    let reduced=f.api("PUT",json!({"agentId":MAIN_AGENT_ID,"revision":saved["revision"],"grants":[full(&second["id"])],"runCredentialInstances":[]})).await.unwrap();
+    let reduced = f
+        .api(
+            "PUT",
+            json!({
+                "agentId": MAIN_AGENT_ID,
+                "revision": saved["revision"],
+                "grants": [full(&second["id"])],
+                "runCredentialInstances": [],
+            }),
+        )
+        .await
+        .unwrap();
     assert!(
         cairn_installation::plugins::run_credentials::for_run(&f.s, MAIN_AGENT_ID, &[])
             .await
@@ -418,7 +440,12 @@ async fn credential_supplier_is_explicit_and_reductions_never_select_another() {
             .files
             .is_empty()
     );
-    let choice = json!({"agentId":MAIN_AGENT_ID,"revision":reduced["revision"],"grants":[full(&second["id"])],"runCredentialInstances":[second["id"]]});
+    let choice = json!({
+        "agentId": MAIN_AGENT_ID,
+        "revision": reduced["revision"],
+        "grants": [full(&second["id"])],
+        "runCredentialInstances": [second["id"]],
+    });
     let denied = f
         .mcp(
             "/mcp-installation",
@@ -444,7 +471,24 @@ async fn installation_can_narrow_a_resource_to_its_descendant_but_cannot_reverse
     let before = f
         .set(json!([contribution("tool", "grant_probe_post", support())]))
         .await;
-    let replace = |revision: &Value, resources: Value| json!({"agentId":MAIN_AGENT_ID,"revision":revision,"grants":[{"instanceId":f.instance,"access":{"type":"selected","contributions":[contribution("tool","grant_probe_post",resources)]}}],"runCredentialInstances":[]});
+    let replace = |revision: &Value, resources: Value| {
+        json!({
+            "agentId": MAIN_AGENT_ID,
+            "revision": revision,
+            "grants": [{
+                "instanceId": f.instance,
+                "access": {
+                    "type": "selected",
+                    "contributions": [contribution(
+                        "tool",
+                        "grant_probe_post",
+                        resources,
+                    )],
+                },
+            }],
+            "runCredentialInstances": [],
+        })
+    };
     let narrowed = f
         .mcp(
             "/mcp-installation",

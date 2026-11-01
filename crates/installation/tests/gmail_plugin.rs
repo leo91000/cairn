@@ -1028,6 +1028,25 @@ async fn manage(f: &Fixture, args: Value) -> Value {
     common::read_json(common::send(&app, request).await).await
 }
 
+async fn plugin_grants(f: &Fixture, method: &str, body: Value) -> Value {
+    cairn_installation::api::dispatch(
+        &f.s,
+        &cairn_installation::http::Input {
+            method: method.into(),
+            path: format!("/api/agents/{MAIN_AGENT_ID}/plugin-grants"),
+            query: std::collections::HashMap::default(),
+            headers: axum::http::HeaderMap::default(),
+            body,
+            identity: Some(cairn_installation::auth::InstallationIdentity::trusted(
+                cairn_installation::auth::InstallationRole::Owner,
+                "fixture-owner",
+            )),
+        },
+    )
+    .await
+    .unwrap()
+}
+
 #[tokio::test]
 async fn a_new_mailbox_reuses_the_google_app_without_exposing_its_secret() {
     let f = fixture().await;
@@ -1147,6 +1166,49 @@ async fn installation_management_reuses_only_a_granted_google_app() {
     assert_ne!(started["result"]["isError"], true, "{started}");
     assert!(started.to_string().contains("fixture-client"), "{started}");
     assert!(!started.to_string().contains("fixture-secret"));
+
+    let current = plugin_grants(&f, "GET", json!({})).await;
+    plugin_grants(
+        &f,
+        "PUT",
+        json!({
+            "agentId": MAIN_AGENT_ID,
+            "revision": current["revision"],
+            "grants": [{ "instanceId": granted.id, "access": { "type": "full" } }],
+            "runCredentialInstances": [],
+        }),
+    )
+    .await;
+    let current = plugin_grants(&f, "GET", json!({})).await;
+    plugin_grants(
+        &f,
+        "PUT",
+        json!({
+            "agentId": MAIN_AGENT_ID,
+            "revision": current["revision"],
+            "grants": [{
+                "instanceId": granted.id,
+                "access": {
+                    "type": "selected",
+                    "contributions": [{ "kind": "tool", "name": "gmail", "resources": [] }],
+                },
+            }],
+            "runCredentialInstances": [],
+        }),
+    )
+    .await;
+
+    let refused = manage(
+        &f,
+        json!({
+            "pluginId": "gmail",
+            "kind": "signin",
+            "data": { "sharedFrom": granted.id, "settings": {}, "secrets": {} },
+        }),
+    )
+    .await;
+    assert_eq!(refused["result"]["isError"], true, "{refused}");
+    assert!(refused.to_string().contains("grant"), "{refused}");
 
     let setup = manage(&f, json!({ "pluginId": "gmail", "kind": "setup" })).await;
     let steps = setup.to_string();

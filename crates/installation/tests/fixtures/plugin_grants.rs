@@ -425,13 +425,38 @@ return {
     }
 
     pub(crate) async fn set_for(&self, agent: &str, contributions: Value) -> Value {
-        let current = self.api("GET", json!({"agentId":agent})).await.unwrap();
-        self.api("PUT",json!({"agentId":agent,"revision":current["revision"],"grants":[{"instanceId":self.instance,"access":{"type":"selected","contributions":contributions}}],"runCredentialInstances":[]})).await.unwrap()
+        let current = self.api("GET", json!({ "agentId": agent })).await.unwrap();
+        self.api(
+            "PUT",
+            json!({
+                "agentId": agent,
+                "revision": current["revision"],
+                "grants": [{
+                    "instanceId": self.instance,
+                    "access": {
+                        "type": "selected",
+                        "contributions": contributions,
+                    },
+                }],
+                "runCredentialInstances": [],
+            }),
+        )
+        .await
+        .unwrap()
     }
 
     pub(crate) async fn mcp(&self, endpoint: &str, token: &str, name: &str, input: Value) -> Value {
         let app = common::relay_fixture::router(self.s.clone()).await.unwrap();
-        let request=common::request("POST",endpoint).header("authorization",format!("Bearer {token}")).body(Body::from(json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":common::mcp_arguments(name,&input)}).to_string())).unwrap();
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": common::mcp_arguments(name, &input),
+        });
+        let request = common::request("POST", endpoint)
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(body.to_string()))
+            .unwrap();
         let response = common::send(&app, request).await;
         assert_eq!(response.status(), StatusCode::OK);
         common::read_json(response).await
