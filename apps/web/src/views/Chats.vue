@@ -6,6 +6,7 @@ import type {
   ChatDetail,
   ChatMessage,
 } from '../../../../packages/contracts/chats'
+import type { ResumeExecutionSelection } from '../../../../packages/contracts/generated/typescript/ResumeExecutionSelection'
 import type { DraftState } from '../attachments'
 import type { LiveWait } from '../chat-wait'
 import type { CachedHistory } from '../history-cache'
@@ -28,7 +29,7 @@ import { deleteChatMessage } from '../../../../packages/contracts/generated/dele
 import { editChatMessage } from '../../../../packages/contracts/generated/editChatMessage'
 import { restartChatSession } from '../../../../packages/contracts/generated/restartChatSession'
 import { restoreChat } from '../../../../packages/contracts/generated/restoreChat'
-import { resumeRun } from '../../../../packages/contracts/generated/resume-run'
+import { resumeChat } from '../../../../packages/contracts/generated/resumeChat'
 import { sendChatMessage } from '../../../../packages/contracts/generated/sendChatMessage'
 import { setChatPaused } from '../../../../packages/contracts/generated/setChatPaused'
 import { stopChat } from '../../../../packages/contracts/generated/stopChat'
@@ -705,8 +706,25 @@ async function resumeQuota() {
   busy.value = true
   error.value = ''
   try {
-    if (chat.run?.status === 'failed')
-      await resumeRun(api, { runId: chat.run.id })
+    const run = chat.run
+    if (run && run.resumeAvailable && ['failed', 'interrupted', 'cancelled'].includes(run.status)) {
+      const savedAgent = run.snapshot?.agent
+      const selectedModel = model.value || savedAgent?.model || ''
+      const selectedReasoning = reasoning.value || (!model.value ? savedAgent?.reasoning : '') || ''
+      const selectedSpeed = speed.value || savedAgent?.speed || ''
+      const selection: ResumeExecutionSelection | undefined = savedAgent
+        && chosenProvider.value === savedAgent.provider
+        && (selectedModel !== savedAgent.model || selectedReasoning !== savedAgent.reasoning || selectedSpeed !== savedAgent.speed)
+        ? { model: selectedModel, reasoning: selectedReasoning, speed: selectedSpeed }
+        : undefined
+      await resumeChat(api, {
+        chatId: chat.id,
+        runId: run.id,
+        turnId: run.chatExecution?.messageId,
+        selection,
+      })
+    }
+
     await setChatPaused(api, { chatId: chat.id, paused: false })
   }
   catch (e) {

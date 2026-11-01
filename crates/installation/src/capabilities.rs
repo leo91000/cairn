@@ -50,6 +50,13 @@ impl ResumeRun {
         input: ResumeRunInput,
         context: ResumeContext,
     ) -> Result<ResumeRunOutput> {
+        if input
+            .turn_id
+            .as_ref()
+            .is_some_and(|turn| turn.is_empty() || turn.chars().count() > 200)
+        {
+            return Err(Error::bad("Invalid turn identifier."));
+        }
         let id = input.run_id.to_string();
         let (origin, bearer) = match context {
             ResumeContext::Human(account) => (Origin::Human(account), None),
@@ -74,17 +81,30 @@ impl ResumeRun {
             }
         };
         let run = s.store.run(&id).await?;
+        let selection = input.selection;
+        let selected_provider = if let Some(selection) = selection.as_ref() {
+            Some(crate::resume_selection::validate(s, &run, selection).await?)
+        } else {
+            None
+        };
         if origin.known() && policy::supports(&run["snapshot"]["agent"], "native") {
             policy::refresh_for(s, &run["snapshot"]["agent"]).await?;
         }
         let commit_id = id.clone();
         s.worker
-            .resume_authorized(s, &id, move |db: &Db<'_>| {
-                if let Some(bearer) = &bearer {
-                    crate::installation_mcp::authorize_in(db, bearer)?;
-                }
-                policy::authorize_run_in(db, &commit_id, &origin)
-            })
+            .resume_selected_authorized(
+                s,
+                &id,
+                input.turn_id,
+                selection,
+                selected_provider,
+                move |db: &Db<'_>| {
+                    if let Some(bearer) = &bearer {
+                        crate::installation_mcp::authorize_in(db, bearer)?;
+                    }
+                    policy::authorize_run_in(db, &commit_id, &origin)
+                },
+            )
             .await?;
         Ok(ResumeRunOutput {
             run_id: input.run_id,

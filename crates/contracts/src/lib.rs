@@ -20,8 +20,26 @@ impl std::fmt::Display for RunId {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResumeExecutionSelection {
+    #[schemars(length(max = 120), pattern(r"^[\w./:\[\]-]*$"))]
+    pub model: String,
+    #[schemars(length(max = 40), pattern(r"^(?:[a-z][a-z0-9_-]*)?$"))]
+    pub reasoning: String,
+    #[schemars(length(max = 40), pattern(r"^(?:[a-z][a-z0-9_-]*)?$"))]
+    pub speed: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResumeRunInput {
     pub run_id: RunId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 200))]
+    #[ts(optional = nullable)]
+    pub turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub selection: Option<ResumeExecutionSelection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
@@ -69,7 +87,7 @@ pub struct QualificationFixture {
 pub const RESUME_RUN_ID: &str = "resume_run";
 pub const RESUME_RUN_SCOPE: &str = "run";
 pub const RESUME_RUN_PATH: &str = "/runs/{runId}/resume";
-pub const RESUME_RUN_DESCRIPTION: &str = "Resume an existing stopped mission run with its saved workspace, session and checkpoint. This does not create a new run (unlike run_task or retry).";
+pub const RESUME_RUN_DESCRIPTION: &str = "Resume an existing stopped run with its saved workspace, session and checkpoint. An optional selection changes only the model, reasoning and speed for this same coding agent; turnId guards against a stale selection. This does not create a new run (unlike run_task or retry).";
 
 /// One schema profile for exported files and live MCP discovery.
 pub fn schema_for<T: JsonSchema>(contract: Contract) -> serde_json::Value {

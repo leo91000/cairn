@@ -8,7 +8,7 @@ use crate::{
     store::Db,
     validation::text,
 };
-use cairn_contracts::EventKind;
+use cairn_contracts::{EventKind, ResumeExecutionSelection};
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
@@ -94,6 +94,25 @@ impl Worker {
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        self.resume_selected_authorized(s, id, None, None, None, authorize)
+            .await
+    }
+
+    /// Resume a stopped run after checking the exact turn and the selected coding agent.
+    pub(crate) async fn resume_selected_authorized<F>(
+        &self,
+        s: &Service,
+        id: &str,
+        expected_turn_id: Option<String>,
+        selection: Option<ResumeExecutionSelection>,
+        selected_provider: Option<crate::provider::Provider>,
+        authorize: F,
+    ) -> Result<Value>
+    where
+        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+    {
+        let preparation = self.run_preparation_lock(id).await;
+        let _preparation = preparation.lock_owned().await;
         let active = self.active.lock().await;
         if active.contains_key(id) {
             return Err(Error::conflict(
@@ -105,7 +124,13 @@ impl Worker {
             .store
             .transaction(move |db| {
                 authorize(db)?;
-                requeue(db, &id)
+                requeue(
+                    db,
+                    &id,
+                    expected_turn_id.as_deref(),
+                    selection.as_ref(),
+                    selected_provider,
+                )
             })
             .await?;
         self.notify();
@@ -235,10 +260,24 @@ fn request_cancel(db: &Db<'_>, id: &str, is_active: bool) -> Result<()> {
 }
 
 /// Queues a stopped run to continue its saved conversation.
-fn requeue(db: &Db<'_>, id: &str) -> Result<Value> {
+fn requeue(
+    db: &Db<'_>,
+    id: &str,
+    expected_turn_id: Option<&str>,
+    selection: Option<&ResumeExecutionSelection>,
+    selected_provider: Option<crate::provider::Provider>,
+) -> Result<Value> {
     let record = required(db.run_record(id)?, "Run not found")?;
     let state = record.state.clone();
     let run = record.wire()?;
+    if expected_turn_id.is_some_and(|expected| {
+        run["chatExecution"]["messageId"].as_str() != Some(expected)
+            && run["missionTurnId"].as_str() != Some(expected)
+    }) {
+        return Err(Error::conflict(
+            "This turn changed before it could be resumed. Refresh the conversation.",
+        ));
+    }
     if run["backendMigration"].is_object() {
         return Err(Error::conflict(
             "Wait for the backend migration to finish before resuming.",
@@ -271,6 +310,31 @@ fn requeue(db: &Db<'_>, id: &str) -> Result<Value> {
             "This run has no saved conversation available to resume.",
         ));
     }
+    let selected_snapshot = if let Some(selection) = selection {
+        if !resumable {
+            return Err(Error::conflict(
+                "A model can only be selected for a saved conversation resume.",
+            ));
+        }
+        let provider = crate::provider::Provider::of_run(&run)?;
+        if selected_provider != Some(provider) {
+            return Err(Error::conflict(
+                "The saved coding agent changed before it could be resumed. Refresh the conversation.",
+            ));
+        }
+        let mut snapshot: cairn_contracts::RunSnapshot =
+            serde_json::from_value(run["snapshot"].clone())?;
+        snapshot.agent.settings.model.clone_from(&selection.model);
+        snapshot
+            .agent
+            .settings
+            .reasoning
+            .clone_from(&selection.reasoning);
+        snapshot.agent.settings.speed.clone_from(&selection.speed);
+        Some(snapshot)
+    } else {
+        None
+    };
     if db
         .active_run_states()?
         .iter()
@@ -319,6 +383,7 @@ fn requeue(db: &Db<'_>, id: &str) -> Result<Value> {
     }
     let wait_reason = (!before_launch).then_some("Resuming saved conversation.");
     let mut patch = crate::runs::RunChanges {
+        snapshot: selected_snapshot,
         status: Some(RunStatus::Queued),
         error: Some(None),
         recovery_pending: Some(true),
@@ -437,7 +502,24 @@ pub async fn routes(s: &Arc<Service>, input: &crate::http::Input) -> Option<Resu
         }
         ["runs", id, "resume"] => {
             async {
-                let command = crate::capabilities::RESUME_RUN.decode(json!({ "runId": id }))?;
+                let mut body = if input.body.is_null() {
+                    json!({})
+                } else {
+                    input.body.clone()
+                };
+                let Some(fields) = body.as_object_mut() else {
+                    return Err(Error::bad("Resume input must be an object."));
+                };
+                if fields
+                    .get("runId")
+                    .is_some_and(|requested| requested.as_str() != Some(id))
+                {
+                    return Err(Error::conflict(
+                        "Resume runId must match the run in the request path.",
+                    ));
+                }
+                fields.insert("runId".into(), id.into());
+                let command = crate::capabilities::RESUME_RUN.decode(body)?;
                 let context = crate::capabilities::ResumeContext::http(input)?;
                 let output = crate::capabilities::RESUME_RUN
                     .invoke(s, command, context)
@@ -473,7 +555,7 @@ mod tests {
                     db.save_checkpoint_boundary("mission", &json!({
                     "completed": completed, "outputInterrupted": true, "launched": true, "prepared": { "cwd": "/workspace" },
                 }))?;
-                    let resumed = requeue(db, "mission")?;
+                    let resumed = requeue(db, "mission", None, None, None)?;
                     assert_eq!(resumed["status"], "queued");
                     let checkpoint = db.checkpoint_boundary("mission")?.unwrap();
                     assert!(checkpoint["outputInterrupted"].is_null());

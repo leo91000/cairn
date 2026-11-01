@@ -56,7 +56,8 @@ import build.cairn.contracts.CreateChatInput
 import build.cairn.contracts.EditChatMessage
 import build.cairn.contracts.EditChatMessageInput
 import build.cairn.contracts.QuestionAnswerInput
-import build.cairn.contracts.ResumeRunInput
+import build.cairn.contracts.ResumeChatInput
+import build.cairn.contracts.ResumeExecutionSelection
 import build.cairn.contracts.SendChatMessageInput
 import build.cairn.contracts.SetChatPausedInput
 import build.cairn.contracts.answerChatQuestion
@@ -67,7 +68,7 @@ import build.cairn.contracts.deleteChatMessage
 import build.cairn.contracts.editChatMessage
 import build.cairn.contracts.restartChatSession
 import build.cairn.contracts.restoreChat
-import build.cairn.contracts.resumeRun
+import build.cairn.contracts.resumeChat
 import build.cairn.contracts.sendChatMessage
 import build.cairn.contracts.setChatPaused
 import build.cairn.contracts.stopChat
@@ -1374,12 +1375,66 @@ internal fun ChatPage(
                                                     resume = {
                                                         chat?.let { current ->
                                                             vm.perform {
-                                                                if (current.run?.status == "failed")
-                                                                    api.resumeRun(
-                                                                        ResumeRunInput(
-                                                                            current.run.id
+                                                                val run = current.run
+                                                                if (
+                                                                    run != null &&
+                                                                        run.resumeAvailable &&
+                                                                        run.status in
+                                                                            setOf(
+                                                                                "failed",
+                                                                                "interrupted",
+                                                                                "cancelled",
+                                                                            )
+                                                                ) {
+                                                                    val savedAgent = run.snapshot?.agent
+                                                                    val selectedModel =
+                                                                        model.ifBlank {
+                                                                            savedAgent?.model.orEmpty()
+                                                                        }
+                                                                    val selectedReasoning =
+                                                                        reasoning.ifBlank {
+                                                                            if (model.isBlank())
+                                                                                savedAgent
+                                                                                    ?.reasoning
+                                                                                    .orEmpty()
+                                                                            else ""
+                                                                        }
+                                                                    val selectedSpeed =
+                                                                        speed.ifBlank {
+                                                                            savedAgent?.speed.orEmpty()
+                                                                        }
+                                                                    val selection =
+                                                                        if (
+                                                                            savedAgent != null &&
+                                                                                chosenProvider ==
+                                                                                    savedAgent.provider &&
+                                                                                (selectedModel !=
+                                                                                    savedAgent.model ||
+                                                                                    selectedReasoning !=
+                                                                                    savedAgent.reasoning ||
+                                                                                    selectedSpeed !=
+                                                                                    savedAgent.speed)
+                                                                        ) {
+                                                                            ResumeExecutionSelection(
+                                                                                model =
+                                                                                    selectedModel,
+                                                                                reasoning =
+                                                                                    selectedReasoning,
+                                                                                speed =
+                                                                                    selectedSpeed,
+                                                                            )
+                                                                        } else null
+                                                                    api.resumeChat(
+                                                                        ResumeChatInput(
+                                                                            chatId = current.id,
+                                                                            runId = run.id,
+                                                                            turnId =
+                                                                                run.chatExecution
+                                                                                    ?.messageId,
+                                                                            selection = selection,
                                                                         )
                                                                     )
+                                                                }
                                                                 api.request(
                                                                     "POST",
                                                                     "/chats/${segment(current.id)}/pause",

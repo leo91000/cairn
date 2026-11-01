@@ -1,11 +1,59 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
+  "definitions": {
+    "ResumeExecutionSelection": {
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "maxLength": 120,
+          "pattern": "^[\\w./:\\[\\]-]*$",
+          "type": "string"
+        },
+        "reasoning": {
+          "maxLength": 40,
+          "pattern": "^(?:[a-z][a-z0-9_-]*)?$",
+          "type": "string"
+        },
+        "speed": {
+          "maxLength": 40,
+          "pattern": "^(?:[a-z][a-z0-9_-]*)?$",
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "model",
+        "reasoning",
+        "speed"
+      ]
+    }
+  },
   "properties": {
     "runId": {
       "description": "Wire UUID for an existing run; distinct from a mission/task identifier.",
       "format": "uuid",
       "type": "string"
+    },
+    "selection": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ResumeExecutionSelection"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "turnId": {
+      "default": null,
+      "maxLength": 200,
+      "minLength": 1,
+      "type": [
+        "string",
+        "null"
+      ]
     }
   },
   "required": [

@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest'
 import expectedWire from '../../../packages/contracts/generated/qualification-wire.json'
 import schema from '../../../packages/contracts/generated/QualificationFixture.json'
 import { resumeRun, resumeRunId } from '../../../packages/contracts/generated/resume-run'
+import { resumeChat } from '../../../packages/contracts/generated/resumeChat'
 import corpus from '../../../tests/fixtures/resume-contracts.json'
 
 const ajv = new Ajv({ useDefaults: true, strict: false })
@@ -53,6 +54,30 @@ describe('generated resume contracts', () => {
 
     expect(resumeRunId).toBe('resume_run')
     expect(await resumeRun(request, { runId: corpus.valid[0].id })).toEqual({ runId: corpus.valid[0].id })
-    expect(calls).toEqual([[`/runs/${corpus.valid[0].id}/resume`, { method: 'POST' }]])
+    expect(calls).toEqual([[
+      `/runs/${corpus.valid[0].id}/resume`,
+      { method: 'POST', body: JSON.stringify({ runId: corpus.valid[0].id }) },
+    ]])
+  })
+
+  it('sends a guarded same-chat selection through the generated client', async () => {
+    const calls: unknown[] = []
+    const request = async <T>(path: string, options: RequestInit): Promise<T> => {
+      calls.push([path, options])
+      return { id: corpus.valid[0].id } as T
+    }
+
+    const input = {
+      chatId: corpus.valid[0].id,
+      runId: corpus.valid[0].id,
+      turnId: 'turn-current',
+      selection: { model: 'gpt-6-luna', reasoning: 'xhigh', speed: '' },
+    }
+
+    await resumeChat(request, input)
+    expect(calls).toEqual([[
+      `/chats/${corpus.valid[0].id}/resume`,
+      { method: 'POST', body: JSON.stringify(input) },
+    ]])
   })
 })

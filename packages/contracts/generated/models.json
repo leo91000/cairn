@@ -10413,6 +10413,74 @@
       ],
       "type": "object"
     },
+    "ResumeChatInput": {
+      "additionalProperties": false,
+      "properties": {
+        "chatId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "runId": {
+          "default": null,
+          "description": "Wire UUID for an existing run; distinct from a mission/task identifier.",
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selection": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ResumeExecutionSelection"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "turnId": {
+          "default": null,
+          "maxLength": 200,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "chatId"
+      ],
+      "type": "object"
+    },
+    "ResumeExecutionSelection": {
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "maxLength": 120,
+          "pattern": "^[\\w./:\\[\\]-]*$",
+          "type": "string"
+        },
+        "reasoning": {
+          "maxLength": 40,
+          "pattern": "^(?:[a-z][a-z0-9_-]*)?$",
+          "type": "string"
+        },
+        "speed": {
+          "maxLength": 40,
+          "pattern": "^(?:[a-z][a-z0-9_-]*)?$",
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "model",
+        "reasoning",
+        "speed"
+      ]
+    },
     "ResumeRunError": {
       "additionalProperties": false,
       "properties": {
@@ -10432,6 +10500,26 @@
           "description": "Wire UUID for an existing run; distinct from a mission/task identifier.",
           "format": "uuid",
           "type": "string"
+        },
+        "selection": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ResumeExecutionSelection"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "turnId": {
+          "default": null,
+          "maxLength": 200,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
