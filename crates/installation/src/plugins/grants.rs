@@ -201,6 +201,45 @@ impl Db<'_> {
         self.clear_ungranted_suppliers(agent)
     }
 
+    /// A newly granted full instance in the setup wizard is an explicit owner
+    /// choice when no supplier remains. Ordinary profile synchronization never
+    /// uses this path and continues to preserve a revoked supplier's tombstone.
+    pub(crate) fn choose_setup_credential_supplier(
+        &self,
+        agent: &str,
+        instance: &str,
+    ) -> Result<()> {
+        if !self.0.query_row(
+            "SELECT EXISTS(SELECT 1 FROM instance_grants WHERE agent_id=? AND instance_id=?)",
+            params![agent, instance],
+            |row| row.get::<_, bool>(0),
+        )? {
+            return Err(Error::forbidden(
+                "Setup credentials require a full instance grant.",
+            ));
+        }
+        let connection = required(self.plugin_instance(instance)?, "Plugin instance not found")?;
+        if self
+            .plugin_credential_supplier(agent, &connection.plugin_id)?
+            .is_some()
+        {
+            return Ok(());
+        }
+        let directory = self
+            .0
+            .path()
+            .and_then(|path| std::path::Path::new(path).parent())
+            .unwrap_or(std::path::Path::new(""));
+        let package = super::registry::upgrade_package(self, directory, &connection.plugin_id)?;
+        if package.manifest.run_credentials.is_some() {
+            self.0.execute(
+                "INSERT INTO plugin_credential_suppliers VALUES(?,?,?) ON CONFLICT(agent_id,plugin_id) DO UPDATE SET instance_id=excluded.instance_id WHERE plugin_credential_suppliers.instance_id IS NULL",
+                params![agent, connection.plugin_id, instance],
+            )?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn clear_ungranted_suppliers(&self, agent: &str) -> Result<()> {
         self.0.execute("UPDATE plugin_credential_suppliers SET instance_id=NULL WHERE agent_id=? AND instance_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM instance_grants g WHERE g.agent_id=plugin_credential_suppliers.agent_id AND g.instance_id=plugin_credential_suppliers.instance_id) AND NOT EXISTS(SELECT 1 FROM plugin_contribution_grants g WHERE g.agent_id=plugin_credential_suppliers.agent_id AND g.instance_id=plugin_credential_suppliers.instance_id AND kind='runCredentials' AND name='')", [agent])?;
         Ok(())

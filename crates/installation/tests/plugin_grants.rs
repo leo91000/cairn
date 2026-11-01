@@ -1331,3 +1331,120 @@ async fn consuming_a_transfer_rechecks_its_source_after_an_async_effect() {
     );
     assert!(result.is_err(), "{result:?}");
 }
+
+#[tokio::test]
+async fn explicit_setup_grant_can_choose_after_removal_without_profile_or_settings_fallback() {
+    let f = Fixture::new().await;
+    let first = common::save_plugin(
+        &f.s,
+        "grant-probe",
+        &json!({
+            "name": "First", "enabled": true, "agentIds": [MAIN_AGENT_ID],
+        }),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        f.api("GET", json!({})).await.unwrap()["runCredentialInstances"],
+        json!([first["id"]])
+    );
+    let retained = common::save_plugin(
+        &f.s,
+        "grant-probe",
+        &json!({
+            "name": "Existing full grant", "enabled": true,
+        }),
+        None,
+    )
+    .await
+    .unwrap();
+    let current = f.api("GET", json!({})).await.unwrap();
+    f.api(
+        "PUT",
+        json!({ "agentId": MAIN_AGENT_ID, "revision": current["revision"],
+            "grants": [{ "instanceId": retained["id"], "access": { "type": "full" } }],
+            "runCredentialInstances": [],
+        }),
+    )
+    .await
+    .unwrap();
+    f.s.agent_fixture(
+        json!({ "name": "Renamed after removal" }),
+        Some(MAIN_AGENT_ID),
+    )
+    .await
+    .unwrap();
+    common::save_plugin(
+        &f.s,
+        "grant-probe",
+        &json!({
+            "name": "Only settings changed", "enabled": true,
+        }),
+        Some(text(&retained, "id")),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        f.api("GET", json!({})).await.unwrap()["runCredentialInstances"],
+        json!([])
+    );
+    let second = common::save_plugin(
+        &f.s,
+        "grant-probe",
+        &json!({
+            "name": "Second", "enabled": true, "agentIds": [MAIN_AGENT_ID],
+            "settings": { "marker": "second" },
+        }),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        f.api("GET", json!({})).await.unwrap()["runCredentialInstances"],
+        json!([second["id"]])
+    );
+    assert_eq!(
+        cairn_installation::plugins::run_credentials::for_run(&f.s, MAIN_AGENT_ID, &[])
+            .await
+            .unwrap()
+            .files,
+        vec![(".config/probe/value".into(), "second".into())]
+    );
+    let third = common::save_plugin(
+        &f.s,
+        "grant-probe",
+        &json!({
+            "name": "Third", "enabled": true, "agentIds": [MAIN_AGENT_ID],
+        }),
+        None,
+    )
+    .await
+    .unwrap();
+    let current = f.api("GET", json!({})).await.unwrap();
+    assert_eq!(current["runCredentialInstances"], json!([second["id"]]));
+    f.api("PUT", json!({ "agentId": MAIN_AGENT_ID, "revision": current["revision"],
+        "grants": [{ "instanceId": third["id"], "access": { "type": "full" } }], "runCredentialInstances": [],
+    })).await.unwrap();
+    common::save_plugin(
+        &f.s,
+        "grant-probe",
+        &json!({
+            "name": "Only settings changed", "enabled": true,
+        }),
+        Some(text(&third, "id")),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        f.api("GET", json!({})).await.unwrap()["runCredentialInstances"],
+        json!([])
+    );
+    assert!(
+        cairn_installation::plugins::run_credentials::for_run(&f.s, MAIN_AGENT_ID, &[])
+            .await
+            .unwrap()
+            .files
+            .is_empty()
+    );
+}

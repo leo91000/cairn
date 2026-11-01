@@ -141,6 +141,9 @@ pub(crate) fn set_instance_agents(db: &Db<'_>, instance: &str, agents: &[String]
         }
         agent.revision = crate::config::id();
         db.save_agent(&agent)?;
+        if granted {
+            db.choose_setup_credential_supplier(&agent.id.to_string(), instance)?;
+        }
     }
     Ok(())
 }
