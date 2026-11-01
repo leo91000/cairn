@@ -894,20 +894,41 @@ async fn malformed_advertisement_scope(restricted: bool) {
     let connection_id = connection["id"].as_str().unwrap();
     s.mcps.test(&s, connection_id).await.unwrap();
     let canonical = s.mcps.server(&s, connection_id).await.unwrap().tools;
-    if restricted {
-        s.agent_fixture(
+    let agent_id = if restricted {
+        let agent = s
+            .agent_fixture(
+                json!({
+                    "name": "Restricted gateway fixture",
+                    "access": {
+                        "mcps": [connection_id],
+                        "mcpTools": { connection_id: ["bounded_fixture"] },
+                    },
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_ne!(agent["id"], MAIN_AGENT_ID);
+        agent["id"].clone()
+    } else {
+        json!(MAIN_AGENT_ID)
+    };
+    let task = s
+        .task_fixture(
             json!({
-                "access": {
-                    "mcps": [connection_id],
-                    "mcpTools": { connection_id: ["bounded_fixture"] },
-                },
+                "name": "Malformed discovery",
+                "agentId": agent_id,
+                "prompt": "Fixture only",
+                "worktree": false,
             }),
-            Some(MAIN_AGENT_ID),
+            None,
         )
         .await
         .unwrap();
-    }
-    let run = manual_run(&s, "Malformed discovery", "Fixture only").await;
+    let run = s
+        .enqueue(task["id"].as_str().unwrap(), "manual", None)
+        .await
+        .unwrap();
     let run_id = run["id"].as_str().unwrap();
     s.store
         .change_run(
