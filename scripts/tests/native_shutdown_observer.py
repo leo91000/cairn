@@ -12,10 +12,39 @@ from pathlib import Path
 import re
 import stat
 import subprocess
+import tempfile
 
 
 class Inconclusive(RuntimeError):
     pass
+
+
+def write_matrix(evidence, value):
+    """Publish this one allowlisted artifact privately to the ordinary runner."""
+    owners = []
+    for key in ('CAIRN_NATIVE_EVIDENCE_UID', 'CAIRN_NATIVE_EVIDENCE_GID'):
+        text = os.environ.get(key, '')
+        if not re.fullmatch('[1-9][0-9]{0,9}', text) or int(text) > 2**31 - 1:
+            raise Inconclusive('evidence-owner-unavailable')
+        owners.append(int(text))
+    uid, gid = owners
+    parent = evidence.lstat()
+    if not stat.S_ISDIR(parent.st_mode) or stat.S_IMODE(parent.st_mode) != 0o700:
+        raise Inconclusive('evidence-directory-not-private')
+    if (parent.st_uid, parent.st_gid) != (uid, gid):
+        raise Inconclusive('evidence-directory-owner-mismatch')
+    descriptor, temporary = tempfile.mkstemp(prefix='.native-shutdown-', dir=evidence)
+    try:
+        with os.fdopen(descriptor, 'w') as output:
+            os.fchmod(output.fileno(), 0o600)
+            os.fchown(output.fileno(), uid, gid)
+            json.dump(value, output, indent=2)
+            output.write('\n')
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, evidence / 'native-shutdown-matrix.json')
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
 FIELDS = ('Id', 'LoadState', 'InvocationID', 'ActiveState', 'SubState',
@@ -212,13 +241,38 @@ def child_gone(child):
         return True
 
 
+def control_observation(result):
+    """Capture completion is separate from whether a control matched its goal."""
+    case = result['case']
+    healthy = result['StatusCode'] == 0 and result['providerCompleted'] and result['PhysicalFinalized']
+    if case.startswith('healthy-'):
+        return dict(status='matched' if healthy else 'not-matched', target='normal-controller-completion')
+    if case == 'residual':
+        primary = result['primary']
+        candidate = result['providerCompleted'] and (primary['ExecMainCode'], primary['ExecMainStatus'], primary['Result']) == (1, 0, 'timeout')
+        return dict(status='not-attributed' if candidate else 'not-exercised',
+            target='owned-descendant-alive-after-systemd-primary-exit',
+            primarySuccessWithCleanupTimeout=candidate, descendantAliveAfterPrimaryExitProven=False,
+            explanation='Pre-release membership and post-fence absence do not establish residual lifetime. Chat process-group or PID-namespace cleanup may remove it earlier.')
+    if case == 'primary-failure':
+        matched = not result['providerCompleted'] and result['StatusCode'] != 0 and result['PhysicalFinalized']
+        return dict(status='matched' if matched else 'not-matched', target='genuine-logical-workload-failure')
+    if case in ('cancel', 'lease'):
+        matched = not result['providerCompleted'] and result['StatusCode'] == 143 and result['PhysicalFinalized']
+        return dict(status='matched' if matched else 'not-matched', target=case + '-controller-stop')
+    if case == 'flush-failure':
+        matched = result['StatusCode'] == 70 and result['FinalizationFailed']
+        return dict(status='matched' if matched else 'not-matched', target='typed-physical-flush-failure')
+    raise Inconclusive('unexpected-control-case')
+
+
 def run_matrix(*, create, start, managed, api, fenced, manager, state, eventually, command, evidence, start_controller):
     """Only invoked by the real explicitly disposable native-runtime fixture."""
     results = []
     def persist(status, stage):
         value = dict(schemaVersion=1, status=status, stage=stage, cases=results, causalRedEstablished=False,
             interpretation='Observation only; primary and cleanup outcomes remain distinct. No mission driver or live recovery claim.')
-        (evidence / 'native-shutdown-matrix.json').write_text(json.dumps(value, indent=2) + '\n')
+        write_matrix(evidence, value)
         return value
 
     for name in ('healthy-unpinned', 'healthy-pinned', 'residual', 'primary-failure', 'cancel', 'lease', 'flush-failure'):
@@ -273,6 +327,7 @@ def run_matrix(*, create, start, managed, api, fenced, manager, state, eventuall
             point = manager('publish', run=run)
             storage = api('/disks/' + run + '/storage-status')
             result['backup'] = dict(published=bool(point.get('backupId')), dirtyBytes=storage['dirtyBytes'])
+            result['controlObservation'] = control_observation(result)
             results.append(result)
             persist('running', name + '-captured')
         except BaseException as error:

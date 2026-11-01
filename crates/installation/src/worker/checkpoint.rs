@@ -911,7 +911,12 @@ mod tests {
     #[test]
     #[ignore = "requires the explicitly disposable CI shutdown matrix"]
     fn classify_native_shutdown_matrix_with_production_guard() {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+
         let path = std::env::var_os("CAIRN_NATIVE_SHUTDOWN_EVIDENCE").unwrap();
+        let output = std::env::var_os("CAIRN_NATIVE_SHUTDOWN_GUARD_OUTPUT").unwrap();
+        assert_ne!(path, output);
         let bytes = std::fs::read(&path).unwrap();
         assert!(bytes.len() <= 65_536);
         let mut evidence: Value = serde_json::from_slice(&bytes).unwrap();
@@ -939,7 +944,16 @@ mod tests {
                 "scope": "actual checkpoint guard; not a mission driver or live run transition",
             });
         }
-        std::fs::write(path, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(output)
+            .unwrap();
+        output
+            .write_all(&serde_json::to_vec_pretty(&evidence).unwrap())
+            .unwrap();
+        output.sync_all().unwrap();
     }
 
     #[tokio::test]

@@ -681,10 +681,9 @@ def main():
                 from native_shutdown_observer import run_matrix
                 evidence = Path(os.environ['NATIVE_STORAGE_EVIDENCE_DIR'])
                 evidence.mkdir(parents=True, exist_ok=True)
-                result = run_matrix(create=create, start=start, managed=managed, api=api, fenced=fenced,
+                run_matrix(create=create, start=start, managed=managed, api=api, fenced=fenced,
                     manager=manager, state=state, eventually=eventually, command=command, evidence=evidence,
                     start_controller=start_controller)
-                (evidence / 'native-shutdown-matrix.json').write_text(json.dumps(result, indent=2) + '\n')
                 for current in runs:
                     manager('purge', run=current)
                     api('/disks/' + current + '/delete')

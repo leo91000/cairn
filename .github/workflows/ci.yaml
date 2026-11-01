@@ -61,10 +61,12 @@ jobs:
       - name: Observe the unchanged normal controller lifecycle
         run: |
           mkdir -p native-shutdown-evidence
-          sudo env PATH="$PWD/.native-s3-test/bin:$PATH" CAIRN_NATIVE_DISPOSABLE_HOST=1 CAIRN_NATIVE_SHUTDOWN_MATRIX=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-shutdown-evidence" .native-s3-test/bin/python scripts/tests/node_s3_test.py --repo "$PWD" --native-runtime target/debug/cairn --qualifier target/debug/examples/native_storage_qualifier
+          chmod 0700 native-shutdown-evidence
+          sudo env PATH="$PWD/.native-s3-test/bin:$PATH" CAIRN_NATIVE_DISPOSABLE_HOST=1 CAIRN_NATIVE_SHUTDOWN_MATRIX=1 CAIRN_NATIVE_EVIDENCE_UID="$(id -u)" CAIRN_NATIVE_EVIDENCE_GID="$(id -g)" NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-shutdown-evidence" .native-s3-test/bin/python scripts/tests/node_s3_test.py --repo "$PWD" --native-runtime target/debug/cairn --qualifier target/debug/examples/native_storage_qualifier
       - name: Evaluate real captured results with the production manager guard
         env:
           CAIRN_NATIVE_SHUTDOWN_EVIDENCE: ${{ github.workspace }}/native-shutdown-evidence/native-shutdown-matrix.json
+          CAIRN_NATIVE_SHUTDOWN_GUARD_OUTPUT: ${{ github.workspace }}/native-shutdown-evidence/native-shutdown-manager-guard.json
         run: node scripts/test-backend.mjs -p cairn-installation --lib worker::checkpoint::tests::classify_native_shutdown_matrix_with_production_guard -- --ignored --exact
       - name: Upload only fixed allowlisted evidence
         if: always()
@@ -73,6 +75,7 @@ jobs:
           name: native-shutdown-8379-${{ github.run_id }}
           path: |
             native-shutdown-evidence/native-shutdown-matrix.json
+            native-shutdown-evidence/native-shutdown-manager-guard.json
             native-shutdown-evidence/source-provenance.json
           if-no-files-found: warn
           retention-days: 7
