@@ -14,14 +14,31 @@ import {
 
 /** Completes a conversation turn and seeds deliverables directly into its run. */
 async function deliverableRun(workspace: Workspace) {
+  const fixtureStartedAt = performance.now()
   initializeRepository(workspace.projectPath)
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Prepare a mobile review with screenshots and a short walkthrough.' })
   let detail: any
-  await expect.poll(async () => {
+  const readRun = async () => {
     detail = await workspace.api(`/api/chats/${chat.id}`)
-    return detail.run?.status
-  }).toBe('succeeded')
+    const run = detail.run
+    if (['failed', 'cancelled', 'interrupted'].includes(run?.status))
+      throw new Error(`Deliverable fixture run ${run.id} ${run.status}: ${run.error ?? 'No further details.'}`)
+    return run
+  }
+
+  // Preparation belongs to the fixture's existing case budget. Reserve the
+  // unchanged completion guard after the provider has opened a real session.
+  const completionTimeout = 7000
+  const preparationTimeout = test.info().timeout - (performance.now() - fixtureStartedAt) - completionTimeout
+  if (preparationTimeout <= 0)
+    throw new Error('No case budget remains to prepare the deliverable fixture run.')
+
+  await expect.poll(async () => {
+    const run = await readRun()
+    return run?.status === 'succeeded' || (typeof run?.sessionId === 'string' && run.sessionId.length > 0)
+  }, { timeout: preparationTimeout, message: 'Prepare the deliverable fixture provider session within the case budget' }).toBe(true)
+  await expect.poll(async () => (await readRun())?.status, { timeout: completionTimeout }).toBe('succeeded')
   const runId: string = detail.run.id
   const directory = path.join(workspace.service.config.dataDir, 'artifacts')
   await mkdir(directory, { recursive: true })
