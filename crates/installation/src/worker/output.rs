@@ -11,7 +11,7 @@ use tokio::{
 
 mod telemetry;
 
-pub(super) use telemetry::Diagnostics;
+pub(super) use telemetry::Publisher;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum OutputKind {
@@ -211,11 +211,9 @@ async fn read_diagnostics(
             return;
         }
     };
-    if !pending.is_empty() {
-        // The receiver only disappears once the run stopped listening.
-        if !forward_diagnostics(&pending, &events, &mut telemetry).await {
-            return;
-        }
+    // The receiver only disappears once the run stopped listening.
+    if !pending.is_empty() && !forward_diagnostics(&pending, &events, &mut telemetry).await {
+        return;
     }
     if let Some(telemetry) = &mut telemetry {
         telemetry.finish(eof);

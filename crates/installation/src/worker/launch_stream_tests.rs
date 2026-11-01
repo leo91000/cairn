@@ -106,8 +106,7 @@ async fn rpc_flood_on_service(root: tempfile::TempDir, service: Arc<Service>) {
         "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":4,\"output_tokens\":2}}\n",
     );
     let (sender, mut events) = mpsc::channel(32);
-    let (reporting, telemetry) =
-        output::Diagnostics::start(service.clone(), None, Vec::new(), &id, &crate::config::id());
+    let telemetry = output::Publisher::new(&id, &crate::config::id());
     let diagnostics_sender = sender.clone();
     let diagnostics = tokio::spawn(async move {
         output::read_agent_diagnostics(stderr.as_bytes(), diagnostics_sender, telemetry).await;
@@ -128,7 +127,6 @@ async fn rpc_flood_on_service(root: tempfile::TempDir, service: Arc<Service>) {
             &mut events,
             &mut 0,
             false,
-            Some(&reporting),
         )
         .await
         .unwrap();
@@ -170,90 +168,64 @@ async fn rpc_flood_on_service(root: tempfile::TempDir, service: Arc<Service>) {
 }
 
 #[tokio::test]
-async fn canonical_refresh_retains_intermediate_numeric_secret_for_summary_rotation() {
-    use std::sync::atomic::AtomicBool;
-    use tracing::instrument::WithSubscriber;
-    use tracing_subscriber::{Layer, layer::SubscriberExt};
+async fn canonical_refresh_preserves_account_rotations_on_retained_output_path() {
+    let (root, service) = service_fixture().await;
+    let id = crate::config::id();
+    let lease = Lease {
+        account_id: crate::config::id(),
+        run_id: id.clone(),
+        provider: Provider::Codex,
+        home: root.path().into(),
+        model: "fixture".into(),
+    };
+    let key = format!("codex-account:{}", lease.account_id);
+    let mut account = Some(lease);
+    let mut sensitive = Vec::new();
+    let checkpoint = Checkpoint::new(
+        service.store.clone(),
+        id.clone(),
+        RunCheckpoint::fresh(None),
+    );
+    let cancel = CancellationToken::new();
+    let mut run = json!({ "id": id });
+    let mut execution = Execution {
+        s: &service,
+        id: id.clone(),
+        run: &mut run,
+        account: &mut account,
+        preparation: None,
+        cancel: &cancel,
+        checkpoint: &checkpoint,
+        sensitive: &mut sensitive,
+        provider: Provider::Codex,
+        directory: root.path().into(),
+        attempt_id: crate::config::id(),
+        reservation: None,
+        output_probe: None,
+    };
+    for value in ["8471", "17381", "19873"] {
+        service
+            .vault
+            .set(&key, &json!({ "tokens": { "access_token": value } }))
+            .await
+            .unwrap();
+        execution.refresh_redactions().await.unwrap();
+    }
+    let observed: Vec<_> = execution.sensitive.iter().map(String::as_str).collect();
+    assert_eq!(observed, ["8471", "17381", "19873"]);
+    let retained = run_output::redact("8471 17381 19873", execution.sensitive);
+    assert_eq!(retained, "[redacted] [redacted] [redacted]");
+    service.shutdown.cancel();
+}
 
-    #[derive(Default)]
-    struct Observed {
-        summaries: AtomicU64,
-        leaked: AtomicBool,
-        masked: AtomicBool,
-    }
-    struct Privacy(Arc<Observed>);
-    struct Record<'a>(&'a Observed);
-    impl tracing::field::Visit for Record<'_> {
-        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-            if field.name() != "record" {
-                return;
-            }
-            let record = format!("{value:?}");
-            self.0.summaries.fetch_add(1, Ordering::Relaxed);
-            if record.contains("17381") || record.contains("19873") {
-                self.0.leaked.store(true, Ordering::Relaxed);
-            }
-            if record.contains("[redacted]") {
-                self.0.masked.store(true, Ordering::Relaxed);
-            }
-        }
-    }
-    impl<S: tracing::Subscriber> Layer<S> for Privacy {
-        fn on_event(
-            &self,
-            event: &tracing::Event<'_>,
-            _: tracing_subscriber::layer::Context<'_, S>,
-        ) {
-            event.record(&mut Record(&self.0));
-        }
-    }
-
-    let _registration = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
-    let observed = Arc::new(Observed::default());
-    let dispatch =
-        tracing::Dispatch::new(tracing_subscriber::registry().with(Privacy(observed.clone())));
-    async {
-        let (root, service) = service_fixture().await;
-        let id = crate::config::id();
-        let lease = Lease {
-            account_id: crate::config::id(), run_id: id.clone(), provider: Provider::Codex,
-            home: root.path().into(), model: "fixture".into(),
-        };
-        let key = format!("codex-account:{}", lease.account_id);
-        service.vault.set(&key, &json!({ "tokens": { "access_token": "8471" } })).await.unwrap();
-        let mut account = Some(lease);
-        let mut sensitive = vec!["8471".into()];
-        let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), RunCheckpoint::fresh(None));
-        let cancel = CancellationToken::new();
-        let mut run = json!({ "id": id });
-        let mut execution = Execution {
-            s: &service, id: id.clone(), run: &mut run, account: &mut account,
-            preparation: None, cancel: &cancel, checkpoint: &checkpoint,
-            sensitive: &mut sensitive, provider: Provider::Codex, directory: root.path().into(),
-            attempt_id: crate::config::id(), reservation: None, output_probe: None,
-        };
-        let (mut diagnostics, mut publisher) = output::Diagnostics::start(
-            service.clone(), execution.account.clone(), execution.sensitive.to_vec(), &id, &execution.attempt_id,
-        );
-        service.vault.set(&key, &json!({ "tokens": { "access_token": "17381" } })).await.unwrap();
-        execution.refresh_redactions(Some(&diagnostics)).await.unwrap();
-        assert!(execution.sensitive.iter().any(|value| value == "17381"));
-        service.vault.set(&key, &json!({ "tokens": { "access_token": "19873" } })).await.unwrap();
-        for elapsed in [17381, 19873] {
-            assert!(publisher.observe(&format!("2026-11-01T00:19:49Z INFO cairn_performance: operation=\"codex_rpc\" method=\"thread/items/list\" request_id=1 event=\"completed\" elapsed_ms={elapsed} queue_ms=0 timeout_ms=20000 succeeded=true\n")));
-        }
-        publisher.finish(true);
-        diagnostics.completed().await;
-        service.shutdown.cancel();
-    }.with_subscriber(dispatch).await;
-    assert!(crate::performance::flush(Duration::from_secs(5)));
-    assert!(observed.summaries.load(Ordering::Relaxed) > 0);
-    assert!(observed.masked.load(Ordering::Relaxed));
-    assert!(!observed.leaked.load(Ordering::Relaxed));
+#[test]
+fn saturated_summary_sink_does_not_hold_canonical_output() {
+    crate::test_process::run_ignored("worker::launch::stream_tests::saturated_summary_sink_child");
 }
 
 #[tokio::test]
-async fn saturated_summary_sink_does_not_hold_canonical_output() {
+#[ignore = "process-global diagnostic sink saturation, invoked by its wrapper"]
+async fn saturated_summary_sink_child() {
     use tracing::instrument::WithSubscriber;
     use tracing_subscriber::{Layer, layer::SubscriberExt};
 

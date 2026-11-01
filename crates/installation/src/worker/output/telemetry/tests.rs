@@ -1,6 +1,12 @@
 use super::*;
-use crate::config::Config;
-use std::io::Write;
+use crate::{config::Config, service::Service};
+use serde_json::{Value, json};
+use std::sync::{Arc, Mutex};
+use tracing::instrument::WithSubscriber;
+use tracing_subscriber::{Layer, layer::SubscriberExt};
+
+const RUN: &str = "00000000-0000-4000-8000-000000000001";
+const ATTEMPT: &str = "00000000-0000-4000-8000-000000000002";
 
 fn started(method: &str) -> String {
     format!(
@@ -14,20 +20,8 @@ fn completed(elapsed: u64, succeeded: bool) -> String {
     )
 }
 
-fn publisher_fixture() -> (Publisher, watch::Receiver<Snapshot>) {
-    let (sender, receiver) = watch::channel(Snapshot::default());
-    (
-        Publisher {
-            snapshot: Snapshot::default(),
-            sender,
-            started: Instant::now(),
-        },
-        receiver,
-    )
-}
-
 #[test]
-fn schema_is_closed_and_does_not_retain_child_text() {
+fn schema_is_closed_and_discards_child_numeric_values_and_text() {
     assert!(matches!(
         parse(&started("thread/items/list")),
         Some(Sample::Started(Method::Items))
@@ -39,8 +33,8 @@ fn schema_is_closed_and_does_not_retain_child_text() {
     assert!(matches!(
         parse(&completed(12345, false)),
         Some(Sample::Completed {
-            elapsed_ms: 12345,
-            succeeded: false,
+            declared_success: false,
+            queue_field_present: true,
             ..
         })
     ));
@@ -58,6 +52,7 @@ fn schema_is_closed_and_does_not_retain_child_text() {
         format!("{valid}extra"),
         completed(MAX_DURATION_MS + 1, true),
         completed(1, true).replace("elapsed_ms=1", "elapsed_ms=-1"),
+        completed(1, true).replace("queue_ms=0", "queue_ms=unknown"),
         completed(1, true).replace("succeeded=true", "succeeded=unknown"),
         format!(
             "{}{}\n",
@@ -70,131 +65,114 @@ fn schema_is_closed_and_does_not_retain_child_text() {
     let missing_queue = completed(1, false).replace("queue_ms=0 ", "");
     assert!(matches!(
         parse(&missing_queue),
-        Some(Sample::Completed { queue_ms: None, .. })
+        Some(Sample::Completed {
+            queue_field_present: false,
+            ..
+        })
     ));
-    let (mut publisher, receiver) = publisher_fixture();
+    let mut publisher = Publisher::new(RUN, ATTEMPT);
     publisher.observe(&valid);
-    let serialized = serde_json::to_string(&*receiver.borrow()).unwrap();
-    assert!(!serialized.contains("untrusted-span"));
-    assert!(!serialized.contains("request_id"));
-    assert!(!serialized.contains("2026-11"));
+    publisher.observe(&completed(17381, true));
+    let serialized = serde_json::to_string(&publisher.snapshot).unwrap();
+    for discarded in [
+        "untrusted-span",
+        "request_id",
+        "2026-11",
+        "elapsed_ms_min",
+        "queue_ms",
+    ] {
+        assert!(!serialized.contains(discarded));
+    }
+    // Local elapsed time may independently coincide with a numeric token; the
+    // isolated rotation test controls that clock and checks the complete record.
+    assert_eq!(publisher.snapshot.items.completed_records, 1);
 }
 
 #[test]
 fn counters_are_cumulative_saturating_and_coverage_is_explicit() {
-    let (mut publisher, receiver) = publisher_fixture();
+    let mut publisher = Publisher::new(RUN, ATTEMPT);
     for _ in 0..6090 {
         assert!(publisher.observe(&started("thread/items/list")));
         assert!(publisher.observe(&completed(1, true)));
     }
     assert!(publisher.observe(&completed(500, false)));
     assert!(!publisher.observe("unrecognized"));
-    let snapshot = *receiver.borrow();
+    let snapshot = publisher.snapshot;
     assert_eq!(snapshot.recognized_records, 12181);
-    assert_eq!(snapshot.items.started, 6090);
-    assert_eq!(snapshot.items.completed, 6091);
-    assert_eq!(snapshot.items.failed, 1);
-    assert_eq!(snapshot.items.slow, 1);
-    assert_eq!(snapshot.items.elapsed_ms_total, 6590);
-    assert_eq!(snapshot.items.elapsed_ms_min, Some(1));
-    assert_eq!(snapshot.items.elapsed_ms_max, 500);
+    assert_eq!(snapshot.items.started_records, 6090);
+    assert_eq!(snapshot.items.completed_records, 6091);
+    assert_eq!(snapshot.items.declared_failure_records, 1);
+    assert_eq!(snapshot.items.missing_queue_field_records, 0);
     assert_eq!(snapshot.unsupported_records, 1);
     assert!(!snapshot.reader_closed);
     assert!(!snapshot.eof);
-    publisher.snapshot.items.started = u64::MAX;
+    publisher.snapshot.items.started_records = u64::MAX;
     publisher.observe(&started("thread/items/list"));
-    assert_eq!(receiver.borrow().items.started, u64::MAX);
-    assert!(receiver.borrow().overflow);
+    assert_eq!(publisher.snapshot.items.started_records, u64::MAX);
+    assert!(publisher.snapshot.overflow);
     publisher.finish(false);
-    assert!(receiver.borrow().reader_closed);
-    assert!(!receiver.borrow().eof);
-    // A later well-formed reader's EOF is a different scoped observation.
-    let (mut complete, receiver) = publisher_fixture();
+    assert!(publisher.snapshot.reader_closed);
+    assert!(!publisher.snapshot.eof);
+    publisher.finish(true);
+    assert!(
+        !publisher.snapshot.eof,
+        "a later finish cannot upgrade error coverage"
+    );
+    assert!(!publisher.observe(&started("thread/items/list")));
+    let mut complete = Publisher::new(RUN, ATTEMPT);
     complete.finish(true);
-    assert!(receiver.borrow().eof);
-    assert!(serde_json::to_vec(&*receiver.borrow()).unwrap().len() < 4096);
+    assert!(complete.snapshot.eof);
+    assert!(serde_json::to_vec(&publisher.snapshot).unwrap().len() < 4096);
 }
 
-#[tokio::test]
-async fn actual_reader_marks_eof_errors_and_unsupported_fragments_distinctly() {
-    struct Reader<'a> {
-        bytes: &'a [u8],
-        error: bool,
-    }
-    impl tokio::io::AsyncRead for Reader<'_> {
-        fn poll_read(
-            mut self: std::pin::Pin<&mut Self>,
-            _: &mut std::task::Context<'_>,
-            buffer: &mut tokio::io::ReadBuf<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            if self.bytes.is_empty() {
-                return std::task::Poll::Ready(if self.error {
-                    Err(std::io::Error::other("synthetic read failure"))
-                } else {
-                    Ok(())
-                });
-            }
-            let count = buffer.remaining().min(self.bytes.len());
-            let bytes = self.bytes;
-            buffer.put_slice(&bytes[..count]);
-            self.bytes = &bytes[count..];
-            std::task::Poll::Ready(Ok(()))
+#[derive(Clone, Default)]
+struct Capture(Arc<Mutex<Vec<Value>>>);
+
+struct Record<'a>(&'a Capture);
+
+impl tracing::field::Visit for Record<'_> {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() != "record" {
+            return;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(&format!("{value:?}")) else {
+            return;
+        };
+        if value["snapshot"].is_object() {
+            self.0.0.lock().unwrap().push(value);
         }
     }
-    for error in [false, true] {
-        let input = started("thread/items/list");
-        let (publisher, receiver) = publisher_fixture();
-        let (sender, mut events) = tokio::sync::mpsc::channel(32);
-        super::super::read_diagnostics(
-            Reader {
-                bytes: input.as_bytes(),
-                error,
-            },
-            sender,
-            Some(publisher),
-        )
-        .await;
-        assert!(events.recv().await.is_none());
-        assert_eq!(receiver.borrow().recognized_records, 1);
-        assert!(receiver.borrow().reader_closed);
-        assert_eq!(receiver.borrow().eof, !error);
-    }
-    let input = started("thread/items/list");
-    let (publisher, receiver) = publisher_fixture();
-    let (sender, mut events) = tokio::sync::mpsc::channel(32);
-    super::super::read_diagnostics(input.trim_end().as_bytes(), sender, Some(publisher)).await;
-    let output = events.recv().await.unwrap();
-    assert_eq!(output.kind, super::super::OutputKind::Performance);
-    assert_eq!(receiver.borrow().recognized_records, 0);
-    assert_eq!(receiver.borrow().unsupported_records, 1);
-    assert!(receiver.borrow().eof);
 }
 
-#[derive(Clone)]
-struct Capture(Arc<Mutex<Vec<u8>>>);
-
-impl Write for Capture {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
+impl<S: tracing::Subscriber> Layer<S> for Capture {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        event.record(&mut Record(self));
     }
 }
 
 fn capture() -> (Capture, tracing::Dispatch) {
-    let capture = Capture(Arc::default());
-    let writer = capture.clone();
-    let dispatch = tracing::Dispatch::new(
-        tracing_subscriber::fmt()
-            .with_ansi(false)
-            .without_time()
-            .with_writer(move || writer.clone())
-            .finish(),
-    );
+    let capture = Capture::default();
+    let dispatch = tracing::Dispatch::new(tracing_subscriber::registry().with(capture.clone()));
     (capture, dispatch)
+}
+
+fn flushed(capture: &Capture) -> Vec<Value> {
+    assert!(crate::performance::flush(Duration::from_secs(5)));
+    capture.0.lock().unwrap().clone()
+}
+
+// The sink and tracing interest are process-global. These children run alone
+// under both ordinary parallel libtest and nextest, using the existing helper.
+#[test]
+fn isolated_reporting_observations() {
+    for child in [
+        "worker::output::telemetry::tests::numeric_rotation_without_canonical_child",
+        "worker::output::telemetry::tests::reader_coverage_child",
+        "worker::output::telemetry::tests::cadence_and_cancellation_child",
+        "worker::output::telemetry::tests::unsupported_only_child",
+    ] {
+        crate::test_process::run_ignored(child);
+    }
 }
 
 async fn service() -> (tempfile::TempDir, Arc<Service>) {
@@ -220,154 +198,198 @@ async fn service() -> (tempfile::TempDir, Arc<Service>) {
     (root, service)
 }
 
-fn lease(root: &std::path::Path) -> Lease {
-    Lease {
-        account_id: crate::config::id(),
-        provider: crate::provider::Provider::Codex,
-        run_id: crate::config::id(),
-        home: root.into(),
-        model: "fixture".into(),
-    }
-}
-
-fn reporter(service: Arc<Service>, receiver: watch::Receiver<Snapshot>) -> Reporter {
-    Reporter {
-        service,
-        secrets: Vec::new(),
-        redactions: Arc::default(),
-        receiver,
-        stop: CancellationToken::new(),
-        run: crate::config::id(),
-        attempt: crate::config::id(),
-    }
-}
-
 #[tokio::test]
-async fn numeric_rotations_and_canonical_observed_intermediate_secrets_are_redacted() {
-    let _registration = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+#[ignore = "process-global diagnostic capture, invoked by isolated_reporting_observations"]
+async fn numeric_rotation_without_canonical_child() {
     let (_root, service) = service().await;
-    let account = lease(_root.path());
-    let key = format!("codex-account:{}", account.account_id);
+    let key = format!("codex-account:{}", crate::config::id());
     service
         .vault
-        .set(
-            &key,
-            &serde_json::json!({ "tokens": { "access_token": "19873" } }),
-        )
+        .set(&key, &json!({ "tokens": { "access_token": "8471" } }))
         .await
         .unwrap();
-    let (mut publisher, receiver) = publisher_fixture();
-    publisher.observe(&completed(17381, true));
-    publisher.observe(&completed(19873, true));
-    publisher.finish(true);
-    let reporter = reporter(service.clone(), receiver);
-    // Canonical output saw B; the Vault is already C when the reporter refreshes.
-    let mut canonical_known = vec!["17381".into()];
-    reporter.redactions.merge(&mut canonical_known);
     let (capture, dispatch) = capture();
-    let refreshing_service = service.clone();
-    reporter
-        .run(move || {
-            let service = refreshing_service.clone();
-            let account = account.clone();
-            async move { service.accounts.redactions(&service, &account).await }
+    async {
+        let mut publisher = Publisher::new(RUN, ATTEMPT);
+        service
+            .vault
+            .set(&key, &json!({ "tokens": { "access_token": "17381" } }))
+            .await
+            .unwrap();
+        assert_eq!(
+            service.vault.get(&key).await.unwrap().unwrap()["tokens"]["access_token"],
+            "17381"
+        );
+        let input = completed(17381, false)
+            .replace("request_id=1", "request_id=17381")
+            .replace("queue_ms=0", "queue_ms=17381");
+        // Model a previously sent window without depending on SQLite or CPU speed.
+        tokio::time::pause();
+        publisher.next_report = Instant::now() + PERIOD;
+        assert!(publisher.observe(&input));
+        tokio::time::resume();
+        // No canonical refresh or reporter refresh ever observes B.
+        service
+            .vault
+            .set(&key, &json!({ "tokens": { "access_token": "19873" } }))
+            .await
+            .unwrap();
+        assert_eq!(
+            service.vault.get(&key).await.unwrap().unwrap()["tokens"]["access_token"],
+            "19873"
+        );
+        // Deterministic local monotonic measurement, independent of SQLite waits.
+        tokio::time::pause();
+        publisher.started = Instant::now() - Duration::from_millis(10);
+        publisher.finish(true);
+        tokio::time::resume();
+    }
+    .with_subscriber(dispatch)
+    .await;
+    let reports = flushed(&capture);
+    assert_eq!(reports.len(), 1);
+    let snapshot = &reports[0]["snapshot"];
+    assert_eq!(
+        snapshot["items"],
+        json!({
+            "started_records": 0,
+            "completed_records": 1,
+            "declared_failure_records": 1,
+            "missing_queue_field_records": 0,
         })
-        .with_subscriber(dispatch)
-        .await;
-    assert!(crate::performance::flush(Duration::from_secs(5)));
-    let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
-    assert!(output.contains("agent_rpc_summary"));
-    assert!(output.contains("[redacted]"));
-    assert!(!output.contains("17381"));
-    assert!(!output.contains("19873"));
-    assert!(output.contains("reader_closed\\\":true") || output.contains("reader_closed\":true"));
-    service.shutdown.cancel();
-}
-
-#[tokio::test]
-async fn pending_refresh_holds_no_redaction_lock_and_cancellation_releases_reporter() {
-    let _registration = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
-    let (_root, service) = service().await;
-    let (mut publisher, receiver) = publisher_fixture();
-    let reporter = reporter(service.clone(), receiver);
-    let secrets = reporter.redactions.clone();
-    let stop = reporter.stop.clone();
-    let entered = CancellationToken::new();
-    let release = CancellationToken::new();
-    let entered_task = entered.clone();
-    let release_task = release.clone();
-    let (capture, dispatch) = capture();
-    let task = tokio::spawn(
-        reporter
-            .run(move || {
-                let entered = entered_task.clone();
-                let release = release_task.clone();
-                async move {
-                    entered.cancel();
-                    release.cancelled().await;
-                    Ok(vec!["not-yet-observed".into()])
-                }
-            })
-            .with_subscriber(dispatch),
     );
-    publisher.observe(&started("thread/items/list"));
-    entered.cancelled().await;
-    // Canonical refresh can merge independently while reporter I/O is pending.
-    let mut canonical = vec!["canonical-rotation".into()];
-    secrets.merge(&mut canonical);
-    assert_eq!(canonical, ["canonical-rotation"]);
-    stop.cancel();
-    task.await.unwrap();
-    assert!(!release.is_cancelled());
-    assert!(capture.0.lock().unwrap().is_empty());
+    assert_eq!(snapshot["local_reader_elapsed_ms"], 10);
+    assert_eq!(snapshot["reader_closed"], true);
+    assert_eq!(snapshot["eof"], true);
+    let encoded = reports[0].to_string();
+    assert!(!encoded.contains("17381"));
+    assert!(!encoded.contains("19873"));
+    for omitted in [
+        "request_id",
+        "elapsed_ms_min",
+        "elapsed_ms_max",
+        "elapsed_ms_total",
+        "queue_ms_total",
+        "queue_ms_max",
+    ] {
+        assert!(!encoded.contains(omitted));
+    }
     service.shutdown.cancel();
 }
 
 #[tokio::test]
-async fn redaction_failure_has_only_a_static_fail_closed_diagnostic() {
-    let _registration = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
-    let (_root, service) = service().await;
-    let (mut publisher, receiver) = publisher_fixture();
-    publisher.observe(&completed(17381, true));
-    publisher.finish(true);
-    let reporter = reporter(service.clone(), receiver);
+#[ignore = "process-global diagnostic capture, invoked by isolated_reporting_observations"]
+async fn reader_coverage_child() {
+    struct Reader<'a> {
+        bytes: &'a [u8],
+        error: bool,
+    }
+    impl tokio::io::AsyncRead for Reader<'_> {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            buffer: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            if self.bytes.is_empty() {
+                return std::task::Poll::Ready(if self.error {
+                    Err(std::io::Error::other("synthetic read failure"))
+                } else {
+                    Ok(())
+                });
+            }
+            let count = buffer.remaining().min(self.bytes.len());
+            let bytes = self.bytes;
+            buffer.put_slice(&bytes[..count]);
+            self.bytes = &bytes[count..];
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
     let (capture, dispatch) = capture();
-    reporter
-        .run(|| async {
-            Err(crate::error::Error::internal(
-                "untrusted-redaction-error-17381",
-            ))
-        })
-        .with_subscriber(dispatch)
+    for error in [false, true] {
+        async {
+            let input = started("thread/items/list");
+            let publisher = Publisher::new(RUN, ATTEMPT);
+            let (sender, mut events) = tokio::sync::mpsc::channel(32);
+            super::super::read_diagnostics(
+                Reader {
+                    bytes: input.as_bytes(),
+                    error,
+                },
+                sender,
+                Some(publisher),
+            )
+            .await;
+            assert!(events.recv().await.is_none());
+        }
+        .with_subscriber(dispatch.clone())
         .await;
-    assert!(crate::performance::flush(Duration::from_secs(5)));
-    let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
-    assert!(output.contains("redaction_unavailable"));
-    assert!(!output.contains("17381"));
-    assert!(!output.contains("untrusted-redaction-error"));
-    assert!(!output.contains("recognized_records"));
-    service.shutdown.cancel();
+        let reports = flushed(&capture);
+        let final_record = reports.last().unwrap();
+        assert_eq!(final_record["snapshot"]["recognized_records"], 1);
+        assert_eq!(final_record["snapshot"]["reader_closed"], true);
+        assert_eq!(final_record["snapshot"]["eof"], !error);
+    }
+    async {
+        let input = started("thread/items/list");
+        let publisher = Publisher::new(RUN, ATTEMPT);
+        let (sender, mut events) = tokio::sync::mpsc::channel(32);
+        super::super::read_diagnostics(input.trim_end().as_bytes(), sender, Some(publisher)).await;
+        let output = events.recv().await.unwrap();
+        assert_eq!(output.kind, super::super::OutputKind::Performance);
+    }
+    .with_subscriber(dispatch)
+    .await;
+    assert_eq!(flushed(&capture).len(), 4);
 }
 
 #[tokio::test]
-async fn unsupported_only_stream_never_performs_a_duplicate_redaction_lookup() {
-    let _registration = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
-    let (_root, service) = service().await;
-    let (mut publisher, receiver) = publisher_fixture();
-    assert!(!publisher.observe(&started("other-method")));
-    publisher.finish(true);
-    let reporter = reporter(service.clone(), receiver);
+#[ignore = "process-global diagnostic capture, invoked by isolated_reporting_observations"]
+async fn cadence_and_cancellation_child() {
     let (capture, dispatch) = capture();
-    let refreshed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let observed = refreshed.clone();
-    reporter
-        .run(move || {
-            observed.store(true, std::sync::atomic::Ordering::Relaxed);
-            async { Ok(Vec::new()) }
-        })
-        .with_subscriber(dispatch)
-        .await;
-    assert!(!refreshed.load(std::sync::atomic::Ordering::Relaxed));
-    assert!(capture.0.lock().unwrap().is_empty());
-    service.shutdown.cancel();
+    async {
+        tokio::time::pause();
+        let mut publisher = Publisher::new(RUN, ATTEMPT);
+        assert!(publisher.observe(&started("thread/items/list")));
+        for _ in 0..100 {
+            publisher.observe(&completed(1, true));
+        }
+        assert_eq!(flushed(&capture).len(), 1);
+        tokio::time::advance(PERIOD).await;
+        publisher.observe(&started("thread/items/list"));
+        assert_eq!(flushed(&capture).len(), 2);
+        publisher.finish(true);
+        publisher.finish(true);
+        assert!(!publisher.observe(&started("thread/items/list")));
+        let reports = flushed(&capture);
+        assert_eq!(reports.len(), 3);
+        assert_eq!(reports[2]["snapshot"]["recognized_records"], 102);
+        assert_eq!(reports[2]["snapshot"]["items"]["completed_records"], 100);
+        assert_eq!(reports[2]["snapshot"]["eof"], true);
+        {
+            let mut cancelled = Publisher::new(RUN, ATTEMPT);
+            cancelled.observe(&started("thread/items/list"));
+        }
+        let reports = flushed(&capture);
+        assert_eq!(reports.len(), 4);
+        assert_eq!(reports[3]["snapshot"]["reader_closed"], false);
+        assert_eq!(reports[3]["snapshot"]["eof"], false);
+        tokio::time::resume();
+    }
+    .with_subscriber(dispatch)
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "process-global diagnostic capture, invoked by isolated_reporting_observations"]
+async fn unsupported_only_child() {
+    let (capture, dispatch) = capture();
+    async {
+        let mut publisher = Publisher::new(RUN, ATTEMPT);
+        assert!(!publisher.observe(&started("other-method")));
+        publisher.finish(true);
+        assert_eq!(publisher.snapshot.unsupported_records, 1);
+    }
+    .with_subscriber(dispatch)
+    .await;
+    assert!(flushed(&capture).is_empty());
 }

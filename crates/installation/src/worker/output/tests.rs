@@ -1104,8 +1104,14 @@ async fn performance_names_inside_diagnostics_are_retained_and_manager_logs_are_
     assert!(!logs.contains("invalid record"), "{logs}");
 }
 
+#[test]
+fn observed_reader_keeps_unknown_performance_on_the_current_redacted_path() {
+    crate::test_process::run_ignored("worker::output::tests::observed_reader_redaction_child");
+}
+
 #[tokio::test]
-async fn observed_reader_keeps_unknown_performance_on_the_current_redacted_path() {
+#[ignore = "process-global diagnostic capture, invoked by its wrapper"]
+async fn observed_reader_redaction_child() {
     use tracing::instrument::WithSubscriber;
 
     let _registration = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
@@ -1119,13 +1125,7 @@ async fn observed_reader_keeps_unknown_performance_on_the_current_redacted_path(
             .with_writer(Arc::new(file))
             .finish(),
     );
-    let (_diagnostics, publisher) = Diagnostics::start(
-        fixture.service.clone(),
-        None,
-        vec!["sensitive-tool-credential".into()],
-        &fixture.id,
-        &crate::config::id(),
-    );
+    let publisher = Publisher::new(&fixture.id, &crate::config::id());
     let input = concat!(
         "2026-11-01T00:19:49Z INFO cairn_performance: operation=\"codex_rpc\" method=\"thread/items/list\" request_id=1 event=\"started\" timeout_ms=20000\r\n",
         "2026-11-01T00:19:49Z INFO cairn_performance: operation=\"codex_rpc\" method=\"sensitive-tool-credential\" request_id=1 event=\"started\" timeout_ms=20000\n",

@@ -1040,13 +1040,7 @@ impl Execution<'_> {
         }
         let stdout = child.child.stdout.take().unwrap();
         let stderr = child.child.stderr.take().unwrap();
-        let (diagnostics, telemetry) = output::Diagnostics::start(
-            s.clone(),
-            self.account.clone(),
-            self.sensitive.to_vec(),
-            &self.id,
-            &self.attempt_id,
-        );
+        let telemetry = output::Publisher::new(&self.id, &self.attempt_id);
         let (tx, mut events) = mpsc::channel(32);
         let out = tokio::spawn(output::read_output(
             stdout,
@@ -1063,13 +1057,7 @@ impl Execution<'_> {
         }
         let span = tracing::info_span!(target: "cairn_performance", "agent_attempt", run_id = self.id, attempt_id = self.attempt_id);
         let exit = self
-            .wait(
-                &mut child,
-                &mut events,
-                log_total,
-                previously_launched,
-                Some(&diagnostics),
-            )
+            .wait(&mut child, &mut events, log_total, previously_launched)
             .instrument(span)
             .await?;
         let _ = out.await;
@@ -1083,7 +1071,6 @@ impl Execution<'_> {
         events: &mut mpsc::Receiver<output::Output>,
         log_total: &mut usize,
         previously_launched: bool,
-        diagnostics: Option<&output::Diagnostics>,
     ) -> Result<Exit> {
         let s = self.s;
         let cancel = self.cancel;
@@ -1133,7 +1120,7 @@ impl Execution<'_> {
                                 probe.canonical();
                             }
                         }
-                        crate::performance::wait("refresh_redactions", self.refresh_redactions(diagnostics)).await?;
+                        crate::performance::wait("refresh_redactions", self.refresh_redactions()).await?;
                         exit.exhausted |= crate::performance::wait("persist_output", output::record(
                             s,
                             &output,
@@ -1153,10 +1140,7 @@ impl Execution<'_> {
     }
 
     /// Account credentials may rotate while the process runs.
-    async fn refresh_redactions(
-        &mut self,
-        diagnostics: Option<&output::Diagnostics>,
-    ) -> Result<()> {
+    async fn refresh_redactions(&mut self) -> Result<()> {
         #[cfg(test)]
         if let Some(probe) = &self.output_probe {
             probe.refresh().await;
@@ -1168,17 +1152,13 @@ impl Execution<'_> {
                 self.sensitive.push("rotated-test-secret".into());
             }
         }
-        if let Some(account) = self.account.as_ref() {
-            for secret in self.s.accounts.redactions(self.s, account).await? {
-                if !self.sensitive.contains(&secret) {
-                    self.sensitive.push(secret);
-                }
+        let Some(account) = self.account.as_ref() else {
+            return Ok(());
+        };
+        for secret in self.s.accounts.redactions(self.s, account).await? {
+            if !self.sensitive.contains(&secret) {
+                self.sensitive.push(secret);
             }
-        }
-        // Publish observed rotations before refresh completes, including before
-        // the timing wrapper can call an independently slow tracing subscriber.
-        if let Some(diagnostics) = diagnostics {
-            diagnostics.redactions(self.sensitive);
         }
         Ok(())
     }
