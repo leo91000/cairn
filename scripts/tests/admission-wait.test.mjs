@@ -8,7 +8,7 @@ import { expect, it } from 'vitest'
 function expectNodeTapSuitePasses(output, suitePath) {
   const counts = Object.fromEntries([...output.matchAll(/^# (tests|pass|fail|cancelled|skipped|todo) (\d+)$/gm)]
     .map(([, name, count]) => [name, Number(count)]))
-  const passedCases = [...output.matchAll(/^ok \d+ - (.+)$/gm)]
+  const passedCases = [...output.matchAll(/^[ \t]*ok \d+ - (.+)$/gm)]
     .filter(([, name]) => name !== suitePath && !/ # (?:SKIP|TODO)(?: |$)/.test(name))
 
   expect(counts.tests).toBeGreaterThan(0)
@@ -52,6 +52,34 @@ it('rejects empty or all-skipped Node TAP child suites', () => {
     expect(allSkippedOutput).toMatch(/^# skipped [1-9]\d*$/m)
     expect(allSkippedOutput).toContain('# fail 0')
     expect(() => expectNodeTapSuitePasses(allSkippedOutput, allSkippedSuitePath)).toThrow()
+  }
+  finally {
+    rmSync(fixtureDir, { recursive: true, force: true })
+  }
+})
+
+it('accepts a named child beneath a nested Node TAP parent', () => {
+  const fixtureDir = mkdtempSync(join(tmpdir(), 'cairn-admission-wait-tap-nested-'))
+  const suitePath = join(fixtureDir, 'nested.mjs')
+  const source = [
+    'import test from \'node:test\'',
+    `test(${JSON.stringify(suitePath)}, () => {`,
+    '  test(\'named nested child\', () => {})',
+    '})',
+    '',
+  ].join('\n')
+
+  try {
+    writeFileSync(suitePath, source)
+    const output = execFileSync(process.execPath, ['--test', '--test-reporter=tap', suitePath], {
+      encoding: 'utf8',
+      timeout: 10000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+
+    expect(output).toMatch(/^[ \t]+ok \d+ - named nested child$/m)
+    expect(output).toContain(`# fail 0`)
+    expectNodeTapSuitePasses(output, suitePath)
   }
   finally {
     rmSync(fixtureDir, { recursive: true, force: true })

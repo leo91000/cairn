@@ -139,6 +139,67 @@ test('sampling gap resets duration while restart serialization preserves eligibl
   assert.equal(observation(late).occurrence, observation(old).occurrence)
 })
 
+test('inconsistent active timestamps reset age without changing episode or retained occurrence', () => {
+  const episodeId = '123e4567-e89b-42d3-a456-426614174000'
+  const first = observeAdmissionWaits(sample(0, [capacity()]), undefined, undefined, () => episodeId)
+  const occurrence = observation(first).occurrence
+  const inconsistent = JSON.parse(JSON.stringify(first.state))
+  inconsistent.observedAt = 1000
+  inconsistent.waits[0].lastObservedAt = 1000000
+
+  const resumed = observeAdmissionWaits(
+    sample(1000000, [capacity()]),
+    inconsistent,
+    () => ({ occurrence }),
+  )
+
+  assert.equal(observation(resumed).status, 'unknown')
+  assert.equal(observation(resumed).observedSince, 1000000)
+  assert.equal(observation(resumed).firstObservedAt, 0)
+  assert.equal(observation(resumed).occurrence, occurrence)
+  assert.equal(resumed.state.waits[0].episodeId, episodeId)
+  assert.equal(resumed.state.waits[0].since, 1000000)
+  assert.equal(resumed.state.limited, false)
+})
+
+test('coherent sample gaps and helper-produced rollbacks reset age but retain occurrence', () => {
+  const episodeId = '123e4567-e89b-42d3-a456-426614174000'
+  const first = observeAdmissionWaits(sample(1000, [capacity()]), undefined, undefined, () => episodeId)
+  const occurrence = observation(first).occurrence
+  const coherent = JSON.parse(JSON.stringify(first.state))
+  coherent.observedAt = 1000
+  coherent.waits[0].lastObservedAt = 1000
+
+  const afterGap = observeAdmissionWaits(
+    sample(1000000, [capacity()]),
+    coherent,
+    () => ({ occurrence }),
+  )
+
+  assert.equal(observation(afterGap).status, 'unknown')
+  assert.equal(observation(afterGap).observedSince, 1000000)
+  assert.equal(observation(afterGap).occurrence, occurrence)
+  assert.equal(afterGap.state.waits[0].episodeId, episodeId)
+
+  const aged = mature()
+  const rollback = observeAdmissionWaits(sample(origin, [], false), aged.state)
+  const rollbackWait = rollback.state.waits.find(wait => wait.runId === 'run-one')
+  assert.equal(rollback.state.observedAt, origin)
+  assert.equal(rollbackWait.since, null)
+  assert(rollbackWait.lastObservedAt > rollback.state.observedAt)
+
+  const resumed = observeAdmissionWaits(
+    sample(origin + 30000, [capacity()]),
+    rollback.state,
+    () => ({ occurrence: observation(aged).occurrence }),
+  )
+
+  assert.equal(observation(resumed).status, 'unknown')
+  assert.equal(observation(resumed).observedSince, origin + 30000)
+  assert.equal(observation(resumed).occurrence, observation(aged).occurrence)
+  assert.equal(resumed.state.waits[0].episodeId, rollbackWait.episodeId)
+})
+
 test('clock rollback, future state and unsupported state never age a new observation', () => {
   const old = mature()
   for (const previous of [old.state, { ...old.state, version: 2 }, { ...old.state, waits: 'unsupported' }]) {

@@ -263,7 +263,7 @@ export function observeAdmissionWaits(sample, previous, retainedEpisode, createE
     const continuous = capacity && !fresh && now !== null && firstObservedAt !== null && sameEpisode && old.since !== null
       && episodeId === old.episodeId && firstObservedAt === old.firstObservedAt
       && timestamp(old.lastObservedAt) && now >= old.lastObservedAt && now - old.lastObservedAt <= admissionWaitLimits.gapMs
-      && timestamp(previous.observedAt) && previous.observedAt <= now
+      && timestamp(previous.observedAt) && old.lastObservedAt <= previous.observedAt && previous.observedAt <= now
     const wait = {
       runId: run.id,
       scope: currentScope,
