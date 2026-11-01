@@ -8,6 +8,8 @@ const reservation: NonNullable<Run['suspendedByExclusive']> = {
   ownerRunId: 'owner',
   reason: 'Build the emulator image',
   state: 'acquired',
+  renewalPending: false,
+  error: null,
   createdAt: 1,
   expiresAt: 1000,
   waitUntil: 1000,

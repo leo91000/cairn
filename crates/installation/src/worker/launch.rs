@@ -355,11 +355,15 @@ impl Execution<'_> {
         let state_home = self.prepare_state_home(&prepared).await?;
         let patch = crate::runs::RunChanges {
             workspace: Some(serde_json::from_value(prepared["cwd"].clone())?),
-            boundary: Some(serde_json::json!({
-                "workspaces": prepared["workspaces"],
-                "isolated": prepared["isolated"],
-                "executionBackend": prepared["backend"],
+            placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {
+                execution_backend: Some(serde_json::from_value(serde_json::json!(
+                    prepared["backend"]
+                ))?),
+                ..Default::default()
             })),
+            boundary: Some(
+                serde_json::json!({"workspaces": prepared["workspaces"],"isolated": prepared["isolated"]}),
+            ),
             ..Default::default()
         };
         s.store.change_run(&self.id, patch).await?;
@@ -884,13 +888,18 @@ impl Execution<'_> {
                 .await?;
         }
         timing.next("placement_commit");
-        let patch = json!({
-            "nodeId": placement["nodeId"],
-            "resources": placement["resources"],
-            "nodeState": null,
-            "movementError": null,
-        });
-        s.store.update_run_boundary(&self.id, patch).await?;
+        s.store
+            .update_run_placement(
+                &self.id,
+                crate::nodes::run_placement::PlacementChanges {
+                    node_id: Some(serde_json::from_value(placement["nodeId"].clone())?),
+                    resources: Some(serde_json::from_value(placement["resources"].clone())?),
+                    node_state: Some(None),
+                    movement_error: Some(None),
+                    ..Default::default()
+                },
+            )
+            .await?;
         let runner_token = execution::secret(&s.config.data_dir, "runner-secret").await?;
         workspace.env.insert("RUNNER_URL".into(), runner_url);
         workspace.env.insert("RUNNER_TOKEN".into(), runner_token);

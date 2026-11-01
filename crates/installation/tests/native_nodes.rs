@@ -1,3 +1,4 @@
+use common::attempt_fixture::*;
 use common::node_fixture::*;
 #[allow(unused_imports)]
 use common::{PluginServiceFixture as _, PluginStoreFixture as _};
@@ -750,14 +751,11 @@ async fn automatic_placement_uses_agent_priorities_and_falls_back_without_conver
             "full" => {
                 f.service
                     .store
-                    .put(
-                        "node-attempts",
-                        json!({
-                            "id": id(), "runId": id(), "nodeId": f.node["id"], "role": "execution",
-                            "released": false, "leaseExpiresAt": now() + 60_000,
-                            "resources": { "cpu": 2, "memoryMiB": 4096, "diskMiB": 32768 },
-                        }),
-                    )
+                    .put_attempt_fixture(json!({
+                        "id": id(), "runId": id(), "nodeId": f.node["id"], "role": "execution",
+                        "released": false, "leaseExpiresAt": now() + 60_000,
+                        "resources": { "cpu": 2, "memoryMiB": 4096, "diskMiB": 32768 },
+                    }))
                     .await
                     .unwrap();
             }
@@ -804,7 +802,7 @@ async fn automatic_placement_uses_agent_priorities_and_falls_back_without_conver
         if scenario == "existing-vm" {
             f.service
                 .store
-                .update_run_boundary(text(&saved, "id"), json!({ "nodeId": vm_id }))
+                .update_run_boundary_fixture(text(&saved, "id"), json!({ "nodeId": vm_id }))
                 .await
                 .unwrap();
             let grant = cairn_installation::nodes::disk_grants::new_disk(&f.service, &saved, vm_id)
@@ -952,12 +950,7 @@ async fn expired_conversations_explicitly_change_backend_without_recovering_dele
                         status: Some(cairn_installation::run_status::RunStatus::Succeeded),
                         snapshot: Some(serde_json::from_value(snapshot).unwrap()),
                         recovery_pending: Some(false),
-                        boundary: Some(json!({
-                            "environmentState": "expired",
-                            "environmentExpiredAt": now(),
-                            "isolated": false,
-                            "nodeId": null,
-                        })),
+                        placement: Some(Box::new(cairn_installation::nodes::run_placement::PlacementChanges {node_id: Some(None), ..Default::default() })), boundary: Some(serde_json::json!({"environmentState": "expired","environmentExpiredAt": now(),"isolated": false})),
                         ..Default::default()
                     },
                 )?;
@@ -1075,10 +1068,10 @@ async fn expired_conversations_explicitly_change_backend_without_recovering_dele
                 .owner_call(
                     "PUT",
                     &placement_path,
-                    json!({
+                    json!({"selection":{
                         "pinnedNodeId": selected["id"],
                         "preferredNodeId": null,
-                    }),
+                    }}),
                 )
                 .await;
             assert_eq!(status, StatusCode::OK, "{selection}");
@@ -1496,7 +1489,14 @@ async fn delegated_native_administration_requires_the_requesters_current_review(
             text(&parent, "id"),
             cairn_installation::runs::RunChanges {
                 status: Some(cairn_contracts::RunStatus::Running),
-                boundary: Some(serde_json::json!({"nodeId": f.node["id"]})),
+                placement: Some(Box::new(
+                    cairn_installation::nodes::run_placement::PlacementChanges {
+                        node_id: Some(
+                            serde_json::from_value(serde_json::json!(f.node["id"])).unwrap(),
+                        ),
+                        ..Default::default()
+                    },
+                )),
                 ..Default::default()
             },
         )
@@ -1650,7 +1650,7 @@ async fn task_delegation_has_its_own_revocable_native_authority() {
     assert!(check(child.clone()).await.unwrap());
     f.service
         .store
-        .update_run_boundary(text(&parent, "id"), json!({ "nativeAuthorityNodes": [] }))
+        .update_run_boundary_fixture(text(&parent, "id"), json!({ "nativeAuthorityNodes": [] }))
         .await
         .unwrap();
     assert!(
@@ -1956,7 +1956,7 @@ async fn accepted_native_run_controls_retain_the_director_on_the_chat_and_run() 
             (
                 "PUT",
                 format!("/api/nodes/placement/{run_id}"),
-                json!({ "pinnedNodeId": node["id"] }),
+                json!({ "selection":{ "pinnedNodeId": node["id"] } }),
             )
         };
         let (status, response) = f.owner_call(method, &path, body).await;
@@ -2093,7 +2093,7 @@ async fn moved_conversations_claim_reservations_for_their_execution_backend() {
         let held = f
             .service
             .store
-            .get("node-attempts", &reservation)
+            .attempt_fixture(&reservation)
             .await
             .unwrap()
             .unwrap();
@@ -2108,13 +2108,22 @@ async fn moved_conversations_claim_reservations_for_their_execution_backend() {
                 cairn_installation::runs::RunChanges {
                     recovery_pending: Some(true),
                     status: Some(cairn_contracts::RunStatus::Queued),
-                    boundary: Some(serde_json::json!({
-                        "placementTransition": false,
-                        "targetNodeId": null,
-                        "moveReservation": reservation,
-                        "nodeId": node["id"],
-                        "nodeState": "resuming",
-                    })),
+                    placement: Some(Box::new(
+                        cairn_installation::nodes::run_placement::PlacementChanges {
+                            target_node_id: Some(None),
+                            move_reservation: Some(
+                                serde_json::from_value(serde_json::json!(reservation)).unwrap(),
+                            ),
+                            node_id: Some(
+                                serde_json::from_value(serde_json::json!(node["id"])).unwrap(),
+                            ),
+                            node_state: Some(
+                                serde_json::from_value(serde_json::json!("resuming")).unwrap(),
+                            ),
+                            ..Default::default()
+                        },
+                    )),
+                    boundary: Some(serde_json::json!({"placementTransition": false})),
                     ..Default::default()
                 },
             )
@@ -2144,7 +2153,7 @@ async fn moved_conversations_claim_reservations_for_their_execution_backend() {
             let execution = f
                 .service
                 .store
-                .get("node-attempts", &attempt)
+                .attempt_fixture(&attempt)
                 .await
                 .unwrap()
                 .unwrap();
@@ -2157,7 +2166,7 @@ async fn moved_conversations_claim_reservations_for_their_execution_backend() {
             assert!(
                 f.service
                     .store
-                    .get("node-attempts", &attempt)
+                    .attempt_fixture(&attempt)
                     .await
                     .unwrap()
                     .is_none()
@@ -2166,7 +2175,7 @@ async fn moved_conversations_claim_reservations_for_their_execution_backend() {
         let previous = f
             .service
             .store
-            .get("node-attempts", &reservation)
+            .attempt_fixture(&reservation)
             .await
             .unwrap()
             .unwrap();
@@ -2203,6 +2212,49 @@ async fn retained_conversations_exhaust_the_shared_native_admission_budget() {
     let next = f.run();
     common::add_run(&f.service.store, &next).await;
     assert!(placement::reserve(&f.service, &next, &id()).await.is_err());
+}
+
+#[tokio::test]
+async fn native_admission_retains_allowances_below_the_configured_budget_minimum() {
+    for (budget, allowance) in [(256, 116), (264, 120)] {
+        let f = Fixture::new().await;
+        let mut node = f.node.clone();
+        node["limits"]["diskMiB"] = budget.into();
+        node["diskGrowthProtocol"] = 1.into();
+        node["diskCapacity"] = json!({
+            "protocol": 1,
+            "capturedAt": now(),
+            "usedBytes": 0,
+            "freeBytes": 900 * 1024 * 1024 * 1024u64,
+            "ownedBytes": {},
+            "retainedBytes": {},
+            "requests": [],
+        });
+        f.service.store.put_node_fixture(node).await.unwrap();
+        let run = f.run();
+        common::add_run(&f.service.store, &run).await;
+        let attempt = id();
+
+        let selected = placement::reserve(&f.service, &run, &attempt)
+            .await
+            .unwrap();
+        assert_eq!(selected["resources"]["diskMiB"], allowance);
+        assert_eq!(
+            f.service
+                .store
+                .attempt(&attempt)
+                .await
+                .unwrap()
+                .unwrap()
+                .resources
+                .disk_mi_b,
+            allowance
+        );
+        placement::release(&f.service, &attempt).await.unwrap();
+        let retained = f.service.store.attempt(&attempt).await.unwrap().unwrap();
+        assert!(retained.released);
+        assert_eq!(retained.resources.disk_mi_b, allowance);
+    }
 }
 
 #[tokio::test]
@@ -2638,16 +2690,13 @@ async fn revoking_a_native_person_stops_lease_renewals_and_workspace_access() {
     .await;
     f.service
         .store
-        .put(
-            "node-attempts",
-            json!({
-                "id": attempt,
-                "runId": run["id"],
-                "nodeId": f.node["id"],
-                "released": false,
-                "leaseExpiresAt": now() + 60000,
-            }),
-        )
+        .put_attempt_fixture(json!({
+            "id": attempt,
+            "runId": run["id"],
+            "nodeId": f.node["id"],
+            "released": false,
+            "leaseExpiresAt": now() + 60000,
+        }))
         .await
         .unwrap();
     let token = auth::token();
@@ -3143,7 +3192,7 @@ async fn changing_the_parent_permission_or_node_ceiling_revokes_descendants() {
     child["nativeParentRunId"] = parent["id"].clone();
     f.service
         .store
-        .update_run_boundary(
+        .update_run_boundary_fixture(
             parent["id"].as_str().unwrap(),
             json!({ "nativeAuthorityNodes": [] }),
         )
@@ -3159,7 +3208,7 @@ async fn changing_the_parent_permission_or_node_ceiling_revokes_descendants() {
     );
     f.service
         .store
-        .update_run_boundary(
+        .update_run_boundary_fixture(
             parent["id"].as_str().unwrap(),
             json!({ "nativeAuthorityNodes": [f.node["id"]] }),
         )
@@ -3591,12 +3640,9 @@ async fn native_mode_confirmation_covers_incoming_moves_and_reservations() {
         if selection == "reservation" {
             f.service
                 .store
-                .put(
-                    "node-attempts",
-                    json!({
-                        "id": id(), "runId": run["id"], "nodeId": node_id, "released": false,
-                    }),
-                )
+                .put_attempt_fixture(json!({
+                    "id": id(), "runId": run["id"], "nodeId": node_id, "released": false,
+                }))
                 .await
                 .unwrap();
         }
@@ -3614,7 +3660,7 @@ async fn native_mode_confirmation_covers_incoming_moves_and_reservations() {
     }
     f.service
         .store
-        .update_run_boundary(
+        .update_run_boundary_fixture(
             text(&incoming[2], "id"),
             json!({
                 "moveRequest": { "nodeId": node_id, "reservation": id() },
@@ -3650,12 +3696,9 @@ async fn native_mode_confirmation_covers_incoming_moves_and_reservations() {
     // interruption snapshot, even though the conversation count stays the same.
     f.service
         .store
-        .put(
-            "node-attempts",
-            json!({
-                "id": id(), "runId": incoming[0]["id"], "nodeId": node_id, "released": false,
-            }),
-        )
+        .put_attempt_fixture(json!({
+            "id": id(), "runId": incoming[0]["id"], "nodeId": node_id, "released": false,
+        }))
         .await
         .unwrap();
     let (status, _) = f
@@ -3740,14 +3783,7 @@ async fn native_mode_transition_keeps_automatic_recovery_and_capacity_moves_on_t
         assert!(!moves::advance(&f.service, &run).await.unwrap());
         assert!(!moves::queue_capacity_move(&f.service, &run).await.unwrap());
         assert!(f.service.store.run(&run_id).await.unwrap()["moveRequest"].is_null());
-        assert!(
-            f.service
-                .store
-                .list("node-attempts")
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        assert!(f.service.store.attempts_fixture().await.unwrap().is_empty());
         assert_eq!(
             f.service
                 .store
@@ -4067,8 +4103,7 @@ async fn enrolled_native_backend_refreshes_authority_when_health_telemetry_is_mi
     .await;
     f.service
         .store
-        .put(
-            "node-attempts",
+        .put_attempt_fixture(
             json!({"id":attempt,"runId":run["id"],"nodeId":f.node["id"],"released":false}),
         )
         .await
@@ -4125,4 +4160,153 @@ async fn enrolled_native_backend_refreshes_authority_when_health_telemetry_is_mi
         "a changed desired generation must still stop old grants"
     );
     server.abort();
+}
+
+async fn delegated_move_result(
+    fixture: &Fixture,
+    configuration: &Value,
+    input: Value,
+) -> cairn_contracts::NodeMoveOperation {
+    let response = delegated_call(fixture, configuration, "move_to_node", input).await;
+    assert_ne!(response["result"]["isError"], true, "{response}");
+    let started: cairn_contracts::NodeMoveStarted =
+        serde_json::from_value(response["result"]["structuredContent"]["result"].clone()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let response = delegated_call(
+                fixture,
+                configuration,
+                "get_node_move_operation",
+                json!({"operationId":started.operation}),
+            )
+            .await;
+            assert_ne!(response["result"]["isError"], true, "{response}");
+            let operation: cairn_contracts::NodeMoveOperation =
+                serde_json::from_value(response["result"]["structuredContent"]["result"].clone())
+                    .unwrap();
+            if operation.state != cairn_contracts::NodeMoveOperationState::Running {
+                return operation;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("Native directing operation did not finish")
+}
+
+#[tokio::test]
+async fn installation_can_direct_its_own_native_run_without_widening_authority_or_parent_cycle() {
+    let mut f = Fixture::new().await;
+    f.agent["access"]["installation"] = true.into();
+    f.service
+        .store
+        .put_agent_fixture(f.agent.clone())
+        .await
+        .unwrap();
+    let mut run = f.run();
+    run["status"] = "running".into();
+    run["requiredTags"] = json!([]);
+    common::add_run(&f.service.store, &run).await;
+    let configuration = f
+        .service
+        .mcps
+        .run_configuration(&f.service, &run)
+        .await
+        .unwrap();
+    // A new node becomes trusted after this run received its original ceiling.
+    // An agent's own directing action cannot supply new human authorization.
+    let mut additional = f.node.clone();
+    additional["id"] = id().into();
+    f.service
+        .store
+        .put_node_fixture(additional.clone())
+        .await
+        .unwrap();
+    f.agent["access"]["nodes"] = json!([f.node["id"], additional["id"]]);
+    f.service
+        .store
+        .put_agent_fixture(f.agent.clone())
+        .await
+        .unwrap();
+    let saved = delegated_call(
+        &f,
+        &configuration,
+        "configure_conversation_placement",
+        json!({
+            "runId":run["id"], "selection":{"pinnedNodeId":null,"preferredNodeId":f.node["id"]}
+        }),
+    )
+    .await;
+    assert_ne!(saved["result"]["isError"], true, "{saved}");
+    let current = f.service.store.run(text(&run, "id")).await.unwrap();
+    assert!(current["nativeParentRunId"].is_null(), "{current}");
+    assert_eq!(current["nativeAuthorityNodes"], json!([f.node["id"]]));
+    let checked = current.clone();
+    let node = f.node.clone();
+    assert!(
+        f.service
+            .store
+            .read(move |db| policy::allows(db, &checked, &node))
+            .await
+            .unwrap()
+    );
+    let checked = current.clone();
+    let outside_ceiling = additional.clone();
+    assert!(
+        !f.service
+            .store
+            .read(move |db| policy::allows(db, &checked, &outside_ceiling))
+            .await
+            .unwrap()
+    );
+    let denied = delegated_move_result(
+        &f,
+        &configuration,
+        json!({ "runId": run["id"], "nodeId": additional["id"] }),
+    )
+    .await;
+    assert_eq!(
+        denied.state,
+        cairn_contracts::NodeMoveOperationState::Failed
+    );
+    // Placement filters nodes outside the native ceiling before selection;
+    // its established no-authorized-node result is 503, not a grant mutation.
+    assert_eq!(denied.error_status, Some(503), "{denied:?}");
+    assert!(
+        denied
+            .error
+            .as_deref()
+            .unwrap()
+            .starts_with(placement::NO_CAPACITY),
+        "{denied:?}"
+    );
+    assert!(f.service.store.run(text(&run, "id")).await.unwrap()["moveRequest"].is_null());
+    let moved = delegated_move_result(
+        &f,
+        &configuration,
+        json!({
+            "runId":run["id"], "nodeId":f.node["id"]
+        }),
+    )
+    .await;
+    assert_eq!(
+        moved.state,
+        cairn_contracts::NodeMoveOperationState::Completed
+    );
+    assert_eq!(
+        serde_json::to_value(moved.result.unwrap()).unwrap()["nodeId"],
+        f.node["id"]
+    );
+    let current = f.service.store.run(text(&run, "id")).await.unwrap();
+    assert!(current["nativeParentRunId"].is_null());
+    assert_eq!(current["nativeAuthorityNodes"], json!([f.node["id"]]));
+    assert_eq!(current["moveRequest"]["nodeId"], f.node["id"]);
+    let node = f.node.clone();
+    assert!(
+        f.service
+            .store
+            .read(move |db| policy::allows(db, &current, &node))
+            .await
+            .unwrap()
+    );
 }

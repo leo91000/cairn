@@ -21,13 +21,6 @@ function host({
   const reports = []
   const run = (command, args) => {
     calls.push({ command, args })
-    if (args.includes('apt-get')) {
-      if (installFails)
-        return { status: 100 }
-      if (args.includes('install') && !staysMissing)
-        absent.clear()
-      return { status: 0 }
-    }
 
     if (args[1] === 'true')
       return { status: sudoFails ? 1 : 0 }
@@ -43,6 +36,13 @@ function host({
     calls,
     reports,
     report: value => reports.push(value),
+    installClosure: () => {
+      if (installFails)
+        throw new Error('CI_NETWORK_PACKAGES_INSTALL_FAILED')
+      if (!staysMissing)
+        absent.clear()
+      return { installedPackages: ['conntrack'], manifestSHA256: 'fixture' }
+    },
   }
 }
 
@@ -80,16 +80,19 @@ describe('real CI network preparation seam', () => {
     expect(observed.find(tool => tool.tool === 'conntrack').version).toBe('1.4.8')
   })
 
-  it('installs only deduplicated packages for missing tools, then reprobes', () => {
-    const fixture = host({ missing: ['ip', 'tc', 'sysctl'] })
-    expect(prepareNetworkTools('android-direct', fixture).installPackages).toEqual(['iproute2', 'procps'])
-    expect(fixture.calls.filter(call => call.args.includes('apt-get'))).toEqual([
-      { command: 'sudo', args: ['-n', 'apt-get', 'update', '-qq'] },
-      { command: 'sudo', args: ['-n', 'apt-get', 'install', '-y', '--no-install-recommends', 'iproute2', 'procps'] },
-    ])
-    expect(fixture.reports[0].tools.find(tool => tool.tool === 'ip').present).toBe(false)
+  it('uses the reviewed offline closure only for missing conntrack, then reprobes', () => {
+    const fixture = host({ missing: ['conntrack'] })
+    expect(prepareNetworkTools('network-bench', fixture).installPackages).toEqual(['conntrack'])
+    expect(fixture.calls.some(call => call.args.includes('apt-get'))).toBe(false)
+    expect(fixture.reports[0].tools.find(tool => tool.tool === 'conntrack').present).toBe(false)
     expect(fixture.reports.find(report => report.phase === 'ready').tools.every(tool => tool.present)).toBe(true)
-    expect(fixture.reports.map(report => report.phase)).toEqual(['before', 'apt-update', 'apt-install', 'ready'])
+    expect(fixture.reports.map(report => report.phase)).toEqual(['before', 'offline-install', 'offline-installed', 'ready'])
+  })
+
+  it('fails closed instead of broadly provisioning an unsupported runner', () => {
+    const fixture = host({ missing: ['ip', 'tc', 'sysctl'] })
+    expect(() => prepareNetworkTools('android-direct', fixture)).toThrow('CI_NETWORK_TOOLS_UNSUPPORTED_HOST')
+    expect(fixture.calls.some(call => call.args.includes('apt-get') || call.args.includes('dpkg'))).toBe(false)
   })
 
   it('requires conntrack for every common network suite and never for Android', () => {
@@ -103,7 +106,6 @@ describe('real CI network preparation seam', () => {
   it('does not mistake shell builtin kill for the executable needed by sudo cleanup', () => {
     const directory = mkdtempSync(join(tmpdir(), 'cairn-network-tools-'))
     const executable = name => writeFileSync(join(directory, name), '#!/bin/sh\necho "fixture 1.2.3"\n', { mode: 0o755 })
-    const installed = []
     try {
       for (const tool of requiredNetworkTools('android-direct')) {
         if (tool.name !== 'kill')
@@ -111,23 +113,13 @@ describe('real CI network preparation seam', () => {
       }
 
       const run = (_, args, options) => {
-        if (args.includes('apt-get')) {
-          if (args.includes('install')) {
-            installed.push(...args.slice(args.indexOf('--no-install-recommends') + 1))
-            executable('kill')
-          }
-
-          return { status: 0 }
-        }
-
         if (args[1] === 'true')
           return { status: 0 }
         const [command, ...parameters] = args.slice(2)
         return spawnSync(command === 'sh' ? '/bin/sh' : join(directory, command), parameters, { ...options, env: { PATH: directory } })
       }
 
-      expect(prepareNetworkTools('android-direct', { run }).phase).toBe('ready')
-      expect(installed).toEqual(['procps'])
+      expect(() => prepareNetworkTools('android-direct', { run })).toThrow('CI_NETWORK_TOOLS_UNSUPPORTED_HOST')
     }
     finally {
       rmSync(directory, { recursive: true, force: true })
@@ -135,8 +127,8 @@ describe('real CI network preparation seam', () => {
   })
 
   it.each([
-    [{ missing: ['ip'], installFails: true }, 'CI_NETWORK_TOOLS_INSTALL_FAILED'],
-    [{ missing: ['ip'], staysMissing: true }, 'CI_NETWORK_TOOLS_STILL_MISSING'],
+    [{ missing: ['conntrack'], installFails: true }, 'CI_NETWORK_PACKAGES_INSTALL_FAILED'],
+    [{ missing: ['conntrack'], staysMissing: true }, 'CI_NETWORK_TOOLS_STILL_MISSING'],
     [{ versionFails: 'ip' }, 'CI_NETWORK_TOOLS_VERSION_FAILED:ip'],
     [{ sudoFails: true }, 'CI_NETWORK_TOOLS_SUDO_UNAVAILABLE'],
     [{ netnsFails: true }, 'CI_NETWORK_TOOLS_NETNS_LIST_FAILED'],
@@ -144,6 +136,6 @@ describe('real CI network preparation seam', () => {
     const fixture = host(options)
     expect(() => prepareNetworkTools('network-bench', fixture)).toThrow(code)
     expect(fixture.reports.some(report => report.phase === 'ready')).toBe(false)
-    expect(fixture.calls.filter(call => call.args.includes('update')).length).toBeLessThanOrEqual(1)
+    expect(fixture.calls.some(call => call.args.includes('apt-get'))).toBe(false)
   })
 })

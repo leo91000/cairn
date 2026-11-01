@@ -264,7 +264,14 @@ class ConversationPresentationTest {
 
     @Test
     fun `exclusive suspension stops working presentation without replacing failures or a user pause`() {
-        val reservation = ExclusiveReservation("reservation", "node", "owner", "Build", "acquired")
+        val reservation =
+            ExclusiveReservation(
+                id = "reservation",
+                nodeId = "node",
+                ownerRunId = "owner",
+                reason = "Build",
+                state = "acquired",
+            )
         val running =
             Run(
                 id = "run",

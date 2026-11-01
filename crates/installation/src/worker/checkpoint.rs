@@ -1201,7 +1201,10 @@ mod tests {
                     crate::runs::RunChanges {
                         status: Some(RunStatus::Queued),
                         recovery_pending: Some(true),
-                        boundary: Some(json!({ "nodeId": "node-a" })),
+                        placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {
+                            node_id: Some(Some("node-a".into())),
+                            ..Default::default()
+                        })),
                         ..Default::default()
                     },
                 )?;

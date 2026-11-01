@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import process from 'node:process'
+import { installNetworkPackageClosure } from './ci-network-package-closure.mjs'
 
 const tools = [
   { name: 'ip', package: 'iproute2', version: ['-Version'] },
@@ -45,7 +46,12 @@ function inspect(tool, run) {
   }
 }
 
-export function prepareNetworkTools(mode, { run = spawnSync, report = () => {} } = {}) {
+export function prepareNetworkTools(mode, {
+  run = spawnSync,
+  report = () => {},
+  packageDirectory = 'target/ci-network-tools',
+  installClosure = installNetworkPackageClosure,
+} = {}) {
   const required = requiredNetworkTools(mode)
   const sudo = run('sudo', ['-n', 'true'], probeOptions)
   if (sudo.error || sudo.status !== 0)
@@ -63,23 +69,25 @@ export function prepareNetworkTools(mode, { run = spawnSync, report = () => {} }
     installPackages: packages,
   })
   if (packages.length) {
-    // A missing prerequisite still requires APT. Do not update/download packages
-    // already present, add retries or hide an installation failure.
-    for (const [phase, args] of [
-      ['apt-update', ['-n', 'apt-get', 'update', '-qq']],
-      ['apt-install', ['-n', 'apt-get', 'install', '-y', '--no-install-recommends', ...packages]],
-    ]) {
-      report({
-        event: 'CI_NETWORK_TOOLS',
-        phase,
-        mode,
-        tools: observed,
-        installPackages: packages,
-      })
-      const result = run('sudo', args, { stdio: 'inherit' })
-      if (result.error || result.status !== 0)
-        throw new Error('CI_NETWORK_TOOLS_INSTALL_FAILED')
-    }
+    // The supported hosted image supplies the six core tools. Only conntrack
+    // has a reviewed package closure; do not repair an arbitrary runner using
+    // broad repository updates on this qualification job's critical path.
+    if (missing.some(tool => tool.name !== 'conntrack'))
+      throw new Error('CI_NETWORK_TOOLS_UNSUPPORTED_HOST')
+    report({
+      event: 'CI_NETWORK_TOOLS',
+      phase: 'offline-install',
+      mode,
+      tools: observed,
+      installPackages: packages,
+    })
+    const closure = installClosure(packageDirectory, { run })
+    report({
+      event: 'CI_NETWORK_TOOLS',
+      phase: 'offline-installed',
+      mode,
+      ...closure,
+    })
 
     observed = required.map(tool => inspect(tool, run))
   }
@@ -118,7 +126,7 @@ if (import.meta.main) {
   }
   catch (error) {
     // Only our fixed codes and whitelisted tool names reach this diagnostic.
-    const known = error instanceof Error && /^CI_NETWORK_TOOLS_[A-Z_]+(?::[a-z]+)?$/.test(error.message)
+    const known = error instanceof Error && /^CI_NETWORK_(?:TOOLS_[A-Z_]+(?::[a-z]+)?|PACKAGES_[A-Z_]+)$/.test(error.message)
     console.error(known ? error.message : 'CI_NETWORK_TOOLS_PREPARATION_FAILED')
     process.exitCode = 1
   }

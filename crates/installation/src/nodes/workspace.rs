@@ -49,9 +49,9 @@ async fn authorize(s: &Service, node: &str, attempt: &str) -> Result<(Value, Val
     let agent = s.agent_snapshot(super::run_agent(&run)).await?;
     let ownership = s
         .store
-        .get("node-attempts", attempt)
+        .attempt(attempt)
         .await?
-        .unwrap_or_default();
+        .ok_or_else(|| Error::forbidden("Remote execution scope expired."))?;
     let record = s.node_boundary(node).await?;
     let native_allowed = if crate::native::policy::node_native(&record) {
         let (run, record) = (run.clone(), record.clone());
@@ -62,8 +62,8 @@ async fn authorize(s: &Service, node: &str, attempt: &str) -> Result<(Value, Val
         true
     };
     if !native_allowed
-        || ownership["released"] == true
-        || ownership["nodeId"] != node
+        || ownership.released
+        || ownership.node_id != node
         || checkpoint["nodeId"] != node
         || checkpoint["runnerId"] != attempt
         || run["status"] != RunStatus::Running
@@ -172,18 +172,14 @@ async fn renew_lease(s: &Service, attempt: &str) -> Result<u64> {
     s.store
         .transaction(move |db| {
             let mut record = db
-                .get("node-attempts", &id)?
+                .attempt(&id)?
                 .ok_or_else(|| Error::conflict("Attempt removed."))?;
-            if record["released"] == true {
+            if record.released {
                 return Err(Error::conflict("Attempt released."));
             }
-            record["leaseExpiresAt"] = (crate::config::now() + lease_ms as i64).into();
-            record["leaseDurationMs"] = record["leaseDurationMs"]
-                .as_u64()
-                .unwrap_or(0)
-                .max(lease_ms)
-                .into();
-            db.put("node-attempts", &record)?;
+            record.lease_expires_at = Some(crate::config::now() + lease_ms as i64);
+            record.lease_duration_ms = Some(record.lease_duration_ms.unwrap_or(0).max(lease_ms));
+            db.save_attempt(&record)?;
             Ok(())
         })
         .await?;
