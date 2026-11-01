@@ -45,7 +45,8 @@ pub(crate) async fn validate(
 }
 
 fn validate_shape(selection: &ResumeExecutionSelection) -> Result<()> {
-    let valid_model = selection.model.len() <= 120;
+    // Match schema maxLength in Unicode scalar values with one character of look-ahead.
+    let valid_model = selection.model.chars().take(121).count() <= 120;
     if !valid_model || !valid_effort(&selection.reasoning) || !valid_effort(&selection.speed) {
         return Err(Error::bad(
             "Choose a valid model, reasoning level and speed.",
@@ -197,6 +198,25 @@ mod tests {
         let mut invalid_effort = selection;
         invalid_effort.reasoning = "2xhigh".into();
         assert!(validate_shape(&invalid_effort).is_err());
+    }
+
+    #[test]
+    fn model_shape_limit_counts_unicode_scalar_values() {
+        let mut selection = ResumeExecutionSelection {
+            model: "m".repeat(120),
+            reasoning: String::new(),
+            speed: String::new(),
+        };
+        validate_shape(&selection).unwrap();
+
+        selection.model = "m".repeat(121);
+        assert!(validate_shape(&selection).is_err());
+
+        selection.model = "🦀".repeat(120);
+        validate_shape(&selection).unwrap();
+
+        selection.model = "🦀".repeat(121);
+        assert!(validate_shape(&selection).is_err());
     }
 
     #[test]
