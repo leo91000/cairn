@@ -7,7 +7,7 @@ homes and SQLite directories keep the journeys separate from live credentials.
 Build the fixture binaries before running Playwright:
 
 ```sh
-cargo build --locked --bin cairn --bin cairn-beacon --example worker_fixture --example browser_fixture
+cargo build --locked --bin cairn --bin cairn-beacon --example worker_fixture --example browser_fixture --example beacon_sql_fixture
 pnpm build
 pnpm test:e2e
 ```
@@ -29,3 +29,17 @@ create valid agents, projects, skills and task snapshots without starting anothe
 worker. `cairn` still handles every HTTP request and actual execution. Synthetic
 account credentials are encrypted by the current native Vault. Do not add test
 routes or fixture commands to the production server.
+
+`executeBeaconSql` synchronously invokes the test-only Beacon example
+`target/debug/examples/beacon_sql_fixture`. It sends the connection URL and raw SQL
+batch on JSON stdin; neither is put in arguments or credential environment fields.
+The same simple-query batch semantics preserve schema/search_path options,
+stop-on-error and implicit rollback, while child failures expose only static codes.
+It does not need a runtime `psql` installation. The example is built once with the
+existing backend fixture artifacts and is excluded from production images.
+
+CI qualifies the real TypeScript helper and distributed example against its
+disposable Postgres 17 service before the browser shard, covering raw multi-query
+batches, options, rollback, explicit commits and private failure output. Run
+`pnpm exec tsx scripts/qualify-beacon-sql-fixture.ts` against a disposable database
+after building the fixtures to exercise that same contract locally.
