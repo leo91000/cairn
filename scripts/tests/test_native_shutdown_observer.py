@@ -1,4 +1,5 @@
 """Pure evidence-schema checks: no native execution, ELF loading or IPC."""
+import base64
 import json
 import os
 from pathlib import Path
@@ -7,7 +8,10 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from native_shutdown_observer import Inconclusive, UnitReference, control_observation, final_metadata, workload, write_matrix
+from native_shutdown_observer import Inconclusive, UnitReference, control_observation, final_metadata, logical_evidence, stop_reason, workload, write_matrix
+
+
+ATTEMPT = '11111111-1111-4111-8111-111111111111'
 
 
 def active():
@@ -140,9 +144,65 @@ class Evidence(unittest.TestCase):
 
     def test_negative_control_capture_can_report_not_matched(self):
         value = dict(case='cancel', StatusCode=0, providerCompleted=True, PhysicalFinalized=True)
-        self.assertEqual(control_observation(value)['status'], 'not-matched')
+        self.assertEqual(control_observation(value)['status'], 'not-attributed')
         value.update(StatusCode=143, providerCompleted=False)
+        self.assertEqual(control_observation(value)['status'], 'not-attributed')
+        value['stopReason'] = 'cancelled'
         self.assertEqual(control_observation(value)['status'], 'matched')
+
+    def test_signal_stop_is_not_a_genuine_logical_failure(self):
+        value = dict(case='primary-failure', attempt=ATTEMPT, StatusCode=143,
+                     providerCompleted=False, PhysicalFinalized=True,
+                     primary=dict(ExecMainCode=2, ExecMainStatus=15, Result='signal'))
+        self.assertEqual(control_observation(value)['status'], 'not-attributed')
+        value['logicalEvidence'] = dict(attempt=ATTEMPT, failed=True, syntheticExitCode=23)
+        self.assertEqual(control_observation(value)['status'], 'not-matched')
+        value['StatusCode'] = 1
+        self.assertEqual(control_observation(value)['status'], 'matched')
+        for changes in (dict(failed=False), dict(syntheticExitCode=-15), dict(attempt='22222222-2222-4222-8222-222222222222')):
+            with self.subTest(changes=changes):
+                proof = dict(attempt=ATTEMPT, failed=True, syntheticExitCode=23)
+                proof.update(changes)
+                value['logicalEvidence'] = proof
+                self.assertEqual(control_observation(value)['status'], 'not-attributed')
+
+    def test_actual_synthetic_exit_is_projected_from_attempt_bound_failed_frame(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / (ATTEMPT + '.log')
+            event = dict(type='turn.failed', error=dict(message='Synthetic native workload failed: 23\nprivate fixture tail'))
+            encoded = (json.dumps(event) + '\n').encode()
+            chunks = [encoded[:19], encoded[19:]]
+            records = [dict(stderr=False, data=base64.b64encode(chunk).decode()) for chunk in chunks]
+            path.write_text(''.join(json.dumps(record) + '\n' for record in records))
+            self.assertEqual(logical_evidence(path, ATTEMPT),
+                dict(attempt=ATTEMPT, completed=False, failed=True, syntheticExitCode=23))
+            with self.assertRaises(Inconclusive):
+                logical_evidence(path, '22222222-2222-4222-8222-222222222222')
+
+    def test_workload_stderr_and_unrelated_errors_cannot_prove_exit23(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / (ATTEMPT + '.log')
+            failed = dict(type='turn.failed', error=dict(message='Synthetic native workload failed: 23\n'))
+            stderr = dict(stderr=True, data=base64.b64encode((json.dumps(failed) + '\n').encode()).decode())
+            unrelated = dict(type='turn.failed', error=dict(message='Unrelated interrupted provider'))
+            stdout = dict(stderr=False, data=base64.b64encode((json.dumps(unrelated) + '\n').encode()).decode())
+            path.write_text(json.dumps(stderr) + '\n' + json.dumps(stdout) + '\n')
+            self.assertEqual(logical_evidence(path, ATTEMPT),
+                dict(attempt=ATTEMPT, completed=False, failed=True, syntheticExitCode=None))
+
+    def test_cancel_and_lease_use_only_the_attempt_fixed_stop_reason(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / (ATTEMPT + '.stop-reason.json')
+            self.assertIsNone(stop_reason(path, ATTEMPT))
+            path.write_text(json.dumps(dict(reason='lease_expired', usage=dict(private='not exported'))))
+            self.assertEqual(stop_reason(path, ATTEMPT), 'lease_expired')
+            value = dict(case='lease', StatusCode=143, providerCompleted=False,
+                         PhysicalFinalized=True, stopReason=stop_reason(path, ATTEMPT))
+            self.assertEqual(control_observation(value)['status'], 'matched')
+            value['case'] = 'cancel'
+            self.assertEqual(control_observation(value)['status'], 'not-matched')
+            path.write_text(json.dumps(dict(reason='untrusted arbitrary payload')))
+            self.assertEqual(stop_reason(path, ATTEMPT), 'other')
 
 
 if __name__ == '__main__':

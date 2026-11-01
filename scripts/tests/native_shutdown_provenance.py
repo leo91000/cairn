@@ -33,13 +33,18 @@ def main():
     current = git('ls-files', '--', 'crates').decode().splitlines()
     if set(current) != set(paths):
         raise RuntimeError('Production source set changed.')
-    for name in ('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml'):
-        if Path(name).read_bytes() != git('show', BASE + ':' + name):
-            raise RuntimeError('Build contract differs from the frozen reference.')
+    contracts = []
+    for name in ('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml',
+                 'scripts/tests/native_chat_fixture.py', 'scripts/tests/node_s3_test.py',
+                 'scripts/test-backend.mjs', 'scripts/test-environment.mjs'):
+        content = Path(name).read_bytes()
+        if content != git('show', BASE + ':' + name):
+            raise RuntimeError('Build or fixture contract differs from the frozen reference.')
+        contracts.append(dict(path=name, sha256=hashlib.sha256(content).hexdigest()))
     output = Path('native-shutdown-evidence')
     output.mkdir(exist_ok=True)
     (output / 'source-provenance.json').write_text(json.dumps(dict(base=BASE,
-        reviewedHead=git('rev-parse', 'HEAD').decode().strip(), paths=evidence,
+        reviewedHead=git('rev-parse', 'HEAD').decode().strip(), paths=evidence, unchangedContracts=contracts,
         artifactReuse=False, build='fresh exact reviewed source, CI only'), indent=2) + '\n')
     print('Frozen production source identity verified; no native execution performed.')
 

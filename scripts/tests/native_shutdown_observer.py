@@ -19,6 +19,9 @@ class Inconclusive(RuntimeError):
     pass
 
 
+ATTEMPT_ID = r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+
+
 def write_matrix(evidence, value):
     """Publish this one allowlisted artifact privately to the ordinary runner."""
     owners = []
@@ -89,7 +92,7 @@ def final_metadata(initial, final):
 class UnitReference:
     """Persistent IPC client, never a short-lived busctl invocation."""
     def __init__(self, unit):
-        if not re.fullmatch(r'cairn-native-[0-9a-f-]{36}\.service', unit):
+        if not re.fullmatch('cairn-native-' + ATTEMPT_ID + r'\.service', unit):
             raise Inconclusive('unit-name-schema')
         self.unit, self.bus, self.library = unit, ctypes.c_void_p(), None
         self.referenced = False
@@ -175,12 +178,19 @@ while ! test -e shutdown-descendant-ready; do sleep 0.05; done
     return script
 
 
-def completed(path):
-    """Read bounded synthetic output in memory; retain only turn-completed bool."""
+def logical_evidence(path, attempt):
+    """Project fixed facts from this attempt's adapter output, never payloads.
+
+    The frozen synthetic app-server derives the error prefix from process.wait(),
+    not from the shell's intent to exit. Its workload output is on stderr; only
+    normalized adapter stdout frames count as logical completion/failure here.
+    """
+    if not re.fullmatch(ATTEMPT_ID, attempt) or path.name != attempt + '.log':
+        raise Inconclusive('fixture-attempt-log-mismatch')
     if path.stat().st_size > 64 * 1024 * 1024:
         raise Inconclusive('fixture-log-over-budget')
     pending = b''
-    found = False
+    facts = dict(attempt=attempt, completed=False, failed=False, syntheticExitCode=None)
     with path.open('rb') as source:
         for line in source:
             if len(line) > 65536:
@@ -199,8 +209,41 @@ def completed(path):
                 except (ValueError, UnicodeError):
                     continue
                 if isinstance(event, dict) and event.get('type') == 'turn.completed':
-                    found = True
-    return found
+                    facts['completed'] = True
+                if not isinstance(event, dict) or event.get('type') != 'turn.failed':
+                    continue
+                facts['failed'] = True
+                error = event.get('error')
+                message = error.get('message') if isinstance(error, dict) else None
+                if not isinstance(message, str):
+                    continue
+                first_line = message.partition('\n')[0]
+                matched = re.fullmatch(r'Synthetic native workload failed: (-?[0-9]{1,3})', first_line)
+                if matched is None:
+                    continue
+                code = int(matched[1])
+                if not -255 <= code <= 255:
+                    continue
+                if facts['syntheticExitCode'] not in (None, code):
+                    raise Inconclusive('conflicting-synthetic-exit')
+                facts['syntheticExitCode'] = code
+    return facts
+
+
+def stop_reason(path, attempt):
+    """Only fixed reasons from this attempt's existing diagnostic; never usage."""
+    if not re.fullmatch(ATTEMPT_ID, attempt) or path.name != attempt + '.stop-reason.json':
+        raise Inconclusive('fixture-attempt-stop-mismatch')
+    try:
+        if path.stat().st_size > 65536:
+            return 'unknown'
+        value = json.loads(path.read_bytes())
+    except FileNotFoundError:
+        return None
+    except (ValueError, UnicodeError):
+        return 'unknown'
+    reason = value.get('reason') if isinstance(value, dict) else None
+    return reason if reason in ('cancelled', 'lease_expired') else 'other'
 
 
 def fence(initial):
@@ -255,11 +298,19 @@ def control_observation(result):
             primarySuccessWithCleanupTimeout=candidate, descendantAliveAfterPrimaryExitProven=False,
             explanation='Pre-release membership and post-fence absence do not establish residual lifetime. Chat process-group or PID-namespace cleanup may remove it earlier.')
     if case == 'primary-failure':
-        matched = not result['providerCompleted'] and result['StatusCode'] != 0 and result['PhysicalFinalized']
-        return dict(status='matched' if matched else 'not-matched', target='genuine-logical-workload-failure')
+        proof = result.get('logicalEvidence', {})
+        attempt = result.get('attempt')
+        attributed = isinstance(attempt, str) and re.fullmatch(ATTEMPT_ID, attempt) is not None \
+            and proof.get('attempt') == attempt and proof.get('failed') is True and proof.get('syntheticExitCode') == 23
+        matched = attributed and not result['providerCompleted'] and result['StatusCode'] == 1 and result['PhysicalFinalized']
+        status = 'matched' if matched else 'not-matched' if attributed else 'not-attributed'
+        return dict(status=status, target='genuine-logical-workload-failure', logicalFailureExit23Proven=attributed)
     if case in ('cancel', 'lease'):
-        matched = not result['providerCompleted'] and result['StatusCode'] == 143 and result['PhysicalFinalized']
-        return dict(status='matched' if matched else 'not-matched', target=case + '-controller-stop')
+        expected = 'cancelled' if case == 'cancel' else 'lease_expired'
+        reason = result.get('stopReason')
+        matched = reason == expected and not result['providerCompleted'] and result['StatusCode'] == 143 and result['PhysicalFinalized']
+        status = 'matched' if matched else 'not-attributed' if reason in (None, 'unknown') else 'not-matched'
+        return dict(status=status, target=case + '-controller-stop', expectedStopReason=expected)
     if case == 'flush-failure':
         matched = result['StatusCode'] == 70 and result['FinalizationFailed']
         return dict(status='matched' if matched else 'not-matched', target='typed-physical-flush-failure')
@@ -317,10 +368,12 @@ def run_matrix(*, create, start, managed, api, fenced, manager, state, eventuall
             record = json.loads((state / (attempt + '.exit')).read_text())
             if not isinstance(record, dict) or type(record.get('StatusCode')) is not int:
                 raise Inconclusive('controller-evidence-schema')
-            result = dict(case=name, attempt=attempt, providerCompleted=completed(state / (attempt + '.log')),
+            logical = logical_evidence(state / (attempt + '.log'), attempt)
+            result = dict(case=name, attempt=attempt, providerCompleted=logical['completed'], logicalEvidence=logical,
                 StatusCode=record['StatusCode'], PhysicalFinalized=record.get('PhysicalFinalized') is True,
                 FinalizationFailed=record.get('FinalizationFailed') is True,
                 primary=reference.capture() if reference else None, fence=fence(initial), ownedDescendant=child)
+            result['stopReason'] = stop_reason(state / (attempt + '.stop-reason.json'), attempt)
             result['ownedDescendantGone'] = child_gone(child)
             if result['ownedDescendantGone'] is False:
                 raise Inconclusive('owned-descendant-remains')
