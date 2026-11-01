@@ -8,6 +8,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
+import build.cairn.contracts.ReleaseExclusiveInput
+import build.cairn.contracts.releaseNodeReservation
 import java.util.Date
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.encodeToJsonElement
@@ -188,7 +190,7 @@ fun NodesScreen(
                         if (
                             health.state != NodeHealthState.READY &&
                                 (health.state != NodeHealthState.FULL ||
-                                    node.occupiedSlots < slotCapacity(node))
+                                    node.occupiedSlots != slotCapacity(node))
                         )
                             Text(
                                 "${freeSlots(node)} slots libres sur ${slotCapacity(node)} · ${node.occupiedSlots} occupés",
@@ -284,9 +286,8 @@ fun NodesScreen(
                                                         listOf("queued", "acquiring", "acquired"),
                                             onClick = {
                                                 vm.perform {
-                                                    api.request(
-                                                        "POST",
-                                                        "/nodes/${segment(node.id)}/exclusive/${segment(reservation.id)}/release",
+                                                    api.releaseNodeReservation(
+                                                        ReleaseExclusiveInput(reservation.id)
                                                     )
                                                     load()
                                                     notify("Libération de la réservation demandée")

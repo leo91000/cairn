@@ -8,6 +8,76 @@ class ContractsTest {
     private val json = Json { encodeDefaults = true }
 
     @Test
+    fun placementCommandsAndExclusiveLifecycleMatchRust() {
+        val root = File(System.getProperty("cairn.contractWire")).parentFile
+        val corpus =
+            json
+                .parseToJsonElement(
+                    File(root, "../../../tests/fixtures/placement-contracts.json").readText()
+                )
+                .jsonObject
+        for (value in corpus.getValue("allocations").jsonArray) {
+            val allocation = json.decodeFromJsonElement<ExecutionResources>(value)
+            val run =
+                json.decodeFromJsonElement<Run>(
+                    buildJsonObject {
+                        put("id", "allocation-run")
+                        put("taskId", "mission")
+                        put("status", "running")
+                        put("resources", value)
+                    }
+                )
+            assertEquals(allocation, run.resources)
+            assertFails { json.decodeFromJsonElement<NodeResources>(value) }
+        }
+        for (value in corpus.getValue("views").jsonArray) {
+            val reservation = json.decodeFromJsonElement<ExclusiveReservation>(value)
+            assertEquals(
+                reservation,
+                json.decodeFromJsonElement<ExclusiveReservation>(
+                    json.encodeToJsonElement(reservation)
+                ),
+            )
+        }
+        val statusValue = buildJsonObject { put("reservations", corpus.getValue("views")) }
+        val status = json.decodeFromJsonElement<ExclusiveStatusOutput>(statusValue)
+        assertEquals(
+            corpus.getValue("views").jsonArray.map {
+                json.decodeFromJsonElement<ExclusiveReservation>(it)
+            },
+            status.reservations,
+        )
+        assertFails { json.decodeFromJsonElement<ExclusiveStatusOutput>(corpus.getValue("views")) }
+        for (value in corpus.getValue("moves").jsonArray) {
+            val move = json.decodeFromJsonElement<MoveToNodeInput>(value)
+            assertEquals(
+                move,
+                json.decodeFromJsonElement<MoveToNodeInput>(json.encodeToJsonElement(move)),
+            )
+        }
+        for (value in corpus.getValue("moveOperations").jsonArray) {
+            val operation = json.decodeFromJsonElement<NodeMoveOperation>(value)
+            assertEquals(value, json.encodeToJsonElement(operation))
+        }
+        for (value in corpus.getValue("acquisitions").jsonArray) {
+            val request = json.decodeFromJsonElement<AcquireExclusiveInput>(value)
+            assertEquals(
+                request,
+                json.decodeFromJsonElement<AcquireExclusiveInput>(
+                    json.encodeToJsonElement(request)
+                ),
+            )
+        }
+        // The pinned client decoder checks numeric bounds; Rust/JSON Schema also
+        // validate reason length and UUIDs within lists before executing a command.
+        for (value in corpus.getValue("invalidAcquisitions").jsonArray.take(2)) {
+            assertFails(value.toString()) {
+                json.decodeFromJsonElement<AcquireExclusiveInput>(value)
+            }
+        }
+    }
+
+    @Test
     fun nodeInventoryAndCommandsMatchRustWithNativeAuthorityKeptSeparate() {
         val root = File(System.getProperty("cairn.contractWire")).parentFile
         val corpus =

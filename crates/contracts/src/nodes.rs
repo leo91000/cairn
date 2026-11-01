@@ -53,9 +53,20 @@ impl Default for NodeResources {
 
 impl NodeResources {
     pub fn validate(&self) -> Result<(), &'static str> {
+        self.validate_allocation()?;
+        if self.disk_mi_b < 128 {
+            return Err("Invalid node resource limits.");
+        }
+        Ok(())
+    }
+
+    /// Admission subtracts the pool reserve and journal from a configured disk
+    /// budget. Persist that derived allowance without reapplying the budget's
+    /// 128 MiB minimum, including when reading historical attempts.
+    pub fn validate_allocation(&self) -> Result<(), &'static str> {
         if !(1..=4096).contains(&self.cpu)
             || !(128..=1_073_741_824).contains(&self.memory_mi_b)
-            || !(128..=1_099_511_627_776).contains(&self.disk_mi_b)
+            || self.disk_mi_b > 1_099_511_627_776
         {
             return Err("Invalid node resource limits.");
         }
@@ -325,9 +336,7 @@ pub struct ExecutionNode {
     pub exclusive_reservations: bool,
     // A10 owns the reservation state and its writer. This view has no authority.
     #[serde(default)]
-    #[schemars(with = "Option<std::collections::BTreeMap<String, serde_json::Value>>", extend("x-kotlin-type" = "ExclusiveReservation"))]
-    #[ts(type = "import('../../nodes').ExclusiveReservation | null")]
-    pub exclusive_reservation: Option<serde_json::Value>,
+    pub exclusive_reservation: Option<crate::ExclusiveReservation>,
     #[serde(default)]
     pub exclusive_agents: Vec<String>,
     #[serde(default)]
@@ -622,6 +631,27 @@ pub enum NativeModeChangeOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn derived_allowances_do_not_lower_configured_disk_budget_limits() {
+        for disk_mi_b in [0, 116, 120, 127] {
+            let resources = NodeResources {
+                disk_mi_b,
+                ..Default::default()
+            };
+            resources.validate_allocation().unwrap();
+            assert!(resources.validate().is_err());
+        }
+        NodeResources::default().validate().unwrap();
+        assert!(
+            NodeResources {
+                disk_mi_b: 1_099_511_627_777,
+                ..Default::default()
+            }
+            .validate_allocation()
+            .is_err()
+        );
+    }
 
     #[test]
     fn node_contracts_keep_capacity_observation_separate_from_configuration_and_authority() {

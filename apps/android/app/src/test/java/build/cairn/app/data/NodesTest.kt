@@ -104,7 +104,7 @@ class NodesTest {
                 ready.copy(
                     pressure = "memory",
                     exclusiveReservation =
-                        build.cairn.boundary.ExclusiveReservation(
+                        build.cairn.contracts.ExclusiveReservation(
                             id = "reservation",
                             nodeId = ready.id,
                             ownerRunId = "run",

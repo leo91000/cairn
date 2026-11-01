@@ -278,20 +278,14 @@ async fn fence_runner(s: &Service, runner_url: &str, attempt: &str) -> Result<()
 async fn node_lease_expired(s: &Service, attempt: &str) -> Result<bool> {
     let owned = s
         .store
-        .get("node-attempts", attempt)
+        .attempt(attempt)
         .await?
-        .unwrap_or_default();
-    let leased = owned["leaseRequired"] == true
-        || owned["nodeId"]
-            .as_str()
-            .is_some_and(|node| node != crate::nodes::LOCAL_NODE_ID);
+        .ok_or_else(|| Error::conflict("Attempt removed."))?;
+    let leased = owned.lease_required || owned.node_id != crate::nodes::LOCAL_NODE_ID;
     if !leased {
         return Ok(false);
     }
-    let lease_ms = owned["leaseDurationMs"]
-        .as_u64()
-        .unwrap_or(60000)
-        .min(300000);
+    let lease_ms = owned.lease_duration_ms.unwrap_or(60000).min(300000);
     let deadline = s
         .node_lease_deadlines
         .lock()

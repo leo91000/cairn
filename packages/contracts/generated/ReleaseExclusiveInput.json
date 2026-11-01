@@ -1,0 +1,15 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "reservationId": {
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "required": [
+    "reservationId"
+  ],
+  "title": "ReleaseExclusiveInput",
+  "type": "object"
+}
