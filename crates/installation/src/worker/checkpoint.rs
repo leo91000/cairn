@@ -960,6 +960,7 @@ mod tests {
             })
             .await
             .unwrap();
+        saved.store(&store, "output-limit").await.unwrap();
         let checkpoint = Checkpoint::new(store.clone(), "output-limit".into(), saved);
         checkpoint
             .decide(move |saved, db| {
