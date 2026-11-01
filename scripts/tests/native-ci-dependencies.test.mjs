@@ -21,6 +21,8 @@ async function executeSetup(fault = '', {
   closeOutput = false,
   blockedOutput = false,
   throwingMarker = false,
+  interruptSignal,
+  interruptPhase = 'descendant',
 } = {}) {
   const directory = mkdtempSync(path.join(os.tmpdir(), 'cairn-native-dependencies-'))
   const history = path.join(directory, 'calls.jsonl')
@@ -58,12 +60,13 @@ if (phase === fault) {
 
   const started = Date.now()
   const fillOutput = `let full = false; const bytes = Buffer.alloc(64 * 1024); for (let i = 0; i < 256; i++) { try { writeSync(process.stdout.fd, bytes); } catch (error) { full = error.code === 'EAGAIN'; break; } } appendFileSync(${JSON.stringify(history)}, JSON.stringify({ phase: 'blocked-output', pid: process.pid, full }) + '\\n');`
-  const driver = `import { writeSync, appendFileSync } from 'node:fs'; import { installNativeCiDependencies } from ${JSON.stringify(new URL('scripts/install-native-ci-dependencies.mjs', root).href)}; ${blockedOutput ? fillOutput : ''} process.exitCode = installNativeCiDependencies({ profile: ${JSON.stringify(profile)}, phaseSeconds: { update: 0.15, install: 0.15 }, entryAllowanceSeconds: 0.65, killAfterSeconds: 0.4${throwingMarker ? ', write: () => { throw new Error("fixture marker failure") }' : ''} });`
+  const workSeconds = interruptSignal ? 5 : 0.15
+  const driver = `import { writeSync, appendFileSync } from 'node:fs'; import { installNativeCiDependencies } from ${JSON.stringify(new URL('scripts/install-native-ci-dependencies.mjs', root).href)}; ${blockedOutput ? fillOutput : ''} process.exitCode = await installNativeCiDependencies({ profile: ${JSON.stringify(profile)}, phaseSeconds: { update: ${workSeconds}, install: ${workSeconds} }, entryAllowanceSeconds: 0.65, killAfterSeconds: 0.4${throwingMarker ? ', write: () => { throw new Error("fixture marker failure") }' : ''} });`
   const unsupportedProfile = !['native', 'android-network'].includes(profile)
   const useDriver = fault || closeOutput || blockedOutput || throwingMarker
   const androidSetup = workflow.jobs['android-direct'].steps.find(step => step.name === 'Install Android network test dependencies' || step.run?.includes('iproute2 iptables util-linux'))
-  const command = unsupportedProfile || useDriver ? process.execPath : '/bin/bash'
-  const args = unsupportedProfile
+  const command = interruptSignal || unsupportedProfile || useDriver ? process.execPath : '/bin/bash'
+  const args = (interruptSignal && interruptPhase === 'descendant') || unsupportedProfile
     ? [fileURLToPath(new URL('scripts/install-native-ci-dependencies.mjs', root)), '--profile', profile]
     : useDriver
       ? ['--input-type=module', '-e', driver]
@@ -75,6 +78,25 @@ if (phase === fault) {
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   let output = ''
+  const liveFixturePids = () => readFileSync(history, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse).filter((call) => {
+    try {
+      return readFileSync(`/proc/${call.pid}/stat`, 'utf8').split(') ')[1][0] !== 'Z'
+    }
+    catch {
+      return false
+    }
+  }).map(call => call.pid)
+  let liveAtPublicExit
+  child.on('exit', () => liveAtPublicExit = liveFixturePids())
+  let signalSent = false
+  const signalTimer = interruptSignal
+    ? setInterval(() => {
+        if (!signalSent && readFileSync(history, 'utf8').includes(`"phase":"${interruptPhase}"`)) {
+          signalSent = true
+          child.kill(interruptSignal)
+        }
+      }, 10)
+    : undefined
   child.stdout.on('data', bytes => output += bytes)
   child.stderr.on('data', bytes => output += bytes)
   if (closeOutput)
@@ -122,10 +144,13 @@ if (phase === fault) {
       harnessKilled,
       survivingFixturePids,
       elapsedMs: Date.now() - started,
+      signalSent,
+      liveAtPublicExit,
     }
   }
   finally {
     clearTimeout(timer)
+    clearInterval(signalTimer)
     // Clean only this fixture's processes, including an interrupted test failure.
     for (const line of readFileSync(history, 'utf8').trim().split('\n').filter(Boolean)) {
       try {
@@ -203,6 +228,26 @@ describe('native CI dependency setup', () => {
     expect(result.calls.filter(call => call.phase === 'descendant')).toHaveLength(1)
     expect(result.calls.filter(call => call.phase === 'install')).toHaveLength(0)
     expect(result.survivingFixturePids).toEqual([])
+  })
+
+  it.each([['SIGINT', 130], ['SIGTERM', 143]])('finishes privileged cleanup before public %s exit', async (interruptSignal, code) => {
+    const result = await executeSetup('hard-stall', { interruptSignal })
+    expect(result.signalSent).toBe(true)
+    expect(result.harnessKilled).toBe(false)
+    expect(result.status).toBe(code)
+    expect(result.signal).toBeNull()
+    expect(result.liveAtPublicExit).toEqual([])
+    expect(result.survivingFixturePids).toEqual([])
+    expect(result.calls.filter(call => call.phase === 'install')).toHaveLength(0)
+  })
+
+  it.each([['SIGINT', 130], ['SIGTERM', 143]])('bounds public %s during stalled privilege entry', async (interruptSignal, code) => {
+    const result = await executeSetup('entry', { interruptSignal, interruptPhase: 'entry' })
+    expect(result.signalSent).toBe(true)
+    expect(result.harnessKilled).toBe(false)
+    expect(result.status).toBe(code)
+    expect(result.liveAtPublicExit).toEqual([])
+    expect(result.calls.filter(call => call.phase === 'update')).toHaveLength(0)
   })
 
   it.each(['fail-descendant', 'success-descendant'])('cleans ordinary %s leader exit before returning its original status', async (fault) => {

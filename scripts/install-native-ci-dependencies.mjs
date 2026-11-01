@@ -58,8 +58,16 @@ export async function runAptPhase(phase, seconds, cleanupGraceMs = 1000, profile
     let finished = false
     let cleanupTimer
     let workTimer
+    let controlInput = ''
     const terminate = () => cleanup(128 + constants.signals.SIGTERM)
     const interrupt = () => cleanup(128 + constants.signals.SIGINT)
+    const control = (bytes) => {
+      controlInput = (controlInput + bytes).slice(0, 32)
+      if (controlInput === 'SIGINT\n')
+        interrupt()
+      else if (controlInput === 'SIGTERM\n')
+        terminate()
+    }
 
     function killGroup(signal) {
       if (!child?.pid)
@@ -84,6 +92,9 @@ export async function runAptPhase(phase, seconds, cleanupGraceMs = 1000, profile
       clearTimeout(workTimer)
       process.removeListener('SIGTERM', terminate)
       process.removeListener('SIGINT', interrupt)
+      process.stdin.removeListener('data', control)
+      process.stdin.removeListener('end', terminate)
+      process.stdin.pause()
       resolve(status)
     }
 
@@ -107,6 +118,10 @@ export async function runAptPhase(phase, seconds, cleanupGraceMs = 1000, profile
 
     process.on('SIGTERM', terminate)
     process.on('SIGINT', interrupt)
+    // A pipe survives the sudo boundary without signalling an unprivileged
+    // wrapper ahead of its root cleanup owner. EOF also handles a lost launcher.
+    process.stdin.on('data', control)
+    process.stdin.on('end', terminate)
     const args = phase === 'install' ? [...specification.args, ...profileSpecification.packages] : specification.args
     child = spawn('apt-get', args, { detached: true, stdio: ['ignore', 'inherit', 'inherit'] })
     workTimer = setTimeout(cleanup, limitSeconds * 1000, 124)
@@ -123,7 +138,7 @@ export async function runAptPhase(phase, seconds, cleanupGraceMs = 1000, profile
   return code
 }
 
-export function installNativeCiDependencies({
+export async function installNativeCiDependencies({
   profile = 'native',
   phaseSeconds = {},
   entryAllowanceSeconds = 30,
@@ -133,46 +148,87 @@ export function installNativeCiDependencies({
   if (!Object.hasOwn(profiles, profile))
     return 2
 
-  for (const phase of Object.keys(phases)) {
-    const seconds = phaseSeconds[phase] ?? profiles[profile].seconds[phase]
-    const started = Date.now()
-    marker(write, phase, 'start', `limit_seconds=${seconds} profile=${profile}`)
-
-    // The privileged owner bounds APT work and cleans its process group. These
-    // fail-safe deadlines cover privilege entry and stalled supervision too.
-    const result = spawnSync('timeout', [
-      `--kill-after=${killAfterSeconds}s`,
-      `${seconds + entryAllowanceSeconds + killAfterSeconds}s`,
-      'sudo',
-      '-n',
-      'env',
-      'DEBIAN_FRONTEND=noninteractive',
-      'timeout',
-      `--kill-after=${killAfterSeconds}s`,
-      `${seconds + killAfterSeconds}s`,
-      process.execPath,
-      fileURLToPath(import.meta.url),
-      '--apt-phase',
-      phase,
-      `${seconds}`,
-      `${Math.min(1000, killAfterSeconds * 500)}`,
-      profile,
-    ], { stdio: ['ignore', 'inherit', 'inherit'] })
-    const code = exitCode(result)
-    marker(write, phase, 'end', `code=${code} elapsed_ms=${Date.now() - started} profile=${profile}`)
-    if (code !== 0)
-      return code
+  let interruptedCode
+  let child
+  let interruptionTimer
+  const interrupt = (signal) => {
+    if (interruptedCode)
+      return
+    interruptedCode = 128 + constants.signals[signal]
+    child?.stdin.end(`${signal}\n`)
+    // Privilege entry might stall before it can consume the control request.
+    // Keep the existing timeout supervisor as a bounded fallback in that case.
+    interruptionTimer = setTimeout(() => {
+      try {
+        process.kill(-child.pid, 'SIGTERM')
+      }
+      catch {
+        // The owned supervisor already exited.
+      }
+    }, killAfterSeconds * 1000)
   }
 
-  return 0
+  const terminate = () => interrupt('SIGTERM')
+  const keyboardInterrupt = () => interrupt('SIGINT')
+  process.on('SIGTERM', terminate)
+  process.on('SIGINT', keyboardInterrupt)
+
+  try {
+    for (const phase of Object.keys(phases)) {
+      if (interruptedCode)
+        return interruptedCode
+      const seconds = phaseSeconds[phase] ?? profiles[profile].seconds[phase]
+      const started = Date.now()
+      marker(write, phase, 'start', `limit_seconds=${seconds} profile=${profile}`)
+
+      // The privileged owner bounds APT work and cleans its process group. These
+      // fail-safe deadlines cover privilege entry and stalled supervision too.
+      const args = [
+        `--kill-after=${killAfterSeconds}s`,
+        `${seconds + entryAllowanceSeconds + killAfterSeconds}s`,
+        'sudo',
+        '-n',
+        'env',
+        'DEBIAN_FRONTEND=noninteractive',
+        'timeout',
+        `--kill-after=${killAfterSeconds}s`,
+        `${seconds + killAfterSeconds}s`,
+        process.execPath,
+        fileURLToPath(import.meta.url),
+        '--apt-phase',
+        phase,
+        `${seconds}`,
+        `${Math.min(1000, killAfterSeconds * 500)}`,
+        profile,
+      ]
+      const result = await new Promise((resolve) => {
+        child = spawn('timeout', args, { detached: true, stdio: ['pipe', 'inherit', 'inherit'] })
+        child.stdin.on('error', () => {})
+        child.on('error', () => resolve({ status: 1, signal: null }))
+        child.on('close', (status, signal) => resolve({ status, signal }))
+      })
+      clearTimeout(interruptionTimer)
+      const code = interruptedCode ?? exitCode(result)
+      marker(write, phase, 'end', `code=${code} elapsed_ms=${Date.now() - started} profile=${profile}`)
+      if (code !== 0)
+        return code
+    }
+
+    return 0
+  }
+  finally {
+    clearTimeout(interruptionTimer)
+    process.removeListener('SIGTERM', terminate)
+    process.removeListener('SIGINT', keyboardInterrupt)
+  }
 }
 
 if (import.meta.main) {
   const args = process.argv.slice(2)
   if (args.length === 0)
-    process.exitCode = installNativeCiDependencies()
+    process.exitCode = await installNativeCiDependencies()
   else if (args.length === 2 && args[0] === '--profile')
-    process.exitCode = installNativeCiDependencies({ profile: args[1] })
+    process.exitCode = await installNativeCiDependencies({ profile: args[1] })
   else if (args.length === 5 && args[0] === '--apt-phase')
     process.exitCode = await runAptPhase(args[1], Number(args[2]), Number(args[3]), args[4])
   else
