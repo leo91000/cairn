@@ -701,14 +701,14 @@ test('a Plan draft never becomes ordinary when its engine resolves to OpenCode',
     await menu.getByRole('button', { name: 'Close', exact: true }).click()
   }
 
-  await expect(picker).toHaveAccessibleName(/OpenCode/)
+  await expect(picker).toHaveAccessibleName(/OpenCode.*Ling 3\.1 Flash Free.*OpenCode Zen/)
   await choose('Codex')
   const toggle = page.getByRole('button', { name: 'Plan first' })
   const message = page.getByRole('textbox', { name: 'Message' })
   await toggle.click()
   await message.fill('Keep this request read-only')
   await page.reload()
-  await expect(picker).toHaveAccessibleName(/OpenCode/)
+  await expect(picker).toHaveAccessibleName(/OpenCode.*Ling 3\.1 Flash Free.*OpenCode Zen/)
   await expect(message).toHaveValue('Keep this request read-only')
   const attempt = page.waitForRequest(request => request.method() === 'POST' && request.url().endsWith(`/chats/${chat.id}/messages`), { timeout: 1000 }).catch(() => null)
   await message.press('Control+Enter')
