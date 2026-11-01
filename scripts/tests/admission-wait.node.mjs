@@ -520,17 +520,34 @@ test('a known end without scope or clock remains a per-run fact under limited hi
   assert.equal(state.state.limited, true)
 })
 
-test('classification requires the actual node writer prefix and clear structured gates', () => {
-  const writer = readFileSync(new URL('../../crates/installation/src/worker/schedule.rs', import.meta.url), 'utf8')
-  assert(writer.includes('pub(super) const CAPACITY_WAIT_REASON: &str = "Waiting for capacity.";'))
+test('legacy wait reason text cannot prove the writer or establish a positive gate', () => {
+  const canonicalNode = 'Waiting for capacity. No authorized node is online and accepting this conversation. The existing environment is preserved.'
   const node = {
     status: 'queued',
-    waitReason: 'Waiting for capacity. Shared node quota has no room.',
+    waitReason: canonicalNode,
     accountRequired: null,
     recoveryPending: 0,
   }
-  assert.equal(classifyAdmissionWait(node), 'capacity')
-  assert.equal(classifyAdmissionWait({ ...node, recoveryPending: false }), 'capacity')
+  const rawAccountError = {
+    status: 'queued',
+    waitReason: 'Waiting for capacity. No authorized node is online and accepting this conversation. The existing environment is preserved.',
+    accountRequired: null,
+    recoveryPending: 0,
+  }
+  assert.deepEqual(rawAccountError, node)
+  assert.equal(classifyAdmissionWait(node), null)
+  assert.equal(classifyAdmissionWait(rawAccountError), null)
+  for (const waitReason of [
+    'Waiting for capacity.',
+    'Waiting for capacity. Shared node quota has no room.',
+    canonicalNode,
+    'Waiting for a free Codex account slot. The run starts when another finishes.',
+    'Waiting for a Codex account with available usage.',
+    'No enabled OpenCode account supports model x. Choose a model available through your connections or connect its model provider.',
+  ]) {
+    assert.equal(classifyAdmissionWait({ ...node, waitReason }), null)
+  }
+
   for (const accountRequired of ['codex', 'claude', 'opencode'])
     assert.equal(classifyAdmissionWait({ ...node, accountRequired }), 'account')
   assert.equal(classifyAdmissionWait({ ...node, recoveryPending: 1 }), 'recovery')
@@ -599,78 +616,41 @@ test('account attention accepts every canonical provider from the actual nullabl
   }
 })
 
-test('actual structured recovery facts work without a reason and canonical account formats match snapshot facts', () => {
+test('actual structured recovery facts work without any reason text', () => {
   const base = {
     status: 'queued',
     accountRequired: null,
     recoveryPending: 0,
-    agentProvider: 'codex',
-    model: 'gpt-6.1',
   }
   for (const recoveryPending of [true, 1]) {
     for (const waitReason of [null, undefined, {}, '', 'Temporary agent error. Retrying in garbage'])
       assert.equal(classifyAdmissionWait({ ...base, recoveryPending, waitReason }), 'recovery')
   }
-
-  for (const [agentProvider, label] of [['codex', 'Codex'], ['claude', 'Claude Code'], ['opencode', 'OpenCode']]) {
-    for (const waitReason of [`Waiting for a free ${label} account slot. The run starts when another finishes.`, `Waiting for a ${label} account with available usage.`]) {
-      assert.equal(classifyAdmissionWait({ ...base, agentProvider, waitReason }), 'account')
-      for (const reason of [waitReason.slice(0, -1), ` ${waitReason}`, `${waitReason} extra`, `${waitReason}\n`])
-        assert.equal(classifyAdmissionWait({ ...base, agentProvider, waitReason: reason }), null)
-    }
-  }
-
-  const model = 'not-supported'
-  const unsupported = `No enabled OpenCode account supports model ${model}. Choose a model available through your connections or connect its model provider.`
-  assert.equal(classifyAdmissionWait({
-    ...base,
-    agentProvider: 'opencode',
-    model,
-    waitReason: unsupported,
-  }), 'account')
-  assert.equal(classifyAdmissionWait({
-    ...base,
-    agentProvider: 'opencode',
-    model: 'different',
-    waitReason: unsupported,
-  }), null)
-  assert.equal(classifyAdmissionWait({
-    ...base,
-    agentProvider: 'codex',
-    model,
-    waitReason: unsupported,
-  }), null)
-  for (const agentProvider of [undefined, null, 'Codex', 'unknown', {}, [], 1])
-    assert.equal(classifyAdmissionWait({ ...base, agentProvider, waitReason: 'Waiting for a free Codex account slot. The run starts when another finishes.' }), null)
 })
 
-test('canonical account exception needs complete valid snapshot context and exact full reason', () => {
+test('raw canonical account and capacity messages stay unknown without typed provenance', () => {
   const base = {
     status: 'queued',
     accountRequired: null,
     recoveryPending: 0,
-    agentProvider: 'codex',
-    model: '',
   }
-  const slot = 'Waiting for a free Codex account slot. The run starts when another finishes.'
-  assert.equal(classifyAdmissionWait({ ...base, waitReason: slot }), 'account')
-  for (const model of [undefined, null, {}, [], 0, Symbol('invalid-model')])
-    assert.equal(classifyAdmissionWait({ ...base, model, waitReason: slot }), null)
-  const inherited = Object.assign(Object.create({ agentProvider: 'codex', model: '' }), {
+  const messages = [
+    'Waiting for a free Codex account slot. The run starts when another finishes.',
+    'Waiting for a Codex account with available usage.',
+    'Waiting for a free Claude Code account slot. The run starts when another finishes.',
+    'Waiting for an OpenCode account with available usage.',
+    'No enabled OpenCode account supports model x. Choose a model available through your connections or connect its model provider.',
+    'Waiting for capacity. No authorized node is online and accepting this conversation. The existing environment is preserved.',
+  ]
+  for (const waitReason of messages)
+    assert.equal(classifyAdmissionWait({ ...base, waitReason }), null)
+
+  const inherited = Object.assign(Object.create({ accountRequired: 'codex' }), {
     status: 'queued',
-    accountRequired: null,
     recoveryPending: 0,
-    waitReason: slot,
+    waitReason: messages[0],
   })
   assert.equal(classifyAdmissionWait(inherited), null)
-  for (const model of [undefined, null, '', {}, [], 0]) {
-    assert.equal(classifyAdmissionWait({
-      ...base,
-      agentProvider: 'opencode',
-      model,
-      waitReason: 'No enabled OpenCode account supports model . Choose a model available through your connections or connect its model provider.',
-    }), null)
-  }
 })
 
 test('current capacity remains a distinct fact when scope, clock or allocation cannot establish an episode', () => {

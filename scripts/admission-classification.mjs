@@ -1,5 +1,5 @@
-// Shared wait text is not a typed gate. Prefer the facts committed by the
-// writers; the few text exceptions must match complete writer-generated forms.
+// Legacy wait text shares one column between admission writers and raw provider
+// errors. It cannot prove which writer stored it, so use only typed row facts.
 export function classifyAdmissionWait(run) {
   if (run === null || typeof run !== 'object' || Array.isArray(run) || run.status !== 'queued')
     return null
@@ -15,35 +15,5 @@ export function classifyAdmissionWait(run) {
   const recovering = run.recoveryPending
   if (recovering === true || recovering === 1)
     return 'recovery'
-  if (recovering !== false && recovering !== 0)
-    return null
-
-  const reason = run.waitReason
-  if (typeof reason !== 'string' || reason.length === 0)
-    return null
-
-  const nodePrefix = 'Waiting for capacity.'
-  if (reason === nodePrefix || reason.startsWith(`${nodePrefix} `))
-    return 'capacity'
-
-  // Busy/usage waits leave accountRequired null. Validate accounts::waiting's
-  // entire format against its snapshot inputs, never generic provider keywords.
-  if (!Object.hasOwn(run, 'agentProvider') || !['codex', 'claude', 'opencode'].includes(run.agentProvider)
-    || !Object.hasOwn(run, 'model') || typeof run.model !== 'string') {
-    return null
-  }
-
-  const provider = run.agentProvider
-  const label = provider === 'claude' ? 'Claude Code' : provider === 'opencode' ? 'OpenCode' : 'Codex'
-  if (reason === `Waiting for a free ${label} account slot. The run starts when another finishes.`
-    || reason === `Waiting for a ${label} account with available usage.`) {
-    return 'account'
-  }
-
-  if (provider === 'opencode' && run.model.length > 0
-    && reason === `No enabled ${label} account supports model ${run.model}. Choose a model available through your connections or connect its model provider.`) {
-    return 'account'
-  }
-
   return null
 }

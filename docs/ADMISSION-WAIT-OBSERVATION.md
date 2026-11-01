@@ -18,31 +18,29 @@ The producer must establish the gate before the observer measures it. The shared
 external manager producer. It returns a class, never a raw reason. An own nullable
 `accountRequired` fact must be valid first: only exact `codex`, `claude`, and
 `opencode` establish account attention. Missing or malformed values remain
-unknown and cannot end or rearm an episode.
+unknown and cannot end or rearm an episode. When attention is null, a validated
+own `recoveryPending` boolean (or SQLite 0/1) is required. True establishes
+recovery without reason text, including manual resume before launch.
 
-When attention is null, a validated own `recoveryPending` boolean (or SQLite 0/1)
-is required. True establishes recovery without any reason text, including manual
-resume before launch. False allows the canonical node marker `Waiting for
-capacity.` to establish node capacity. Human-only retry, recovery, account or
-provider words cannot establish a gate: even a complete retry message with a
-false recovery flag remains unknown. Raw model-at-capacity errors without a
-structured gate likewise remain unknown rather than becoming node capacity.
+The current run schema has no typed fact identifying the writer of
+`account_wait_reason`. `report_capacity_wait` writes its node marker there, and
+`report_account_wait` can write an arbitrary provider error to the same column.
+Those values can be byte-for-byte identical, including the complete canonical
+node message. Therefore no prefix, exact message, account-slot wording, or model
+wording from that column proves a node-capacity or null-attention account wait.
+With current producer inputs, queued rows whose only candidate class is the
+legacy reason text are unknown. They do not age as capacity, set
+`currentCapacity`, certify recovery, or rearm/clear sent evidence. A trusted
+upstream producer may still pass a preclassified `waitClass: 'capacity'` to the
+public observer contract; this current producer cannot do so from legacy text.
 
-Account slot/usage waits are the narrow exception: `accounts::waiting` can leave
-attention null while an enabled account exists. Match its **complete generated
-message**, using valid own snapshot provider/model facts from the same bounded
-query. Provider labels must match exactly; the model-specific OpenCode message
-must equal the current nonempty snapshot model. Missing context, mismatched
-provider/model, truncated messages and extra suffixes remain unknown. This is
-not a generic keyword, retry-prefix or provider-error parser.
-
-The writer audit fixes the producer contract to existing committed facts:
+The writer audit separates existing typed facts from legacy reason text:
 
 | Writer | Source of positive evidence |
 | --- | --- |
-| `worker/schedule.rs::report_capacity_wait` | Queued node marker and null attention; recovery must be known clear. |
-| `worker/schedule.rs::report_account_wait` | `needs_attention(...).then_some(provider)` can return a canonical provider or null; the raw error is not itself a typed gate. |
-| `accounts/mod.rs::waiting` | Null attention busy-slot/usage messages and OpenCode unsupported-model text have complete formats matched against snapshot provider/model. Other raw errors stay unknown. |
+| `worker/schedule.rs::report_capacity_wait` | Writes a node marker into shared legacy text; there is no current typed node-capacity fact, so the producer returns unknown. |
+| `worker/schedule.rs::report_account_wait` | `needs_attention(...).then_some(provider)` can return a canonical provider or null. A typed provider establishes account attention; raw error text does not establish a class. |
+| `accounts/mod.rs::waiting` | Busy-slot/usage and unsupported-model messages can leave attention null. Their text has no typed provenance and remains unknown to this producer. |
 | `worker/retry.rs::schedule_in` | Commits `recovery_pending: true` and null attention with the full retry message; the flag, not the message, establishes recovery. |
 | `worker/control.rs` manual resume | Commits recovery true, including the before-launch case with no reason. |
 | `worker/mod.rs` restart and `worker/execution.rs` queued failure/fencing | Commit recovery true. No recovery-text fallback is needed. |
@@ -50,10 +48,17 @@ The writer audit fixes the producer contract to existing committed facts:
 | `worker/launch.rs::switch_account` | The run is already running; known nonqueued status ends capacity observation independently of its usage message. |
 | `nodes/moves.rs` explanatory recovery text | Text alone supplies no new positive gate; require valid recovery facts or known nonqueued status. |
 
-The producer reuses its existing bounded query, adding optional account and
-snapshot provider/model projections. No new query, history scan, schema/write,
-permission or wait-start inference is introduced. Raw reasons and snapshot model
-context remain inside the producer and are not returned to the monitor.
+The producer reuses its existing bounded query and optional account projection.
+Snapshot provider/model context is not needed to classify legacy reason text and
+is not used as a substitute for writer provenance. No new query, history scan,
+schema/write, permission or wait-start inference is introduced. Raw reasons are
+not returned to the monitor.
+
+Positive node-capacity detection requires a future authoritative writer fact
+stored atomically with the run row. The future change must cover every wait,
+launch, recovery, and terminal writer, and must prevent stale facts from surviving
+older rolling writers. The current observation path deliberately leaves this
+coverage gap visible instead of treating legacy text as proof.
 
 A current `queued`/`capacity` observation begins its own interval on its first
 sample. It becomes `bad` only after more than ten minutes of fresh observations
@@ -117,7 +122,7 @@ scope/end facts. No optional caller callback is needed for that preservation.
 Legacy three-part occurrences remain exact for unresolved history;
 only a positively fresh observation receives a new discriminator.
 
-A fresh validated queued-capacity row also carries `currentCapacity: true` in
+A trusted validated queued-capacity row also carries `currentCapacity: true` in
 its observation, independently of `status`, scope, clock and episode identity.
 This bit is current gate evidence, never a healthy/bad/mature result or an
 occurrence. Ambiguous duplicate rows and unknown gates cannot establish it; it
