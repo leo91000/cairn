@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { Buffer } from 'node:buffer'
 import test from 'node:test'
-import { admissionWaitLimits, observeAdmissionWaits } from '../admission-wait.mjs'
+import { admissionWaitLimits, observeAdmissionWaits, readAdmissionOccurrence } from '../admission-wait.mjs'
 
 const origin = 1700000000000
 
@@ -181,4 +181,79 @@ test('bounded long technical identities survive persisted scope parsing', () => 
   const old = mature(run)
   assert.equal(observation(old, run.id).status, 'bad')
   assert(Buffer.byteLength(JSON.stringify(old.state)) < 2000)
+})
+
+test('rollback before the original timestamp resets only duration, not episode identity', () => {
+  const old = mature()
+  let result = observeAdmissionWaits(sample(origin - 60000, [capacity()]), old.state)
+  assert.equal(observation(result).occurrence, observation(old).occurrence)
+  assert.equal(observation(result).observedSince, origin - 60000)
+  for (let minute = 0; minute <= 12; minute++)
+    result = observeAdmissionWaits(sample(origin + minute * 60000, [capacity()]), result.state)
+  assert.equal(observation(result).status, 'bad')
+  assert.equal(observation(result).occurrence, observation(old).occurrence)
+})
+
+test('scope-checked retained identity restores history without borrowing its age', () => {
+  const old = mature()
+  const occurrence = observation(old).occurrence
+  const previous = { ...old.state, waits: [], limited: true }
+  const result = observeAdmissionWaits(sample(origin + 12 * 60000, [capacity()]), previous, () => ({ occurrence }))
+  assert.equal(observation(result).occurrence, occurrence)
+  assert.equal(observation(result).observedSince, origin + 12 * 60000)
+  assert.equal(observation(result).status, 'unknown')
+  for (const retained of ['unsupported', JSON.stringify(['other-run', JSON.stringify(['attempt-one', 'input-one', null]), origin])]) {
+    const unknown = observeAdmissionWaits(sample(origin + 12 * 60000, [capacity()]), previous, () => ({ occurrence: retained }))
+    assert.equal(observation(unknown).occurrence, undefined)
+    assert.equal(observation(unknown).status, 'unknown')
+  }
+})
+
+test('unreconciled lost history stays unknown until a known scope transition', () => {
+  let result = {
+    state: {
+      version: 1,
+      observedAt: origin,
+      waits: [],
+      limited: true,
+    },
+  }
+  for (let minute = 1; minute <= 14; minute++) {
+    result = observeAdmissionWaits(sample(origin + minute * 60000, [capacity()]), result.state)
+    assert.equal(observation(result).status, 'unknown')
+    assert.equal(observation(result).occurrence, undefined)
+    assert.equal(result.state.limited, true)
+  }
+
+  result = observeAdmissionWaits(sample(origin + 15 * 60000, [capacity('run-one', { activeMessageId: 'next-input' })]), result.state)
+  assert.equal(observation(result).firstObservedAt, origin + 15 * 60000)
+  assert(readAdmissionOccurrence(observation(result).occurrence))
+})
+
+test('retained occurrence decoding is bounded, canonical and metadata-only', () => {
+  const occurrence = observation(mature()).occurrence
+  assert.deepEqual(readAdmissionOccurrence(occurrence), { runId: 'run-one', scope: JSON.stringify(['attempt-one', 'input-one', null]), firstObservedAt: origin })
+  for (const value of [null, {}, 'x'.repeat(1201), '[]', '["run", "unsupported", 0]', JSON.stringify(['run', JSON.stringify([null, null, null]), 0])])
+    assert.equal(readAdmissionOccurrence(value), null)
+})
+
+test('unsupported retained evidence and resolver failures cannot mint a fresh episode', () => {
+  const failure = () => {
+    throw new Error('not exported')
+  }
+
+  for (const callback of [() => 'unsupported', () => ({ fresh: false }), () => ({ unknown: true, occurrence: 'extra' }), failure]) {
+    const result = observeAdmissionWaits(sample(origin, [capacity()]), undefined, callback)
+    assert.equal(observation(result).status, 'unknown')
+    assert.equal(observation(result).occurrence, undefined)
+    assert(!JSON.stringify(result).includes('not exported'))
+  }
+})
+
+test('a caller-confirmed end overrides still-retained helper identity without inheriting age', () => {
+  const old = mature()
+  const result = observeAdmissionWaits(sample(origin + 12 * 60000, [capacity()]), old.state, () => ({ fresh: true }))
+  assert.equal(observation(result).status, 'unknown')
+  assert.equal(observation(result).observedSince, origin + 12 * 60000)
+  assert.notEqual(observation(result).occurrence, observation(old).occurrence)
 })

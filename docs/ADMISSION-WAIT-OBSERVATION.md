@@ -6,7 +6,7 @@ recent event is not necessarily an admission transition either. The current
 projection supplies neither a canonical wait-start timestamp nor its history, so
 the helper uses neither timestamp and performs no additional database query.
 
-Call `observeAdmissionWaits(sample, previousState)` with each fresh bounded manager
+Call `observeAdmissionWaits(sample, previousState, retainedEpisode)` with each fresh bounded manager
 probe and persist its returned `state`. The sample has an epoch-millisecond `at`
 and a manager result containing `ok`, `data.runs`, and `data.runsComplete`. Each
 run supplies only `id`, `status`, `waitClass`, `attemptId`, `activeMessageId`, and
@@ -29,9 +29,27 @@ ends only this capacity-wait observation. That does not prove physical cleanup,
 successful execution, working admission, backup integrity or a repaired node.
 
 The state contains at most 200 metadata entries, matching the bounded active plus
-tracked run projection. Its `limited` flag exposes row/history truncation. When
-an old unknown entry is displaced, deduplication and retained alert evidence
-belong to the caller and must remain intact. A caller resolving absent identities
+tracked run projection. Its `limited` flag exposes row/history truncation. The
+optional `retainedEpisode(runId, scope)` callback reconciles the caller's existing
+bounded occurrence/sent evidence. It returns an exact `occurrence`, `{ fresh:
+true }` only after known end/scope change, `{ unknown: true }` for unavailable or
+ambiguous identity, or null when it has no evidence. `readAdmissionOccurrence`
+strictly decodes bounded canonical metadata; a retained value must match the same
+run and full scope. Never copy an old owner's scope into a different logical turn.
+
+Clock rollback resets only measured duration, not the retained episode identity.
+The first-observed identity timestamp may consequently be later than the current
+clock; it is never subtracted to calculate wait duration. A lost history entry
+without identity reconciliation remains unknown and carries no new occurrence.
+An active coordinator owner alone may no longer prove whether a later same-scope
+wait ended after local history loss: the caller must keep that case unknown,
+rather than transfer old ownership to a possibly new episode.
+
+Persist a valid current capacity episode's identity in the existing bounded caller
+map before its age matures. A known current capacity observation stops a recovery
+clear streak even while its duration is still pending; this neither deletes sent
+evidence nor certifies health. Retain outbox, ownership and historical evidence
+independently of helper-history eviction. A caller resolving absent identities
 must use the returned `complete` flag, not an unvalidated inventory flag.
 
 Use generic per-run `admission-wait:<runId>` identities and the supplied occurrence

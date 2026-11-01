@@ -36,9 +36,26 @@ function validScope(value) {
   }
 }
 
-function previousWaits(previous, now) {
+export function readAdmissionOccurrence(value) {
+  if (typeof value !== 'string' || value.length > 1200)
+    return null
+  try {
+    const parts = JSON.parse(value)
+    if (!Array.isArray(parts) || parts.length !== 3 || !identity(parts[0])
+      || !validScope(parts[1]) || !timestamp(parts[2]) || JSON.stringify(parts) !== value) {
+      return null
+    }
+
+    return { runId: parts[0], scope: parts[1], firstObservedAt: parts[2] }
+  }
+  catch {
+    return null
+  }
+}
+
+function previousWaits(previous) {
   if (!record(previous) || previous.version !== 1 || !timestamp(previous.observedAt)
-    || previous.observedAt > now || !Array.isArray(previous.waits)
+    || !Array.isArray(previous.waits)
     || previous.waits.length > admissionWaitLimits.entries) {
     return new Map()
   }
@@ -46,10 +63,9 @@ function previousWaits(previous, now) {
   const waits = new Map()
   for (const wait of previous.waits) {
     if (!record(wait) || !identity(wait.runId) || !validScope(wait.scope)
-      || !timestamp(wait.firstObservedAt) || !timestamp(wait.lastObservedAt)
-      || wait.firstObservedAt > wait.lastObservedAt || wait.lastObservedAt > previous.observedAt
+      || (wait.firstObservedAt !== null && !timestamp(wait.firstObservedAt)) || !timestamp(wait.lastObservedAt)
       || (wait.since !== null && (!timestamp(wait.since)
-        || wait.since < wait.firstObservedAt || wait.since > wait.lastObservedAt))
+        || wait.firstObservedAt === null || wait.since > wait.lastObservedAt))
       || waits.has(wait.runId)) {
       return new Map()
     }
@@ -69,7 +85,7 @@ function previousWaits(previous, now) {
 // The caller supplies a fresh bounded manager probe on each invocation. An
 // unavailable probe, omitted row or excessive sampling gap cannot age a wait.
 // Unknown retains an episode's identity for deduplication, never certifies recovery.
-export function observeAdmissionWaits(sample, previous) {
+export function observeAdmissionWaits(sample, previous, retainedEpisode) {
   const now = sample?.at
   const observations = new Map()
   const next = new Map()
@@ -86,7 +102,7 @@ export function observeAdmissionWaits(sample, previous) {
     }
   }
 
-  const prior = previousWaits(previous, now)
+  const prior = previousWaits(previous)
   const manager = sample.manager?.ok === true ? sample.manager.data : null
   const rows = record(manager) && Array.isArray(manager.runs) ? manager.runs : []
   let complete = record(manager) && Array.isArray(manager.runs)
@@ -127,20 +143,50 @@ export function observeAdmissionWaits(sample, previous) {
 
     const old = prior.get(run.id)
     const sameEpisode = old?.scope === currentScope
-    const continuous = sameEpisode && old.since !== null && now - old.lastObservedAt <= admissionWaitLimits.gapMs
+    let retained = old && !sameEpisode ? { fresh: true } : null
+    if (retained === null && retainedEpisode !== undefined) {
+      try {
+        retained = typeof retainedEpisode === 'function' ? retainedEpisode(run.id, currentScope) : { unknown: true }
+      }
+      catch {
+        retained = { unknown: true }
+      }
+    }
+
+    if (retained != null && (!record(retained) || Object.keys(retained).length !== 1
+      || !(typeof retained.occurrence === 'string' || retained.fresh === true || retained.unknown === true))) {
+      retained = { unknown: true }
+    }
+
+    const recovered = readAdmissionOccurrence(retained?.occurrence)
+    if (retained?.unknown || (retained?.occurrence !== undefined
+      && (!recovered || recovered.runId !== run.id || recovered.scope !== currentScope))) {
+      observations.set(run.id, { id, runId: run.id, status: 'unknown' })
+      limited = true
+      continue
+    }
+
+    let firstObservedAt = retained?.fresh === true ? now : recovered?.firstObservedAt ?? (sameEpisode ? old.firstObservedAt : null)
+    if (firstObservedAt === null && (retained?.fresh === true || (!sameEpisode && !previous?.limited)))
+      firstObservedAt = now
+    const continuous = retained?.fresh !== true && firstObservedAt !== null && sameEpisode && old.since !== null
+      && now >= old.lastObservedAt && now - old.lastObservedAt <= admissionWaitLimits.gapMs
+      && previous.observedAt <= now
     const wait = {
       runId: run.id,
       scope: currentScope,
-      firstObservedAt: sameEpisode ? old.firstObservedAt : now,
+      firstObservedAt,
       lastObservedAt: now,
-      since: continuous ? old.since : now,
+      since: firstObservedAt === null ? null : continuous ? old.since : now,
     }
     next.set(run.id, wait)
+    if (firstObservedAt === null)
+      limited = true
     observations.set(run.id, {
       id,
       runId: run.id,
-      status: now - wait.since > admissionWaitLimits.quietMs ? 'bad' : 'unknown',
-      occurrence: JSON.stringify([run.id, currentScope, wait.firstObservedAt]),
+      status: wait.since !== null && now - wait.since > admissionWaitLimits.quietMs ? 'bad' : 'unknown',
+      ...(firstObservedAt !== null ? { occurrence: JSON.stringify([run.id, currentScope, firstObservedAt]) } : {}),
       observedSince: wait.since,
       firstObservedAt: wait.firstObservedAt,
     })
