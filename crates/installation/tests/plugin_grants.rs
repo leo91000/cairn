@@ -660,6 +660,32 @@ async fn legacy_full_grant_sync_clears_supplier_across_package_without_run_crede
 }
 
 #[tokio::test]
+async fn legacy_full_grant_sync_preserves_supplier_while_package_is_unavailable() {
+    let f = Fixture::new().await;
+    let profile = json!({ "plugins": [f.instance] });
+    f.s.agent_fixture(profile.clone(), Some(MAIN_AGENT_ID))
+        .await
+        .unwrap();
+
+    let path = f.s.config.data_dir.join("plugins/grant-probe/1/main.luau");
+    let original = std::fs::read(&path).unwrap();
+    std::fs::write(&path, "return {} -- temporarily unavailable").unwrap();
+    f.s.agent_fixture(profile, Some(MAIN_AGENT_ID))
+        .await
+        .unwrap();
+    std::fs::write(&path, original).unwrap();
+
+    assert_eq!(
+        cairn_installation::plugins::run_credentials::for_run(&f.s, MAIN_AGENT_ID, &[])
+            .await
+            .unwrap()
+            .files,
+        vec![(".config/probe/value".into(), "first".into())],
+        "an unavailable package must not erase its explicitly retained supplier"
+    );
+}
+
+#[tokio::test]
 async fn installation_can_narrow_a_resource_to_its_descendant_but_cannot_reverse_it() {
     let f = Fixture::new().await;
     let before = f

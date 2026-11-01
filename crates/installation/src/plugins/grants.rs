@@ -184,19 +184,22 @@ impl Db<'_> {
             )?;
             let connection =
                 required(self.plugin_instance(instance)?, "Plugin instance not found")?;
-            let supplies = *packages
+            let package_has_credentials = *packages
                 .entry(connection.plugin_id.clone())
                 .or_insert_with(|| {
                     super::registry::upgrade_package(self, directory, &connection.plugin_id)
-                        .is_ok_and(|package| package.manifest.run_credentials.is_some())
+                        .ok()
+                        .map(|package| package.manifest.run_credentials.is_some())
                 });
-            let choice = supplies.then_some(instance);
-            // Even a package without credentials gets an empty choice: adding
-            // credentials in a later version must not silently select an instance.
-            self.0.execute(
-                "INSERT INTO plugin_credential_suppliers VALUES(?,?,?) ON CONFLICT(agent_id,plugin_id) DO UPDATE SET instance_id=NULL WHERE excluded.instance_id IS NULL",
-                params![agent, connection.plugin_id, choice],
-            )?;
+            if let Some(has_credentials) = package_has_credentials {
+                let choice = has_credentials.then_some(instance);
+                // Even a package without credentials gets an empty choice: adding
+                // credentials in a later version must not silently select an instance.
+                self.0.execute(
+                    "INSERT INTO plugin_credential_suppliers VALUES(?,?,?) ON CONFLICT(agent_id,plugin_id) DO UPDATE SET instance_id=NULL WHERE excluded.instance_id IS NULL",
+                    params![agent, connection.plugin_id, choice],
+                )?;
+            }
         }
         self.clear_ungranted_suppliers(agent)
     }
