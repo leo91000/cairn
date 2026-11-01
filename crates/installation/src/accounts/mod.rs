@@ -710,8 +710,13 @@ impl Accounts {
     }
 
     pub async fn poll(&self, s: &Service, only_due: bool) -> Result<()> {
-        let Ok(_guard) = self.polling.try_lock() else {
-            return Ok(());
+        let _guard = if only_due {
+            let Ok(guard) = self.polling.try_lock() else {
+                return Ok(());
+            };
+            guard
+        } else {
+            self.polling.lock().await
         };
         self.initialize(s).await?;
         let mut due = Vec::new();

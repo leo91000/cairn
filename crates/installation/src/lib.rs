@@ -70,6 +70,7 @@ pub mod supervisor;
 pub mod timeline;
 pub mod tls;
 pub mod toolkit;
+mod unix_socket;
 pub mod validation;
 pub mod vault;
 pub mod waits;

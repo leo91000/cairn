@@ -209,6 +209,21 @@ async fn main() -> Result<()> {
 
                     Value::Null
                 }
+                "seedInterleavedEvents" => {
+                    let events = arg(0);
+                    let events = events
+                        .as_array()
+                        .ok_or_else(|| Error::bad("Expected fixture events"))?;
+                    for event in events {
+                        db.event(
+                            text(event, "runId"),
+                            &EventKind::from_adapter(text(event, "type")),
+                            text(event, "text"),
+                            event.get("payload").filter(|value| !value.is_null()),
+                        )?;
+                    }
+                    Value::Null
+                }
                 "set" => {
                     db.set(string(0), &arg(1), arg(2).as_i64())?;
                     Value::Null

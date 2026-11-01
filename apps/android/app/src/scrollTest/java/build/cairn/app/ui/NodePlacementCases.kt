@@ -19,6 +19,7 @@ import build.cairn.app.data.*
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.*
 import okhttp3.mockwebserver.*
@@ -216,9 +217,13 @@ abstract class NodePlacementCases {
                     .fetchSemanticsNodes()
                     .isNotEmpty()
             }
-            // The page renders before connect() finishes refreshing the workspace, and
-            // vm.perform ignores actions until then. This control's own busy state does not
-            // reflect it.
+            compose.waitUntil(10000) { !vm.state.value.busy }
+            val refresh = CompletableDeferred<Unit>()
+            compose.runOnUiThread { assertTrue(vm.tryPerform { refresh.await() }) }
+            compose.waitUntil(10000) { vm.state.value.busy }
+            compose.onNodeWithText("Passer en Natif administrateur").assertIsNotEnabled()
+            assertTrue(writes.isEmpty())
+            refresh.complete(Unit)
             compose.waitUntil(10000) { !vm.state.value.busy }
             compose
                 .onNodeWithText("Passer en Natif administrateur")
@@ -234,6 +239,16 @@ abstract class NodePlacementCases {
             compose.onNodeWithText("Tâche nocturne").performScrollTo().assertExists()
             compose.runOnIdle { assertEquals(1, writes.size) }
             capture("native-administrator-review")
+            compose.waitUntil(10000) { !vm.state.value.busy }
+            val confirmationRefresh = CompletableDeferred<Unit>()
+            compose.runOnUiThread { assertTrue(vm.tryPerform { confirmationRefresh.await() }) }
+            compose.waitUntil(10000) { vm.state.value.busy }
+            compose
+                .onNodeWithText("Confirmer l’accès et relancer les exécutions")
+                .assertIsNotEnabled()
+            assertEquals(1, writes.size)
+            confirmationRefresh.complete(Unit)
+            compose.waitUntil(10000) { !vm.state.value.busy }
             compose
                 .onNodeWithText("Confirmer l’accès et relancer les exécutions")
                 .performScrollTo()
@@ -501,7 +516,11 @@ abstract class NodePlacementCases {
             }
             compose.onNodeWithText("Ajouter une machine").performScrollTo().performClick()
             compose.onNodeWithText("Nom de la machine").performTextInput("Desk")
-            compose.onNodeWithText("Exécution native sur l’hôte").performClick()
+            compose
+                .onNodeWithText("Exécution native sur l’hôte")
+                .performScrollTo()
+                .assertIsDisplayed()
+                .performClick()
 
             // The page renders before connect() finishes refreshing the workspace.
             compose.waitUntil(10000) {
@@ -1104,12 +1123,22 @@ abstract class NodePlacementCases {
     fun ownerCanPreferOrPinAnAuthorizedNodeAndSeeSynchronizationAge() {
         MockWebServer().use { server ->
             val saved = CopyOnWriteArrayList<JsonObject>()
+            val moves = CopyOnWriteArrayList<JsonObject>()
+            var hasSession by mutableStateOf(false)
             server.dispatcher =
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path!!.substringBefore('?')
                         val body =
                             when {
+                                path == "/api/installations/fixture/api/nodes/placement/run/move" &&
+                                    request.method == "POST" -> {
+                                    moves +=
+                                        wireJson
+                                            .parseToJsonElement(request.body.readUtf8())
+                                            .jsonObject
+                                    "{}"
+                                }
                                 path == "/api/installations/fixture/api/nodes/placement/run" &&
                                     request.method == "PUT" -> {
                                     saved +=
@@ -1181,6 +1210,7 @@ abstract class NodePlacementCases {
                                 vm,
                                 Run(
                                     id = "run",
+                                    sessionId = if (hasSession) "session" else null,
                                     status = "succeeded",
                                     nodeId = "b40903f9-0487-53d0-a309-c589f0cae405",
                                     resources =
@@ -1220,9 +1250,14 @@ abstract class NodePlacementCases {
                 .assertExists()
             capture("execution-sheet")
             compose.onNodeWithText("Enregistrer").performScrollTo().assertIsNotEnabled()
+            compose.waitUntil(10000) { !vm.state.value.busy }
             compose.onNodeWithText("Préférer").performClick()
-            // The sheet renders before connect() finishes refreshing the workspace, and
-            // vm.perform ignores actions until then.
+            val refresh = CompletableDeferred<Unit>()
+            compose.runOnUiThread { vm.perform { refresh.await() } }
+            compose.waitUntil(10000) { vm.state.value.busy }
+            compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+            assertTrue(saved.isEmpty())
+            refresh.complete(Unit)
             compose.waitUntil(10000) { !vm.state.value.busy }
             compose.onNodeWithText("Enregistrer").performScrollTo().performClick()
             // Receipt by the server precedes the response and its UI confirmation.
@@ -1257,6 +1292,21 @@ abstract class NodePlacementCases {
             // Without a recorded provider session there is nothing to resume elsewhere yet.
             compose.onNodeWithText("Déplacer…").performScrollTo().performClick()
             compose.onNodeWithText("Déplacer maintenant").performScrollTo().assertIsNotEnabled()
+            compose.runOnIdle { hasSession = true }
+            compose.onNodeWithText("Déplacer maintenant").assertIsEnabled()
+            val movementRefresh = CompletableDeferred<Unit>()
+            compose.runOnUiThread { vm.perform { movementRefresh.await() } }
+            compose.waitUntil(10000) { vm.state.value.busy }
+            compose.onNodeWithText("Déplacer maintenant").assertIsNotEnabled()
+            assertTrue(moves.isEmpty())
+            movementRefresh.complete(Unit)
+            compose.waitUntil(10000) { !vm.state.value.busy }
+            compose.onNodeWithText("Déplacer maintenant").assertIsEnabled().performClick()
+            compose.waitUntil(10000) { moves.isNotEmpty() }
+            assertEquals(
+                "824f3da3-b37b-5713-9c61-06e3f54a7ff8",
+                moves.single()["nodeId"]?.jsonPrimitive?.content,
+            )
         }
     }
 
@@ -1359,6 +1409,7 @@ abstract class NodePlacementCases {
                     .fetchSemanticsNodes()
                     .isNotEmpty()
             }
+            compose.waitUntil(10000) { !vm.state.value.busy }
             compose.onNodeWithText("Migrer cette conversation…").performScrollTo().performClick()
             compose
                 .onNodeWithText("Le prochain message ouvre une nouvelle session", substring = true)
@@ -1379,10 +1430,14 @@ abstract class NodePlacementCases {
             }
             assertTrue(submitted.isEmpty())
             capture("backend-migration-confirm")
-            // The migration renders before connect() finishes refreshing the workspace, and
-            // vm.perform ignores actions until then.
+            val refresh = CompletableDeferred<Unit>()
+            compose.runOnUiThread { vm.perform { refresh.await() } }
+            compose.waitUntil(10000) { vm.state.value.busy }
+            compose.onNodeWithText("Confirmer").assertIsNotEnabled()
+            assertTrue(submitted.isEmpty())
+            refresh.complete(Unit)
             compose.waitUntil(10000) { !vm.state.value.busy }
-            compose.onNodeWithText("Confirmer").performClick()
+            compose.onNodeWithText("Confirmer").assertIsEnabled().performClick()
             compose.waitUntil(10000) { submitted.isNotEmpty() }
             assertEquals("native", submitted[0]["backend"]?.jsonPrimitive?.content)
             assertEquals(

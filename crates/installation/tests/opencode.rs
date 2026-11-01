@@ -35,6 +35,49 @@ async fn connect(s: &Service) -> Value {
 }
 
 #[tokio::test]
+#[cfg(target_os = "linux")]
+async fn broker_serves_and_fences_a_lease_in_a_long_data_directory() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = TempDir::new().unwrap();
+    let data = root.path().join("long-data-directory-".repeat(6));
+    std::fs::create_dir(&data).unwrap();
+    let s = Service::new(Config {
+        opencode_bin: common::fixture("opencode.mjs"),
+        ..common::config(&data)
+    })
+    .await
+    .unwrap();
+    connect(&s).await;
+    let lease = s
+        .accounts
+        .acquire(&s, "long-run", Provider::Opencode, MODEL)
+        .await
+        .unwrap()
+        .unwrap();
+    let path = lease.home.join(broker::SOCKET);
+    assert!(path.as_os_str().len() >= 108);
+    let server = broker::serve(&s, &lease).await.unwrap();
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let request = broker::Request::default();
+    let response = broker::request(&path, &request, Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert_eq!(response["key"], KEY);
+    s.accounts.release(&s, &lease).await.unwrap();
+    let denied = broker::request(&path, &request, Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert!(denied.get("error").is_some());
+    assert!(denied.get("key").is_none());
+    drop(server);
+    assert!(!path.exists());
+}
+
+#[tokio::test]
 async fn incompatible_model_routes_are_not_reported_as_exhausted_usage_or_busy_slots() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
