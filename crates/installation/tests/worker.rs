@@ -2237,6 +2237,9 @@ async fn serve_controller(State(state): State<Arc<Controller>>, request: Request
 }
 
 fn classify_opencode_resume_error(error: Option<&str>) -> &'static str {
+    const HTTP_PREFIX: &str = "Remote workspace preparation failed (HTTP ";
+    const HTTP_SUFFIX: &str = "); source files are preserved.";
+
     let Some(error) = error.filter(|error| error.len() <= 512) else {
         return "unknown";
     };
@@ -2301,11 +2304,9 @@ fn classify_opencode_resume_error(error: Option<&str>) -> &'static str {
         ),
     ];
     if let Some((_, class)) = known_errors.iter().find(|(known, _)| *known == error) {
-        return *class;
+        return class;
     }
 
-    const HTTP_PREFIX: &str = "Remote workspace preparation failed (HTTP ";
-    const HTTP_SUFFIX: &str = "); source files are preserved.";
     if let Some(status) = error
         .strip_prefix(HTTP_PREFIX)
         .and_then(|error| error.strip_suffix(HTTP_SUFFIX))
