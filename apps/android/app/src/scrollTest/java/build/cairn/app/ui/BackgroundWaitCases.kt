@@ -498,7 +498,7 @@ abstract class BackgroundWaitCases {
                 compose
                     .onAllNodes(
                         hasTestTag("model-picker") and
-                            hasContentDescription("GPT-6 Sol · effort moyen", substring = true)
+                            hasContentDescription("GPT-6 Sol · effort élevé", substring = true)
                     )
                     .fetchSemanticsNodes()
                     .isNotEmpty()
@@ -547,7 +547,7 @@ abstract class BackgroundWaitCases {
                 compose
                     .onAllNodes(
                         hasTestTag("model-picker") and
-                            hasContentDescription("GPT-6 Sol · effort moyen", substring = true)
+                            hasContentDescription("GPT-6 Sol · effort élevé", substring = true)
                     )
                     .fetchSemanticsNodes()
                     .isNotEmpty()
@@ -599,7 +599,7 @@ abstract class BackgroundWaitCases {
                 compose
                     .onAllNodes(
                         hasTestTag("model-picker") and
-                            hasContentDescription("GPT-6 Sol · effort moyen", substring = true)
+                            hasContentDescription("GPT-6 Sol · effort élevé", substring = true)
                     )
                     .fetchSemanticsNodes()
                     .isNotEmpty()

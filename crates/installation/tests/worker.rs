@@ -2161,9 +2161,13 @@ async fn serve_controller(State(state): State<Arc<Controller>>, request: Request
         let plans = state.plans.lock().await;
         let plan = plans.iter().find(|plan| plan["id"] == attempt).unwrap();
         // OpenCode validates saved session IDs when resuming; keep the Codex fixture value intact.
-        let provider = cairn_installation::microvm::plan::Plan::new(plan.clone())
-            .chat_provider()
-            .unwrap();
+        let provider = if plan.get("chat").is_some_and(|chat| !chat.is_null()) {
+            cairn_installation::microvm::plan::Plan::new(plan.clone())
+                .chat_provider()
+                .unwrap()
+        } else {
+            None
+        };
         let session_id = if provider == Some(Provider::Opencode) {
             "ses_fixture_session"
         } else {
@@ -2232,6 +2236,191 @@ async fn serve_controller(State(state): State<Arc<Controller>>, request: Request
     Json(json!({})).into_response()
 }
 
+fn classify_opencode_resume_error(error: Option<&str>) -> &'static str {
+    let Some(error) = error.filter(|error| error.len() <= 512) else {
+        return "unknown";
+    };
+
+    let known_errors = [
+        (
+            "Choose an OpenCode model in provider/model format.",
+            "opencode_model_format_invalid",
+        ),
+        (
+            "OpenCode currently requires YOLO access in an isolated execution environment. It does not implement the read-only or workspace-write sandbox.",
+            "opencode_sandbox_invalid",
+        ),
+        (
+            "OpenCode MCP server names must remain distinct after native normalization.",
+            "opencode_mcp_server_name_collision",
+        ),
+        (
+            "OpenCode MCP tool names must remain distinct after native normalization.",
+            "opencode_mcp_tool_name_collision",
+        ),
+        (
+            "Connect an OpenCode model-provider API key before starting this agent.",
+            "opencode_account_lease_missing",
+        ),
+        ("Account not found.", "opencode_account_record_missing"),
+        (
+            "This OpenCode connection no longer offers the selected model. Choose another model or connection.",
+            "opencode_auto_route_unavailable",
+        ),
+        (
+            "Agent access was reduced after this run was queued. Run the task again with the current policy.",
+            "agent_access_reduced",
+        ),
+        (
+            "Isolated runner is not configured. This agent will not fall back to shared execution.",
+            "isolated_runner_unconfigured",
+        ),
+        (
+            "Configure a valid STORAGE_S3_BUCKET on the server.",
+            "storage_bucket_invalid",
+        ),
+        (
+            "Confirm that R2 public domains and bucket locks are disabled in the Cloudflare dashboard.",
+            "storage_private_bucket_unconfirmed",
+        ),
+        (
+            "STORAGE_S3_ENDPOINT must be an https:// URL.",
+            "storage_endpoint_requires_https",
+        ),
+        (
+            "Remote workspace preparation interrupted.",
+            "remote_workspace_interrupted",
+        ),
+        (
+            "Remote workspace preparation timed out after 280 seconds; source files are preserved.",
+            "remote_workspace_timeout",
+        ),
+        (
+            "An internal error occurred. Check the server logs.",
+            "internal_error",
+        ),
+    ];
+    if let Some((_, class)) = known_errors.iter().find(|(known, _)| *known == error) {
+        return *class;
+    }
+
+    const HTTP_PREFIX: &str = "Remote workspace preparation failed (HTTP ";
+    const HTTP_SUFFIX: &str = "); source files are preserved.";
+    if let Some(status) = error
+        .strip_prefix(HTTP_PREFIX)
+        .and_then(|error| error.strip_suffix(HTTP_SUFFIX))
+        && status.len() == 3
+        && status.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return "remote_workspace_http_error";
+    }
+
+    "unknown"
+}
+
+#[test]
+fn opencode_resume_error_classification_is_exact_bounded_and_redacted() {
+    let cases = [
+        (
+            "Choose an OpenCode model in provider/model format.",
+            "opencode_model_format_invalid",
+        ),
+        (
+            "OpenCode currently requires YOLO access in an isolated execution environment. It does not implement the read-only or workspace-write sandbox.",
+            "opencode_sandbox_invalid",
+        ),
+        (
+            "OpenCode MCP server names must remain distinct after native normalization.",
+            "opencode_mcp_server_name_collision",
+        ),
+        (
+            "OpenCode MCP tool names must remain distinct after native normalization.",
+            "opencode_mcp_tool_name_collision",
+        ),
+        (
+            "Connect an OpenCode model-provider API key before starting this agent.",
+            "opencode_account_lease_missing",
+        ),
+        ("Account not found.", "opencode_account_record_missing"),
+        (
+            "This OpenCode connection no longer offers the selected model. Choose another model or connection.",
+            "opencode_auto_route_unavailable",
+        ),
+        (
+            "Agent access was reduced after this run was queued. Run the task again with the current policy.",
+            "agent_access_reduced",
+        ),
+        (
+            "Isolated runner is not configured. This agent will not fall back to shared execution.",
+            "isolated_runner_unconfigured",
+        ),
+        (
+            "Configure a valid STORAGE_S3_BUCKET on the server.",
+            "storage_bucket_invalid",
+        ),
+        (
+            "Confirm that R2 public domains and bucket locks are disabled in the Cloudflare dashboard.",
+            "storage_private_bucket_unconfirmed",
+        ),
+        (
+            "STORAGE_S3_ENDPOINT must be an https:// URL.",
+            "storage_endpoint_requires_https",
+        ),
+        (
+            "Remote workspace preparation interrupted.",
+            "remote_workspace_interrupted",
+        ),
+        (
+            "Remote workspace preparation timed out after 280 seconds; source files are preserved.",
+            "remote_workspace_timeout",
+        ),
+        (
+            "An internal error occurred. Check the server logs.",
+            "internal_error",
+        ),
+    ];
+    for (error, expected_class) in cases {
+        assert_eq!(classify_opencode_resume_error(Some(error)), expected_class);
+    }
+    assert_eq!(
+        classify_opencode_resume_error(Some(
+            "Remote workspace preparation failed (HTTP 404); source files are preserved.",
+        )),
+        "remote_workspace_http_error"
+    );
+    assert_eq!(classify_opencode_resume_error(None), "unknown");
+    assert_eq!(
+        classify_opencode_resume_error(Some("remote workspace preparation timed out")),
+        "unknown"
+    );
+    assert_eq!(
+        classify_opencode_resume_error(Some("unrecognized provider diagnostic")),
+        "unknown"
+    );
+    assert_eq!(
+        classify_opencode_resume_error(Some(
+            "Remote workspace preparation failed (HTTP 40x); source files are preserved.",
+        )),
+        "unknown"
+    );
+    assert_eq!(
+        classify_opencode_resume_error(Some(
+            "Remote workspace preparation failed (HTTP 404); source files are preserved. extra",
+        )),
+        "unknown"
+    );
+    let boundary_error = "x".repeat(512);
+    assert_eq!(
+        classify_opencode_resume_error(Some(boundary_error.as_str())),
+        "unknown"
+    );
+    let oversized_error = "x".repeat(513);
+    assert_eq!(
+        classify_opencode_resume_error(Some(oversized_error.as_str())),
+        "unknown"
+    );
+}
+
 async fn report_opencode_resume_wait_state(
     fixture: &Fixture,
     run_id: &str,
@@ -2241,6 +2430,7 @@ async fn report_opencode_resume_wait_state(
     log_request_seen: &std::sync::atomic::AtomicBool,
 ) {
     let run = fixture.service.store.run(run_id).await.ok();
+    let run_record_present = run.is_some();
     let status = run
         .as_ref()
         .and_then(RunStatus::of)
@@ -2252,10 +2442,68 @@ async fn report_opencode_resume_wait_state(
         .as_ref()
         .is_some_and(|run| run["resumeAvailable"] == true);
     let error_present = run.as_ref().is_some_and(|run| !run["error"].is_null());
+    let error_class =
+        classify_opencode_resume_error(run.as_ref().and_then(|run| run["error"].as_str()));
+    let account_id_recorded = run.as_ref().is_some_and(|run| run["accountId"].is_string());
+    let account_required_is_opencode = run
+        .as_ref()
+        .is_some_and(|run| run["accountRequired"] == "opencode");
+    let account_id = run.as_ref().and_then(|run| run["accountId"].as_str());
+    let (account_record_present, account_ready, account_enabled) =
+        if let Some(account_id) = account_id {
+            match fixture
+                .service
+                .accounts
+                .account(&fixture.service, account_id)
+                .await
+            {
+                Ok(account) => (true, account.is_ready(), account.enabled),
+                Err(_) => (false, false, false),
+            }
+        } else {
+            (false, false, false)
+        };
+    let checkpoint = fixture
+        .service
+        .store
+        .checkpoint_boundary(run_id)
+        .await
+        .ok()
+        .flatten();
+    let checkpoint_record_present = checkpoint.is_some();
+    // These checkpoint fields are retained state and may describe an earlier attempt;
+    // they do not identify the current worker's failure phase.
+    let checkpoint_prepared_recorded = checkpoint
+        .as_ref()
+        .is_some_and(|checkpoint| checkpoint["prepared"].is_object());
+    let checkpoint_runner_id_recorded = checkpoint
+        .as_ref()
+        .is_some_and(|checkpoint| checkpoint["runnerId"].is_string());
+    let checkpoint_process_recorded = checkpoint
+        .as_ref()
+        .is_some_and(|checkpoint| checkpoint["process"].is_object());
+    let checkpoint_node_id_recorded = checkpoint
+        .as_ref()
+        .is_some_and(|checkpoint| checkpoint["nodeId"].is_string());
     let plan_received = plan_received.load(std::sync::atomic::Ordering::Relaxed);
     let log_request_observed = log_request_seen.load(std::sync::atomic::Ordering::Relaxed);
+    let retained_state_category = if !run_record_present {
+        "unknown"
+    } else if plan_received {
+        "test_controller_plan_post_observed"
+    } else if checkpoint_process_recorded {
+        "checkpoint_process_recorded"
+    } else if checkpoint_runner_id_recorded {
+        "checkpoint_runner_id_recorded"
+    } else if checkpoint_prepared_recorded {
+        "checkpoint_prepared_recorded"
+    } else if account_id_recorded {
+        "account_id_recorded"
+    } else {
+        "account_id_not_recorded"
+    };
     eprintln!(
-        "CAIRN_RESUME_TEST_DIAGNOSTIC test={test} wait={wait} status={status} sessionPresent={session_present} resumeAvailable={resume_available} errorPresent={error_present} planReceived={plan_received} logRequestObserved={log_request_observed} threadStartedObserved={thread_started_observed}"
+        "CAIRN_RESUME_TEST_DIAGNOSTIC test={test} wait={wait} status={status} runRecordPresent={run_record_present} checkpointRecordPresent={checkpoint_record_present} retainedStateCategory={retained_state_category} errorClass={error_class} accountIdRecorded={account_id_recorded} accountRequiredIsOpenCode={account_required_is_opencode} accountRecordPresent={account_record_present} accountReady={account_ready} accountEnabled={account_enabled} checkpointPreparedRecorded={checkpoint_prepared_recorded} checkpointRunnerIdRecorded={checkpoint_runner_id_recorded} checkpointProcessRecorded={checkpoint_process_recorded} checkpointNodeIdRecorded={checkpoint_node_id_recorded} sessionPresent={session_present} resumeAvailable={resume_available} errorPresent={error_present} planReceived={plan_received} logRequestObserved={log_request_observed} threadStartedObserved={thread_started_observed}"
     );
 }
 
@@ -5070,7 +5318,7 @@ async fn claude_conversations_run_together_and_lowering_limit_does_not_cancel_th
 
 #[tokio::test]
 async fn manual_resume_cancels_a_staged_switch_during_worker_fencing() {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     let mut fixture = Fixture::new().await;
     fixture.stop(false).await;
@@ -5082,34 +5330,61 @@ async fn manual_resume_cancels_a_staged_switch_during_worker_fencing() {
         hold: AtomicBool::new(true),
     });
     let block_fence = Arc::new(AtomicBool::new(false));
+    let fenced_attempt = Arc::new(std::sync::Mutex::new(None::<String>));
+    let blocked_delete_count = Arc::new(AtomicUsize::new(0));
     let fence_entered = Arc::new(tokio::sync::Notify::new());
     let fence_release = Arc::new(tokio::sync::Notify::new());
-    let app = Router::new()
-        .fallback(any({
-            let (block_fence, fence_entered, fence_release) = (
-                block_fence.clone(),
-                fence_entered.clone(),
-                fence_release.clone(),
-            );
-            move |state: State<Arc<Controller>>, request: Request| {
-                let (block_fence, fence_entered, fence_release) = (
+    let app =
+        Router::new()
+            .fallback(any({
+                let (
+                    block_fence,
+                    fenced_attempt,
+                    blocked_delete_count,
+                    fence_entered,
+                    fence_release,
+                ) = (
                     block_fence.clone(),
+                    fenced_attempt.clone(),
+                    blocked_delete_count.clone(),
                     fence_entered.clone(),
                     fence_release.clone(),
                 );
-                async move {
-                    if block_fence.load(Ordering::SeqCst)
-                        && request.method() == axum::http::Method::DELETE
-                        && request.uri().path().starts_with("/runs/")
-                    {
-                        fence_entered.notify_one();
-                        fence_release.notified().await;
+                move |state: State<Arc<Controller>>, request: Request| {
+                    let (
+                        block_fence,
+                        fenced_attempt,
+                        blocked_delete_count,
+                        fence_entered,
+                        fence_release,
+                    ) = (
+                        block_fence.clone(),
+                        fenced_attempt.clone(),
+                        blocked_delete_count.clone(),
+                        fence_entered.clone(),
+                        fence_release.clone(),
+                    );
+                    async move {
+                        let attempt_to_fence = fenced_attempt.lock().unwrap().clone();
+                        let is_target_attempt =
+                            request.uri().path().strip_prefix("/runs/").is_some_and(
+                                |request_attempt| {
+                                    attempt_to_fence.as_deref() == Some(request_attempt)
+                                },
+                            );
+                        if request.method() == axum::http::Method::DELETE
+                            && is_target_attempt
+                            && block_fence.swap(false, Ordering::SeqCst)
+                        {
+                            blocked_delete_count.fetch_add(1, Ordering::SeqCst);
+                            fence_entered.notify_one();
+                            fence_release.notified().await;
+                        }
+                        serve_controller(state, request).await
                     }
-                    serve_controller(state, request).await
                 }
-            }
-        }))
-        .with_state(controller.clone());
+            }))
+            .with_state(controller.clone());
     let (listener, address) = common::bind().await;
     common::reconfigure(&mut fixture.service, |config| {
         config.runner_url = format!("http://{address}");
@@ -5117,6 +5392,12 @@ async fn manual_resume_cancels_a_staged_switch_during_worker_fencing() {
     .await;
     let s = fixture.service.clone();
     let server = common::serve(listener, app);
+    let phase = |name: &'static str| {
+        eprintln!(
+            "CAIRN_RESUME_TEST_PHASE test=manual_resume_cancels_a_staged_switch_during_worker_fencing phase={name} blockedDeleteCount={}",
+            blocked_delete_count.load(Ordering::SeqCst).min(16)
+        );
+    };
     let home = s.config.home.join(".codex");
     tokio::fs::create_dir_all(&home).await.unwrap();
     tokio::fs::write(home.join("auth.json"), "{}")
@@ -5164,12 +5445,17 @@ async fn manual_resume_cancels_a_staged_switch_during_worker_fencing() {
     let turn_id = text(&sent, "id").to_owned();
     s.chat_send(&chat_id, sent).await.unwrap();
     fixture.start().await;
+    phase("chat_run_lookup_before");
     let run_id = fixture.chat_run(&chat_id).await;
+    phase("chat_run_lookup_after");
+    phase("initial_run_wait_before");
     let active = fixture
         .until(&run_id, |run| {
             run["status"] == RunStatus::Running && run["sessionId"].is_string()
         })
         .await;
+    phase("initial_run_wait_after");
+    phase("initial_controller_plan_wait_before");
     eventually(
         Duration::from_secs(20),
         Duration::from_millis(30),
@@ -5184,6 +5470,17 @@ async fn manual_resume_cancels_a_staged_switch_during_worker_fencing() {
         },
     )
     .await;
+    phase("initial_controller_plan_wait_after");
+    let initial_attempt = controller
+        .plans
+        .lock()
+        .await
+        .iter()
+        .find(|plan| plan["runId"] == run_id)
+        .and_then(|plan| plan["id"].as_str())
+        .expect("the initial run must have a controller attempt")
+        .to_owned();
+    *fenced_attempt.lock().unwrap() = Some(initial_attempt);
     let relay = common::relay_fixture::context(&s).await;
     let relay_token = text(&relay, "value");
     let client = reqwest::Client::new();
@@ -5195,11 +5492,13 @@ async fn manual_resume_cancels_a_staged_switch_during_worker_fencing() {
         .await
         .unwrap();
     stopped.error_for_status().unwrap();
+    phase("stopped_run_wait_before");
     let terminal = fixture
         .until(&run_id, |run| {
             run["status"] == RunStatus::Cancelled && run["resumeAvailable"] == true
         })
         .await;
+    phase("stopped_run_wait_after");
     assert_eq!(terminal["sessionId"], active["sessionId"]);
     fixture.stop(false).await;
     s.store
@@ -5280,9 +5579,11 @@ async fn manual_resume_cancels_a_staged_switch_during_worker_fencing() {
         .hold
         .store(false, std::sync::atomic::Ordering::Relaxed);
     fixture.start().await;
+    phase("first_fence_wait_before");
     tokio::time::timeout(Duration::from_secs(10), fence_entered.notified())
         .await
         .expect("the production switch worker should reach runner fencing");
+    phase("first_fence_wait_after");
 
     let cancelled = client
         .post(format!("{}/api/chats/{chat_id}/stop", fixture.url))
@@ -5319,7 +5620,10 @@ async fn manual_resume_cancels_a_staged_switch_during_worker_fencing() {
         .await
         .unwrap();
     assert!(resumed.status().is_success());
+    phase("resumed_execution_wait_before");
     let completed = fixture.until_finished(&run_id).await;
+    phase("resumed_execution_wait_after");
+    assert_eq!(blocked_delete_count.load(Ordering::SeqCst), 1);
     assert_eq!(completed["status"], RunStatus::Succeeded, "{completed}");
     assert_eq!(completed["snapshot"]["agent"]["provider"], "codex");
     assert_eq!(completed["snapshot"]["agent"]["speed"], "priority");
@@ -6689,6 +6993,7 @@ async fn chat_resume_selection_keeps_saved_identity_and_reaches_the_worker_plan(
         )
         .await
         .unwrap();
+    let default_plan_count_before_resume = controller.plans.lock().await.len();
     let (default_resume_status, default_resume_response) = api_post(
         &app,
         text(&session, "value"),
@@ -6755,6 +7060,7 @@ async fn chat_resume_selection_keeps_saved_identity_and_reaches_the_worker_plan(
         .lock()
         .await
         .iter()
+        .skip(default_plan_count_before_resume)
         .find(|plan| {
             plan["runId"] == default_model_run_id
                 && plan["chat"]["execution"]["messageId"] == default_model_turn_id
@@ -6805,6 +7111,7 @@ async fn chat_resume_selection_keeps_saved_identity_and_reaches_the_worker_plan(
         .await;
     let preserved_checkpoint_before = fixture.checkpoint(&preserved_model_run_id).await;
     let preserved_generation_before = preserved_checkpoint_before.get("generation").cloned();
+    let preserved_plan_count_before_resume = controller.plans.lock().await.len();
     let (preserve_status, preserve_response) = api_post(
         &app,
         relay_token,
@@ -6860,10 +7167,10 @@ async fn chat_resume_selection_keeps_saved_identity_and_reaches_the_worker_plan(
         .lock()
         .await
         .iter()
+        .skip(preserved_plan_count_before_resume)
         .find(|plan| {
             plan["runId"] == preserved_model_run_id
                 && plan["chat"]["execution"]["messageId"] == preserved_model_turn_id
-                && plan["chat"]["serviceTier"] == "default"
         })
         .cloned()
         .expect(

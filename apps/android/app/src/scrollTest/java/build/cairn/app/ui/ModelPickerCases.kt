@@ -140,14 +140,52 @@ abstract class ModelPickerCases {
 
     @Test
     fun inheritedBlankModelStaysBlankWhileNonInheritingPickerSelectsCatalogDefault() {
+        val openCodeCatalog =
+            ModelCatalog(
+                models =
+                    listOf(
+                        CodingAgentModel(
+                            model = "auto/sonnet",
+                            displayName = "Sonnet",
+                            isDefault = true,
+                            routes =
+                                listOf(
+                                    ModelRoute(
+                                        model = "opencode/sonnet",
+                                        provider = "opencode",
+                                        providerName = "OpenCode Zen",
+                                        billing = "credits",
+                                    ),
+                                    ModelRoute(
+                                        model = "opencode-go/sonnet",
+                                        provider = "opencode-go",
+                                        providerName = "OpenCode Go",
+                                        billing = "subscription",
+                                    ),
+                                ),
+                        )
+                    )
+            )
         var inheritedModel by mutableStateOf("")
         var explicitModel by mutableStateOf("")
         compose.setContent {
             androidx.compose.foundation.layout.Column {
-                ModelPicker(catalog, inheritedModel, "", inherit = true) { model, _ ->
+                ModelPicker(
+                    openCodeCatalog,
+                    inheritedModel,
+                    "",
+                    inherit = true,
+                    provider = "opencode",
+                ) { model, _ ->
                     inheritedModel = model
                 }
-                ModelPicker(catalog, explicitModel, "", inherit = false) { model, _ ->
+                ModelPicker(
+                    openCodeCatalog,
+                    explicitModel,
+                    "",
+                    inherit = false,
+                    provider = "opencode",
+                ) { model, _ ->
                     explicitModel = model
                 }
             }
@@ -156,7 +194,21 @@ abstract class ModelPickerCases {
         compose.waitForIdle()
 
         assertEquals("", inheritedModel)
-        assertEquals("large", explicitModel)
+        assertEquals("auto/sonnet", explicitModel)
+    }
+
+    @Test
+    fun codexKeepsBlankModelWhenPickerDoesNotInherit() {
+        var model by mutableStateOf("")
+        compose.setContent {
+            ModelPicker(catalog, model, "", inherit = false, provider = "codex") { selected, _ ->
+                model = selected
+            }
+        }
+
+        compose.waitForIdle()
+
+        assertEquals("", model)
     }
 
     @Test
