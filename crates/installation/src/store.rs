@@ -1430,7 +1430,7 @@ mod schema_tests {
         drop(Store::open(root.path()).unwrap());
         let file = root.path().join("manager.db");
         let db = Connection::open(&file).unwrap();
-        db.execute_batch("DROP TABLE timeline_entries; DROP TABLE timeline_state; DROP TABLE run_progress; DROP TABLE plugin_hook_receipts; DROP TABLE plugin_hook_events; PRAGMA user_version=19; INSERT INTO kv(key,data) VALUES('hook-upgrade-fixture','true');").unwrap();
+        db.execute_batch("DROP TABLE timeline_entries; DROP TABLE timeline_state; DROP TABLE run_progress; ALTER TABLE chat_messages DROP COLUMN plan; ALTER TABLE chat_questions DROP COLUMN plan; DROP TABLE plugin_hook_receipts; DROP TABLE plugin_hook_events; PRAGMA user_version=19; INSERT INTO kv(key,data) VALUES('hook-upgrade-fixture','true');").unwrap();
         drop(db);
         drop(Store::open(root.path()).unwrap());
         drop(Store::open(root.path()).unwrap());
@@ -1470,7 +1470,7 @@ mod schema_tests {
             .unwrap()
         };
         let retained = hook_schema(&db);
-        db.execute_batch("DROP TABLE timeline_entries; DROP TABLE timeline_state; DROP TABLE run_progress; PRAGMA user_version=20; INSERT INTO kv(key,data) VALUES('progress-upgrade-fixture','true');").unwrap();
+        db.execute_batch("DROP TABLE timeline_entries; DROP TABLE timeline_state; DROP TABLE run_progress; ALTER TABLE chat_messages DROP COLUMN plan; ALTER TABLE chat_questions DROP COLUMN plan; PRAGMA user_version=20; INSERT INTO kv(key,data) VALUES('progress-upgrade-fixture','true');").unwrap();
         drop(db);
         drop(Store::open(root.path()).unwrap());
         drop(Store::open(root.path()).unwrap());

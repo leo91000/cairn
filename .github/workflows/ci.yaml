@@ -204,7 +204,14 @@ jobs:
       - name: Run backend tests across binaries with isolated credentials
         run: |
           set -o pipefail
-          node scripts/test-backend.mjs --nextest --test-threads 8 --no-fail-fast --color never --status-level pass 2>&1 | tee backend-tests.log
+          node scripts/test-backend.mjs --nextest --test-threads 8 --no-fail-fast --color never --status-level all 2>&1 | tee backend-tests.log
+      - name: Preserve the isolated backend test trace, including interrupted cases
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: backend-test-trace
+          path: backend-tests.log
+          if-no-files-found: ignore
       - name: Measure the bounded bootstrap observer without filesystem work
         run: node scripts/test-backend.mjs -p cairn-installation --lib native::bootstrap::tests::observation_hot_path_measurement -- --exact --nocapture
       - name: Qualify native backend namespace isolation with ordinary private bind mounts

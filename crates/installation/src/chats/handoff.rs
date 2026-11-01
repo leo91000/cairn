@@ -326,6 +326,11 @@ mod tests {
     fn a_fresh_session_receives_the_proposed_plan_it_is_asked_to_implement() {
         let connection = rusqlite::Connection::open_in_memory().unwrap();
         connection.execute_batch(EVENTS).unwrap();
+        // Db::event also writes the canonical timeline, as in the other transcript fixtures.
+        connection.execute_batch(crate::timeline::SCHEMA).unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", false)
+            .unwrap();
         connection.execute_batch(crate::runs::SCHEMA).unwrap();
         let db = Db(&connection);
         db.event(

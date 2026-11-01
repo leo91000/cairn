@@ -1582,7 +1582,9 @@ async fn durable_progress_is_atomic_bound_and_survives_restart_without_a_fresh_c
 async fn malformed_or_truncated_stdout_retains_monitoring_gap_without_changing_control_policy() {
     let malformed = "{malformed".to_owned();
     let oversized = json!({
-        "type": "item.updated",
+        // Conversation frames are retained intact; this unknown technical frame
+        // still exercises the raw line budget and an incomplete JSON record.
+        "type": "unknown.diagnostic",
         "item": {
             "id": "message",
             "type": "agent_message",
