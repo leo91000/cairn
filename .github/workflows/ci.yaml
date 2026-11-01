@@ -555,7 +555,24 @@ jobs:
           path: target/debug/
       - run: chmod +x target/debug/examples/browser_fixture target/debug/cairn target/debug/cairn-beacon target/debug/examples/network_direct_client target/debug/examples/worker_fixture
       - name: Install Postgres client for beacon account fixtures
-        run: apt-get update -qq && apt-get install -y --no-install-recommends postgresql-client
+        timeout-minutes: 5
+        run: |
+          # A new APT process clears cached connection failures without retrying tests.
+          apt_options=(-o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20)
+          for attempt in 1 2 3; do
+            if apt-get "${apt_options[@]}" -o APT::Update::Error-Mode=any update -qq \
+              && apt-get "${apt_options[@]}" install -y --no-install-recommends postgresql-client; then
+              exit 0
+            else
+              status=$?
+            fi
+
+            if [[ "$attempt" == 3 ]]; then
+              exit "$status"
+            fi
+
+            sleep 2
+          done
       - name: Run browser shard
         timeout-minutes: 10
         run: |

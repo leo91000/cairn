@@ -141,6 +141,10 @@ async fn assert_files(owner: &Owner, node: &str, run: &str, native: bool) {
 async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_source_on_failure() {
     let (listener, address) = common::bind().await;
     let owner = Owner::at(address.to_string()).await;
+    // Migration stages disks on the manager, so configure its fixture reserve too.
+    owner
+        .put_node_fixture(json!({ "id": LOCAL_NODE_ID, "storage": small_reserve() }))
+        .await;
     let (run, agent, chat, vm_node, native_node) = (id(), id(), id(), id(), id());
     let original_agent = json!({ "id": agent, "revision": id(), "access": { "backend": "firecracker", "nodes": [vm_node] } });
     owner.put("agents", original_agent.clone()).await;
@@ -379,10 +383,10 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
         assert_files(&owner, destination, &run, backend == "native").await;
     }
     let before = owner.run(&run).await;
-    let mut profile = original_agent;
+    let mut profile = original_agent.clone();
     profile["access"]["backend"] = "native".into();
     profile["access"]["nodes"] = json!([native_node]);
-    owner.put("agents", profile).await;
+    owner.put("agents", profile.clone()).await;
     faults.failed.store(true, Ordering::SeqCst);
     let (status, response) = owner
         .send(
@@ -396,12 +400,30 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     assert!(failed["backendMigrationError"].is_string(), "{failed}");
     assert_eq!(failed["nodeId"], before["nodeId"]);
     assert_eq!(failed["backup"]["id"], before["backup"]["id"]);
+    let source_context = LazyDisk::context(
+        &owner
+            .root()
+            .join(&vm_node)
+            .join("disks")
+            .join(&run)
+            .join("lazy"),
+    )
+    .unwrap();
+    let source_grant = source_context["grant"].as_str().unwrap();
+    assert!(
+        disk_grants::authorize(&owner.service, source_grant)
+            .await
+            .is_err()
+    );
+    // Repairing the source requires restoring its profile authorization first.
+    owner.put("agents", original_agent).await;
     assert_files(&owner, &vm_node, &run, false).await;
     faults.failed.store(false, Ordering::SeqCst);
     assert!(
         failed["backendMigration"].is_null(),
         "a pre-conversion failure must allow repairing the source"
     );
+    owner.put("agents", profile).await;
     let marker = json!({ "id": id(), "reservationId": id(), "process": "old-manager-process", "paused": false });
     owner
         .service
