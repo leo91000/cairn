@@ -64,6 +64,34 @@ class SpeedsTest {
     }
 
     @Test
+    fun resumeUsesTheSpeedShownForTheSelectedModel() {
+        val deep = astra.copy(model = "deep", serviceTiers = emptyList())
+        val savedSpeed = pickerAppliedSpeed("codex", astra, "", "priority")
+        val unavailableInheritedSpeed = pickerAppliedSpeed("codex", deep, "", "priority")
+        assertEquals("priority", savedSpeed)
+        assertEquals(STANDARD_SPEED, unavailableInheritedSpeed)
+        assertTrue(unavailableInheritedSpeed != savedSpeed)
+        assertEquals(STANDARD_SPEED, pickerAppliedSpeed("codex", deep, STANDARD_SPEED, "priority"))
+        assertEquals(
+            "priority",
+            pickerAppliedSpeed("codex", astra.copy(serviceTiers = null), "", "priority"),
+        )
+        assertEquals(STANDARD_SPEED, resumeSelectionSpeed("codex", deep, "", "priority"))
+        assertEquals("priority", resumeSelectionSpeed("codex", astra, "", "priority"))
+        assertEquals("", resumeSelectionSpeed("claude", astra, "", "priority"))
+    }
+
+    @Test
+    fun resumeSelectionComparesPickerSpeedWithPersistedRequest() {
+        assertTrue(needsResumeSelection("deep", "high", STANDARD_SPEED, "deep", "high", "priority"))
+        assertFalse(needsResumeSelection("fast", "high", "priority", "fast", "high", "priority"))
+        assertFalse(needsResumeSelection("fast", "high", STANDARD_SPEED, "fast", "high", ""))
+        assertFalse(needsResumeSelection("fast", "", "priority", "fast", "", "priority"))
+        assertTrue(needsResumeSelection("fast", "", STANDARD_SPEED, "fast", "", "priority"))
+        assertTrue(needsResumeSelection("new", "high", "priority", "fast", "high", "priority"))
+    }
+
+    @Test
     fun namesSpeedsWithCodexOwnWords() {
         assertEquals("Fast", speedLabel("priority", listOf(fast)))
         assertEquals("Standard", speedLabel(STANDARD_SPEED))
