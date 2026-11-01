@@ -139,6 +139,62 @@ abstract class ModelPickerCases {
     }
 
     @Test
+    fun inheritedBlankModelStaysBlankWhileNonInheritingPickerSelectsCatalogDefault() {
+        var inheritedModel by mutableStateOf("")
+        var explicitModel by mutableStateOf("")
+        compose.setContent {
+            androidx.compose.foundation.layout.Column {
+                ModelPicker(catalog, inheritedModel, "", inherit = true) { model, _ ->
+                    inheritedModel = model
+                }
+                ModelPicker(catalog, explicitModel, "", inherit = false) { model, _ ->
+                    explicitModel = model
+                }
+            }
+        }
+
+        compose.waitForIdle()
+
+        assertEquals("", inheritedModel)
+        assertEquals("large", explicitModel)
+    }
+
+    @Test
+    fun inheritedDisplayedDefaultAndExplicitDefaultUseDifferentReasoningIntents() {
+        var model by mutableStateOf("")
+        var reasoning by mutableStateOf("")
+        var intent by mutableStateOf<ResumeReasoningIntent>(ResumeReasoningIntent.Untouched)
+        compose.setContent {
+            ModelPicker(
+                catalog,
+                model,
+                reasoning,
+                defaultModel = "large",
+                defaultReasoning = "high",
+                inherit = true,
+                onReasoningIntent = { intent = it },
+            ) { selectedModel, selectedReasoning ->
+                model = selectedModel
+                reasoning = selectedReasoning
+            }
+        }
+
+        compose.onNodeWithTag("model-picker").assertTextContains("Grand modèle").performClick()
+        compose.onNodeWithTag("reasoning-default").performScrollTo().performClick()
+        compose.runOnIdle {
+            assertEquals("", model)
+            assertEquals(ResumeReasoningIntent.Untouched, intent)
+        }
+
+        compose.onNode(hasText("Grand modèle") and isSelectable()).performClick()
+        compose.onNodeWithTag("reasoning-default").performScrollTo().performClick()
+        compose.runOnIdle {
+            assertEquals("large", model)
+            assertEquals(ResumeReasoningIntent.ModelDefault, intent)
+        }
+    }
+
+    @Test
     fun claudeDefaultAliasIsMergedIntoTheDefaultRow() {
         val claude =
             ModelCatalog(

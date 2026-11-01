@@ -20,8 +20,33 @@ impl std::fmt::Display for RunId {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResumeExecutionSelection {
+    #[schemars(length(max = 120))]
+    pub model: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    #[schemars(default)]
+    pub preserve_model: bool,
+    #[schemars(length(max = 40), pattern(r"^(?:[a-z][a-z0-9_-]*)?$"))]
+    pub reasoning: String,
+    #[schemars(length(max = 40), pattern(r"^(?:[a-z][a-z0-9_-]*)?$"))]
+    pub speed: String,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResumeRunInput {
     pub run_id: RunId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 200))]
+    #[ts(optional = nullable)]
+    pub turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub selection: Option<ResumeExecutionSelection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
@@ -69,7 +94,7 @@ pub struct QualificationFixture {
 pub const RESUME_RUN_ID: &str = "resume_run";
 pub const RESUME_RUN_SCOPE: &str = "run";
 pub const RESUME_RUN_PATH: &str = "/runs/{runId}/resume";
-pub const RESUME_RUN_DESCRIPTION: &str = "Resume an existing stopped mission run with its saved workspace, session and checkpoint. This does not create a new run (unlike run_task or retry).";
+pub const RESUME_RUN_DESCRIPTION: &str = "Resume an existing stopped chat run with its saved workspace, session and checkpoint. An optional selection changes only the model, reasoning and speed for this same coding agent; turnId is required and guards against a stale selection. An empty model resolves to the current catalog default unless preserveModel is true, in which case the saved model must also be blank and remains unchanged. For Codex, an empty selection speed inherits the saved request and standard explicitly selects Standard. Mission runs retain their existing resume behavior without model selection. This does not create a new run (unlike run_task or retry).";
 
 /// One schema profile for exported files and live MCP discovery.
 pub fn schema_for<T: JsonSchema>(contract: Contract) -> serde_json::Value {
@@ -90,6 +115,59 @@ fn wire_integer<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<i64
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resume_selection_schema_leaves_model_ids_to_provider_catalogs() {
+        let schema = schema_for::<ResumeExecutionSelection>(Contract::Deserialize);
+        let model = &schema["properties"]["model"];
+        assert_eq!(model["maxLength"], 120);
+        assert!(model.get("pattern").is_none());
+        assert_eq!(schema["properties"]["preserveModel"]["default"], false);
+        assert!(
+            !schema["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|field| field == "preserveModel")
+        );
+        assert_eq!(
+            schema["properties"]["reasoning"]["pattern"],
+            "^(?:[a-z][a-z0-9_-]*)?$"
+        );
+    }
+
+    #[test]
+    fn resume_selection_preserve_model_is_optional_and_omitted_when_false() {
+        let selection: ResumeExecutionSelection = serde_json::from_value(serde_json::json!({
+            "model": "",
+            "reasoning": "",
+            "speed": "",
+        }))
+        .unwrap();
+        assert!(!selection.preserve_model);
+        assert_eq!(
+            serde_json::to_value(selection).unwrap(),
+            serde_json::json!({ "model": "", "reasoning": "", "speed": "" })
+        );
+
+        let selection: ResumeExecutionSelection = serde_json::from_value(serde_json::json!({
+            "model": "",
+            "preserveModel": true,
+            "reasoning": "",
+            "speed": "standard",
+        }))
+        .unwrap();
+        assert_eq!(selection.preserve_model, true);
+        assert!(
+            serde_json::from_value::<ResumeExecutionSelection>(serde_json::json!({
+                "model": "",
+                "preserveModel": "true",
+                "reasoning": "",
+                "speed": "",
+            }))
+            .is_err()
+        );
+    }
 
     #[test]
     fn qualification_corpus_decodes_and_round_trips() {

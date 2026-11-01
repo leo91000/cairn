@@ -13,6 +13,7 @@ import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
+import build.cairn.contracts.ServiceTier
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.*
@@ -210,7 +211,7 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun savedQuotaFailureOffersManualResumeInsteadOfPromisingAutomaticRecovery() =
-        conversation("failed", quota = true) { server ->
+        conversation("failed", quota = true, resumableTurn = true) { server ->
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
             compose.onNodeWithText("Reprendre la conversation").assertExists()
             compose
@@ -231,6 +232,7 @@ abstract class BackgroundWaitCases {
                 .assertIsDisplayed()
                 .performClick()
             val effects = mutableListOf<String>()
+            var resumeBody: JsonObject? = null
             compose.waitUntil(10000) {
                 compose.waitForIdle()
                 var request = server.takeRequest(0, TimeUnit.MILLISECONDS)
@@ -240,22 +242,503 @@ abstract class BackgroundWaitCases {
                         request.method == "POST" &&
                             path in
                                 listOf(
-                                    "/api/installations/fixture/api/runs/$SAVED_RUN_ID/resume",
+                                    "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume",
                                     "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/pause",
                                 )
-                    )
+                    ) {
                         effects.add(path)
+                        if (path.endsWith("/resume")) {
+                            resumeBody = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+                        }
+                    }
                     request = server.takeRequest(0, TimeUnit.MILLISECONDS)
                 }
                 effects.size == 2
             }
             org.junit.Assert.assertEquals(
                 listOf(
-                    "/api/installations/fixture/api/runs/$SAVED_RUN_ID/resume",
+                    "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume",
                     "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/pause",
                 ),
                 effects,
             )
+            org.junit.Assert.assertEquals(
+                "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                resumeBody!!["chatId"]!!.jsonPrimitive.content,
+            )
+            org.junit.Assert.assertEquals(
+                SAVED_RUN_ID,
+                resumeBody!!["runId"]!!.jsonPrimitive.content,
+            )
+            org.junit.Assert.assertEquals(
+                "quota-turn",
+                resumeBody!!["turnId"]!!.jsonPrimitive.content,
+            )
+        }
+
+    @Test
+    fun savedCodexQuotaResumeSubmitsChangedModelDefaultEffort() =
+        conversation("failed", quota = true, resumeChangedModel = true) { server ->
+            compose.onNodeWithTag("chat-quota").assertIsDisplayed()
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("GPT-6 Sol").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithTag("model-picker").performClick()
+            compose
+                .onNode(hasText("Modèle de la conversation") and isSelectable())
+                .assertIsSelected()
+                .assert(hasText("GPT-6 Sol", substring = true))
+            compose.onNodeWithText("GPT-6 Luna").performScrollTo().performClick()
+            compose.onNodeWithTag("reasoning-slider").assert(hasStateDescription("Faible"))
+            compose.onNodeWithText("Terminé").performClick()
+            compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
+
+            val request = generateSequence {
+                server.takeRequest(5, TimeUnit.SECONDS)
+            }
+                .first {
+                    it.method == "POST" &&
+                        it.path?.endsWith("/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume") ==
+                            true
+                }
+            val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+            org.junit.Assert.assertEquals(
+                "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                body["chatId"]!!.jsonPrimitive.content,
+            )
+            org.junit.Assert.assertEquals(SAVED_RUN_ID, body["runId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("quota-turn", body["turnId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals(
+                "gpt-6-luna",
+                body["selection"]!!.jsonObject["model"]!!.jsonPrimitive.content,
+            )
+            org.junit.Assert.assertEquals(
+                "low",
+                body["selection"]!!.jsonObject["reasoning"]!!.jsonPrimitive.content,
+            )
+            org.junit.Assert.assertEquals(
+                "standard",
+                body["selection"]!!.jsonObject["speed"]!!.jsonPrimitive.content,
+            )
+        }
+
+    @Test
+    fun savedOpenCodeGroupedRouteResumeSubmitsTheExplicitRouteId() =
+        conversation("failed", quota = true, resumeRouteSelection = true) { server ->
+            compose.onNodeWithTag("chat-quota").assertIsDisplayed()
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("Sonnet").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithTag("model-picker").performClick()
+            compose.onNodeWithText("OpenCode Zen · Crédits").performScrollTo().performClick()
+            compose.onNodeWithText("Terminé").performClick()
+            compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
+
+            val request = generateSequence {
+                server.takeRequest(5, TimeUnit.SECONDS)
+            }
+                .first {
+                    it.method == "POST" &&
+                        it.path?.endsWith("/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume") ==
+                            true
+                }
+            val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+            org.junit.Assert.assertEquals(
+                "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                body["chatId"]!!.jsonPrimitive.content,
+            )
+            org.junit.Assert.assertEquals(SAVED_RUN_ID, body["runId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("quota-turn", body["turnId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals(
+                "opencode/ling-3.1-flash-free",
+                body["selection"]!!.jsonObject["model"]!!.jsonPrimitive.content,
+            )
+        }
+
+    @Test
+    fun savedOpenCodeAutoRouteResumeSubmitsTheGroupedModelId() =
+        conversation(
+            "failed",
+            quota = true,
+            resumeRouteSelection = true,
+            resumePinnedRouteSelection = true,
+        ) { server ->
+            compose.onNodeWithTag("chat-quota").assertIsDisplayed()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(
+                        hasTestTag("model-picker") and
+                            hasContentDescription("Sonnet · OpenCode Zen", substring = true)
+                    )
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithTag("model-picker").performClick()
+            val pinnedRoute = compose.onNode(hasText("OpenCode Zen · Crédits") and hasClickAction())
+            pinnedRoute.assertIsSelected()
+            val automaticRoute = compose.onNode(hasText("Auto") and hasClickAction())
+            automaticRoute.performClick()
+            automaticRoute.assertIsSelected()
+            compose.onNodeWithText("Terminé").performClick()
+            compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
+
+            val request = generateSequence {
+                server.takeRequest(5, TimeUnit.SECONDS)
+            }
+                .first {
+                    it.method == "POST" &&
+                        it.path?.endsWith("/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume") ==
+                            true
+                }
+            val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+            org.junit.Assert.assertEquals(
+                "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                body["chatId"]!!.jsonPrimitive.content,
+            )
+            org.junit.Assert.assertEquals(SAVED_RUN_ID, body["runId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("quota-turn", body["turnId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals(
+                "auto/sonnet",
+                body["selection"]!!.jsonObject["model"]!!.jsonPrimitive.content,
+            )
+        }
+
+    @Test
+    fun savedCodexQuotaResumeKeepsEmptyInheritedEffortWithoutPickerChanges() =
+        conversation("failed", quota = true, resumeInheritedEffort = true) { server ->
+            compose.onNodeWithTag("chat-quota").assertIsDisplayed()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(
+                        hasTestTag("model-picker") and
+                            hasContentDescription("GPT-6 Sol · effort moyen", substring = true)
+                    )
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
+
+            val request = generateSequence {
+                server.takeRequest(5, TimeUnit.SECONDS)
+            }
+                .first {
+                    it.method == "POST" &&
+                        it.path?.endsWith("/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume") ==
+                            true
+                }
+            val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+            org.junit.Assert.assertEquals(
+                "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                body["chatId"]!!.jsonPrimitive.content,
+            )
+            org.junit.Assert.assertEquals(SAVED_RUN_ID, body["runId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("quota-turn", body["turnId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertFalse(body.containsKey("selection"))
+        }
+
+    @Test
+    fun savedCodexQuotaResumePreservesEmptyEffortForSpeedOnlySelection() =
+        conversation(
+            "failed",
+            quota = true,
+            resumeInheritedEffort = true,
+            resumeInheritedSpeed = true,
+        ) { server ->
+            compose.onNodeWithTag("chat-quota").assertIsDisplayed()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(
+                        hasTestTag("model-picker") and
+                            hasContentDescription("GPT-6 Sol · effort moyen", substring = true)
+                    )
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithTag("model-picker").performClick()
+            val inheritedEffort = compose.onNodeWithTag("reasoning-default")
+            inheritedEffort.assertIsSelected()
+            inheritedEffort.assert(hasText("Par défaut · Moyen", substring = true))
+            compose
+                .onNode(hasText("Standard") and hasAnyAncestor(hasTestTag("speed-options")))
+                .performClick()
+            inheritedEffort.assertIsSelected()
+            compose.onNodeWithText("Terminé").performClick()
+            compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
+
+            val request = generateSequence {
+                server.takeRequest(5, TimeUnit.SECONDS)
+            }
+                .first {
+                    it.method == "POST" &&
+                        it.path?.endsWith("/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume") ==
+                            true
+                }
+            val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+            org.junit.Assert.assertEquals(
+                "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                body["chatId"]!!.jsonPrimitive.content,
+            )
+            org.junit.Assert.assertEquals(SAVED_RUN_ID, body["runId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("quota-turn", body["turnId"]!!.jsonPrimitive.content)
+            val selection = body["selection"]!!.jsonObject
+            org.junit.Assert.assertEquals("gpt-6-sol", selection["model"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("", selection["reasoning"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals(
+                "standard",
+                selection["speed"]!!.jsonPrimitive.content,
+            )
+        }
+
+    @Test
+    fun savedCodexQuotaResumeUsesExplicitSameModelDefaultEffort() =
+        conversation("failed", quota = true, resumeSameModelDefault = true) { server ->
+            compose.onNodeWithTag("chat-quota").assertIsDisplayed()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(
+                        hasTestTag("model-picker") and
+                            hasContentDescription("GPT-6 Sol · effort moyen", substring = true)
+                    )
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithTag("model-picker").performClick()
+            compose
+                .onNode(hasText("GPT-6 Sol", substring = false) and hasClickAction())
+                .performScrollTo()
+                .performClick()
+            val defaultEffort = compose.onNodeWithTag("reasoning-default")
+            defaultEffort.assert(hasText("Par défaut · Moyen", substring = true))
+            defaultEffort.performClick()
+            compose
+                .onNode(hasText("Standard") and hasAnyAncestor(hasTestTag("speed-options")))
+                .performClick()
+            defaultEffort.assertIsSelected()
+            compose.onNodeWithText("Terminé").performClick()
+            compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
+
+            val request = generateSequence {
+                server.takeRequest(5, TimeUnit.SECONDS)
+            }
+                .first {
+                    it.method == "POST" &&
+                        it.path?.endsWith("/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume") ==
+                            true
+                }
+            val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+            org.junit.Assert.assertEquals(
+                "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                body["chatId"]!!.jsonPrimitive.content,
+            )
+            org.junit.Assert.assertEquals(SAVED_RUN_ID, body["runId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("quota-turn", body["turnId"]!!.jsonPrimitive.content)
+            val selection = body["selection"]!!.jsonObject
+            org.junit.Assert.assertEquals("gpt-6-sol", selection["model"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("medium", selection["reasoning"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("standard", selection["speed"]!!.jsonPrimitive.content)
+        }
+
+    @Test
+    fun savedCodexQuotaResumeKeepsExplicitEffortOverModelDefault() =
+        conversation("failed", quota = true, resumeExplicitEffort = true) { server ->
+            compose.onNodeWithTag("chat-quota").assertIsDisplayed()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(
+                        hasTestTag("model-picker") and
+                            hasContentDescription("GPT-6 Sol · effort moyen", substring = true)
+                    )
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithTag("model-picker").performClick()
+            compose
+                .onNode(hasText("GPT-6 Sol", substring = false) and hasClickAction())
+                .performScrollTo()
+                .performClick()
+            compose.onNodeWithTag("reasoning-slider").performSemanticsAction(
+                SemanticsActions.SetProgress
+            ) {
+                it(0f)
+            }
+            compose.onNodeWithTag("reasoning-slider").assert(hasStateDescription("Faible"))
+            compose.onNodeWithText("Terminé").performClick()
+            compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
+
+            val request = generateSequence {
+                server.takeRequest(5, TimeUnit.SECONDS)
+            }
+                .first {
+                    it.method == "POST" &&
+                        it.path?.endsWith("/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume") ==
+                            true
+                }
+            val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+            org.junit.Assert.assertEquals(
+                "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                body["chatId"]!!.jsonPrimitive.content,
+            )
+            org.junit.Assert.assertEquals(SAVED_RUN_ID, body["runId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("quota-turn", body["turnId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals(
+                "gpt-6-sol",
+                body["selection"]!!.jsonObject["model"]!!.jsonPrimitive.content,
+            )
+            org.junit.Assert.assertEquals(
+                "low",
+                body["selection"]!!.jsonObject["reasoning"]!!.jsonPrimitive.content,
+            )
+        }
+
+    @Test
+    fun savedCodexQuotaResumeClearsDefaultIntentWhenReturningToConversationModel() =
+        conversation("failed", quota = true, resumeResetIntent = true) { server ->
+            compose.onNodeWithTag("chat-quota").assertIsDisplayed()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(
+                        hasTestTag("model-picker") and
+                            hasContentDescription("GPT-6 Sol · effort moyen", substring = true)
+                    )
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithTag("model-picker").performClick()
+            compose
+                .onNode(hasText("GPT-6 Sol", substring = false) and hasClickAction())
+                .performScrollTo()
+                .performClick()
+            compose.onNodeWithTag("reasoning-default").performClick()
+            compose
+                .onNode(hasText("Modèle de la conversation") and isSelectable())
+                .performScrollTo()
+                .performClick()
+            compose.onNodeWithText("Terminé").performClick()
+            compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
+
+            val request = generateSequence {
+                server.takeRequest(5, TimeUnit.SECONDS)
+            }
+                .first {
+                    it.method == "POST" &&
+                        it.path?.endsWith("/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume") ==
+                            true
+                }
+            val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+            org.junit.Assert.assertEquals(
+                "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                body["chatId"]!!.jsonPrimitive.content,
+            )
+            org.junit.Assert.assertEquals(SAVED_RUN_ID, body["runId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("quota-turn", body["turnId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertFalse(body.containsKey("selection"))
+        }
+
+    @Test
+    fun prelaunchQuotaFailureUsesOrdinaryResumeWithoutSavedSelection() =
+        conversation("failed", quota = true, resumePrelaunch = true) { server ->
+            compose.onNodeWithTag("chat-quota").assertIsDisplayed()
+            compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
+
+            val request = generateSequence {
+                server.takeRequest(5, TimeUnit.SECONDS)
+            }
+                .first {
+                    it.method == "POST" &&
+                        it.path?.endsWith("/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume") ==
+                            true
+                }
+            val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+            org.junit.Assert.assertEquals(
+                "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                body["chatId"]!!.jsonPrimitive.content,
+            )
+            org.junit.Assert.assertEquals(SAVED_RUN_ID, body["runId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("quota-turn", body["turnId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertFalse(body.containsKey("selection"))
+        }
+
+    @Test
+    fun savedCodexResumeKeepsUntouchedBlankModelWhenNothingChanges() =
+        conversation("failed", quota = true, resumeBlankModelNoChange = true) { server ->
+            compose.onNodeWithTag("chat-quota").assertIsDisplayed()
+            compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
+
+            val request = generateSequence {
+                server.takeRequest(5, TimeUnit.SECONDS)
+            }
+                .first {
+                    it.method == "POST" &&
+                        it.path?.endsWith("/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume") ==
+                            true
+                }
+            val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+            org.junit.Assert.assertEquals(SAVED_RUN_ID, body["runId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("quota-turn", body["turnId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertFalse(body.containsKey("selection"))
+        }
+
+    @Test
+    fun savedCodexResumePreservesBlankModelForSpeedOnlyChange() =
+        conversation("failed", quota = true, resumeBlankModelSpeedOnly = true) { server ->
+            compose.onNodeWithTag("chat-quota").assertIsDisplayed()
+            compose.onNodeWithTag("model-picker").performClick()
+            compose
+                .onNode(hasText("Modèle de la conversation") and isSelectable())
+                .assertIsSelected()
+            compose
+                .onNode(hasText("Standard") and hasAnyAncestor(hasTestTag("speed-options")))
+                .performClick()
+            compose.onNodeWithText("Terminé").performClick()
+            compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
+
+            val request = generateSequence {
+                server.takeRequest(5, TimeUnit.SECONDS)
+            }
+                .first {
+                    it.method == "POST" &&
+                        it.path?.endsWith("/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume") ==
+                            true
+                }
+            val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+            val selection = body["selection"]!!.jsonObject
+            org.junit.Assert.assertEquals("", selection["model"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals(true, selection["preserveModel"]!!.jsonPrimitive.boolean)
+            org.junit.Assert.assertEquals("", selection["reasoning"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("standard", selection["speed"]!!.jsonPrimitive.content)
+        }
+
+    @Test
+    fun savedCodexResumePreservesBlankModelForReasoningOnlyChange() =
+        conversation("failed", quota = true, resumeBlankModelReasoning = true) { server ->
+            compose.onNodeWithTag("chat-quota").assertIsDisplayed()
+            compose.onNodeWithTag("model-picker").performClick()
+            compose
+                .onNode(hasText("Modèle de la conversation") and isSelectable())
+                .assertIsSelected()
+            compose.onNodeWithTag("reasoning-slider").performSemanticsAction(
+                SemanticsActions.SetProgress
+            ) {
+                it(2f)
+            }
+            compose.onNodeWithTag("reasoning-slider").assert(hasStateDescription("Élevé"))
+            compose.onNodeWithText("Terminé").performClick()
+            compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
+
+            val request = generateSequence {
+                server.takeRequest(5, TimeUnit.SECONDS)
+            }
+                .first {
+                    it.method == "POST" &&
+                        it.path?.endsWith("/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume") ==
+                            true
+                }
+            val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+            val selection = body["selection"]!!.jsonObject
+            org.junit.Assert.assertEquals("", selection["model"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals(true, selection["preserveModel"]!!.jsonPrimitive.boolean)
+            org.junit.Assert.assertEquals("high", selection["reasoning"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("standard", selection["speed"]!!.jsonPrimitive.content)
         }
 
     @Test
@@ -595,6 +1078,20 @@ abstract class BackgroundWaitCases {
         sleeping: Boolean = false,
         conditional: Boolean = false,
         quota: Boolean = false,
+        resumeSelection: Boolean = false,
+        resumeChangedModel: Boolean = false,
+        resumeInheritedEffort: Boolean = false,
+        resumeInheritedSpeed: Boolean = false,
+        resumeSameModelDefault: Boolean = false,
+        resumeExplicitEffort: Boolean = false,
+        resumeResetIntent: Boolean = false,
+        resumeBlankModelNoChange: Boolean = false,
+        resumeBlankModelSpeedOnly: Boolean = false,
+        resumeBlankModelReasoning: Boolean = false,
+        resumePrelaunch: Boolean = false,
+        resumeRouteSelection: Boolean = false,
+        resumePinnedRouteSelection: Boolean = false,
+        resumableTurn: Boolean = false,
         codingAgentChoices: Boolean = false,
         initialAlternatives: String? = null,
         rejectSwitch: Boolean = false,
@@ -605,6 +1102,18 @@ abstract class BackgroundWaitCases {
     ) {
         MockWebServer().use { server ->
             val now = System.currentTimeMillis()
+            val hasResumeSelection =
+                resumeSelection ||
+                    resumeChangedModel ||
+                    resumeInheritedEffort ||
+                    resumeSameModelDefault ||
+                    resumeExplicitEffort ||
+                    resumeResetIntent ||
+                    resumeBlankModelNoChange ||
+                    resumeBlankModelSpeedOnly ||
+                    resumeBlankModelReasoning ||
+                    resumeRouteSelection
+            val hasSavedTurn = hasResumeSelection || resumableTurn || resumePrelaunch
             val chat =
                 Chat(
                     id = "6cc6efab-10af-54c7-a91b-dcff664166a1",
@@ -618,6 +1127,11 @@ abstract class BackgroundWaitCases {
                             id = SAVED_RUN_ID,
                             status = status,
                             startedAt = now - 60_000,
+                            resumeAvailable = hasSavedTurn && !resumePrelaunch,
+                            sessionId =
+                                if (hasSavedTurn && !resumePrelaunch) "saved-session" else null,
+                            chatExecution =
+                                if (hasSavedTurn) ChatExecution(messageId = "quota-turn") else null,
                             snapshot =
                                 Snapshot(
                                     agent =
@@ -636,7 +1150,57 @@ abstract class BackgroundWaitCases {
                                                     skills = null,
                                                     mcps = null,
                                                 ),
-                                            provider = if (quota) "claude" else "codex",
+                                            provider =
+                                                if (resumeRouteSelection) "opencode"
+                                                else if (
+                                                    quota &&
+                                                        !resumePrelaunch &&
+                                                        !resumeSelection &&
+                                                        !resumeChangedModel &&
+                                                        !resumeInheritedEffort &&
+                                                        !resumeSameModelDefault &&
+                                                        !resumeExplicitEffort &&
+                                                        !resumeResetIntent &&
+                                                        !resumeBlankModelNoChange &&
+                                                        !resumeBlankModelSpeedOnly &&
+                                                        !resumeBlankModelReasoning
+                                                )
+                                                    "claude"
+                                                else "codex",
+                                            model =
+                                                when {
+                                                    resumePinnedRouteSelection ->
+                                                        "opencode/ling-3.1-flash-free"
+                                                    resumeRouteSelection -> "auto/sonnet"
+                                                    resumeChangedModel ||
+                                                        resumeInheritedEffort ||
+                                                        resumeSameModelDefault ||
+                                                        resumeExplicitEffort ||
+                                                        resumeResetIntent -> "gpt-6-sol"
+                                                    else -> ""
+                                                },
+                                            reasoning =
+                                                when {
+                                                    resumeRouteSelection -> "medium"
+                                                    resumeSelection -> "high"
+                                                    resumeChangedModel -> "high"
+                                                    resumeSameModelDefault ||
+                                                        resumeExplicitEffort ||
+                                                        resumeResetIntent -> "high"
+                                                    else -> ""
+                                                },
+                                            speed =
+                                                if (
+                                                    resumeSelection ||
+                                                        resumeChangedModel ||
+                                                        resumeInheritedSpeed ||
+                                                        resumeSameModelDefault ||
+                                                        resumeExplicitEffort ||
+                                                        resumeResetIntent ||
+                                                        resumeBlankModelSpeedOnly
+                                                )
+                                                    "priority"
+                                                else "",
                                         ),
                                     task =
                                         build.cairn.contracts.RunTaskSnapshot(
@@ -753,6 +1317,12 @@ abstract class BackgroundWaitCases {
                                         """{"runId":"$SAVED_RUN_ID","turnId":"quota-turn","provider":"claude","choices":[{"provider":"codex","label":"$label"}]$progress}"""
                                 )
                         }
+                        if (hasResumeSelection && path.endsWith("/coding-agent"))
+                            return MockResponse()
+                                .setHeader("Content-Type", "application/json")
+                                .setBody(
+                                    """{"runId":"$SAVED_RUN_ID","turnId":"quota-turn","provider":"${if (resumeRouteSelection) "opencode" else "codex"}","choices":[]}"""
+                                )
 
                         if (
                             path ==
@@ -799,6 +1369,10 @@ abstract class BackgroundWaitCases {
                                                         ),
                                                     id = MAIN_AGENT_ID,
                                                     name = "Agent principal",
+                                                    model =
+                                                        if (resumeChangedModel) "gpt-6-sol" else "",
+                                                    reasoning =
+                                                        if (resumeChangedModel) "high" else "",
                                                 )
                                             )
                                         )
@@ -807,9 +1381,126 @@ abstract class BackgroundWaitCases {
                                     wireJson.encodeToString(chat)
                                 "/api/installations/fixture/api/overview" ->
                                     installationOverviewFixture()
+                                "/api/installations/fixture/api/codex/models" ->
+                                    wireJson.encodeToString(
+                                        ModelCatalog(
+                                            models =
+                                                listOf(
+                                                    CodingAgentModel(
+                                                        model = "gpt-6-sol",
+                                                        displayName = "GPT-6 Sol",
+                                                        isDefault = true,
+                                                        defaultReasoningEffort = "medium",
+                                                        supportedReasoningEfforts =
+                                                            listOf(
+                                                                ReasoningOption(
+                                                                    reasoningEffort = "low"
+                                                                ),
+                                                                ReasoningOption(
+                                                                    reasoningEffort = "medium"
+                                                                ),
+                                                                ReasoningOption(
+                                                                    reasoningEffort = "high"
+                                                                ),
+                                                            ),
+                                                        serviceTiers =
+                                                            if (resumeBlankModelSpeedOnly)
+                                                                listOf(
+                                                                    ServiceTier(
+                                                                        id = "priority",
+                                                                        name = "Priority",
+                                                                    )
+                                                                )
+                                                            else emptyList(),
+                                                    ),
+                                                    CodingAgentModel(
+                                                        model = "gpt-6-luna",
+                                                        displayName = "GPT-6 Luna",
+                                                        defaultReasoningEffort = "low",
+                                                        supportedReasoningEfforts =
+                                                            listOf(
+                                                                ReasoningOption(
+                                                                    reasoningEffort = "low"
+                                                                ),
+                                                                ReasoningOption(
+                                                                    reasoningEffort = "high"
+                                                                ),
+                                                            ),
+                                                        serviceTiers = emptyList(),
+                                                    ),
+                                                ),
+                                            checkedAt = now,
+                                        )
+                                    )
+                                "/api/installations/fixture/api/opencode/models" ->
+                                    wireJson.encodeToString(
+                                        ModelCatalog(
+                                            models =
+                                                listOf(
+                                                    CodingAgentModel(
+                                                        model = "auto/sonnet",
+                                                        displayName = "Sonnet",
+                                                        isDefault = true,
+                                                        supportedReasoningEfforts =
+                                                            listOf(
+                                                                ReasoningOption(
+                                                                    reasoningEffort = "medium"
+                                                                ),
+                                                                ReasoningOption(
+                                                                    reasoningEffort = "high"
+                                                                ),
+                                                            ),
+                                                        routes =
+                                                            listOf(
+                                                                ModelRoute(
+                                                                    model =
+                                                                        "opencode/ling-3.1-flash-free",
+                                                                    provider = "opencode",
+                                                                    providerName = "OpenCode Zen",
+                                                                    billing = "credits",
+                                                                    supportedReasoningEfforts =
+                                                                        listOf(
+                                                                            ReasoningOption(
+                                                                                reasoningEffort =
+                                                                                    "medium"
+                                                                            ),
+                                                                            ReasoningOption(
+                                                                                reasoningEffort =
+                                                                                    "high"
+                                                                            ),
+                                                                        ),
+                                                                ),
+                                                                ModelRoute(
+                                                                    model =
+                                                                        "opencode-go/ling-3.1-flash-free",
+                                                                    provider = "opencode-go",
+                                                                    providerName = "OpenCode Go",
+                                                                    billing = "subscription",
+                                                                    supportedReasoningEfforts =
+                                                                        listOf(
+                                                                            ReasoningOption(
+                                                                                reasoningEffort =
+                                                                                    "medium"
+                                                                            ),
+                                                                            ReasoningOption(
+                                                                                reasoningEffort =
+                                                                                    "high"
+                                                                            ),
+                                                                        ),
+                                                                ),
+                                                            ),
+                                                    )
+                                                ),
+                                            checkedAt = now,
+                                        )
+                                    )
                                 "/api/installations/fixture/api/runs/$SAVED_RUN_ID/resume" ->
                                     wireJson.encodeToString(
                                         build.cairn.contracts.ResumeRunOutput(SAVED_RUN_ID)
+                                    )
+                                "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume" ->
+                                    wireJson.encodeToString(
+                                        chat.run!!.copy(status = "queued", resumeAvailable = false)
                                     )
                                 else ->
                                     if (
