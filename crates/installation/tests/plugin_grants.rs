@@ -33,7 +33,10 @@ async fn tools_commands_and_hooks_resolve_every_designation_and_reject_contradic
         tools.iter().map(|t| text(t, "name")).collect::<Vec<_>>(),
         vec!["grant_probe_post"]
     );
-    assert_eq!(agents::instructions(&f.s, MAIN_AGENT_ID).await.unwrap(), "");
+    let run = cairn_installation::project_workspaces::authorize(&f.s, &f.bearer)
+        .await
+        .unwrap();
+    assert_eq!(agents::instructions(&f.s, &run).await.unwrap(), "");
     for input in [
         json!({"channel":"support","author":"anyone"}),
         json!({"*":"support"}),
@@ -125,7 +128,7 @@ async fn tools_commands_and_hooks_resolve_every_designation_and_reject_contradic
     ]))
     .await;
     assert_eq!(
-        agents::instructions(&f.s, MAIN_AGENT_ID).await.unwrap(),
+        agents::instructions(&f.s, &run).await.unwrap(),
         "probe instructions"
     );
     assert_eq!(
@@ -252,6 +255,67 @@ async fn revocation_during_io_withholds_the_result_and_prevents_the_next_effect(
     f.release.notify_one();
     assert!(called.await.unwrap().is_err());
     assert_eq!(f.posts.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn delegated_plugin_instructions_recheck_the_requesters_contribution_grants() {
+    let f = Fixture::new().await;
+    let requester =
+        f.s.agent_fixture(
+            json!({ "access": { "delegation": true, "installation": true } }),
+            Some(MAIN_AGENT_ID),
+        )
+        .await
+        .unwrap();
+    let requester_id = text(&requester, "id");
+    let child =
+        f.s.agent_fixture(
+            json!({ "name": "Child", "access": { "installation": true } }),
+            None,
+        )
+        .await
+        .unwrap();
+    let child_id = text(&child, "id");
+    let instruction = json!([contribution("instructions", "", json!([]))]);
+    f.set_for(requester_id, instruction.clone()).await;
+    f.set_for(child_id, instruction).await;
+
+    let parent =
+        f.s.chat_create(json!({ "agentId": requester_id }))
+            .await
+            .unwrap();
+    let parent_id = text(&parent, "id");
+    f.s.chat_send(
+        parent_id,
+        json!({ "id": cairn_installation::config::id(), "text": "Delegate" }),
+    )
+    .await
+    .unwrap();
+    let parent_token = running_conversation(&f.s, parent_id).await;
+    let task = cairn_installation::delegation::delegate(
+        &f.s,
+        &parent_token,
+        &json!({ "agentId": child_id, "task": "Use the plugin" }),
+    )
+    .await
+    .unwrap();
+    let child_chat = text(&task, "chatId");
+    let child_token = running_conversation(&f.s, child_chat).await;
+    let run = cairn_installation::project_workspaces::authorize(&f.s, &child_token)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        agents::with_instructions(&f.s, &run).await["pluginInstructions"],
+        "probe instructions"
+    );
+
+    f.remove_for(requester_id).await;
+    assert_eq!(
+        agents::with_instructions(&f.s, &run).await["pluginInstructions"],
+        "",
+        "the target's instruction grant must not outlive its requester's contribution ceiling"
+    );
 }
 
 #[tokio::test]

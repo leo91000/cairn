@@ -67,23 +67,49 @@ fn agent(run: &Value) -> (String, Value) {
     (id.clone(), json!({ "id": id, "name": text(agent, "name") }))
 }
 
-/// Prompt instructions from every package granting this agent, one paragraph each.
-pub async fn instructions(s: &Service, agent_id: &str) -> Result<String> {
-    Ok(granted(s, agent_id, None, Some((Kind::Instructions, "")))
-        .await?
-        .iter()
-        .map(|(package, _)| package.manifest.instructions.trim())
-        .filter(|text| !text.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n"))
+/// Prompt instructions from every package granting this run's agent, one paragraph each.
+pub async fn instructions(s: &Service, run: &Value) -> Result<String> {
+    let agent_id = text(&run["snapshot"]["agent"], "id");
+    let packages = granted(s, agent_id, None, Some((Kind::Instructions, ""))).await?;
+    let mut paragraphs = Vec::new();
+    for (package, instances) in packages {
+        let snapshot = super::grant_authorization::Snapshot::for_run(s, run, &package).await?;
+        snapshot.recheck(s).await?;
+        let expected = snapshot.clone();
+        let agent_id = agent_id.to_owned();
+        let still_granted = s
+            .store
+            .read(move |db| {
+                expected.authorize(db)?;
+                for instance in instances {
+                    let current = super::connections::authorize(db, &instance)?;
+                    if db
+                        .plugin_contribution(&agent_id, &current.id, Kind::Instructions, "")?
+                        .is_some()
+                    {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            })
+            .await?;
+        if !still_granted {
+            continue;
+        }
+
+        let instructions = package.manifest.instructions.trim();
+        if !instructions.is_empty() {
+            paragraphs.push(instructions.to_owned());
+        }
+    }
+    Ok(paragraphs.join("\n"))
 }
 
 /// The run with `pluginInstructions` for its agent, for the launch prompt. A lookup
 /// failure only leaves the instructions out.
 pub async fn with_instructions(s: &Service, run: &Value) -> Value {
     let mut run = run.clone();
-    let agent_id = text(&run["snapshot"]["agent"], "id").to_owned();
-    run["pluginInstructions"] = json!(instructions(s, &agent_id).await.unwrap_or_default());
+    run["pluginInstructions"] = json!(instructions(s, &run).await.unwrap_or_default());
     run
 }
 
