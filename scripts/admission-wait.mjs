@@ -274,7 +274,9 @@ export function observeAdmissionWaits(sample, previous, retainedEpisode, createE
       since: !capacity || firstObservedAt === null || now === null ? null : continuous ? old.since : now,
     }
     next.set(run.id, wait)
-    if (firstObservedAt === null)
+    // A tracked unknown gate is local; only lost history blocking a known
+    // capacity transition keeps the global limit in place.
+    if (capacity && history.limited && firstObservedAt === null && !positiveTransition)
       limited = true
     observations.set(run.id, {
       id,

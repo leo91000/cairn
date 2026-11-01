@@ -201,6 +201,49 @@ test('exactly bounded unique inventories retain current capacity and can age it'
   assert.equal(observation(aged, 'bounded-0').status, 'bad')
 })
 
+test('tracked unknown gate does not suppress an independent trusted capacity episode', () => {
+  const unknownRun = capacity('unknown-run', { waitClass: null })
+  const capacityRun = capacity('capacity-run')
+  const first = observeAdmissionWaits(sample(origin, [unknownRun]))
+  const firstUnknown = observation(first, 'unknown-run')
+
+  assert.equal(firstUnknown.status, 'unknown')
+  assert.equal(firstUnknown.currentCapacity, undefined)
+  assert.equal(firstUnknown.occurrence, undefined)
+  assert.equal(first.state.waits.find(wait => wait.runId === 'unknown-run').since, null)
+
+  let result = observeAdmissionWaits(sample(origin + 60000, [unknownRun, capacityRun]), first.state)
+  const continuingUnknown = observation(result, 'unknown-run')
+  const newCapacity = observation(result, 'capacity-run')
+  const capacityOccurrence = newCapacity.occurrence
+
+  assert.equal(continuingUnknown.status, 'unknown')
+  assert.equal(continuingUnknown.currentCapacity, undefined)
+  assert.equal(continuingUnknown.occurrence, undefined)
+  assert.equal(result.state.waits.find(wait => wait.runId === 'unknown-run').since, null)
+  assert.equal(newCapacity.currentCapacity, true)
+  assert.equal(newCapacity.status, 'unknown')
+  assert.equal(newCapacity.observedSince, origin + 60000)
+  assert(readAdmissionOccurrence(capacityOccurrence))
+  assert.equal(result.state.limited, false)
+
+  result = observeAdmissionWaits(sample(origin + 120000, [capacityRun]), result.state)
+  assert.equal(observation(result, 'unknown-run').status, 'good')
+  assert.equal(observation(result, 'capacity-run').occurrence, capacityOccurrence)
+  assert.equal(result.state.waits.find(wait => wait.runId === 'capacity-run').since, origin + 60000)
+  assert.equal(result.state.limited, false)
+
+  for (let minute = 3; minute <= 12; minute++)
+    result = observeAdmissionWaits(sample(origin + minute * 60000, [capacityRun]), result.state)
+
+  assert.equal(observation(result, 'unknown-run').status, 'good')
+  assert.equal(observation(result, 'capacity-run').status, 'bad')
+  assert.equal(observation(result, 'capacity-run').occurrence, capacityOccurrence)
+  assert.equal(result.state.waits.find(wait => wait.runId === 'capacity-run').since, origin + 60000)
+  assert.equal(result.state.limited, false)
+  assert.equal(first.state.limited, false)
+})
+
 test('bounded state is independent of conversation content and cannot grow with historical runs', () => {
   const rows = Array.from({ length: admissionWaitLimits.entries + 1 }, (_, index) => capacity(`run-${index}`, { prompt: 'sensitive-sentinel' }))
   const first = observeAdmissionWaits(sample(origin, rows))

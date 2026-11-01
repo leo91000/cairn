@@ -49,9 +49,21 @@ stored atomically with the run row. The future change must cover every wait,
 launch, recovery, move, and terminal writer, bind the fact to a monotonic current
 gate generation and writer-contract epoch, and drain older writers before the
 producer trusts it. A nullable column's presence is not freshness proof; mixed
-version rows remain unknown. The current observation path deliberately leaves
-this legacy coverage gap visible instead of treating old typed fields or reason
-text as proof.
+version rows remain unknown. Before any producer enables a non-null typed
+positive class, its validated gate generation must reach the observer input and
+be included in the run scope/episode identity and persisted occurrence. A
+changed generation starts a new episode and resets measured duration even when
+the run, attempt and logical turn stay the same. Add a regression where capacity
+changes away and back entirely between samples while those identifiers remain
+unchanged, and prove the generation change prevents the old age and occurrence
+from carrying forward.
+
+The current helper does not receive a gate generation. Its interval measures
+continuity across observed capacity samples; matching identifiers and class do
+not prove that no unobserved gate transition occurred between samples. This is a
+hard future activation prerequisite, not implemented here. The current producer
+continues to emit `waitClass: null` for every queued row, and this change adds no
+positive capacity coverage.
 
 A current `queued`/`capacity` observation begins its own interval on its first
 sample. It becomes `bad` only after more than ten minutes of fresh observations
@@ -65,10 +77,10 @@ excessive sampling gap breaks age continuity. The episode identity survives
 unknown observations for deduplication; unknown never certifies recovery or
 rearms a notification. Validated run/turn scope is independent of the gate,
 clock and identity allocation: an unknown gate/status cannot restore a positively
-ended turn. A present valid row can still be observed in an ordinary partial inventory. An
-array over the 200-row bound is different: a conflicting duplicate may be hidden
-in the unscanned tail, so none of the scanned prefix rows can establish current
-gate or ending evidence. The helper examines only the first 200 rows. Known
+ended turn. A present valid row can still be observed in an ordinary partial
+inventory. An array over the 200-row bound is different: a conflicting duplicate
+may be hidden in the unscanned tail, so no scanned prefix row can establish
+current gate or ending evidence. The helper examines only the first 200 rows. Known
 noncapacity state or absence from a complete active inventory
 ends only this capacity-wait observation. Its per-run positive end remains in the
 same bounded helper history, allowing a new episode even while unrelated evicted
@@ -78,12 +90,15 @@ scope and timing before it can age. That does not prove physical cleanup,
 successful execution, working admission, backup integrity or a repaired node.
 
 The state contains at most 200 metadata entries, matching the bounded active plus
-tracked run projection. Its `limited` flag exposes row/history truncation. Lost
-identity uncertainty survives partial inventories even after currently retained
-rows end; only a validated complete inventory can establish which omitted runs
-ended. Entries present with unknown identity stay unknown until exact identity or
-a positive transition is observed. Malformed persisted history is uncertain,
-never equivalent to a first-ever monitor observation. The optional `retainedEpisode(runId, scope)` callback reconciles the caller's existing
+tracked run projection. Its `limited` flag exposes actual row/history loss and
+unresolved identity. A valid tracked run/scope with an unknown gate remains
+locally age-less and does not set the global flag or suppress an independent
+capacity run. Lost identity uncertainty survives partial inventories even after
+currently retained rows end; only a validated complete inventory can establish
+which omitted runs ended. Entries with unknown identity remain unknown until
+exact identity or a positive transition is observed. Malformed persisted history
+is uncertain, never equivalent to a first-ever monitor observation. The optional
+`retainedEpisode(runId, scope)` callback reconciles the caller's existing
 bounded occurrence/sent evidence. It returns an exact `occurrence`, `{ fresh:
 true }` only after known end/scope change, `{ unknown: true }` for unavailable or
 ambiguous identity, or null when it has no evidence. A supplied resolver that
