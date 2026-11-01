@@ -1,8 +1,6 @@
 import assert from 'node:assert/strict'
 import { Buffer } from 'node:buffer'
-import { readFileSync } from 'node:fs'
 import test from 'node:test'
-import { classifyAdmissionWait } from '../admission-classification.mjs'
 import {
   admissionWaitLimits,
   observeAdmissionWaits,
@@ -520,137 +518,26 @@ test('a known end without scope or clock remains a per-run fact under limited hi
   assert.equal(state.state.limited, true)
 })
 
-test('legacy wait reason text cannot prove the writer or establish a positive gate', () => {
-  const canonicalNode = 'Waiting for capacity. No authorized node is online and accepting this conversation. The existing environment is preserved.'
-  const node = {
-    status: 'queued',
-    waitReason: canonicalNode,
-    accountRequired: null,
-    recoveryPending: 0,
-  }
-  const rawAccountError = {
-    status: 'queued',
-    waitReason: 'Waiting for capacity. No authorized node is online and accepting this conversation. The existing environment is preserved.',
-    accountRequired: null,
-    recoveryPending: 0,
-  }
-  assert.deepEqual(rawAccountError, node)
-  assert.equal(classifyAdmissionWait(node), null)
-  assert.equal(classifyAdmissionWait(rawAccountError), null)
-  for (const waitReason of [
-    'Waiting for capacity.',
-    'Waiting for capacity. Shared node quota has no room.',
-    canonicalNode,
-    'Waiting for a free Codex account slot. The run starts when another finishes.',
-    'Waiting for a Codex account with available usage.',
-    'No enabled OpenCode account supports model x. Choose a model available through your connections or connect its model provider.',
-  ]) {
-    assert.equal(classifyAdmissionWait({ ...node, waitReason }), null)
-  }
-
-  for (const accountRequired of ['codex', 'claude', 'opencode'])
-    assert.equal(classifyAdmissionWait({ ...node, accountRequired }), 'account')
-  assert.equal(classifyAdmissionWait({ ...node, recoveryPending: 1 }), 'recovery')
-  assert.equal(classifyAdmissionWait({ ...node, recoveryPending: true }), 'recovery')
-  for (const status of ['running', 'waiting', 'failed', 'unsupported', null])
-    assert.equal(classifyAdmissionWait({ ...node, status }), null)
-})
-
-test('human-only provider and recovery text never establishes a gate by keyword or prefix', () => {
-  const base = {
-    status: 'queued',
-    accountRequired: null,
-    recoveryPending: 0,
-    agentProvider: 'codex',
-    model: 'gpt-6.1',
-  }
-  for (const waitReason of ['Selected model is at capacity. Please try a different model.', 'Provider is at capacity; retry later.', 'The model is busy.', 'No accounts have free slots.', 'Usage limit reached.', 'Quota exceeded.', 'Rate limit reached.', 'capacity', 'Unknown capacity-related condition.', 'waiting for capacity.', ' Waiting for capacity.', 'Waiting for capacity.X', 'Waiting for capacity.\nNode unavailable.', 'Temporary agent error. Retrying in garbage', 'Temporary agent error. Retrying in ', 'Temporary agent error. Retrying in 5 seconds (attempt 1/5).', 'Waiting for the previous VM to stop.', 'Waiting for the previous execution to stop before recovery.', 'Paused for worker restart. This run will resume automatically.', 'Recovering after worker restart.', 'Recovering after a worker error.', 'Resuming saved conversation.', 'Usage exhausted. Waiting for an available Codex account to resume.', 'Connect a Codex account in Connections before running this agent.'])
-    assert.equal(classifyAdmissionWait({ ...base, waitReason }), null)
-})
-
-test('missing or malformed producer gate facts never become node capacity', () => {
-  const base = {
-    status: 'queued',
-    waitReason: 'Waiting for capacity. Node unavailable.',
-    accountRequired: null,
-    recoveryPending: 0,
-  }
-  const missingAccount = { ...base }
-  delete missingAccount.accountRequired
-  const missingRecovery = { ...base }
-  delete missingRecovery.recoveryPending
-  for (const row of [null, undefined, [], 1, {}, missingAccount, missingRecovery, ...[undefined, false, 0, {}, [], '', ' '].map(accountRequired => ({ ...base, accountRequired })), ...[undefined, null, 'false', 2, {}, []].map(recoveryPending => ({ ...base, recoveryPending })), ...[undefined, null, {}, [], 3].map(waitReason => ({ ...base, waitReason }))])
-    assert.equal(classifyAdmissionWait(row), null)
-})
-
-test('malformed account facts never establish any positive gate or bypass through a reason', () => {
-  const malformed = [undefined, '', ' ', '\t\n', 'not-a-provider', 'Codex', 'CODEX', 'Claude', 'OpenCode', ' codex', 'codex ', 'claude\n', 'opencode\0', false, true, 0, 1, -1, Number.NaN, Number.POSITIVE_INFINITY, 0n, Symbol('invalid-provider'), {}, [], ['codex'], new Object('codex'), () => 'codex']
-  for (const accountRequired of malformed) {
-    for (const extra of [
-      { waitReason: 'Waiting for capacity. Node unavailable.', recoveryPending: 0 },
-      { waitReason: 'Selected model is at capacity. Please try a different model.', recoveryPending: 0 },
-      { waitReason: 'Waiting for the previous VM to stop.', recoveryPending: 1 },
-    ])
-      assert.equal(classifyAdmissionWait({ status: 'queued', accountRequired, ...extra }), null)
-  }
-
-  const inherited = Object.assign(Object.create({ accountRequired: 'codex' }), { status: 'queued', waitReason: 'Waiting for capacity.', recoveryPending: 0 })
-  assert.equal(classifyAdmissionWait(inherited), null)
-  for (const waitReason of ['Selected model is at capacity. Please try a different model.', 'Waiting for the previous VM to stop.'])
-    assert.equal(classifyAdmissionWait({ status: 'queued', waitReason, recoveryPending: 1 }), null)
-})
-
-test('account attention accepts every canonical provider from the actual nullable store constraint', () => {
-  const store = readFileSync(new URL('../../crates/installation/src/runs/mod.rs', import.meta.url), 'utf8')
-  const constraint = store.match(/account_required TEXT CHECK\(account_required IN \(([^)]+)\)\)/)
-  assert(constraint)
-  const providers = [...constraint[1].matchAll(/'([^']+)'/g)].map(match => match[1])
-  assert(providers.length > 0)
-  for (const accountRequired of providers) {
-    assert.equal(classifyAdmissionWait({
-      status: 'queued',
-      accountRequired,
-      waitReason: null,
-      recoveryPending: null,
-    }), 'account')
-  }
-})
-
-test('actual structured recovery facts work without any reason text', () => {
-  const base = {
-    status: 'queued',
-    accountRequired: null,
-    recoveryPending: 0,
-  }
-  for (const recoveryPending of [true, 1]) {
-    for (const waitReason of [null, undefined, {}, '', 'Temporary agent error. Retrying in garbage'])
-      assert.equal(classifyAdmissionWait({ ...base, recoveryPending, waitReason }), 'recovery')
-  }
-})
-
-test('raw canonical account and capacity messages stay unknown without typed provenance', () => {
-  const base = {
-    status: 'queued',
-    accountRequired: null,
-    recoveryPending: 0,
-  }
-  const messages = [
-    'Waiting for a free Codex account slot. The run starts when another finishes.',
-    'Waiting for a Codex account with available usage.',
-    'Waiting for a free Claude Code account slot. The run starts when another finishes.',
-    'Waiting for an OpenCode account with available usage.',
-    'No enabled OpenCode account supports model x. Choose a model available through your connections or connect its model provider.',
-    'Waiting for capacity. No authorized node is online and accepting this conversation. The existing environment is preserved.',
+test('legacy account, recovery, and reason context without a trusted class stays unknown', () => {
+  const old = mature()
+  const contexts = [
+    { accountRequired: 'codex', recoveryPending: 0, waitReason: 'Waiting for capacity. No authorized node is online and accepting this conversation. The existing environment is preserved.' },
+    { accountRequired: null, recoveryPending: 1, waitReason: 'Resuming saved conversation.' },
+    { accountRequired: 'claude', recoveryPending: 0, waitReason: 'Recovering after worker restart.' },
+    { accountRequired: null, recoveryPending: 1, waitReason: null },
+    { accountRequired: 'opencode', recoveryPending: 0, waitReason: 'Waiting for a free account slot.' },
   ]
-  for (const waitReason of messages)
-    assert.equal(classifyAdmissionWait({ ...base, waitReason }), null)
-
-  const inherited = Object.assign(Object.create({ accountRequired: 'codex' }), {
-    status: 'queued',
-    recoveryPending: 0,
-    waitReason: messages[0],
-  })
-  assert.equal(classifyAdmissionWait(inherited), null)
+  for (const extra of contexts) {
+    const row = { id: 'run-one', status: 'queued', attemptId: 'attempt-one', activeMessageId: 'input-one', ...extra }
+    let result = old
+    for (let minute = 13; minute <= 15; minute++) {
+      result = observeAdmissionWaits(sample(origin + minute * 60000, [row]), result.state)
+      assert.equal(observation(result).status, 'unknown')
+      assert.equal(observation(result).currentCapacity, undefined)
+      assert.equal(result.state.waits[0].since, null)
+      assert.notEqual(result.state.waits[0].ended, true)
+    }
+  }
 })
 
 test('current capacity remains a distinct fact when scope, clock or allocation cannot establish an episode', () => {

@@ -13,52 +13,45 @@ run supplies only `id`, `status`, `waitClass`, `attemptId`, `activeMessageId`, a
 `missionTurnId`. Technical identifiers are bounded ASCII identifiers; at least
 an attempt or logical turn must be known. Unsupported evidence is unknown.
 
-The producer must establish the gate before the observer measures it. The shared
-`scripts/admission-classification.mjs` classifier is consumed byte-for-byte by the
-external manager producer. It returns a class, never a raw reason. An own nullable
-`accountRequired` fact must be valid first: only exact `codex`, `claude`, and
-`opencode` establish account attention. Missing or malformed values remain
-unknown and cannot end or rearm an episode. When attention is null, a validated
-own `recoveryPending` boolean (or SQLite 0/1) is required. True establishes
-recovery without reason text, including manual resume before launch.
+The current producer cannot establish a fresh positive class for a queued row.
+The existing `account_required` and `recovery_pending` fields are typed, but no
+current generation or activation fact binds them to the current admission gate.
+They can remain stale across wait, resume, recovery, launch, move and end
+transitions, so this producer preserves them only as context and sets
+`waitClass: null` for every queued row. A trusted upstream producer may still pass
+a preclassified `waitClass: 'capacity'` to the public observer contract; this
+producer has no current positive capacity proof.
 
-The current run schema has no typed fact identifying the writer of
-`account_wait_reason`. `report_capacity_wait` writes its node marker there, and
-`report_account_wait` can write an arbitrary provider error to the same column.
-Those values can be byte-for-byte identical, including the complete canonical
-node message. Therefore no prefix, exact message, account-slot wording, or model
-wording from that column proves a node-capacity or null-attention account wait.
-With current producer inputs, queued rows whose only candidate class is the
-legacy reason text are unknown. They do not age as capacity, set
-`currentCapacity`, certify recovery, or rearm/clear sent evidence. A trusted
-upstream producer may still pass a preclassified `waitClass: 'capacity'` to the
-public observer contract; this current producer cannot do so from legacy text.
+The `account_wait_reason` column is also not provenance. `report_capacity_wait`
+writes its node marker there, and `report_account_wait` can write a raw provider
+error to the same column. Those values can be byte-for-byte identical, including
+the complete canonical node message. No prefix, exact message, account-slot
+wording, or model wording proves a node-capacity or account gate. Queued rows
+remain unknown: they do not age as capacity, set `currentCapacity`, certify
+recovery, or rearm/clear sent evidence. Known nonqueued status and absence from a
+complete active inventory remain valid positive ends for an existing capacity
+observation; a partial inventory cannot establish absence.
 
-The writer audit separates existing typed facts from legacy reason text:
-
-| Writer | Source of positive evidence |
+| Existing fact or writer | What this producer can establish |
 | --- | --- |
-| `worker/schedule.rs::report_capacity_wait` | Writes a node marker into shared legacy text; there is no current typed node-capacity fact, so the producer returns unknown. |
-| `worker/schedule.rs::report_account_wait` | `needs_attention(...).then_some(provider)` can return a canonical provider or null. A typed provider establishes account attention; raw error text does not establish a class. |
-| `accounts/mod.rs::waiting` | Busy-slot/usage and unsupported-model messages can leave attention null. Their text has no typed provenance and remains unknown to this producer. |
-| `worker/retry.rs::schedule_in` | Commits `recovery_pending: true` and null attention with the full retry message; the flag, not the message, establishes recovery. |
-| `worker/control.rs` manual resume | Commits recovery true, including the before-launch case with no reason. |
-| `worker/mod.rs` restart and `worker/execution.rs` queued failure/fencing | Commit recovery true. No recovery-text fallback is needed. |
-| `worker/schedule.rs::recover_or_wait` | Called for a recovering run; explanatory text does not replace the recovery flag. |
-| `worker/launch.rs::switch_account` | The run is already running; known nonqueued status ends capacity observation independently of its usage message. |
-| `nodes/moves.rs` explanatory recovery text | Text alone supplies no new positive gate; require valid recovery facts or known nonqueued status. |
+| `account_required` from `report_account_wait` | The stored enum is retained as context. It has no freshness binding, so it does not classify the current queued gate. |
+| `recovery_pending` from retry, manual resume, restart, failure/fencing, and recovery paths | The stored boolean is retained as context. It can be stale before or after recovery, so it does not classify the current queued gate. |
+| `worker/schedule.rs::report_capacity_wait` and `report_account_wait` | Both write the shared legacy reason column. Text alone cannot establish which writer last owned the current wait. |
+| `accounts/mod.rs::waiting` | Busy-slot, usage, and unsupported-model outcomes can leave attention null; their reason text has no writer provenance. |
+| `worker/launch.rs`, `worker/retry.rs`, `worker/control.rs`, `worker/mod.rs`, `worker/execution.rs`, `worker/checkpoint.rs`, and `nodes/moves.rs` | These paths can replace, resume, recover, launch, move, or end the gate while older typed fields remain. The current producer does not treat those fields as fresh. |
 
-The producer reuses its existing bounded query and optional account projection.
-Snapshot provider/model context is not needed to classify legacy reason text and
-is not used as a substitute for writer provenance. No new query, history scan,
-schema/write, permission or wait-start inference is introduced. Raw reasons are
-not returned to the monitor.
+The producer reuses its existing bounded query and account projection. It adds no
+query, history scan, schema change, writer change, permission or wait-start
+inference. Raw reasons are not returned to the monitor.
 
 Positive node-capacity detection requires a future authoritative writer fact
 stored atomically with the run row. The future change must cover every wait,
-launch, recovery, and terminal writer, and must prevent stale facts from surviving
-older rolling writers. The current observation path deliberately leaves this
-coverage gap visible instead of treating legacy text as proof.
+launch, recovery, move, and terminal writer, bind the fact to a monotonic current
+gate generation and writer-contract epoch, and drain older writers before the
+producer trusts it. A nullable column's presence is not freshness proof; mixed
+version rows remain unknown. The current observation path deliberately leaves
+this legacy coverage gap visible instead of treating old typed fields or reason
+text as proof.
 
 A current `queued`/`capacity` observation begins its own interval on its first
 sample. It becomes `bad` only after more than ten minutes of fresh observations
