@@ -142,7 +142,9 @@ test('clock rollback, future state and unsupported state never age a new observa
   for (const previous of [old.state, { ...old.state, version: 2 }, { ...old.state, waits: 'unsupported' }]) {
     const result = observeAdmissionWaits(sample(origin, [capacity()]), previous)
     assert.equal(observation(result).status, 'unknown')
-    assert.equal(observation(result).observedSince, origin)
+    assert.equal(observation(result).observedSince, previous === old.state ? origin : null)
+    if (previous !== old.state)
+      assert.equal(observation(result).occurrence, undefined)
   }
 
   const invalid = observeAdmissionWaits({ at: Number.NaN }, old.state)
@@ -374,4 +376,97 @@ test('invalid clock preserves positive scope and known-end facts without measuri
   assert.equal(ended.state.waits.length, 0)
   const afterEnd = observeAdmissionWaits(sample(origin, [capacity()]), JSON.parse(JSON.stringify(ended.state)))
   assert.notEqual(observation(afterEnd).occurrence, observation(first).occurrence)
+})
+
+test('validated scope transitions survive an unknown gate independently from time and admission state', () => {
+  const first = observeAdmissionWaits(sample(origin, [capacity()]))
+  for (const waitClass of [null, 'unsupported']) {
+    const unknown = observeAdmissionWaits(sample(origin + 60000, [capacity('run-one', { activeMessageId: 'input-two', waitClass })]), first.state)
+    assert.equal(observation(unknown).status, 'unknown')
+    assert.equal(unknown.state.waits[0].scope, JSON.stringify(['attempt-one', 'input-two', null]))
+    assert(readAdmissionTransition(observation(unknown).transition))
+    const returned = observeAdmissionWaits(sample(origin + 120000, [capacity()]), JSON.parse(JSON.stringify(unknown.state)))
+    assert.notEqual(observation(returned).occurrence, observation(first).occurrence)
+  }
+})
+
+test('history loss survives partial resolution and restart until a complete inventory proves absence', () => {
+  const rows = prefix => Array.from({ length: 200 }, (_, index) => capacity(`${prefix}-${index}`))
+  let state = observeAdmissionWaits(sample(origin, rows('old'), false))
+  const original = observation(state, 'old-0').occurrence
+  state = observeAdmissionWaits(sample(origin + 60000, rows('current'), false), state.state)
+  assert.equal(state.state.limited, true)
+  state = observeAdmissionWaits(sample(origin + 120000, rows('current').map(run => ({ ...run, waitClass: 'account' })), false), JSON.parse(JSON.stringify(state.state)))
+  assert.equal(state.complete, false)
+  assert.equal(state.state.limited, true)
+  for (let minute = 3; minute <= 16; minute++) {
+    state = observeAdmissionWaits(sample(origin + minute * 60000, [capacity('old-0')], false), JSON.parse(JSON.stringify(state.state)))
+    assert.equal(observation(state, 'old-0').status, 'unknown')
+    assert.equal(observation(state, 'old-0').occurrence, undefined)
+  }
+
+  const absent = observeAdmissionWaits(sample(origin + 17 * 60000, [], true), state.state)
+  assert.equal(absent.state.limited, false)
+  const fresh = observeAdmissionWaits(sample(origin + 18 * 60000, [capacity('old-0')], true), absent.state)
+  assert.notEqual(observation(fresh, 'old-0').occurrence, original)
+  assert(readAdmissionOccurrence(observation(fresh, 'old-0').occurrence))
+})
+
+test('unavailable reconciliation preserves validated scope facts without inventing identity', () => {
+  const lost = {
+    version: 1,
+    observedAt: origin,
+    waits: [],
+    limited: true,
+  }
+  const unknown = observeAdmissionWaits(sample(origin + 60000, [capacity('run-one', { activeMessageId: 'input-two', waitClass: null })]), lost, () => ({ unknown: true }))
+  assert.equal(unknown.state.waits[0].scope, JSON.stringify(['attempt-one', 'input-two', null]))
+  assert.equal(observation(unknown).occurrence, undefined)
+  const returned = observeAdmissionWaits(sample(origin + 120000, [capacity()]), JSON.parse(JSON.stringify(unknown.state)), () => ({ unknown: true }))
+  assert(readAdmissionOccurrence(observation(returned).occurrence))
+  assert.equal(observation(returned).observedSince, origin + 120000)
+})
+
+test('malformed persisted history stays uncertain until a known inventory end', () => {
+  for (const previous of [{}, { version: 2, waits: [] }, {
+    version: 1,
+    observedAt: origin,
+    waits: [],
+    limited: 'unsupported',
+  }]) {
+    let state = observeAdmissionWaits(sample(origin, [capacity()], false), previous)
+    for (let minute = 1; minute <= 12; minute++) {
+      state = observeAdmissionWaits(sample(origin + minute * 60000, [capacity()], false), JSON.parse(JSON.stringify(state.state)))
+      assert.equal(observation(state).occurrence, undefined)
+      assert.equal(observation(state).status, 'unknown')
+    }
+
+    const absent = observeAdmissionWaits(sample(origin + 13 * 60000, [], true), state.state)
+    assert.equal(absent.state.limited, false)
+  }
+})
+
+test('invalid scope cannot certify a complete inventory and erase lost identity uncertainty', () => {
+  const lost = {
+    version: 1,
+    observedAt: origin,
+    waits: [],
+    limited: true,
+  }
+  const invalid = observeAdmissionWaits(sample(origin + 60000, [capacity('run-one', { activeMessageId: null, attemptId: null })], true), lost)
+  assert.equal(invalid.complete, false)
+  assert.equal(invalid.state.limited, true)
+  const returned = observeAdmissionWaits(sample(origin + 120000, [capacity()], true), JSON.parse(JSON.stringify(invalid.state)))
+  assert.equal(observation(returned).occurrence, undefined)
+  assert.equal(observation(returned).status, 'unknown')
+})
+
+test('unknown status preserves a validated changed scope without aging it', () => {
+  const first = observeAdmissionWaits(sample(origin, [capacity()]))
+  const unknown = observeAdmissionWaits(sample(origin + 60000, [capacity('run-one', { activeMessageId: 'input-two', status: 'unsupported' })]), first.state)
+  assert.equal(unknown.complete, false)
+  assert(readAdmissionTransition(observation(unknown).transition))
+  assert.equal(observation(unknown).observedSince, null)
+  const returned = observeAdmissionWaits(sample(origin + 120000, [capacity()]), unknown.state)
+  assert.notEqual(observation(returned).occurrence, observation(first).occurrence)
 })

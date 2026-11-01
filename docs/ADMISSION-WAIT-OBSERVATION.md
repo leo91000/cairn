@@ -23,14 +23,19 @@ start or refresh it. Account, recovery and other waits are not disk failures.
 An unavailable probe, missing row in a partial inventory, malformed row or
 excessive sampling gap breaks age continuity. The episode identity survives
 unknown observations for deduplication; unknown never certifies recovery or
-rearms a notification. A present valid row can still be observed in a partial
-inventory. Known noncapacity state or absence from a complete active inventory
+rearms a notification. Validated run/turn scope is independent of the gate,
+clock and identity allocation: an unknown gate/status cannot restore a positively
+ended turn. A present valid row can still be observed in a partial inventory. Known noncapacity state or absence from a complete active inventory
 ends only this capacity-wait observation. That does not prove physical cleanup,
 successful execution, working admission, backup integrity or a repaired node.
 
 The state contains at most 200 metadata entries, matching the bounded active plus
-tracked run projection. Its `limited` flag exposes row/history truncation. The
-optional `retainedEpisode(runId, scope)` callback reconciles the caller's existing
+tracked run projection. Its `limited` flag exposes row/history truncation. Lost
+identity uncertainty survives partial inventories even after currently retained
+rows end; only a validated complete inventory can establish which omitted runs
+ended. Entries present with unknown identity stay unknown until exact identity or
+a positive transition is observed. Malformed persisted history is uncertain,
+never equivalent to a first-ever monitor observation. The optional `retainedEpisode(runId, scope)` callback reconciles the caller's existing
 bounded occurrence/sent evidence. It returns an exact `occurrence`, `{ fresh:
 true }` only after known end/scope change, `{ unknown: true }` for unavailable or
 ambiguous identity, or null when it has no evidence. `readAdmissionOccurrence`

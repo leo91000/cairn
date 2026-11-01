@@ -83,10 +83,13 @@ export function readAdmissionTransition(value) {
 }
 
 function previousWaits(previous) {
+  if (previous == null)
+    return { waits: new Map(), limited: false }
   if (!record(previous) || previous.version !== 1 || (previous.observedAt !== null && !timestamp(previous.observedAt))
+    || (previous.limited !== undefined && typeof previous.limited !== 'boolean')
     || !Array.isArray(previous.waits)
     || previous.waits.length > admissionWaitLimits.entries) {
-    return new Map()
+    return { waits: new Map(), limited: true }
   }
 
   const waits = new Map()
@@ -101,7 +104,7 @@ function previousWaits(previous) {
         || wait.firstObservedAt === null || !timestamp(wait.lastObservedAt) || previous.observedAt === null
         || wait.since > wait.lastObservedAt))
       || waits.has(wait.runId)) {
-      return new Map()
+      return { waits: new Map(), limited: true }
     }
 
     waits.set(wait.runId, {
@@ -115,7 +118,7 @@ function previousWaits(previous) {
     })
   }
 
-  return waits
+  return { waits, limited: previous.limited === true }
 }
 
 // The caller supplies a fresh bounded manager probe on each invocation. An
@@ -125,7 +128,8 @@ export function observeAdmissionWaits(sample, previous, retainedEpisode, createE
   const now = timestamp(sample?.at) ? sample.at : null
   const observations = new Map()
   const next = new Map()
-  const prior = previousWaits(previous)
+  const history = previousWaits(previous)
+  const prior = history.waits
   const manager = sample?.manager?.ok === true ? sample.manager.data : null
   const rows = record(manager) && Array.isArray(manager.runs) ? manager.runs : []
   let complete = record(manager) && Array.isArray(manager.runs)
@@ -147,19 +151,22 @@ export function observeAdmissionWaits(sample, previous, retainedEpisode, createE
 
     seen.add(run.id)
     const id = `admission-wait:${run.id}`
-    if (!statuses.has(run.status)) {
+    const knownStatus = statuses.has(run.status)
+    if (!knownStatus)
       complete = false
-      observations.set(run.id, { id, runId: run.id, status: 'unknown' })
-      continue
-    }
 
-    if (run.status !== 'queued' || ['account', 'recovery', 'other'].includes(run.waitClass)) {
+    const ended = knownStatus && (run.status !== 'queued' || ['account', 'recovery', 'other'].includes(run.waitClass))
+    if (ended) {
       observations.set(run.id, { id, runId: run.id, status: 'good' })
       continue
     }
 
+    // Scope, gate and clock are independent facts. An unknown gate cannot
+    // reinstall an older turn; only a known capacity gate can age the wait.
+    const capacity = knownStatus && run.status === 'queued' && run.waitClass === 'capacity'
     const currentScope = scope(run)
-    if (run.waitClass !== 'capacity' || currentScope === null) {
+    if (currentScope === null) {
+      complete = false
       observations.set(run.id, { id, runId: run.id, status: 'unknown' })
       continue
     }
@@ -184,15 +191,28 @@ export function observeAdmissionWaits(sample, previous, retainedEpisode, createE
     const recovered = readAdmissionOccurrence(retained?.occurrence)
     if (retained?.unknown || (retained?.occurrence !== undefined
       && (!recovered || recovered.runId !== run.id || recovered.scope !== currentScope))) {
+      // Identity reconciliation may fail independently of the validated scope.
+      // Keep that scope so a later different turn cannot revive its predecessor.
+      next.set(run.id, sameEpisode
+        ? { ...old, since: null }
+        : {
+            runId: run.id,
+            scope: currentScope,
+            firstObservedAt: null,
+            episodeId: null,
+            transition: false,
+            lastObservedAt: now,
+            since: null,
+          })
       observations.set(run.id, { id, runId: run.id, status: 'unknown' })
       limited = true
       continue
     }
 
     const fresh = retained?.fresh === true || (sameEpisode && old.transition)
-    const positiveTransition = fresh || (!sameEpisode && !previous?.limited)
-    let firstObservedAt = fresh ? now : recovered?.firstObservedAt ?? (sameEpisode ? old.firstObservedAt : null)
-    if (firstObservedAt === null && positiveTransition)
+    const positiveTransition = fresh || (!sameEpisode && !history.limited)
+    let firstObservedAt = fresh ? null : recovered?.firstObservedAt ?? (sameEpisode ? old.firstObservedAt : null)
+    if (firstObservedAt === null && positiveTransition && capacity)
       firstObservedAt = now
     let episodeId = fresh ? undefined : recovered ? recovered.episodeId ?? null : sameEpisode ? old.episodeId : undefined
     if (firstObservedAt !== null && episodeId === undefined) {
@@ -213,7 +233,7 @@ export function observeAdmissionWaits(sample, previous, retainedEpisode, createE
     }
 
     const transition = firstObservedAt === null && positiveTransition
-    const continuous = !fresh && now !== null && firstObservedAt !== null && sameEpisode && old.since !== null
+    const continuous = capacity && !fresh && now !== null && firstObservedAt !== null && sameEpisode && old.since !== null
       && episodeId === old.episodeId && firstObservedAt === old.firstObservedAt
       && timestamp(old.lastObservedAt) && now >= old.lastObservedAt && now - old.lastObservedAt <= admissionWaitLimits.gapMs
       && timestamp(previous.observedAt) && previous.observedAt <= now
@@ -224,7 +244,7 @@ export function observeAdmissionWaits(sample, previous, retainedEpisode, createE
       episodeId: episodeId ?? null,
       transition,
       lastObservedAt: now ?? (sameEpisode ? old.lastObservedAt : null),
-      since: firstObservedAt === null || now === null ? null : continuous ? old.since : now,
+      since: !capacity || firstObservedAt === null || now === null ? null : continuous ? old.since : now,
     }
     next.set(run.id, wait)
     if (firstObservedAt === null)
@@ -266,7 +286,9 @@ export function observeAdmissionWaits(sample, previous, retainedEpisode, createE
       version: 1,
       observedAt: now ?? (timestamp(previous?.observedAt) ? previous.observedAt : null),
       waits: [...next.values()],
-      limited,
+      // Partial observations can resolve retained rows, never the unknown
+      // identities already evicted from the bounded history.
+      limited: limited || (history.limited && !complete),
     },
     observations: [...observations.values()],
     complete,
