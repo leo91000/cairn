@@ -2522,7 +2522,9 @@ pub(crate) mod tests {
             error.message,
             "Native output exceeded its bounded log budget."
         );
-        let code = controller.execution_status(attempt, result).await;
+        let code = controller
+            .execution_status(attempt, result.map(|()| 0))
+            .await;
         assert_eq!(code, crate::runner::CONTROLLER_FAILED);
         assert_eq!(tokio::fs::metadata(log).await.unwrap().len(), MAX_LOG + 1);
         atomic_write(
