@@ -65,6 +65,11 @@ provider to its concrete `provider/model` and records it as a conversation statu
 A rate limit uses the existing exhaustion flow, so the resumed session continues on
 the next route. A route's `provider/model` pins that provider. Auto offers only the
 variants every route shares, because a fallback must accept the chosen reasoning.
+The catalog's `hidden` flag controls presentation; it is not a general permission
+check. A provider-qualified route stays pinned even when its catalog route is
+deprecated. An `auto/<model>` parent is different: it is routable only while at
+least one connected route is available. When every route is deprecated the parent
+is hidden and a resume must reject it without substituting another model.
 
 ## Initial scope
 

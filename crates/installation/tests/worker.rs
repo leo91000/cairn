@@ -5464,6 +5464,268 @@ async fn chat_resume_selection_resolves_opencode_catalog_default_before_adapter_
 }
 
 #[tokio::test]
+async fn chat_resume_rejects_hidden_opencode_auto_without_blocking_pinned_provider_route() {
+    use std::sync::atomic::AtomicBool;
+
+    let mut fixture =
+        Fixture::with_opencode_bin(2, common::fixture("opencode-hidden-default.mjs")).await;
+    fixture.stop(false).await;
+    let data_dir = fixture.service.config.data_dir.clone();
+    let controller = Arc::new(Controller {
+        data: data_dir,
+        plans: tokio::sync::Mutex::new(Vec::new()),
+        failures: 0,
+        slots: 4,
+        hold: AtomicBool::new(true),
+    });
+    let runner = Router::new()
+        .fallback(any(serve_controller))
+        .with_state(controller.clone());
+    let (listener, address) = common::bind().await;
+    common::reconfigure(&mut fixture.service, |config| {
+        config.runner_url = format!("http://{address}");
+    })
+    .await;
+    let s = fixture.service.clone();
+    let server = common::serve(listener, runner);
+    s.accounts
+        .connect_api_key(
+            &s,
+            Provider::Opencode,
+            "OpenCode Zen",
+            "opencode",
+            "synthetic-hidden-default-resume-key",
+            None,
+        )
+        .await
+        .unwrap();
+
+    let catalog = s.opencode.models(&s).await.unwrap();
+    let hidden_default = catalog["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["model"] == "auto/retired-model")
+        .unwrap();
+    assert_eq!(hidden_default["isDefault"], true);
+    assert_eq!(hidden_default["hidden"], true);
+    assert_eq!(
+        hidden_default["routes"][0]["model"],
+        "opencode/retired-model"
+    );
+    assert_eq!(hidden_default["routes"][0]["hidden"], true);
+
+    let mut agent = s.agent_snapshot(MAIN_AGENT_ID).await.unwrap();
+    agent["id"] = id().into();
+    agent["name"] = "OpenCode hidden default resume fixture".into();
+    agent["provider"] = "opencode".into();
+    agent["model"] = "opencode/ling-3.1-flash-free".into();
+    agent["reasoning"] = "high".into();
+    agent["speed"] = "".into();
+    agent["access"]["sandbox"] = "yolo".into();
+    let agent = s.store.put_agent_fixture(agent).await.unwrap();
+    let chat = s
+        .chat_create(json!({ "agentId": text(&agent, "id") }))
+        .await
+        .unwrap();
+    let chat_id = text(&chat, "id").to_owned();
+    let mut sent = message("fixture:opencode-hang");
+    sent["provider"] = "opencode".into();
+    sent["model"] = "opencode/ling-3.1-flash-free".into();
+    sent["reasoning"] = "high".into();
+    let turn_id = text(&sent, "id").to_owned();
+    s.chat_send(&chat_id, sent).await.unwrap();
+    fixture.start().await;
+    let run_id = fixture.chat_run(&chat_id).await;
+    let running = fixture
+        .until(&run_id, |run| {
+            run["status"] == RunStatus::Running && run["sessionId"].is_string()
+        })
+        .await;
+    eventually(
+        Duration::from_secs(20),
+        Duration::from_millis(30),
+        async || {
+            controller
+                .plans
+                .lock()
+                .await
+                .iter()
+                .any(|plan| plan["runId"] == run_id)
+                .then_some(())
+        },
+    )
+    .await;
+    assert_eq!(
+        running["snapshot"]["agent"]["model"],
+        "opencode/ling-3.1-flash-free"
+    );
+
+    let relay = common::relay_fixture::context(&s).await;
+    let relay_token = text(&relay, "value").to_owned();
+    let client = reqwest::Client::new();
+    let stopped = client
+        .post(format!("{}/api/chats/{chat_id}/stop", fixture.url))
+        .header("x-test-relay-token", &relay_token)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    stopped.error_for_status().unwrap();
+    let cancelled = fixture
+        .until(&run_id, |run| {
+            run["status"] == RunStatus::Cancelled && run["resumeAvailable"] == true
+        })
+        .await;
+    let checkpoint_before = fixture.checkpoint(&run_id).await;
+    fixture.stop(false).await;
+    s.store
+        .change_run(
+            &run_id,
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Failed),
+                finished_at: Some(Some(now())),
+                error: Some(Some("Usage limit has been reached".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let before_rejection = s.store.run(&run_id).await.unwrap();
+    let attempts_before = s
+        .store
+        .attempts_fixture()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|attempt| attempt["runId"] == run_id)
+        .count();
+    let plans_before = controller
+        .plans
+        .lock()
+        .await
+        .iter()
+        .filter(|plan| plan["runId"] == run_id)
+        .count();
+    assert_eq!(before_rejection["status"], RunStatus::Failed);
+    assert_eq!(before_rejection["resumeAvailable"], true);
+
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
+    for (label, model) in [
+        ("hidden default", ""),
+        ("explicit hidden Auto", "auto/retired-model"),
+    ] {
+        let (status, response) = api_post(
+            &app,
+            &relay_token,
+            &format!("/api/chats/{chat_id}/resume"),
+            json!({
+                "runId": run_id,
+                "turnId": turn_id,
+                "selection": { "model": model, "reasoning": "", "speed": "" },
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{label}: {response}");
+        assert_eq!(
+            s.store.run(&run_id).await.unwrap(),
+            before_rejection,
+            "{label}"
+        );
+        assert_eq!(
+            fixture.checkpoint(&run_id).await,
+            checkpoint_before,
+            "{label}"
+        );
+        assert_eq!(
+            s.store
+                .attempts_fixture()
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|attempt| attempt["runId"] == run_id)
+                .count(),
+            attempts_before,
+            "{label} must not create an attempt",
+        );
+        assert_eq!(
+            controller
+                .plans
+                .lock()
+                .await
+                .iter()
+                .filter(|plan| plan["runId"] == run_id)
+                .count(),
+            plans_before,
+            "{label} must not reach the worker",
+        );
+        assert_eq!(before_rejection["chatExecution"]["messageId"], turn_id);
+        assert_eq!(before_rejection["sessionId"], cancelled["sessionId"]);
+        assert_eq!(before_rejection["workspace"], cancelled["workspace"]);
+    }
+
+    let (status, response) = api_post(
+        &app,
+        &relay_token,
+        &format!("/api/chats/{chat_id}/resume"),
+        json!({
+            "runId": run_id,
+            "turnId": turn_id,
+            "selection": {
+                "model": "opencode/retired-model",
+                "reasoning": "",
+                "speed": "",
+            },
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let queued = s.store.run(&run_id).await.unwrap();
+    let mut expected_snapshot = cancelled["snapshot"].clone();
+    expected_snapshot["agent"]["model"] = "opencode/retired-model".into();
+    expected_snapshot["agent"]["reasoning"] = "".into();
+    expected_snapshot["agent"]["speed"] = "".into();
+    assert_eq!(queued["status"], RunStatus::Queued);
+    assert_eq!(queued["snapshot"], expected_snapshot);
+    for field in ["id", "taskId", "workspace", "sessionId", "chatExecution"] {
+        assert_eq!(queued[field], cancelled[field], "{field}");
+    }
+
+    controller
+        .hold
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    fixture.start().await;
+    let completed = fixture.until_finished(&run_id).await;
+    assert_eq!(completed["status"], RunStatus::Succeeded, "{completed}");
+    assert_eq!(completed["snapshot"], expected_snapshot);
+    for field in ["id", "taskId", "workspace", "sessionId", "chatExecution"] {
+        assert_eq!(completed[field], cancelled[field], "{field}");
+    }
+    assert_eq!(
+        fixture.checkpoint(&run_id).await["generation"],
+        checkpoint_before["generation"]
+    );
+    let pinned_plan = controller
+        .plans
+        .lock()
+        .await
+        .iter()
+        .find(|plan| {
+            plan["runId"] == run_id
+                && plan["chat"]["provider"] == "opencode"
+                && plan["chat"]["model"] == "opencode/retired-model"
+                && plan["chat"]["execution"]["messageId"] == turn_id
+        })
+        .cloned()
+        .expect("a deprecated provider-qualified route stays pinned in the worker plan");
+    assert_eq!(pinned_plan["sandbox"], "yolo");
+    assert_eq!(pinned_plan["chat"]["sessionId"], cancelled["sessionId"]);
+    fixture.stop(false).await;
+    server.abort();
+}
+
+#[tokio::test]
 async fn chat_resume_selection_keeps_saved_identity_and_reaches_the_worker_plan() {
     use std::sync::atomic::AtomicBool;
 

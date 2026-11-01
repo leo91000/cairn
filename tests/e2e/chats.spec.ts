@@ -1288,8 +1288,8 @@ test('same-provider quota resume submits the saved turn with the picker-applied 
       agent: {
         ...savedAgent,
         provider: 'codex',
-        model: 'fixture-deep',
-        reasoning: 'ultra',
+        model: 'fixture-fast',
+        reasoning: 'low',
         speed: 'priority',
       },
     },
@@ -1310,7 +1310,7 @@ test('same-provider quota resume submits the saved turn with the picker-applied 
           defaultReasoningEffort: 'low',
           supportedReasoningEfforts: [{ reasoningEffort: 'low', description: '' }],
           routes: [],
-          serviceTiers: [],
+          serviceTiers: [{ id: 'priority', name: 'Priority' }],
           defaultServiceTier: null,
           resolvedModel: null,
         },
@@ -1320,8 +1320,11 @@ test('same-provider quota resume submits the saved turn with the picker-applied 
           description: 'Complex investigations',
           hidden: false,
           isDefault: false,
-          defaultReasoningEffort: 'ultra',
-          supportedReasoningEfforts: [{ reasoningEffort: 'ultra', description: '' }],
+          defaultReasoningEffort: 'high',
+          supportedReasoningEfforts: [
+            { reasoningEffort: 'high', description: '' },
+            { reasoningEffort: 'ultra', description: '' },
+          ],
           routes: [],
           serviceTiers: [],
           defaultServiceTier: null,
@@ -1349,7 +1352,10 @@ test('same-provider quota resume submits the saved turn with the picker-applied 
   const menu = page.getByRole('dialog', { name: 'Agent & model' })
   const inheritedModel = menu.getByRole('radio', { name: 'Conversation model', exact: true })
   await expect(inheritedModel).toHaveAttribute('aria-checked', 'true')
-  await expect(inheritedModel).toContainText('Deep thinker')
+  await expect(inheritedModel).toContainText('Quick coder')
+  const selectedModel = menu.getByRole('radio', { name: 'Deep thinker', exact: true })
+  await selectedModel.click()
+  await expect(selectedModel).toHaveAttribute('aria-checked', 'true')
   await menu.getByRole('radio', { name: 'Ultra', exact: true }).click()
   await expect(menu.getByRole('radiogroup', { name: 'Speed' })).toContainText('Standard')
   await menu.getByRole('button', { name: 'Close', exact: true }).click()

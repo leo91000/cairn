@@ -33,7 +33,7 @@ pub(crate) async fn validate(
     validate_provider_speed(provider, &selection.speed)?;
 
     let catalog = provider.adapter().model_catalog(s).await?;
-    validate_catalog(selection, &catalog)?;
+    validate_catalog(provider, selection, &catalog)?;
     validate_shape(selection)?;
 
     let mut agent = run["snapshot"]["agent"].clone();
@@ -87,7 +87,11 @@ fn model_row<'a>(catalog: &'a Value, model: &str) -> Option<(&'a Value, Option<&
     None
 }
 
-fn validate_catalog(selection: &mut ResumeExecutionSelection, catalog: &Value) -> Result<()> {
+fn validate_catalog(
+    provider: Provider,
+    selection: &mut ResumeExecutionSelection,
+    catalog: &Value,
+) -> Result<()> {
     let selected_name = if selection.model.is_empty() {
         catalog["models"]
             .as_array()
@@ -109,6 +113,17 @@ fn validate_catalog(selection: &mut ResumeExecutionSelection, catalog: &Value) -
             "Choose a model from this coding agent's current model catalog.",
         ));
     };
+    // `hidden` is picker presentation metadata, not a general authorization rule:
+    // explicit provider/model routes remain pinned even when deprecated. OpenCode's
+    // `auto/` parent is different: with no visible routes it cannot be routed at all.
+    if provider == Provider::Opencode
+        && selected_name.starts_with(crate::opencode::AUTO)
+        && model["hidden"] == true
+    {
+        return Err(Error::bad(
+            "Choose a model from this coding agent's current model catalog.",
+        ));
+    }
     if selection.model.is_empty() {
         selection.model.clone_from(&selected_name);
     }
@@ -168,7 +183,7 @@ mod tests {
                 }],
             }],
         });
-        validate_catalog(&mut selection, &catalog).unwrap();
+        validate_catalog(Provider::Opencode, &mut selection, &catalog).unwrap();
 
         let mut oversized = selection.clone();
         oversized.model = "m".repeat(121);
@@ -177,7 +192,7 @@ mod tests {
         let mut unlisted = selection.clone();
         unlisted.model = "openrouter/unlisted@revision+vision".into();
         assert!(validate_shape(&unlisted).is_ok());
-        assert!(validate_catalog(&mut unlisted, &catalog).is_err());
+        assert!(validate_catalog(Provider::Opencode, &mut unlisted, &catalog).is_err());
 
         let mut invalid_effort = selection;
         invalid_effort.reasoning = "2xhigh".into();
@@ -199,7 +214,7 @@ mod tests {
             }],
         });
 
-        validate_catalog(&mut selection, &catalog).unwrap();
+        validate_catalog(Provider::Codex, &mut selection, &catalog).unwrap();
 
         assert_eq!(selection.model, "gpt-6-sol");
     }
@@ -219,7 +234,61 @@ mod tests {
             }],
         });
 
-        assert!(validate_catalog(&mut selection, &catalog).is_err());
+        assert!(validate_catalog(Provider::Opencode, &mut selection, &catalog).is_err());
         assert!(selection.model.is_empty());
+    }
+
+    #[test]
+    fn hidden_opencode_auto_requires_a_visible_route_but_pinned_routes_remain_valid() {
+        let catalog = serde_json::json!({
+            "models": [{
+                "model": "auto/retired-model",
+                "isDefault": true,
+                "hidden": true,
+                "supportedReasoningEfforts": [],
+                "routes": [{
+                    "model": "opencode/retired-model",
+                    "hidden": true,
+                    "supportedReasoningEfforts": [],
+                }],
+            }],
+        });
+        let mut inherited = ResumeExecutionSelection {
+            model: String::new(),
+            reasoning: String::new(),
+            speed: String::new(),
+        };
+        assert!(validate_catalog(Provider::Opencode, &mut inherited, &catalog).is_err());
+        assert!(inherited.model.is_empty());
+
+        let mut automatic = ResumeExecutionSelection {
+            model: "auto/retired-model".into(),
+            reasoning: String::new(),
+            speed: String::new(),
+        };
+        assert!(validate_catalog(Provider::Opencode, &mut automatic, &catalog).is_err());
+
+        let mut pinned = ResumeExecutionSelection {
+            model: "opencode/retired-model".into(),
+            reasoning: String::new(),
+            speed: String::new(),
+        };
+        validate_catalog(Provider::Opencode, &mut pinned, &catalog).unwrap();
+        assert_eq!(pinned.model, "opencode/retired-model");
+
+        // Hidden Codex catalog rows keep their existing saved-selection semantics.
+        let codex_catalog = serde_json::json!({
+            "models": [{
+                "model": "gpt-6-sol",
+                "hidden": true,
+                "supportedReasoningEfforts": [],
+            }],
+        });
+        let mut codex = ResumeExecutionSelection {
+            model: "gpt-6-sol".into(),
+            reasoning: String::new(),
+            speed: String::new(),
+        };
+        validate_catalog(Provider::Codex, &mut codex, &codex_catalog).unwrap();
     }
 }
