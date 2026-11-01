@@ -3529,6 +3529,54 @@ async fn code_mode_checks_each_operations_scopes_and_revocation_without_rolling_
 }
 
 #[tokio::test]
+async fn code_mode_truncates_one_completed_result_without_repeating_its_effect() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let before = call(&s, &configuration, "list_chats", json!({})).await;
+    let before = result(&before)["chats"].as_array().unwrap().len();
+
+    let response = call(
+        &s,
+        &configuration,
+        "execute",
+        json!({
+            "code": "await cairn.create_chat({}); return 'x'.repeat(1100000);",
+        }),
+    )
+    .await;
+    assert_eq!(response["id"], 1);
+    assert_ne!(
+        response["result"]["isError"], true,
+        "A completed operation must not become a tool error because its result is large",
+    );
+    assert!(serde_json::to_vec(&response["result"]).unwrap().len() <= 1024 * 1024);
+    assert_eq!(response["result"]["structuredContent"]["truncated"], true);
+    assert_eq!(response["result"]["structuredContent"]["retained"], false);
+    assert!(
+        response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("truncated")
+    );
+
+    let after = call(&s, &configuration, "list_chats", json!({})).await;
+    assert_eq!(
+        result(&after)["chats"].as_array().unwrap().len(),
+        before + 1
+    );
+    let next = call(
+        &s,
+        &configuration,
+        "execute",
+        json!({ "code": "return 42;" }),
+    )
+    .await;
+    assert_eq!(result(&next), 42);
+}
+
+#[tokio::test]
 async fn code_mode_isolates_scripts_bounds_resources_and_remains_usable_after_failure() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
