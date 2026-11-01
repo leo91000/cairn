@@ -1377,7 +1377,12 @@ composition reauthorizes those permissions for the consuming run; a retained
 instructions-only grant cannot download a revoked tool's attachment. The binding
 contains no producing run token, so a new turn can use a still-authorized handle.
 Unscoped transport/owner transfers require full instance access from an agent;
-agent uploads remain bound to their uploader unless a full-access agent uses them.
+agent uploads remain bound to their original uploader. A full-access agent may use
+another uploader's file without acquiring its identity. Appends preserve that
+boundary and all contribution origins, including when scoped data is added to a
+raw upload. Bytes and provenance change together; reads, appends, HTTP bodies and
+MIME attachments refuse a transfer version changed since authorization with a
+conflict, requiring fresh authorization before retrying.
 
 An unavailable package's previously held grants and supplier can be retained while
 reducing another grant. Migration also retains the exact legacy instance choice

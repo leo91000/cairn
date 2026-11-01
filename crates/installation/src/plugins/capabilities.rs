@@ -109,27 +109,38 @@ pub async fn effect(s: &Service, context: &Context, method: &str, args: Value) -
         }
         "http.request" => http(s, context, &args).await,
         "files.create" | "files.append" | "files.read" | "files.delete" | "files.composeMime" => {
-            if method == "files.composeMime" {
+            let mut attachments = std::collections::BTreeMap::new();
+            let access = if method == "files.composeMime" {
                 for attachment in args["attachments"].as_array().into_iter().flatten() {
+                    let id = text(attachment, "id");
+                    let access = s.plugins.files.authorize(s, context, id).await?;
+                    attachments.insert(id.to_owned(), access);
+                }
+                None
+            } else if method != "files.create" {
+                Some(
                     s.plugins
                         .files
-                        .authorize(s, context, text(attachment, "id"))
-                        .await?;
-                }
-            } else if method != "files.create" {
+                        .authorize(s, context, text(&args, "id"))
+                        .await?,
+                )
+            } else {
+                None
+            };
+            let result = if method == "files.composeMime" {
+                super::mime::compose_authorized(
+                    &s.plugins.files,
+                    &context.connection,
+                    &args,
+                    &attachments,
+                )?
+            } else {
                 s.plugins
                     .files
-                    .authorize(s, context, text(&args, "id"))
-                    .await?;
-            }
-            let result = s.plugins.files.call(&context.connection, method, &args)?;
-            if matches!(
-                method,
-                "files.create" | "files.composeMime" | "files.append"
-            ) {
-                s.plugins
-                    .files
-                    .bind(context, &result, method != "files.append")?;
+                    .call_authorized(context, method, &args, access.as_ref())?
+            };
+            if matches!(method, "files.create" | "files.composeMime") {
+                s.plugins.files.bind_new(context, &result)?;
             }
             Ok(result)
         }
@@ -399,14 +410,15 @@ async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
         if !context.manifest.permits_capability("files") {
             return Err(Error::forbidden("File transfers are not approved."));
         }
-        s.plugins
+        let access = s
+            .plugins
             .files
             .authorize(s, context, text(spec, "id"))
             .await?;
-        let bytes = s
-            .plugins
-            .files
-            .bytes(&context.connection, text(spec, "id"))?;
+        let bytes =
+            s.plugins
+                .files
+                .bytes_authorized(&context.connection, text(spec, "id"), &access)?;
         match text(spec, "format") {
             "base64url" => {
                 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -509,7 +521,7 @@ async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
             .plugins
             .files
             .response(&context.connection, spec, &body, media_type)?;
-        s.plugins.files.bind(context, &file, true)?;
+        s.plugins.files.bind_new(context, &file)?;
         return Ok(json!({ "status": status, "headers": headers, "file": file }));
     }
     let json = serde_json::from_slice::<Value>(&body).ok();
@@ -804,5 +816,127 @@ mod authorization_tests {
                 f.s.shutdown.cancel();
             }
         }
+    }
+
+    #[tokio::test]
+    async fn concurrent_appends_keep_all_origins_and_refuse_stale_reads_and_mime_inputs() {
+        use crate::config::MAIN_AGENT_ID;
+        let f = Fixture::new().await;
+        let first = transfer_context(&f, MAIN_AGENT_ID, true).await;
+        let mut second = transfer_context(&f, MAIN_AGENT_ID, false).await;
+        let snapshot = second.management.as_ref().unwrap().snapshot().unwrap();
+        let package = super::super::registry::active(&f.s, "grant-probe")
+            .await
+            .unwrap();
+        let invocation = super::super::grant_authorization::Invocation::prepare(
+            &f.s,
+            snapshot.clone(),
+            second.connection.clone(),
+            PluginContributionKind::Tool,
+            "grant_probe_other",
+            &json!({}),
+        )
+        .await
+        .unwrap();
+        second.management = Some(super::super::management::Authority::agent_action(
+            second.connection.clone(),
+            snapshot,
+            Some(invocation),
+        ));
+        let file = effect(&f.s, &first, "files.create", json!({ "data": "" }))
+            .await
+            .unwrap();
+        let id = text(&file, "id");
+        // Both callers authorize the same version. The first changes its bytes
+        // and origin before the second consumes its proof at a known new offset.
+        let access_first = f.s.plugins.files.authorize(&f.s, &first, id).await.unwrap();
+        let stale_second =
+            f.s.plugins
+                .files
+                .authorize(&f.s, &second, id)
+                .await
+                .unwrap();
+        f.s.plugins
+            .files
+            .call_authorized(
+                &first,
+                "files.append",
+                &json!({ "id": id, "offset": 0, "data": "A" }),
+                Some(&access_first),
+            )
+            .unwrap();
+        assert_eq!(
+            f.s.plugins
+                .files
+                .call_authorized(
+                    &second,
+                    "files.append",
+                    &json!({ "id": id, "offset": 1, "data": "B" }),
+                    Some(&stale_second)
+                )
+                .unwrap_err()
+                .status,
+            409
+        );
+        assert_eq!(
+            f.s.plugins.files.bytes(&first.connection, id).unwrap(),
+            b"A"
+        );
+        assert_eq!(
+            f.s.plugins
+                .files
+                .bytes_authorized(&second.connection, id, &stale_second)
+                .unwrap_err()
+                .status,
+            409
+        );
+        assert_eq!(
+            super::super::mime::compose_authorized(
+                &f.s.plugins.files,
+                &second.connection,
+                &json!({
+                    "from": "sender@example.test", "to": ["recipient@example.test"], "text": "Body",
+                    "attachments": [{ "id": id, "name": "part.txt", "mediaType": "text/plain" }],
+                }),
+                &std::collections::BTreeMap::from([(id.to_owned(), stale_second)])
+            )
+            .unwrap_err()
+            .status,
+            409
+        );
+        let access_second =
+            f.s.plugins
+                .files
+                .authorize(&f.s, &second, id)
+                .await
+                .unwrap();
+        f.s.plugins
+            .files
+            .call_authorized(
+                &second,
+                "files.append",
+                &json!({ "id": id, "offset": 1, "data": "B" }),
+                Some(&access_second),
+            )
+            .unwrap();
+        assert_eq!(
+            f.s.plugins.files.bytes(&second.connection, id).unwrap(),
+            b"AB"
+        );
+        f.set(json!([
+            contribution("instructions", "", json!([])),
+            contribution("tool", "grant_probe_other", json!([])),
+        ]))
+        .await;
+        let reader = transfer_context(&f, MAIN_AGENT_ID, false).await;
+        assert_eq!(
+            effect(&f.s, &reader, "files.read", json!({ "id": id }))
+                .await
+                .unwrap_err()
+                .status,
+            403,
+            "the surviving contribution dropped the first origin"
+        );
+        f.s.shutdown.cancel();
     }
 }
