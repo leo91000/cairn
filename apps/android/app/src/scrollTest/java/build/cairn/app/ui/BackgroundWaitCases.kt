@@ -286,6 +286,7 @@ abstract class BackgroundWaitCases {
             compose
                 .onNode(hasText("Modèle de la conversation") and isSelectable())
                 .assertIsSelected()
+                .assert(hasText("GPT-6 Sol", substring = true))
             compose.onNodeWithText("GPT-6 Luna", exact = true).performScrollTo().performClick()
             compose.onNodeWithTag("reasoning-slider").assert(hasStateDescription("Faible"))
             compose.onNodeWithText("Terminé").performClick()
@@ -363,11 +364,20 @@ abstract class BackgroundWaitCases {
         ) { server ->
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
             compose.waitUntil(10000) {
-                compose.onAllNodesWithText("Sonnet").fetchSemanticsNodes().isNotEmpty()
+                compose
+                    .onAllNodes(
+                        hasTestTag("model-picker") and
+                            hasContentDescription("Sonnet · OpenCode Zen", substring = true)
+                    )
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
             }
             compose.onNodeWithTag("model-picker").performClick()
-            compose.onAllNodes(hasText("Auto") and hasClickAction()).assertCountEquals(1)
-            compose.onNode(hasText("Auto") and hasClickAction()).performClick()
+            val pinnedRoute = compose.onNode(hasText("OpenCode Zen · Crédits") and hasClickAction())
+            pinnedRoute.assertIsSelected()
+            val automaticRoute = compose.onNode(hasText("Auto") and hasClickAction())
+            automaticRoute.performClick()
+            automaticRoute.assertIsSelected()
             compose.onNodeWithText("Terminé").performClick()
             compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
 

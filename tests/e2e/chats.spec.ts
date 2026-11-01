@@ -1,5 +1,6 @@
 import type { Page } from '@playwright/test'
 import type { Workspace } from './fixtures'
+import type { ResumeDiagnosticRecord } from './resume-diagnostic'
 import { randomUUID } from 'node:crypto'
 import {
   signIn as authenticateWorkspace,
@@ -11,14 +12,7 @@ import {
   useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
-
-interface ResumeDiagnosticRecord {
-  stage: 'handler-entered' | 'guard-no-detail' | 'guard-busy' | 'run-state' | 'selection-start' | 'catalog-state' | 'selection-ready' | 'resume-attempt' | 'resume-returned' | 'pause-attempt' | 'pause-returned' | 'caught'
-  runStatus?: 'missing' | 'other' | 'queued' | 'running' | 'failed' | 'interrupted' | 'cancelled' | 'succeeded' | 'idle'
-  resumeAvailable?: boolean
-  provider?: 'codex' | 'claude' | 'opencode' | 'other'
-  catalogPresent?: boolean
-}
+import { projectResumeDiagnostic, RESUME_DIAGNOSTIC_MARKER } from './resume-diagnostic'
 
 type ResumeDiagnosticWindow = Window & {
   __cairnTestResumeDiagnostic?: (record: ResumeDiagnosticRecord) => void
@@ -35,6 +29,59 @@ async function installResumeDiagnosticProbe(page: Page) {
         records.push({ ...record })
     }
   })
+}
+
+async function reportResumeDiagnostic(page: Page, requestCount: number) {
+  let report = projectResumeDiagnostic(requestCount, undefined)
+  try {
+    const source = await page.evaluate(() => (window as ResumeDiagnosticWindow).__cairnTestResumeDiagnosticRecords)
+    report = projectResumeDiagnostic(requestCount, source)
+  }
+  catch {
+    // Failure reporting must not replace the original request-count assertion.
+  }
+
+  try {
+    await test.info().attach('resume-diagnostic.json', {
+      body: JSON.stringify(report),
+      contentType: 'application/json',
+    })
+  }
+  catch {
+    report = projectResumeDiagnostic(requestCount, undefined)
+    try {
+      await test.info().attach('resume-diagnostic.json', {
+        body: JSON.stringify(report),
+        contentType: 'application/json',
+      })
+    }
+    catch {
+      // Keep the fixed console record as the last available diagnostic.
+    }
+  }
+
+  try {
+    console.error(`${RESUME_DIAGNOSTIC_MARKER} ${JSON.stringify(report)}`)
+  }
+  catch {
+    // Keep the original assertion as the reported failure.
+  }
+}
+
+async function expectSingleResumeRequest(page: Page, requestCount: () => number) {
+  try {
+    await expect.poll(() => ({ requests: requestCount() })).toMatchObject({ requests: 1 })
+  }
+  catch (failure) {
+    try {
+      await reportResumeDiagnostic(page, requestCount())
+    }
+    catch {
+      // Diagnostic reporting cannot mask the original request-count assertion.
+    }
+
+    throw failure
+  }
 }
 
 async function createFailedCodexQuotaChat(
@@ -1418,10 +1465,7 @@ test('same-provider quota resume submits the saved turn with the picker-applied 
   await menu.getByRole('button', { name: 'Close', exact: true }).click()
   await expect(picker).toHaveAccessibleName(/Deep thinker · Ultra reasoning/)
   await card.getByRole('button', { name: 'Resume conversation', exact: true }).click()
-  await expect.poll(async () => ({
-    requests: resumeRequests.length,
-    stages: await page.evaluate(() => (window as ResumeDiagnosticWindow).__cairnTestResumeDiagnosticRecords ?? []),
-  })).toMatchObject({ requests: 1 })
+  await expectSingleResumeRequest(page, () => resumeRequests.length)
 
   expect(resumeRequests[0]).toMatchObject({
     chatId: chat.id,
@@ -1511,10 +1555,7 @@ test('same-provider quota resume submits the changed model default and unchanged
   await menu.getByRole('button', { name: 'Close', exact: true }).click()
   await expect(picker).toHaveAccessibleName(/Deep thinker · High reasoning/)
   await changedCard.getByRole('button', { name: 'Resume conversation', exact: true }).click()
-  await expect.poll(async () => ({
-    requests: changedRequests.length,
-    stages: await page.evaluate(() => (window as ResumeDiagnosticWindow).__cairnTestResumeDiagnosticRecords ?? []),
-  })).toMatchObject({ requests: 1 })
+  await expectSingleResumeRequest(page, () => changedRequests.length)
   expect(changedRequests[0]).toMatchObject({
     chatId: changed.chat.id,
     runId: changed.before.id,
@@ -1536,10 +1577,7 @@ test('same-provider quota resume submits the changed model default and unchanged
   await inheritedMenu.getByRole('button', { name: 'Close', exact: true }).click()
   await expect(inheritedPicker).toHaveAccessibleName(/Quick coder · High reasoning/)
   await unchangedCard.getByRole('button', { name: 'Resume conversation', exact: true }).click()
-  await expect.poll(async () => ({
-    requests: unchangedRequests.length,
-    stages: await page.evaluate(() => (window as ResumeDiagnosticWindow).__cairnTestResumeDiagnosticRecords ?? []),
-  })).toMatchObject({ requests: 1 })
+  await expectSingleResumeRequest(page, () => unchangedRequests.length)
   expect(unchangedRequests[0]).toMatchObject({
     chatId: unchanged.chat.id,
     runId: unchanged.before.id,

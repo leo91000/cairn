@@ -5950,7 +5950,6 @@ async fn chat_resume_selection_keeps_saved_identity_and_reaches_the_worker_plan(
         RunStatus::Cancelled
     );
 
-    drop(resume);
     fixture.stop(false).await;
     s.store
         .change_run(
@@ -6297,7 +6296,6 @@ async fn chat_resume_selection_keeps_saved_identity_and_reaches_the_worker_plan(
         .expect("the explicit Standard request must reach the resumed worker plan");
     assert_eq!(standard_plan["chat"]["serviceTier"], "default");
 
-    drop(resume);
     controller
         .hold
         .store(false, std::sync::atomic::Ordering::Relaxed);
