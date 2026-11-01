@@ -120,10 +120,12 @@ impl ResumeRun {
             .resume_selected_authorized(
                 s,
                 &id,
-                input.turn_id,
-                selection,
-                selected_provider,
-                saved_auto_catalog,
+                crate::worker::ResumeSelectionContext {
+                    expected_turn_id: input.turn_id,
+                    selection,
+                    selected_provider,
+                    saved_auto_catalog,
+                },
                 move |db: &Db<'_>| {
                     if let Some(bearer) = &bearer {
                         crate::installation_mcp::authorize_in(db, bearer)?;

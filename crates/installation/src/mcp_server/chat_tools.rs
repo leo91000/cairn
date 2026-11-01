@@ -445,10 +445,12 @@ pub(crate) async fn invoke(
             .resume_selected_authorized(
                 s,
                 &run_id,
-                expected_turn_id,
-                selection,
-                selected_provider,
-                saved_auto_catalog,
+                crate::worker::ResumeSelectionContext {
+                    expected_turn_id,
+                    selection,
+                    selected_provider,
+                    saved_auto_catalog,
+                },
                 move |db: &Db<'_>| {
                     commit_authority(db)?;
                     let chat = required(

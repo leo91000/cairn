@@ -1,4 +1,4 @@
-use super::{Worker, checkpoint::RunCheckpoint};
+use super::{ResumeSelectionContext, Worker, checkpoint::RunCheckpoint};
 use crate::{
     config::now,
     error::{Error, Result, required},
@@ -94,7 +94,7 @@ impl Worker {
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
-        self.resume_selected_authorized(s, id, None, None, None, None, authorize)
+        self.resume_selected_authorized(s, id, ResumeSelectionContext::default(), authorize)
             .await
     }
 
@@ -103,17 +103,15 @@ impl Worker {
         &self,
         s: &Service,
         id: &str,
-        expected_turn_id: Option<String>,
-        selection: Option<ResumeExecutionSelection>,
-        selected_provider: Option<crate::provider::Provider>,
-        saved_auto_catalog: Option<Value>,
+        resume: ResumeSelectionContext,
         authorize: F,
     ) -> Result<Value>
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
-        if selection.is_some()
-            && expected_turn_id
+        if resume.selection.is_some()
+            && resume
+                .expected_turn_id
                 .as_deref()
                 .is_none_or(|turn| turn.is_empty() || turn.chars().count() > 200)
         {
@@ -137,10 +135,10 @@ impl Worker {
                 requeue(
                     db,
                     &id,
-                    expected_turn_id.as_deref(),
-                    selection.as_ref(),
-                    selected_provider,
-                    saved_auto_catalog.as_ref(),
+                    resume.expected_turn_id.as_deref(),
+                    resume.selection.as_ref(),
+                    resume.selected_provider,
+                    resume.saved_auto_catalog.as_ref(),
                 )
             })
             .await?;
