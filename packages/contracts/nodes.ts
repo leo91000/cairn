@@ -274,7 +274,7 @@ export function nodeHealth(node: ExecutionNode, now = Date.now(), clock: number 
   const running = node.occupiedSlots ?? 0
   const free = freeSlots(node)
   if (free <= 0)
-    return { state: 'full', label: 'Full', detail: slots ? `All ${slots} slots in use` : 'The runtime offers no slot' }
+    return { state: 'full', label: 'Full', detail: !slots ? 'The runtime offers no slot' : running >= slots ? `All ${slots} slots in use` : 'No slots available' }
   return { state: 'ready', label: 'Ready', detail: running ? `${running} running · ${free} of ${slots} slots free` : `${free} of ${slots} slots free` }
 }
 
