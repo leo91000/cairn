@@ -4,6 +4,8 @@ import { speedLabel } from '../../../packages/contracts/models'
 import {
   effectiveSpeed,
   offersSpeed,
+  pickerAppliedSpeed,
+  resumeSelectionSpeed,
   showsSpeed,
   speedNote,
   speedTier,
@@ -91,6 +93,20 @@ describe('codex speeds', () => {
     expect(showsSpeed('codex', model({}), 'priority')).toBe(true)
     expect(showsSpeed('claude', astra, 'priority')).toBe(false)
     expect(showsSpeed('opencode', astra, '')).toBe(false)
+  })
+
+  it('uses the speed shown for the selected model when resuming', () => {
+    const deep = model({ model: 'deep', serviceTiers: [] })
+    const savedSpeed = pickerAppliedSpeed('codex', astra, '', 'priority')
+    const unavailableInheritedSpeed = pickerAppliedSpeed('codex', deep, '', 'priority')
+    expect(savedSpeed).toBe('priority')
+    expect(unavailableInheritedSpeed).toBe('standard')
+    expect(unavailableInheritedSpeed).not.toBe(savedSpeed)
+    expect(pickerAppliedSpeed('codex', deep, 'standard', 'priority')).toBe('standard')
+    expect(pickerAppliedSpeed('codex', model({ model: 'unknown' }), '', 'priority')).toBe('priority')
+    expect(resumeSelectionSpeed('codex', deep, '', 'priority')).toBe('standard')
+    expect(resumeSelectionSpeed('codex', astra, '', 'priority')).toBe('priority')
+    expect(resumeSelectionSpeed('claude', astra, '', 'priority')).toBe('')
   })
 
   it('names speeds with Codex\'s own words', () => {

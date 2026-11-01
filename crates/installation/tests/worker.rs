@@ -5049,7 +5049,7 @@ async fn chat_resume_selection_keeps_saved_identity_and_reaches_the_worker_plan(
     let override_selection = json!({
         "model": "gpt-6-luna",
         "reasoning": "xhigh",
-        "speed": "",
+        "speed": "standard",
     });
 
     let active_refusal = resume(json!({
@@ -5101,6 +5101,14 @@ async fn chat_resume_selection_keeps_saved_identity_and_reaches_the_worker_plan(
     .await
     .unwrap();
     assert_eq!(stale_turn.status(), StatusCode::CONFLICT);
+    for body in [
+        json!({ "selection": override_selection }),
+        json!({ "runId": run_id, "selection": override_selection }),
+        json!({ "turnId": turn_id, "selection": override_selection }),
+    ] {
+        let missing_guard = resume(body).send().await.unwrap();
+        assert_eq!(missing_guard.status(), StatusCode::BAD_REQUEST);
+    }
     assert_eq!(
         s.store.run(&run_id).await.unwrap()["snapshot"],
         before["snapshot"]
@@ -5130,6 +5138,27 @@ async fn chat_resume_selection_keeps_saved_identity_and_reaches_the_worker_plan(
         s.store.run(&run_id).await.unwrap()["status"],
         RunStatus::Cancelled
     );
+    let invalid_default_speed = resume(json!({
+        "runId": run_id,
+        "turnId": turn_id,
+        "selection": {
+            "model": "gpt-6-luna",
+            "reasoning": "xhigh",
+            "speed": "default",
+        },
+    }))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(invalid_default_speed.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        s.store.run(&run_id).await.unwrap()["snapshot"],
+        before["snapshot"]
+    );
+    assert_eq!(
+        s.store.run(&run_id).await.unwrap()["status"],
+        RunStatus::Cancelled
+    );
 
     controller
         .hold
@@ -5143,11 +5172,10 @@ async fn chat_resume_selection_keeps_saved_identity_and_reaches_the_worker_plan(
     .await
     .unwrap();
     assert!(resumed.status().is_success());
-    drop(resume);
     let mut expected_snapshot = before["snapshot"].clone();
     expected_snapshot["agent"]["model"] = "gpt-6-luna".into();
     expected_snapshot["agent"]["reasoning"] = "xhigh".into();
-    expected_snapshot["agent"]["speed"] = "".into();
+    expected_snapshot["agent"]["speed"] = "standard".into();
     let completed = fixture.until_finished(&run_id).await;
     assert_eq!(completed["status"], RunStatus::Succeeded, "{completed}");
     assert_eq!(completed["snapshot"], expected_snapshot);
@@ -5173,11 +5201,91 @@ async fn chat_resume_selection_keeps_saved_identity_and_reaches_the_worker_plan(
         .cloned()
         .expect("the resumed worker plan must contain the selected model and reasoning");
     assert_eq!(selected_plan["chat"]["execution"]["messageId"], turn_id);
+    assert_eq!(selected_plan["chat"]["serviceTier"], "default");
     assert_eq!(selected_plan["chat"]["sessionId"], before["sessionId"]);
     assert_eq!(
         selected_plan["chat"]["execution"]["attachments"],
         before["chatExecution"]["attachments"]
     );
+
+    let unpaused = client
+        .post(format!("{}/api/chats/{chat_id}/pause", fixture.url))
+        .header("x-test-relay-token", text(&session, "value"))
+        .json(&json!({ "paused": false }))
+        .send()
+        .await
+        .unwrap();
+    unpaused.error_for_status().unwrap();
+    controller
+        .hold
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let mut later_message = message("fixture:chat-hang");
+    later_message["provider"] = "codex".into();
+    later_message["model"] = "gpt-6-luna".into();
+    later_message["reasoning"] = "xhigh".into();
+    let later_turn_id = text(&later_message, "id").to_owned();
+    s.chat_send(chat_id, later_message).await.unwrap();
+    let later_turn = fixture
+        .until(&run_id, |run| {
+            run["status"] == RunStatus::Running
+                && run["chatExecution"]["messageId"] == later_turn_id
+        })
+        .await;
+    assert_eq!(later_turn["id"], run_id);
+    eventually(
+        Duration::from_secs(20),
+        Duration::from_millis(30),
+        async || {
+            controller
+                .plans
+                .lock()
+                .await
+                .iter()
+                .any(|plan| {
+                    plan["runId"] == run_id
+                        && plan["chat"]["execution"]["messageId"] == later_turn_id
+                })
+                .then_some(())
+        },
+    )
+    .await;
+    let stopped = client
+        .post(format!("{}/api/chats/{chat_id}/stop", fixture.url))
+        .header("x-test-relay-token", text(&session, "value"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    stopped.error_for_status().unwrap();
+    let later_turn_stopped = fixture
+        .until(&run_id, |run| {
+            run["status"] == RunStatus::Cancelled && run["resumeAvailable"] == true
+        })
+        .await;
+    assert_eq!(
+        later_turn_stopped["chatExecution"]["messageId"],
+        later_turn_id
+    );
+    let stale_existing_turn = resume(json!({
+        "runId": run_id,
+        "turnId": turn_id,
+        "selection": override_selection,
+    }))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(stale_existing_turn.status(), StatusCode::CONFLICT);
+    let after_stale_existing_turn = s.store.run(&run_id).await.unwrap();
+    assert_eq!(after_stale_existing_turn["status"], RunStatus::Cancelled);
+    assert_eq!(after_stale_existing_turn["snapshot"], expected_snapshot);
+    assert_eq!(
+        after_stale_existing_turn["chatExecution"]["messageId"],
+        later_turn_id
+    );
+    drop(resume);
+    controller
+        .hold
+        .store(false, std::sync::atomic::Ordering::Relaxed);
 
     let compatibility_chat = s.chat_create(json!({})).await.unwrap();
     let compatibility_chat_id = text(&compatibility_chat, "id");
@@ -5197,11 +5305,6 @@ async fn chat_resume_selection_keeps_saved_identity_and_reaches_the_worker_plan(
             run["status"] == RunStatus::Running && run["sessionId"].is_string()
         })
         .await;
-    let compatibility_turn = text(
-        &s.store.run(&compatibility_run_id).await.unwrap()["chatExecution"],
-        "messageId",
-    )
-    .to_owned();
     let stopped = client
         .post(format!(
             "{}/api/chats/{compatibility_chat_id}/stop",
@@ -5227,10 +5330,7 @@ async fn chat_resume_selection_keeps_saved_identity_and_reaches_the_worker_plan(
             fixture.url
         ))
         .header("x-test-relay-token", text(&session, "value"))
-        .json(&json!({
-            "runId": compatibility_run_id,
-            "turnId": compatibility_turn,
-        }))
+        .json(&json!({}))
         .send()
         .await
         .unwrap();

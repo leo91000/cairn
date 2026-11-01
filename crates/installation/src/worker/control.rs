@@ -111,6 +111,15 @@ impl Worker {
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        if selection.is_some()
+            && expected_turn_id
+                .as_deref()
+                .is_none_or(|turn| turn.is_empty() || turn.chars().count() > 200)
+        {
+            return Err(Error::bad(
+                "A valid turn identifier is required when selecting a model for resume.",
+            ));
+        }
         let preparation = self.run_preparation_lock(id).await;
         let _preparation = preparation.lock_owned().await;
         let active = self.active.lock().await;
@@ -270,10 +279,18 @@ fn requeue(
     let record = required(db.run_record(id)?, "Run not found")?;
     let state = record.state.clone();
     let run = record.wire()?;
-    if expected_turn_id.is_some_and(|expected| {
-        run["chatExecution"]["messageId"].as_str() != Some(expected)
-            && run["missionTurnId"].as_str() != Some(expected)
-    }) {
+    let turn_mismatch = if selection.is_some() {
+        expected_turn_id.is_none_or(|expected| {
+            text(&run, "trigger") != "chat"
+                || run["chatExecution"]["messageId"].as_str() != Some(expected)
+        })
+    } else {
+        expected_turn_id.is_some_and(|expected| {
+            run["chatExecution"]["messageId"].as_str() != Some(expected)
+                && run["missionTurnId"].as_str() != Some(expected)
+        })
+    };
+    if turn_mismatch {
         return Err(Error::conflict(
             "This turn changed before it could be resumed. Refresh the conversation.",
         ));

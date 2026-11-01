@@ -28,6 +28,30 @@ export function showsSpeed(provider: Provider, model: CodingAgentModel | undefin
   return provider === 'codex' && (!!model?.serviceTiers?.length || !!speed)
 }
 
+/** The speed shown by the picker after applying its provider and selected-model rules. */
+export function pickerAppliedSpeed(
+  provider: Provider,
+  model: CodingAgentModel | undefined,
+  speed: string,
+  inherited: string,
+) {
+  const current = effectiveSpeed(speed, inherited)
+  return showsSpeed(provider, model, speed || inherited) && offersSpeed(model, current)
+    ? current
+    : STANDARD_SPEED
+}
+
+/** Only Codex accepts a speed override; keep its picker-applied value, including Standard. */
+export function resumeSelectionSpeed(
+  provider: Provider,
+  model: CodingAgentModel | undefined,
+  speed: string,
+  inherited: string,
+) {
+  const applied = pickerAppliedSpeed(provider, model, speed, inherited)
+  return provider === 'codex' ? applied : ''
+}
+
 /**
  * A queued or saved faster speed is a request, which each turn reports on, since Codex may answer
  * with its built-in list and an account's plan decides; one the model's catalog lacks says so. An

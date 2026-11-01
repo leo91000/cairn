@@ -388,6 +388,16 @@ pub(crate) async fn invoke(
         {
             return Err(Error::bad("Invalid turn identifier."));
         }
+        if selection.is_some() && expected_run_id.is_none() {
+            return Err(Error::bad(
+                "A run identifier is required when selecting a model for resume.",
+            ));
+        }
+        if selection.is_some() && expected_turn_id.is_none() {
+            return Err(Error::bad(
+                "A turn identifier is required when selecting a model for resume.",
+            ));
+        }
         let check = authorize.clone();
         let run_id = s
             .store
@@ -406,7 +416,10 @@ pub(crate) async fn invoke(
             .await?;
         let run = s.store.run(&run_id).await?;
         let selected_provider = if let Some(selection) = selection.as_ref() {
-            Some(crate::resume_selection::validate(s, &run, selection).await?)
+            let expected_turn_id = expected_turn_id.as_deref().ok_or_else(|| {
+                Error::bad("A turn identifier is required when selecting a model for resume.")
+            })?;
+            Some(crate::resume_selection::validate(s, &run, selection, expected_turn_id).await?)
         } else {
             None
         };

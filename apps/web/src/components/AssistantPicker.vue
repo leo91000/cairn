@@ -33,6 +33,7 @@ import { modelCatalogs } from '../models'
 import {
   effectiveSpeed,
   offersSpeed,
+  pickerAppliedSpeed,
   showsSpeed,
   speedTier,
 } from '../speeds'
@@ -96,7 +97,7 @@ const currentSpeed = computed(() => effectiveSpeed(speed.value, inheritedSpeed.v
 const speedShown = computed(() => showsSpeed(provider.value, selected.value, speed.value || inheritedSpeed.value))
 const speedOffered = computed(() => offersSpeed(selected.value, currentSpeed.value))
 // A speed the model lacks runs at standard speed, so the trigger never claims it.
-const appliedSpeed = computed(() => speedShown.value && speedOffered.value ? currentSpeed.value : STANDARD_SPEED)
+const appliedSpeed = computed(() => pickerAppliedSpeed(provider.value, selected.value, speed.value, inheritedSpeed.value))
 const appliedTier = computed(() => speedTier(selected.value, appliedSpeed.value))
 // A speed not every account confirms, or a model whose speeds are unknown, is only requested.
 const speedTag = computed(() => appliedSpeed.value === STANDARD_SPEED

@@ -30,6 +30,34 @@ fun offersSpeed(model: CodingAgentModel?, speed: String): Boolean {
 fun showsSpeed(provider: String, model: CodingAgentModel?, speed: String) =
     provider == "codex" && (!model?.serviceTiers.isNullOrEmpty() || speed.isNotBlank())
 
+/** The speed shown by the picker after applying its provider and selected-model rules. */
+fun pickerAppliedSpeed(
+    provider: String,
+    model: CodingAgentModel?,
+    speed: String,
+    inherited: String,
+    enabled: Boolean = true,
+): String {
+    val current = effectiveSpeed(speed, inherited)
+    val shown = enabled && showsSpeed(provider, model, speed.ifBlank { inherited })
+    return if (shown && offersSpeed(model, current)) {
+        current
+    } else {
+        STANDARD_SPEED
+    }
+}
+
+/** Only Codex accepts a speed override; keep its picker-applied value, including Standard. */
+fun resumeSelectionSpeed(
+    provider: String,
+    model: CodingAgentModel?,
+    speed: String,
+    inherited: String,
+): String {
+    val applied = pickerAppliedSpeed(provider, model, speed, inherited)
+    return if (provider == "codex") applied else ""
+}
+
 /**
  * A queued or saved faster speed is a request, which each turn reports on, since Codex may answer
  * with its built-in list and an account's plan decides; one the model's catalog lacks says so. An

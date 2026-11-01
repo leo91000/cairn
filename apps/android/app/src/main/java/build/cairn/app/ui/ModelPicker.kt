@@ -203,7 +203,7 @@ fun ModelPicker(
         changeSpeed != null && showsSpeed(provider, selected, speed.ifBlank { inheritedSpeed })
     // A speed the model lacks runs at standard speed, so the trigger never claims it.
     val appliedSpeed =
-        if (speedShown && offersSpeed(selected, currentSpeed)) currentSpeed else STANDARD_SPEED
+        pickerAppliedSpeed(provider, selected, speed, inheritedSpeed, changeSpeed != null)
     // A speed not every account confirms, or a model whose speeds are unknown, is only requested.
     val speedUncertain = selected?.serviceTiers?.any { it.id == appliedSpeed && it.limited } ?: true
     val speedTag =

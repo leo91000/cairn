@@ -118,7 +118,7 @@ pub(crate) const CHAT_OPERATIONS: &[ChatOperation] = &[
     ChatOperation {
         name: "resume_chat",
         scope: "run",
-        description: "Resume a failed or stopped agent execution using its saved session, subject to existing recovery rules. An optional selection changes only this turn's model, reasoning and speed for the same coding agent; runId and turnId guard against stale selections. Use set_chat_paused(false) to resume queued follow-ups.",
+        description: "Resume a failed or stopped chat turn using its saved session, subject to existing recovery rules. An optional selection changes only this turn's model, reasoning and speed for the same coding agent; runId and turnId are required and guard against stale selections. Mission runs do not support model selection. Use set_chat_paused(false) to resume queued follow-ups.",
     },
     ChatOperation {
         name: "restart_chat_session",

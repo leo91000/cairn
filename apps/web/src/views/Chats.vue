@@ -111,6 +111,7 @@ import { useRetryState } from '../run-retry'
 import { exclusiveSuspensionLabel, isExclusivelySuspended } from '../run-status'
 import { backgroundWait } from '../signal'
 import { chatSkills } from '../skill-mentions'
+import { pickerAppliedSpeed, resumeSelectionSpeed } from '../speeds'
 import { delegatedChatsKey, openSubagentKey, subagentState } from '../subagents'
 import { iconButton } from '../ui'
 import { useLiveRun } from '../use-live-run'
@@ -709,18 +710,31 @@ async function resumeQuota() {
     const run = chat.run
     if (run && run.resumeAvailable && ['failed', 'interrupted', 'cancelled'].includes(run.status)) {
       const savedAgent = run.snapshot?.agent
-      const selectedModel = model.value || savedAgent?.model || ''
+      const catalog = modelCatalogs[chosenProvider.value].catalog.models
+      const selectedModel = model.value || savedAgent?.model || catalog.find(item => item.isDefault)?.model || ''
       const selectedReasoning = reasoning.value || (!model.value ? savedAgent?.reasoning : '') || ''
-      const selectedSpeed = speed.value || savedAgent?.speed || ''
+      const modelRow = (name: string) => catalog.find(item => item.model === name || item.routes?.some(route => route.model === name))
+        || (!name ? catalog.find(item => item.isDefault) : undefined)
+      const selectedDisplayedSpeed = savedAgent
+        ? pickerAppliedSpeed(chosenProvider.value, modelRow(selectedModel), speed.value, savedAgent.speed)
+        : ''
+      const selectedSpeed = savedAgent
+        ? resumeSelectionSpeed(chosenProvider.value, modelRow(selectedModel), speed.value, savedAgent.speed)
+        : ''
+      const savedSpeed = savedAgent
+        ? pickerAppliedSpeed(chosenProvider.value, modelRow(savedAgent.model), '', savedAgent.speed)
+        : ''
+      const turnId = run.chatExecution?.messageId
       const selection: ResumeExecutionSelection | undefined = savedAgent
         && chosenProvider.value === savedAgent.provider
-        && (selectedModel !== savedAgent.model || selectedReasoning !== savedAgent.reasoning || selectedSpeed !== savedAgent.speed)
+        && !!turnId
+        && (selectedModel !== savedAgent.model || selectedReasoning !== savedAgent.reasoning || selectedDisplayedSpeed !== savedSpeed)
         ? { model: selectedModel, reasoning: selectedReasoning, speed: selectedSpeed }
         : undefined
       await resumeChat(api, {
         chatId: chat.id,
         runId: run.id,
-        turnId: run.chatExecution?.messageId,
+        turnId,
         selection,
       })
     }

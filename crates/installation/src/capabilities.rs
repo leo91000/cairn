@@ -57,7 +57,16 @@ impl ResumeRun {
         {
             return Err(Error::bad("Invalid turn identifier."));
         }
+        if input.selection.is_some() && input.turn_id.is_none() {
+            return Err(Error::bad(
+                "A turn identifier is required when selecting a model for resume.",
+            ));
+        }
         let id = input.run_id.to_string();
+        let preauthorize_before_catalog = matches!(
+            &context,
+            ResumeContext::Human(_) | ResumeContext::Public(..)
+        );
         let (origin, bearer) = match context {
             ResumeContext::Human(account) => (Origin::Human(account), None),
             ResumeContext::Public(scopes, _) => {
@@ -80,10 +89,25 @@ impl ResumeRun {
                 (Origin::Run(caller), Some(bearer))
             }
         };
-        let run = s.store.run(&id).await?;
         let selection = input.selection;
+        let run = if selection.is_some() && preauthorize_before_catalog {
+            let authorize_id = id.clone();
+            let authorize_origin = origin.clone();
+            s.store
+                .read(move |db| {
+                    let run = crate::error::required(db.run(&authorize_id)?, "Run not found")?;
+                    policy::run_grant(db, &run, &authorize_origin)?;
+                    Ok(run)
+                })
+                .await?
+        } else {
+            s.store.run(&id).await?
+        };
         let selected_provider = if let Some(selection) = selection.as_ref() {
-            Some(crate::resume_selection::validate(s, &run, selection).await?)
+            let expected_turn_id = input.turn_id.as_deref().ok_or_else(|| {
+                Error::bad("A turn identifier is required when selecting a model for resume.")
+            })?;
+            Some(crate::resume_selection::validate(s, &run, selection, expected_turn_id).await?)
         } else {
             None
         };

@@ -1387,7 +1387,7 @@ internal fun ChatPage(
                                                                             )
                                                                 ) {
                                                                     val savedAgent = run.snapshot?.agent
-                                                                    val selectedModel =
+                                                                    val selectedModelName =
                                                                         model.ifBlank {
                                                                             savedAgent?.model.orEmpty()
                                                                         }
@@ -1399,30 +1399,69 @@ internal fun ChatPage(
                                                                                     .orEmpty()
                                                                             else ""
                                                                         }
-                                                                    val selectedSpeed =
-                                                                        speed.ifBlank {
-                                                                            savedAgent?.speed.orEmpty()
-                                                                        }
                                                                     val selection =
                                                                         if (
                                                                             savedAgent != null &&
                                                                                 chosenProvider ==
                                                                                     savedAgent.provider &&
-                                                                                (selectedModel !=
+                                                                                !run.chatExecution
+                                                                                    ?.messageId
+                                                                                    .isNullOrBlank()
+                                                                        ) {
+                                                                            val catalog =
+                                                                                state.modelCatalog(
+                                                                                    chosenProvider,
+                                                                                )
+                                                                            val selectedRow =
+                                                                                selectedModel(
+                                                                                    catalog,
+                                                                                    model,
+                                                                                    savedAgent.model,
+                                                                                )
+                                                                            val savedRow =
+                                                                                selectedModel(
+                                                                                    catalog,
+                                                                                    savedAgent.model,
+                                                                                    savedAgent.model,
+                                                                                )
+                                                                            val selectedDisplayedSpeed =
+                                                                                pickerAppliedSpeed(
+                                                                                    chosenProvider,
+                                                                                    selectedRow,
+                                                                                    speed,
+                                                                                    savedAgent.speed,
+                                                                                )
+                                                                            val selectedSpeed =
+                                                                                resumeSelectionSpeed(
+                                                                                    chosenProvider,
+                                                                                    selectedRow,
+                                                                                    speed,
+                                                                                    savedAgent.speed,
+                                                                                )
+                                                                            val savedSpeed =
+                                                                                pickerAppliedSpeed(
+                                                                                    chosenProvider,
+                                                                                    savedRow,
+                                                                                    "",
+                                                                                    savedAgent.speed,
+                                                                                )
+                                                                            if (
+                                                                                selectedModelName !=
                                                                                     savedAgent.model ||
                                                                                     selectedReasoning !=
                                                                                     savedAgent.reasoning ||
-                                                                                    selectedSpeed !=
-                                                                                    savedAgent.speed)
-                                                                        ) {
-                                                                            ResumeExecutionSelection(
-                                                                                model =
-                                                                                    selectedModel,
-                                                                                reasoning =
-                                                                                    selectedReasoning,
-                                                                                speed =
-                                                                                    selectedSpeed,
-                                                                            )
+                                                                                    selectedDisplayedSpeed !=
+                                                                                    savedSpeed
+                                                                            ) {
+                                                                                ResumeExecutionSelection(
+                                                                                    model =
+                                                                                        selectedModelName,
+                                                                                    reasoning =
+                                                                                        selectedReasoning,
+                                                                                    speed =
+                                                                                        selectedSpeed,
+                                                                                )
+                                                                            } else null
                                                                         } else null
                                                                     api.resumeChat(
                                                                         ResumeChatInput(

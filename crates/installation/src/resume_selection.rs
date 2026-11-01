@@ -12,14 +12,17 @@ pub(crate) async fn validate(
     s: &Service,
     run: &Value,
     selection: &ResumeExecutionSelection,
+    expected_turn_id: &str,
 ) -> Result<Provider> {
     if !matches!(text(run, "status"), "failed" | "interrupted" | "cancelled")
         || run["resumeAvailable"] != true
         || !run["workspaceCleanedAt"].is_null()
         || run["backendMigration"].is_object()
+        || text(run, "trigger") != "chat"
+        || run["chatExecution"]["messageId"].as_str() != Some(expected_turn_id)
     {
         return Err(Error::conflict(
-            "This stopped run is not available for a model-aware resume.",
+            "This stopped chat turn is not available for a model-aware resume.",
         ));
     }
     let provider = Provider::of_run(run)?;
