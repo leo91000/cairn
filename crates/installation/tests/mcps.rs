@@ -651,7 +651,11 @@ createInterface({ input: process.stdin }).on('line', line => {
     } else if (request.method === 'tools/call') {
         appendFileSync(process.env.TEST_COUNTER, 'call\n');
         const mode = request.params.arguments.mode;
-        if (mode === 'many') {
+        if (mode === 'scalar') {
+            result = 42;
+        } else if (mode === 'array') {
+            result = ['fixture'];
+        } else if (mode === 'many') {
             result = { content: Array.from({ length: 60000 }, () => ({ type: 'text', text: '' })), structuredContent: { value: 'completed' } };
         } else {
             result = mode === 'error'
@@ -703,12 +707,12 @@ async fn gateway_bounds_completed_results_without_changing_schemas_grants_or_eff
         .unwrap();
     let endpoint = format!("{origin}/mcp-gateway/{connection_id}");
     let http = reqwest::Client::new();
-    let request = |method: &str, params: Value| {
+    let request = |version: &str, method: &str, params: Value| {
         http.post(&endpoint).bearer_auth(token)
-            .header("mcp-protocol-version", "2025-11-25")
+            .header("mcp-protocol-version", version)
             .json(&json!({ "jsonrpc": "2.0", "id": "fixture-id", "method": method, "params": params }))
     };
-    let catalog: Value = request("tools/list", json!({}))
+    let catalog: Value = request("2025-11-25", "tools/list", json!({}))
         .send()
         .await
         .unwrap()
@@ -731,6 +735,7 @@ async fn gateway_bounds_completed_results_without_changing_schemas_grants_or_eff
         .enumerate()
     {
         let response = request(
+            "2025-11-25",
             "tools/call",
             json!({ "name": "bounded_fixture", "arguments": { "mode": mode } }),
         )
@@ -778,8 +783,36 @@ async fn gateway_bounds_completed_results_without_changing_schemas_grants_or_eff
         s.mcps.server(&s, connection_id).await.unwrap().tools,
         canonical
     );
+    let mut calls = 5;
+    for version in ["2025-11-25", "2026-07-28"] {
+        for mode in ["scalar", "array"] {
+            let response = request(
+                version,
+                "tools/call",
+                json!({ "name": "bounded_fixture", "arguments": { "mode": mode } }),
+            )
+            .send()
+            .await
+            .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            let response: Value = response.json().await.unwrap();
+            assert_eq!(response["id"], "fixture-id");
+            assert_eq!(response["error"]["code"], -32603);
+            assert_eq!(
+                response["error"]["message"],
+                "MCP response result must be an object. Tool outcome is unknown; do not repeat the operation automatically."
+            );
+            assert!(response.get("result").is_none());
+            calls += 1;
+            assert_eq!(
+                std::fs::read_to_string(&counter).unwrap().lines().count(),
+                calls
+            );
+        }
+    }
     s.mcps.revoke_run(&s, run_id).await.unwrap();
     let revoked = request(
+        "2025-11-25",
         "tools/call",
         json!({ "name": "bounded_fixture", "arguments": { "mode": "small" } }),
     )
@@ -789,7 +822,7 @@ async fn gateway_bounds_completed_results_without_changing_schemas_grants_or_eff
     assert_eq!(revoked.status(), reqwest::StatusCode::UNAUTHORIZED);
     assert_eq!(
         std::fs::read_to_string(&counter).unwrap().lines().count(),
-        5
+        calls
     );
     server.abort();
 }

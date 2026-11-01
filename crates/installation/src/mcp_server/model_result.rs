@@ -129,7 +129,7 @@ pub(super) fn finish(mut result: Value) -> Result<Value> {
     Ok(result)
 }
 
-/// Omit whole optional fields, largest first, retaining small complete auth
+/// Omit whole optional fields, largest first, reserving complete auth
 /// metadata. Count each field once; many small extensions must not cause a
 /// quadratic series of whole-result serializations.
 fn prune_metadata(result: &mut Value) -> Result<()> {
@@ -151,16 +151,20 @@ fn prune_metadata(result: &mut Value) -> Result<()> {
         {
             for (key, value) in meta {
                 let field_bytes = size(&json!(key)) + 1 + size(value);
-                candidates.push((field_bytes, Some(key.clone()), "_meta".to_owned()));
+                // A recognized challenge is considered only after every
+                // optional sibling. It can be omitted only if it cannot fit
+                // alongside the bounded mandatory result envelope by itself.
+                let optional = key != "mcp/www_authenticate";
+                candidates.push((optional, field_bytes, Some(key.clone()), "_meta".to_owned()));
             }
             continue;
         }
         let field_bytes = size(&json!(key)) + 1 + size(value);
-        candidates.push((field_bytes, None, key.clone()));
+        candidates.push((true, field_bytes, None, key.clone()));
     }
     candidates.sort_unstable();
     while bytes > LIMIT {
-        let Some((field_bytes, meta_key, key)) = candidates.pop() else {
+        let Some((_, field_bytes, meta_key, key)) = candidates.pop() else {
             return Err(Error::bad_gateway(
                 "Mandatory MCP result metadata exceeds the response budget. Tool outcome is unknown; do not repeat the operation automatically.",
             ));
@@ -319,6 +323,70 @@ mod tests {
         );
         assert_eq!(result["structuredContent"]["metadataOmitted"], true);
         assert_eq!(result["isError"], true);
+    }
+
+    #[test]
+    fn many_tiny_optional_metadata_fields_cannot_evict_a_small_auth_challenge() {
+        let challenge = json!(["Bearer error=\"insufficient_scope\", scope=\"read\""]);
+        let mut meta = serde_json::Map::new();
+        meta.insert("mcp/www_authenticate".to_owned(), challenge.clone());
+        for index in 0..90_000 {
+            meta.insert(format!("x{index:06}"), json!(0));
+        }
+        let original = json!({
+            "content": [{ "type": "text", "text": "denied" }],
+            "isError": true,
+            "_meta": meta,
+        });
+        let wire = json!({ "jsonrpc": "2.0", "id": 1, "result": original });
+        let wire_bytes = serde_json::to_vec(&wire).unwrap().len();
+        assert!(wire_bytes > LIMIT);
+        assert!(wire_bytes < 2_000_000);
+
+        MEASURED_ENCODED_BYTES.with(|measured| measured.set(0));
+        let result = finish(original).unwrap();
+        let measured = MEASURED_ENCODED_BYTES.with(std::cell::Cell::get);
+        assert!(
+            measured < 8 * wire_bytes,
+            "Metadata sizing revisited {measured} bytes for a {wire_bytes}-byte fixture"
+        );
+        assert!(serde_json::to_vec(&result).unwrap().len() <= LIMIT);
+        assert_eq!(result["_meta"]["mcp/www_authenticate"], challenge);
+        assert_eq!(result["isError"], true);
+        assert_eq!(result["structuredContent"]["metadataOmitted"], true);
+        assert_eq!(result["structuredContent"]["retained"], false);
+    }
+
+    #[test]
+    fn auth_challenge_that_cannot_fit_itself_is_omitted_whole() {
+        let result = bounded(json!({
+            "content": [{ "type": "text", "text": "denied" }],
+            "isError": true,
+            "_meta": { "mcp/www_authenticate": "x".repeat(LIMIT + 1) },
+        }));
+        assert!(result["_meta"].get("mcp/www_authenticate").is_none());
+        assert_eq!(result["isError"], true);
+        assert_eq!(result["structuredContent"]["metadataOmitted"], true);
+    }
+
+    #[test]
+    fn protocol_adaptation_rejects_non_object_results_before_indexing_in_all_versions() {
+        for modern in [false, true] {
+            for malformed in [
+                json!(42),
+                json!([]),
+                json!("x".repeat(LIMIT + 1)),
+                json!(["x".repeat(LIMIT + 1)]),
+            ] {
+                let error =
+                    super::super::finish_result(malformed, "tools/call", modern, true).unwrap_err();
+                assert_eq!(error.status, 502);
+                assert_eq!(
+                    error.message,
+                    "MCP response result must be an object. Tool outcome is unknown; do not repeat the operation automatically."
+                );
+            }
+        }
     }
 
     #[test]

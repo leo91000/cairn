@@ -368,6 +368,11 @@ async fn respond(s: &Arc<Service>, request: Request) -> Result<Response> {
 
 /// Adapts a result to the negotiated protocol's result metadata.
 fn finish_result(mut result: Value, method: &str, modern: bool, gateway: bool) -> Result<Value> {
+    if !result.is_object() {
+        return Err(Error::bad_gateway(
+            "MCP response result must be an object. Tool outcome is unknown; do not repeat the operation automatically.",
+        ));
+    }
     if modern && CACHEABLE.contains(&method) {
         result["ttlMs"] = 0.into();
         result["cacheScope"] = "private".into();

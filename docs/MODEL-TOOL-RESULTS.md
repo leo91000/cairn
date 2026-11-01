@@ -34,7 +34,7 @@ When necessary, whole oversized fields are omitted and `metadataOmitted=true`
 is reported. Small authentication challenges survive alongside omitted large
 siblings. An oversized challenge itself can be omitted, so its original
 authentication hint is unavailable; the original error outcome remains.
-Oversized mandatory routing metadata, or an oversized non-object result, is an
+Oversized mandatory routing metadata, or a non-object result, is an
 unsupported protocol result with a fixed bounded error and unknown outcome.
 Cairn does not manufacture a replacement challenge or infer new permissions.
 
