@@ -489,6 +489,151 @@ abstract class BackgroundWaitCases {
         }
 
     @Test
+    fun savedCodexQuotaResumeUsesExplicitSameModelDefaultEffort() =
+        conversation("failed", quota = true, resumeSameModelDefault = true) { server ->
+            compose.onNodeWithTag("chat-quota").assertIsDisplayed()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(
+                        hasTestTag("model-picker") and
+                            hasContentDescription("GPT-6 Sol · effort moyen", substring = true)
+                    )
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithTag("model-picker").performClick()
+            compose
+                .onNode(hasText("GPT-6 Sol", substring = false) and hasClickAction())
+                .performScrollTo()
+                .performClick()
+            val defaultEffort = compose.onNodeWithTag("reasoning-default")
+            defaultEffort.assert(hasText("Par défaut · Moyen", substring = true))
+            defaultEffort.performClick()
+            compose
+                .onNode(hasText("Standard") and hasAnyAncestor(hasTestTag("speed-options")))
+                .performClick()
+            defaultEffort.assertIsSelected()
+            compose.onNodeWithText("Terminé").performClick()
+            compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
+
+            val request = generateSequence {
+                server.takeRequest(5, TimeUnit.SECONDS)
+            }
+                .first {
+                    it.method == "POST" &&
+                        it.path?.endsWith("/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume") ==
+                            true
+                }
+            val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+            org.junit.Assert.assertEquals(
+                "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                body["chatId"]!!.jsonPrimitive.content,
+            )
+            org.junit.Assert.assertEquals(SAVED_RUN_ID, body["runId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("quota-turn", body["turnId"]!!.jsonPrimitive.content)
+            val selection = body["selection"]!!.jsonObject
+            org.junit.Assert.assertEquals("gpt-6-sol", selection["model"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("medium", selection["reasoning"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("standard", selection["speed"]!!.jsonPrimitive.content)
+        }
+
+    @Test
+    fun savedCodexQuotaResumeKeepsExplicitEffortOverModelDefault() =
+        conversation("failed", quota = true, resumeExplicitEffort = true) { server ->
+            compose.onNodeWithTag("chat-quota").assertIsDisplayed()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(
+                        hasTestTag("model-picker") and
+                            hasContentDescription("GPT-6 Sol · effort moyen", substring = true)
+                    )
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithTag("model-picker").performClick()
+            compose
+                .onNode(hasText("GPT-6 Sol", substring = false) and hasClickAction())
+                .performScrollTo()
+                .performClick()
+            compose.onNodeWithTag("reasoning-slider").performSemanticsAction(
+                SemanticsActions.SetProgress
+            ) {
+                it(0f)
+            }
+            compose.onNodeWithTag("reasoning-slider").assert(hasStateDescription("Faible"))
+            compose.onNodeWithText("Terminé").performClick()
+            compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
+
+            val request = generateSequence {
+                server.takeRequest(5, TimeUnit.SECONDS)
+            }
+                .first {
+                    it.method == "POST" &&
+                        it.path?.endsWith("/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume") ==
+                            true
+                }
+            val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+            org.junit.Assert.assertEquals(
+                "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                body["chatId"]!!.jsonPrimitive.content,
+            )
+            org.junit.Assert.assertEquals(SAVED_RUN_ID, body["runId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("quota-turn", body["turnId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals(
+                "gpt-6-sol",
+                body["selection"]!!.jsonObject["model"]!!.jsonPrimitive.content,
+            )
+            org.junit.Assert.assertEquals(
+                "low",
+                body["selection"]!!.jsonObject["reasoning"]!!.jsonPrimitive.content,
+            )
+        }
+
+    @Test
+    fun savedCodexQuotaResumeClearsDefaultIntentWhenReturningToConversationModel() =
+        conversation("failed", quota = true, resumeResetIntent = true) { server ->
+            compose.onNodeWithTag("chat-quota").assertIsDisplayed()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(
+                        hasTestTag("model-picker") and
+                            hasContentDescription("GPT-6 Sol · effort moyen", substring = true)
+                    )
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithTag("model-picker").performClick()
+            compose
+                .onNode(hasText("GPT-6 Sol", substring = false) and hasClickAction())
+                .performScrollTo()
+                .performClick()
+            compose.onNodeWithTag("reasoning-default").performClick()
+            compose
+                .onNode(hasText("Modèle de la conversation") and isSelectable())
+                .performScrollTo()
+                .performClick()
+            compose.onNodeWithText("Terminé").performClick()
+            compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
+
+            val request = generateSequence {
+                server.takeRequest(5, TimeUnit.SECONDS)
+            }
+                .first {
+                    it.method == "POST" &&
+                        it.path?.endsWith("/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume") ==
+                            true
+                }
+            val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+            org.junit.Assert.assertEquals(
+                "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                body["chatId"]!!.jsonPrimitive.content,
+            )
+            org.junit.Assert.assertEquals(SAVED_RUN_ID, body["runId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("quota-turn", body["turnId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertFalse(body.containsKey("selection"))
+        }
+
+    @Test
     fun relayedBackgroundWaitReplacesWorking() =
         conversation("running") {
             compose.onNodeWithTag("agent-waiting").assertExists()
@@ -829,6 +974,9 @@ abstract class BackgroundWaitCases {
         resumeChangedModel: Boolean = false,
         resumeInheritedEffort: Boolean = false,
         resumeInheritedSpeed: Boolean = false,
+        resumeSameModelDefault: Boolean = false,
+        resumeExplicitEffort: Boolean = false,
+        resumeResetIntent: Boolean = false,
         resumeRouteSelection: Boolean = false,
         resumePinnedRouteSelection: Boolean = false,
         resumableTurn: Boolean = false,
@@ -846,6 +994,9 @@ abstract class BackgroundWaitCases {
                 resumeSelection ||
                     resumeChangedModel ||
                     resumeInheritedEffort ||
+                    resumeSameModelDefault ||
+                    resumeExplicitEffort ||
+                    resumeResetIntent ||
                     resumeRouteSelection
             val hasSavedTurn = hasResumeSelection || resumableTurn
             val chat =
@@ -889,7 +1040,10 @@ abstract class BackgroundWaitCases {
                                                     quota &&
                                                         !resumeSelection &&
                                                         !resumeChangedModel &&
-                                                        !resumeInheritedEffort
+                                                        !resumeInheritedEffort &&
+                                                        !resumeSameModelDefault &&
+                                                        !resumeExplicitEffort &&
+                                                        !resumeResetIntent
                                                 )
                                                     "claude"
                                                 else "codex",
@@ -898,8 +1052,11 @@ abstract class BackgroundWaitCases {
                                                     resumePinnedRouteSelection ->
                                                         "opencode/ling-3.1-flash-free"
                                                     resumeRouteSelection -> "auto/sonnet"
-                                                    resumeChangedModel || resumeInheritedEffort ->
-                                                        "gpt-6-sol"
+                                                    resumeChangedModel ||
+                                                        resumeInheritedEffort ||
+                                                        resumeSameModelDefault ||
+                                                        resumeExplicitEffort ||
+                                                        resumeResetIntent -> "gpt-6-sol"
                                                     else -> ""
                                                 },
                                             reasoning =
@@ -907,13 +1064,19 @@ abstract class BackgroundWaitCases {
                                                     resumeRouteSelection -> "medium"
                                                     resumeSelection -> "high"
                                                     resumeChangedModel -> "high"
+                                                    resumeSameModelDefault ||
+                                                        resumeExplicitEffort ||
+                                                        resumeResetIntent -> "high"
                                                     else -> ""
                                                 },
                                             speed =
                                                 if (
                                                     resumeSelection ||
                                                         resumeChangedModel ||
-                                                        resumeInheritedSpeed
+                                                        resumeInheritedSpeed ||
+                                                        resumeSameModelDefault ||
+                                                        resumeExplicitEffort ||
+                                                        resumeResetIntent
                                                 )
                                                     "priority"
                                                 else "",
@@ -1109,6 +1272,9 @@ abstract class BackgroundWaitCases {
                                                         defaultReasoningEffort = "medium",
                                                         supportedReasoningEfforts =
                                                             listOf(
+                                                                ReasoningOption(
+                                                                    reasoningEffort = "low"
+                                                                ),
                                                                 ReasoningOption(
                                                                     reasoningEffort = "medium"
                                                                 ),

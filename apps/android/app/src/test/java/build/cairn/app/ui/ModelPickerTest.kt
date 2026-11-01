@@ -64,6 +64,46 @@ class ModelPickerTest : ModelPickerCases() {
     }
 
     @Test
+    fun resumeSelectionKeepsUntouchedAndExplicitReasoningIntentsDistinct() {
+        assertEquals(
+            "",
+            resumeSelectionReasoning(ResumeReasoningIntent.Untouched, "", "", false, "low"),
+        )
+        assertEquals(
+            "high",
+            resumeSelectionReasoning(ResumeReasoningIntent.Untouched, "", "high", false, "low"),
+        )
+        assertEquals(
+            "low",
+            resumeSelectionReasoning(ResumeReasoningIntent.Untouched, "", "high", true, "low"),
+        )
+        assertEquals(
+            "low",
+            resumeSelectionReasoning(ResumeReasoningIntent.ModelDefault, "", "high", false, "low"),
+        )
+        assertEquals(
+            "xhigh",
+            resumeSelectionReasoning(
+                ResumeReasoningIntent.Effort("xhigh"),
+                "",
+                "high",
+                true,
+                "low",
+            ),
+        )
+        assertEquals(
+            "medium",
+            resumeSelectionReasoning(
+                ResumeReasoningIntent.Untouched,
+                "medium",
+                "high",
+                true,
+                "low",
+            ),
+        )
+    }
+
+    @Test
     fun resumeSelectionPreservesExplicitGroupedRouteIds() {
         val catalog =
             ModelCatalog(

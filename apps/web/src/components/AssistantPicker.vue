@@ -2,6 +2,7 @@
 import type { CSSProperties } from 'vue'
 import type { Provider } from '../../../../packages/contracts/accounts'
 import type { CodingAgentModel } from '../../../../packages/contracts/models'
+import type { ResumeReasoningIntent } from '../speeds'
 import {
   computed,
   nextTick,
@@ -58,6 +59,9 @@ const props = withDefaults(defineProps<{
   defaultSource: 'agent',
   variant: 'pill',
 })
+const emit = defineEmits<{
+  reasoningChoice: [choice: ResumeReasoningIntent]
+}>()
 const provider = defineModel<Provider>('provider', { default: 'codex' })
 const model = defineModel<string>('model', { default: '' })
 const reasoning = defineModel<string>('reasoning', { default: '' })
@@ -169,6 +173,7 @@ const unsupported = computed(() => !!reasoning.value && !!selected.value && !eff
 function chooseProvider(value: Provider) {
   if (value === provider.value)
     return
+  emit('reasoningChoice', { kind: 'untouched' })
   provider.value = value
   model.value = ''
   reasoning.value = ''
@@ -179,6 +184,7 @@ function chooseProvider(value: Provider) {
 function chooseModel(option: { value: string, chosen: boolean }) {
   if (option.chosen)
     return
+  emit('reasoningChoice', { kind: 'untouched' })
   model.value = option.value
   reasoning.value = ''
 }
@@ -186,8 +192,19 @@ function chooseModel(option: { value: string, chosen: boolean }) {
 // Switching between routes of one model keeps a reasoning level they share.
 function chooseRoute(value: string) {
   const effort = effectiveEffort.value
+  emit('reasoningChoice', { kind: 'untouched' })
   model.value = value
   reasoning.value = efforts.value.some(option => option.reasoningEffort === effort) ? effort : ''
+}
+
+function chooseDefaultReasoning() {
+  reasoning.value = ''
+  emit('reasoningChoice', model.value ? { kind: 'model-default' } : { kind: 'untouched' })
+}
+
+function chooseReasoningEffort(value: string) {
+  reasoning.value = value
+  emit('reasoningChoice', { kind: 'effort', value })
 }
 
 function place() {
@@ -468,7 +485,7 @@ onBeforeUnmount(() => removeEventListener('resize', place))
                       :aria-checked="!reasoning"
                       class="effort-chip"
                       :disabled="disabled"
-                      @click="reasoning = ''"
+                      @click="chooseDefaultReasoning"
                     >
                       <Icon v-if="!reasoning" :name="Check" :size="12" />{{ defaultOwner }} default{{ defaultEffort ? ` · ${effortLabel(defaultEffort)}` : '' }}
                     </button>
@@ -480,7 +497,7 @@ onBeforeUnmount(() => removeEventListener('resize', place))
                       :aria-checked="reasoning === effort.reasoningEffort"
                       class="effort-chip"
                       :disabled="disabled"
-                      @click="reasoning = effort.reasoningEffort"
+                      @click="chooseReasoningEffort(effort.reasoningEffort)"
                     >
                       {{ effortLabel(effort.reasoningEffort) }}
                     </button>

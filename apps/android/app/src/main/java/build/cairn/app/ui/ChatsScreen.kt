@@ -378,6 +378,25 @@ internal fun ChatPage(
                 current = { savedIsCurrent(it, conversations.state?.chats) },
             )
     val chat = live.state?.chat?.takeIf { it.id == id }
+    val savedResumeRun = chat?.run
+    val savedResumeAgent = savedResumeRun?.snapshot?.agent
+    val savedResumeTurnId = savedResumeRun?.chatExecution?.messageId
+    val resumeReasoningContext =
+        listOf(
+                id,
+                chat?.id,
+                savedResumeRun?.id,
+                savedResumeTurnId,
+                savedResumeAgent?.id,
+                savedResumeAgent?.provider,
+                savedResumeAgent?.model,
+                savedResumeAgent?.reasoning,
+                savedResumeAgent?.speed,
+            )
+            .joinToString("\u0000") { value ->
+                val normalized = value.orEmpty()
+                "${normalized.length}:$normalized"
+            }
     ReadWhileOpen(
         vm,
         chat
@@ -402,6 +421,31 @@ internal fun ChatPage(
     var model by rememberSaveable(id) { mutableStateOf(savedDraft.model) }
     var reasoning by rememberSaveable(id) { mutableStateOf(savedDraft.reasoning) }
     var speed by rememberSaveable(id) { mutableStateOf(savedDraft.speed) }
+    var reasoningIntentKind by
+        rememberSaveable(id, resumeReasoningContext) { mutableStateOf("untouched") }
+    var reasoningIntentValue by rememberSaveable(id, resumeReasoningContext) { mutableStateOf("") }
+    fun setResumeReasoningIntent(intent: ResumeReasoningIntent) {
+        when (intent) {
+            is ResumeReasoningIntent.Effort -> {
+                reasoningIntentKind = "effort"
+                reasoningIntentValue = intent.value
+            }
+            ResumeReasoningIntent.ModelDefault -> {
+                reasoningIntentKind = "model-default"
+                reasoningIntentValue = ""
+            }
+            ResumeReasoningIntent.Untouched -> {
+                reasoningIntentKind = "untouched"
+                reasoningIntentValue = ""
+            }
+        }
+    }
+    val currentResumeReasoningIntent =
+        when (reasoningIntentKind) {
+            "model-default" -> ResumeReasoningIntent.ModelDefault
+            "effort" -> ResumeReasoningIntent.Effort(reasoningIntentValue)
+            else -> ResumeReasoningIntent.Untouched
+        }
     var attachments by rememberForm(savedDraft.attachments)
     // Per-file states of the composer: refused before upload, uploading, or failed to upload.
     var rejected by rememberForm(savedDraft.rejected)
@@ -567,6 +611,7 @@ internal fun ChatPage(
     val defaultReasoning = inheritedAssistant?.reasoning.orEmpty()
     val defaultSpeed = inheritedAssistant?.speed.orEmpty()
     fun chooseProvider(value: String) {
+        setResumeReasoningIntent(ResumeReasoningIntent.Untouched)
         provider = value
         model = ""
         reasoning = ""
@@ -662,6 +707,7 @@ internal fun ChatPage(
         uploadErrors.remove(key)
     }
     fun clearDraft() {
+        setResumeReasoningIntent(ResumeReasoningIntent.Untouched)
         vm.files.discard(attachments)
         attachments = emptyList()
         rejected = emptyList()
@@ -783,6 +829,7 @@ internal fun ChatPage(
             return
         }
         editing = message.id
+        setResumeReasoningIntent(ResumeReasoningIntent.Untouched)
         composer.setTextAndPlaceCursorAtEnd(message.text)
         provider = message.provider.ifBlank { currentProvider }
         model = message.model
@@ -1416,23 +1463,16 @@ internal fun ChatPage(
                                                                                         savedAgent
                                                                                             .model
                                                                             val selectedReasoning =
-                                                                                if (
-                                                                                    reasoning
-                                                                                        .isNotBlank()
-                                                                                ) {
-                                                                                    reasoning
-                                                                                } else if (
-                                                                                    selectedModelChanged
-                                                                                ) {
-                                                                                    pickerAppliedReasoning(
-                                                                                        selectedRow,
-                                                                                        reasoning,
-                                                                                        "",
-                                                                                    )
-                                                                                } else {
+                                                                                resumeSelectionReasoning(
+                                                                                    currentResumeReasoningIntent,
+                                                                                    reasoning,
                                                                                     savedAgent
-                                                                                        .reasoning
-                                                                                }
+                                                                                        .reasoning,
+                                                                                    selectedModelChanged,
+                                                                                    selectedRow
+                                                                                        ?.defaultReasoningEffort
+                                                                                        .orEmpty(),
+                                                                                )
                                                                             val selectedModelName =
                                                                                 resumeSelectionModelId(
                                                                                     selectedRow,
@@ -1791,6 +1831,7 @@ internal fun ChatPage(
                                                 speed = speed,
                                                 defaultSpeed = defaultSpeed,
                                                 changeSpeed = { speed = it },
+                                                onReasoningIntent = ::setResumeReasoningIntent,
                                             ) { m, r ->
                                                 model = m
                                                 reasoning = r

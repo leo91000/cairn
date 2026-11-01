@@ -2,6 +2,11 @@ import type { Provider } from '../../../packages/contracts/accounts'
 import type { CodingAgentModel, ServiceTier } from '../../../packages/contracts/models'
 import { speedLabel, STANDARD_SPEED } from '../../../packages/contracts/models'
 
+export type ResumeReasoningIntent
+  = | { kind: 'untouched' }
+    | { kind: 'model-default' }
+    | { kind: 'effort', value: string }
+
 // A speed is independent of the model and the reasoning level: it is kept when either
 // changes. Only Codex lists speeds, per model and account, in its catalog.
 
@@ -64,6 +69,25 @@ export function needsResumeSelection(
   return selectedModel !== savedModel
     || selectedReasoning !== savedReasoning
     || selectedSpeed !== effectiveSpeed('', savedSpeed)
+}
+
+/** Resolve the picker choice without confusing an untouched blank with an explicit default. */
+export function resumeSelectionReasoning(
+  intent: ResumeReasoningIntent,
+  reasoning: string,
+  savedReasoning: string,
+  modelChanged: boolean,
+  modelDefault: string,
+) {
+  if (intent.kind === 'effort')
+    return intent.value
+  if (intent.kind === 'model-default')
+    return modelDefault
+  if (reasoning)
+    return reasoning
+  if (modelChanged)
+    return modelDefault
+  return savedReasoning
 }
 
 /**

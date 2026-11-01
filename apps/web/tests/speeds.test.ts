@@ -6,6 +6,7 @@ import {
   needsResumeSelection,
   offersSpeed,
   pickerAppliedSpeed,
+  resumeSelectionReasoning,
   resumeSelectionSpeed,
   showsSpeed,
   speedNote,
@@ -117,6 +118,16 @@ describe('codex speeds', () => {
     expect(needsResumeSelection('fast', '', 'priority', 'fast', '', 'priority')).toBe(false)
     expect(needsResumeSelection('fast', '', 'standard', 'fast', '', 'priority')).toBe(true)
     expect(needsResumeSelection('new', 'high', 'priority', 'fast', 'high', 'priority')).toBe(true)
+  })
+
+  it('keeps reasoning intent separate from the blank picker value', () => {
+    const untouched = { kind: 'untouched' } as const
+    expect(resumeSelectionReasoning(untouched, '', '', false, 'low')).toBe('')
+    expect(resumeSelectionReasoning(untouched, '', 'high', false, 'low')).toBe('high')
+    expect(resumeSelectionReasoning(untouched, '', 'high', true, 'low')).toBe('low')
+    expect(resumeSelectionReasoning({ kind: 'model-default' }, '', 'high', false, 'low')).toBe('low')
+    expect(resumeSelectionReasoning({ kind: 'effort', value: 'xhigh' }, '', 'high', true, 'low')).toBe('xhigh')
+    expect(resumeSelectionReasoning(untouched, 'medium', 'high', true, 'low')).toBe('medium')
   })
 
   it('names speeds with Codex\'s own words', () => {

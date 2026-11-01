@@ -4316,7 +4316,10 @@ async fn installation_resume_selection_authorizes_target_before_catalog_discover
             json!({
                 "name": "Native resume target",
                 "provider": "codex",
-                "access": { "backend": "auto", "nodes": [] },
+                "access": {
+                    "backend": "auto",
+                    "nodes": [cairn_installation::nodes::LOCAL_NODE_ID],
+                },
             }),
             None,
         )
@@ -4349,6 +4352,11 @@ async fn installation_resume_selection_authorizes_target_before_catalog_discover
     let queued = s.store.run(&target_id).await.unwrap();
     assert_eq!(queued["trigger"], "chat");
     assert_eq!(queued["chatExecution"]["messageId"], turn_id);
+    assert_eq!(
+        queued["snapshot"]["agent"]["access"]["nodes"],
+        json!([cairn_installation::nodes::LOCAL_NODE_ID]),
+        "the saved target must retain its authorized execution node",
+    );
 
     let mut snapshot = queued["snapshot"].clone();
     snapshot["agent"]["access"]["backend"] = "native".into();

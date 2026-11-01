@@ -1497,6 +1497,21 @@ test('same-provider quota resume submits the changed model default and unchanged
     reasoning: '',
     speed: 'priority',
   })
+  const sameModelDefault = await createFailedCodexQuotaChat(workspace, {
+    model: 'fixture-fast',
+    reasoning: 'high',
+    speed: 'priority',
+  })
+  const sameModelEffort = await createFailedCodexQuotaChat(workspace, {
+    model: 'fixture-fast',
+    reasoning: 'high',
+    speed: '',
+  })
+  const resetDefaultIntent = await createFailedCodexQuotaChat(workspace, {
+    model: 'fixture-fast',
+    reasoning: 'high',
+    speed: '',
+  })
   await page.route('**/codex/models', route => route.fulfill({
     json: {
       models: [
@@ -1542,6 +1557,9 @@ test('same-provider quota resume submits the changed model default and unchanged
   const unchangedRequests: Record<string, unknown>[] = []
   const inheritedNoChangeRequests: Record<string, unknown>[] = []
   const inheritedSpeedRequests: Record<string, unknown>[] = []
+  const sameModelDefaultRequests: Record<string, unknown>[] = []
+  const sameModelEffortRequests: Record<string, unknown>[] = []
+  const resetDefaultRequests: Record<string, unknown>[] = []
   await installResumeDiagnosticProbe(page)
   await page.route(`**/chats/${changed.chat.id}/resume`, async (route) => {
     changedRequests.push(route.request().postDataJSON())
@@ -1558,6 +1576,18 @@ test('same-provider quota resume submits the changed model default and unchanged
   await page.route(`**/chats/${inheritedSpeedOnly.chat.id}/resume`, async (route) => {
     inheritedSpeedRequests.push(route.request().postDataJSON())
     await route.fulfill({ json: { ...inheritedSpeedOnly.before, status: 'queued', resumeAvailable: false } })
+  })
+  await page.route(`**/chats/${sameModelDefault.chat.id}/resume`, async (route) => {
+    sameModelDefaultRequests.push(route.request().postDataJSON())
+    await route.fulfill({ json: { ...sameModelDefault.before, status: 'queued', resumeAvailable: false } })
+  })
+  await page.route(`**/chats/${sameModelEffort.chat.id}/resume`, async (route) => {
+    sameModelEffortRequests.push(route.request().postDataJSON())
+    await route.fulfill({ json: { ...sameModelEffort.before, status: 'queued', resumeAvailable: false } })
+  })
+  await page.route(`**/chats/${resetDefaultIntent.chat.id}/resume`, async (route) => {
+    resetDefaultRequests.push(route.request().postDataJSON())
+    await route.fulfill({ json: { ...resetDefaultIntent.before, status: 'queued', resumeAvailable: false } })
   })
 
   await page.goto(workspacePath(`/chats/${changed.chat.id}`))
@@ -1641,6 +1671,70 @@ test('same-provider quota resume submits the changed model default and unchanged
     turnId: inheritedSpeedOnly.turnId,
     selection: { model: 'fixture-fast', reasoning: '', speed: 'standard' },
   })
+
+  await page.goto(workspacePath(`/chats/${sameModelDefault.chat.id}`))
+  const sameModelDefaultCard = page.getByRole('status', { name: 'Coding agent quota reached' })
+  await expect(sameModelDefaultCard).toBeVisible()
+  const sameModelDefaultPicker = page.getByRole('button', { name: /^Agent, model, reasoning and speed/ })
+  await sameModelDefaultPicker.click()
+  const sameModelDefaultMenu = page.getByRole('dialog', { name: 'Agent & model' })
+  await sameModelDefaultMenu.getByRole('radio', { name: 'Quick coder', exact: true }).click()
+  const explicitModelDefault = sameModelDefaultMenu.getByRole('radiogroup', { name: 'Reasoning' })
+    .getByRole('radio', { name: 'Model default · Low', exact: true })
+  await explicitModelDefault.click()
+  await expect(explicitModelDefault).toHaveAttribute('aria-checked', 'true')
+  await sameModelDefaultMenu.getByRole('radiogroup', { name: 'Speed' })
+    .getByRole('radio', { name: 'Standard', exact: true })
+    .click()
+  await expect(explicitModelDefault).toHaveAttribute('aria-checked', 'true')
+  await sameModelDefaultMenu.getByRole('button', { name: 'Close', exact: true }).click()
+  await sameModelDefaultCard.getByRole('button', { name: 'Resume conversation', exact: true }).click()
+  await expectSingleResumeRequest(page, () => sameModelDefaultRequests.length)
+  expect(sameModelDefaultRequests[0]).toMatchObject({
+    chatId: sameModelDefault.chat.id,
+    runId: sameModelDefault.before.id,
+    turnId: sameModelDefault.turnId,
+    selection: { model: 'fixture-fast', reasoning: 'low', speed: 'standard' },
+  })
+
+  await page.goto(workspacePath(`/chats/${sameModelEffort.chat.id}`))
+  const sameModelEffortCard = page.getByRole('status', { name: 'Coding agent quota reached' })
+  await expect(sameModelEffortCard).toBeVisible()
+  await page.getByRole('button', { name: /^Agent, model, reasoning and speed/ }).click()
+  const sameModelEffortMenu = page.getByRole('dialog', { name: 'Agent & model' })
+  await sameModelEffortMenu.getByRole('radio', { name: 'Quick coder', exact: true }).click()
+  await sameModelEffortMenu.getByRole('radiogroup', { name: 'Reasoning' })
+    .getByRole('radio', { name: 'Low', exact: true })
+    .click()
+  await sameModelEffortMenu.getByRole('button', { name: 'Close', exact: true }).click()
+  await sameModelEffortCard.getByRole('button', { name: 'Resume conversation', exact: true }).click()
+  await expectSingleResumeRequest(page, () => sameModelEffortRequests.length)
+  expect(sameModelEffortRequests[0]).toMatchObject({
+    chatId: sameModelEffort.chat.id,
+    runId: sameModelEffort.before.id,
+    turnId: sameModelEffort.turnId,
+    selection: { model: 'fixture-fast', reasoning: 'low', speed: 'standard' },
+  })
+
+  await page.goto(workspacePath(`/chats/${resetDefaultIntent.chat.id}`))
+  const resetDefaultCard = page.getByRole('status', { name: 'Coding agent quota reached' })
+  await expect(resetDefaultCard).toBeVisible()
+  await page.getByRole('button', { name: /^Agent, model, reasoning and speed/ }).click()
+  const resetDefaultMenu = page.getByRole('dialog', { name: 'Agent & model' })
+  await resetDefaultMenu.getByRole('radio', { name: 'Quick coder', exact: true }).click()
+  await resetDefaultMenu.getByRole('radiogroup', { name: 'Reasoning' })
+    .getByRole('radio', { name: 'Model default · Low', exact: true })
+    .click()
+  await resetDefaultMenu.getByRole('radio', { name: 'Conversation model', exact: true }).click()
+  await resetDefaultMenu.getByRole('button', { name: 'Close', exact: true }).click()
+  await resetDefaultCard.getByRole('button', { name: 'Resume conversation', exact: true }).click()
+  await expectSingleResumeRequest(page, () => resetDefaultRequests.length)
+  expect(resetDefaultRequests[0]).toMatchObject({
+    chatId: resetDefaultIntent.chat.id,
+    runId: resetDefaultIntent.before.id,
+    turnId: resetDefaultIntent.turnId,
+  })
+  expect(resetDefaultRequests[0]).not.toHaveProperty('selection')
 })
 
 test('starts project chats, steers, edits the queue and preserves a compact mobile composer', async ({ page, workspace }) => {

@@ -75,6 +75,30 @@ internal fun pickerAppliedReasoning(
     inheritedReasoning.ifBlank { selectedModel?.defaultReasoningEffort.orEmpty() }
 }
 
+internal sealed interface ResumeReasoningIntent {
+    data object Untouched : ResumeReasoningIntent
+
+    data object ModelDefault : ResumeReasoningIntent
+
+    data class Effort(val value: String) : ResumeReasoningIntent
+}
+
+internal fun resumeSelectionReasoning(
+    intent: ResumeReasoningIntent,
+    reasoning: String,
+    savedReasoning: String,
+    modelChanged: Boolean,
+    modelDefault: String,
+): String =
+    when (intent) {
+        is ResumeReasoningIntent.Effort -> intent.value
+        ResumeReasoningIntent.ModelDefault -> modelDefault
+        ResumeReasoningIntent.Untouched ->
+            reasoning.ifBlank {
+                if (modelChanged) modelDefault else savedReasoning
+            }
+    }
+
 internal fun providerLabel(value: String) = codingAgent(value).label
 
 internal fun selectedModel(
@@ -167,6 +191,7 @@ fun ModelPicker(
     speed: String = "",
     defaultSpeed: String = "",
     changeSpeed: ((String) -> Unit)? = null,
+    onReasoningIntent: (ResumeReasoningIntent) -> Unit = {},
     change: (String, String) -> Unit,
 ) {
     var open by rememberSaveable { mutableStateOf(false) }
@@ -198,6 +223,7 @@ fun ModelPicker(
                 model.isBlank() &&
                 !(inherit && defaultModel.isNotBlank())
         ) {
+            onReasoningIntent(ResumeReasoningIntent.Untouched)
             val next =
                 catalog.models.find { it.isDefault && !it.hidden }
                     ?: catalog.models.find { !it.hidden }
@@ -278,7 +304,13 @@ fun ModelPicker(
                 it.displayName.contains(query, true) || it.model.contains(query, true)
             }
             val reasoningFor: @Composable () -> Unit = {
-                ReasoningControl(selected, reasoning, inheritedEffort, enabled) {
+                ReasoningControl(
+                    selected,
+                    reasoning,
+                    inheritedEffort,
+                    enabled,
+                    onReasoningIntent,
+                ) {
                     change(model, it)
                 }
                 if (changeSpeed != null) {
@@ -449,6 +481,7 @@ fun ModelPicker(
                                     route,
                                     enabled,
                                 ) { value ->
+                                    onReasoningIntent(ResumeReasoningIntent.Untouched)
                                     val efforts =
                                         (chosen.route(value)?.supportedReasoningEfforts
                                                 ?: chosen.supportedReasoningEfforts)
@@ -461,6 +494,7 @@ fun ModelPicker(
                             reasoningFor()
                         },
                     ) {
+                        onReasoningIntent(ResumeReasoningIntent.Untouched)
                         change("", "")
                     }
                 models.forEach { item ->
@@ -480,6 +514,7 @@ fun ModelPicker(
                             } else "",
                         reasoning = {
                             RouteControl(item, routes, route, enabled) { value ->
+                                onReasoningIntent(ResumeReasoningIntent.Untouched)
                                 val efforts =
                                     (item.route(value)?.supportedReasoningEfforts
                                             ?: item.supportedReasoningEfforts)
@@ -489,7 +524,10 @@ fun ModelPicker(
                             reasoningFor()
                         },
                     ) {
-                        if (!item.matches(model)) change(item.model, "")
+                        if (!item.matches(model)) {
+                            onReasoningIntent(ResumeReasoningIntent.Untouched)
+                            change(item.model, "")
+                        }
                     }
                 }
                 if (models.isEmpty() && query.isNotBlank())
@@ -513,7 +551,10 @@ fun ModelPicker(
                     Field(
                         "Nom du modèle",
                         model,
-                        { change(it, "") },
+                        {
+                            onReasoningIntent(ResumeReasoningIntent.Untouched)
+                            change(it, "")
+                        },
                         keyboardOptions = InputKeyboards.Literal,
                     )
                 if (catalog.stale || catalog.error.isNotBlank())
@@ -889,6 +930,7 @@ internal fun ReasoningControl(
     value: String,
     default: String,
     enabled: Boolean,
+    onIntent: (ResumeReasoningIntent) -> Unit = {},
     change: (String) -> Unit,
 ) {
     val order = listOf("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
@@ -928,6 +970,7 @@ internal fun ReasoningControl(
             value = index.coerceAtLeast(0).toFloat(),
             onValueChange = { position ->
                 val next = efforts[position.roundToInt().coerceIn(efforts.indices)].reasoningEffort
+                onIntent(ResumeReasoningIntent.Effort(next))
                 if (next != effective || value.isBlank()) {
                     haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                     change(next)
@@ -998,6 +1041,7 @@ internal fun ReasoningControl(
             value == efforts.single().reasoningEffort,
             enabled,
         ) {
+            onIntent(ResumeReasoningIntent.Effort(efforts.single().reasoningEffort))
             change(efforts.single().reasoningEffort)
         }
     }
@@ -1029,6 +1073,10 @@ internal fun ReasoningControl(
         enabled,
         Modifier.testTag("reasoning-default"),
     ) {
+        onIntent(
+            if (model.isNotBlank()) ResumeReasoningIntent.ModelDefault
+            else ResumeReasoningIntent.Untouched
+        )
         change("")
     }
 }

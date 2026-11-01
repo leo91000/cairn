@@ -10,6 +10,7 @@ import type { ResumeExecutionSelection } from '../../../../packages/contracts/ge
 import type { DraftState } from '../attachments'
 import type { LiveWait } from '../chat-wait'
 import type { CachedHistory } from '../history-cache'
+import type { ResumeReasoningIntent } from '../speeds'
 import {
   computed,
   inject,
@@ -111,7 +112,13 @@ import { useRetryState } from '../run-retry'
 import { exclusiveSuspensionLabel, isExclusivelySuspended } from '../run-status'
 import { backgroundWait } from '../signal'
 import { chatSkills } from '../skill-mentions'
-import { needsResumeSelection, pickerAppliedSpeed, resumeSelectionSpeed } from '../speeds'
+import {
+  needsResumeSelection,
+  pickerAppliedSpeed,
+
+  resumeSelectionReasoning,
+  resumeSelectionSpeed,
+} from '../speeds'
 import { delegatedChatsKey, openSubagentKey, subagentState } from '../subagents'
 import { iconButton } from '../ui'
 import { useLiveRun } from '../use-live-run'
@@ -248,6 +255,30 @@ const draft = ref('')
 const model = ref('')
 const reasoning = ref('')
 const speed = ref('')
+const resumeReasoningIntent = ref<ResumeReasoningIntent>({ kind: 'untouched' })
+const resumeReasoningContext = computed(() => {
+  const chat = detail.value
+  const run = chat?.run
+  const agent = run?.snapshot.agent
+  return JSON.stringify([
+    chat?.id ?? '',
+    run?.id ?? '',
+    run?.chatExecution?.messageId ?? '',
+    agent?.id ?? '',
+    agent?.provider ?? '',
+    agent?.model ?? '',
+    agent?.reasoning ?? '',
+    agent?.speed ?? '',
+  ])
+})
+watch(resumeReasoningContext, () => {
+  resumeReasoningIntent.value = { kind: 'untouched' }
+}, { flush: 'sync' })
+
+function setResumeReasoningIntent(intent: ResumeReasoningIntent) {
+  resumeReasoningIntent.value = intent
+}
+
 // Names queued messages' speeds; the composer's picker keeps this catalog current.
 const codexModels = computed(() => modelCatalogs.codex.catalog.models)
 const provider = ref<'' | Provider>('')
@@ -527,6 +558,7 @@ const currentProvider = computed(() => detail.value?.run?.snapshot.agent.provide
 const chosenProvider = computed({
   get: () => provider.value || currentProvider.value,
   set: (value: Provider) => {
+    resumeReasoningIntent.value = { kind: 'untouched' }
     provider.value = value
     model.value = ''
     reasoning.value = ''
@@ -614,6 +646,7 @@ function newConversation() {
   provider.value = ''
   model.value = ''
   reasoning.value = ''
+  resumeReasoningIntent.value = { kind: 'untouched' }
   speed.value = ''
   agentId.value = MAIN_AGENT_ID
   projectId.value = ''
@@ -801,10 +834,13 @@ async function resumeQuota() {
         || (!name ? catalog.find(item => item.isDefault) : undefined)
       // A catalog default stays display-only until the picker changes the model draft.
       const selectedModelChanged = !!model.value && model.value !== (savedAgent?.model || '')
-      const selectedReasoning = reasoning.value
-        || (!selectedModelChanged ? savedAgent?.reasoning : '')
-        || (selectedModelChanged ? modelRow(selectedModel)?.defaultReasoningEffort : '')
-        || ''
+      const selectedReasoning = resumeSelectionReasoning(
+        resumeReasoningIntent.value,
+        reasoning.value,
+        savedAgent?.reasoning || '',
+        selectedModelChanged,
+        modelRow(selectedModel)?.defaultReasoningEffort || '',
+      )
       const selectedDisplayedSpeed = savedAgent
         ? pickerAppliedSpeed(chosenProvider.value, modelRow(selectedModel), speed.value, savedAgent.speed)
         : ''
@@ -866,6 +902,7 @@ function edit(message: ChatMessage) {
   }
 
   editing.value = message.id
+  resumeReasoningIntent.value = { kind: 'untouched' }
   clearAttachments()
   attachments.value = [...(message.attachments ?? [])]
   draft.value = message.text
@@ -889,6 +926,7 @@ watch(chatId, (id) => {
   provider.value = ''
   model.value = ''
   reasoning.value = ''
+  resumeReasoningIntent.value = { kind: 'untouched' }
   speed.value = ''
   submission = undefined
   const destinationId = createdChat && createdChat.slug === id ? createdChat.id : selectedChatId.value
@@ -1523,6 +1561,7 @@ function key(event: KeyboardEvent) {
                       :default-source="inheritConversation ? 'conversation' : 'agent'"
                       :switching="switchingProvider"
                       :disabled="busy"
+                      @reasoning-choice="setResumeReasoningIntent"
                     />
                   </div>
                   <!-- As on Android: steer while typing during a reply, stop when the field is empty, otherwise send. -->

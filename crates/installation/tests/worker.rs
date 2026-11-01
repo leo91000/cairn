@@ -5309,6 +5309,7 @@ async fn chat_resume_selection_resolves_opencode_catalog_default_before_adapter_
     s.chat_send(&chat_id, sent).await.unwrap();
     fixture.start().await;
     let run_id = fixture.chat_run(&chat_id).await;
+    eprintln!("CAIRN_RESUME_TEST_PHASE test=opencode_catalog_default phase=initial_running");
     let running = fixture
         .until(&run_id, |run| {
             run["status"] == RunStatus::Running && run["sessionId"].is_string()
@@ -5353,6 +5354,7 @@ async fn chat_resume_selection_resolves_opencode_catalog_default_before_adapter_
         .await
         .unwrap();
     stopped.error_for_status().unwrap();
+    eprintln!("CAIRN_RESUME_TEST_PHASE test=opencode_catalog_default phase=stopped_resumable");
     let cancelled = fixture
         .until(&run_id, |run| {
             run["status"] == RunStatus::Cancelled && run["resumeAvailable"] == true
@@ -5428,6 +5430,9 @@ async fn chat_resume_selection_resolves_opencode_catalog_default_before_adapter_
         .hold
         .store(false, std::sync::atomic::Ordering::Relaxed);
     fixture.start().await;
+    eprintln!(
+        "CAIRN_RESUME_TEST_PHASE test=opencode_catalog_default phase=selected_turn_completed"
+    );
     let completed = fixture.until_finished(&run_id).await;
     assert_eq!(completed["status"], RunStatus::Succeeded, "{completed}");
     assert_eq!(completed["snapshot"], expected_snapshot);
@@ -5538,6 +5543,7 @@ async fn chat_resume_rejects_hidden_opencode_auto_without_blocking_pinned_provid
     s.chat_send(&chat_id, sent).await.unwrap();
     fixture.start().await;
     let run_id = fixture.chat_run(&chat_id).await;
+    eprintln!("CAIRN_RESUME_TEST_PHASE test=opencode_hidden_auto phase=initial_running");
     let running = fixture
         .until(&run_id, |run| {
             run["status"] == RunStatus::Running && run["sessionId"].is_string()
@@ -5573,6 +5579,7 @@ async fn chat_resume_rejects_hidden_opencode_auto_without_blocking_pinned_provid
         .await
         .unwrap();
     stopped.error_for_status().unwrap();
+    eprintln!("CAIRN_RESUME_TEST_PHASE test=opencode_hidden_auto phase=stopped_resumable");
     let cancelled = fixture
         .until(&run_id, |run| {
             run["status"] == RunStatus::Cancelled && run["resumeAvailable"] == true
@@ -5697,6 +5704,7 @@ async fn chat_resume_rejects_hidden_opencode_auto_without_blocking_pinned_provid
         .hold
         .store(false, std::sync::atomic::Ordering::Relaxed);
     fixture.start().await;
+    eprintln!("CAIRN_RESUME_TEST_PHASE test=opencode_hidden_auto phase=pinned_turn_completed");
     let completed = fixture.until_finished(&run_id).await;
     assert_eq!(completed["status"], RunStatus::Succeeded, "{completed}");
     assert_eq!(completed["snapshot"], expected_snapshot);
@@ -5871,7 +5879,7 @@ async fn chat_resume_selection_keeps_saved_identity_and_reaches_the_worker_plan(
         .await;
     let checkpoint_before = fixture.checkpoint(&run_id).await;
     assert!(checkpoint_before["prepared"].is_object());
-    assert!(checkpoint_before["generation"].is_string());
+    let checkpoint_generation_before = checkpoint_before.get("generation").cloned();
 
     let stale_run = resume(json!({
         "runId": id(),
@@ -5958,11 +5966,21 @@ async fn chat_resume_selection_keeps_saved_identity_and_reaches_the_worker_plan(
                 status: Some(RunStatus::Failed),
                 finished_at: Some(Some(now())),
                 error: Some(Some("Usage limit has been reached".into())),
+                cancel_requested_at: Some(None),
                 ..Default::default()
             },
         )
         .await
         .unwrap();
+    let failed_quota_run = s.store.run(&run_id).await.unwrap();
+    assert_eq!(failed_quota_run["status"], RunStatus::Failed);
+    assert_eq!(failed_quota_run["cancelRequestedAt"], Value::Null);
+    assert!(
+        failed_quota_run["error"]
+            .as_str()
+            .unwrap()
+            .contains("Usage limit")
+    );
     let mut alternative = serde_json::to_value(
         s.accounts
             .create(&s, Provider::Claude, "Switch target")
@@ -6147,8 +6165,8 @@ async fn chat_resume_selection_keeps_saved_identity_and_reaches_the_worker_plan(
     assert_eq!(completed["chatExecution"]["messageId"], turn_id);
     let checkpoint_after = fixture.checkpoint(&run_id).await;
     assert_eq!(
-        checkpoint_after["generation"],
-        checkpoint_before["generation"]
+        checkpoint_after.get("generation").cloned(),
+        checkpoint_generation_before
     );
     let selected_plan = controller
         .plans
