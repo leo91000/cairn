@@ -1,10 +1,12 @@
 import { spawn } from 'node:child_process'
 import {
+  existsSync,
   mkdtempSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs'
+import { createServer } from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
@@ -27,6 +29,11 @@ async function executeSetup(fault = '', {
   const directory = mkdtempSync(path.join(os.tmpdir(), 'cairn-native-dependencies-'))
   const history = path.join(directory, 'calls.jsonl')
   writeFileSync(history, '')
+  const closedControlPath = path.join(directory, 'closed-control.sock')
+  const closedControl = fault === 'closed-control' ? createServer(socket => socket.end()) : undefined
+  if (closedControl)
+    await new Promise(resolve => closedControl.listen(closedControlPath, resolve))
+  const recordSpawn = `import childProcess from 'node:child_process';import{syncBuiltinESMExports}from'node:module';import{appendFileSync}from'node:fs';const original=childProcess.spawn;childProcess.spawn=function(command,...args){if(command==='apt-get')appendFileSync(${JSON.stringify(history)},JSON.stringify({phase:'apt-spawn',pid:process.pid})+'\\n');return original.call(this,command,...args)};syncBuiltinESMExports();`
   const fixture = `#!${process.execPath}
 const { spawn, spawnSync } = require('node:child_process')
 const { appendFileSync } = require('node:fs')
@@ -37,6 +44,13 @@ const args = process.argv.slice(2)
 const phase = name === 'sudo' ? 'entry' : args.includes('update') ? 'update' : 'install'
 appendFileSync(${JSON.stringify(history)}, JSON.stringify({ phase, pid: process.pid, args }) + '\\n')
 const fault = ${JSON.stringify(fault)}
+if (phase === 'entry' && fault === 'delayed-entry') {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 150)
+  appendFileSync(${JSON.stringify(history)}, JSON.stringify({ phase: 'entry-resumed', pid: process.pid }) + '\\n')
+  args.splice(args.indexOf(process.execPath) + 1, 0, '--import', ${JSON.stringify(`data:text/javascript,${encodeURIComponent(recordSpawn)}`)})
+}
+if (phase === 'entry' && fault === 'closed-control')
+  args[args.length - 1] = ${JSON.stringify(closedControlPath)}
 if (phase === fault) {
   setInterval(() => {}, 1000)
 } else if (phase === 'update' && ['hard-stall', 'orphan-stall', 'fail-descendant', 'success-descendant'].includes(fault)) {
@@ -129,6 +143,12 @@ if (phase === fault) {
   try {
     const result = await new Promise(resolve => child.on('close', (status, signal) => resolve({ status, signal })))
     const calls = readFileSync(history, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
+    const controlDirectoriesRemaining = calls.filter(call => call.phase === 'entry')
+      .map(call => call.args.at(-1))
+      .filter(candidate => typeof candidate === 'string' && path.basename(candidate) === 'owner.sock')
+      .map(candidate => path.dirname(candidate))
+      .filter(candidate => existsSync(candidate))
+    expect(controlDirectoriesRemaining).toEqual([])
     const survivingFixturePids = calls.filter((call) => {
       try {
         return readFileSync(`/proc/${call.pid}/stat`, 'utf8').split(') ')[1][0] !== 'Z'
@@ -151,6 +171,8 @@ if (phase === fault) {
   finally {
     clearTimeout(timer)
     clearInterval(signalTimer)
+    if (closedControl)
+      await new Promise(resolve => closedControl.close(resolve))
     // Clean only this fixture's processes, including an interrupted test failure.
     for (const line of readFileSync(history, 'utf8').trim().split('\n').filter(Boolean)) {
       try {
@@ -248,6 +270,26 @@ describe('native CI dependency setup', () => {
     expect(result.status).toBe(code)
     expect(result.liveAtPublicExit).toEqual([])
     expect(result.calls.filter(call => call.phase === 'update')).toHaveLength(0)
+  })
+
+  it.each([['SIGINT', 130], ['SIGTERM', 143]])('refuses APT after delayed privilege entry resumes following %s', async (interruptSignal, code) => {
+    const result = await executeSetup('delayed-entry', { interruptSignal, interruptPhase: 'entry' })
+    expect(result.harnessKilled).toBe(false)
+    expect(result.signalSent).toBe(true)
+    expect(result.status).toBe(code)
+    expect(result.calls.filter(call => call.phase === 'entry-resumed')).toHaveLength(1)
+    expect(result.output).toContain('phase=update event=entry-ready')
+    expect(result.calls.filter(call => call.phase === 'apt-spawn')).toHaveLength(0)
+    expect(result.calls.filter(call => call.phase === 'update' || call.phase === 'install')).toHaveLength(0)
+    expect(result.liveAtPublicExit).toEqual([])
+  })
+
+  it('refuses APT when the privileged start control channel is already closed', async () => {
+    const result = await executeSetup('closed-control')
+    expect(result.harnessKilled).toBe(false)
+    expect(result.status).toBe(143)
+    expect(result.calls.filter(call => call.phase === 'update' || call.phase === 'install')).toHaveLength(0)
+    expect(result.liveAtPublicExit).toEqual([])
   })
 
   it.each(['fail-descendant', 'success-descendant'])('cleans ordinary %s leader exit before returning its original status', async (fault) => {

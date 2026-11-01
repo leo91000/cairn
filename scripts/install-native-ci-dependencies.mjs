@@ -1,5 +1,8 @@
 import { spawn, spawnSync } from 'node:child_process'
-import { constants } from 'node:os'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { createConnection, createServer } from 'node:net'
+import { constants, tmpdir } from 'node:os'
+import { join } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
@@ -38,8 +41,8 @@ function exitCode(result) {
   return result.signal ? 128 + (constants.signals[result.signal] ?? 0) : 1
 }
 
-export async function runAptPhase(phase, seconds, cleanupGraceMs = 1000, profile = 'native') {
-  if (!Object.hasOwn(phases, phase) || !Object.hasOwn(profiles, profile))
+export async function runAptPhase(phase, seconds, cleanupGraceMs = 1000, profile = 'native', controlPath) {
+  if (!Object.hasOwn(phases, phase) || !Object.hasOwn(profiles, profile) || typeof controlPath !== 'string' || !controlPath)
     return 2
 
   const specification = phases[phase]
@@ -51,22 +54,41 @@ export async function runAptPhase(phase, seconds, cleanupGraceMs = 1000, profile
     return 2
   }
 
-  marker(writeMarker, phase, 'apt-start', `profile=${profile}`)
+  marker(writeMarker, phase, 'entry-ready', `profile=${profile}`)
   const code = await new Promise((resolve) => {
     let child
     let stopping = false
     let finished = false
     let cleanupTimer
     let workTimer
+    let controlSocket
     let controlInput = ''
     const terminate = () => cleanup(128 + constants.signals.SIGTERM)
     const interrupt = () => cleanup(128 + constants.signals.SIGINT)
     const control = (bytes) => {
-      controlInput = (controlInput + bytes).slice(0, 32)
-      if (controlInput === 'SIGINT\n')
-        interrupt()
-      else if (controlInput === 'SIGTERM\n')
-        terminate()
+      controlInput += bytes
+      if (controlInput.length > 32) {
+        cleanup(2)
+        return
+      }
+
+      let authorized = false
+      while (controlInput.includes('\n')) {
+        const boundary = controlInput.indexOf('\n')
+        const command = controlInput.slice(0, boundary)
+        controlInput = controlInput.slice(boundary + 1)
+        if (command === 'SIGINT')
+          interrupt()
+        else if (command === 'SIGTERM')
+          terminate()
+        else if (command === 'START')
+          authorized = true
+        else
+          cleanup(2)
+      }
+
+      if (authorized && !stopping && !child)
+        startApt()
     }
 
     function killGroup(signal) {
@@ -92,9 +114,7 @@ export async function runAptPhase(phase, seconds, cleanupGraceMs = 1000, profile
       clearTimeout(workTimer)
       process.removeListener('SIGTERM', terminate)
       process.removeListener('SIGINT', interrupt)
-      process.stdin.removeListener('data', control)
-      process.stdin.removeListener('end', terminate)
-      process.stdin.pause()
+      controlSocket?.destroy()
       resolve(status)
     }
 
@@ -118,21 +138,28 @@ export async function runAptPhase(phase, seconds, cleanupGraceMs = 1000, profile
 
     process.on('SIGTERM', terminate)
     process.on('SIGINT', interrupt)
-    // A pipe survives the sudo boundary without signalling an unprivileged
-    // wrapper ahead of its root cleanup owner. EOF also handles a lost launcher.
-    process.stdin.on('data', control)
-    process.stdin.on('end', terminate)
-    const args = phase === 'install' ? [...specification.args, ...profileSpecification.packages] : specification.args
-    child = spawn('apt-get', args, { detached: true, stdio: ['ignore', 'inherit', 'inherit'] })
-    workTimer = setTimeout(cleanup, limitSeconds * 1000, 124)
-    child.on('error', () => {
-      if (!stopping)
-        cleanup(1)
-    })
-    child.on('exit', (status, signal) => {
-      if (!stopping)
-        cleanup(exitCode({ status, signal }))
-    })
+
+    function startApt() {
+      const args = phase === 'install' ? [...specification.args, ...profileSpecification.packages] : specification.args
+      child = spawn('apt-get', args, { detached: true, stdio: ['ignore', 'inherit', 'inherit'] })
+      workTimer = setTimeout(cleanup, limitSeconds * 1000, 124)
+      child.on('error', () => {
+        if (!stopping)
+          cleanup(1)
+      })
+      child.on('exit', (status, signal) => {
+        if (!stopping)
+          cleanup(exitCode({ status, signal }))
+      })
+      marker(writeMarker, phase, 'apt-start', `profile=${profile}`)
+    }
+
+    // Connect only after privilege entry. The live launcher then authorizes
+    // package work, or refuses it if cancellation happened while entry waited.
+    controlSocket = createConnection(controlPath)
+    controlSocket.on('data', control)
+    controlSocket.on('end', terminate)
+    controlSocket.on('error', () => cleanup(1))
   })
   marker(writeMarker, phase, 'apt-end', `code=${code} profile=${profile}`)
   return code
@@ -150,12 +177,15 @@ export async function installNativeCiDependencies({
 
   let interruptedCode
   let child
+  let controlSocket
+  let controlDirectory
+  let controlServer
   let interruptionTimer
   const interrupt = (signal) => {
     if (interruptedCode)
       return
     interruptedCode = 128 + constants.signals[signal]
-    child?.stdin.end(`${signal}\n`)
+    controlSocket?.end(`${signal}\n`)
     // Privilege entry might stall before it can consume the control request.
     // Keep the existing timeout supervisor as a bounded fallback in that case.
     interruptionTimer = setTimeout(() => {
@@ -174,6 +204,25 @@ export async function installNativeCiDependencies({
   process.on('SIGINT', keyboardInterrupt)
 
   try {
+    controlDirectory = mkdtempSync(join(tmpdir(), 'cairn-apt-control-'))
+    const controlPath = join(controlDirectory, 'owner.sock')
+    controlServer = createServer((socket) => {
+      if (controlSocket) {
+        socket.destroy()
+        return
+      }
+
+      controlSocket = socket
+      socket.on('error', () => {})
+      if (interruptedCode)
+        socket.end(`${interruptedCode === 130 ? 'SIGINT' : 'SIGTERM'}\n`)
+      else
+        socket.write('START\n')
+    })
+    await new Promise((resolve, reject) => {
+      controlServer.once('error', reject)
+      controlServer.listen(controlPath, resolve)
+    })
     for (const phase of Object.keys(phases)) {
       if (interruptedCode)
         return interruptedCode
@@ -200,14 +249,16 @@ export async function installNativeCiDependencies({
         `${seconds}`,
         `${Math.min(1000, killAfterSeconds * 500)}`,
         profile,
+        controlPath,
       ]
       const result = await new Promise((resolve) => {
-        child = spawn('timeout', args, { detached: true, stdio: ['pipe', 'inherit', 'inherit'] })
-        child.stdin.on('error', () => {})
+        child = spawn('timeout', args, { detached: true, stdio: ['ignore', 'inherit', 'inherit'] })
         child.on('error', () => resolve({ status: 1, signal: null }))
         child.on('close', (status, signal) => resolve({ status, signal }))
       })
       clearTimeout(interruptionTimer)
+      controlSocket?.destroy()
+      controlSocket = undefined
       const code = interruptedCode ?? exitCode(result)
       marker(write, phase, 'end', `code=${code} elapsed_ms=${Date.now() - started} profile=${profile}`)
       if (code !== 0)
@@ -216,10 +267,18 @@ export async function installNativeCiDependencies({
 
     return 0
   }
+  catch {
+    return interruptedCode ?? 1
+  }
   finally {
     clearTimeout(interruptionTimer)
     process.removeListener('SIGTERM', terminate)
     process.removeListener('SIGINT', keyboardInterrupt)
+    controlSocket?.destroy()
+    if (controlServer)
+      await new Promise(resolve => controlServer.close(resolve))
+    if (controlDirectory)
+      rmSync(controlDirectory, { recursive: true, force: true })
   }
 }
 
@@ -229,8 +288,8 @@ if (import.meta.main) {
     process.exitCode = await installNativeCiDependencies()
   else if (args.length === 2 && args[0] === '--profile')
     process.exitCode = await installNativeCiDependencies({ profile: args[1] })
-  else if (args.length === 5 && args[0] === '--apt-phase')
-    process.exitCode = await runAptPhase(args[1], Number(args[2]), Number(args[3]), args[4])
+  else if (args.length === 6 && args[0] === '--apt-phase')
+    process.exitCode = await runAptPhase(args[1], Number(args[2]), Number(args[3]), args[4], args[5])
   else
     process.exitCode = 2
 }
