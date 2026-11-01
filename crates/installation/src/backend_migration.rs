@@ -258,13 +258,9 @@ fn change_expired_backend(
 ) -> Result<()> {
     let run_id = text(&chat, "runId");
     let mut boundary = json!({
-        "nodeId": node["id"],
-        "targetNodeId": null,
         "requiredRuntime": node["runtimeId"],
         // No disk exists yet: constrain fresh placement without recording a
         // materialized checkpoint. The owner can still change this preference.
-        "pinnedNodeId": node["id"],
-        "preferredNodeId": null,
         "backendMigration": null,
         "backendMigrationError": null,
         "isolated": false,
@@ -281,6 +277,13 @@ fn change_expired_backend(
             resume_available: Some(false),
             workspace: Some(None),
             recovery_pending: Some(false),
+            placement: Some(Box::new(nodes::run_placement::PlacementChanges {
+                node_id: Some(serde_json::from_value(node["id"].clone())?),
+                pinned_node_id: Some(serde_json::from_value(node["id"].clone())?),
+                target_node_id: Some(None),
+                preferred_node_id: Some(None),
+                ..Default::default()
+            })),
             boundary: Some(boundary),
             ..Default::default()
         },
@@ -584,7 +587,8 @@ impl Service {
                 db.update_run_boundary(
                     &key,
                     &json!({ "backendMigration": current["backendMigration"] }),
-                )
+                )?;
+                required(db.run(&key)?, "Conversation removed")
             })
             .await?;
         let source_node = self.node_boundary(nodes::owner_node(&run)).await?;
@@ -697,17 +701,25 @@ impl Service {
                 error : Some(None),
                 cancel_requested_at : Some(None),
                 recovery_pending : Some(false),
+                placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {
+                    node_id: Some(serde_json::from_value(serde_json::json!(node["id"]))?),
+                    resources: Some(serde_json::from_value(serde_json::json!(placement["resources"]))?),
+                    pinned_node_id: Some(None),
+                    preferred_node_id: Some(None),
+                    node_state: Some(None),
+                    ..Default::default()
+                })),
                 boundary: Some(serde_json::json!({
-                    "nodeId": node["id"],
-                    "resources": placement["resources"],
                     "requiredRuntime": node["runtimeId"],
-                    "pinnedNodeId": null,
-                    "preferredNodeId": null,
                     "backendMigration": null,
                     "backendMigrationError": null,
-                    "nodeState": null,
                     "storage": { "mode": nodes::ON_DEMAND },
-                    "backup": { "id": point["id"], "snapshotId": point["snapshotId"], "capturedAt": point["capturedAt"], "status": "ready" },
+                    "backup": {
+                        "id": point["id"],
+                        "snapshotId": point["snapshotId"],
+                        "capturedAt": point["capturedAt"],
+                        "status": "ready"
+                    }
                 })),
                 ..Default::default()
             };

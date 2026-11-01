@@ -136,7 +136,9 @@ async fn assert_files(owner: &Owner, node: &str, run: &str, native: bool) {
     assert_eq!(fs.read(home).unwrap(), b"engine context");
 }
 
-#[tokio::test]
+// Match the service executor: synchronous fixture disk I/O must not starve
+// its synthetic native-authority and node-heartbeat task.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires loopback S3; run scripts/tests/node_s3_test.py --case backend_migration"]
 async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_source_on_failure() {
     let (listener, address) = common::bind().await;
@@ -204,15 +206,6 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
         cancel_during_capture: Arc::new(AtomicBool::new(false)),
     };
     let mut tasks = Vec::new();
-    // This fixture has no Beacon authority server. Model its fresh owner
-    // membership independently of slow CI filesystem/S3 timing.
-    let authority = owner.service.store.clone();
-    tasks.push(tokio::spawn(async move {
-        loop {
-            authority.set("native-authority", json!({ "observedAt": now(), "accounts": { "fixture-owner": { "email": "fixture@example.test" } } }), None).await.unwrap();
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-    }));
     for node in [&vm_node, &native_node] {
         tasks.extend(connect_node(&owner, &record, node, address, &faults, &stop, false).await);
     }
@@ -228,6 +221,23 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     let mut vm_record = owner.stored("nodes", &vm_node).await.unwrap();
     vm_record["capabilities"]["backend"] = "firecracker".into();
     owner.put_node_fixture(vm_record).await;
+    // This fixture has no Beacon authority server. Model its fresh owner
+    // membership independently of slow CI filesystem/S3 timing.
+    let authority = owner.service.store.clone();
+    let connected_nodes = [vm_node.clone(), native_node.clone()];
+    tasks.push(tokio::spawn(async move {
+        loop {
+            authority.set("native-authority", json!({ "observedAt": now(), "accounts": { "fixture-owner": { "email": "fixture@example.test" } } }), None).await.unwrap();
+            // The relay fixture does not run a real controller heartbeat loop.
+            // Keep its enrolled nodes fresh while conversion performs disk I/O.
+            for node in &connected_nodes {
+                let mut current = authority.node_boundary(node).await.unwrap().unwrap();
+                current["lastSeen"] = now().into();
+                authority.put_node_fixture(current).await.unwrap();
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }));
     seed_ext4(&owner, &record, &vm_node, &format!("http://{address}/")).await;
     tasks.push(owner.serve(listener));
     publication::capture(&owner.service, &owner.run(&run).await)
@@ -428,7 +438,7 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     owner
         .service
         .store
-        .update_run_boundary(&run, json!({ "backendMigration": marker }))
+        .update_run_boundary_fixture(&run, json!({ "backendMigration": marker }))
         .await
         .unwrap();
     let (status, response) = owner
@@ -466,11 +476,17 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
             &run,
             cairn_installation::runs::RunChanges {
                 snapshot: Some(serde_json::from_value(before["snapshot"].clone()).unwrap()),
-                boundary: Some(json!({
-                    "nodeId": before["nodeId"],
-                    "backup": before["backup"],
-                    "backendMigration": pending,
-                })),
+                placement: Some(Box::new(
+                    cairn_installation::nodes::run_placement::PlacementChanges {
+                        node_id: Some(
+                            serde_json::from_value(serde_json::json!(before["nodeId"])).unwrap(),
+                        ),
+                        ..Default::default()
+                    },
+                )),
+                boundary: Some(
+                    serde_json::json!({"backup": before["backup"],"backendMigration": pending}),
+                ),
                 ..Default::default()
             },
         )

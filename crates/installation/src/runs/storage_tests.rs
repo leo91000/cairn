@@ -1,4 +1,4 @@
-use crate::{run_fixture::DbRunFixture, store::Store};
+use crate::{attempt_fixture::DbAttemptFixture, run_fixture::DbRunFixture, store::Store};
 use serde_json::json;
 
 #[tokio::test]
@@ -28,10 +28,23 @@ async fn storage_projection_keeps_decision_fields_without_frozen_execution_data(
                         "nodeId": "native-node", "nodeState": "saving",
                         "storage": { "mode": "on-demand", "dirtyBytes": u64::MAX },
                         "backup": { "status": "ready", "requestedRevision": 1, "acknowledgedRevision": 1 },
-                        "moveRequest": { "nodeId": "destination" }, "moveReservation": "reservation",
+                        "moveRequest": {
+                            "reservation": format!("reservation-{index}"),
+                            "nodeId": crate::nodes::LOCAL_NODE_ID,
+                            "resources": { "cpu": 1, "memoryMiB": 128, "diskMiB": 128 },
+                        },
                     }),
                     None,
                 )?;
+                db.put_attempt_fixture(&json!({
+                    "id": format!("reservation-{index}"), "runId": id,
+                    "role": "destination", "nodeId": crate::nodes::LOCAL_NODE_ID,
+                    "resources": { "cpu": 1, "memoryMiB": 128, "diskMiB": 128 },
+                }))?;
+                db.change_run_placement(&id, crate::nodes::run_placement::PlacementChanges {
+                    move_reservation: Some(Some(format!("reservation-{index}"))),
+                    ..Default::default()
+                })?;
                 let full = db.run(&id)?.unwrap();
                 let compact = db.node_storage_run(&id)?.unwrap();
                 let fields = [

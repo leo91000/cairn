@@ -411,5 +411,10 @@ capability and agent `exclusiveNodes` grants. Only the owner can add those grant
 installation agents retain the existing refusal for sensitive permission expansion.
 Run-scoped workspace tools (`acquire_exclusive`, `exclusive_status`,
 `renew_exclusive`, `release_exclusive`) now support matching native executions too.
+
+`exclusive_status` returns the generated object `{ "reservations": [...] }`, with
+up to 20 current/recent entries in the existing order. Its advertised output schema
+and structured result share this envelope for legacy and current MCP versions.
+
 Native reservations freeze other Cairn workload cgroups and preserve storage
 suspensions. They do not release GPU allocations or stop external host applications.

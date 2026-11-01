@@ -9,7 +9,7 @@ use crate::{
     store::Db,
     validation::text,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Value, json};
 
 /// How long a new reservation stays valid before its execution must renew it.
@@ -19,24 +19,7 @@ const FRESH_HEARTBEAT_MS: i64 = 30_000;
 /// Disk kept aside for a new on-demand journal or a pending attempt.
 const JOURNAL_MIB: u64 = 128;
 
-/// What a `node-attempts` record reserves capacity for.
-#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum AttemptRole {
-    /// The conversation executes on the node.
-    Execution,
-    /// Capacity held on the node a conversation is moving to.
-    Destination,
-}
-
-impl AttemptRole {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Execution => "execution",
-            Self::Destination => "destination",
-        }
-    }
-}
+pub(crate) use super::attempts::{Attempt, AttemptRole};
 
 pub fn defaults() -> Resources {
     Resources {
@@ -66,23 +49,6 @@ fn disk_total(volume: &Value, requested: u64, replacing: bool) -> u64 {
         requested.saturating_sub(current)
     };
     total.saturating_add(added)
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct NewAttempt<'a> {
-    id: &'a str,
-    role: AttemptRole,
-    run_id: &'a Value,
-    node_id: &'a str,
-    resources: &'a Resources,
-    runtime_id: &'a str,
-    created_at: i64,
-    lease_expires_at: i64,
-    released: bool,
-    native_mode: Value,
-    additional_disk_mi_b: u64,
-    disk_materialized: bool,
 }
 
 /// The node and capacity chosen for an attempt.
@@ -205,22 +171,22 @@ impl<'a> Request<'a> {
 
 /// Current reservations across all nodes.
 struct Fleet<'a> {
-    attempts: &'a [Value],
+    attempts: &'a [Attempt],
     volumes: &'a [Value],
 }
 
 impl Fleet<'_> {
-    fn active_on<'b>(&'b self, node: &'b str) -> impl Iterator<Item = &'b Value> {
+    fn active_on<'b>(&'b self, node: &'b str) -> impl Iterator<Item = &'b Attempt> {
         self.attempts
             .iter()
-            .filter(move |a| a["nodeId"] == node && is_active_attempt(a))
+            .filter(move |a| a.node_id == node && is_active_attempt(a))
     }
 
     /// Each live execution or pending destination owns one slot, atomically.
     fn free_slots(&self, request: &Request, node: &Value) -> u64 {
         let used = self
             .active_on(text(node, "id"))
-            .filter(|attempt| !(request.moving && attempt["runId"] == request.run["id"]))
+            .filter(|attempt| !(request.moving && attempt.run_id == request.run["id"]))
             .count() as u64;
         let capacity = super::slots(node).min(node["runtimeSlots"].as_u64().unwrap_or(u64::MAX));
         capacity.saturating_sub(used)
@@ -315,13 +281,24 @@ impl Candidate {
 
 /// Select within current grants and preserve the location of an existing environment.
 pub async fn reserve(s: &Service, run: &Value, attempt: &str) -> Result<Value> {
+    reserve_authorized(s, run, attempt, super::moves::Authorization::default()).await
+}
+
+pub(crate) async fn reserve_authorized(
+    s: &Service,
+    run: &Value,
+    attempt: &str,
+    authorize: super::moves::Authorization,
+) -> Result<Value> {
     // Placement falls back to the last recorded local runner state.
     let _ = super::refresh_local(s).await;
+    authorize.recheck(s).await?;
     let run = run.clone();
     let attempt = attempt.to_owned();
     let configured = !s.config.runner_url.is_empty();
     s.store
         .transaction(move |db| {
+            authorize.check(db)?;
             let result = match reserve_in(db, &run, &attempt, configured) {
                 Ok(placement) => Ok(placement),
                 Err(error) if is_no_capacity(&error) => Err(error),
@@ -360,7 +337,7 @@ struct Snapshot {
     priorities: Vec<Value>,
     checkpoint: Value,
     nodes: Vec<Value>,
-    attempts: Vec<Value>,
+    attempts: Vec<Attempt>,
     volumes: Vec<Value>,
 }
 
@@ -396,7 +373,7 @@ impl Snapshot {
                 .unwrap_or_default(),
             checkpoint: super::db_checkpoint(db, text(run, "id"))?,
             nodes,
-            attempts: db.list("node-attempts")?,
+            attempts: db.attempts()?,
             volumes: db.list("node-volumes")?,
         })
     }
@@ -520,7 +497,7 @@ fn request_reclamation(db: &Db<'_>, run: &Value, configured: bool) -> Result<()>
 
 /// Growth leaves enough capacity for the oldest eligible queued conversation.
 /// This is a transaction-local ceiling, not an allocation or an authority grant.
-pub(super) fn waiting_disk_bytes(db: &Db<'_>, node: &Value, attempts: &[Value]) -> Result<u64> {
+pub(super) fn waiting_disk_bytes(db: &Db<'_>, node: &Value, attempts: &[Attempt]) -> Result<u64> {
     let mut runs = db.queued_run_records()?;
     runs.sort_by(|left, right| {
         left.state
@@ -535,7 +512,7 @@ pub(super) fn waiting_disk_bytes(db: &Db<'_>, node: &Value, attempts: &[Value]) 
             || record.boundary["backendMigration"].is_object()
             || attempts
                 .iter()
-                .any(|attempt| attempt["runId"] == state.id && super::is_active_attempt(attempt))
+                .any(|attempt| attempt.run_id == state.id && super::is_active_attempt(attempt))
             || crate::run_retry::Retry::waiting(state.retry.as_ref(), crate::config::now())
             || crate::conversation_lifecycle::require_active_run(db, &state.id).is_err()
         {
@@ -613,9 +590,9 @@ fn claim_reservation(
     configured: bool,
 ) -> Result<Value> {
     let mut held = db
-        .get("node-attempts", reservation)?
+        .attempt(reservation)?
         .ok_or_else(|| Error::conflict("Movement reservation is missing."))?;
-    let node = text(&held, "nodeId").to_owned();
+    let node = held.node_id.clone();
     let record = nodes
         .iter()
         .find(|n| n["id"] == node.as_str())
@@ -644,27 +621,33 @@ fn claim_reservation(
             "Destination is preparing for maintenance.",
         ));
     }
-    let revoked = held["released"] == true
-        || held["runId"] != request.run["id"]
+    let revoked = held.released
+        || held.run_id != request.run["id"]
         || !allowed(&request.access["nodes"], &node)
         || record["revoked"] == true;
     if revoked {
         return Err(Error::conflict("Movement reservation was revoked."));
     }
     let mut consumed = held.clone();
-    consumed["released"] = true.into();
-    db.put("node-attempts", &consumed)?;
-    held["id"] = attempt.into();
-    held["role"] = AttemptRole::Execution.as_str().into();
-    held["runtimeId"] = record["runtimeId"].clone();
-    held["leaseExpiresAt"] = (now() + RESERVATION_LEASE_MS).into();
-    db.put("node-attempts", &held)?;
-    db.update_run_boundary(request.run_id(), &json!({ "moveReservation": null }))?;
+    consumed.released = true;
+    db.save_attempt(&consumed)?;
+    held.id = attempt.into();
+    held.role = AttemptRole::Execution;
+    held.runtime_id = text(record, "runtimeId").into();
+    held.lease_expires_at = Some(now() + RESERVATION_LEASE_MS);
+    db.save_attempt(&held)?;
+    db.update_run_placement(
+        request.run_id(),
+        crate::nodes::run_placement::PlacementChanges {
+            move_reservation: Some(None),
+            ..Default::default()
+        },
+    )?;
     let placement = Placement {
-        native_mode: held["nativeMode"].clone(),
-        node_id: &held["nodeId"],
-        resources: &held["resources"],
-        runtime_id: &held["runtimeId"],
+        native_mode: serde_json::to_value(&held.native_mode)?,
+        node_id: &held.node_id.clone().into(),
+        resources: &serde_json::to_value(&held.resources)?,
+        runtime_id: &held.runtime_id.clone().into(),
         lease_expires_at: None,
     };
     Ok(serde_json::to_value(placement)?)
@@ -675,15 +658,15 @@ fn admit(
     db: &Db<'_>,
     request: &Request,
     best: &Candidate,
-    attempts: &[Value],
+    attempts: &[Attempt],
     attempt: &str,
 ) -> Result<Value> {
     let run = request.run;
     let id = text(&best.node, "id");
     let still_owned = attempts.iter().any(|a| {
-        a["runId"] == run["id"]
+        a.run_id == run["id"]
             && is_active_attempt(a)
-            && (!request.moving || a["role"] == AttemptRole::Destination.as_str())
+            && (!request.moving || a.role == AttemptRole::Destination)
     });
     if still_owned {
         return Err(Error::conflict(
@@ -708,25 +691,28 @@ fn admit(
     let disk = disk_total(&volume, best.resources.disk_mi_b, request.replacing(id));
     volume["diskMiB"] = disk.into();
     let lease_expires_at = now() + RESERVATION_LEASE_MS;
-    let record = NewAttempt {
-        id: attempt,
+    let record = Attempt {
+        id: attempt.into(),
         role: if request.moving {
             AttemptRole::Destination
         } else {
             AttemptRole::Execution
         },
-        run_id: &run["id"],
-        node_id: id,
-        resources: &best.resources,
-        runtime_id,
+        run_id: request.run_id().into(),
+        node_id: id.into(),
+        resources: best.resources.clone(),
+        runtime_id: runtime_id.into(),
         created_at: now(),
-        lease_expires_at,
+        lease_expires_at: Some(lease_expires_at),
         released: false,
-        native_mode: super::native_mode::requested(&best.node),
+        native_mode: serde_json::from_value(super::native_mode::requested(&best.node))?,
         additional_disk_mi_b: disk.saturating_sub(previous),
         disk_materialized: false,
+        released_at: None,
+        lease_required: false,
+        lease_duration_ms: None,
     };
-    db.put("node-attempts", &serde_json::to_value(record)?)?;
+    db.save_attempt(&record)?;
     db.put("node-volumes", &volume)?;
     if policy(&run["snapshot"]["agent"])["backend"] == "auto" {
         let mut snapshot = run["snapshot"].clone();
@@ -744,7 +730,13 @@ fn admit(
                 ..Default::default()
             },
         )?;
-        db.update_run_boundary(request.run_id(), &json!({ "executionBackend": backend }))?;
+        db.update_run_placement(
+            request.run_id(),
+            crate::nodes::run_placement::PlacementChanges {
+                execution_backend: Some(serde_json::from_value(serde_json::json!(backend))?),
+                ..Default::default()
+            },
+        )?;
     }
     let placement = Placement {
         native_mode: super::native_mode::requested(&best.node),
@@ -769,21 +761,20 @@ pub(crate) async fn renew_preparation(s: &Service, run: &str, attempt: &str) -> 
     let (run, attempt) = (run.to_owned(), attempt.to_owned());
     s.store
         .transaction(move |db| {
-            let Some(mut held) = db.get("node-attempts", &attempt)? else {
+            let Some(mut held) = db.attempt(&attempt)? else {
                 return Ok(());
             };
-            if held["runId"] != run || held["released"] == true || held["diskMaterialized"] == true
-            {
+            if held.run_id != run || held.released || held.disk_materialized {
                 return Ok(());
             }
             let current = db.run(&run)?.unwrap_or_default();
             let agent = db
                 .agent_snapshot(super::run_agent(&current))?
                 .unwrap_or_default();
-            let node = db.node_boundary(text(&held, "nodeId"))?.unwrap_or_default();
+            let node = db.node_boundary(&held.node_id)?.unwrap_or_default();
             if current["status"] != RunStatus::Running
                 || !current["cancelRequestedAt"].is_null()
-                || !super::agent_allows(&agent, text(&held, "nodeId"))
+                || !super::agent_allows(&agent, &held.node_id)
                 || node["revoked"] == true
                 || crate::native::policy::node_native(&node)
                     && !crate::native::policy::allows(db, &current, &node)?
@@ -791,37 +782,37 @@ pub(crate) async fn renew_preparation(s: &Service, run: &str, attempt: &str) -> 
                 return Ok(());
             }
             crate::backend_migration::require_lineage(db, &current)?;
-            held["leaseExpiresAt"] = (now() + RESERVATION_LEASE_MS).into();
-            db.put("node-attempts", &held)?;
+            held.lease_expires_at = Some(now() + RESERVATION_LEASE_MS);
+            db.save_attempt(&held)?;
             Ok(())
         })
         .await
 }
 
 pub(crate) fn release_in(db: &Db<'_>, attempt: &str) -> Result<()> {
-    let Some(mut record) = db.get("node-attempts", attempt)? else {
+    let Some(mut record) = db.attempt(attempt)? else {
         return Ok(());
     };
     if !is_active_attempt(&record) {
         return Ok(());
     }
-    record["released"] = true.into();
-    record["releasedAt"] = now().into();
-    db.put("node-attempts", &record)?;
-    let volume_id = format!("{}:{}", text(&record, "runId"), text(&record, "nodeId"));
+    record.released = true;
+    record.released_at = Some(now());
+    db.save_attempt(&record)?;
+    let volume_id = format!("{}:{}", record.run_id, record.node_id);
     let Some(mut volume) = db.get("node-volumes", &volume_id)? else {
         return Ok(());
     };
-    if record["diskMaterialized"] != true {
+    if !record.disk_materialized {
         volume["diskMiB"] = volume["diskMiB"]
             .as_u64()
             .unwrap_or(0)
-            .saturating_sub(record["additionalDiskMiB"].as_u64().unwrap_or(0))
+            .saturating_sub(record.additional_disk_mi_b)
             .into();
     }
     let unused = volume["materialized"] != true
-        && !db.list("node-attempts")?.iter().any(|a| {
-            a["runId"] == record["runId"] && a["nodeId"] == record["nodeId"] && is_active_attempt(a)
+        && !db.attempts()?.iter().any(|a| {
+            a.run_id == record.run_id && a.node_id == record.node_id && is_active_attempt(a)
         });
     if unused {
         db.remove("node-volumes", &volume_id)?;
@@ -837,33 +828,26 @@ pub async fn materialize(s: &Service, attempt: &str) -> Result<()> {
     s.store
         .transaction(move |db| {
             let mut record = db
-                .get("node-attempts", &attempt)?
+                .attempt(&attempt)?
                 .ok_or_else(|| Error::conflict("Missing disk allocation."))?;
-            if record["released"] == true {
+            if record.released {
                 return Err(Error::conflict("Disk reservation was released."));
             }
-            if let Some(run) = db.run(text(&record, "runId"))? {
+            if let Some(run) = db.run(&record.run_id)? {
                 crate::backend_migration::require_lineage(db, &run)?;
             }
-            record["diskMaterialized"] = true.into();
-            db.put("node-attempts", &record)?;
-            let id = format!("{}:{}", text(&record, "runId"), text(&record, "nodeId"));
+            record.disk_materialized = true;
+            db.save_attempt(&record)?;
+            let id = format!("{}:{}", record.run_id, record.node_id);
             let mut volume = db
                 .get("node-volumes", &id)?
                 .ok_or_else(|| Error::conflict("Missing disk allocation."))?;
             volume["materialized"] = true.into();
-            volume["activeDiskMiB"] = record["resources"]["diskMiB"].clone();
+            volume["activeDiskMiB"] = record.resources.disk_mi_b.into();
             db.put("node-volumes", &volume)?;
             Ok(())
         })
         .await
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Selection {
-    pinned_node_id: Option<String>,
-    preferred_node_id: Option<String>,
 }
 
 /// Owner controls still obey the selected agent's current node grants.
@@ -899,16 +883,18 @@ fn configure_in(db: &Db<'_>, run: &str, input: Option<Value>) -> Result<Value> {
         .ok_or_else(|| Error::forbidden("Agent removed."))?;
     let access = policy(&agent);
     if let Some(input) = input {
-        let selection: Selection = serde_json::from_value(input)
+        let selection: cairn_contracts::PlacementSelection = serde_json::from_value(input)
             .map_err(|_| Error::bad("Invalid placement selection."))?;
         for node in [&selection.pinned_node_id, &selection.preferred_node_id]
             .into_iter()
             .flatten()
         {
-            crate::validation::uuid(node)?;
-            let unauthorized = !allowed(&access["nodes"], node)
+            let node = node.to_string();
+            let unauthorized = !allowed(&access["nodes"], &node)
                 || (node != LOCAL_NODE_ID
-                    && db.node_boundary(node)?.is_none_or(|n| n["revoked"] == true));
+                    && db
+                        .node_boundary(&node)?
+                        .is_none_or(|n| n["revoked"] == true));
             if unauthorized {
                 return Err(Error::forbidden(
                     "This node is not authorized for the conversation's agent.",
@@ -918,7 +904,14 @@ fn configure_in(db: &Db<'_>, run: &str, input: Option<Value>) -> Result<Value> {
         if record["moveRequest"].is_object() || record["moveReservation"].is_string() {
             return Err(Error::conflict("Wait for the current movement to finish."));
         }
-        record = db.update_run_boundary(run, &serde_json::to_value(&selection)?)?;
+        record = db.update_run_placement(
+            run,
+            super::run_placement::PlacementChanges {
+                pinned_node_id: Some(selection.pinned_node_id.map(|id| id.to_string())),
+                preferred_node_id: Some(selection.preferred_node_id.map(|id| id.to_string())),
+                ..Default::default()
+            },
+        )?;
         db.audit(
             "node.placement.configured",
             &json!({
@@ -962,22 +955,18 @@ pub async fn renew_local(s: &Service, run_id: &str) -> Result<()> {
                 .agent_snapshot(super::run_agent(&run))?
                 .unwrap_or_default();
             let mut record = db
-                .get("node-attempts", &owned)?
+                .attempt(&owned)?
                 .ok_or_else(|| Error::conflict("Attempt removed."))?;
             if run["status"] != RunStatus::Running
                 || !run["cancelRequestedAt"].is_null()
-                || record["released"] == true
+                || record.released
                 || !super::agent_allows(&agent, LOCAL_NODE_ID)
             {
                 return Err(Error::conflict("Execution no longer authorized."));
             }
-            record["leaseRequired"] = true.into();
-            record["leaseDurationMs"] = record["leaseDurationMs"]
-                .as_u64()
-                .unwrap_or(0)
-                .max(lease_ms)
-                .into();
-            db.put("node-attempts", &record)?;
+            record.lease_required = true;
+            record.lease_duration_ms = Some(record.lease_duration_ms.unwrap_or(0).max(lease_ms));
+            db.save_attempt(&record)?;
             Ok(())
         })
         .await?;
@@ -1001,11 +990,15 @@ pub async fn renew_local(s: &Service, run_id: &str) -> Result<()> {
 }
 
 #[cfg(test)]
+use crate::attempt_fixture::*;
+
+#[cfg(test)]
 use crate::run_fixture::DbRunFixture;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::node_fixture::DbNodeFixture;
 
     #[tokio::test]
     async fn move_reservations_require_the_current_node_and_adopt_its_runtime() {
@@ -1017,13 +1010,14 @@ mod tests {
             let attempt = crate::config::id();
             let node_id = crate::config::id();
             store.transaction(move |db| {
+                db.put_node_fixture(&json!({ "id":node_id,"capabilities":{"backend":backend,"ublk":true} }))?;
                 let run = json!({
                     "id": run_id, "taskId": crate::config::id(), "createdAt": now(),
                     "status": "queued", "moveReservation": held_id,
                     "snapshot": { "agent": { "provider": "codex", "access": { "backend": backend } } },
                 });
                 db.add_run_fixture(&run, None)?;
-                db.put("node-attempts", &json!({
+                db.put_attempt_fixture(&json!({
                     "id": held_id, "runId": run_id, "nodeId": node_id,
                     "role": "destination", "runtimeId": "previous-build", "released": false,
                     "resources": { "cpu": 1, "memoryMiB": 512, "diskMiB": 1024 },
@@ -1038,20 +1032,20 @@ mod tests {
                 });
                 let error = claim_reservation(db, &request, &[node.clone()], &held_id, &attempt, true).unwrap_err();
                 assert!(error.message.contains("version mismatch"));
-                assert_eq!(db.get("node-attempts", &held_id)?.unwrap()["released"], false);
-                assert!(db.get("node-attempts", &attempt)?.is_none());
+                assert_eq!(db.attempt_fixture(&held_id)?.unwrap()["released"], false);
+                assert!(db.attempt_fixture(&attempt)?.is_none());
                 assert_eq!(db.run(&run_id)?.unwrap()["moveReservation"], held_id);
 
                 node["runtimeId"] = super::super::component_runtime().into();
                 node["lastSeen"] = (now() - FRESH_HEARTBEAT_MS).into();
                 assert!(claim_reservation(db, &request, &[node.clone()], &held_id, &attempt, true).is_err());
-                assert_eq!(db.get("node-attempts", &held_id)?.unwrap()["released"], false);
-                assert!(db.get("node-attempts", &attempt)?.is_none());
+                assert_eq!(db.attempt_fixture(&held_id)?.unwrap()["released"], false);
+                assert!(db.attempt_fixture(&attempt)?.is_none());
                 node["lastSeen"] = now().into();
                 let placement = claim_reservation(db, &request, &[node], &held_id, &attempt, true)?;
                 assert_eq!(placement["runtimeId"], super::super::component_runtime());
-                assert_eq!(db.get("node-attempts", &attempt)?.unwrap()["runtimeId"], placement["runtimeId"]);
-                assert_eq!(db.get("node-attempts", &held_id)?.unwrap()["released"], true);
+                assert_eq!(db.attempt_fixture(&attempt)?.unwrap()["runtimeId"], placement["runtimeId"]);
+                assert_eq!(db.attempt_fixture(&held_id)?.unwrap()["released"], true);
                 assert!(db.run(&run_id)?.unwrap()["moveReservation"].is_null());
                 Ok(())
             }).await.unwrap();

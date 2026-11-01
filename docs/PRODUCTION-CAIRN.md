@@ -78,10 +78,11 @@ Version 19 upgrades to 20 by adding plugin hook tables.
 Version 20 upgrades to 21 through the [writer-owned progress migration](migrations/0021-run-progress.md).
 Version 21 upgrades to 22 through the [timeline projection migration](migrations/0022-timeline-projection.md), replaying retained events.
 
+Version 22 upgrades to 23 through the [typed placement migration](migrations/0023-typed-placement.md).
 Stop the old manager and retain a consistent database/WAL backup first. Keep the
 installation identity, configuration, data roots, node state and object storage.
 The migration preserves node identities, credentials, configuration and references;
-conversion failures leave version 11 available for repair and retry. Earlier
+conversion failures leave the original version available for repair and retry. Earlier
 layouts need their explicit migrations; do not replace a migration with a schema
 version edit or a data reset. Deploy matching manager, runner, node and guest
 versions before resuming work.

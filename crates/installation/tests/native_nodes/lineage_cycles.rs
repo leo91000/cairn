@@ -1,4 +1,5 @@
 use super::*;
+use cairn_installation::nodes::run_placement::PlacementChanges;
 
 struct Actor {
     chat: Value,
@@ -307,10 +308,13 @@ async fn migrating_an_expired_vm_requester_cannot_adopt_its_native_child() {
                     status: Some(cairn_contracts::RunStatus::Succeeded),
                     recovery_pending: Some(false),
                     resume_available: Some(false),
+                    placement: Some(Box::new(PlacementChanges {
+                        node_id: Some(None),
+                        ..Default::default()
+                    })),
                     boundary: Some(json!({
                         "environmentState": "expired",
                         "environmentExpiredAt": now(),
-                        "nodeId": null,
                         "isolated": false,
                     })),
                     ..Default::default()
@@ -437,6 +441,7 @@ async fn pending_migration_cannot_reserve_materialize_or_read_after_a_back_edge(
             "nativeParentRunId": director.run["id"],
             "nativeParentAccess": "installation",
             "nativeProvenanceUnknown": false,
+            "nativePluginGrants": [],
         });
         let prepared = json!({
             "id": id(),
@@ -454,7 +459,11 @@ async fn pending_migration_cannot_reserve_materialize_or_read_after_a_back_edge(
                 text(&source.run, "id"),
                 cairn_installation::runs::RunChanges {
                     status: Some(cairn_contracts::RunStatus::Succeeded),
-                    boundary: Some(json!({ "nodeId": origin["id"], "backendMigration": prepared })),
+                    placement: Some(Box::new(PlacementChanges {
+                        node_id: Some(Some(text(origin, "id").to_owned())),
+                        ..Default::default()
+                    })),
+                    boundary: Some(json!({ "backendMigration": prepared })),
                     ..Default::default()
                 },
             )
@@ -517,7 +526,7 @@ async fn pending_migration_cannot_reserve_materialize_or_read_after_a_back_edge(
             .await
             .unwrap();
         assert_eq!(changed["nativeParentRunId"], descendant.run["id"]);
-        let attempts_before = f.service.store.list("node-attempts").await.unwrap();
+        let attempts_before = f.service.store.attempts().await.unwrap();
         let volumes_before = f.service.store.list("node-volumes").await.unwrap();
         let grants_before = f.service.store.list("node-disk-grants").await.unwrap();
         let rejected = id();
@@ -564,10 +573,7 @@ async fn pending_migration_cannot_reserve_materialize_or_read_after_a_back_edge(
             body.to_string().contains("cyclic native authority lineage"),
             "{body}"
         );
-        assert_eq!(
-            f.service.store.list("node-attempts").await.unwrap(),
-            attempts_before
-        );
+        assert_eq!(f.service.store.attempts().await.unwrap(), attempts_before);
         assert_eq!(
             f.service.store.list("node-volumes").await.unwrap(),
             volumes_before
@@ -576,22 +582,9 @@ async fn pending_migration_cannot_reserve_materialize_or_read_after_a_back_edge(
             f.service.store.list("node-disk-grants").await.unwrap(),
             grants_before
         );
-        let held_state = f
-            .service
-            .store
-            .get("node-attempts", &held)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(held_state["diskMaterialized"], false);
-        assert!(
-            f.service
-                .store
-                .get("node-attempts", &rejected)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        let held_state = f.service.store.attempt(&held).await.unwrap().unwrap();
+        assert!(!held_state.disk_materialized);
+        assert!(f.service.store.attempt(&rejected).await.unwrap().is_none());
         placement::release(&f.service, &held).await.unwrap();
     }
 }

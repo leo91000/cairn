@@ -528,6 +528,16 @@ pub(crate) fn chat_grant(db: &Db<'_>, chat: &Value, source: &Origin) -> Result<V
     if policy(&agent)["backend"] == "auto" && run["id"].is_string() {
         effective["access"]["backend"] = policy(&run["snapshot"]["agent"])["backend"].clone();
     }
+    // Directing one's own conversation retains its existing ancestry. Treating
+    // this as delegation would make the run its own parent and invalidate leases.
+    let directing_self = matches!(source, Origin::Run(id) if run["id"] == *id);
+    let retained;
+    let source = if directing_self {
+        retained = Origin::Stored(run.clone());
+        &retained
+    } else {
+        source
+    };
     let incoming = authorize_origin(db, &effective, source)?;
     if chat["id"].is_string()
         && run["id"].is_string()
@@ -582,7 +592,9 @@ pub(crate) fn chat_grant(db: &Db<'_>, chat: &Value, source: &Origin) -> Result<V
         }) {
             continue;
         }
-        if parent.is_some() && !explicit(&incoming["nativeAuthorityNodes"], text(&node, "id")) {
+        if (parent.is_some() || directing_self)
+            && !explicit(&incoming["nativeAuthorityNodes"], text(&node, "id"))
+        {
             continue;
         }
         if chat["nativeParentRunId"].is_string()
