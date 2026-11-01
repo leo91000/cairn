@@ -689,6 +689,7 @@ mod tests {
                     Some("chat-turn"),
                     Some(&selection),
                     Some(crate::provider::Provider::Codex),
+                    None,
                 )
             })
             .await
@@ -738,6 +739,7 @@ mod tests {
                     Some("chat-turn"),
                     Some(&preserve),
                     Some(crate::provider::Provider::Codex),
+                    None,
                 )
             })
             .await
@@ -768,6 +770,7 @@ mod tests {
                     Some("chat-turn"),
                     Some(&explicit),
                     Some(crate::provider::Provider::Codex),
+                    None,
                 )
             })
             .await
@@ -793,7 +796,7 @@ mod tests {
                     db.save_checkpoint_boundary("mission", &json!({
                     "completed": completed, "outputInterrupted": true, "launched": true, "prepared": { "cwd": "/workspace" },
                 }))?;
-                    let resumed = requeue(db, "mission", None, None, None)?;
+                    let resumed = requeue(db, "mission", None, None, None, None)?;
                     assert_eq!(resumed["status"], "queued");
                     let checkpoint = db.checkpoint_boundary("mission")?.unwrap();
                     assert!(checkpoint["outputInterrupted"].is_null());
