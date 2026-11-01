@@ -539,11 +539,15 @@ test('classification requires the actual node writer prefix and clear structured
     assert.equal(classifyAdmissionWait({ ...node, status }), null)
 })
 
-test('provider and account capacity words never establish node capacity', () => {
-  const base = { status: 'queued', accountRequired: null, recoveryPending: 0 }
-  for (const waitReason of ['Selected model is at capacity. Please try a different model.', 'Provider is at capacity; retry later.', 'The model is busy.', 'No accounts have free slots.', 'Usage limit reached.', 'Quota exceeded.', 'Rate limit reached.'])
-    assert.equal(classifyAdmissionWait({ ...base, waitReason }), 'account')
-  for (const waitReason of ['capacity', 'Unknown capacity-related condition.', 'waiting for capacity.', ' Waiting for capacity.', 'Waiting for capacity.X', 'Waiting for capacity.\nNode unavailable.'])
+test('human-only provider and recovery text never establishes a gate by keyword or prefix', () => {
+  const base = {
+    status: 'queued',
+    accountRequired: null,
+    recoveryPending: 0,
+    agentProvider: 'codex',
+    model: 'gpt-6.1',
+  }
+  for (const waitReason of ['Selected model is at capacity. Please try a different model.', 'Provider is at capacity; retry later.', 'The model is busy.', 'No accounts have free slots.', 'Usage limit reached.', 'Quota exceeded.', 'Rate limit reached.', 'capacity', 'Unknown capacity-related condition.', 'waiting for capacity.', ' Waiting for capacity.', 'Waiting for capacity.X', 'Waiting for capacity.\nNode unavailable.', 'Temporary agent error. Retrying in garbage', 'Temporary agent error. Retrying in ', 'Temporary agent error. Retrying in 5 seconds (attempt 1/5).', 'Waiting for the previous VM to stop.', 'Waiting for the previous execution to stop before recovery.', 'Paused for worker restart. This run will resume automatically.', 'Recovering after worker restart.', 'Recovering after a worker error.', 'Resuming saved conversation.', 'Usage exhausted. Waiting for an available Codex account to resume.', 'Connect a Codex account in Connections before running this agent.'])
     assert.equal(classifyAdmissionWait({ ...base, waitReason }), null)
 })
 
@@ -592,5 +596,79 @@ test('account attention accepts every canonical provider from the actual nullabl
       waitReason: null,
       recoveryPending: null,
     }), 'account')
+  }
+})
+
+test('actual structured recovery facts work without a reason and canonical account formats match snapshot facts', () => {
+  const base = {
+    status: 'queued',
+    accountRequired: null,
+    recoveryPending: 0,
+    agentProvider: 'codex',
+    model: 'gpt-6.1',
+  }
+  for (const recoveryPending of [true, 1]) {
+    for (const waitReason of [null, undefined, {}, '', 'Temporary agent error. Retrying in garbage'])
+      assert.equal(classifyAdmissionWait({ ...base, recoveryPending, waitReason }), 'recovery')
+  }
+
+  for (const [agentProvider, label] of [['codex', 'Codex'], ['claude', 'Claude Code'], ['opencode', 'OpenCode']]) {
+    for (const waitReason of [`Waiting for a free ${label} account slot. The run starts when another finishes.`, `Waiting for a ${label} account with available usage.`]) {
+      assert.equal(classifyAdmissionWait({ ...base, agentProvider, waitReason }), 'account')
+      for (const reason of [waitReason.slice(0, -1), ` ${waitReason}`, `${waitReason} extra`, `${waitReason}\n`])
+        assert.equal(classifyAdmissionWait({ ...base, agentProvider, waitReason: reason }), null)
+    }
+  }
+
+  const model = 'not-supported'
+  const unsupported = `No enabled OpenCode account supports model ${model}. Choose a model available through your connections or connect its model provider.`
+  assert.equal(classifyAdmissionWait({
+    ...base,
+    agentProvider: 'opencode',
+    model,
+    waitReason: unsupported,
+  }), 'account')
+  assert.equal(classifyAdmissionWait({
+    ...base,
+    agentProvider: 'opencode',
+    model: 'different',
+    waitReason: unsupported,
+  }), null)
+  assert.equal(classifyAdmissionWait({
+    ...base,
+    agentProvider: 'codex',
+    model,
+    waitReason: unsupported,
+  }), null)
+  for (const agentProvider of [undefined, null, 'Codex', 'unknown', {}, [], 1])
+    assert.equal(classifyAdmissionWait({ ...base, agentProvider, waitReason: 'Waiting for a free Codex account slot. The run starts when another finishes.' }), null)
+})
+
+test('canonical account exception needs complete valid snapshot context and exact full reason', () => {
+  const base = {
+    status: 'queued',
+    accountRequired: null,
+    recoveryPending: 0,
+    agentProvider: 'codex',
+    model: '',
+  }
+  const slot = 'Waiting for a free Codex account slot. The run starts when another finishes.'
+  assert.equal(classifyAdmissionWait({ ...base, waitReason: slot }), 'account')
+  for (const model of [undefined, null, {}, [], 0, Symbol('invalid-model')])
+    assert.equal(classifyAdmissionWait({ ...base, model, waitReason: slot }), null)
+  const inherited = Object.assign(Object.create({ agentProvider: 'codex', model: '' }), {
+    status: 'queued',
+    accountRequired: null,
+    recoveryPending: 0,
+    waitReason: slot,
+  })
+  assert.equal(classifyAdmissionWait(inherited), null)
+  for (const model of [undefined, null, '', {}, [], 0]) {
+    assert.equal(classifyAdmissionWait({
+      ...base,
+      agentProvider: 'opencode',
+      model,
+      waitReason: 'No enabled OpenCode account supports model . Choose a model available through your connections or connect its model provider.',
+    }), null)
   }
 })

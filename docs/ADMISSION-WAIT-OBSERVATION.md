@@ -14,21 +14,46 @@ run supplies only `id`, `status`, `waitClass`, `attemptId`, `activeMessageId`, a
 an attempt or logical turn must be known. Unsupported evidence is unknown.
 
 The producer must establish the gate before the observer measures it. The shared
-`scripts/admission-classification.mjs` classifier returns only a safe class and is
-consumed byte-for-byte by the external manager producer. `account_wait_reason` is
-shared by node, account and recovery writers: a generic capacity word is not a
-node gate. Node capacity requires queued status, the exact node writer prefix
-`Waiting for capacity.`, explicit null `accountRequired`, and known-clear
-`recoveryPending`. Provider/model busy text, including Codex's model-at-capacity
-message, remains account wait. An own nullable `accountRequired` fact must be
-present and valid before any reason/recovery fallback is trusted: only the exact
-`codex`, `claude`, and `opencode` strings establish account attention. Missing
-fields and values outside null or that exact enum remain unknown and cannot end
-or rearm an unresolved episode. Valid explicit account attention and recovery
-facts take precedence over stale node text. Missing schema facts, malformed data and
-unrecognized reasons stay unknown; no raw reason crosses the producer projection.
-The producer reuses its existing bounded query, adding the optional account field;
-it adds no query, database write or wait-start inference.
+`scripts/admission-classification.mjs` classifier is consumed byte-for-byte by the
+external manager producer. It returns a class, never a raw reason. An own nullable
+`accountRequired` fact must be valid first: only exact `codex`, `claude`, and
+`opencode` establish account attention. Missing or malformed values remain
+unknown and cannot end or rearm an episode.
+
+When attention is null, a validated own `recoveryPending` boolean (or SQLite 0/1)
+is required. True establishes recovery without any reason text, including manual
+resume before launch. False allows the canonical node marker `Waiting for
+capacity.` to establish node capacity. Human-only retry, recovery, account or
+provider words cannot establish a gate: even a complete retry message with a
+false recovery flag remains unknown. Raw model-at-capacity errors without a
+structured gate likewise remain unknown rather than becoming node capacity.
+
+Account slot/usage waits are the narrow exception: `accounts::waiting` can leave
+attention null while an enabled account exists. Match its **complete generated
+message**, using valid own snapshot provider/model facts from the same bounded
+query. Provider labels must match exactly; the model-specific OpenCode message
+must equal the current nonempty snapshot model. Missing context, mismatched
+provider/model, truncated messages and extra suffixes remain unknown. This is
+not a generic keyword, retry-prefix or provider-error parser.
+
+The writer audit fixes the producer contract to existing committed facts:
+
+| Writer | Source of positive evidence |
+| --- | --- |
+| `worker/schedule.rs::report_capacity_wait` | Queued node marker and null attention; recovery must be known clear. |
+| `worker/schedule.rs::report_account_wait` | `needs_attention(...).then_some(provider)` can return a canonical provider or null; the raw error is not itself a typed gate. |
+| `accounts/mod.rs::waiting` | Null attention busy-slot/usage messages and OpenCode unsupported-model text have complete formats matched against snapshot provider/model. Other raw errors stay unknown. |
+| `worker/retry.rs::schedule_in` | Commits `recovery_pending: true` and null attention with the full retry message; the flag, not the message, establishes recovery. |
+| `worker/control.rs` manual resume | Commits recovery true, including the before-launch case with no reason. |
+| `worker/mod.rs` restart and `worker/execution.rs` queued failure/fencing | Commit recovery true. No recovery-text fallback is needed. |
+| `worker/schedule.rs::recover_or_wait` | Called for a recovering run; explanatory text does not replace the recovery flag. |
+| `worker/launch.rs::switch_account` | The run is already running; known nonqueued status ends capacity observation independently of its usage message. |
+| `nodes/moves.rs` explanatory recovery text | Text alone supplies no new positive gate; require valid recovery facts or known nonqueued status. |
+
+The producer reuses its existing bounded query, adding optional account and
+snapshot provider/model projections. No new query, history scan, schema/write,
+permission or wait-start inference is introduced. Raw reasons and snapshot model
+context remain inside the producer and are not returned to the monitor.
 
 A current `queued`/`capacity` observation begins its own interval on its first
 sample. It becomes `bad` only after more than ten minutes of fresh observations
