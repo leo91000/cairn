@@ -544,11 +544,11 @@ async fn pending_migration_cannot_reserve_materialize_or_read_after_a_back_edge(
                 .message
                 .contains("cyclic native authority lineage")
         );
-        let issue_error =
-            disk_grants::issue(&f.service, &candidate, text(destination, "id"), &point)
-                .await
-                .err()
-                .expect("A cyclic lineage must not issue a disk credential");
+        let Err(issue_error) =
+            disk_grants::issue(&f.service, &candidate, text(destination, "id"), &point).await
+        else {
+            panic!("A cyclic lineage must not issue a disk credential");
+        };
         assert!(
             issue_error
                 .message

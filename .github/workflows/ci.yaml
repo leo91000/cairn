@@ -10,6 +10,11 @@ on:
         description: Run backend tests and doctests without release resolution or image jobs
         type: boolean
         default: false
+      backend-qualification:
+        description: Optional physical backend qualification after the backend suite
+        type: choice
+        options: [none, backend-migration]
+        default: none
       browser-workers:
         description: Workers per browser group for performance comparisons
         type: choice
@@ -221,6 +226,18 @@ jobs:
         run: |
           set -o pipefail
           node scripts/test-backend.mjs --nextest --test-threads 8 --no-fail-fast --color never --status-level pass 2>&1 | tee backend-tests.log
+      - name: Qualify physical backend migration with the same compiled source
+        if: inputs.backend-qualification == 'backend-migration'
+        run: |
+          set -o pipefail
+          python3 -m venv .node-s3-test
+          .node-s3-test/bin/pip install 'moto[server]==5.2.3' awscli blake3==1.0.8
+          PATH="$PWD/.node-s3-test/bin:$PATH" .node-s3-test/bin/python scripts/tests/node_s3_test.py --case backend_migration_keeps_chat_and_files_both_directions_and_preserves_source_on_failure 2>&1 | tee backend-migration-tests.log
+          python3 - <<'PYTHON'
+          import pathlib, re
+          result = pathlib.Path('backend-migration-tests.log').read_text()
+          assert re.search(r'^test result: ok\. 1 passed; 0 failed; 0 ignored;', result, re.MULTILINE), 'Expected exactly one passing physical backend migration test'
+          PYTHON
       - name: Measure the bounded bootstrap observer without filesystem work
         run: node scripts/test-backend.mjs -p cairn-installation --lib native::bootstrap::tests::observation_hot_path_measurement -- --exact --nocapture
       - name: Qualify native backend namespace isolation with ordinary private bind mounts
