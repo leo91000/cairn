@@ -72,7 +72,12 @@ describe('parallel CI coverage', () => {
     ])
     const journey = browser.steps.find(step => step.name === 'Run the saved-chat resume journey')
     expect(journey['timeout-minutes']).toBe(10)
-    expect(journey.run).toBe('pnpm test:e2e --project=journeys-chats tests/e2e/chats.spec.ts --grep \'^same-provider quota resume\' --workers=1 --fail-on-flaky-tests')
+    expect(journey.run).toBe('pnpm test:e2e --project=journeys-chats tests/e2e/chats.spec.ts --grep \'same-provider quota resume\' --workers=1 --fail-on-flaky-tests')
+    const grep = journey.run.match(/--grep '([^']+)'/)?.[1]
+    expect(grep).toBe('same-provider quota resume')
+    const matches = new RegExp(grep)
+    expect(matches.test('journeys-chats chats.spec.ts same-provider quota resume submits the changed model default')).toBe(true)
+    expect(matches.test('journeys-chats chats.spec.ts unrelated chat case')).toBe(false)
 
     const uploads = browser.steps.filter(step => step.uses?.startsWith('actions/upload-artifact@'))
     expect(uploads).toHaveLength(1)

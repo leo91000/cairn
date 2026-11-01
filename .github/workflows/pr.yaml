@@ -139,7 +139,7 @@ jobs:
         run: pnpm exec tsx scripts/qualify-beacon-sql-fixture.ts
       - name: Run the saved-chat resume journey
         timeout-minutes: 10
-        run: pnpm test:e2e --project=journeys-chats tests/e2e/chats.spec.ts --grep '^same-provider quota resume' --workers=1 --fail-on-flaky-tests
+        run: pnpm test:e2e --project=journeys-chats tests/e2e/chats.spec.ts --grep 'same-provider quota resume' --workers=1 --fail-on-flaky-tests
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
