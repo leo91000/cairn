@@ -39,7 +39,13 @@ pub(crate) async fn validate(
     provider.adapter().validate_agent(&agent)?;
 
     let catalog = provider.adapter().model_catalog(s).await?;
+    let model_is_default = selection.model.is_empty();
     validate_catalog(provider, selection, &catalog)?;
+    if model_is_default {
+        validate_shape(selection)?;
+        agent["model"] = selection.model.clone().into();
+        provider.adapter().validate_agent(&agent)?;
+    }
     Ok(provider)
 }
 
@@ -78,7 +84,7 @@ fn model_row<'a>(catalog: &'a Value, model: &str) -> Option<(&'a Value, Option<&
 
 fn validate_catalog(
     provider: Provider,
-    selection: &ResumeExecutionSelection,
+    selection: &mut ResumeExecutionSelection,
     catalog: &Value,
 ) -> Result<()> {
     let selected_name = if selection.model.is_empty() {
@@ -89,14 +95,23 @@ fn validate_catalog(
             .find(|model| model["isDefault"] == true)
             .map(|model| text(model, "model"))
             .unwrap_or("")
+            .to_owned()
     } else {
-        selection.model.as_str()
+        selection.model.clone()
     };
-    let Some((model, route)) = model_row(catalog, selected_name) else {
+    if selected_name.is_empty() {
+        return Err(Error::bad(
+            "Choose a model from this coding agent's current model catalog.",
+        ));
+    }
+    let Some((model, route)) = model_row(catalog, &selected_name) else {
         return Err(Error::bad(
             "Choose a model from this coding agent's current model catalog.",
         ));
     };
+    if selection.model.is_empty() {
+        selection.model.clone_from(&selected_name);
+    }
 
     let efforts = route
         .map(|route| &route["supportedReasoningEfforts"])
@@ -135,7 +150,7 @@ mod tests {
 
     #[test]
     fn opencode_catalog_route_ids_keep_provider_validation_and_bounds() {
-        let selection = ResumeExecutionSelection {
+        let mut selection = ResumeExecutionSelection {
             model: "openrouter/model@revision+vision".into(),
             reasoning: "xhigh".into(),
             speed: String::new(),
@@ -158,7 +173,7 @@ mod tests {
                 }],
             }],
         });
-        validate_catalog(Provider::Opencode, &selection, &catalog).unwrap();
+        validate_catalog(Provider::Opencode, &mut selection, &catalog).unwrap();
 
         let mut oversized = selection.clone();
         oversized.model = "m".repeat(121);
@@ -167,10 +182,30 @@ mod tests {
         let mut unlisted = selection.clone();
         unlisted.model = "openrouter/unlisted@revision+vision".into();
         assert!(validate_shape(&unlisted).is_ok());
-        assert!(validate_catalog(Provider::Opencode, &unlisted, &catalog).is_err());
+        assert!(validate_catalog(Provider::Opencode, &mut unlisted, &catalog).is_err());
 
         let mut invalid_effort = selection;
         invalid_effort.reasoning = "2xhigh".into();
         assert!(validate_shape(&invalid_effort).is_err());
+    }
+
+    #[test]
+    fn empty_model_selection_resolves_the_catalog_default() {
+        let mut selection = ResumeExecutionSelection {
+            model: String::new(),
+            reasoning: "high".into(),
+            speed: String::new(),
+        };
+        let catalog = serde_json::json!({
+            "models": [{
+                "model": "gpt-6-sol",
+                "isDefault": true,
+                "supportedReasoningEfforts": [{ "reasoningEffort": "high" }],
+            }],
+        });
+
+        validate_catalog(Provider::Codex, &mut selection, &catalog).unwrap();
+
+        assert_eq!(selection.model, "gpt-6-sol");
     }
 }

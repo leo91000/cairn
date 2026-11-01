@@ -1388,12 +1388,6 @@ internal fun ChatPage(
                                                                 ) {
                                                                     val savedAgent =
                                                                         run.snapshot?.agent
-                                                                    val selectedModelName =
-                                                                        model.ifBlank {
-                                                                            savedAgent
-                                                                                ?.model
-                                                                                .orEmpty()
-                                                                        }
                                                                     val selectedReasoning =
                                                                         reasoning.ifBlank {
                                                                             if (model.isBlank())
@@ -1419,6 +1413,13 @@ internal fun ChatPage(
                                                                             val selectedRow =
                                                                                 selectedModel(
                                                                                     catalog,
+                                                                                    model,
+                                                                                    savedAgent
+                                                                                        .model,
+                                                                                )
+                                                                            val selectedModelName =
+                                                                                resumeSelectionModelId(
+                                                                                    selectedRow,
                                                                                     model,
                                                                                     savedAgent
                                                                                         .model,

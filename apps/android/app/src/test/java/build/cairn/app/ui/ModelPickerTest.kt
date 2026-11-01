@@ -9,6 +9,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.*
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
+import org.junit.Assert.assertEquals
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -22,6 +23,21 @@ class ModelPickerTest : ModelPickerCases() {
     override fun captureReasoning() = capture("reasoning")
 
     override fun captureDefaultModel() = capture("claude-default")
+
+    @Test
+    fun resumeSelectionUsesTheDisplayedDefaultModelId() {
+        val catalog =
+            ModelCatalog(
+                models =
+                    listOf(
+                        CodingAgentModel(model = "gpt-6-sol", isDefault = true),
+                        CodingAgentModel(model = "gpt-6-luna"),
+                    )
+            )
+        val selected = selectedModel(catalog, "", "")
+
+        assertEquals("gpt-6-sol", resumeSelectionModelId(selected, "", ""))
+    }
 
     private fun capture(name: String, tag: String = "model-settings-sheet") {
         val file = java.io.File("build/reports/model-picker/$name.png")

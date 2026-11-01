@@ -259,6 +259,53 @@ abstract class BackgroundWaitCases {
         }
 
     @Test
+    fun savedCodexQuotaResumeSubmitsDisplayedDefaultModelAndAppliedSelection() =
+        conversation("failed", quota = true, resumeSelection = true) { server ->
+            compose.onNodeWithTag("chat-quota").assertIsDisplayed()
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("GPT-6 Sol").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithTag("model-picker").performClick()
+            compose.onNode(hasText("GPT-6 Sol") and isSelectable()).assertIsSelected()
+            compose.onNodeWithTag("reasoning-slider").performSemanticsAction(
+                androidx.compose.ui.semantics.SemanticsActions.SetProgress
+            ) {
+                it(1f)
+            }
+            compose.onNodeWithText("Standard").assertExists()
+            compose.onNodeWithText("Terminé").performClick()
+            compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
+
+            val request = generateSequence {
+                server.takeRequest(5, TimeUnit.SECONDS)
+            }
+                .first {
+                    it.method == "POST" &&
+                        it.path?.endsWith("/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume") ==
+                            true
+                }
+            val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+            org.junit.Assert.assertEquals(
+                "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                body["chatId"]!!.jsonPrimitive.content,
+            )
+            org.junit.Assert.assertEquals(SAVED_RUN_ID, body["runId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("quota-turn", body["turnId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals(
+                "gpt-6-sol",
+                body["selection"]!!.jsonObject["model"]!!.jsonPrimitive.content,
+            )
+            org.junit.Assert.assertEquals(
+                "high",
+                body["selection"]!!.jsonObject["reasoning"]!!.jsonPrimitive.content,
+            )
+            org.junit.Assert.assertEquals(
+                "standard",
+                body["selection"]!!.jsonObject["speed"]!!.jsonPrimitive.content,
+            )
+        }
+
+    @Test
     fun relayedBackgroundWaitReplacesWorking() =
         conversation("running") {
             compose.onNodeWithTag("agent-waiting").assertExists()
@@ -595,6 +642,7 @@ abstract class BackgroundWaitCases {
         sleeping: Boolean = false,
         conditional: Boolean = false,
         quota: Boolean = false,
+        resumeSelection: Boolean = false,
         codingAgentChoices: Boolean = false,
         initialAlternatives: String? = null,
         rejectSwitch: Boolean = false,
@@ -618,6 +666,11 @@ abstract class BackgroundWaitCases {
                             id = SAVED_RUN_ID,
                             status = status,
                             startedAt = now - 60_000,
+                            resumeAvailable = resumeSelection,
+                            sessionId = if (resumeSelection) "saved-session" else null,
+                            chatExecution =
+                                if (resumeSelection) ChatExecution(messageId = "quota-turn")
+                                else null,
                             snapshot =
                                 Snapshot(
                                     agent =
@@ -636,7 +689,12 @@ abstract class BackgroundWaitCases {
                                                     skills = null,
                                                     mcps = null,
                                                 ),
-                                            provider = if (quota) "claude" else "codex",
+                                            provider =
+                                                if (quota && !resumeSelection) "claude"
+                                                else "codex",
+                                            model = "",
+                                            reasoning = if (resumeSelection) "high" else "",
+                                            speed = if (resumeSelection) "priority" else "",
                                         ),
                                     task =
                                         build.cairn.contracts.RunTaskSnapshot(
@@ -753,6 +811,12 @@ abstract class BackgroundWaitCases {
                                         """{"runId":"$SAVED_RUN_ID","turnId":"quota-turn","provider":"claude","choices":[{"provider":"codex","label":"$label"}]$progress}"""
                                 )
                         }
+                        if (resumeSelection && path.endsWith("/coding-agent"))
+                            return MockResponse()
+                                .setHeader("Content-Type", "application/json")
+                                .setBody(
+                                    """{"runId":"$SAVED_RUN_ID","turnId":"quota-turn","provider":"codex","choices":[]}"""
+                                )
 
                         if (
                             path ==
@@ -807,9 +871,39 @@ abstract class BackgroundWaitCases {
                                     wireJson.encodeToString(chat)
                                 "/api/installations/fixture/api/overview" ->
                                     installationOverviewFixture()
+                                "/api/installations/fixture/api/codex/models" ->
+                                    wireJson.encodeToString(
+                                        ModelCatalog(
+                                            models =
+                                                listOf(
+                                                    CodingAgentModel(
+                                                        model = "gpt-6-sol",
+                                                        displayName = "GPT-6 Sol",
+                                                        isDefault = true,
+                                                        defaultReasoningEffort = "medium",
+                                                        supportedReasoningEfforts =
+                                                            listOf(
+                                                                ReasoningOption(
+                                                                    reasoningEffort = "medium"
+                                                                ),
+                                                                ReasoningOption(
+                                                                    reasoningEffort = "high"
+                                                                ),
+                                                            ),
+                                                        serviceTiers = emptyList(),
+                                                    ),
+                                                    CodingAgentModel(model = "gpt-6-luna"),
+                                                ),
+                                            checkedAt = now,
+                                        )
+                                    )
                                 "/api/installations/fixture/api/runs/$SAVED_RUN_ID/resume" ->
                                     wireJson.encodeToString(
                                         build.cairn.contracts.ResumeRunOutput(SAVED_RUN_ID)
+                                    )
+                                "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume" ->
+                                    wireJson.encodeToString(
+                                        chat.run!!.copy(status = "queued", resumeAvailable = false)
                                     )
                                 else ->
                                     if (

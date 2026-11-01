@@ -4,18 +4,46 @@ import {
   it,
   vi,
 } from 'vitest'
+import { validationFailures } from '../pr-validation-required.mjs'
 import { validationScope } from '../pr-validation-scope.mjs'
 import { runPlan, validationPlan } from '../validate-pr.mjs'
 
 describe('pR validation', () => {
   it('includes platform and contract checks for indirect shared inputs', () => {
-    for (const file of ['crates/contracts/src/lib.rs', 'packages/contracts/generated/models.json', 'scripts/generate-contracts.mjs', 'tests/fixtures/resume-contracts.json', 'pnpm-lock.yaml', '.github/workflows/pr.yaml', 'scripts/pr-validation-scope.mjs', 'apps/android/app/src/main/java/build/cairn/contracts/ResumeRunClient.kt', 'apps/android/app/src/main/java/build/cairn/boundary/Wire.kt'])
-      expect(validationScope([file])).toEqual({ android: true, contracts: true })
-    expect(validationScope(['apps/web/src/main.ts'])).toEqual({ android: false, contracts: false })
-    expect(validationScope(['apps/android/app/build.gradle.kts'])).toEqual({ android: true, contracts: false })
-    expect(validationScope(['crates/installation/src/lib.rs'])).toEqual({ android: false, contracts: true })
-    expect(validationScope(['rust-toolchain.toml'])).toEqual({ android: false, contracts: true })
-    expect(validationScope(['scripts/generate-contracts.mjs'])).toEqual({ android: true, contracts: true })
+    for (const file of ['crates/contracts/src/lib.rs', 'packages/contracts/generated/models.json', 'scripts/generate-contracts.mjs', 'tests/fixtures/resume-contracts.json', 'pnpm-lock.yaml', '.github/workflows/pr.yaml', 'scripts/pr-validation-scope.mjs'])
+      expect(validationScope([file])).toEqual({ android: true, contracts: true, browser: true })
+    expect(validationScope(['apps/web/src/main.ts'])).toEqual({ android: false, contracts: false, browser: true })
+    expect(validationScope(['apps/android/app/src/main/java/build/cairn/contracts/ResumeRunClient.kt'])).toEqual({ android: true, contracts: true, browser: false })
+    expect(validationScope(['apps/android/app/src/main/java/build/cairn/boundary/Wire.kt'])).toEqual({ android: true, contracts: true, browser: false })
+    expect(validationScope(['apps/android/app/build.gradle.kts'])).toEqual({ android: true, contracts: false, browser: false })
+    expect(validationScope(['crates/installation/src/lib.rs'])).toEqual({ android: false, contracts: true, browser: true })
+    expect(validationScope(['rust-toolchain.toml'])).toEqual({ android: false, contracts: true, browser: true })
+    expect(validationScope(['scripts/generate-contracts.mjs'])).toEqual({ android: true, contracts: true, browser: true })
+    expect(validationScope(['tests/e2e/chats.spec.ts'])).toEqual({ android: false, contracts: false, browser: true })
+    expect(validationScope(['docs/README.md'])).toEqual({ android: false, contracts: false, browser: false })
+  })
+
+  it('requires the selected browser job and permits only a genuinely unselected skip', () => {
+    const required = {
+      scope: { result: 'success', outputs: { contracts: 'false', android: 'false', browser: 'true' } },
+      quality: { result: 'success' },
+      contracts: { result: 'skipped' },
+      android: { result: 'skipped' },
+      browser: { result: 'success' },
+    }
+    expect(validationFailures(required)).toEqual([])
+    expect(validationFailures({ ...required, browser: { result: 'failure' } }))
+      .toContain('browser: expected success, got failure')
+    expect(validationFailures({
+      ...required,
+      scope: { ...required.scope, outputs: { ...required.scope.outputs, browser: 'false' } },
+      browser: { result: 'skipped' },
+    })).toEqual([])
+    expect(validationFailures({
+      ...required,
+      scope: { ...required.scope, outputs: { ...required.scope.outputs, browser: 'false' } },
+      browser: { result: 'failure' },
+    })).toContain('browser: expected skipped, got failure')
   })
 
   it('defaults to the full core and validates all suite names before running anything', () => {

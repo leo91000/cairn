@@ -79,6 +79,12 @@ internal fun selectedModel(
     else catalog.models.find { it.isDefault }
 }
 
+internal fun resumeSelectionModelId(
+    selectedModel: CodingAgentModel?,
+    model: String,
+    savedModel: String,
+): String = selectedModel?.model ?: model.ifBlank { savedModel }
+
 internal fun billingLabel(value: String) =
     when (value) {
         "subscription" -> "Inclus"

@@ -5938,6 +5938,138 @@ async fn chat_resume_selection_keeps_saved_identity_and_reaches_the_worker_plan(
             .iter()
             .all(|plan| plan["chat"]["model"] == "gpt-6-sol")
     );
+
+    controller
+        .hold
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let default_model_chat = s.chat_create(json!({})).await.unwrap();
+    let default_model_chat_id = text(&default_model_chat, "id").to_owned();
+    let mut default_model_message = message("fixture:chat-hang");
+    default_model_message["provider"] = "codex".into();
+    default_model_message["model"] = "".into();
+    default_model_message["reasoning"] = "high".into();
+    default_model_message["speed"] = "priority".into();
+    let default_model_turn_id = text(&default_model_message, "id").to_owned();
+    s.chat_send(&default_model_chat_id, default_model_message)
+        .await
+        .unwrap();
+    let default_model_run_id = fixture.chat_run(&default_model_chat_id).await;
+    let default_model_running = fixture
+        .until(&default_model_run_id, |run| {
+            run["status"] == RunStatus::Running && run["sessionId"].is_string()
+        })
+        .await;
+    assert_eq!(default_model_running["snapshot"]["agent"]["model"], "");
+    let stopped = client
+        .post(format!(
+            "{}/api/chats/{default_model_chat_id}/stop",
+            fixture.url
+        ))
+        .header("x-test-relay-token", text(&session, "value"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    stopped.error_for_status().unwrap();
+    let default_model_before = fixture
+        .until(&default_model_run_id, |run| {
+            run["status"] == RunStatus::Cancelled && run["resumeAvailable"] == true
+        })
+        .await;
+    assert_eq!(
+        default_model_before["sessionId"],
+        default_model_running["sessionId"]
+    );
+    fixture.stop(false).await;
+    s.store
+        .change_run(
+            &default_model_run_id,
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Failed),
+                finished_at: Some(Some(now())),
+                error: Some(Some("Usage limit has been reached".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let (default_resume_status, default_resume_response) = api_post(
+        &app,
+        text(&session, "value"),
+        &format!("/api/chats/{default_model_chat_id}/resume"),
+        json!({
+            "runId": default_model_run_id,
+            "turnId": default_model_turn_id,
+            "selection": {
+                "model": "",
+                "reasoning": "high",
+                "speed": "standard",
+            },
+        }),
+    )
+    .await;
+    assert_eq!(
+        default_resume_status,
+        StatusCode::OK,
+        "{default_resume_response}"
+    );
+    let default_resume_queued = s.store.run(&default_model_run_id).await.unwrap();
+    assert_eq!(default_resume_queued["status"], RunStatus::Queued);
+    assert_eq!(
+        default_resume_queued["snapshot"]["agent"]["model"],
+        "gpt-6-sol"
+    );
+    assert_eq!(
+        default_resume_queued["snapshot"]["agent"]["reasoning"],
+        "high"
+    );
+    assert_eq!(
+        default_resume_queued["snapshot"]["agent"]["speed"],
+        "standard"
+    );
+    assert_eq!(
+        default_resume_queued["chatExecution"]["messageId"],
+        default_model_turn_id
+    );
+    assert_eq!(
+        default_resume_queued["sessionId"],
+        default_model_before["sessionId"]
+    );
+
+    controller
+        .hold
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    fixture.start().await;
+    let default_model_completed = fixture.until_finished(&default_model_run_id).await;
+    assert_eq!(default_model_completed["status"], RunStatus::Succeeded);
+    assert_eq!(
+        default_model_completed["snapshot"]["agent"]["model"],
+        "gpt-6-sol"
+    );
+    assert_eq!(
+        default_model_completed["chatExecution"]["messageId"],
+        default_model_turn_id
+    );
+    assert_eq!(
+        default_model_completed["sessionId"],
+        default_model_before["sessionId"]
+    );
+    let default_model_plan = controller
+        .plans
+        .lock()
+        .await
+        .iter()
+        .find(|plan| {
+            plan["runId"] == default_model_run_id
+                && plan["chat"]["execution"]["messageId"] == default_model_turn_id
+        })
+        .cloned()
+        .expect("the resolved default model must reach the resumed worker plan");
+    assert_eq!(default_model_plan["chat"]["provider"], "codex");
+    assert_eq!(default_model_plan["chat"]["model"], "gpt-6-sol");
+    assert_eq!(default_model_plan["chat"]["reasoning"], "high");
+    assert_eq!(default_model_plan["chat"]["serviceTier"], "default");
+
     fixture.stop(false).await;
     server.abort();
 }

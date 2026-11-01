@@ -11,7 +11,7 @@ data class ResumeExecutionSelection(
     val speed: String,
 ) {
     init {
-        require(Regex("^(?:[a-z][a-z0-9_-]*)?\\$").containsMatchIn(reasoning))
-        require(Regex("^(?:[a-z][a-z0-9_-]*)?\\$").containsMatchIn(speed))
+        require(Regex("^(?:[a-z][a-z0-9_-]*)?\$").containsMatchIn(reasoning))
+        require(Regex("^(?:[a-z][a-z0-9_-]*)?\$").containsMatchIn(speed))
     }
 }

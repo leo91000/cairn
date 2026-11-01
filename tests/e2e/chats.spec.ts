@@ -1272,6 +1272,98 @@ test('failed replies show the current error instead of an old answer and can be 
   await expect(page.getByRole('alert')).toContainText('The response stopped before finishing')
 })
 
+test('same-provider quota resume submits the saved turn with the picker-applied speed', async ({ page, workspace }) => {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  const turnId = randomUUID()
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: turnId, text: 'Keep this Codex turn and session' })
+  await expect.poll(() => workspace.service.chats.detail(chat.id).run?.status).toBe('succeeded')
+  const before = workspace.service.chats.detail(chat.id).run!
+  const savedAgent = before.snapshot.agent
+  workspace.service.store.updateRun(before.id, {
+    status: 'failed',
+    error: 'Usage limit has been reached',
+    resumeAvailable: true,
+    snapshot: {
+      ...before.snapshot,
+      agent: {
+        ...savedAgent,
+        provider: 'codex',
+        model: 'fixture-deep',
+        reasoning: 'ultra',
+        speed: 'priority',
+      },
+    },
+  })
+  workspace.service.store.put('chats', { ...workspace.service.store.get('chats', chat.id)!, paused: true })
+  workspace.service.store.event(before.id, 'turn.failed', 'Usage limit has been reached', { type: 'turn.failed' })
+  workspace.service.store.event(before.id, 'status', 'failed')
+
+  await page.route('**/codex/models', route => route.fulfill({
+    json: {
+      models: [
+        {
+          model: 'fixture-fast',
+          displayName: 'Quick coder',
+          description: 'Fast everyday coding',
+          hidden: false,
+          isDefault: true,
+          defaultReasoningEffort: 'low',
+          supportedReasoningEfforts: [{ reasoningEffort: 'low', description: '' }],
+          routes: [],
+          serviceTiers: [],
+          defaultServiceTier: null,
+          resolvedModel: null,
+        },
+        {
+          model: 'fixture-deep',
+          displayName: 'Deep thinker',
+          description: 'Complex investigations',
+          hidden: false,
+          isDefault: false,
+          defaultReasoningEffort: 'ultra',
+          supportedReasoningEfforts: [{ reasoningEffort: 'ultra', description: '' }],
+          routes: [],
+          serviceTiers: [],
+          defaultServiceTier: null,
+          resolvedModel: null,
+        },
+      ],
+      checkedAt: Date.now(),
+      stale: false,
+      error: '',
+    },
+  }))
+  const resumeRequests: Record<string, unknown>[] = []
+  await page.route(`**/chats/${chat.id}/resume`, async (route) => {
+    expect(route.request().method()).toBe('POST')
+    resumeRequests.push(route.request().postDataJSON())
+    await route.fulfill({ json: { ...before, status: 'queued', resumeAvailable: false } })
+  })
+
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  const card = page.getByRole('status', { name: 'Coding agent quota reached' })
+  await expect(card).toBeVisible()
+  const picker = page.getByRole('button', { name: /^Agent, model, reasoning and speed/ })
+  await picker.click()
+  const menu = page.getByRole('dialog', { name: 'Agent & model' })
+  await expect(menu.getByRole('radio', { name: 'Deep thinker', exact: true })).toHaveAttribute('aria-checked', 'true')
+  await menu.getByRole('radio', { name: 'Ultra', exact: true }).click()
+  await expect(menu.getByRole('radiogroup', { name: 'Speed' })).toContainText('Standard')
+  await menu.getByRole('button', { name: 'Close', exact: true }).click()
+  await expect(picker).toHaveAccessibleName(/Deep thinker · Ultra reasoning/)
+  await card.getByRole('button', { name: 'Resume conversation', exact: true }).click()
+  await expect.poll(() => resumeRequests.length).toBe(1)
+
+  expect(resumeRequests[0]).toMatchObject({
+    chatId: chat.id,
+    runId: before.id,
+    turnId,
+    selection: { model: 'fixture-deep', reasoning: 'ultra', speed: 'standard' },
+  })
+  expect(workspace.service.store.chatMessages(chat.id).map(message => message.id)).toContain(turnId)
+})
+
 test('starts project chats, steers, edits the queue and preserves a compact mobile composer', async ({ page, workspace }) => {
   initializeRepository(workspace.projectPath)
   await page.goto(workspacePath('/tasks'))
