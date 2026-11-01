@@ -42,7 +42,14 @@ export function knownScope(session: string) {
 }
 
 function valid(value: CachedHistory): boolean {
-  return value?.version === 2 && typeof value.history === 'string' && value.history.startsWith('v2:')
+  // The Fil has no reply representation: its legacy identity describes only the list.
+  const legacyList = value?.history === 'v1::0' && value.cursor === 0
+    && value.state?.run === null && value.state.chat === null && Array.isArray(value.state.chats)
+    && value.state.artifacts?.length === 0 && value.events?.length === 0 && value.entries?.length === 0
+    && (value.oldest === undefined || value.oldest === 0)
+    && (value.hasOlder === undefined || value.hasOlder === false)
+
+  return value?.version === 2 && typeof value.history === 'string' && (value.history.startsWith('v2:') || legacyList)
     && Number.isSafeInteger(value.cursor) && value.cursor >= 0 && Array.isArray(value.events) && Array.isArray(value.entries)
     && !!value.state && Array.isArray(value.state.artifacts)
     && (value.state.run === null || typeof value.state.run?.id === 'string')

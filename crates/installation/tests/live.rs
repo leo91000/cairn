@@ -21,6 +21,186 @@ use std::{
 };
 use tempfile::TempDir;
 
+/// Released clients read `events` and ignore unknown fields such as timeline cards.
+#[tokio::test]
+async fn legacy_client_receives_reply_snapshots_in_live_and_history() {
+    #[derive(serde::Deserialize)]
+    struct LegacyBatch {
+        events: Vec<cairn_installation::store::Event>,
+    }
+
+    let f = Fixture::new().await;
+    let mut stream = f.open_legacy(0).await;
+    stream.batch().await;
+    f.service
+        .store
+        .event(
+            &f.run,
+            &EventKind::ItemUpdated,
+            "Legacy reply",
+            Some(json!({
+                "item": { "id": "reply", "type": "agent_message", "text": "Legacy reply" },
+            })),
+        )
+        .await
+        .unwrap();
+
+    let (_, live) = stream.batch().await;
+    let history = live["history"].as_str().unwrap();
+    let response = f.history(&format!("history={history}")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let history: Value = response.json().await.unwrap();
+    for (surface, value) in [("live", live), ("history", history)] {
+        let batch: LegacyBatch = serde_json::from_value(value).unwrap();
+        assert!(
+            batch
+                .events
+                .iter()
+                .any(|event| event.text == "Legacy reply"),
+            "released clients must receive their reply in {surface} events"
+        );
+    }
+}
+
+#[tokio::test]
+async fn legacy_reply_deltas_keep_full_history_and_reconnect_baselines() {
+    let f = Fixture::new().await;
+    let mut stream = f.open_legacy(0).await;
+    stream.batch().await;
+    let publish = async |content: &str| {
+        f.service
+            .store
+            .event(
+                &f.run,
+                &EventKind::ItemUpdated,
+                content,
+                Some(json!({
+                    "item": { "id": "reply", "type": "agent_message", "text": content },
+                })),
+            )
+            .await
+            .unwrap();
+    };
+    publish("Bonjour 👋").await;
+    let (cursor, first) = stream.batch().await;
+    assert_eq!(first["events"][0]["payload"]["item"]["text"], "Bonjour 👋");
+    assert!(first["entries"].as_array().unwrap().is_empty());
+    assert!(first["history"].as_str().unwrap().starts_with("v1:"));
+    publish("Bonjour 👋 café").await;
+    let (_, second) = stream.batch().await;
+    assert_eq!(second["events"][0]["payload"]["item"]["delta"], " café");
+    assert_eq!(second["events"][0]["text"], "");
+    let (_, resumed) = f.open_legacy(cursor).await.batch().await;
+    assert_eq!(
+        resumed["events"][0]["payload"]["item"]["text"],
+        "Bonjour 👋 café"
+    );
+    let history: Value = f
+        .history(&format!("history={}", second["history"].as_str().unwrap()))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(history["events"].as_array().unwrap().iter().any(|event| {
+        event["payload"]["item"]["text"] == "Bonjour 👋 café"
+            && event["payload"]["item"].get("delta").is_none()
+    }));
+    assert!(history["entries"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn legacy_recent_window_and_backwards_pages_keep_every_reply() {
+    let f = Fixture::new().await;
+    let run = f.run.clone();
+    f.service
+        .store
+        .transaction(move |db| {
+            for index in 0..140 {
+                db.event(
+                    &run,
+                    &EventKind::ItemCompleted,
+                    &"x".repeat(1024),
+                    Some(&json!({
+                        "item": { "id": format!("reply-{index}"), "type": "agent_message", "text": "x".repeat(1024) },
+                    })),
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (_, mut page) = f
+        .open_request(&format!("/api/runs/{}/stream?window=1", f.run), None)
+        .await
+        .batch()
+        .await;
+    let history = page["history"].as_str().unwrap().to_owned();
+    assert!(history.starts_with("v1:"));
+    let mut replies = std::collections::HashSet::new();
+    let mut pages = 0;
+    loop {
+        for event in page["events"].as_array().unwrap() {
+            if let Some(id) = event["payload"]["item"]["id"].as_str() {
+                replies.insert(id.to_owned());
+            }
+        }
+        if page["hasOlder"] != true {
+            break;
+        }
+        pages += 1;
+        assert!(pages < 10, "history pages must advance");
+        let before = page["oldest"].as_i64().unwrap();
+        let response = f
+            .history(&format!("before={before}&history={history}"))
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        page = response.json().await.unwrap();
+        assert!(page["oldest"].as_i64().unwrap() < before);
+    }
+    assert_eq!(replies.len(), 140);
+    assert!(pages > 0);
+}
+
+#[tokio::test]
+async fn opting_into_cards_keeps_large_reply_snapshots_off_the_new_wire() {
+    let f = Fixture::new().await;
+    let content = "x".repeat(300 * 1024);
+    f.service
+        .store
+        .event(
+            &f.run,
+            &EventKind::ItemUpdated,
+            &content,
+            Some(json!({
+                "item": { "id": "large", "type": "agent_message", "text": content },
+            })),
+        )
+        .await
+        .unwrap();
+    let (_, legacy) = f.open_legacy(0).await.batch().await;
+    assert!(legacy["events"].as_array().unwrap().iter().any(|event| {
+        event["payload"]["item"]["text"].as_str().map(str::len) == Some(300 * 1024)
+    }));
+    let mut current = f.open(0).await;
+    let mut references = 0;
+    loop {
+        let (_, batch) = current.batch().await;
+        assert!(
+            batch["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|event| { event["payload"]["item"]["type"] != "agent_message" })
+        );
+        references += batch["largeEntries"].as_array().map_or(0, Vec::len);
+        if batch["more"] == false {
+            break;
+        }
+    }
+    assert_eq!(references, 1);
+    assert!(current.received < 30 * 1024);
+}
+
 /// A queued run served over HTTP, with a trusted owner context to stream it.
 struct Fixture {
     _root: TempDir,
@@ -71,6 +251,20 @@ impl Fixture {
     }
 
     async fn open_path(&self, path: &str, last: Option<i64>) -> Stream {
+        let separator = if path.contains('?') { '&' } else { '?' };
+        self.open_request(&format!("{path}{separator}timeline=1"), last)
+            .await
+    }
+
+    async fn open_legacy(&self, after: i64) -> Stream {
+        self.open_request(
+            &format!("/api/runs/{}/stream?after={after}", self.run),
+            None,
+        )
+        .await
+    }
+
+    async fn open_request(&self, path: &str, last: Option<i64>) -> Stream {
         let mut request = reqwest::Client::new()
             .get(format!("{}{path}", self.url))
             .header("x-test-relay-token", &self.token)

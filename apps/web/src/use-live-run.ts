@@ -41,6 +41,19 @@ export interface LiveRunOptions {
   savedAs?: (state: LiveState) => string | undefined
 }
 
+function acceptCacheRevision(metadata?: LiveState) {
+  if (!metadata?.cacheRevision)
+    return
+  const revisionKey = state.installationId ? `conversation-cache-revision:${state.installationId}` : 'conversation-cache-revision'
+  try {
+    if (localStorage.getItem(revisionKey) !== metadata.cacheRevision) {
+      void clearHistoryCache()
+      localStorage.setItem(revisionKey, metadata.cacheRevision)
+    }
+  }
+  catch { void clearHistoryCache() }
+}
+
 // A view shows its own stream only: switching paths clears the previous data at once, so
 // a saved conversation shows immediately and anything else waits for its first snapshot.
 export function useLiveRun(path: () => string | undefined, options: LiveRunOptions = {}) {
@@ -140,6 +153,21 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
 
     // A copy opened under another path is also saved where other openings look for it.
     const saved = () => [...new Set([value, (detail && options.savedAs?.(detail)) || value])]
+
+    function resetHistory() {
+      replacements++
+      accumulator = new LiveTimeline()
+      oldest = 0
+      older = false
+      complete = false
+      position.value = undefined
+      olderError.value = ''
+      if (scope) {
+        for (const path of saved())
+          void removeHistory(scope, path)
+      }
+    }
+
     persist = () => {
       if (!scope || !complete || !detail || !history || current !== generation || !state.authenticated || state.signingOut)
         return
@@ -202,30 +230,12 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
       const apply = (large: TimelineEntry[]) => {
         if (signal?.aborted || disposed || current !== generation)
           return
-        if (batch.state?.cacheRevision) {
-          const revisionKey = state.installationId ? `conversation-cache-revision:${state.installationId}` : 'conversation-cache-revision'
-          try {
-            if (localStorage.getItem(revisionKey) !== batch.state.cacheRevision) {
-              void clearHistoryCache()
-              localStorage.setItem(revisionKey, batch.state.cacheRevision)
-            }
-          }
-          catch { void clearHistoryCache() }
-        }
+        acceptCacheRevision(batch.state)
 
         const reset = batch.reset || (history && batch.history !== history)
           || (batch.state && detail?.run?.id !== batch.state.run?.id)
-        if (reset) {
-          replacements++
-          accumulator = new LiveTimeline()
-          oldest = 0
-          older = false
-          complete = false
-          position.value = undefined
-          olderError.value = ''
-          if (scope)
-            saved().forEach(path => void removeHistory(scope, path))
-        }
+        if (reset)
+          resetHistory()
 
         // Persist a complete snapshot only. An interrupted catch-up cannot corrupt it.
         const candidate = accumulator.copy()
@@ -294,7 +304,41 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
             saved().forEach(path => void removeHistory(scope, path))
         }
       }).finally(() => { checking = false })
-    }, cached ? { cursor: cached.cursor, history: cached.history } : undefined, () => position.value?.follow ?? true, options.list ? '&list=1' : '')
+    }, cached ? { cursor: cached.cursor, history: cached.history } : undefined, () => position.value?.follow ?? true, options.list ? '&list=1' : '', (metadata, legacyHistory) => {
+      if (disposed || current !== generation)
+        return false
+      acceptCacheRevision(metadata)
+      const inactive = metadata?.chat?.lifecycle === 'trash' || metadata?.chat?.lifecycle === 'purging'
+      const changedRun = metadata !== undefined && (!metadata.run || inactive || detail?.run?.id !== metadata.run.id)
+      const changedHistory = !!history && history !== legacyHistory.replace(/^v1:/, 'v2:')
+      const reset = changedRun || changedHistory
+      complete = false
+      synced.value = false
+      clearTimeout(saveTimer)
+      saveTimer = undefined
+      if (reset) {
+        resetHistory()
+        cursor = 0
+        history = undefined
+        hasOlder.value = false
+        restored.value = false
+        catchingUp.value = !!(metadata ?? detail)?.run && !inactive
+        show()
+      }
+      else if (waiting && cached) {
+        showSaved(cached)
+      }
+
+      waiting = false
+
+      if (metadata) {
+        detail = metadata
+        snapshot.value = metadata
+        carriesList.value = !!options.list && !!metadata.chats
+      }
+
+      return reset
+    })
   }
 
   watch([path, () => state.authenticated && !state.signingOut, () => state.csrf], ([value, enabled, csrf]) => {
@@ -355,7 +399,19 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
     error,
     position,
     savePosition,
-    connectionNotice: computed(() => error.value ? '' : status.value === 'offline' ? (snapshot.value ? 'Offline · showing saved conversation' : 'Offline') : status.value === 'reconnecting' ? 'Reconnecting…' : status.value === 'connecting' && snapshot.value && slow.value ? 'Updating…' : ''),
+    connectionNotice: computed(() => {
+      if (error.value)
+        return ''
+      if (status.value === 'updating')
+        return 'This installation must finish updating. Retrying…'
+      if (status.value === 'offline')
+        return snapshot.value ? 'Offline · showing saved conversation' : 'Offline'
+      if (status.value === 'reconnecting')
+        return 'Reconnecting…'
+      if (status.value === 'connecting' && snapshot.value && slow.value)
+        return 'Updating…'
+      return ''
+    }),
     reconnect: () => connection?.reconnect(),
   }
 }

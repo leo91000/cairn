@@ -36,6 +36,62 @@ class HistoryCacheTest {
         )
 
     @Test
+    fun `legacy metadata-only Fil survives a cold cache read`() = runBlocking {
+        val value = CachedHistory(0, "v1::0", LiveState(chats = emptyList()), emptyList())
+        cache().save("list", value, true)
+        assertEquals(value, cache().read("list"))
+    }
+
+    @Test
+    fun `legacy Fil cache never admits a conversation or nonempty content`() = runBlocking {
+        val value = CachedHistory(0, "v1::0", LiveState(chats = emptyList()), emptyList())
+        val card =
+            TimelineCard(
+                id = "reply",
+                runId = "run",
+                position = 1,
+                source = 1,
+                revision = 1,
+                turn = 1,
+                attempt = 0,
+                createdAt = 1,
+                updatedAt = 1,
+                content =
+                    build.cairn.contracts.TimelineContent.B(
+                        itemId = "reply",
+                        state = "running",
+                        text = "Reply",
+                    ),
+            )
+        val incompatible =
+            listOf(
+                value.copy(history = "v1:run:1"),
+                value.copy(
+                    state = value.state.copy(run = Run(id = "run", taskId = "", status = "running"))
+                ),
+                value.copy(state = value.state.copy(chat = Chat(id = "chat"))),
+                value.copy(state = value.state.copy(chats = null)),
+                value.copy(cursor = 1),
+                value.copy(events = record().events),
+                value.copy(entries = listOf(card)),
+                value.copy(
+                    state =
+                        value.state.copy(
+                            artifacts =
+                                listOf(Deliverable(id = "artifact", runId = "run", key = "file"))
+                        )
+                ),
+                value.copy(oldest = 1),
+                value.copy(hasOlder = true),
+            )
+        for ((index, candidate) in incompatible.withIndex()) {
+            val key = "incompatible-$index"
+            cache().save(key, candidate, true)
+            assertNull("Invalid legacy cache variant $index", cache().read(key))
+        }
+    }
+
+    @Test
     fun `warm reads and neighboring saves reuse retained payload sizes`() = runBlocking {
         val traversals = AtomicInteger()
         val contents = mapOf<String, JsonElement>("output" to JsonPrimitive("retained output"))

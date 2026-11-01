@@ -146,6 +146,8 @@ data class LiveSnapshot(
     val epoch: Int = 0,
     /** Tells the stream whether the reader follows the latest output, from the reading position. */
     val followLatest: (Boolean) -> Unit = {},
+    /** The manager still returns the events-only format instead of timeline cards. */
+    val timelineUnavailable: Boolean = false,
 )
 
 private fun CairnApi.frames(
@@ -163,7 +165,7 @@ private fun CairnApi.frames(
             builder(
                     "$path?after=$cursor" +
                         (history?.let { "&history=${segment(it)}" } ?: "") +
-                        (if (windowed) "&window=1" else "") +
+                        (if (windowed) "&window=1&timeline=1" else "") +
                         if (windowed && recent) "&recent=1" else ""
                 )
                 .header("Accept", "text/event-stream")
@@ -343,6 +345,8 @@ suspend fun CairnApi.readLargeTimeline(
     return cards
 }
 
+private class TimelineUnavailable : IOException()
+
 fun CairnApi.live(path: String, session: LiveSession = LiveSession()): Flow<LiveSnapshot> = flow {
     session.mutex.withLock {
         val generation = streamGeneration.get()
@@ -370,6 +374,34 @@ fun CairnApi.live(path: String, session: LiveSession = LiveSession()): Flow<Live
                 frames(path, cursor, generation, snapshot.history, forceRelay, recent).collect {
                     frame ->
                     val batch = frame.batch
+                    if (path != "/chats/stream" && batch.history?.startsWith("v1:") == true) {
+                        val state = batch.state
+                        val inactive = state?.chat?.lifecycle in setOf("trash", "purging")
+                        val changedRun =
+                            state != null &&
+                                (state.run == null ||
+                                    inactive ||
+                                    state.run.id != snapshot.state?.run?.id)
+                        val changedHistory =
+                            snapshot.history?.let {
+                                it != batch.history.replaceFirst("v1:", "v2:")
+                            } ?: false
+                        if (changedRun || changedHistory) {
+                            accumulator.clear()
+                            cursor = 0
+                            val metadata = state ?: snapshot.state
+                            snapshot =
+                                LiveSnapshot(
+                                    state = metadata,
+                                    catchingUp = metadata?.run != null && !inactive,
+                                    epoch = snapshot.epoch + 1,
+                                    timelineUnavailable = true,
+                                )
+                        } else if (state != null) {
+                            snapshot = snapshot.copy(state = state)
+                        }
+                        throw TimelineUnavailable()
+                    }
                     val large = readLargeTimeline(path, batch.largeEntries)
                     require(snapshot.history == null || batch.history != null) {
                         "Révision indisponible"
@@ -434,8 +466,13 @@ fun CairnApi.live(path: String, session: LiveSession = LiveSession()): Flow<Live
                 snapshot =
                     snapshot.copy(
                         httpStatus = (e as? ApiException)?.status,
-                        status = if (terminal) "Déconnecté" else "Reconnexion…",
+                        status =
+                            if (e is TimelineUnavailable)
+                                "L’installation doit terminer sa mise à jour. Nouvelle tentative…"
+                            else if (terminal) "Déconnecté" else "Reconnexion…",
                         error = if (terminal) e.message else null,
+                        synced = if (e is TimelineUnavailable) false else snapshot.synced,
+                        timelineUnavailable = e is TimelineUnavailable,
                     )
                 session.cursor = cursor
                 session.snapshot = snapshot

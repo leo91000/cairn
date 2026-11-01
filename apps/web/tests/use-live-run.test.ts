@@ -51,6 +51,151 @@ afterEach(async () => {
   vi.unstubAllGlobals()
 })
 
+it('shows the installation update transition without declaring an empty conversation synchronized', async () => {
+  const scope = effectScope()
+  scopes.push(scope)
+  const live = scope.run(() => useLiveRun(() => '/chats/updating/stream'))!
+  await vi.waitFor(() => expect(liveConnection).toHaveBeenCalled())
+  vi.mocked(liveConnection).mock.calls[0]![2]('updating')
+  expect(live.connectionNotice.value).toBe('This installation must finish updating. Retrying…')
+  expect(live.synced.value).toBe(false)
+  expect(live.error.value).toBe('')
+})
+
+it('shows a valid hidden running cache while keeping newer legacy metadata unsynchronized', async () => {
+  const cache = await cacheScope('test-session')
+  const route = '/chats/c/stream'
+  const saved: CachedHistory = {
+    version: 2,
+    cursor: 7,
+    history: 'v2:r:1',
+    state: {
+      run: {
+        id: 'r',
+        taskId: 'task',
+        status: 'running',
+        snapshot: {
+          task: {
+            id: 'task',
+            revision: null,
+            createdAt: 1,
+            nextRun: null,
+            authorId: null,
+            authorAccessId: null,
+            authorRemoved: false,
+            scheduleWaitReason: null,
+            scheduleFailure: null,
+            nativePrincipals: [],
+            nativeAuthorityNodes: [],
+            nativeParentRunId: null,
+            nativeParentAccess: null,
+            nativeProvenanceUnknown: false,
+            nativePluginGrants: null,
+            name: 'Cached task',
+            prompt: '',
+            agentId: 'agent',
+            projectId: null,
+            skills: [],
+            tags: [],
+            cron: null,
+            timezone: 'UTC',
+            enabled: false,
+            archived: false,
+            worktree: false,
+          },
+          agent: {
+            id: 'agent',
+            revision: '1',
+            createdAt: 1,
+            name: 'Cached agent',
+            provider: 'codex',
+            description: '',
+            model: '',
+            reasoning: '',
+            speed: '',
+            instructions: '',
+            timeoutMinutes: 30,
+            access: {
+              backend: 'auto',
+              nodes: null,
+              projects: null,
+              skills: null,
+              mcps: null,
+              mcpTools: {},
+              installation: false,
+              delegation: false,
+              sandbox: 'workspace-write',
+            },
+            exclusiveNodes: [],
+            nodePriorities: [],
+            plugins: [],
+          },
+          project: null,
+          projects: [],
+          availableProjects: [],
+          skills: [],
+          delegation: null,
+        },
+        isolated: false,
+        workspaces: [],
+        taskName: '',
+        agentName: '',
+        unread: false,
+        projectId: null,
+        trigger: 'chat',
+        createdAt: 1,
+        startedAt: 1,
+        finishedAt: null,
+        summary: '',
+        sessionId: null,
+        workspace: null,
+        recoveryPending: false,
+        resumeAvailable: false,
+        resumeCount: 0,
+      },
+      chat: null,
+      artifacts: [],
+    },
+    events: [],
+    entries: [{
+      id: 'reply',
+      runId: 'r',
+      position: 1,
+      revision: 7,
+      source: 7,
+      turn: 1,
+      attempt: 0,
+      createdAt: 1,
+      updatedAt: 7,
+      content: {
+        kind: 'agentMessage',
+        itemId: 'reply',
+        text: 'Saved reply',
+        state: 'running',
+      },
+    }],
+    oldest: 1,
+    hasOlder: false,
+    savedAt: Date.now(),
+  }
+  await writeHistory(cache, route, saved)
+  const scope = effectScope()
+  scopes.push(scope)
+  const live = scope.run(() => useLiveRun(() => route, { current: () => false }))!
+  await vi.waitFor(() => expect(liveConnection).toHaveBeenCalled())
+  expect(live.timeline.value).toHaveLength(0)
+  const callbacks = vi.mocked(liveConnection).mock.calls.at(-1)!
+  const metadata = { ...saved.state, run: { ...saved.state.run!, status: 'waiting' as const } }
+  expect(callbacks[6]!(metadata, 'v1:r:1')).toBe(false)
+  callbacks[2]('updating')
+  expect(live.timeline.value).toMatchObject([{ content: { text: 'Saved reply' } }])
+  expect(live.snapshot.value?.run?.status).toBe('waiting')
+  expect(live.catchingUp.value).toBe(false)
+  expect(live.synced.value).toBe(false)
+  expect(live.connectionNotice.value).toContain('finish updating')
+  expect(peekHistory(cache, route)?.cursor).toBe(7)
+})
+
 it('releases list delivery when a conversation is terminally unavailable', async () => {
   const scope = effectScope()
   scopes.push(scope)

@@ -75,12 +75,26 @@ class HistoryCache(
             .digest("$origin\n$session\n$path".toByteArray())
             .joinToString("") { "%02x".format(it) }
 
-    private fun valid(value: CachedHistory) =
-        value.version == 2 &&
-            value.history.startsWith("v2:") &&
+    private fun valid(value: CachedHistory): Boolean {
+        // The Fil has no reply representation: its legacy identity describes only the list.
+        val legacyList =
+            value.history == "v1::0" &&
+                value.cursor == 0L &&
+                value.state.run == null &&
+                value.state.chat == null &&
+                value.state.chats != null &&
+                value.state.artifacts.isEmpty() &&
+                value.events.isEmpty() &&
+                value.entries.isEmpty() &&
+                value.oldest == 0L &&
+                !value.hasOlder
+
+        return value.version == 2 &&
+            (value.history.startsWith("v2:") || legacyList) &&
             value.cursor >= 0 &&
             System.currentTimeMillis() - value.savedAt < ttl &&
             value.events.all { it.id > 0 && it.id <= value.cursor }
+    }
 
     private fun olderThan(value: CachedHistory, reference: CachedHistory?) =
         reference?.history == value.history && reference.cursor > value.cursor
