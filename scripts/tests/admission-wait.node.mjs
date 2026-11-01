@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import { Buffer } from 'node:buffer'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
+import { classifyAdmissionWait } from '../admission-classification.mjs'
 import {
   admissionWaitLimits,
   observeAdmissionWaits,
@@ -516,4 +518,45 @@ test('a known end without scope or clock remains a per-run fact under limited hi
   assert.equal(observation(state).status, 'bad')
   assert(readAdmissionOccurrence(observation(state).occurrence))
   assert.equal(state.state.limited, true)
+})
+
+test('classification requires the actual node writer prefix and clear structured gates', () => {
+  const writer = readFileSync(new URL('../../crates/installation/src/worker/schedule.rs', import.meta.url), 'utf8')
+  assert(writer.includes('pub(super) const CAPACITY_WAIT_REASON: &str = "Waiting for capacity.";'))
+  const node = {
+    status: 'queued',
+    waitReason: 'Waiting for capacity. Shared node quota has no room.',
+    accountRequired: null,
+    recoveryPending: 0,
+  }
+  assert.equal(classifyAdmissionWait(node), 'capacity')
+  assert.equal(classifyAdmissionWait({ ...node, recoveryPending: false }), 'capacity')
+  assert.equal(classifyAdmissionWait({ ...node, accountRequired: 'codex' }), 'account')
+  assert.equal(classifyAdmissionWait({ ...node, recoveryPending: 1 }), 'recovery')
+  assert.equal(classifyAdmissionWait({ ...node, recoveryPending: true }), 'recovery')
+  for (const status of ['running', 'waiting', 'failed', 'unsupported', null])
+    assert.equal(classifyAdmissionWait({ ...node, status }), null)
+})
+
+test('provider and account capacity words never establish node capacity', () => {
+  const base = { status: 'queued', accountRequired: null, recoveryPending: 0 }
+  for (const waitReason of ['Selected model is at capacity. Please try a different model.', 'Provider is at capacity; retry later.', 'The model is busy.', 'No accounts have free slots.', 'Usage limit reached.', 'Quota exceeded.', 'Rate limit reached.'])
+    assert.equal(classifyAdmissionWait({ ...base, waitReason }), 'account')
+  for (const waitReason of ['capacity', 'Unknown capacity-related condition.', 'waiting for capacity.', ' Waiting for capacity.', 'Waiting for capacity.X', 'Waiting for capacity.\nNode unavailable.'])
+    assert.equal(classifyAdmissionWait({ ...base, waitReason }), null)
+})
+
+test('missing or malformed producer gate facts never become node capacity', () => {
+  const base = {
+    status: 'queued',
+    waitReason: 'Waiting for capacity. Node unavailable.',
+    accountRequired: null,
+    recoveryPending: 0,
+  }
+  const missingAccount = { ...base }
+  delete missingAccount.accountRequired
+  const missingRecovery = { ...base }
+  delete missingRecovery.recoveryPending
+  for (const row of [null, undefined, [], 1, {}, missingAccount, missingRecovery, ...[undefined, false, 0, {}, [], '', ' '].map(accountRequired => ({ ...base, accountRequired })), ...[undefined, null, 'false', 2, {}, []].map(recoveryPending => ({ ...base, recoveryPending })), ...[undefined, null, {}, [], 3].map(waitReason => ({ ...base, waitReason }))])
+    assert.equal(classifyAdmissionWait(row), null)
 })

@@ -13,6 +13,19 @@ run supplies only `id`, `status`, `waitClass`, `attemptId`, `activeMessageId`, a
 `missionTurnId`. Technical identifiers are bounded ASCII identifiers; at least
 an attempt or logical turn must be known. Unsupported evidence is unknown.
 
+The producer must establish the gate before the observer measures it. The shared
+`scripts/admission-classification.mjs` classifier returns only a safe class and is
+consumed byte-for-byte by the external manager producer. `account_wait_reason` is
+shared by node, account and recovery writers: a generic capacity word is not a
+node gate. Node capacity requires queued status, the exact node writer prefix
+`Waiting for capacity.`, explicit null `accountRequired`, and known-clear
+`recoveryPending`. Provider/model busy text, including Codex's model-at-capacity
+message, remains account wait. Explicit account attention and recovery facts take
+precedence over stale node text. Missing schema facts, malformed data and
+unrecognized reasons stay unknown; no raw reason crosses the producer projection.
+The producer reuses its existing bounded query, adding the optional account field;
+it adds no query, database write or wait-start inference.
+
 A current `queued`/`capacity` observation begins its own interval on its first
 sample. It becomes `bad` only after more than ten minutes of fresh observations
 with the same run, attempt and logical turn. Samples more than two minutes apart
