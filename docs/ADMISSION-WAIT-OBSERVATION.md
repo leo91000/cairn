@@ -58,8 +58,10 @@ The helper uses `crypto.randomUUID()` by default; a fourth `createEpisodeId`
 argument can supply deterministic UUIDs in tests. Failed or invalid allocation
 stays unknown but preserves the positively observed current scope. Its bounded
 `transition` marker records that the previous scope ended even before the new
-identity can be allocated. Persist that marker in the same caller occurrence map;
-`readAdmissionTransition` validates it separately from a real incident occurrence.
+identity can be allocated. The same marker can preserve a validated known end
+from a caller's exact coordinator record after local history eviction. Persist it
+in the same bounded caller occurrence map; `readAdmissionTransition` validates it
+separately from a real incident occurrence.
 A later valid allocation starts a fresh measured interval; a transition marker
 never carries old ownership into that episode. An invalid sample clock likewise
 breaks measured duration while retaining validated unresolved identity and known
@@ -73,6 +75,11 @@ clear streak even while its duration is still pending; this neither deletes sent
 evidence nor certifies health. Retain outbox, ownership and historical evidence
 independently of helper-history eviction. A caller resolving absent identities
 must use the returned `complete` flag, not an unvalidated inventory flag.
+Reconcile bounded coordinator-only admission IDs too: complete absence or a known
+noncapacity observation ends their prior episode even after local eviction. Keep
+that positive end in bounded caller occurrence history, rather than only a good
+counter that normal compaction may drop. Historical ownership remains exact and
+must not suppress the distinct next episode; partial absence proves no end.
 
 Use generic per-run `admission-wait:<runId>` identities and the supplied occurrence
 for new alerts. A legacy global `admission-disk-headroom` episode has no proven
