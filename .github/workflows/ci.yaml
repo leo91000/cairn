@@ -90,6 +90,8 @@ jobs:
       - name: Install bindings toolchain for the required ublk transport
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev
       - uses: ./.github/actions/cache-rust
+        with:
+          save: true
       - name: Build the browser-test backend and frontend
         run: |
           cargo build --locked --bin cairn --example worker_fixture --example browser_fixture --example network_direct_client --example network_qualification --example native_storage_qualifier
@@ -189,8 +191,6 @@ jobs:
       - name: Install native test dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age e2fsprogs fakeroot
       - uses: ./.github/actions/cache-rust
-        with:
-          save: true
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
         with:
           tool: cargo-nextest@0.9.149
