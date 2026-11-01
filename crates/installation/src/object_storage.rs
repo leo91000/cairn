@@ -319,7 +319,17 @@ fn read_error(
 impl Storage {
     /// Qualify direct request destinations and writes for the actual S3 driver.
     /// These tiny control objects never contain a conversation's disk data.
+    #[cfg(test)]
     pub(crate) async fn require_direct(&self) -> Result<()> {
+        self.require_direct_authorized(&crate::authorization::Authorization::default())
+            .await
+    }
+
+    pub(crate) async fn require_direct_authorized(
+        &self,
+        authorize: &crate::authorization::Authorization,
+    ) -> Result<()> {
+        authorize.recheck().await?;
         let cache_key = (self.endpoint.clone(), self.bucket.clone());
         let probe = self
             .hot
@@ -369,9 +379,11 @@ impl Storage {
                         ))
                 };
                 let result = async {
+                    authorize.recheck().await?;
                     request().send().await.map_err(|_| {
                         Error::unavailable("Direct storage capability probe failed.")
                     })?;
+                    authorize.recheck().await?;
                     match request().send().await {
                         Err(error)
                             if error
@@ -392,6 +404,8 @@ impl Storage {
                     }
                 }
                 .await;
+                // Cleanup is confined to this probe's random control key;
+                // it removes no caller data and remains necessary on revocation.
                 let cleanup = client
                     .delete_object()
                     .bucket(&self.bucket)

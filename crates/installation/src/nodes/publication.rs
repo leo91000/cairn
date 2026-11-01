@@ -427,7 +427,8 @@ async fn publish(
     let base = super::transport::url(s, run_id).await?;
     let credential = super::runner_secret(s).await?;
     authorize.recheck().await?;
-    let snapshot = request_snapshot(s, run, &base, attempt, &credential, protocol).await?;
+    let snapshot =
+        request_snapshot(s, run, &base, attempt, &credential, protocol, authorize).await?;
     authorize.recheck().await?;
 
     if snapshot["alreadyPublished"] == true {
@@ -511,6 +512,7 @@ async fn request_snapshot(
     attempt: &str,
     credential: &str,
     protocol: CaptureProtocol,
+    authorize: &crate::authorization::Authorization,
 ) -> Result<Value> {
     let run_id = text(run, "id");
     let changing_envelope = match protocol {
@@ -518,6 +520,7 @@ async fn request_snapshot(
         CaptureProtocol::LegacyControllerDrain => run["backup"]["blockEnvelope"] == 3,
     };
     if requested(run) && !changing_envelope {
+        authorize.recheck().await?;
         let response = s
             .http
             .post(format!("{base}/disks/{run_id}/snapshot-completed"))
@@ -557,6 +560,7 @@ async fn request_snapshot(
     } else {
         format!("{base}/runs/{attempt}/snapshot")
     };
+    authorize.recheck().await?;
     let response = s
         .http
         .post(capture_path)
@@ -870,7 +874,9 @@ impl Publication<'_> {
         if missing.is_empty() {
             return Ok(0);
         }
-        self.storage.require_direct().await?;
+        self.storage
+            .require_direct_authorized(&self.authorize)
+            .await?;
         self.authorize.recheck().await?;
         let mut reader = direct_reader::Lease::open(self).await?;
         let mut uploaded = 0;
