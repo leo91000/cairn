@@ -65,7 +65,11 @@ excessive sampling gap breaks age continuity. The episode identity survives
 unknown observations for deduplication; unknown never certifies recovery or
 rearms a notification. Validated run/turn scope is independent of the gate,
 clock and identity allocation: an unknown gate/status cannot restore a positively
-ended turn. A present valid row can still be observed in a partial inventory. Known noncapacity state or absence from a complete active inventory
+ended turn. A present valid row can still be observed in an ordinary partial inventory. An
+array over the 200-row bound is different: a conflicting duplicate may be hidden
+in the unscanned tail, so none of the scanned prefix rows can establish current
+gate or ending evidence. The helper examines only the first 200 rows. Known
+noncapacity state or absence from a complete active inventory
 ends only this capacity-wait observation. Its per-run positive end remains in the
 same bounded helper history, allowing a new episode even while unrelated evicted
 runs remain uncertain and no optional callback is installed. End facts do not
@@ -82,7 +86,9 @@ a positive transition is observed. Malformed persisted history is uncertain,
 never equivalent to a first-ever monitor observation. The optional `retainedEpisode(runId, scope)` callback reconciles the caller's existing
 bounded occurrence/sent evidence. It returns an exact `occurrence`, `{ fresh:
 true }` only after known end/scope change, `{ unknown: true }` for unavailable or
-ambiguous identity, or null when it has no evidence. `readAdmissionOccurrence`
+ambiguous identity, or null when it has no evidence. A supplied resolver that
+returns `undefined` is treated as unknown; only `null` means no retained evidence.
+`readAdmissionOccurrence`
 strictly decodes bounded canonical metadata; a retained value must match the same
 run and full scope. Never copy an old owner's scope into a different logical turn.
 

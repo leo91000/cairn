@@ -149,9 +149,10 @@ export function observeAdmissionWaits(sample, previous, retainedEpisode, createE
   const prior = history.waits
   const manager = sample?.manager?.ok === true ? sample.manager.data : null
   const rows = record(manager) && Array.isArray(manager.runs) ? manager.runs : []
+  const inventoryBounded = rows.length <= admissionWaitLimits.entries
   let complete = record(manager) && Array.isArray(manager.runs)
-    && manager.runsComplete === true && rows.length <= admissionWaitLimits.entries
-  let limited = rows.length > admissionWaitLimits.entries
+    && manager.runsComplete === true && inventoryBounded
+  let limited = !inventoryBounded
   const seen = new Set()
   const duplicates = new Set()
   for (const run of rows.slice(0, admissionWaitLimits.entries)) {
@@ -168,7 +169,9 @@ export function observeAdmissionWaits(sample, previous, retainedEpisode, createE
 
     seen.add(run.id)
     const id = `admission-wait:${run.id}`
-    const knownStatus = statuses.has(run.status)
+    // An oversized array may hide a conflicting duplicate after the bounded
+    // prefix, so no prefix row can establish positive or ending gate evidence.
+    const knownStatus = inventoryBounded && statuses.has(run.status)
     if (!knownStatus)
       complete = false
 
@@ -199,6 +202,8 @@ export function observeAdmissionWaits(sample, previous, retainedEpisode, createE
     if (retained === null && retainedEpisode !== undefined) {
       try {
         retained = typeof retainedEpisode === 'function' ? retainedEpisode(run.id, currentScope) : { unknown: true }
+        if (retained === undefined)
+          retained = { unknown: true }
       }
       catch {
         retained = { unknown: true }

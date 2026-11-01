@@ -174,6 +174,33 @@ test('malformed/duplicate identities and unsupported queued reasons stay unknown
   assert.equal(observation(missing).status, 'unknown')
 })
 
+test('oversized inventory cannot trust a prefix row when a tail duplicate may conflict', () => {
+  const original = observeAdmissionWaits(sample(origin, [capacity('conflicted-run')]))
+  const rows = [
+    capacity('conflicted-run'),
+    ...Array.from({ length: admissionWaitLimits.entries - 1 }, (_, index) => capacity(`prefix-${index}`)),
+    capacity('conflicted-run', { waitClass: 'account', activeMessageId: 'different-input' }),
+  ]
+  const result = observeAdmissionWaits(sample(origin + 12 * 60000, rows), original.state)
+
+  assert.equal(result.complete, false)
+  assert.equal(result.state.limited, true)
+  assert.equal(observation(result, 'conflicted-run').status, 'unknown')
+  assert.equal(observation(result, 'conflicted-run').currentCapacity, undefined)
+  assert.equal(result.state.waits.find(wait => wait.runId === 'conflicted-run').since, null)
+})
+
+test('exactly bounded unique inventories retain current capacity and can age it', () => {
+  const rows = Array.from({ length: admissionWaitLimits.entries }, (_, index) => capacity(`bounded-${index}`))
+  let aged
+  for (let minute = 0; minute <= 11; minute++)
+    aged = observeAdmissionWaits(sample(origin + minute * 60000, rows), aged?.state)
+
+  assert.equal(aged.complete, true)
+  assert.equal(observation(aged, 'bounded-0').currentCapacity, true)
+  assert.equal(observation(aged, 'bounded-0').status, 'bad')
+})
+
 test('bounded state is independent of conversation content and cannot grow with historical runs', () => {
   const rows = Array.from({ length: admissionWaitLimits.entries + 1 }, (_, index) => capacity(`run-${index}`, { prompt: 'sensitive-sentinel' }))
   const first = observeAdmissionWaits(sample(origin, rows))
@@ -258,12 +285,21 @@ test('unsupported retained evidence and resolver failures cannot mint a fresh ep
     throw new Error('not exported')
   }
 
-  for (const callback of [() => 'unsupported', () => ({ fresh: false }), () => ({ unknown: true, occurrence: 'extra' }), failure]) {
+  for (const callback of [() => 'unsupported', () => undefined, () => ({ fresh: false }), () => ({ unknown: true, occurrence: 'extra' }), failure]) {
     const result = observeAdmissionWaits(sample(origin, [capacity()]), undefined, callback)
     assert.equal(observation(result).status, 'unknown')
     assert.equal(observation(result).occurrence, undefined)
     assert(!JSON.stringify(result).includes('not exported'))
   }
+})
+
+test('a resolver null means no retained evidence and permits a fresh valid observation', () => {
+  const result = observeAdmissionWaits(sample(origin, [capacity()]), undefined, () => null)
+
+  assert.equal(observation(result).status, 'unknown')
+  assert.equal(observation(result).currentCapacity, true)
+  assert.equal(observation(result).observedSince, origin)
+  assert.equal(result.state.waits[0].firstObservedAt, origin)
 })
 
 test('a caller-confirmed end overrides still-retained helper identity without inheriting age', () => {
