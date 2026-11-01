@@ -590,6 +590,37 @@ async fn access_token_with(
     if let Some(secret) = metadata["clientSecret"].as_str() {
         fields.push(("client_secret".into(), secret.to_owned()));
     }
+    let expected = connection.clone();
+    let management = management.cloned();
+    let selected_package = (!package.builtin).then(|| {
+        (
+            package.manifest.id.clone(),
+            package.manifest.version.clone(),
+            package.digest.clone(),
+        )
+    });
+    let authorize_refresh = Arc::new(move |db: &crate::store::Db<'_>| -> Result<()> {
+        if let Some(authority) = &management {
+            authority.authorize(db)?;
+        }
+        authorize_token(db, &expected, editing)?;
+        if let Some((id, version, digest)) = &selected_package {
+            let current = db.plugin_package(id)?;
+            if current.active.as_ref() != Some(version)
+                || current.approvals.get(version) != Some(digest)
+            {
+                return Err(Error::conflict(
+                    "The plugin package changed during OAuth refresh.",
+                ));
+            }
+        }
+        Ok(())
+    });
+    // Credential/package retrieval awaited after the mutex's initial check.
+    // Fence local revocation again immediately before the provider effect;
+    // semantic resolution here could recursively require this same OAuth lock.
+    let before_send = authorize_refresh.clone();
+    s.store.read(move |db| before_send(db)).await?;
     let response = post(s, &package.manifest, &oauth.token_url, &fields).await?;
     let flow = Flow {
         id: id(),
@@ -615,14 +646,9 @@ async fn access_token_with(
     };
     let refreshed = credentials(&response, &flow, oauth, Some(&saved))?;
     let encrypted = s.vault.encrypt(&key, &refreshed)?;
-    let expected = connection.clone();
-    let management = management.cloned();
     s.store
         .transaction(move |db| {
-            if let Some(authority) = management {
-                authority.authorize(db)?;
-            }
-            authorize_token(db, &expected, editing)?;
+            authorize_refresh(db)?;
             db.set(&format!("mcp-secret:{key}"), &encrypted, None)
         })
         .await?;

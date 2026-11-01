@@ -1153,3 +1153,97 @@ async fn installation_management_reuses_only_a_granted_google_app() {
     assert!(steps.contains("Google Cloud app"), "{setup}");
     assert!(steps.contains("callbackUrl"), "{setup}");
 }
+
+#[tokio::test]
+async fn refresh_does_not_post_after_revocation_during_credential_preparation() {
+    use std::{sync::mpsc, task::Poll, time::Duration};
+    let f = fixture().await;
+    let account = connect(&f, "alice").await;
+    assert!(account.agent_id.is_empty());
+    let key = connections::credential_key(&account.id);
+    let mut credential = f.s.vault.get(&key).await.unwrap().unwrap();
+    credential["oauth"]["expiresAt"] = json!(now() - 1);
+    f.s.vault.set(&key, &credential).await.unwrap();
+    let token_requests = || {
+        f.google
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call["path"] == "/token")
+            .count()
+    };
+    let before = token_requests();
+
+    // Occupy the current four SQLite readers. Polling the token future queues
+    // its initial local validation; the following gate then parks the reader
+    // after that validation, before the future can retrieve its credential.
+    // The writer remains independent, just as it does during a real I/O wait.
+    let mut release = Vec::new();
+    let mut readers = Vec::new();
+    for _ in 0..4 {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let signal = entered.clone();
+        let (send, receive) = mpsc::channel();
+        let store = f.s.store.clone();
+        readers.push(tokio::spawn(async move {
+            store
+                .read(move |_| {
+                    signal.notify_one();
+                    let _ = receive.recv();
+                    Ok(())
+                })
+                .await
+        }));
+        tokio::time::timeout(Duration::from_secs(10), entered.notified())
+            .await
+            .unwrap();
+        release.push(send);
+    }
+    tokio::task::yield_now().await;
+    let mut token = Box::pin(oauth::access_token(&f.s, &account));
+    assert!(matches!(futures_util::poll!(token.as_mut()), Poll::Pending));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let signal = entered.clone();
+    let (send, receive) = mpsc::channel();
+    let mut after_validation = Box::pin(f.s.store.read(move |_| {
+        signal.notify_one();
+        let _ = receive.recv();
+        Ok(())
+    }));
+    assert!(matches!(
+        futures_util::poll!(after_validation.as_mut()),
+        Poll::Pending
+    ));
+    release.remove(0).send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), entered.notified())
+        .await
+        .unwrap();
+    let mut disabled = account.clone();
+    disabled.enabled = false;
+    disabled.revision = uuid::Uuid::new_v4().to_string();
+    f.s.store
+        .transaction(move |db| db.save_plugin_instance(&disabled))
+        .await
+        .unwrap();
+    for gate in release {
+        gate.send(()).unwrap();
+    }
+    send.send(()).unwrap();
+    after_validation.await.unwrap();
+    for reader in readers {
+        reader.await.unwrap().unwrap();
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_secs(10), token)
+            .await
+            .unwrap()
+            .is_err()
+    );
+    assert_eq!(
+        token_requests(),
+        before,
+        "refresh POST escaped after its local authority was revoked"
+    );
+    assert!(f.s.vault.get(&key).await.unwrap().as_ref() == Some(&credential));
+}
