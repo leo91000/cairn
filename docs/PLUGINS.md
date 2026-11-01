@@ -1367,6 +1367,9 @@ rights before subsequent effects and publication. Cancellation, deletion and
 grant reductions still revoke the job; normal completion alone does not. This is
 private job authority, never a broader tool grant or a fallback to another agent,
 and does not extend bounded deferred resource operations.
+Deferred project/skill source results also retain their initiating authority and
+all bound source-instance/project proofs for polling; later delivery revalidates
+them. Completing the work does not turn its private results into an unguarded cache.
 
 Ticket F must call `plugins::grant_authorization::authorize_hook_delivery` with
 the execution agent, instance, declared hook name and payload before delivery; a

@@ -17,9 +17,45 @@ pub(crate) struct Authority {
     instance: Option<Connection>,
     package: Option<(String, String, String)>,
     management: Option<crate::plugins::management::Authority>,
+    result_proofs: Option<std::sync::Arc<std::sync::Mutex<Vec<Self>>>>,
 }
 
 impl Authority {
+    /// Retain each bound source/project proof for later result delivery, without
+    /// capturing Service (which owns the operation registry) or extending the
+    /// transport bearer. Snapshots stored here never point back to this list.
+    pub(crate) fn retain_result_authority(&mut self) -> plugin_packages::Authority {
+        let mut initial = self.clone();
+        initial.result_proofs = None;
+        let proofs = std::sync::Arc::new(std::sync::Mutex::new(vec![initial]));
+        self.result_proofs = Some(proofs.clone());
+        let local = proofs.clone();
+        plugin_packages::Authority::default()
+            .with_guard(move |db| {
+                for proof in local.lock().unwrap().iter() {
+                    proof.authorize(db)?;
+                }
+                Ok(())
+            })
+            .with_recheck_guard(move |s| {
+                let proofs = proofs.lock().unwrap().clone();
+                Box::pin(async move {
+                    for proof in proofs {
+                        proof.recheck(s).await?;
+                    }
+                    Ok(())
+                })
+            })
+    }
+
+    fn record_result_authority(&self) {
+        if let Some(proofs) = &self.result_proofs {
+            let mut bound = self.clone();
+            bound.result_proofs = None;
+            proofs.lock().unwrap().push(bound);
+        }
+    }
+
     pub(crate) async fn new(
         s: &Service,
         context: ResumeContext,
@@ -78,6 +114,7 @@ impl Authority {
         let path = PathBuf::from(&project.settings.path);
         self.project = Some(project);
         self.recheck(s).await?;
+        self.record_result_authority();
         Ok(Some(path))
     }
 
@@ -131,6 +168,7 @@ impl Authority {
             ));
         }
         authority.recheck(s).await?;
+        authority.record_result_authority();
         Ok(authority)
     }
 

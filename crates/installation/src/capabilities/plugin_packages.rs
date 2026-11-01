@@ -489,6 +489,7 @@ impl PluginPackageOperation {
         let check = authority.clone();
         s.store.read(move |db| check.authorize(db)).await?;
         let mut resource_result = None;
+        let mut result_authority = None;
         let result = match self.name {
             "list_plugins" => {
                 let _: ListPluginPackagesInput = decode(input)?;
@@ -644,11 +645,13 @@ impl PluginPackageOperation {
                     authority.bearer.as_deref(),
                     owner,
                 )?;
+                result_authority = s.plugins.operations.result_authority(&input.operation_id)?;
                 resource_result = s.plugins.operations.resource_read(
                     &input.operation_id,
                     self.name == "get_plugin_resource_operation",
                 )?;
-                if resource_result.is_some()
+                let protected_result = resource_result.is_some() || result_authority.is_some();
+                if protected_result
                     && authority.owner.is_none()
                     && let Some(account) = &human_account
                 {
@@ -669,6 +672,14 @@ impl PluginPackageOperation {
                     }
                     authority.additional_public_scope = Some("read");
                 }
+                if result_authority.is_some()
+                    && public_resource_read.is_some()
+                    && authority.public_credential.is_none()
+                {
+                    return Err(Error::unauthorized(
+                        "A current public MCP authorization is required.",
+                    ));
+                }
                 if self.name == "cancel_plugin_operation" {
                     s.plugins.operations.cancel(&input.operation_id)?;
                 }
@@ -680,6 +691,11 @@ impl PluginPackageOperation {
         s.store.read(move |db| check.authorize(db)).await?;
         if let Some(read) = resource_result {
             read.authorize_result(s, &authority).await?;
+        }
+        if let Some(origin) = result_authority {
+            authority.recheck(s).await?;
+            origin.recheck(s).await?;
+            authority.recheck(s).await?;
         }
         Ok(result)
     }

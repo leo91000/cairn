@@ -291,10 +291,10 @@ impl Accepted {
                 return Err(revoked());
             }
         }
-        if let Some((id, created)) = &self.task {
-            if required(db.mission(id)?, "Initiating task removed")?.created_at != *created {
-                return Err(revoked());
-            }
+        if let Some((id, created)) = &self.task
+            && required(db.mission(id)?, "Initiating task removed")?.created_at != *created
+        {
+            return Err(revoked());
         }
         Ok(())
     }
@@ -513,7 +513,7 @@ mod tests {
 
     #[tokio::test]
     async fn accepted_source_jobs_keep_the_original_invocation_after_normal_completion() {
-        for change in ["complete", "ancestry", "grant", "delete"] {
+        for change in ["complete", "ancestry", "grant", "delete", "delivery"] {
             let (f, bearer) = Fixture::delegated_manager().await;
             let installed = crate::common::package_install(&f.s, &json!({
                 "manifest": { "id": "retained-source", "name": "Retained source", "version": "1", "apiVersion": 2,
@@ -523,7 +523,7 @@ mod tests {
                 "source": r#"return { projects = function(input)
                     cairn.http.request({instance=input.instance.id,url="https://service.example.test/hold"})
                     cairn.http.request({instance=input.instance.id,url="https://service.example.test/upload"})
-                    return {items=cairn.array({})}
+                    return {items=cairn.array({{id="private",name="Private repository"}})}
                 end }"#,
             })).await.unwrap();
             crate::common::package_approve(
@@ -560,7 +560,9 @@ mod tests {
             tokio::time::timeout(std::time::Duration::from_secs(10), f.entered.notified())
                 .await
                 .unwrap();
-            complete(&f, &caller).await;
+            if change != "delivery" {
+                complete(&f, &caller).await;
+            }
             match change {
                 "ancestry" => f.moved_parent.store(true, Ordering::SeqCst),
                 "grant" => {
@@ -599,7 +601,7 @@ mod tests {
             .unwrap();
             assert_eq!(
                 result["state"],
-                if change == "complete" {
+                if matches!(change, "complete" | "delivery") {
                     "completed"
                 } else {
                     "failed"
@@ -608,14 +610,47 @@ mod tests {
             );
             assert_eq!(
                 f.uploads.load(Ordering::SeqCst),
-                usize::from(change == "complete"),
+                usize::from(matches!(change, "complete" | "delivery")),
                 "{change}"
             );
-            assert!(
-                crate::installation_mcp::authorize(&f.s, &bearer)
+            if change == "delivery" {
+                let read =
+                    crate::capabilities::plugin_package_operation("get_plugin_operation").unwrap();
+                let input = json!({ "operationId": operation });
+                let response = read
+                    .invoke(
+                        &f.s,
+                        input.clone(),
+                        crate::capabilities::ResumeContext::Installation(bearer.clone()),
+                    )
                     .await
-                    .is_err()
-            );
+                    .unwrap();
+                assert_eq!(
+                    response["result"]["page"]["items"][0]["name"],
+                    "Private repository"
+                );
+                f.remove_for(text(&caller["snapshot"]["agent"], "id")).await;
+                assert!(
+                    crate::installation_mcp::authorize(&f.s, &bearer)
+                        .await
+                        .is_ok()
+                );
+                let error = read
+                    .invoke(
+                        &f.s,
+                        input,
+                        crate::capabilities::ResumeContext::Installation(bearer.clone()),
+                    )
+                    .await
+                    .unwrap_err();
+                assert_eq!(error.status, 403);
+            } else {
+                assert!(
+                    crate::installation_mcp::authorize(&f.s, &bearer)
+                        .await
+                        .is_err()
+                );
+            }
             f.s.shutdown.cancel();
         }
     }
