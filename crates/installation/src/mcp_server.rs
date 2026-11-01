@@ -383,17 +383,8 @@ fn finish_result(mut result: Value, method: &str, modern: bool, gateway: bool) -
     if !modern && let Some(object) = result.as_object_mut() {
         object.remove("resultType");
     }
-    if method == "tools/list"
-        && let Some(tools) = result["tools"].as_array_mut()
-    {
-        for tool in tools {
-            let descriptor = std::mem::take(tool);
-            *tool = if gateway {
-                model_result::describe_proxy(descriptor)
-            } else {
-                model_result::describe_owned(descriptor)
-            };
-        }
+    if method == "tools/list" {
+        return model_result::advertise(result, gateway);
     }
     if method == "tools/call" {
         return model_result::finish(result);

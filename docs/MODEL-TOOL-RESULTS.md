@@ -60,6 +60,12 @@ the source catalogs retain their canonical schemas. The workspace listing adds
 its granted plugin/delegation tools before the adaptation; authorization and
 tool filtering still happen in their original layers.
 
+The advertisement boundary requires an object catalog, a tools array, and
+object descriptors with nonempty string names, object input schemas and
+optional string descriptions. Malformed catalogs produce a fixed bounded
+protocol error rather than a partial advertisement. External output schemas
+remain opaque; this validation neither resolves them nor infers permissions.
+
 ## Coverage
 
 This policy covers Cairn's owned `/mcp`, `/mcp-installation`, `/mcp-workspace`
@@ -68,8 +74,10 @@ Code Mode's hidden intermediate values keep their independent worker wire
 guards. Existing upstream MCP wire ceilings remain in force: a response rejected
 before parsing needs a semantic producer/streaming solution, not raw JSON cutting.
 
-Native Codex, Claude Code and OpenCode builtins are outside this coverage. Cairn's
-activity adapters observe those results after model consumption. The separate
+Native Codex, Claude Code and OpenCode builtins, and command MCP connections
+configured directly as stdio inside those coding agents, are outside this
+coverage. Cairn's activity adapters operate after model consumption and do not
+enforce this model-facing budget for those paths. The separate
 16 KiB timeline preview and native/VM canonical transport limits are unchanged.
 This change does not establish an unacknowledged transport window or remove a
 legacy lifetime transport cap.

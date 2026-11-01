@@ -48,14 +48,14 @@ pub(super) fn omitted_value(value_bytes: usize) -> Value {
 /// duplicated representations and metadata. Below-budget authorized data is
 /// returned unchanged, including credentials delivered by granted tools.
 pub(super) fn finish(mut result: Value) -> Result<Value> {
+    if !result.is_object() {
+        return Err(Error::bad_gateway(
+            "MCP response result must be an object. Tool outcome is unknown; do not repeat the operation automatically.",
+        ));
+    }
     let original_bytes = size(&result);
     if original_bytes <= LIMIT {
         return Ok(result);
-    }
-    if !result.is_object() {
-        return Err(Error::bad_gateway(
-            "Oversized MCP result is not an object. Tool outcome is unknown; do not repeat the operation automatically.",
-        ));
     }
 
     let content = match result
@@ -197,46 +197,71 @@ fn truncated_schema() -> Value {
     })
 }
 
-/// Only Cairn's source-owned schemas: draft07 generated definitions keep their
-/// original root location, so #/definitions/... references retain their meaning.
-/// Arbitrary external schemas use `describe_proxy` instead of being rewritten.
-pub(super) fn describe_owned(mut tool: Value) -> Value {
-    if let Some(mut schema) = tool
-        .as_object_mut()
-        .and_then(|tool| tool.remove("outputSchema"))
-    {
-        let mut advertised = json!({ "type": "object" });
-        for key in ["$schema", "definitions"] {
-            if let Some(value) = schema.as_object_mut().and_then(|schema| schema.remove(key)) {
-                advertised[key] = value;
+fn invalid_catalog() -> Error {
+    Error::bad_gateway("MCP server returned an invalid tool catalog.")
+}
+
+/// Validate each advertisement descriptor before transforming its fields.
+/// Only this response copy changes; upstream discovery/storage and grant
+/// filtering retain their existing contracts.
+pub(super) fn advertise(listing: Value, gateway: bool) -> Result<Value> {
+    let Value::Object(mut listing) = listing else {
+        return Err(invalid_catalog());
+    };
+    let Some(Value::Array(tools)) = listing.remove("tools") else {
+        return Err(invalid_catalog());
+    };
+    let tools = tools
+        .into_iter()
+        .map(|tool| describe(tool, gateway))
+        .collect::<Result<Vec<_>>>()?;
+    listing.insert("tools".to_owned(), Value::Array(tools));
+    Ok(Value::Object(listing))
+}
+
+fn describe(tool: Value, gateway: bool) -> Result<Value> {
+    let Value::Object(mut tool) = tool else {
+        return Err(invalid_catalog());
+    };
+    let valid_name = tool
+        .get("name")
+        .and_then(Value::as_str)
+        .is_some_and(|name| !name.is_empty());
+    let valid_input = tool.get("inputSchema").is_some_and(Value::is_object);
+    let valid_description = tool.get("description").is_none_or(Value::is_string);
+    if !valid_name || !valid_input || !valid_description {
+        return Err(invalid_catalog());
+    }
+
+    let description = tool
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let mut description = format!("{description}{POLICY}");
+    if let Some(schema) = tool.remove("outputSchema") {
+        if gateway {
+            // External schemas stay opaque: no dialect/ref relocation,
+            // compilation or network resolution. Withdraw only this copy.
+            description.push_str(" The gateway omits the upstream outputSchema because a truncated response has a different shape.");
+        } else {
+            // Only the verified source-owned draft07 profile is transformed.
+            // Definitions keep their root location and local refs keep meaning.
+            let Value::Object(mut schema) = schema else {
+                return Err(invalid_catalog());
+            };
+            let mut advertised = serde_json::Map::new();
+            advertised.insert("type".to_owned(), "object".into());
+            for key in ["$schema", "definitions"] {
+                if let Some(value) = schema.remove(key) {
+                    advertised.insert(key.to_owned(), value);
+                }
             }
+            advertised.insert("anyOf".to_owned(), json!([schema, truncated_schema()]));
+            tool.insert("outputSchema".to_owned(), Value::Object(advertised));
         }
-        advertised["anyOf"] = json!([schema, truncated_schema()]);
-        tool["outputSchema"] = advertised;
     }
-    describe_policy(tool)
-}
-
-/// The gateway intentionally withdraws optional output-schema precision rather
-/// than relocating unknown dialects, root refs, anchors or external resources.
-/// This changes only the advertised copy, never stored/upstream descriptors.
-pub(super) fn describe_proxy(mut tool: Value) -> Value {
-    let had_schema = tool
-        .as_object_mut()
-        .and_then(|tool| tool.remove("outputSchema"))
-        .is_some();
-    let mut tool = describe_policy(tool);
-    if had_schema {
-        let description = tool["description"].as_str().unwrap_or_default();
-        tool["description"] = format!("{description} The gateway omits the upstream outputSchema because a truncated response has a different shape.").into();
-    }
-    tool
-}
-
-fn describe_policy(mut tool: Value) -> Value {
-    let description = tool["description"].as_str().unwrap_or_default();
-    tool["description"] = format!("{description}{POLICY}").into();
-    tool
+    tool.insert("description".to_owned(), description.into());
+    Ok(Value::Object(tool))
 }
 
 #[cfg(test)]
@@ -390,6 +415,98 @@ mod tests {
     }
 
     #[test]
+    fn advertisement_rejects_malformed_descriptors_and_mixed_catalogs_in_all_versions() {
+        let valid = json!({
+            "name": "fixture",
+            "inputSchema": { "type": "object" },
+            "outputSchema": { "type": "object" },
+        });
+        for malformed in [
+            json!(42),
+            json!([]),
+            json!(null),
+            json!(true),
+            json!("fixture"),
+            json!({}),
+            json!({ "name": 42, "inputSchema": {} }),
+            json!({ "name": "", "inputSchema": {} }),
+            json!({ "name": "fixture", "inputSchema": [] }),
+            json!({ "name": "fixture", "inputSchema": {}, "description": 42 }),
+        ] {
+            for modern in [false, true] {
+                for gateway in [false, true] {
+                    for tools in [
+                        json!([malformed]),
+                        json!([valid, malformed]),
+                        json!([malformed, valid]),
+                    ] {
+                        let error = super::super::finish_result(
+                            json!({ "tools": tools }),
+                            "tools/list",
+                            modern,
+                            gateway,
+                        )
+                        .unwrap_err();
+                        assert_eq!(error.status, 502);
+                        assert_eq!(
+                            error.message,
+                            "MCP server returned an invalid tool catalog."
+                        );
+                    }
+                }
+            }
+        }
+        for malformed in [
+            json!(null),
+            json!(42),
+            json!([]),
+            json!({}),
+            json!({ "tools": null }),
+            json!({ "tools": 42 }),
+            json!({ "tools": {} }),
+        ] {
+            assert_eq!(
+                advertise(malformed, true).unwrap_err().message,
+                "MCP server returned an invalid tool catalog."
+            );
+        }
+        let invalid_owned_schema =
+            json!({ "tools": [{ "name": "fixture", "inputSchema": {}, "outputSchema": [] }] });
+        assert!(advertise(invalid_owned_schema, false).is_err());
+    }
+
+    #[test]
+    fn advertisement_preserves_valid_input_permissions_and_extensions() {
+        let canonical = json!({
+            "name": "fixture",
+            "description": "Original description.",
+            "inputSchema": { "type": "object", "$ref": "https://invalid.example/do-not-fetch" },
+            "outputSchema": { "$ref": "#", "$defs": {} },
+            "annotations": { "readOnlyHint": false },
+            "_meta": { "securitySchemes": [{ "type": "oauth2", "scopes": ["read"] }] },
+            "extension": [42, null],
+        });
+        let result = advertise(
+            json!({ "tools": [canonical], "nextCursor": "cursor" }),
+            true,
+        )
+        .unwrap();
+        let advertised = &result["tools"][0];
+        for key in ["name", "inputSchema", "annotations", "_meta", "extension"] {
+            assert_eq!(advertised[key], canonical[key]);
+        }
+        assert_eq!(result["nextCursor"], "cursor");
+        assert!(advertised.get("outputSchema").is_none());
+        assert!(
+            advertised["description"]
+                .as_str()
+                .unwrap()
+                .starts_with("Original description.")
+        );
+        assert!(canonical.get("outputSchema").is_some());
+    }
+
+    #[test]
     fn complete_media_is_kept_or_omitted_never_sliced() {
         let small = json!({ "type": "image", "mimeType": "image/png", "data": "aGVsbG8=" });
         let large =
@@ -495,7 +612,7 @@ mod tests {
             if original["name"] != "search" && original["name"] != "execute" {
                 assert_owned_schema_profile(schema);
             }
-            let advertised = describe_owned(original.clone());
+            let advertised = describe(original.clone(), false).unwrap();
             let validator = jsonschema::validator_for(&advertised["outputSchema"]).unwrap();
             assert!(validator.is_valid(&marker()));
             let complete = match original["name"].as_str().unwrap() {
@@ -565,7 +682,7 @@ mod tests {
                 "outputSchema": schema,
                 "_meta": { "securitySchemes": [{ "type": "oauth2", "scopes": ["read"] }] },
             });
-            let advertised = describe_proxy(canonical.clone());
+            let advertised = describe(canonical.clone(), true).unwrap();
             assert!(advertised.get("outputSchema").is_none());
             assert_eq!(canonical["outputSchema"], schema);
             assert_eq!(advertised["inputSchema"], canonical["inputSchema"]);
