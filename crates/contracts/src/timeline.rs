@@ -80,6 +80,10 @@ pub enum TimelineContent {
     /// arrives as its placeholder; the answer itself never enters the timeline.
     UserMessage {
         text: String,
+        /// The delivered request asks for a protected Plan turn.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        #[ts(as = "Option<bool>", optional)]
+        plan: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         message_id: Option<String>,

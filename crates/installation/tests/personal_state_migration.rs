@@ -156,7 +156,25 @@ async fn real_v17_upgrade_preserves_each_accounts_reads_and_set_aside_outcomes()
 
     let after = snapshot(&db);
     for (name, old) in &before {
-        if !matches!(name.as_str(), "kv" | "nodes" | "records" | "runs") {
+        if matches!(name.as_str(), "chat_messages" | "chat_questions") {
+            let (schema, rows) = &after[name];
+            let previous_schema = old.0.strip_suffix(')').unwrap();
+            assert_eq!(
+                schema,
+                &format!(
+                    "{previous_schema}, plan INTEGER NOT NULL DEFAULT 0 CHECK(plan IN (0,1)))"
+                ),
+                "only the Plan flag may be added to {name}"
+            );
+            let previous_rows = rows
+                .iter()
+                .map(|row| {
+                    assert_eq!(row.last(), Some(&SqlValue::Integer(0)));
+                    row[..row.len() - 1].to_vec()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(previous_rows, old.1, "preserved rows in {name}");
+        } else if !matches!(name.as_str(), "kv" | "nodes" | "records" | "runs") {
             assert_eq!(after.get(name), Some(old), "unrelated table {name}");
         }
     }
@@ -206,7 +224,7 @@ async fn real_v17_upgrade_preserves_each_accounts_reads_and_set_aside_outcomes()
     assert_eq!(
         db.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
             .unwrap(),
-        23
+        24
     );
 
     // The real service serves each account its own preserved outcomes.
@@ -314,7 +332,7 @@ async fn v17_upgrade_preserves_legacy_paid_retry_and_checkpoint() {
     assert_eq!(
         db.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
             .unwrap(),
-        23
+        24
     );
 }
 
@@ -355,6 +373,6 @@ fn malformed_previous_read_state_rolls_back_schema_data_and_version() {
     assert_eq!(
         db.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
             .unwrap(),
-        23
+        24
     );
 }

@@ -178,6 +178,10 @@
                 "null"
               ]
             },
+            "plan": {
+              "description": "The delivered request asks for a protected Plan turn.",
+              "type": "boolean"
+            },
             "questionId": {
               "type": [
                 "string",

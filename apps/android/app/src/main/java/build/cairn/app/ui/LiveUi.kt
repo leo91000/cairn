@@ -57,6 +57,7 @@ fun rememberLive(
     val enabled = workspace.session.authenticated && !workspace.signingOut
     val api = if (enabled) vm.api else null
     var value by remember(path, api) { mutableStateOf(LiveSnapshot()) }
+    var reconnectGeneration by remember(path, api) { mutableIntStateOf(0) }
     val session = remember(path, api) { LiveSession() }
     // Retained pager pages become previews and then selected again without being restored.
     // Recheck their latest snapshot at selection, before a frame of old content can show.
@@ -98,7 +99,7 @@ fun rememberLive(
     var loadingOlder by remember(path, api) { mutableStateOf(false) }
     var olderError by remember(path, api) { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(path, api, owner, streaming) {
+    LaunchedEffect(path, api, owner, streaming, reconnectGeneration) {
         if (enabled && api != null) {
             var cacheGeneration = vm.historyCache.generation
             val key = vm.historyCache.key(api.cacheScope, api.csrf, path)
@@ -208,8 +209,13 @@ fun rememberLive(
                                 )
 
                         val large = api.readLargeTimeline(path, page.largeEntries.orEmpty())
+                        val events = api.readLargeEvents(path, page.events)
                         val applied =
-                            pages.apply(page.copy(entries = page.entries + large), value, requested)
+                            pages.apply(
+                                page.copy(entries = page.entries + large, events = events),
+                                value,
+                                requested,
+                            )
                         if (applied != null) {
                             value = applied
                             // Release paging in the same UI turn as insertion. Disk persistence
@@ -247,6 +253,7 @@ fun rememberLive(
             }
         },
         followLatest = { session.followsLatest = it },
+        reconnect = { reconnectGeneration++ },
     )
 }
 
@@ -620,6 +627,50 @@ internal fun RunEvent.item(): JsonObject? = activityData()?.get("item") as? Json
 internal fun JsonObject?.string(key: String) =
     this?.get(key)?.let { it as? JsonPrimitive }?.contentOrNull.orEmpty()
 
+/** Approval identity is distinct from the row anchored for reading. */
+internal fun proposedPlanApproval(
+    events: List<RunEvent>,
+    cards: List<TimelineCard> = emptyList(),
+): String? {
+    var latest: RunEvent? = null
+    var lastRequest: RunEvent? = null
+    for (event in events) {
+        if (event.type == "chat.user" && event.id > (lastRequest?.id ?: Long.MIN_VALUE))
+            lastRequest = event
+        if (event.type !in listOf("item.started", "item.updated", "item.completed")) continue
+        val item = event.item()
+        if (
+            item.string("type") == "proposed_plan" &&
+                item.string("parent_id").isBlank() &&
+                event.id > (latest?.id ?: Long.MIN_VALUE)
+        )
+            latest = event
+    }
+    val requestCard = cards.filter { it.content is TimelineContent.A }.maxByOrNull { it.source }
+    val requestSource =
+        maxOf(lastRequest?.id ?: Long.MIN_VALUE, requestCard?.source ?: Long.MIN_VALUE)
+    val requestId =
+        if (requestCard != null && requestCard.source == requestSource)
+            (requestCard.content as? TimelineContent.A)?.messageId
+        else lastRequest?.payload?.string("messageId")
+    val proposal = latest ?: return null
+    if (
+        proposal.type != "item.completed" ||
+            proposal.id <= requestSource ||
+            proposal.item().string("text").isBlank()
+    )
+        return null
+    val item = proposal.item()
+    val authoredRequest = item.string("request_id")
+    if (
+        item?.containsKey("request_id") == true &&
+            (authoredRequest.isBlank() ||
+                requestSource != Long.MIN_VALUE && authoredRequest != requestId)
+    )
+        return null
+    return "${proposal.runId}:${proposal.id}"
+}
+
 internal data class TimelineEntry(
     val key: String,
     val events: List<RunEvent>,
@@ -636,6 +687,10 @@ internal data class TimelineEntry(
     val agents: List<Subagent> = emptyList(),
     /** A scheduled wait, shown as one card from its scheduling to its resumption. */
     val wait: ActivityWait? = null,
+    /** The approach a plan turn proposed. */
+    val proposal: Boolean = false,
+    /** The completed root event to approve, separate from the first-event display key. */
+    val proposalSourceId: String? = null,
     /** The agent's plan, kept up to date by its later updates. */
     val plan: AgentPlan? = null,
     /** Where an update changed the plan. */
@@ -658,7 +713,7 @@ internal fun timelineEntries(
     Performance.measure(PerfOperation.TIMELINE) {
         val folded = mutableListOf<RunEvent>()
         val sources = mutableListOf<MutableList<Long>>()
-        val positions = mutableMapOf<String, Int>()
+        val positions = mutableMapOf<Triple<String, String, String>, Int>()
         val subagents = subagentTimeline(events)
         for (event in events) {
             // Context usage is a measurement the conversation header shows, not an activity.
@@ -675,10 +730,15 @@ internal fun timelineEntries(
             }
             val item = event.item()
             val id = item.string("id")
+            val itemType = item.string("type")
             // Each plan update keeps its place: it shows what changed at that moment.
-            val planUpdate = item.string("type") == "todo_list"
+            val planUpdate = itemType == "todo_list"
             if (event.timeline != true && id.isNotBlank() && !planUpdate) {
-                val key = "${item.string("type")}:$id"
+                // A paginated child proposal can outlive its spawning event. Its
+                // item ID must not replace the conversation's own proposed plan.
+                val proposalParent =
+                    if (itemType == "proposed_plan") item.string("parent_id") else ""
+                val key = Triple(itemType, id, proposalParent)
                 val index = positions[key]
                 if (index == null) {
                     positions[key] = folded.size
@@ -1063,6 +1123,27 @@ internal fun timelineEntries(
                 }
                 continue
             }
+            if (
+                event.item().string("type") == "proposed_plan" &&
+                    event.item().string("parent_id").isBlank()
+            ) {
+                flushActivity()
+                val proposalSources = sourceIds.getValue(event.id)
+                result.add(
+                    TimelineEntry(
+                        "proposal:${event.id}",
+                        listOf(event),
+                        false,
+                        sourceIds = mapOf(event.id to proposalSources),
+                        proposal = true,
+                        proposalSourceId =
+                            if (event.type == "item.completed")
+                                "${event.runId}:${proposalSources.last()}"
+                            else null,
+                    )
+                )
+                continue
+            }
             // An engine marker Cairn does not know yet stays in the run log.
             if (chat && presentActivity(event).let { it.kind == ActivityKind.NOTICE && !it.failed })
                 continue
@@ -1187,6 +1268,9 @@ internal fun TimelineRow(
     active: Boolean = false,
     /** The plan the agent still follows, if any. */
     livePlan: String? = null,
+    /** Queues the implementation of this proposed plan, when it is the latest one. */
+    implement: (() -> Unit)? = null,
+    canImplement: Boolean = false,
 ) {
     if (entry.files.isNotEmpty()) ArtifactStrip(vm, entry.files)
     else if (entry.agents.isNotEmpty()) SubagentTeam(entry.agents, active, identity = entry.key)
@@ -1201,8 +1285,10 @@ internal fun TimelineRow(
                 (card.content as? TimelineContent.A)?.attachments.orEmpty(),
                 card.createdAt,
                 if (via.isNullOrBlank()) agent else "$agent · via $via",
+                planRequest = (card.content as? TimelineContent.A)?.plan == true,
             )
         }
+    else if (entry.proposal) ProposedPlanCard(entry.events.single(), implement, canImplement)
     else if (entry.wait != null) WaitCard(entry.wait)
     else if (entry.plan != null) PlanCard(entry.plan, live = active && livePlan == entry.key)
     else if (entry.planUpdate != null) PlanUpdateRow(entry.planUpdate)
@@ -1234,6 +1320,7 @@ fun MessageRow(
     attachments: List<ChatAttachment>,
     createdAt: Long,
     agent: String = "Cairn",
+    planRequest: Boolean = false,
 ) {
     run {
         val time =
@@ -1306,18 +1393,22 @@ fun MessageRow(
                             else Markdown(content)
                             if (user)
                                 Text(
-                                    time,
+                                    if (planRequest) "Plan · $time" else time,
                                     Modifier.align(Alignment.End),
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    color =
+                                        if (planRequest) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                         }
                     }
                 else
                     Text(
-                        time,
+                        if (planRequest) "Plan · $time" else time,
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color =
+                            if (planRequest) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
                     )
             }
         }

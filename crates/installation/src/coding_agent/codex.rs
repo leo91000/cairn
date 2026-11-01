@@ -49,6 +49,10 @@ impl ExecutionAdapter for Codex {
         }
     }
 
+    fn plan_turns(&self) -> bool {
+        true
+    }
+
     fn validate_agent(&self, _agent: &Value) -> Result<()> {
         Ok(())
     }

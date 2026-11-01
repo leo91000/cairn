@@ -35,6 +35,7 @@ import { stopChat } from '../../../../packages/contracts/generated/stopChat'
 import { sameReason } from '../activity'
 import {
   api,
+  ApiError,
   apiUpload,
   refreshSkills,
   state,
@@ -94,6 +95,7 @@ import {
   Maximize2,
   Menu,
   MoreHorizontal,
+  NotebookPen,
   Paperclip,
   Plug,
   Plus,
@@ -185,6 +187,8 @@ const speed = ref('')
 // Names queued messages' speeds; the composer's picker keeps this catalog current.
 const codexModels = computed(() => modelCatalogs.codex.catalog.models)
 const provider = ref<'' | Provider>('')
+// The next messages are plan turns until the user turns it off or implements a plan.
+const planning = ref(false)
 const history = ref(false)
 const deletingConversation = ref<ChatDetail>()
 const detailsOpen = ref(false)
@@ -293,7 +297,6 @@ const dragging = ref(0)
 const hasDraft = computed(() => !!draft.value.trim() || attachments.value.length > 0)
 // Rejected files must be removed before sending; nothing is sent while a file uploads.
 const attachmentsBlocked = computed(() => Object.values(attachmentStates.value).some(item => item.status === 'rejected' || item.status === 'uploading'))
-const canSend = computed(() => !inactive.value && (!route.params.id || (detail.value?.id === route.params.id || detail.value?.slug === route.params.id)) && !live.error.value && (!!draft.value.trim() || attachments.value.length > 0) && !attachmentsBlocked.value)
 
 function removeAttachment(id: string) {
   if (previews.value[id])
@@ -468,6 +471,14 @@ const chosenProvider = computed({
   },
 })
 const switchingProvider = computed(() => !!detail.value?.run && chosenProvider.value !== currentProvider.value)
+const planAvailable = computed(() => providers[chosenProvider.value].planTurns)
+// Availability can block submission, but must not erase the requested boundary.
+const planRequested = computed(() => planning.value)
+const planBlocked = computed(() => planRequested.value && !planAvailable.value)
+const planUnavailableMessage = 'Plan requires Codex or Claude Code. Choose a compatible agent, or turn Plan off to send an ordinary request.'
+const canSend = computed(() => !planBlocked.value && !inactive.value && (!route.params.id || (detail.value?.id === route.params.id || detail.value?.slug === route.params.id)) && !live.error.value && (!!draft.value.trim() || attachments.value.length > 0) && !attachmentsBlocked.value)
+// A plan request cannot join a turn that can already change files.
+const steerBlocked = computed(() => planRequested.value && !detail.value?.run?.chatExecution?.plan)
 const conversationAssistant = computed(() => detail.value?.run?.snapshot.agent)
 const inheritConversation = computed(() => chosenProvider.value === conversationAssistant.value?.provider)
 const inheritedAssistant = computed(() => {
@@ -484,21 +495,52 @@ const projects = computed(() => [{
   icon: FolderGit2,
 }, ...state.projects.filter(project => selectedAgent.value?.access.projects === null || selectedAgent.value?.access.projects.includes(project.id)).map(project => ({ value: project.id, label: project.name, icon: FolderGit2 }))])
 const draftScope = state.installationId ? `${state.installationId}:` : ''
+let createdChat: Chat | undefined
 let draftKey = ''
+let restoringDraft = false
 
-function loadDraft() {
-  draftKey = `cairn-chat-draft:${draftScope}${selectedChatId.value || `new:${agentId.value}:${projectId.value}`}`
-  draft.value = sessionStorage.getItem(draftKey) ?? (typeof route.query.draft === 'string' ? route.query.draft : '')
+function saveDraft(key = draftKey, text = draft.value, plan = planning.value) {
+  if (!key)
+    return
+  sessionStorage.setItem(key, text)
+  sessionStorage.setItem(`${key}:plan`, String(plan))
+}
+
+function loadDraft(keepPlanning = false) {
+  restoringDraft = true
+  try {
+    draftKey = `cairn-chat-draft:${draftScope}${selectedChatId.value || `new:${agentId.value}:${projectId.value}`}`
+    draft.value = sessionStorage.getItem(draftKey) ?? (typeof route.query.draft === 'string' ? route.query.draft : '')
+    const savedPlan = sessionStorage.getItem(`${draftKey}:plan`)
+    if (savedPlan !== null || !keepPlanning)
+      planning.value = savedPlan === 'true'
+  }
+  finally {
+    restoringDraft = false
+  }
 }
 
 loadDraft()
 watch(selectedChatId, (id, previous) => {
-  // A user can type while a bookmarked slug is still resolving to its UUID.
-  if (id && previous === chatId.value && id !== previous && draft.value)
-    sessionStorage.setItem(`cairn-chat-draft:${draftScope}${id}`, draft.value)
-  loadDraft()
+  // Text or an explicit Plan choice can arrive before a slug resolves to its UUID.
+  if (id && previous === chatId.value && id !== previous) {
+    const previousKey = `cairn-chat-draft:${draftScope}${previous}`
+    const destinationKey = `cairn-chat-draft:${draftScope}${id}`
+    const text = sessionStorage.getItem(previousKey) ?? draft.value
+    const plan = sessionStorage.getItem(`${previousKey}:plan`)
+    if (text)
+      saveDraft(destinationKey, text, plan === 'true')
+    else if (plan !== null)
+      sessionStorage.setItem(`${destinationKey}:plan`, plan)
+  }
+
+  loadDraft(!!createdChat && (id === createdChat.id || chatId.value === createdChat.slug))
 })
-watch(draft, value => sessionStorage.setItem(draftKey, value))
+watch([draft, planning], () => {
+  // Save user changes before a navigation can change the destination key.
+  if (!restoringDraft)
+    saveDraft()
+}, { flush: 'sync' })
 watch(agentId, () => {
   if (!projects.value.some(project => project.value === projectId.value))
     projectId.value = ''
@@ -533,13 +575,19 @@ let submission: {
     provider: Provider
     model: string
     reasoning: string
+    plan: boolean
     speed: string
     attachmentIds: string[]
   }
 } | undefined
-let createdChat: Chat | undefined
 
 function newConversation() {
+  if (chatId.value)
+    saveDraft()
+  else
+    saveDraft(draftKey, '', false)
+  // The composer resets belong to the destination, not the previous draft.
+  draftKey = ''
   outgoing.value = null
   history.value = false
   detailsOpen.value = false
@@ -548,6 +596,7 @@ function newConversation() {
   provider.value = ''
   model.value = ''
   reasoning.value = ''
+  planning.value = false
   speed.value = ''
   agentId.value = MAIN_AGENT_ID
   projectId.value = ''
@@ -555,24 +604,38 @@ function newConversation() {
   submission = undefined
   editing.value = null
   error.value = ''
-  void router.push('/chats')
+  void router.push('/chats').finally(() => loadDraft())
 }
 
-async function send(mode: 'queue' | 'steer' = 'queue') {
+async function send(mode: 'queue' | 'steer' = 'queue', planApproval?: { sourceId: string, revision: string }) {
   const originalDraft = draft.value
-  const text = originalDraft.trim()
-  if (!canSend.value || busy.value)
+  const text = planApproval ? 'Implement the plan you proposed.' : originalDraft.trim()
+  if ((!planApproval && !canSend.value) || busy.value)
     return
+  // Submission authority belongs to the originating draft, never the draft
+  // navigation might load while creation or attachment uploads are outstanding.
+  const requestedPlan = !planApproval && planRequested.value
+  const selectedProvider = chosenProvider.value
+  const selectedModel = model.value || inheritedAssistant.value?.model || ''
+  const selectedReasoning = reasoning.value || (!model.value ? inheritedAssistant.value?.reasoning : '') || ''
+  const selectedSpeed = speed.value || inheritedAssistant.value?.speed || ''
+  const selectedAttachments = [...attachments.value]
+  const editingMessage = editing.value
+  const target = detail.value ?? createdChat
+  const targetAgent = agentId.value
+  const targetProject = projectId.value || null
   submitting.value = true
   const origin = chatId.value
   const direct = !editing.value && ((mode === 'steer' && !detail.value?.paused) || (!responding.value && !detail.value?.paused && !pending.value.length))
   busy.value = true
   error.value = ''
   try {
-    const chat = detail.value ?? createdChat ?? await createChat(api, { agentId: agentId.value, projectId: projectId.value || null })
+    const chat = target ?? await createChat(api, { agentId: targetAgent, projectId: targetProject })
+    if (chatId.value !== origin)
+      return
     createdChat = chat
     // Items without a local file (reused or already sent records) are never uploaded again.
-    const pendingUploads = attachments.value.filter(attachment => files.has(attachment.id) && !uploaded.has(attachment.id))
+    const pendingUploads = selectedAttachments.filter(attachment => files.has(attachment.id) && !uploaded.has(attachment.id))
     for (const attachment of pendingUploads)
       attachmentStates.value[attachment.id] = { status: 'uploading' }
     const results = await Promise.allSettled(pendingUploads.map(async (attachment) => {
@@ -600,23 +663,21 @@ async function send(mode: 'queue' | 'steer' = 'queue') {
     if (results.some(result => result.status === 'rejected'))
       return
 
-    const attachmentIds = attachments.value.map(attachment => attachment.id)
-    // A chat can use a different model from its saved agent. Keep the displayed
-    // conversation selection explicit on the wire, including after a reload.
-    const selectedModel = model.value || inheritedAssistant.value?.model || ''
-    const selectedReasoning = reasoning.value || (!model.value ? inheritedAssistant.value?.reasoning : '') || ''
-    // The speed survives a model change, so it is inherited even with a new model.
-    const selectedSpeed = speed.value || inheritedAssistant.value?.speed || ''
+    if (chatId.value !== origin)
+      return
+    const attachmentIds = selectedAttachments.map(attachment => attachment.id)
     const content = {
       text,
       mode,
-      provider: chosenProvider.value,
+      provider: selectedProvider,
       model: selectedModel,
       reasoning: selectedReasoning,
+      plan: requestedPlan,
       speed: selectedSpeed,
       attachmentIds,
+      ...(planApproval ? { planApproval } : {}),
     }
-    const submissionKey = JSON.stringify({ chatId: chat.id, editing: editing.value, ...content })
+    const submissionKey = JSON.stringify({ chatId: chat.id, editing: editingMessage, ...content })
     // Retain the id after a network failure only for the same target and content.
     if (submission?.key !== submissionKey) {
       submission = {
@@ -632,12 +693,12 @@ async function send(mode: 'queue' | 'steer' = 'queue') {
         revision: '',
         status: 'queued',
         createdAt: Date.now(),
-        attachments: [...attachments.value],
+        attachments: selectedAttachments,
       }
     }
 
-    if (editing.value)
-      await editChatMessage(api, { chatId: chat.id, messageId: editing.value, message: submission.message })
+    if (editingMessage)
+      await editChatMessage(api, { chatId: chat.id, messageId: editingMessage, message: submission.message })
     else
       await sendChatMessage(api, { chatId: chat.id, message: submission.message })
     // Another conversation was opened meanwhile; its composer is not this message's.
@@ -652,7 +713,7 @@ async function send(mode: 'queue' | 'steer' = 'queue') {
     clearAttachments()
     submission = undefined
     if (!detail.value) {
-      sessionStorage.setItem(`cairn-chat-draft:${draftScope}${chat.id}`, draft.value)
+      saveDraft(`cairn-chat-draft:${draftScope}${chat.id}`)
       await router.push(chatPath(chat))
     }
 
@@ -661,6 +722,14 @@ async function send(mode: 'queue' | 'steer' = 'queue') {
   catch (e) {
     outgoing.value = null
     error.value = (e as Error).message
+    if (planApproval) {
+      // Reconnect for a current snapshot after a refused stale approval. Keep the
+      // original request ID for an uncertain response, never silently approve anew.
+      if (e instanceof ApiError && e.status === 409)
+        submission = undefined
+
+      live.reconnect()
+    }
   }
   finally {
     busy.value = false
@@ -740,8 +809,18 @@ function edit(message: ChatMessage) {
   provider.value = message.provider || currentProvider.value
   model.value = message.model
   reasoning.value = message.reasoning || ''
+  planning.value = message.plan === true
   speed.value = message.speed || ''
   textarea.value?.focus()
+}
+
+// Leaving plan mode is explicit: this queues an ordinary turn in the same conversation,
+// with the agent's usual permissions.
+async function implementPlan(sourceId: string) {
+  if (hasDraft.value || editing.value || active.value || pending.value.length || delivery.value.sending.length)
+    return
+  planning.value = false
+  await send('queue', { sourceId, revision: detail.value!.revision })
 }
 
 // The view stays mounted across conversations: reset what belongs to the previous one.
@@ -757,9 +836,10 @@ watch(chatId, (id) => {
   provider.value = ''
   model.value = ''
   reasoning.value = ''
+  const opening = !!createdChat && createdChat.slug === id
   speed.value = ''
   submission = undefined
-  const destinationId = createdChat && createdChat.slug === id ? createdChat.id : selectedChatId.value
+  const destinationId = opening ? createdChat!.id : selectedChatId.value
   createdChat = undefined
   // A first message keeps its optimistic bubble while the new chat opens.
   if (outgoing.value?.chatId !== destinationId)
@@ -769,7 +849,8 @@ watch(chatId, (id) => {
     projectId.value = typeof route.query.project === 'string' ? route.query.project : ''
   }
 
-  loadDraft()
+  // Plan mode follows the first message into the conversation it created.
+  loadDraft(opening)
 })
 
 function key(event: KeyboardEvent) {
@@ -1153,10 +1234,12 @@ function key(event: KeyboardEvent) {
             :subagent-bar="subagentBar"
             compact-toolbar
             chat
+            :can-implement="!hasDraft && !editing && !busy && !inactive && !active && !pending.length && !delivery.sending.length"
             @resume-quota="resumeQuota"
             @coding-agent-switched="chosenProvider = $event"
             @load="live.loadOlder"
             @position="live.savePosition"
+            @implement="implementPlan"
             @pause-wait="busy || action('pause', { paused: true })"
           />
           <div v-if="!inactive" class="mx-auto w-full max-w-205 shrink-0 px-5 pb-1 pt-3 phone:px-0 phone:pt-2">
@@ -1361,12 +1444,20 @@ function key(event: KeyboardEvent) {
                   class="mb-1.5"
                   @remove="removeAttachment"
                 />
+                <p
+                  v-if="planBlocked"
+                  role="status"
+                  class="px-2 text-sm text-danger"
+                  data-testid="plan-unavailable"
+                >
+                  {{ planUnavailableMessage }}
+                </p>
                 <SkillTextarea
                   ref="textarea"
                   v-model="draft"
                   :skills="skills"
                   aria-label="Message"
-                  :placeholder="liveWait?.wakeup ? (detail?.paused ? 'Add to the queue — this cancels the wait' : 'Reply now — this cancels the wait') : responding ? 'Add a follow-up…' : skills.length ? 'Message your agent… Type $ for skills' : 'Message your agent…'"
+                  :placeholder="planRequested ? 'Describe what to plan… The agent proposes without changing anything' : liveWait?.wakeup ? (detail?.paused ? 'Add to the queue — this cancels the wait' : 'Reply now — this cancels the wait') : responding ? 'Add a follow-up…' : skills.length ? 'Message your agent… Type $ for skills' : 'Message your agent…'"
                   rows="2"
                   maxlength="50000"
                   @keydown="key"
@@ -1392,6 +1483,19 @@ function key(event: KeyboardEvent) {
                       :switching="switchingProvider"
                       :disabled="busy"
                     />
+                    <button
+                      type="button"
+                      class="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full px-3 text-sm font-medium disabled:opacity-50"
+                      :class="planRequested ? 'bg-soft text-accent' : 'text-muted hover:bg-hover'"
+                      :aria-pressed="planRequested"
+                      aria-label="Plan first"
+                      :title="planAvailable ? 'Plan first: the agent explores and proposes an approach without changing files, using the network from its shell or calling tools with external effects. Implement it afterwards in this conversation.' : planUnavailableMessage"
+                      :disabled="busy || (!planAvailable && !planRequested)"
+                      data-testid="plan-toggle"
+                      @click="planning = !planning"
+                    >
+                      <Icon :name="NotebookPen" :size="15" />Plan
+                    </button>
                   </div>
                   <!-- As on Android: steer while typing during a reply, stop when the field is empty, otherwise send. -->
                   <div class="flex shrink-0 items-center gap-1">
@@ -1401,7 +1505,7 @@ function key(event: KeyboardEvent) {
                       class="round-action bg-soft text-accent"
                       aria-label="Steer now"
                       title="Send into the current turn (Alt + Enter)"
-                      :disabled="busy || !canSend || switchingProvider"
+                      :disabled="busy || !canSend || switchingProvider || steerBlocked"
                       @click="send('steer')"
                     >
                       <Icon :name="Zap" :size="16" />

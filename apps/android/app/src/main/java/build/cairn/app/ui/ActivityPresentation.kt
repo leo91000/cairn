@@ -290,6 +290,12 @@ private fun presentEvent(event: RunEvent): ActivityPresentation {
                 subtitle = "${item?.get("changes").asArray()?.size ?: 0} fichier(s)",
             )
         "todo_list" -> base.copy(kind = ActivityKind.PLAN, title = "Plan de travail")
+        "proposed_plan" ->
+            base.copy(
+                kind = ActivityKind.THINKING,
+                title = "Proposition du sous-agent",
+                output = item.string("text"),
+            )
         "reasoning" ->
             base.copy(
                 kind = ActivityKind.THINKING,

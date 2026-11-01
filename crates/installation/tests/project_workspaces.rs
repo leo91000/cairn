@@ -487,6 +487,165 @@ async fn builtin_mcp_endpoint_exposes_scoped_workspace_tools_and_checks_the_run_
     server.abort();
 }
 
+/// Sends one JSON-RPC request to the built-in workspace MCP.
+async fn workspace_rpc(s: &Arc<Service>, token: &str, method: &str, params: Value) -> Value {
+    let app = cairn_installation::http::router(s.clone()).await.unwrap();
+    let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
+    let request = common::request("POST", "/mcp-workspace")
+        .header("authorization", format!("Bearer {token}"))
+        .body(axum::body::Body::from(body.to_string()))
+        .unwrap();
+    common::read_json(common::send(&app, request).await).await
+}
+
+fn tool_names(listing: &Value) -> Vec<String> {
+    let mut names = listing["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| text(tool, "name").to_owned())
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+}
+
+#[tokio::test]
+async fn plan_turns_list_and_call_only_workspace_tools_without_effects() {
+    let (_root, s, _) = fixture().await;
+    let run = run(&s, Value::Null, MAIN_AGENT_ID).await;
+    let planning = json!({ "messageId": "plan-message", "text": "Plan", "plan": true });
+    patch_run(
+        &s,
+        &run,
+        json!({ "status": RunStatus::Running, "chatExecution": planning }),
+    )
+    .await;
+    let run = s.store.run(text(&run, "id")).await.unwrap();
+    let token = run_token(&s, &run).await;
+
+    let listing = workspace_rpc(&s, &token, "tools/list", json!({})).await;
+    assert_eq!(
+        tool_names(&listing),
+        [
+            "ask_questions",
+            "exclusive_status",
+            "list_nodes",
+            "open_project",
+            "pending_questions",
+            "withdraw_question"
+        ]
+    );
+    for (name, arguments) in [
+        ("publish_artifact", json!({ "path": "result.md" })),
+        ("wait_for", json!({ "delay": 60 })),
+        (
+            "report_outcome",
+            json!({ "status": "completed", "reason": "Done" }),
+        ),
+        ("acquire_exclusive", json!({})),
+        ("onepassword", json!({})),
+    ] {
+        let response = workspace_rpc(
+            &s,
+            &token,
+            "tools/call",
+            json!({ "name": name, "arguments": arguments }),
+        )
+        .await;
+        assert_eq!(response["result"]["isError"], true, "{name}: {response}");
+        assert!(
+            response.to_string().contains("plan turn"),
+            "{name}: {response}"
+        );
+    }
+    let pending = workspace_rpc(
+        &s,
+        &token,
+        "tools/call",
+        json!({ "name": "pending_questions", "arguments": {} }),
+    )
+    .await;
+    assert!(!pending.to_string().contains("plan turn"), "{pending}");
+
+    // A plan turn can ask the user; the answer continues the plan, never implementation.
+    let mut chat = s.chat_create(json!({})).await.unwrap();
+    chat["runId"] = run["id"].clone();
+    let chat_id = text(&chat, "id").to_owned();
+    s.store.save_conversation_boundary(chat).await.unwrap();
+    let ask = |request: &str| {
+        json!({
+            "name": "ask_questions",
+            "arguments": {
+                "requestId": request,
+                "questions": [{ "id": "scope", "title": "Which scope?", "options": [{ "id": "web", "label": "Web" }] }],
+            },
+        })
+    };
+    let answer = |s: Arc<Service>, question: &str| {
+        let (chat_id, question) = (chat_id.clone(), question.to_owned());
+        async move {
+            let id = id();
+            s.question_answer(
+                &chat_id,
+                &question,
+                json!({ "id": id, "answers": { "scope": { "selected": ["web"] } } }),
+            )
+            .await
+            .unwrap();
+            let detail = s.chat_detail(&chat_id).await.unwrap();
+            detail["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|message| message["id"] == id.as_str())
+                .unwrap()
+                .clone()
+        }
+    };
+    let asked = workspace_rpc(&s, &token, "tools/call", ask(&id().to_string())).await;
+    assert_ne!(asked["result"]["isError"], true, "{asked}");
+    let later = workspace_rpc(&s, &token, "tools/call", ask(&id().to_string())).await;
+    let during = answer(
+        s.clone(),
+        text(&asked["result"]["structuredContent"], "questionId"),
+    )
+    .await;
+    assert_eq!(during["plan"], true);
+    assert_eq!(during["mode"], "steer");
+    // Once a turn that can change files runs, the answer waits for its own plan turn.
+    let ordinary = json!({ "messageId": "ordinary-message", "text": "Implement" });
+    patch_run(&s, &run, json!({ "chatExecution": ordinary })).await;
+    // Reopen the real database through a new service before answering.
+    let restarted = Service::new(s.config.clone()).await.unwrap();
+    let after = answer(
+        restarted,
+        text(&later["result"]["structuredContent"], "questionId"),
+    )
+    .await;
+    assert_eq!(after["plan"], true);
+    assert_eq!(after["mode"], "queue");
+    // A question asked by a turn that can change files keeps an ordinary answer.
+    let current = s.store.run(text(&run, "id")).await.unwrap();
+    let ordinary_token = run_token(&s, &current).await;
+    let asked = workspace_rpc(&s, &ordinary_token, "tools/call", ask(&id().to_string())).await;
+    assert_ne!(asked["result"]["isError"], true, "{asked}");
+    let plain = answer(
+        s.clone(),
+        text(&asked["result"]["structuredContent"], "questionId"),
+    )
+    .await;
+    assert!(plain.get("plan").is_none(), "{plain}");
+    assert_eq!(plain["mode"], "steer");
+
+    // The next turn's grant offers the whole catalog again.
+    let next = json!({ "messageId": "next-message", "text": "Implement", "afterPlan": true });
+    patch_run(&s, &run, json!({ "chatExecution": next })).await;
+    let run = s.store.run(text(&run, "id")).await.unwrap();
+    let token = run_token(&s, &run).await;
+    let listing = workspace_rpc(&s, &token, "tools/list", json!({})).await;
+    assert_eq!(tool_names(&listing).len(), 14);
+}
+
 #[tokio::test]
 async fn seed_cleanup_does_not_follow_repository_symlinks_outside_its_private_copy() {
     let (root, s, projects) = fixture().await;
@@ -1515,4 +1674,158 @@ async fn concurrent_large_questionnaire_responses_are_delivered_in_bounded_batch
         s.chat_acknowledge(text(&run, "id"), message).await.unwrap();
     }
     assert_eq!(received.len(), 2);
+}
+
+#[tokio::test]
+async fn plan_question_can_be_retired_after_chat_clarification_without_answer_or_authorization() {
+    let (_root, s, _) = fixture().await;
+    let original = run(&s, Value::Null, MAIN_AGENT_ID).await;
+    patch_run(
+        &s,
+        &original,
+        json!({
+            "status": RunStatus::Running,
+            "chatExecution": { "messageId": "plan-request", "text": "Explore", "plan": true }
+        }),
+    )
+    .await;
+    let current = s.store.run(text(&original, "id")).await.unwrap();
+    let token = run_token(&s, &current).await;
+    let mut chat = s.chat_create(json!({})).await.unwrap();
+    chat["runId"] = current["id"].clone();
+    let chat_id = text(&chat, "id").to_owned();
+    s.store.save_conversation_boundary(chat).await.unwrap();
+    let asked = workspace_rpc(&s, &token, "tools/call", json!({
+        "name": "ask_questions", "arguments": {
+            "requestId": id(),
+            "questions": [{ "id": "scope", "title": "Which scope?", "options": [{ "id": "web", "label": "Web" }] }]
+        }
+    })).await;
+    assert_ne!(asked["result"]["isError"], true, "{asked}");
+    let question = text(&asked["result"]["structuredContent"], "questionId").to_owned();
+    let sent = s
+        .chat_send(
+            &chat_id,
+            json!({ "id": id(), "text": "Only explore the web client.", "mode": "queue" }),
+        )
+        .await
+        .unwrap();
+    let before = s.chat_detail(&chat_id).await.unwrap()["messages"].clone();
+    let withdrawn = workspace_rpc(
+        &s,
+        &token,
+        "tools/call",
+        json!({ "name": "withdraw_question", "arguments": { "questionId": question } }),
+    )
+    .await;
+    assert_eq!(
+        withdrawn["result"]["structuredContent"]["status"], "cancelled",
+        "{withdrawn}"
+    );
+    assert_eq!(s.chat_detail(&chat_id).await.unwrap()["messages"], before);
+    assert_ne!(sent["plan"], true);
+    s.store.event(text(&current, "id"), &cairn_contracts::EventKind::ItemCompleted, "", Some(json!({
+        "item": { "id": "approach", "type": "proposed_plan", "text": "Read the web caller, then propose tests.", "request_id": "plan-request" }
+    }))).await.unwrap();
+    let reopened = Service::new(s.config.clone()).await.unwrap();
+    let question_id = question.clone();
+    let saved = reopened
+        .store
+        .read(move |db| {
+            Ok(db.0.query_row(
+                "SELECT status,plan FROM chat_questions WHERE id=?",
+                [question_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(saved, ("cancelled".to_owned(), true));
+    assert_eq!(
+        reopened.chat_detail(&chat_id).await.unwrap()["messages"],
+        before
+    );
+}
+
+#[tokio::test]
+async fn plan_policy_read_failure_cannot_write_outcome_or_dispatch_plugin_command() {
+    for plugin in [false, true] {
+        let (_root, s, _) = fixture().await;
+        let run = run(&s, Value::Null, MAIN_AGENT_ID).await;
+        patch_run(
+            &s,
+            &run,
+            json!({
+                "status": RunStatus::Running,
+                "chatExecution": { "messageId": "plan-message", "text": "Plan", "plan": true }
+            }),
+        )
+        .await;
+        let run = s.store.run(text(&run, "id")).await.unwrap();
+        let token = run_token(&s, &run).await;
+        let app = cairn_installation::http::router(s.clone()).await.unwrap();
+        common::policy_read_fault::fail_next_grant_read(&s.store).await;
+        if plugin {
+            // With the old swallowed read error this proceeds to command lookup
+            // and returns 404. The policy error must stop dispatch first.
+            let request = common::request("POST", "/plugin-command")
+                .header("authorization", format!("Bearer {token}"))
+                .body(axum::body::Body::from(
+                    json!({ "plugin": "not-installed", "command": "mutate", "arguments": [] })
+                        .to_string(),
+                ))
+                .unwrap();
+            let response = common::send(&app, request).await;
+            assert_eq!(
+                response.status(),
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR
+            );
+        } else {
+            // Call the real MCP dispatcher after endpoint authentication, so the
+            // one-shot failure occurs in the Plan guard, not the outer HTTP gate.
+            let result = project_workspaces::rpc(
+                &s,
+                &token,
+                "tools/call",
+                &json!({
+                    "name": "report_outcome",
+                    "arguments": { "status": "completed", "reason": "Must not write", "evidence": ["synthetic fixture"] }
+                }),
+            )
+            .await;
+            assert_eq!(result.unwrap_err().status, 500);
+        }
+        // The same token is valid after the single failing reader lookup. The
+        // old outcome path could authorize successfully on the writer and write.
+        assert!(project_workspaces::authorize(&s, &token).await.is_ok());
+        let stored = s.store.run(text(&run, "id")).await.unwrap();
+        assert!(stored["outcome"].is_null(), "{stored}");
+        assert_eq!(stored["chatExecution"]["plan"], true);
+        if plugin {
+            let input = json!({ "plugin": "not-installed", "command": "mutate", "arguments": [] });
+            assert_eq!(
+                s.plugins
+                    .command(&s, &token, &input)
+                    .await
+                    .unwrap_err()
+                    .status,
+                403
+            );
+            patch_run(
+                &s,
+                &run,
+                json!({ "chatExecution": { "messageId": "plan-message", "plan": false } }),
+            )
+            .await;
+            // Ordinary authority still reaches lookup; no blanket plugin ban.
+            assert_eq!(
+                s.plugins
+                    .command(&s, &token, &input)
+                    .await
+                    .unwrap_err()
+                    .status,
+                404
+            );
+        }
+    }
 }

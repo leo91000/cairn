@@ -811,7 +811,10 @@ pub async fn authorize_request(s: &Service, input: &crate::http::Input) -> Resul
         .split('/')
         .collect::<Vec<_>>();
     if input.method == "POST"
-        && matches!(parts.as_slice(), ["runs" | "chats", _, "timeline-content"])
+        && matches!(
+            parts.as_slice(),
+            ["runs" | "chats", _, "timeline-content" | "event-content"]
+        )
     {
         // This endpoint reads an immutable source snapshot; use the same admission as history GET.
         return Ok(());

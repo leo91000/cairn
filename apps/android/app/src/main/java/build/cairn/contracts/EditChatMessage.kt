@@ -9,6 +9,8 @@ data class EditChatMessage(
     val attachmentIds: List<String> = listOf(),
     val mode: String = "queue",
     val model: String = "",
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val plan: Boolean? = null,
     val provider: String = "",
     val reasoning: String = "",
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)

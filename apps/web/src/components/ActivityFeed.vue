@@ -21,10 +21,16 @@ import {
   watch,
 } from 'vue'
 import { latestArtifacts } from '../../../../packages/contracts/artifacts'
-import { activityEntries, ActivityGroups } from '../activity'
+import { activityEntries, ActivityGroups, proposedPlanApproval } from '../activity'
 import { currentPlan } from '../agent-plan'
 import { deliveryEntries } from '../deliverables'
-import { ArrowDown, Maximize2, Minimize2 } from '../icons'
+import {
+  ArrowDown,
+  Hammer,
+  Maximize2,
+  Minimize2,
+  NotebookPen,
+} from '../icons'
 import { MessageTimes } from '../message-times'
 import { questionAnswerText } from '../question-answer'
 import { exclusiveSuspensionLabel } from '../run-status'
@@ -80,12 +86,15 @@ const props = defineProps<{
   codingAgentSwitch?: { provider: Provider, error: string | null } | null
   canManageAccounts?: boolean
   busy?: boolean
+  /** The composer can send an implementation request now. */
+  canImplement?: boolean
 }>()
 const emit = defineEmits<{
   load: []
   position: [value: ReadingPosition, key?: string]
   pauseWait: []
   resumeQuota: []
+  implement: [sourceId: string]
   codingAgentSwitched: [provider: Provider]
 }>()
 const skillNames = computed(() => new Set(props.skills ?? []))
@@ -115,6 +124,7 @@ const entries = computed(() => {
         text: questionAnswerText(message.text, message.questionId),
         attachments: message.attachments,
         delivery: label,
+        ...(message.plan ? { plan: true } : {}),
       })
     }
   }
@@ -132,6 +142,11 @@ const working = computed(() => {
   if (wait)
     return { ...waitingStep(wait), subagents: waitingForSubagents(wait.taskIds, subagents.value) }
   return workingStep(activity.value, props.agent, props.events[0]?.createdAt ?? null)
+})
+// Only the latest proposal, before any later request, offers to implement it.
+const implementable = computed(() => {
+  const sourceId = proposedPlanApproval(props.events, props.timeline)
+  return sourceId ? activity.value.findLast(entry => entry.kind === 'proposal' && entry.sourceId === sourceId)?.id : null
 })
 const visibleOutcome = computed(() => !props.active && !props.sending?.length && !props.loading ? props.outcome : null)
 const outcomeEntryId = computed(() => {
@@ -461,11 +476,13 @@ defineExpose({
                       </template>
                     </p>
                     <p class="mt-1.5! mb-0! flex justify-end gap-2 text-2xs text-muted">
+                      <span v-if="entry.plan" class="inline-flex items-center gap-1 font-semibold text-accent" title="Plan turn: the agent explores and proposes without changing anything"><Icon :name="NotebookPen" :size="12" />Plan</span>
                       <span v-if="entry.delivery" role="status">{{ entry.delivery }}</span>
                       <time :datetime="messageTimes.format(entry.time).datetime" :title="messageTimes.format(entry.time).title">{{ messageTimes.format(entry.time).label }}</time>
                     </p>
                   </div>
                   <p v-else class="m-0! flex justify-end gap-2 text-2xs text-muted">
+                    <span v-if="entry.plan" class="inline-flex items-center gap-1 font-semibold text-accent" title="Plan turn: the agent explores and proposes without changing anything"><Icon :name="NotebookPen" :size="12" />Plan</span>
                     <span v-if="entry.delivery" role="status">{{ entry.delivery }}</span>
                     <time :datetime="messageTimes.format(entry.time).datetime" :title="messageTimes.format(entry.time).title">{{ messageTimes.format(entry.time).label }}</time>
                   </p>
@@ -476,6 +493,24 @@ defineExpose({
                     <time :datetime="messageTimes.format(entry.time).datetime" :title="messageTimes.format(entry.time).title">{{ messageTimes.format(entry.time).label }}</time>
                   </p>
                   <ActivityContent :content="entry.text" />
+                </article>
+                <article v-else-if="entry.kind === 'proposal'" class="activity-proposal my-3 rounded-2xl border border-line px-4 py-3" data-testid="proposed-plan">
+                  <p class="mb-1.5! flex items-center justify-between gap-3 text-2xs text-muted">
+                    <span class="inline-flex items-center gap-1.5 font-semibold text-accent"><Icon :name="NotebookPen" :size="14" />Proposed plan</span>
+                    <time :datetime="messageTimes.format(entry.time).datetime" :title="messageTimes.format(entry.time).title">{{ messageTimes.format(entry.time).label }}</time>
+                  </p>
+                  <ActivityContent :content="entry.text" />
+                  <div v-if="entry.id === implementable" class="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-line pt-3">
+                    <span class="text-2xs text-muted">Nothing was changed. Implementing starts a turn with the agent’s usual permissions.</span>
+                    <UiButton
+                      class="text-sm"
+                      :disabled="!canImplement"
+                      title="Queue an implementation request in this conversation"
+                      @click="entry.sourceId && emit('implement', entry.sourceId)"
+                    >
+                      <Icon :name="Hammer" :size="14" />Implement
+                    </UiButton>
+                  </div>
                 </article>
                 <ChatNotice v-else-if="entry.kind === 'notice'" :notice="entry.artifact" />
                 <SubagentTeam v-else-if="entry.kind === 'team'" :agents="entry.agents" :active="active" />

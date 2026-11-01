@@ -90,4 +90,63 @@ class LargeTimelineTest {
             assertEquals(digest, secondRequest.sha256)
         }
     }
+
+    @Test
+    fun `proposal chunks preserve parent and completion identity before cursor application`() =
+        runTest {
+            val event =
+                wireJson.decodeFromString<RunEvent>(
+                    """{"id":8,"runId":"run","createdAt":1,"type":"item.completed","text":"🦊 approach","payload":{"item":{"id":"p","type":"proposed_plan","text":"🦊 approach"},"parent_tool_use_id":"child","request_id":"request"}}"""
+                )
+            val json = wireJson.encodeToString(event)
+            val split = json.indexOf("🦊")
+            val first = json.substring(0, split)
+            val second = json.substring(split)
+            val next = first.toByteArray(Charsets.UTF_8).size.toLong()
+            val total = json.toByteArray(Charsets.UTF_8).size.toLong()
+            MockWebServer().use { server ->
+                fun response(offset: Long, data: String, continuation: Long?) =
+                    wireJson.encodeToString(
+                        RunContentOutput(
+                            data = data,
+                            encoding = "utf-8",
+                            eventId = 8,
+                            format = "json",
+                            nextOffset = continuation,
+                            offset = offset,
+                            runId = "run",
+                            sha256 = "a".repeat(64),
+                            totalBytes = total,
+                        )
+                    )
+                server.enqueue(MockResponse().setBody(response(0, first, next)))
+                server.enqueue(MockResponse().setBody(response(next, second, null)))
+                val api = CairnApi(server.url("/"), MemoryVault())
+                val preview =
+                    event.copy(
+                        text = "",
+                        payload =
+                            kotlinx.serialization.json.buildJsonObject {
+                                put(
+                                    "_cairnEventContent",
+                                    kotlinx.serialization.json.JsonPrimitive(true),
+                                )
+                            },
+                    )
+                assertEquals(
+                    listOf(event),
+                    api.readLargeEvents("/runs/run/stream", listOf(preview)),
+                )
+                assertEquals("/api/runs/run/event-content", server.takeRequest().path)
+                val request =
+                    wireJson.parseToJsonElement(server.takeRequest().body.readUtf8()).toString()
+                org.junit.Assert.assertTrue(request.contains("\"sha256\":\"${"a".repeat(64)}\""))
+                // An incomplete chunk must fail before the caller can accept the frame/cursor.
+                server.enqueue(MockResponse().setBody(response(0, "x", null)))
+                org.junit.Assert.assertTrue(
+                    runCatching { api.readLargeEvents("/runs/run/stream", listOf(preview)) }
+                        .isFailure
+                )
+            }
+        }
 }

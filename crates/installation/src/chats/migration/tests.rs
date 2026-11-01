@@ -825,3 +825,116 @@ async fn actual_version14_preserves_conversations_accounts_leases_and_credential
         );
     }
 }
+
+#[tokio::test]
+async fn version23_messages_gain_plan_requests_without_other_changes() {
+    let root = tempfile::tempdir().unwrap();
+    let db = database(root.path()).await;
+    let chat = json!({"id": CHAT, "slug": "retained-plan", "paused": true});
+    db.execute(
+        "INSERT INTO records VALUES(?,'chats',?,1)",
+        params![CHAT, chat.to_string()],
+    )
+    .unwrap();
+    let message = json!({
+        "id": "retained", "chatId": CHAT, "text": "Retained message", "createdAt": 99,
+        "mode": "queue", "status": "queued", "provider": "codex",
+    });
+    db.execute(
+        "INSERT INTO chat_messages VALUES('retained',?,?,99)",
+        params![CHAT, message.to_string()],
+    )
+    .unwrap();
+    drop(db);
+    let mut db = Connection::open(root.path().join("manager.db")).unwrap();
+    upgrade(&mut db).unwrap();
+    // Upgrade through the current main layout, without either plan column.
+    crate::chats::question_migration::upgrade(&mut db).unwrap();
+    crate::attachments::migration::upgrade(&mut db).unwrap();
+    crate::reads::migration::upgrade(&mut db).unwrap();
+    crate::runs::projections::upgrade(&mut db).unwrap();
+    db.execute_batch(crate::plugins::hooks::SCHEMA).unwrap();
+    db.pragma_update(None, "user_version", 20).unwrap();
+    crate::worker::progress::upgrade(&mut db).unwrap();
+    crate::timeline::migration::upgrade(&mut db).unwrap();
+    crate::nodes::attempts_migration::upgrade(&mut db).unwrap();
+    assert_eq!(
+        db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap(),
+        23
+    );
+    assert!(
+        !db.prepare("SELECT 1 FROM pragma_table_info('chat_messages') WHERE name='plan'")
+            .unwrap()
+            .exists([])
+            .unwrap()
+    );
+    assert!(
+        !db.prepare("SELECT 1 FROM pragma_table_info('chat_questions') WHERE name='plan'")
+            .unwrap()
+            .exists([])
+            .unwrap()
+    );
+    let retained = snapshot(&db);
+    let rows = |db: &Connection| -> Vec<String> {
+        db.prepare("SELECT json_array(id,chat_id,revision,text,provider,model,reasoning,speed,mode,status,created_at,question_id) FROM chat_messages ORDER BY rowid")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    let before = rows(&db);
+    assert_eq!(before.len(), 1);
+    drop(db);
+
+    for _ in 0..2 {
+        drop(Store::open(root.path()).unwrap());
+    }
+    let db = Connection::open(root.path().join("manager.db")).unwrap();
+    assert_eq!(
+        db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+            .unwrap(),
+        crate::store::DATABASE_VERSION
+    );
+    assert_eq!(snapshot(&db), retained);
+    assert_eq!(rows(&db), before);
+    assert!(!Db(&db).conversation_messages(CHAT).unwrap()[0].plan);
+    assert!(Db(&db).messages(CHAT).unwrap()[0].get("plan").is_none());
+    drop(db);
+
+    let store = Store::open(root.path()).unwrap();
+    store
+        .transaction(|db| {
+            let saved = db.put_message(&json!({
+                "id": "00000000-0000-4000-8000-0000000000aa", "chatId": CHAT,
+                "text": "Plan it", "createdAt": 100, "provider": "codex", "plan": true,
+            }))?;
+            assert_eq!(saved["plan"], true);
+            let messages = db.conversation_messages(CHAT)?;
+            assert_eq!(messages.len(), 2);
+            assert!(!messages[0].plan);
+            assert!(messages[1].plan);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    drop(store);
+    let db = Connection::open(root.path().join("manager.db")).unwrap();
+    assert!(
+        db.execute(
+            "UPDATE chat_messages SET plan=2 WHERE id='00000000-0000-4000-8000-0000000000aa'",
+            []
+        )
+        .is_err()
+    );
+    // Plan-turn question provenance has the same column and constraint.
+    let question = |plan: i64| {
+        db.execute(
+            "INSERT INTO chat_questions(id,chat_id,run_id,blocking,source,status,plan) VALUES(?,?,'run',0,'cairn','pending',?)",
+            params![format!("question-{plan}"), CHAT, plan],
+        )
+    };
+    question(1).unwrap();
+    assert!(question(2).is_err());
+}

@@ -104,7 +104,20 @@ async fn real_v16_upgrade_preserves_metadata_files_quota_and_every_unrelated_tab
         run_columns_before
     );
     for (name, old) in &before {
-        if name != "kv" {
+        if matches!(name.as_str(), "chat_messages" | "chat_questions") {
+            // The later Plan migration adds only a false flag to existing rows.
+            let (schema, rows) = after.get(name).unwrap();
+            assert_eq!(
+                schema.replace(", plan INTEGER NOT NULL DEFAULT 0 CHECK(plan IN (0,1))", ""),
+                old.0,
+                "previous schema {name}"
+            );
+            let mut previous = rows.clone();
+            for row in &mut previous {
+                assert_eq!(row.pop(), Some(SqlValue::Integer(0)));
+            }
+            assert_eq!(previous, old.1, "previous rows {name}");
+        } else if name != "kv" {
             assert_eq!(after.get(name), Some(old), "unrelated table {name}");
         }
     }
@@ -139,7 +152,7 @@ async fn real_v16_upgrade_preserves_metadata_files_quota_and_every_unrelated_tab
     assert_eq!(
         db.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
             .unwrap(),
-        23
+        24
     );
     let s = Service::new(common::config(root.path())).await.unwrap();
     let proof = s.store.kv("d2-fixture-proof").await.unwrap().unwrap();

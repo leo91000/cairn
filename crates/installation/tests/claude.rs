@@ -1086,6 +1086,301 @@ fn explicit_provider_and_sandbox_arguments_preserve_boundaries() {
     assert!(a.contains(&"--strict-mcp-config".into()));
 }
 
+fn plan_turn(root: &TempDir) -> Value {
+    let mut p = plan(root, "fixture:plan-turn");
+    // Chat plans make every plan turn read-only, including YOLO agents' turns.
+    p["planning"] = true.into();
+    p["sandbox"] = "read-only".into();
+    p["claudePlanTools"] = json!(["mcp__cairn_fixture__search", "mcp__cairn_workspace__*"]);
+    p
+}
+
+#[test]
+fn plan_turn_arguments_use_plan_mode_a_networkless_sandbox_and_deny_workspace_edits() {
+    let root = TempDir::new().unwrap();
+    let a = claude_process::args(&plan_turn(&root), &root.path().join("instructions.txt"));
+    let mode = a.iter().position(|arg| arg == "--permission-mode").unwrap();
+    assert_eq!(a[mode + 1], "plan");
+    assert!(!a.contains(&"--dangerously-skip-permissions".into()));
+
+    let settings = a.iter().position(|arg| arg == "--settings").unwrap();
+    let settings: Value = serde_json::from_str(&a[settings + 1]).unwrap();
+    assert_eq!(settings["sandbox"]["enabled"], true);
+    assert_eq!(settings["sandbox"]["failIfUnavailable"], true);
+    assert_eq!(settings["sandbox"]["allowUnsandboxedCommands"], false);
+    assert_eq!(settings["sandbox"]["network"]["allowedDomains"], json!([]));
+    // No command widens the allowlist, and Cairn's callback decides rather than Claude
+    // Code's auto-mode classifier.
+    assert_eq!(settings["sandbox"]["network"]["strictAllowlist"], true);
+    assert_eq!(settings["useAutoModeDuringPlan"], false);
+    assert_eq!(settings["permissions"]["disableAutoMode"], "disable");
+    assert_eq!(
+        settings["sandbox"]["filesystem"]["denyWrite"],
+        json!([root.path()])
+    );
+
+    let denied = a.iter().position(|arg| arg == "--disallowedTools").unwrap();
+    let denied = a[denied + 1].split(',').collect::<Vec<_>>();
+    let rule = format!("Edit(/{}/**)", root.path().display());
+    // Questions use Cairn's own tool, in plan turns as elsewhere.
+    assert_eq!(denied, vec!["AskUserQuestion", rule.as_str()]);
+
+    // Outside plan turns, YOLO keeps its existing arguments.
+    let a = claude_process::args(&plan(&root, "test"), &root.path().join("instructions.txt"));
+    assert!(a.contains(&"--dangerously-skip-permissions".into()));
+    assert!(!a.iter().any(|arg| arg.contains("allowedDomains")));
+    let mut writing = plan(&root, "test");
+    writing["sandbox"] = "workspace-write".into();
+    let a = claude_process::args(&writing, &root.path().join("instructions.txt"));
+    let settings = a.iter().position(|arg| arg == "--settings").unwrap();
+    let settings: Value = serde_json::from_str(&a[settings + 1]).unwrap();
+    assert!(
+        settings["sandbox"]["network"]
+            .get("strictAllowlist")
+            .is_none()
+    );
+    assert!(settings.get("useAutoModeDuringPlan").is_none());
+}
+
+#[tokio::test]
+async fn only_a_cairn_plan_turn_shows_exit_plan_mode_as_a_proposed_plan() {
+    // Claude Code's own plan mode, in an ordinary turn, may implement right after
+    // ExitPlanMode: the call is not a proposal nothing has acted on.
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    let (result, events) = run_to_end(&c, plan(&root, "fixture:plan-turn")).await;
+    result.unwrap();
+    assert!(completes(&events));
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["item"]["type"] == "proposed_plan"),
+        "{events:?}"
+    );
+    assert!(events.iter().any(|event| {
+        event["item"]["type"] == "mcp_tool_call" && event["item"]["tool"] == "ExitPlanMode"
+    }));
+    // Ordinary permissions are unchanged: the callback still allows leaving plan mode.
+    let responses = std::fs::read_to_string(c.home.join(".claude/plan-responses.jsonl")).unwrap();
+    let exit = responses
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|response| response["id"] == "exit-plan")
+        .unwrap();
+    assert_eq!(exit["behavior"], "allow");
+}
+
+#[tokio::test]
+async fn plan_turns_deny_writes_effects_and_leaving_plan_mode() {
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    let (result, events) = run_to_end(&c, plan_turn(&root)).await;
+    result.unwrap();
+    assert!(completes(&events));
+
+    let responses = std::fs::read_to_string(c.home.join(".claude/plan-responses.jsonl")).unwrap();
+    let decisions = responses
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .map(|response| (response["id"].as_str().unwrap().to_owned(), response))
+        .collect::<std::collections::HashMap<_, _>>();
+    for allowed in [
+        "plan-file",
+        "sandboxed-shell",
+        "read",
+        "read-only-mcp",
+        "gateway-mcp",
+    ] {
+        assert_eq!(decisions[allowed]["behavior"], "allow", "{allowed}");
+    }
+    for denied in [
+        "workspace-write",
+        "workspace-edit",
+        "notebook-edit",
+        "home-write",
+        "escaping-plan-file",
+        "unsandboxed-shell",
+        "widening-shell",
+        "excluded-mcp",
+        "scheduler",
+        "exit-plan",
+        "exit-without-plan",
+    ] {
+        assert_eq!(decisions[denied]["behavior"], "deny", "{denied}");
+    }
+    let exit = decisions["exit-plan"]["message"].as_str().unwrap();
+    assert!(exit.contains("plan was shown to the user"), "{exit}");
+    // Without a plan file there is nothing to show: Claude is told so, and no empty
+    // proposal appears.
+    let missing = decisions["exit-without-plan"]["message"].as_str().unwrap();
+    assert!(missing.contains("No plan reached the user"), "{missing}");
+    assert!(
+        decisions["workspace-write"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("plan turn")
+    );
+
+    let proposed = events
+        .iter()
+        .filter(|event| event["item"]["type"] == "proposed_plan")
+        .collect::<Vec<_>>();
+    assert_eq!(proposed.len(), 2);
+    assert_eq!(proposed[1]["type"], "item.completed");
+    assert_eq!(proposed[1]["item"]["status"], "completed");
+    assert_eq!(
+        proposed[1]["item"]["text"],
+        "1. Change main.rs\n2. Run the tests"
+    );
+    assert!(proposed[1]["item"].get("result").is_none());
+}
+
+#[tokio::test]
+async fn completed_plan_receipt_replays_the_proposal_without_starting_another_turn() {
+    let root = TempDir::new().unwrap();
+    let mut c = setup(&root);
+    let p = plan_turn(&root);
+    let (result, events) = run_to_end(&c, p.clone()).await;
+    result.unwrap();
+    let completed: Vec<_> = events
+        .iter()
+        .filter(|event| {
+            event["type"] == "item.completed" && event["item"]["type"] == "proposed_plan"
+        })
+        .map(|event| event["item"].clone())
+        .collect();
+    assert_eq!(completed.len(), 1);
+
+    // Model output was buffered when the controller stopped: replay starts with no
+    // durable proposal event or output file, only the adapter's completion receipt.
+    std::fs::remove_file(root.path().join("result.md")).unwrap();
+    c.claude_bin = "/nonexistent-claude-for-receipt".into();
+    // A later clarification was delivered after the proposal, before the receipt was saved.
+    let receipt_path = root.path().join("result.claude-receipt.json");
+    let mut receipt: Value =
+        serde_json::from_slice(&std::fs::read(&receipt_path).unwrap()).unwrap();
+    receipt["delivered"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("later-clarification"));
+    std::fs::write(&receipt_path, receipt.to_string()).unwrap();
+    let (result, replayed) = run_to_end(&c, p).await;
+    result.unwrap();
+    assert!(completes(&replayed));
+    let proposals: Vec<_> = replayed
+        .iter()
+        .filter(|event| {
+            event["type"] == "item.completed" && event["item"]["type"] == "proposed_plan"
+        })
+        .map(|event| event["item"].clone())
+        .collect();
+    assert_eq!(proposals, completed);
+    assert_eq!(proposals[0]["request_id"], "original");
+    assert!(
+        replayed
+            .iter()
+            .any(|event| event["type"] == "chat.delivered"
+                && event["messageId"] == "later-clarification")
+    );
+    let invocations = std::fs::read_to_string(c.home.join(".claude/invocations.jsonl")).unwrap();
+    assert_eq!(invocations.lines().count(), 1);
+}
+
+#[tokio::test]
+async fn completed_plan_receipt_preserves_proposal_ids_and_subagent_parentage() {
+    for ambiguous in [false, true] {
+        let root = TempDir::new().unwrap();
+        let mut c = setup(&root);
+        c.claude_bin = "/nonexistent-claude-for-receipt".into();
+        let proposals = json!([
+            {
+                "id": "root-proposal",
+                "type": "proposed_plan",
+                "text": "The root approach",
+                "status": "completed",
+            },
+            {
+                "id": "child-proposal",
+                "parent_id": "delegated-actor",
+                "type": "proposed_plan",
+                "text": "The child approach stays with its actor",
+                "status": "completed",
+            },
+        ]);
+        let receipt = json!({
+            "messageId": "original",
+            "delivered": if ambiguous { json!(["original", "later-clarification"]) } else { json!(["original"]) },
+            "text": "Waiting for approval",
+            "itemId": "final-reply",
+            "proposals": proposals,
+        });
+        std::fs::write(
+            root.path().join("result.claude-receipt.json"),
+            receipt.to_string(),
+        )
+        .unwrap();
+
+        let (result, replayed) = run_to_end(&c, plan_turn(&root)).await;
+        result.unwrap();
+        assert!(completes(&replayed));
+        let actual: Vec<_> = replayed
+            .iter()
+            .filter(|event| event["item"]["type"] == "proposed_plan")
+            .map(|event| event["item"].clone())
+            .collect();
+        let mut expected = proposals;
+        for item in expected.as_array_mut().unwrap() {
+            item["request_id"] = if ambiguous {
+                Value::Null
+            } else {
+                json!("original")
+            };
+        }
+        assert_eq!(json!(actual), expected);
+        assert!(!c.home.join(".claude/invocations.jsonl").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("result.md")).unwrap(),
+            "Waiting for approval"
+        );
+    }
+}
+
+#[tokio::test]
+async fn completed_plan_receipt_replays_the_proposal_without_another_native_turn() {
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    let mut p = plan_turn(&root);
+    p["execution"]["text"] = "fixture:plan-turn fixture:receipt-child".into();
+    let (result, original) = run_to_end(&c, p.clone()).await;
+    result.unwrap();
+    let proposals = |events: Vec<Value>| {
+        events
+            .into_iter()
+            .filter(|event| {
+                event["type"] == "item.completed" && event["item"]["type"] == "proposed_plan"
+            })
+            .collect::<Vec<_>>()
+    };
+    let expected = proposals(original);
+    assert_eq!(expected.len(), 2);
+    assert_eq!(expected[0]["item"]["parent_id"], "child-agent");
+    assert!(expected[1]["item"]["parent_id"].is_null());
+    for event in &expected {
+        assert_eq!(event["item"]["request_id"], "original");
+    }
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("result.md")).unwrap(),
+        ""
+    );
+    // Only the receipt survives: this new receiver has no earlier proposal events.
+    let (result, recovered) = run_to_end(&c, p).await;
+    result.unwrap();
+    assert!(completes(&recovered));
+    assert_eq!(proposals(recovered), expected);
+    let calls = std::fs::read_to_string(c.home.join(".claude/invocations.jsonl")).unwrap();
+    assert_eq!(calls.lines().count(), 1);
+}
+
 #[tokio::test]
 async fn disk_notice_reaches_engine_without_user_receipts_including_replay() {
     let root = TempDir::new().unwrap();
@@ -1155,6 +1450,50 @@ async fn steering_waits_for_both_responses_and_acknowledges_each_message() {
     .unwrap();
     task.await.unwrap().unwrap();
     assert_eq!(delivered, vec![json!("original"), json!("steering")]);
+    let receipt: Value = serde_json::from_slice(
+        &std::fs::read(root.path().join("result.claude-receipt.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(receipt["delivered"], json!(["original", "steering"]));
+}
+
+#[tokio::test]
+async fn plan_requests_only_join_a_plan_turn() {
+    for planning in [false, true] {
+        let root = TempDir::new().unwrap();
+        let c = setup(&root);
+        // Left in the inbox for an earlier turn, or claimed before the turn changed.
+        deliver(
+            &root,
+            &json!([
+                { "id": "plan-request", "text": "fixture:slow plan it", "attachments": [], "plan": true },
+                { "id": "ordinary", "text": "fixture:slow keep going", "attachments": [] },
+            ]),
+        );
+        let mut p = plan(&root, "fixture:slow");
+        if planning {
+            p["planning"] = true.into();
+            p["sandbox"] = "read-only".into();
+        }
+        let (result, events) = tokio::time::timeout(Duration::from_secs(15), run_to_end(&c, p))
+            .await
+            .unwrap();
+        result.unwrap();
+        let delivered = events
+            .iter()
+            .filter(|event| event["type"] == "chat.delivered")
+            .map(|event| event["messageId"].clone())
+            .collect::<Vec<_>>();
+        assert!(delivered.contains(&json!("ordinary")), "{delivered:?}");
+        // A turn that can change files never receives the plan request.
+        assert_eq!(
+            delivered.contains(&json!("plan-request")),
+            planning,
+            "{delivered:?}"
+        );
+        let inputs = std::fs::read_to_string(c.home.join(".claude/user-messages.jsonl")).unwrap();
+        assert_eq!(inputs.contains("plan it"), planning);
+    }
 }
 
 #[tokio::test]

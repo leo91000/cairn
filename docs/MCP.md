@@ -175,9 +175,18 @@ discovered with `search` and invoked through `execute` as `await cairn.<name>(ar
 `create_chat` defaults to Main for external clients and to the calling agent for
 `cairn_installation`. Its optional `projectId` must be allowed by the selected
 agent. Creating an empty chat does not start execution. `send_chat_message` accepts
-the same provider, model, reasoning, attachments and queue/steer settings as the
-apps. Supply a UUID in `message.id` and reuse it with identical content on retries.
+the same provider, model, reasoning, plan, attachments and queue/steer settings as the
+apps. `plan: true` requests a [plan turn](chats.md#plan-turns); during such a turn,
+`cairn_installation` only lists and runs `read` operations. Supply a UUID in `message.id` and reuse it with identical content on retries.
 A message starts work with the target agent's permissions.
+
+To approve a reviewed approach with the same freshness check as the apps, supply
+`message.planApproval: {sourceId: "<runId>:<completed-event-id>", revision: "<chat-revision>"}`.
+Use the latest completed root `proposed_plan` event from `get_run`/`read_run_content`,
+not a folded presentation ID, native tool ID or child proposal. The manager checks
+this identity and revision atomically with queue insertion and refuses stale
+approvals. Retried accepted message IDs keep their original result. Omit this
+precondition for freely composed ordinary messages.
 
 | Scope | Conversation operations |
 | --- | --- |

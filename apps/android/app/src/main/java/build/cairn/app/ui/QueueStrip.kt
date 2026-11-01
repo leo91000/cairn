@@ -54,7 +54,9 @@ internal fun QueueStrip(
         canSteer &&
             message.status == "queued" &&
             message.questionId == null &&
-            message.mode != "steer"
+            message.mode != "steer" &&
+            // A plan request waits for its own turn: it cannot restrict a turn already running.
+            message.plan != true
     fun preview(message: ChatMessage) =
         if (message.questionId in privateQuestions) "Réponse privée"
         else message.text.ifBlank { "Pièces jointes" }
@@ -119,6 +121,7 @@ internal fun QueueStrip(
                                     when {
                                         message.status == "sending" -> "Envoi en cours…"
                                         message.mode == "steer" -> "Transmis dès que possible"
+                                        message.plan == true -> "Plan · aucune modification"
                                         message.attachments.isNotEmpty() ->
                                             listOfNotNull(
                                                     "${message.attachments.size} pièce${if (message.attachments.size > 1) "s" else ""} jointe${if (message.attachments.size > 1) "s" else ""}",

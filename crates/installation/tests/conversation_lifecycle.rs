@@ -1,4 +1,4 @@
-use crate::common::run_fixture::DbRunFixture;
+use crate::common::run_fixture::{DbRunFixture, RunFixture};
 use cairn_contracts::EventKind;
 use common::account_fixture::AccountFixtures;
 use common::node_fixture::*;
@@ -1508,6 +1508,159 @@ async fn measure_retention_storage() {
     }
 }
 
+#[tokio::test]
+async fn http_edits_change_plan_explicitly_and_preserve_it_when_omitted() {
+    for (initial, requested, expected) in [
+        (false, Some(true), true),
+        (true, Some(false), false),
+        (true, None, true),
+    ] {
+        let app = App::new().await;
+        common::managed_codex_home(&app.service.config.home);
+        let chat = app.create_chat().await;
+        let path = chat_path(&chat);
+        let messages = format!("{path}/messages");
+        let (status, body) = app
+            .request("POST", &format!("{path}/pause"), json!({ "paused": true }))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let message = id();
+        let (status, body) = app
+            .request(
+                "POST",
+                &messages,
+                json!({ "id": message, "text": "Original request", "plan": initial }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let mut edit = json!({ "text": "Edited request" });
+        if let Some(plan) = requested {
+            edit["plan"] = plan.into();
+        }
+        let (status, body) = app
+            .request("PUT", &format!("{messages}/{message}"), edit)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (_, detail) = app.get(&path).await;
+        let saved = detail["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|saved| saved["id"] == message.as_str())
+            .unwrap();
+        assert_eq!(saved["plan"] == true, expected, "{saved}");
+        let (status, body) = app
+            .request("POST", &format!("{path}/pause"), json!({ "paused": false }))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        app.tick().await;
+        let (_, detail) = app.get(&path).await;
+        assert_eq!(
+            detail["run"]["chatExecution"]["messageId"],
+            message.as_str()
+        );
+        assert_eq!(
+            detail["run"]["chatExecution"]["plan"] == true,
+            expected,
+            "{detail}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_plan_request_admitted_while_idle_never_joins_a_turn_that_can_change_files() {
+    let app = App::new().await;
+    common::managed_codex_home(&app.service.config.home);
+    let chat = app.create_chat().await;
+    let path = chat_path(&chat);
+    let messages = format!("{path}/messages");
+    let inbox = |run: &Value| {
+        let file = app
+            .service
+            .config
+            .data_dir
+            .join("runs")
+            .join(run["id"].as_str().unwrap())
+            .join("chat-input/messages.json");
+        serde_json::from_slice::<Value>(&std::fs::read(file).unwrap()).unwrap()
+    };
+
+    // With the queue paused no turn runs, so a plan request asking to steer is admitted.
+    let (status, _) = app
+        .request("POST", &format!("{path}/pause"), json!({ "paused": true }))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let ordinary = id();
+    let plan = id();
+    for message in [
+        json!({ "id": ordinary, "text": "Refactor the queue" }),
+        json!({ "id": plan, "text": "Plan the follow-up", "mode": "steer", "plan": true }),
+    ] {
+        let (status, body) = app.request("POST", &messages, message).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    app.request("POST", &format!("{path}/pause"), json!({ "paused": false }))
+        .await;
+
+    // The ordinary message ahead starts a turn that can change files.
+    app.tick().await;
+    let run = app
+        .service
+        .chat_detail(chat["id"].as_str().unwrap())
+        .await
+        .unwrap()["run"]
+        .clone();
+    assert_eq!(run["chatExecution"]["messageId"], ordinary.as_str());
+    assert_ne!(run["chatExecution"]["plan"], true);
+    let run_id = run["id"].as_str().unwrap().to_owned();
+    app.service
+        .store
+        .change_run_fixture(&run_id, json!({ "status": "running" }))
+        .await
+        .unwrap();
+    app.service
+        .chat_acknowledge(&run_id, &ordinary)
+        .await
+        .unwrap();
+    app.service
+        .store
+        .save_checkpoint_boundary(&run_id, json!({ "completed": true, "launched": true }))
+        .await
+        .unwrap();
+
+    // Steering never hands it the plan request, which stays queued.
+    app.tick().await;
+    assert_eq!(inbox(&run), json!([]));
+    let (_, detail) = app.get(&path).await;
+    let pending = detail["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["id"] == plan.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(pending["status"], "queued");
+
+    // After the turn boundary it runs as its own plan turn.
+    app.service
+        .store
+        .change_run_fixture(
+            &run_id,
+            json!({ "status": "succeeded", "sessionId": "saved-session", "workspace": "/saved/workspace" }),
+        )
+        .await
+        .unwrap();
+    app.tick().await;
+    let next = app
+        .service
+        .chat_detail(chat["id"].as_str().unwrap())
+        .await
+        .unwrap()["run"]
+        .clone();
+    assert_eq!(next["chatExecution"]["messageId"], plan.as_str());
+    assert_eq!(next["chatExecution"]["plan"], true);
+}
+
 /// Admission can reach quota before there is a checkpoint or an engine session.
 async fn quota_switch_fixture(app: &App) -> (String, Value) {
     std::fs::create_dir_all(&app.service.config.home).unwrap();
@@ -1920,5 +2073,542 @@ async fn quota_switch_recognizes_current_structured_limits_without_reusing_recov
             app.request("POST", &endpoint, input).await.0,
             StatusCode::OK
         );
+    }
+}
+
+#[tokio::test]
+async fn quota_switch_keeps_a_plan_turn_on_an_engine_that_enforces_it() {
+    let app = App::new().await;
+    let (path, mut input) = quota_switch_fixture(&app).await;
+    let run_id = text(&input, "runId").to_owned();
+    let mut account = serde_json::to_value(
+        app.service
+            .accounts
+            .create(
+                &app.service,
+                cairn_installation::provider::Provider::Opencode,
+                "Alternative",
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    account["state"] = "ready".into();
+    account["modelProvider"] = "opencode".into();
+    app.service
+        .store
+        .save_account_fixture(account)
+        .await
+        .unwrap();
+    let endpoint = format!("{path}/coding-agent");
+    let mut execution = app.service.store.run(&run_id).await.unwrap()["chatExecution"].clone();
+    execution["plan"] = true.into();
+    app.service
+        .store
+        .change_run_fixture(&run_id, json!({ "chatExecution": execution }))
+        .await
+        .unwrap();
+
+    // OpenCode cannot enforce a plan turn's boundary: it is not accepted.
+    let (status, options) = app.get(&endpoint).await;
+    assert_eq!(status, StatusCode::OK, "{options}");
+    assert_eq!(
+        options["choices"],
+        json!([{"provider":"claude","label":"Claude Code"}])
+    );
+    let mut opencode = input.clone();
+    opencode["provider"] = "opencode".into();
+    let (status, refused) = app.request("POST", &endpoint, opencode).await;
+    assert!(status.is_client_error(), "{refused}");
+    assert!(app.get(&path).await.1["codingAgentSwitch"].is_null());
+
+    // Claude Code takes the same plan turn over, still as a plan turn.
+    input["requestId"] = uuid::Uuid::new_v4().to_string().into();
+    assert_eq!(
+        app.request("POST", &endpoint, input.clone()).await.0,
+        StatusCode::OK
+    );
+    for mut account in app.service.store.account_fixtures().await.unwrap() {
+        account["enabled"] = false.into();
+        app.service
+            .store
+            .save_account_fixture(account)
+            .await
+            .unwrap();
+    }
+    let restarted = Service::new(app.service.config.clone()).await.unwrap();
+    restarted.worker.tick(&restarted).await.unwrap();
+    common::eventually(
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_millis(20),
+        async || {
+            let run = restarted.store.run(&run_id).await.unwrap();
+            (run["snapshot"]["agent"]["provider"] == "claude").then_some(())
+        },
+    )
+    .await;
+    let switched = restarted.store.run(&run_id).await.unwrap();
+    assert_eq!(switched["chatExecution"]["messageId"], input["turnId"]);
+    assert_eq!(switched["chatExecution"]["plan"], true);
+    restarted.shutdown.cancel();
+    restarted.worker.close().await;
+}
+
+#[tokio::test]
+async fn implementation_approval_is_atomic_with_concurrent_requests_and_retries() {
+    let app = App::new().await;
+    let chat = app.create_chat().await;
+    let chat_id = text(&chat, "id").to_owned();
+    let run = id();
+    app.add_finished_run(
+        &run,
+        RunStatus::Succeeded,
+        json!({ "snapshot": { "agent": { "provider": "codex" } } }),
+        "Plan request",
+    )
+    .await;
+    let c = chat_id.clone();
+    let r = run.clone();
+    app.service
+        .store
+        .transaction(move |db| {
+            let mut chat = db.conversation_boundary(&c)?.unwrap();
+            chat["runId"] = r.clone().into();
+            db.save_conversation_boundary(&chat)?;
+            db.event(
+                &r,
+                &EventKind::ItemCompleted,
+                "Reviewed plan",
+                Some(&json!({
+                    "type": "item.completed",
+                    "item": { "id": "proposal", "type": "proposed_plan", "text": "Reviewed plan" },
+                })),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let path = chat_path(&chat);
+    let (_, snapshot) = app.get(&path).await;
+    let r = run.clone();
+    let event_id = app
+        .service
+        .store
+        .read(move |db| {
+            Ok(db
+                .0
+                .query_row("SELECT MAX(id) FROM events WHERE run_id=?", [r], |row| {
+                    row.get::<_, i64>(0)
+                })?)
+        })
+        .await
+        .unwrap();
+    let approval = json!({
+        "sourceId": format!("{run}:{event_id}"), "revision": snapshot["revision"],
+    });
+    let messages = format!("{path}/messages");
+    let first_request = json!({
+        "id": id(), "text": "Implement the plan you proposed.", "planApproval": approval,
+    });
+    let mut competing_request = first_request.clone();
+    competing_request["id"] = id().into();
+    // Two clients approve the same snapshot concurrently: exactly one can be accepted.
+    let (first_result, competing_result) = tokio::join!(
+        app.request("POST", &messages, first_request.clone()),
+        app.request("POST", &messages, competing_request.clone()),
+    );
+    let (accepted, first) = if first_result.0 == StatusCode::OK {
+        assert_eq!(
+            competing_result.0,
+            StatusCode::CONFLICT,
+            "{competing_result:?}"
+        );
+        (first_request, first_result.1)
+    } else {
+        assert_eq!(first_result.0, StatusCode::CONFLICT, "{first_result:?}");
+        assert_eq!(competing_result.0, StatusCode::OK, "{competing_result:?}");
+        (competing_request, competing_result.1)
+    };
+    let (status, retry) = app.request("POST", &messages, accepted).await;
+    assert_eq!(status, StatusCode::OK, "{retry}");
+    assert_eq!(first["id"], retry["id"]);
+    // Remove the accepted request, then capture the refreshed idle boundary.
+    app.request(
+        "DELETE",
+        &format!("{messages}/{}", text(&first, "id")),
+        Value::Null,
+    )
+    .await;
+    let (_, snapshot) = app.get(&path).await;
+    let stale =
+        json!({ "sourceId": format!("{run}:{event_id}"), "revision": snapshot["revision"] });
+    // B is accepted after A captured the card, before A's request reaches the manager.
+    let revision = json!({ "id": id(), "text": "Revise the approach", "plan": true });
+    let (status, body) = app.request("POST", &messages, revision).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = app
+        .request(
+            "POST",
+            &messages,
+            json!({
+                "id": id(), "text": "Implement the plan you proposed.", "planApproval": stale,
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let (_, after) = app.get(&path).await;
+    assert!(
+        after["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|message| { message["text"] != "Implement the plan you proposed." })
+    );
+    // Manually written ordinary messages keep their ordinary queue semantics.
+    assert_eq!(
+        app.request(
+            "POST",
+            &messages,
+            json!({ "id": id(), "text": "An ordinary follow-up" })
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn proposal_replay_cannot_renew_an_invalidated_request_boundary() {
+    let app = App::new().await;
+    for request in [json!("request-a"), Value::Null] {
+        let chat = app.create_chat().await;
+        let chat_id = text(&chat, "id").to_owned();
+        let run = id();
+        app.add_finished_run(
+            &run,
+            RunStatus::Succeeded,
+            json!({ "snapshot": { "agent": { "provider": "codex" } } }),
+            "Plan request",
+        )
+        .await;
+        let (c, r) = (chat_id.clone(), run.clone());
+        let replayed = app.service.store.transaction(move |db| {
+            let mut chat = db.conversation_boundary(&c)?.unwrap();
+            chat["runId"] = r.clone().into();
+            db.save_conversation_boundary(&chat)?;
+            db.event(&r, &EventKind::ChatUser, "Initial request", Some(&json!({ "messageId": "request-a" })))?;
+            let proposal = json!({ "item": { "id": "proposal", "type": "proposed_plan", "text": "Original approach", "request_id": request } });
+            db.event(&r, &EventKind::ItemCompleted, "Original approach", Some(&proposal))?;
+            db.event(&r, &EventKind::ChatUser, "Clarification", Some(&json!({ "messageId": "request-b" })))?;
+            // Recovery restores the same artifact, not a new approach to the clarification.
+            db.event(&r, &EventKind::ItemCompleted, "Original approach", Some(&proposal))?;
+            Ok(db.0.query_row("SELECT MAX(id) FROM events WHERE run_id=?", [r], |row| row.get::<_, i64>(0))?)
+        }).await.unwrap();
+        let path = chat_path(&chat);
+        let (_, current) = app.get(&path).await;
+        let (status, body) = app.request("POST", &format!("{path}/messages"), json!({
+            "id": id(), "text": "Implement the plan you proposed.",
+            "planApproval": { "sourceId": format!("{run}:{replayed}"), "revision": current["revision"] }
+        })).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(
+            app.get(&path).await.1["messages"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let r = run.clone();
+        let completed = app.service.store.transaction(move |db| {
+            db.event(&r, &EventKind::ItemCompleted, "Clarified approach", Some(&json!({
+                "item": { "id": "revised", "type": "proposed_plan", "text": "Clarified approach", "request_id": "request-b" }
+            })))?;
+            Ok(db.0.query_row("SELECT MAX(id) FROM events WHERE run_id=?", [r], |row| row.get::<_, i64>(0))?)
+        }).await.unwrap();
+        let (_, current) = app.get(&path).await;
+        let request = json!({ "id": id(), "text": "Implement the plan you proposed.",
+            "planApproval": { "sourceId": format!("{run}:{completed}"), "revision": current["revision"] } });
+        let (status, accepted) = app
+            .request("POST", &format!("{path}/messages"), request.clone())
+            .await;
+        assert_eq!(status, StatusCode::OK, "{accepted}");
+        let (status, retry) = app
+            .request("POST", &format!("{path}/messages"), request)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{retry}");
+        assert_eq!(accepted["id"], retry["id"]);
+    }
+}
+
+#[tokio::test]
+async fn implementation_rejects_newer_unfinished_root_lifecycles() {
+    let app = App::new().await;
+    for status in [RunStatus::Failed, RunStatus::Cancelled] {
+        for proposal in ["proposal", "replacement"] {
+            for phase in [
+                EventKind::ItemStarted,
+                EventKind::ItemUpdated,
+                EventKind::ItemCompleted,
+            ] {
+                let chat = app.create_chat().await;
+                let chat_id = text(&chat, "id").to_owned();
+                let run = id();
+                app.add_finished_run(
+                    &run,
+                    status,
+                    json!({
+                        "snapshot": { "agent": { "provider": "codex" } }
+                    }),
+                    "Plan request",
+                )
+                .await;
+                let (c, r) = (chat_id.clone(), run.clone());
+                let old_event = app.service.store.transaction(move |db| {
+                    let mut chat = db.conversation_boundary(&c)?.unwrap();
+                    chat["runId"] = r.clone().into();
+                    db.save_conversation_boundary(&chat)?;
+                    db.event(&r, &EventKind::ItemCompleted, "Reviewed plan", Some(&json!({
+                        "item": { "id": "proposal", "type": "proposed_plan", "text": "Reviewed plan" }
+                    })))?;
+                    let old: i64 = db.0.query_row("SELECT MAX(id) FROM events WHERE run_id=?", [&r], |row| row.get(0))?;
+                    db.event(&r, &phase, "", Some(&json!({
+                        "item": { "id": proposal, "type": "proposed_plan", "text": "" }
+                    })))?;
+                    Ok(old)
+                }).await.unwrap();
+                let path = chat_path(&chat);
+                let (_, snapshot) = app.get(&path).await;
+                let message = json!({
+                    "id": id(), "text": "Implement the plan you proposed.",
+                    "planApproval": { "sourceId": format!("{run}:{old_event}"), "revision": snapshot["revision"] }
+                });
+                let (response, body) = app
+                    .request("POST", &format!("{path}/messages"), message)
+                    .await;
+                assert_eq!(
+                    response,
+                    StatusCode::CONFLICT,
+                    "{status:?} {proposal}: {body}"
+                );
+                assert!(
+                    app.get(&path).await.1["messages"]
+                        .as_array()
+                        .unwrap()
+                        .is_empty()
+                );
+
+                // An empty completion is a lifecycle marker, not a reviewable approach.
+                let r = run.clone();
+                let marker = app
+                    .service
+                    .store
+                    .read(move |db| {
+                        Ok(db.0.query_row(
+                            "SELECT MAX(id) FROM events WHERE run_id=?",
+                            [r],
+                            |row| row.get::<_, i64>(0),
+                        )?)
+                    })
+                    .await
+                    .unwrap();
+                let (_, current) = app.get(&path).await;
+                let (response, body) = app.request("POST", &format!("{path}/messages"), json!({
+                    "id": id(), "text": "Implement the plan you proposed.",
+                    "planApproval": { "sourceId": format!("{run}:{marker}"), "revision": current["revision"] }
+                })).await;
+                assert_eq!(response, StatusCode::CONFLICT, "{body}");
+
+                // Steering before the final completion belongs to the reviewed approach.
+                let r = run.clone();
+                let completed = app.service.store.transaction(move |db| {
+                    db.event(&r, &EventKind::ChatUser, "Clarify the design", None)?;
+                    db.event(&r, &EventKind::ItemCompleted, "Clarified plan", Some(&json!({
+                        "item": { "id": proposal, "type": "proposed_plan", "text": "Clarified plan" }
+                    })))?;
+                    Ok(db.0.query_row("SELECT MAX(id) FROM events WHERE run_id=?", [r], |row| row.get::<_, i64>(0))?)
+                }).await.unwrap();
+                let (_, snapshot) = app.get(&path).await;
+                let message = json!({
+                    "id": id(), "text": "Implement the plan you proposed.",
+                    "planApproval": { "sourceId": format!("{run}:{completed}"), "revision": snapshot["revision"] }
+                });
+                let (response, accepted) = app
+                    .request("POST", &format!("{path}/messages"), message.clone())
+                    .await;
+                assert_eq!(response, StatusCode::OK, "{accepted}");
+                let (response, retry) = app
+                    .request("POST", &format!("{path}/messages"), message)
+                    .await;
+                assert_eq!(response, StatusCode::OK, "{retry}");
+                assert_eq!(accepted["id"], retry["id"]);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn early_codex_plan_is_approved_only_after_its_start_is_accepted() {
+    use cairn_installation::chat_process;
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+
+    for resumed in [false, true] {
+        for rejected in [false, true] {
+            let app = App::new().await;
+            let root = app._root.path();
+            let home = root.join("early-codex");
+            let inbox = root.join("early-inbox");
+            std::fs::create_dir(&home).unwrap();
+            std::fs::create_dir(&inbox).unwrap();
+            let mut config = app.service.config.clone();
+            config.codex_bin = common::fixture("codex.mjs");
+            let mut plan = json!({
+                "execution": {"messageId": id(), "text": "Earlier request", "recovery": false},
+                "instructions": "Test instructions", "inputDirectory": inbox,
+                "output": root.join("early-result.md"), "cwd": root,
+                "model": "", "reasoning": "medium", "sandbox": "yolo",
+                "writableRoots": [], "args": [],
+            });
+            if resumed {
+                let (tx, mut rx) = mpsc::channel(64);
+                let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+                chat_process::run(&config, &home, plan.clone(), tx, CancellationToken::new())
+                    .await
+                    .unwrap();
+                drain.await.unwrap();
+                plan["sessionId"] = "fixture-chat".into();
+            }
+            let request_id = id();
+            plan["execution"]["messageId"] = request_id.clone().into();
+            plan["execution"]["text"] = if rejected {
+                "fixture:early-plan-rejected"
+            } else {
+                "fixture:early-plan"
+            }
+            .into();
+            plan["planning"] = true.into();
+            plan["sandbox"] = "read-only".into();
+            let (tx, mut rx) = mpsc::channel(64);
+            let (cfg, native_home) = (config.clone(), home.clone());
+            let stop = CancellationToken::new();
+            let native_stop = stop.clone();
+            let task = tokio::spawn(async move {
+                chat_process::run(&cfg, &native_home, plan, tx, native_stop).await
+            });
+            let collected = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                let mut events = Vec::new();
+                let mut premature = false;
+                let mut gate_seen = false;
+                while let Some(event) = rx.recv().await {
+                    // This notification follows the early plan on the native pipe,
+                    // while the fixture withholds BOTH its initial user item and RPC reply.
+                    if event["type"] == "context.usage" && event["usage"]["contextTokens"] == 12345
+                    {
+                        premature = events.iter().any(|event: &Value| {
+                            event["item"]["type"] == "proposed_plan"
+                                || (event["type"] == "chat.delivered"
+                                    && event["messageId"] == request_id)
+                        });
+                        gate_seen = true;
+                        // Always release, even on the old failing implementation.
+                        std::fs::write(home.join("fixture-early-plan-release"), "release").unwrap();
+                    }
+                    events.push(event);
+                }
+                (events, premature, gate_seen)
+            })
+            .await;
+            stop.cancel();
+            let result = task.await.unwrap();
+            let (events, premature, gate_seen) = collected.expect("bounded native start handshake");
+            assert!(gate_seen);
+            assert!(
+                !premature,
+                "request/proposal emitted before native acceptance: {events:?}"
+            );
+            if rejected {
+                assert!(result.is_err());
+                assert!(
+                    !events
+                        .iter()
+                        .any(|event| event["item"]["type"] == "proposed_plan"
+                            || (event["type"] == "chat.delivered"
+                                && event["messageId"] == request_id))
+                );
+                continue;
+            }
+            result.unwrap();
+            let delivered = events
+                .iter()
+                .position(|event| {
+                    event["type"] == "chat.delivered" && event["messageId"] == request_id
+                })
+                .unwrap();
+            let completed = events
+                .iter()
+                .position(|event| {
+                    event["type"] == "item.completed" && event["item"]["type"] == "proposed_plan"
+                })
+                .unwrap();
+            assert!(delivered < completed);
+            assert_eq!(events[completed]["item"]["request_id"], request_id);
+
+            // Store the actual adapter emission order, then exercise the public
+            // HTTP/common send acceptance contract against that durable history.
+            let chat = app.create_chat().await;
+            let (chat_id, run) = (text(&chat, "id").to_owned(), id());
+            app.add_finished_run(
+                &run,
+                RunStatus::Succeeded,
+                json!({"snapshot":{"agent":{"provider":"codex"}}}),
+                "Earlier context",
+            )
+            .await;
+            let r = run.clone();
+            let source = app
+                .service
+                .store
+                .transaction(move |db| {
+                    let mut chat = db.conversation_boundary(&chat_id)?.unwrap();
+                    chat["runId"] = r.clone().into();
+                    db.save_conversation_boundary(&chat)?;
+                    let mut source = 0_i64;
+                    for event in events {
+                        if event["type"] == "chat.delivered" {
+                            db.event(
+                                &r,
+                                &EventKind::ChatUser,
+                                "Plan request",
+                                Some(&json!({"messageId":event["messageId"], "plan":event["messageId"] == request_id})),
+                            )?;
+                        } else if event["type"]
+                            .as_str()
+                            .is_some_and(|kind| kind.starts_with("item."))
+                        {
+                            let kind = serde_json::from_value(event["type"].clone())?;
+                            db.event(&r, &kind, text(&event["item"], "text"), Some(&event))?;
+                            if event["type"] == "item.completed" && event["item"]["type"] == "proposed_plan" {
+                                source = db.0.query_row(
+                                    "SELECT MAX(id) FROM events WHERE run_id=?",
+                                    [&r],
+                                    |row| row.get(0),
+                                )?;
+                            }
+                        }
+                    }
+                    Ok(source)
+                })
+                .await
+                .unwrap();
+            let path = chat_path(&chat);
+            let (_, snapshot) = app.get(&path).await;
+            let input = json!({"id":id(), "text":"Implement the plan you proposed.",
+                "planApproval":{"sourceId":format!("{run}:{source}"), "revision":snapshot["revision"]}});
+            for _ in 0..2 {
+                let (status, body) = app
+                    .request("POST", &format!("{path}/messages"), input.clone())
+                    .await;
+                assert_eq!(status, StatusCode::OK, "resumed={resumed}: {body}");
+            }
+        }
     }
 }

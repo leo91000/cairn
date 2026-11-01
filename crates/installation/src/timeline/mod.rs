@@ -122,6 +122,7 @@ struct StoredReply {
 fn card_with(mut card: Card, (kind, content): &(String, String)) -> Result<Card> {
     card.content = match kind.as_str() {
         "userMessage" => TimelineContent::UserMessage {
+            plan: false,
             text: String::new(),
             message_id: None,
             question_id: None,
@@ -437,6 +438,7 @@ fn hydrate(card: Card, source: &Source, run: &str) -> TimelineEntry {
                 .filter(|sent| *sent > 0 && *sent <= source.created_at)
                 .unwrap_or(source.created_at);
             TimelineContent::UserMessage {
+                plan: payload["plan"].as_bool().unwrap_or(false),
                 text: reducer::message_text(&event),
                 message_id: string("messageId"),
                 question_id: string("questionId"),

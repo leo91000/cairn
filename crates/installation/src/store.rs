@@ -36,7 +36,7 @@ struct Pool {
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-pub(crate) const DATABASE_VERSION: i64 = 23;
+pub(crate) const DATABASE_VERSION: i64 = 24;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -191,6 +191,10 @@ impl Store {
         }
         if !fresh && version == 22 {
             crate::nodes::attempts_migration::upgrade(&mut writer)?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        }
+        if !fresh && version == 23 {
+            crate::chats::migration::plan_requests(&mut writer)?;
         }
         if fresh {
             let tx = writer.transaction()?;

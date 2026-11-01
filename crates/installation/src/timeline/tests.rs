@@ -48,16 +48,26 @@ fn tables(db: &Connection) -> BTreeMap<String, Vec<String>> {
     let mut snapshot: BTreeMap<String, Vec<String>> = names
         .into_iter()
         .map(|name| {
-            let query = if name == "nodes" {
-                let columns: Vec<String> = db.prepare("SELECT name FROM pragma_table_info('nodes') WHERE name!='exclusive_reservation' ORDER BY cid")
-                    .unwrap().query_map([], |row| row.get(0)).unwrap()
-                    .collect::<rusqlite::Result<_>>().unwrap();
-                let fields = columns.iter().map(|column| format!("\"{column}\"")).collect::<Vec<_>>().join(",");
-                format!("SELECT {fields} FROM nodes")
-            } else {
-                format!("SELECT * FROM \"{name}\"")
-            };
-            let mut statement = db.prepare(&query).unwrap();
+            // Compare retained columns across both placement23 and Plan24 migrations.
+            let projection =
+                if matches!(name.as_str(), "chat_messages" | "chat_questions" | "nodes") {
+                    db.prepare(&format!("PRAGMA table_info({name})"))
+                        .unwrap()
+                        .query_map([], |row| row.get::<_, String>(1))
+                        .unwrap()
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                        .unwrap()
+                        .into_iter()
+                        .filter(|column| column != "plan" && column != "exclusive_reservation")
+                        .map(|column| format!("\"{column}\""))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                } else {
+                    "*".to_owned()
+                };
+            let mut statement = db
+                .prepare(&format!("SELECT {projection} FROM \"{name}\""))
+                .unwrap();
             let columns = statement.column_count();
             let mut rows = statement
                 .query_map([], |row| {
@@ -1260,4 +1270,43 @@ async fn empty_wait_ends_the_interval_and_a_new_wait_gets_a_new_start() {
     assert!(cards(&store, CODEX).await.into_iter().all(|entry| !matches!(entry.content,
         TimelineContent::Notice { notice } if notice.code == NoticeCode::BackgroundTasks && notice.waiting_since.is_some()
     )));
+}
+
+#[tokio::test]
+async fn plan_delivery_flag_is_hydrated_without_changing_the_stored_card_or_private_answer() {
+    let root = tempfile::tempdir().unwrap();
+    drop(previous(root.path()));
+    let store = Store::open(root.path()).unwrap();
+    store
+        .event(
+            CODEX,
+            &EventKind::ChatUser,
+            "",
+            Some(serde_json::json!({
+                "messageId": "protected-attachment", "text": "", "plan": true,
+                "attachments": [{ "id": "attachment", "name": "design.txt", "kind": "file" }]
+            })),
+        )
+        .await
+        .unwrap();
+    let shown = cards(&store, CODEX).await;
+    let entry = shown.iter().find(|entry| matches!(&entry.content, TimelineContent::UserMessage { message_id, .. } if message_id.as_deref() == Some("protected-attachment"))).unwrap();
+    assert!(
+        matches!(&entry.content, TimelineContent::UserMessage { plan: true, text, attachments, .. } if text.is_empty() && attachments.len() == 1)
+    );
+    let source = entry.source;
+    assert_eq!(
+        store
+            .read(move |db| Ok(db.0.query_row(
+                "SELECT content FROM timeline_entries WHERE run_id=? AND source=?",
+                rusqlite::params![CODEX, source],
+                |row| row.get::<_, String>(0)
+            )?))
+            .await
+            .unwrap(),
+        "{}"
+    );
+    drop(store);
+    let reopened = Store::open(root.path()).unwrap();
+    assert!(cards(&reopened, CODEX).await.iter().any(|entry| matches!(&entry.content, TimelineContent::UserMessage { plan: true, message_id, .. } if message_id.as_deref() == Some("protected-attachment"))));
 }

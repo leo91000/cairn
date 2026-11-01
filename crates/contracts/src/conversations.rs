@@ -212,6 +212,10 @@ pub struct ChatMessage {
     pub model: String,
     #[serde(default)]
     pub reasoning: String,
+    /// A plan turn request. Absent on messages saved before plan turns, which never were.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[ts(as = "Option<bool>", optional)]
+    pub plan: bool,
     #[serde(default)]
     pub speed: String,
     #[serde(default)]
@@ -479,9 +483,23 @@ pub struct ChatInput {
     pub chat_id: ConversationId,
 }
 
+/// A transient acceptance precondition for the explicit Implement action.
+/// Retried accepted message IDs return their original result before checking freshness.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlanApproval {
+    #[schemars(length(max = 200))]
+    pub source_id: String,
+    #[schemars(length(max = 120))]
+    pub revision: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatMessageInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub plan_approval: Option<PlanApproval>,
     #[serde(deserialize_with = "uuid_string")]
     #[schemars(with = "uuid::Uuid")]
     pub id: String,
@@ -503,6 +521,11 @@ pub struct ChatMessageInput {
     #[serde(default)]
     #[schemars(pattern("^(?:[a-z][a-z0-9_-]*)?$"), length(max = 40))]
     pub reasoning: String,
+    /// Plan turn: the agent explores and proposes an approach without changing files, using
+    /// shell network access or calling tools with external effects. Send a later message
+    /// without plan to implement it. Unavailable with OpenCode.
+    #[serde(default)]
+    pub plan: bool,
     #[serde(default)]
     #[schemars(pattern("^(?:[a-z][a-z0-9_-]*)?$"), length(max = 40))]
     pub speed: String,
@@ -510,6 +533,16 @@ pub struct ChatMessageInput {
 
 impl ChatMessageInput {
     pub fn validate(&mut self) -> Result<(), String> {
+        if let Some(approval) = &self.plan_approval
+            && (approval.source_id.is_empty()
+                || approval.source_id.len() > 200
+                || approval.revision.is_empty()
+                || approval.revision.len() > 120
+                || self.plan
+                || self.mode != MessageMode::Queue)
+        {
+            return Err("Invalid plan approval.".into());
+        }
         self.text = self.text.trim().to_owned();
         self.model = self.model.trim().to_owned();
         if self.text.chars().count() > 50000
@@ -616,6 +649,10 @@ pub struct EditChatMessage {
     #[serde(default)]
     #[schemars(pattern("^(?:[a-z][a-z0-9_-]*)?$"), length(max = 40))]
     pub reasoning: String,
+    /// Plan turn request; an edit without it keeps the stored one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "boolean")]
+    pub plan: Option<bool>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -770,6 +807,14 @@ pub struct ChatExecution {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub context: Option<String>,
+    /// A plan turn: the agent explores and proposes without changing anything.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[ts(as = "Option<bool>", optional)]
+    pub plan: bool,
+    /// The previous turn of this run was a plan turn, whose engine mode may persist.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[ts(as = "Option<bool>", optional)]
+    pub after_plan: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     #[schemars(pattern("^compact$"))]

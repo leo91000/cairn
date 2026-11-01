@@ -221,6 +221,9 @@ async fn run_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Result
         ("GET", [kind @ ("chats" | "runs"), id, "history"]) => {
             crate::live::history(s, kind, id, input).await?
         }
+        ("POST", [kind @ ("chats" | "runs"), id, "event-content"]) => {
+            crate::live::event_content(s, kind, id, input).await?
+        }
         ("POST", [kind @ ("chats" | "runs"), id, "timeline-content"]) => {
             crate::live::content(s, kind, id, input).await?
         }
@@ -364,6 +367,7 @@ async fn chat_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resul
                             | "model"
                             | "reasoning"
                             | "speed"
+                            | "plan"
                     )
                 });
             }

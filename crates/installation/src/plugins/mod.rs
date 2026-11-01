@@ -154,7 +154,14 @@ impl Plugins {
 
     /// Run-scoped CLI commands declared by any package the run's agent is granted.
     pub async fn command(&self, s: &Service, bearer: &str, input: &Value) -> Result<Value> {
-        crate::project_workspaces::authorize(s, bearer).await?;
+        let run = crate::project_workspaces::authorize(s, bearer).await?;
+        // A failed policy read never confers ordinary-turn authority. Keep this
+        // check at the common dispatch boundary, including non-HTTP callers.
+        if crate::chats::planning(&run) {
+            return Err(Error::forbidden(
+                "Plugin commands are unavailable during a plan turn. Include the step in your plan; the user starts implementation explicitly.",
+            ));
+        }
         agents::command(s, bearer, input).await
     }
 

@@ -4,6 +4,20 @@
 use rusqlite::Connection;
 
 pub fn previous_layout(db: &Connection) {
+    // The released placement input predates Plan24, including its message/question columns.
+    for table in ["chat_messages", "chat_questions"] {
+        let has_plan = db
+            .prepare(&format!(
+                "SELECT 1 FROM pragma_table_info('{table}') WHERE name='plan'"
+            ))
+            .unwrap()
+            .exists([])
+            .unwrap();
+        if has_plan {
+            db.execute_batch(&format!("ALTER TABLE {table} DROP COLUMN plan"))
+                .unwrap();
+        }
+    }
     db.execute_batch("PRAGMA foreign_keys=OFF;
 DROP VIEW IF EXISTS run_views;
 DROP TABLE IF EXISTS timeline_entries;

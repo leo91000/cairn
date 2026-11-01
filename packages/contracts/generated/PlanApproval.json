@@ -1,0 +1,21 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "description": "A transient acceptance precondition for the explicit Implement action.\nRetried accepted message IDs return their original result before checking freshness.",
+  "properties": {
+    "revision": {
+      "maxLength": 120,
+      "type": "string"
+    },
+    "sourceId": {
+      "maxLength": 200,
+      "type": "string"
+    }
+  },
+  "required": [
+    "sourceId",
+    "revision"
+  ],
+  "title": "PlanApproval",
+  "type": "object"
+}

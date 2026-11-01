@@ -6,6 +6,10 @@ import type { TimelineState } from './TimelineState'
 export type TimelineContent = {
   kind: 'userMessage'
   text: string
+  /**
+   * The delivered request asks for a protected Plan turn.
+   */
+  plan?: boolean
   messageId?: string
   questionId?: string
   /**
