@@ -232,7 +232,11 @@ test('unreconciled lost history stays unknown until a known scope transition', (
 
 test('retained occurrence decoding is bounded, canonical and metadata-only', () => {
   const occurrence = observation(mature()).occurrence
-  assert.deepEqual(readAdmissionOccurrence(occurrence), { runId: 'run-one', scope: JSON.stringify(['attempt-one', 'input-one', null]), firstObservedAt: origin })
+  const decoded = readAdmissionOccurrence(occurrence)
+  assert.equal(decoded.runId, 'run-one')
+  assert.equal(decoded.scope, JSON.stringify(['attempt-one', 'input-one', null]))
+  assert.equal(decoded.firstObservedAt, origin)
+  assert.match(decoded.episodeId, /^[\w-]{36}$/)
   for (const value of [null, {}, 'x'.repeat(1201), '[]', '["run", "unsupported", 0]', JSON.stringify(['run', JSON.stringify([null, null, null]), 0])])
     assert.equal(readAdmissionOccurrence(value), null)
 })
@@ -256,4 +260,47 @@ test('a caller-confirmed end overrides still-retained helper identity without in
   assert.equal(observation(result).status, 'unknown')
   assert.equal(observation(result).observedSince, origin + 12 * 60000)
   assert.notEqual(observation(result).occurrence, observation(old).occurrence)
+})
+
+test('a known-ended recurrence has a distinct nonce even when the clock repeats', () => {
+  let count = 0
+  const create = () => `00000000-0000-4000-8000-${(++count).toString(16).padStart(12, '0')}`
+  const first = observeAdmissionWaits(sample(origin, [capacity()]), undefined, undefined, create)
+  const ended = observeAdmissionWaits(sample(origin + 60000, [capacity('run-one', { waitClass: 'account' })]), first.state, undefined, create)
+  const again = observeAdmissionWaits(sample(origin, [capacity()]), ended.state, () => ({ fresh: true }), create)
+  assert.equal(observation(first).firstObservedAt, observation(again).firstObservedAt)
+  assert.notEqual(observation(first).occurrence, observation(again).occurrence)
+  assert.equal(count, 2)
+  const restarted = observeAdmissionWaits(sample(origin + 60000, [capacity()]), JSON.parse(JSON.stringify(again.state)), undefined, create)
+  assert.equal(observation(restarted).occurrence, observation(again).occurrence)
+  assert.equal(count, 2)
+})
+
+test('unresolved legacy occurrence remains exact until a positive new episode', () => {
+  const legacy = JSON.stringify(['run-one', JSON.stringify(['attempt-one', 'input-one', null]), origin])
+  let count = 0
+  const create = () => {
+    count++
+    return '00000000-0000-4000-8000-000000000001'
+  }
+
+  const restored = observeAdmissionWaits(sample(origin + 60000, [capacity()]), undefined, () => ({ occurrence: legacy }), create)
+  assert.equal(observation(restored).occurrence, legacy)
+  assert.equal(count, 0)
+  const again = observeAdmissionWaits(sample(origin, [capacity()]), restored.state, () => ({ fresh: true }), create)
+  assert.notEqual(observation(again).occurrence, legacy)
+  assert.equal(count, 1)
+})
+
+test('unavailable or malformed fresh nonce never emits an invented episode', () => {
+  const unavailable = () => {
+    throw new Error('entropy unavailable')
+  }
+
+  for (const create of [() => 'unsupported', () => null, unavailable]) {
+    const result = observeAdmissionWaits(sample(origin, [capacity()]), undefined, undefined, create)
+    assert.equal(observation(result).status, 'unknown')
+    assert.equal(observation(result).occurrence, undefined)
+    assert(!JSON.stringify(result).includes('entropy unavailable'))
+  }
 })

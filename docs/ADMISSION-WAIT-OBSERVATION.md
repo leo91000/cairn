@@ -1,6 +1,6 @@
 # Observing an admission wait
 
-`scripts/admission-wait.mjs` is a pure, metadata-only helper for an external health
+`scripts/admission-wait.mjs` is a metadata-only helper for an external health
 monitor. A queued conversation's age is not its current admission-wait age. A
 recent event is not necessarily an admission transition either. The current
 projection supplies neither a canonical wait-start timestamp nor its history, so
@@ -45,6 +45,15 @@ An active coordinator owner alone may no longer prove whether a later same-scope
 wait ended after local history loss: the caller must keep that case unknown,
 rather than transfer old ownership to a possibly new episode.
 
+Fresh observed episodes have a UUID discriminator independent of the wall clock.
+It is allocated once, persisted with the helper state, and retained through
+unresolved gaps/restarts. A positively known-ended recurrence therefore cannot
+recreate the previous occurrence even if run, scope and clock timestamp repeat.
+The helper uses `crypto.randomUUID()` by default; a fourth `createEpisodeId`
+argument can supply deterministic UUIDs in tests. Failed or invalid allocation
+stays unknown. Legacy three-part occurrences remain exact for unresolved history;
+only a positively fresh observation receives a new discriminator.
+
 Persist a valid current capacity episode's identity in the existing bounded caller
 map before its age matures. A known current capacity observation stops a recovery
 clear streak even while its duration is still pending; this neither deletes sent
@@ -63,6 +72,12 @@ disk reservation or inferred rejection cause. It does not modify runtime state,
 historical coverage gaps, log cursors, outboxes, pins or acknowledgements. The
 external monitor's deployment, state migration and functional verification remain
 separate actions.
+
+Notification acknowledgement tokens must likewise be strictly newer than the
+previous acknowledged token, even after clock rollback. The actual delivery time
+and observed sample time remain separate metadata. If no larger safe integer can
+be encoded, preserve the durable outbox with an explicit delivery-blocked reason;
+never silently reuse an old acknowledgement for a new notification.
 
 Validation: `node --test scripts/tests/admission-wait.node.mjs` exercises observed
 age, identity transitions, gaps, partial inventory, restart, bounds and unknown
