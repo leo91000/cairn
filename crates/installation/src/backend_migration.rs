@@ -83,6 +83,21 @@ pub(crate) fn candidate(run: &Value) -> Value {
     candidate
 }
 
+/// Capacity/materialization and disk reads use the pending destination grant
+/// during a migration, including an explicit owner's adoption of old authority.
+/// This is only a structural check; principal, node and revocation decisions
+/// remain with each caller's existing transaction-local authorization.
+pub(crate) fn require_lineage(db: &Db<'_>, run: &Value) -> Result<()> {
+    policy::require_acyclic_parent(db, text(run, "id"), lineage(run))
+}
+
+/// The authority that preparation will actually use, without cloning a frozen
+/// execution snapshot merely to inspect its parent edge.
+pub(crate) fn lineage(run: &Value) -> &Value {
+    let pending = &run["backendMigration"]["grant"];
+    if pending.is_object() { pending } else { run }
+}
+
 fn chat_run(db: &Db<'_>, chat_id: &str) -> Result<(Value, Value, Value, bool)> {
     let chat = required(db.conversation_boundary(chat_id)?, "Chat not found")?;
     require_active(&chat)?;
@@ -173,6 +188,10 @@ pub(crate) fn source_read(db: &Db<'_>, run_id: &str, node: &Value) -> Result<boo
 
 fn migration_grant(db: &Db<'_>, run: &Value, agent: &Value, source: &Origin) -> Result<Value> {
     let mut grant = policy::authorize_origin(db, agent, source)?;
+    // Initial/expired migration and the final conversion commit all construct
+    // this grant inside their writer transaction. Owner adoption is explicit;
+    // delegated callers must not make the target depend on its own descendant.
+    policy::require_acyclic_parent(db, text(run, "id"), &grant)?;
     if matches!(source, Origin::Human(_)) {
         return Ok(grant);
     }
@@ -215,6 +234,10 @@ fn migration_grant(db: &Db<'_>, run: &Value, agent: &Value, source: &Origin) -> 
 }
 
 fn allowed(db: &Db<'_>, proposed: &Value, node: &Value) -> Result<bool> {
+    // Pending migration grants are read again after asynchronous conversion.
+    // An ancestor may have changed since preparation; neither backend may use
+    // a saved prospective edge that now closes a cycle.
+    policy::require_acyclic_parent(db, text(proposed, "id"), proposed)?;
     let agent = required(
         db.agent_snapshot(nodes::run_agent(proposed))?,
         "Agent not found",
@@ -798,6 +821,89 @@ use crate::run_fixture::DbRunFixture;
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn pending_migration_rechecks_ancestor_edges_before_reads_and_final_grant() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(directory.path()).unwrap();
+        store.transaction(|db| {
+            let (vm, native, profile, target, caller) = (id(), id(), id(), id(), id());
+            db.set("native-authority", &json!({
+                "observedAt": now(),
+                "accounts": { "owner": {} },
+            }), None)?;
+            db.put_node_fixture(&json!({
+                "id": vm,
+                "capabilities": { "backend": "firecracker" },
+            }))?;
+            let native_node = db.put_node_fixture(&json!({
+                "id": native,
+                "capabilities": { "backend": "native", "nativeModeProtocol": 1 },
+                "nativeModeObserved": { "mode": "protected", "generation": null, "status": "applied" },
+                "nativeEnabled": true,
+                "nativeAccounts": ["owner"],
+            }))?;
+            let current = serde_json::to_value(crate::agent_fixture::profile(json!({
+                "id": profile,
+                "access": { "backend": "auto", "nodes": [vm, native], "installation": true },
+            }))?)?;
+            db.save_agent(&serde_json::from_value(current.clone())?)?;
+            let mut vm_agent = current.clone();
+            vm_agent["access"]["backend"] = "firecracker".into();
+            for run in [&target, &caller] {
+                db.add_run_fixture(&json!({
+                    "id": run,
+                    "taskId": id(),
+                    "status": RunStatus::Running,
+                    "createdAt": now(),
+                    "snapshot": { "agent": vm_agent },
+                    "nodeId": vm,
+                    "nativePrincipals": ["owner"],
+                    "nativeAuthorityNodes": [native],
+                    "nativeProvenanceUnknown": false,
+                }), None)?;
+            }
+            let original = db.run(&target)?.unwrap();
+            let source = Origin::Run(caller.clone());
+            let mut destination = current;
+            destination["access"]["backend"] = "native".into();
+            let initial = prospective(db, &original, &destination, &source)?;
+            assert!(allowed(db, &initial, &native_node)?);
+            let grant = migration_grant(db, &original, &destination, &source)?;
+            db.update_run_boundary(&target, &json!({
+                "backendMigration": {
+                    "process": PROCESS.as_str(),
+                    "sourceReadReady": true,
+                    "nodeId": native,
+                    "snapshot": initial["snapshot"],
+                    "grant": grant,
+                },
+            }))?;
+
+            // A normal directing effect can change a still-independent ancestor
+            // after preparation. It does not see an uncommitted migration edge.
+            policy::authorize_run_in(db, &caller, &Origin::Run(target.clone()))?;
+            assert_eq!(db.run(&caller)?.unwrap()["nativeParentRunId"], target);
+            db.change_run(&target, crate::runs::RunChanges {
+                status: Some(RunStatus::Succeeded),
+                ..Default::default()
+            })?;
+            let before = db.run(&target)?.unwrap();
+            assert!(before["nativeParentRunId"].is_null());
+            let pending = candidate(&before);
+            assert_eq!(pending["nativeParentRunId"], caller);
+            assert!(!policy::allows(db, &pending, &native_node)?);
+            for error in [
+                allowed(db, &pending, &native_node).unwrap_err(),
+                source_read(db, &target, &db.node_boundary(&vm)?.unwrap()).unwrap_err(),
+                prospective(db, &before, &destination, &source).unwrap_err(),
+            ] {
+                assert!(error.message.contains("cyclic native authority lineage"));
+            }
+            assert_eq!(db.run(&target)?.unwrap(), before);
+            Ok(())
+        }).await.unwrap();
+    }
+
     #[test]
     #[ignore = "requires CAP_SYS_ADMIN; uses a disposable private mount namespace"]
     fn migration_staging_preserves_a_mounted_storage_root() {
@@ -911,6 +1017,15 @@ mod tests {
             let adopted = prospective(db, &plugin_bound, &agent, &Origin::Human("owner".into()))?;
             assert!(allowed(db, &adopted, &db.node_boundary(&node)?.unwrap())?,
                 "The explicit owner can still adopt existing work");
+            let mut historical_cycle = plugin_bound.clone();
+            historical_cycle["id"] = id().into();
+            historical_cycle["nativeParentRunId"] = historical_cycle["id"].clone();
+            assert!(policy::require_acyclic_parent(db, text(&historical_cycle, "id"), &historical_cycle).is_err());
+            let adopted_grant = migration_grant(db, &historical_cycle, &agent, &Origin::Human("owner".into()))?;
+            historical_cycle["backendMigration"] = json!({ "grant": adopted_grant });
+            require_lineage(db, &historical_cycle)?;
+            assert_eq!(historical_cycle["nativeParentRunId"], historical_cycle["id"],
+                "Checking the explicit pending adoption never rewrites retained old provenance");
             let mut revoked = db.node_boundary(&node)?.unwrap();
             revoked["nativeAccounts"] = json!(["owner"]); db.put_node_fixture(&revoked)?;
             assert!(!allowed(db, &candidate, &revoked)?);

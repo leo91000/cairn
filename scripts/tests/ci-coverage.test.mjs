@@ -51,6 +51,35 @@ describe('parallel CI coverage', () => {
     expect(quality.jobs.quality.steps.some(step => step.run === 'pnpm validate:pr contracts')).toBe(true)
   })
 
+  it('opts into one physical migration case after the normal backend suite without changing ordinary CI', () => {
+    const input = quality.on.workflow_dispatch.inputs['backend-qualification']
+    expect(input).toEqual({
+      description: 'Optional physical backend qualification after the backend suite',
+      type: 'choice',
+      options: ['none', 'backend-migration'],
+      default: 'none',
+    })
+
+    const backend = quality.jobs.backend
+    const normal = backend.steps.findIndex(step => step.run?.includes('--nextest --test-threads'))
+    const selected = backend.steps.findIndex(step => step.name === 'Qualify physical backend migration with the same compiled source')
+    expect(selected).toBeGreaterThan(normal)
+    const step = backend.steps[selected]
+    const enabled = step.if.replaceAll('inputs.backend-qualification', 'selection')
+    for (const selection of [undefined, '', 'none', 'other', 'backend-migration']) {
+      expect(runInNewContext(enabled, { selection }, { timeout: 1000 })).toBe(selection === 'backend-migration')
+    }
+
+    expect(step.run).toContain('set -o pipefail')
+    expect(step.run).toContain('\'moto[server]==5.2.3\' awscli blake3==1.0.8')
+    expect(step.run).toContain('scripts/tests/node_s3_test.py --case backend_migration_keeps_chat_and_files_both_directions_and_preserves_source_on_failure')
+    expect(step.run).toContain('1 passed; 0 failed; 0 ignored;')
+    expect(step.run).not.toContain('${{')
+    expect(step.run).not.toContain('CAIRN_TEST_REUSED_BUILD')
+    expect(step.run).not.toContain('--archive-file')
+    expect(backend['timeout-minutes']).toBe(30)
+  })
+
   it('keeps every split validation in the image publication gate', () => {
     for (const name of ['build', 'quality', 'rust-check', 'backend', 'node-checks', 'browser', 'network-bench', 'native-runtime', 'android-direct-build', 'android-direct', 'image', 'beacon-image']) {
       expect(quality.jobs.publish.needs).toContain(name)

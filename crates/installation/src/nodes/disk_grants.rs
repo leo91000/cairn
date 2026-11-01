@@ -6,7 +6,7 @@ use crate::{
     validation::text,
 };
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -33,8 +33,20 @@ async fn grant(s: &Service, run: &Value, node: &str, backups: Vec<&Value>) -> Re
         node_id: node,
         backups,
     };
+    let grant = serde_json::to_value(grant)?;
+    let run_id = text(run, "id").to_owned();
+    let requested = json!({
+        "nativeParentRunId": crate::backend_migration::lineage(run)["nativeParentRunId"],
+    });
     s.store
-        .put("node-disk-grants", serde_json::to_value(grant)?)
+        .transaction(move |db| {
+            crate::native::policy::require_acyclic_parent(db, &run_id, &requested)?;
+            if let Some(current) = db.run(&run_id)? {
+                crate::backend_migration::require_lineage(db, &current)?;
+            }
+            db.put("node-disk-grants", &grant)?;
+            Ok(())
+        })
         .await?;
     Ok(token)
 }
@@ -96,6 +108,9 @@ pub(crate) fn authorize_id_db(db: &crate::store::Db<'_>, grant_id: &str) -> Resu
 }
 
 pub(crate) fn authorize_owner(db: &crate::store::Db<'_>, run: &Value, node: &str) -> Result<()> {
+    // A VM read must not outlive a now-cyclic pending destination grant merely
+    // because its backend does not need the native host-admission checks.
+    crate::backend_migration::require_lineage(db, run)?;
     let agent = crate::error::required(
         db.agent_snapshot(super::run_agent(run))?,
         "Agent not found.",

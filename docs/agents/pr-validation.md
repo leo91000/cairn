@@ -66,6 +66,13 @@ If the local host cannot execute a required qualification, run the appropriate
 GitHub workflow manually on the branch and wait for its result. A manual run can
 provide test evidence for the PR; it cannot supply reusable release provenance.
 
+For a focused physical backend-migration check, dispatch `ci.yaml` with
+`backend-only=true` and `backend-qualification=backend-migration`. The optional
+case runs after the normal backend suite in the same disposable job, using its
+compiled source and the regular isolated loopback-S3 launcher. The default is
+`none`; this selected case does not replace native-runtime or other affected
+specialist qualifications.
+
 ## GitHub responsibilities
 
 `PR validation` runs on every PR and push to main: the `quality` suite always,

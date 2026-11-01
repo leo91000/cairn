@@ -343,6 +343,9 @@ struct Snapshot {
 
 impl Snapshot {
     fn load(db: &Db<'_>, run: &Value, configured: bool) -> Result<Self> {
+        // Both backend decisions must see fresh ancestor edges in the same
+        // transaction that reserves or claims capacity for this environment.
+        crate::backend_migration::require_lineage(db, run)?;
         let agent = db
             .agent_snapshot(super::run_agent(run))?
             .ok_or_else(|| Error::forbidden("Agent removed."))?;
@@ -778,6 +781,7 @@ pub(crate) async fn renew_preparation(s: &Service, run: &str, attempt: &str) -> 
             {
                 return Ok(());
             }
+            crate::backend_migration::require_lineage(db, &current)?;
             held.lease_expires_at = Some(now() + RESERVATION_LEASE_MS);
             db.save_attempt(&held)?;
             Ok(())
@@ -828,6 +832,9 @@ pub async fn materialize(s: &Service, attempt: &str) -> Result<()> {
                 .ok_or_else(|| Error::conflict("Missing disk allocation."))?;
             if record.released {
                 return Err(Error::conflict("Disk reservation was released."));
+            }
+            if let Some(run) = db.run(&record.run_id)? {
+                crate::backend_migration::require_lineage(db, &run)?;
             }
             record.disk_materialized = true;
             db.save_attempt(&record)?;
