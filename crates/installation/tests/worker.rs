@@ -5733,16 +5733,23 @@ async fn chat_resume_selection_resolves_opencode_catalog_default_before_adapter_
         .unwrap();
     let account_id = account.id.to_string();
     let catalog = s.opencode.models(&s).await.unwrap();
-    let default_model = "auto/ling-3-1-flash-free";
-    assert_eq!(
-        catalog["models"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|model| model["isDefault"] == true)
-            .unwrap()["model"],
-        default_model
-    );
+    let default_catalog_entry = catalog["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["isDefault"] == true)
+        .unwrap();
+    let default_model = text(default_catalog_entry, "model").to_owned();
+    assert_eq!(default_model, "auto/ling-3-1-flash-free");
+    let expected_plan_model = default_catalog_entry["routes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|route| route["provider"] == "opencode" && route["hidden"] != true)
+        .map(|route| text(route, "model"))
+        .filter(|model| !model.is_empty())
+        .expect("the default catalog alias must expose a visible OpenCode route")
+        .to_owned();
 
     let mut agent = s.agent_snapshot(MAIN_AGENT_ID).await.unwrap();
     agent["id"] = id().into();
@@ -5854,6 +5861,7 @@ async fn chat_resume_selection_resolves_opencode_catalog_default_before_adapter_
         .await
         .unwrap();
 
+    let resumed_plan_boundary = controller.plans.lock().await.len();
     let (resume_status, resume_response) = api_post(
         &app,
         &relay_token,
@@ -5902,14 +5910,15 @@ async fn chat_resume_selection_resolves_opencode_catalog_default_before_adapter_
         .lock()
         .await
         .iter()
+        .skip(resumed_plan_boundary)
         .find(|plan| {
             plan["runId"] == run_id
                 && plan["chat"]["provider"] == "opencode"
-                && plan["chat"]["model"] == default_model
                 && plan["chat"]["execution"]["messageId"] == turn_id
         })
         .cloned()
-        .expect("the catalog-default OpenCode selection must reach the worker plan");
+        .expect("the catalog-default OpenCode selection must reach a new worker plan");
+    assert_eq!(selected_plan["chat"]["model"], expected_plan_model);
     assert_eq!(selected_plan["sandbox"], "yolo");
     assert_eq!(selected_plan["chat"]["sessionId"], cancelled["sessionId"]);
     assert_eq!(selected_plan["chat"]["execution"]["messageId"], turn_id);
