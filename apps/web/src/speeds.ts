@@ -52,6 +52,20 @@ export function resumeSelectionSpeed(
   return provider === 'codex' ? applied : ''
 }
 
+/** Whether resuming would change the selected request from the saved request. */
+export function needsResumeSelection(
+  selectedModel: string,
+  selectedReasoning: string,
+  selectedSpeed: string,
+  savedModel: string,
+  savedReasoning: string,
+  savedSpeed: string,
+) {
+  return selectedModel !== savedModel
+    || selectedReasoning !== savedReasoning
+    || selectedSpeed !== effectiveSpeed('', savedSpeed)
+}
+
 /**
  * A queued or saved faster speed is a request, which each turn reports on, since Codex may answer
  * with its built-in list and an account's plan decides; one the model's catalog lacks says so. An

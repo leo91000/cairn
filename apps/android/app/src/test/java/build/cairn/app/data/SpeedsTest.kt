@@ -79,6 +79,22 @@ class SpeedsTest {
     }
 
     @Test
+    fun resumeSelectionComparesPickerSpeedWithPersistedRequest() {
+        assertTrue(
+            needsResumeSelection("deep", "high", STANDARD_SPEED, "deep", "high", "priority"),
+        )
+        assertFalse(
+            needsResumeSelection("fast", "high", "priority", "fast", "high", "priority"),
+        )
+        assertFalse(
+            needsResumeSelection("fast", "high", STANDARD_SPEED, "fast", "high", ""),
+        )
+        assertTrue(
+            needsResumeSelection("new", "high", "priority", "fast", "high", "priority"),
+        )
+    }
+
+    @Test
     fun namesSpeedsWithCodexOwnWords() {
         assertEquals("Fast", speedLabel("priority", listOf(fast)))
         assertEquals("Standard", speedLabel(STANDARD_SPEED))

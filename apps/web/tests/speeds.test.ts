@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { speedLabel } from '../../../packages/contracts/models'
 import {
   effectiveSpeed,
+  needsResumeSelection,
   offersSpeed,
   pickerAppliedSpeed,
   resumeSelectionSpeed,
@@ -107,6 +108,13 @@ describe('codex speeds', () => {
     expect(resumeSelectionSpeed('codex', deep, '', 'priority')).toBe('standard')
     expect(resumeSelectionSpeed('codex', astra, '', 'priority')).toBe('priority')
     expect(resumeSelectionSpeed('claude', astra, '', 'priority')).toBe('')
+  })
+
+  it('sends a selection when Standard differs from the saved request', () => {
+    expect(needsResumeSelection('deep', 'high', 'standard', 'deep', 'high', 'priority')).toBe(true)
+    expect(needsResumeSelection('fast', 'high', 'priority', 'fast', 'high', 'priority')).toBe(false)
+    expect(needsResumeSelection('fast', 'high', 'standard', 'fast', 'high', '')).toBe(false)
+    expect(needsResumeSelection('new', 'high', 'priority', 'fast', 'high', 'priority')).toBe(true)
   })
 
   it('names speeds with Codex\'s own words', () => {

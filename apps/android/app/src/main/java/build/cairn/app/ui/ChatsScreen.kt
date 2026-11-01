@@ -1418,12 +1418,6 @@ internal fun ChatPage(
                                                                                     model,
                                                                                     savedAgent.model,
                                                                                 )
-                                                                            val savedRow =
-                                                                                selectedModel(
-                                                                                    catalog,
-                                                                                    savedAgent.model,
-                                                                                    savedAgent.model,
-                                                                                )
                                                                             val selectedDisplayedSpeed =
                                                                                 pickerAppliedSpeed(
                                                                                     chosenProvider,
@@ -1438,20 +1432,15 @@ internal fun ChatPage(
                                                                                     speed,
                                                                                     savedAgent.speed,
                                                                                 )
-                                                                            val savedSpeed =
-                                                                                pickerAppliedSpeed(
-                                                                                    chosenProvider,
-                                                                                    savedRow,
-                                                                                    "",
+                                                                            if (
+                                                                                needsResumeSelection(
+                                                                                    selectedModelName,
+                                                                                    selectedReasoning,
+                                                                                    selectedDisplayedSpeed,
+                                                                                    savedAgent.model,
+                                                                                    savedAgent.reasoning,
                                                                                     savedAgent.speed,
                                                                                 )
-                                                                            if (
-                                                                                selectedModelName !=
-                                                                                    savedAgent.model ||
-                                                                                    selectedReasoning !=
-                                                                                    savedAgent.reasoning ||
-                                                                                    selectedDisplayedSpeed !=
-                                                                                    savedSpeed
                                                                             ) {
                                                                                 ResumeExecutionSelection(
                                                                                     model =

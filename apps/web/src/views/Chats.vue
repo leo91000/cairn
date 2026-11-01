@@ -111,7 +111,7 @@ import { useRetryState } from '../run-retry'
 import { exclusiveSuspensionLabel, isExclusivelySuspended } from '../run-status'
 import { backgroundWait } from '../signal'
 import { chatSkills } from '../skill-mentions'
-import { pickerAppliedSpeed, resumeSelectionSpeed } from '../speeds'
+import { needsResumeSelection, pickerAppliedSpeed, resumeSelectionSpeed } from '../speeds'
 import { delegatedChatsKey, openSubagentKey, subagentState } from '../subagents'
 import { iconButton } from '../ui'
 import { useLiveRun } from '../use-live-run'
@@ -721,14 +721,18 @@ async function resumeQuota() {
       const selectedSpeed = savedAgent
         ? resumeSelectionSpeed(chosenProvider.value, modelRow(selectedModel), speed.value, savedAgent.speed)
         : ''
-      const savedSpeed = savedAgent
-        ? pickerAppliedSpeed(chosenProvider.value, modelRow(savedAgent.model), '', savedAgent.speed)
-        : ''
       const turnId = run.chatExecution?.messageId
       const selection: ResumeExecutionSelection | undefined = savedAgent
         && chosenProvider.value === savedAgent.provider
         && !!turnId
-        && (selectedModel !== savedAgent.model || selectedReasoning !== savedAgent.reasoning || selectedDisplayedSpeed !== savedSpeed)
+        && needsResumeSelection(
+          selectedModel,
+          selectedReasoning,
+          selectedDisplayedSpeed,
+          savedAgent.model,
+          savedAgent.reasoning,
+          savedAgent.speed,
+        )
         ? { model: selectedModel, reasoning: selectedReasoning, speed: selectedSpeed }
         : undefined
       await resumeChat(api, {
