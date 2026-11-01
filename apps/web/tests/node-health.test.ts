@@ -123,7 +123,8 @@ describe('node health', () => {
   it('reads a missing free-slot count as none, like the generated Kotlin contract', () => {
     const partial = node({ occupiedSlots: 0 })
     delete (partial as Partial<ExecutionNode>).availableSlots
-    expect(nodeHealth(partial)).toMatchObject({ state: 'full', detail: 'All 4 slots in use' })
+    expect(nodeHealth(partial)).toMatchObject({ state: 'full', detail: 'No slots available' })
+    expect(nodeHealth(node({ availableSlots: 0, occupiedSlots: 1 }))).toMatchObject({ state: 'full', detail: 'No slots available' })
   })
 
   it('judges the built-in runner against server time, never against the device clock offset', () => {
