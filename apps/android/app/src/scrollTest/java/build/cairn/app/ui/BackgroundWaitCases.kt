@@ -505,7 +505,11 @@ abstract class BackgroundWaitCases {
             }
             compose.onNodeWithTag("model-picker").performClick()
             compose
-                .onNode(hasText("GPT-6 Sol", substring = false) and hasClickAction())
+                .onNode(
+                    hasText("GPT-6 Sol", substring = false) and
+                        hasClickAction() and
+                        hasAnyAncestor(hasTestTag("model-settings-sheet"))
+                )
                 .performScrollTo()
                 .performClick()
             val defaultEffort = compose.onNodeWithTag("reasoning-default")
@@ -554,7 +558,11 @@ abstract class BackgroundWaitCases {
             }
             compose.onNodeWithTag("model-picker").performClick()
             compose
-                .onNode(hasText("GPT-6 Sol", substring = false) and hasClickAction())
+                .onNode(
+                    hasText("GPT-6 Sol", substring = false) and
+                        hasClickAction() and
+                        hasAnyAncestor(hasTestTag("model-settings-sheet"))
+                )
                 .performScrollTo()
                 .performClick()
             compose.onNodeWithTag("reasoning-slider").performSemanticsAction(
@@ -606,7 +614,11 @@ abstract class BackgroundWaitCases {
             }
             compose.onNodeWithTag("model-picker").performClick()
             compose
-                .onNode(hasText("GPT-6 Sol", substring = false) and hasClickAction())
+                .onNode(
+                    hasText("GPT-6 Sol", substring = false) and
+                        hasClickAction() and
+                        hasAnyAncestor(hasTestTag("model-settings-sheet"))
+                )
                 .performScrollTo()
                 .performClick()
             compose.onNodeWithTag("reasoning-default").performClick()

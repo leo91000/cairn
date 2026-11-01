@@ -34,7 +34,7 @@ pub(crate) async fn validate(
     validate_provider_speed(provider, &selection.speed)?;
 
     let catalog = provider.adapter().model_catalog(s).await?;
-    validate_catalog(provider, selection, &catalog)?;
+    validate_catalog(provider, &run["snapshot"]["agent"], selection, &catalog)?;
     validate_shape(selection)?;
 
     let mut agent = run["snapshot"]["agent"].clone();
@@ -107,6 +107,7 @@ fn model_row<'a>(catalog: &'a Value, model: &str) -> Option<(&'a Value, Option<&
 
 fn validate_catalog(
     provider: Provider,
+    saved_agent: &Value,
     selection: &mut ResumeExecutionSelection,
     catalog: &Value,
 ) -> Result<()> {
@@ -127,6 +128,19 @@ fn validate_catalog(
         ));
     }
     let Some((model, route)) = model_row(catalog, &selected_name) else {
+        if provider == Provider::Codex
+            && !selection.model.is_empty()
+            && selection.model == text(saved_agent, "model")
+            && !text(saved_agent, "model").is_empty()
+            && selection.reasoning == text(saved_agent, "reasoning")
+            && (selection.speed == crate::models::STANDARD_SPEED
+                || selection.speed == text(saved_agent, "speed"))
+        {
+            // A speed-only change can retain the exact saved Codex alias. Its current
+            // capabilities are unknown, so keep its saved reasoning and only allow its
+            // already-saved tier or Standard; never infer capabilities for a new choice.
+            return Ok(());
+        }
         return Err(Error::bad(
             "Choose a model from this coding agent's current model catalog.",
         ));
@@ -202,7 +216,7 @@ mod tests {
                 }],
             }],
         });
-        validate_catalog(Provider::Opencode, &mut selection, &catalog).unwrap();
+        validate_catalog(Provider::Opencode, &Value::Null, &mut selection, &catalog).unwrap();
 
         let mut oversized = selection.clone();
         oversized.model = "m".repeat(121);
@@ -211,7 +225,9 @@ mod tests {
         let mut unlisted = selection.clone();
         unlisted.model = "openrouter/unlisted@revision+vision".into();
         assert!(validate_shape(&unlisted).is_ok());
-        assert!(validate_catalog(Provider::Opencode, &mut unlisted, &catalog).is_err());
+        assert!(
+            validate_catalog(Provider::Opencode, &Value::Null, &mut unlisted, &catalog).is_err()
+        );
 
         let mut invalid_effort = selection;
         invalid_effort.reasoning = "2xhigh".into();
@@ -254,9 +270,63 @@ mod tests {
             }],
         });
 
-        validate_catalog(Provider::Codex, &mut selection, &catalog).unwrap();
+        validate_catalog(Provider::Codex, &Value::Null, &mut selection, &catalog).unwrap();
 
         assert_eq!(selection.model, "gpt-6-sol");
+    }
+
+    #[test]
+    fn missing_saved_codex_alias_keeps_only_its_saved_reasoning_and_speed_or_standard() {
+        let saved_agent = serde_json::json!({
+            "model": "my-alias",
+            "reasoning": "high",
+            "speed": "priority",
+        });
+        let catalog = serde_json::json!({
+            "models": [{
+                "model": "gpt-6-sol",
+                "isDefault": true,
+                "supportedReasoningEfforts": [{ "reasoningEffort": "high" }],
+                "serviceTiers": [{ "id": "priority" }],
+            }],
+        });
+        let mut standard = ResumeExecutionSelection {
+            model: "my-alias".into(),
+            preserve_model: false,
+            reasoning: "high".into(),
+            speed: crate::models::STANDARD_SPEED.into(),
+        };
+
+        validate_catalog(Provider::Codex, &saved_agent, &mut standard, &catalog).unwrap();
+        assert_eq!(standard.model, "my-alias");
+        assert_eq!(standard.reasoning, "high");
+        assert_eq!(standard.speed, crate::models::STANDARD_SPEED);
+
+        let mut saved_speed = standard.clone();
+        saved_speed.speed = "priority".into();
+        validate_catalog(Provider::Codex, &saved_agent, &mut saved_speed, &catalog).unwrap();
+
+        let mut changed_model = standard.clone();
+        changed_model.model = "new-alias".into();
+        assert!(
+            validate_catalog(Provider::Codex, &saved_agent, &mut changed_model, &catalog).is_err()
+        );
+
+        let mut changed_reasoning = standard.clone();
+        changed_reasoning.reasoning = "xhigh".into();
+        assert!(
+            validate_catalog(
+                Provider::Codex,
+                &saved_agent,
+                &mut changed_reasoning,
+                &catalog
+            )
+            .is_err()
+        );
+
+        let mut new_speed = standard;
+        new_speed.speed = "ultrafast".into();
+        assert!(validate_catalog(Provider::Codex, &saved_agent, &mut new_speed, &catalog).is_err());
     }
 
     #[test]
@@ -276,7 +346,7 @@ mod tests {
             }],
         });
 
-        validate_catalog(Provider::Codex, &mut selection, &catalog).unwrap();
+        validate_catalog(Provider::Codex, &Value::Null, &mut selection, &catalog).unwrap();
 
         assert!(selection.model.is_empty());
         assert!(selection.preserve_model);
@@ -319,7 +389,9 @@ mod tests {
             }],
         });
 
-        assert!(validate_catalog(Provider::Opencode, &mut selection, &catalog).is_err());
+        assert!(
+            validate_catalog(Provider::Opencode, &Value::Null, &mut selection, &catalog).is_err()
+        );
         assert!(selection.model.is_empty());
     }
 
@@ -344,7 +416,9 @@ mod tests {
             reasoning: String::new(),
             speed: String::new(),
         };
-        assert!(validate_catalog(Provider::Opencode, &mut inherited, &catalog).is_err());
+        assert!(
+            validate_catalog(Provider::Opencode, &Value::Null, &mut inherited, &catalog).is_err()
+        );
         assert!(inherited.model.is_empty());
 
         let mut automatic = ResumeExecutionSelection {
@@ -353,7 +427,9 @@ mod tests {
             reasoning: String::new(),
             speed: String::new(),
         };
-        assert!(validate_catalog(Provider::Opencode, &mut automatic, &catalog).is_err());
+        assert!(
+            validate_catalog(Provider::Opencode, &Value::Null, &mut automatic, &catalog).is_err()
+        );
 
         let mut pinned = ResumeExecutionSelection {
             model: "opencode/retired-model".into(),
@@ -361,7 +437,7 @@ mod tests {
             reasoning: String::new(),
             speed: String::new(),
         };
-        validate_catalog(Provider::Opencode, &mut pinned, &catalog).unwrap();
+        validate_catalog(Provider::Opencode, &Value::Null, &mut pinned, &catalog).unwrap();
         assert_eq!(pinned.model, "opencode/retired-model");
 
         // Hidden Codex catalog rows keep their existing saved-selection semantics.
@@ -378,6 +454,6 @@ mod tests {
             reasoning: String::new(),
             speed: String::new(),
         };
-        validate_catalog(Provider::Codex, &mut codex, &codex_catalog).unwrap();
+        validate_catalog(Provider::Codex, &Value::Null, &mut codex, &codex_catalog).unwrap();
     }
 }

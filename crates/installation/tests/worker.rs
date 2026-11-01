@@ -6239,6 +6239,12 @@ async fn chat_resume_selection_keeps_saved_identity_and_reaches_the_worker_plan(
                         "supportedReasoningEfforts": [{ "reasoningEffort": "xhigh" }],
                         "serviceTiers": [{ "id": "priority" }],
                     },
+                    {
+                        "model": "my-alias",
+                        "isDefault": false,
+                        "supportedReasoningEfforts": [{ "reasoningEffort": "high" }],
+                        "serviceTiers": [{ "id": "priority" }],
+                    },
                 ],
             }),
             None,
@@ -7188,6 +7194,210 @@ async fn chat_resume_selection_keeps_saved_identity_and_reaches_the_worker_plan(
         preserved_plan["chat"]["execution"]["attachments"],
         preserved_model_before["chatExecution"]["attachments"]
     );
+
+    controller
+        .hold
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let alias_chat = s.chat_create(json!({})).await.unwrap();
+    let alias_chat_id = text(&alias_chat, "id").to_owned();
+    let mut alias_message = message("fixture:chat-hang");
+    alias_message["provider"] = "codex".into();
+    alias_message["model"] = "my-alias".into();
+    alias_message["reasoning"] = "high".into();
+    alias_message["speed"] = "priority".into();
+    let alias_turn_id = text(&alias_message, "id").to_owned();
+    let alias_initial_plan_boundary = controller.plans.lock().await.len();
+    s.chat_send(&alias_chat_id, alias_message).await.unwrap();
+    let alias_run_id = fixture.chat_run(&alias_chat_id).await;
+    let alias_running = fixture
+        .until(&alias_run_id, |run| {
+            run["status"] == RunStatus::Running && run["sessionId"].is_string()
+        })
+        .await;
+    assert_eq!(alias_running["snapshot"]["agent"]["model"], "my-alias");
+    assert_eq!(alias_running["snapshot"]["agent"]["reasoning"], "high");
+    assert_eq!(alias_running["snapshot"]["agent"]["speed"], "priority");
+    eventually(
+        Duration::from_secs(20),
+        Duration::from_millis(30),
+        async || {
+            controller
+                .plans
+                .lock()
+                .await
+                .iter()
+                .any(|plan| {
+                    plan["runId"] == alias_run_id
+                        && plan["chat"]["execution"]["messageId"] == alias_turn_id
+                })
+                .then_some(())
+        },
+    )
+    .await;
+    let alias_initial_plan = controller
+        .plans
+        .lock()
+        .await
+        .iter()
+        .skip(alias_initial_plan_boundary)
+        .find(|plan| {
+            plan["runId"] == alias_run_id && plan["chat"]["execution"]["messageId"] == alias_turn_id
+        })
+        .cloned()
+        .expect("the current catalog must route the saved alias before it is removed");
+    assert_eq!(alias_initial_plan["chat"]["model"], "my-alias");
+    assert_eq!(alias_initial_plan["chat"]["reasoning"], "high");
+    assert_eq!(alias_initial_plan["chat"]["serviceTier"], "priority");
+    let stopped = client
+        .post(format!("{}/api/chats/{alias_chat_id}/stop", fixture.url))
+        .header("x-test-relay-token", relay_token)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    stopped.error_for_status().unwrap();
+    let alias_before = fixture
+        .until(&alias_run_id, |run| {
+            run["status"] == RunStatus::Cancelled && run["resumeAvailable"] == true
+        })
+        .await;
+    let alias_checkpoint_before = fixture.checkpoint(&alias_run_id).await;
+    let alias_generation_before = alias_checkpoint_before.get("generation").cloned();
+
+    fixture.stop(false).await;
+    s.store
+        .set(
+            "codex-models:",
+            json!({
+                "checkedAt": now(),
+                "models": [
+                    {
+                        "model": "gpt-6-sol",
+                        "isDefault": true,
+                        "supportedReasoningEfforts": [{ "reasoningEffort": "high" }],
+                        "serviceTiers": [{ "id": "priority" }],
+                    },
+                    {
+                        "model": "gpt-6-luna",
+                        "isDefault": false,
+                        "supportedReasoningEfforts": [{ "reasoningEffort": "xhigh" }],
+                        "serviceTiers": [{ "id": "priority" }],
+                    },
+                ],
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let changed_alias = json!({
+        "runId": alias_run_id,
+        "turnId": alias_turn_id,
+        "selection": {
+            "model": "new-alias",
+            "reasoning": "high",
+            "speed": "standard",
+        },
+    });
+    let (changed_alias_status, _) = api_post(
+        &app,
+        relay_token,
+        &format!("/api/chats/{alias_chat_id}/resume"),
+        changed_alias,
+    )
+    .await;
+    assert_eq!(changed_alias_status, StatusCode::BAD_REQUEST);
+    let changed_alias_reasoning = json!({
+        "runId": alias_run_id,
+        "turnId": alias_turn_id,
+        "selection": {
+            "model": "my-alias",
+            "reasoning": "xhigh",
+            "speed": "standard",
+        },
+    });
+    let (changed_reasoning_status, _) = api_post(
+        &app,
+        relay_token,
+        &format!("/api/chats/{alias_chat_id}/resume"),
+        changed_alias_reasoning,
+    )
+    .await;
+    assert_eq!(changed_reasoning_status, StatusCode::BAD_REQUEST);
+    assert_eq!(s.store.run(&alias_run_id).await.unwrap(), alias_before);
+    assert_eq!(
+        fixture.checkpoint(&alias_run_id).await,
+        alias_checkpoint_before
+    );
+
+    let alias_plan_boundary = controller.plans.lock().await.len();
+    let (alias_resume_status, alias_resume_response) = api_post(
+        &app,
+        relay_token,
+        &format!("/api/chats/{alias_chat_id}/resume"),
+        json!({
+            "runId": alias_run_id,
+            "turnId": alias_turn_id,
+            "selection": {
+                "model": "my-alias",
+                "reasoning": "high",
+                "speed": "standard",
+            },
+        }),
+    )
+    .await;
+    assert_eq!(
+        alias_resume_status,
+        StatusCode::OK,
+        "{alias_resume_response}"
+    );
+    let alias_queued = s.store.run(&alias_run_id).await.unwrap();
+    assert_eq!(alias_queued["status"], RunStatus::Queued);
+    assert_eq!(alias_queued["snapshot"]["agent"]["model"], "my-alias");
+    assert_eq!(alias_queued["snapshot"]["agent"]["reasoning"], "high");
+    assert_eq!(alias_queued["snapshot"]["agent"]["speed"], "standard");
+    for field in ["id", "taskId", "workspace", "sessionId", "chatExecution"] {
+        assert_eq!(alias_queued[field], alias_before[field], "{field}");
+    }
+    assert_eq!(alias_queued["chatExecution"]["messageId"], alias_turn_id);
+
+    controller
+        .hold
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    fixture.start().await;
+    let alias_completed = fixture.until_finished(&alias_run_id).await;
+    assert_eq!(alias_completed["status"], RunStatus::Succeeded);
+    assert_eq!(alias_completed["snapshot"]["agent"]["model"], "my-alias");
+    assert_eq!(alias_completed["snapshot"]["agent"]["reasoning"], "high");
+    assert_eq!(alias_completed["snapshot"]["agent"]["speed"], "standard");
+    assert_eq!(alias_completed["chatExecution"]["messageId"], alias_turn_id);
+    for field in ["id", "taskId", "workspace", "sessionId", "chatExecution"] {
+        assert_eq!(alias_completed[field], alias_before[field], "{field}");
+    }
+    assert_eq!(
+        fixture
+            .checkpoint(&alias_run_id)
+            .await
+            .get("generation")
+            .cloned(),
+        alias_generation_before
+    );
+    let alias_plan = controller
+        .plans
+        .lock()
+        .await
+        .iter()
+        .skip(alias_plan_boundary)
+        .find(|plan| {
+            plan["runId"] == alias_run_id
+                && plan["chat"]["execution"]["messageId"] == alias_turn_id
+                && plan["chat"]["model"] == "my-alias"
+        })
+        .cloned()
+        .expect("the retained saved Codex alias must reach the resumed worker plan");
+    assert_eq!(alias_plan["chat"]["reasoning"], "high");
+    assert_eq!(alias_plan["chat"]["serviceTier"], "default");
+    assert_eq!(alias_plan["chat"]["sessionId"], alias_before["sessionId"]);
 
     fixture.stop(false).await;
     server.abort();
