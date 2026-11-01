@@ -92,6 +92,16 @@ ordinary diagnostics, unknown performance and outer error separately. The outer
 conflict is intentionally injected at the actual wait boundary; this is not a
 provider/SQLite-failure cause reproduction. Legacy is a separate process control.
 
+Additive isolated controls exercise the V2 channel -> Reports -> real bounded
+sink/Capture route: one controlled final-only numeric summary, and the actual
+worker wait loop's final cumulative 12,180-record/closed/EOF result. Intermediate
+summary counts are deliberately not fixed. The historical direct reporter test
+remains a separate regression; a new-route pass alone does not explain a missing
+direct report. Optional test-owned atomic stage counters observe the existing
+enabled gate, admission, callback and Capture decisions without another enabled
+call, report dump, global collector or synchronous replacement sink. A flush is
+a worker barrier, not evidence that a particular summary was admitted.
+
 The original flood fixture exercises 12,180 recognized records and three actual
 canonical records. Its controlled account-work delay uses virtual Tokio time;
 that elapsed value is NOT physical production latency. Store-refresh counts,

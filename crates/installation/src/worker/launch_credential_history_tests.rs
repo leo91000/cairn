@@ -283,7 +283,7 @@ async fn historical_rotation_fixture(aggregate: bool) {
             output::read_output(stdout_reader, false, out_sender, Vec::new()).await;
         });
         let accepted = CancellationToken::new();
-        let mut publisher = output::Publisher::new(&id, &crate::config::id());
+        let (mut publisher, reports) = output::Publisher::channel(&id, &crate::config::id());
         publisher.accepted_fixture(accepted.clone());
         let err = tokio::spawn(async move {
             if aggregate {
@@ -344,7 +344,13 @@ async fn historical_rotation_fixture(aggregate: bool) {
         let mut log_total = 0;
         let ((), result) = tokio::join!(
             produce,
-            execution.wait(&mut child, &mut events, &mut log_total, false, None)
+            execution.wait(
+                &mut child,
+                &mut events,
+                &mut log_total,
+                false,
+                aggregate.then_some(reports)
+            )
         );
         let Err(error) = result else {
             panic!("the explicit wait boundary must fail");

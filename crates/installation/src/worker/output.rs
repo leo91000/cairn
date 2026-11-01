@@ -11,6 +11,8 @@ use tokio::{
 
 mod telemetry;
 
+#[cfg(test)]
+pub(super) use telemetry::{Capture as SummaryCapture, Probe};
 pub(super) use telemetry::{Publisher, Reports};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

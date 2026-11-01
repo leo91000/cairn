@@ -1,9 +1,8 @@
 use super::*;
 use crate::{config::Config, service::Service};
 use serde_json::{Value, json};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tracing::instrument::WithSubscriber;
-use tracing_subscriber::{Layer, layer::SubscriberExt};
 
 const RUN: &str = "00000000-0000-4000-8000-000000000001";
 const ATTEMPT: &str = "00000000-0000-4000-8000-000000000002";
@@ -125,40 +124,13 @@ fn counters_are_cumulative_saturating_and_coverage_is_explicit() {
     assert!(serde_json::to_vec(&publisher.snapshot).unwrap().len() < 4096);
 }
 
-#[derive(Clone, Default)]
-struct Capture(Arc<Mutex<Vec<Value>>>);
-
-struct Record<'a>(&'a Capture);
-
-impl tracing::field::Visit for Record<'_> {
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        if field.name() != "record" {
-            return;
-        }
-        let Ok(value) = serde_json::from_str::<Value>(&format!("{value:?}")) else {
-            return;
-        };
-        if value["snapshot"].is_object() {
-            self.0.0.lock().unwrap().push(value);
-        }
-    }
-}
-
-impl<S: tracing::Subscriber> Layer<S> for Capture {
-    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
-        event.record(&mut Record(self));
-    }
-}
-
 fn capture() -> (Capture, tracing::Dispatch) {
-    let capture = Capture::default();
-    let dispatch = tracing::Dispatch::new(tracing_subscriber::registry().with(capture.clone()));
-    (capture, dispatch)
+    Capture::with_dispatch(None)
 }
 
 fn flushed(capture: &Capture) -> Vec<Value> {
     assert!(crate::performance::flush(Duration::from_secs(5)));
-    capture.0.lock().unwrap().clone()
+    capture.records()
 }
 
 // The sink and tracing interest are process-global. These children run alone
@@ -208,9 +180,11 @@ async fn numeric_rotation_without_canonical_child() {
         .set(&key, &json!({ "tokens": { "access_token": "8471" } }))
         .await
         .unwrap();
-    let (capture, dispatch) = capture();
+    let probe = Arc::new(Probe::default());
+    let (capture, dispatch) = Capture::with_dispatch(Some(probe.clone()));
     async {
         let mut publisher = Publisher::new(RUN, ATTEMPT);
+        publisher.probe_fixture(probe.clone());
         service
             .vault
             .set(&key, &json!({ "tokens": { "access_token": "17381" } }))
@@ -247,7 +221,12 @@ async fn numeric_rotation_without_canonical_child() {
     .with_subscriber(dispatch)
     .await;
     let reports = flushed(&capture);
-    assert_eq!(reports.len(), 1);
+    assert_eq!(
+        reports.len(),
+        1,
+        "fixed_reporting_stages={}",
+        probe.snapshot()
+    );
     let snapshot = &reports[0]["snapshot"];
     assert_eq!(
         snapshot["items"],
@@ -424,4 +403,108 @@ async fn dropped_reader_observer_does_not_upgrade_partial_coverage_to_eof() {
     assert_eq!(latest.recognized_records, 1);
     assert!(!latest.reader_closed && !latest.eof);
     assert!(!reports.changed().await);
+}
+
+#[tokio::test]
+#[ignore = "process-global V2 diagnostic capture, invoked by isolated_v2_reporting"]
+async fn numeric_rotation_v2_channel_child() {
+    let (_root, service) = service().await;
+    let key = format!("codex-account:{}", crate::config::id());
+    service
+        .vault
+        .set(&key, &json!({ "tokens": { "access_token": "8471" } }))
+        .await
+        .unwrap();
+    let probe = Arc::new(Probe::default());
+    let (capture, dispatch) = Capture::with_dispatch(Some(probe.clone()));
+    async {
+        let (mut publisher, mut consumer) = Publisher::channel_fixture(RUN, ATTEMPT, probe.clone());
+        service
+            .vault
+            .set(&key, &json!({ "tokens": { "access_token": "17381" } }))
+            .await
+            .unwrap();
+        assert_eq!(
+            service.vault.get(&key).await.unwrap().unwrap()["tokens"]["access_token"],
+            "17381"
+        );
+        let input = completed(17381, false)
+            .replace("request_id=1", "request_id=17381")
+            .replace("queue_ms=0", "queue_ms=17381");
+        // Model a previously sent window without depending on SQLite or CPU speed.
+        tokio::time::pause();
+        publisher.next_report = Instant::now() + PERIOD;
+        assert!(publisher.observe(&input));
+        tokio::time::resume();
+        // No canonical refresh or reporter refresh ever observes B.
+        service
+            .vault
+            .set(&key, &json!({ "tokens": { "access_token": "19873" } }))
+            .await
+            .unwrap();
+        assert_eq!(
+            service.vault.get(&key).await.unwrap().unwrap()["tokens"]["access_token"],
+            "19873"
+        );
+        // Deterministic local monotonic measurement, independent of SQLite waits.
+        tokio::time::pause();
+        publisher.started = Instant::now() - Duration::from_millis(10);
+        publisher.finish(true);
+        tokio::time::resume();
+        drop(publisher);
+        assert!(
+            consumer.changed().await,
+            "fixed_reporting_stages={}",
+            probe.snapshot()
+        );
+        consumer.publish_latest();
+        assert!(
+            !consumer.changed().await,
+            "fixed_reporting_stages={}",
+            probe.snapshot()
+        );
+    }
+    .with_subscriber(dispatch)
+    .await;
+    let reports = flushed(&capture);
+    assert_eq!(
+        reports.len(),
+        1,
+        "fixed_reporting_stages={}",
+        probe.snapshot()
+    );
+    let snapshot = &reports[0]["snapshot"];
+    assert_eq!(
+        snapshot["items"],
+        json!({
+            "started_records": 0,
+            "completed_records": 1,
+            "declared_failure_records": 1,
+            "missing_queue_field_records": 0,
+        })
+    );
+    assert_eq!(snapshot["local_reader_elapsed_ms"], 10);
+    assert_eq!(snapshot["reader_closed"], true);
+    assert_eq!(snapshot["eof"], true);
+    let encoded = reports[0].to_string();
+    assert!(!encoded.contains("17381"));
+    assert!(!encoded.contains("19873"));
+    for omitted in [
+        "request_id",
+        "elapsed_ms_min",
+        "elapsed_ms_max",
+        "elapsed_ms_total",
+        "queue_ms_total",
+        "queue_ms_max",
+    ] {
+        assert!(!encoded.contains(omitted));
+    }
+    service.shutdown.cancel();
+}
+
+#[test]
+fn isolated_v2_reporting() {
+    crate::test_process::run_ignored(
+        "worker::output::telemetry::tests::numeric_rotation_v2_channel_child",
+    );
 }

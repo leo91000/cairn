@@ -5,6 +5,12 @@ use serde::Serialize;
 use std::str::SplitAsciiWhitespace;
 use tokio::time::{Duration, Instant};
 
+#[cfg(test)]
+mod probe;
+
+#[cfg(test)]
+pub(in crate::worker) use probe::{Capture, Probe};
+
 const PERIOD: Duration = Duration::from_secs(1);
 const MAX_DURATION_MS: u64 = 86_400_000;
 
@@ -133,6 +139,8 @@ pub(in crate::worker) struct Publisher {
     reports: Option<tokio::sync::watch::Sender<Option<Snapshot>>>,
     #[cfg(test)]
     accepted: Option<tokio_util::sync::CancellationToken>,
+    #[cfg(test)]
+    probe: Option<std::sync::Arc<Probe>>,
 }
 
 impl Publisher {
@@ -149,6 +157,8 @@ impl Publisher {
             reports: None,
             #[cfg(test)]
             accepted: None,
+            #[cfg(test)]
+            probe: None,
         }
     }
 
@@ -162,7 +172,26 @@ impl Publisher {
             attempt: publisher.attempt.clone(),
             dispatch: publisher.dispatch.clone(),
             rejected_reports: 0,
+            #[cfg(test)]
+            probe: None,
         };
+        (publisher, reports)
+    }
+
+    #[cfg(test)]
+    pub(in crate::worker) fn probe_fixture(&mut self, probe: std::sync::Arc<Probe>) {
+        self.probe = Some(probe);
+    }
+
+    #[cfg(test)]
+    pub(in crate::worker) fn channel_fixture(
+        run: &str,
+        attempt: &str,
+        probe: std::sync::Arc<Probe>,
+    ) -> (Self, Reports) {
+        let (mut publisher, mut reports) = Self::channel(run, attempt);
+        publisher.probe = Some(probe.clone());
+        reports.probe = Some(probe);
         (publisher, reports)
     }
 
@@ -254,6 +283,8 @@ impl Publisher {
             self.snapshot,
             &self.dispatch,
             &mut self.rejected_reports,
+            #[cfg(test)]
+            self.probe.as_ref(),
         );
     }
 
@@ -275,6 +306,8 @@ pub(in crate::worker) struct Reports {
     attempt: String,
     dispatch: tracing::Dispatch,
     rejected_reports: u64,
+    #[cfg(test)]
+    probe: Option<std::sync::Arc<Probe>>,
 }
 
 impl Reports {
@@ -291,6 +324,8 @@ impl Reports {
                 snapshot,
                 &self.dispatch,
                 &mut self.rejected_reports,
+                #[cfg(test)]
+                self.probe.as_ref(),
             );
         }
     }
@@ -302,6 +337,7 @@ fn publish(
     snapshot: Snapshot,
     dispatch: &tracing::Dispatch,
     rejected_reports: &mut u64,
+    #[cfg(test)] probe: Option<&std::sync::Arc<Probe>>,
 ) {
     // This record contains only managed UUIDs, static labels, local event
     // counts and a host-monotonic reader duration. Child numeric payloads
@@ -309,7 +345,17 @@ fn publish(
     // Unknown records still use the original fresh-redacted output path.
     let dispatch = dispatch.clone();
     let accepted = tracing::dispatcher::with_default(&dispatch, || {
-        if !crate::performance::enabled() {
+        let enabled = crate::performance::enabled();
+        #[cfg(test)]
+        if let Some(probe) = probe {
+            Probe::bump(&probe.enabled_attempts);
+            Probe::bump(if enabled {
+                &probe.enabled_true
+            } else {
+                &probe.enabled_false
+            });
+        }
+        if !enabled {
             return None;
         }
         let summary = serde_json::json!({
@@ -321,13 +367,35 @@ fn publish(
             "timing": "host-monotonic elapsed since reader observer creation; child RPC timings and IDs are discarded",
             "coverage": "cumulative reader observations, not authoritative agent progress",
         }).to_string();
+        #[cfg(test)]
+        if let Some(probe) = probe {
+            Probe::bump(&probe.admission_attempts);
+        }
+        #[cfg(test)]
+        let callback_probe = probe.cloned();
         Some(crate::performance::try_record(move |delivery| {
+            #[cfg(test)]
+            if let Some(probe) = &callback_probe {
+                Probe::bump(&probe.callback_entered);
+            }
             tracing::info!(target: "cairn_performance", parent: None,
                 operation = "agent_rpc_summary", source = "agent_process",
                 record = %summary, diagnostics_queue_us = delivery.queue_us,
                 dropped_reports_total = delivery.dropped_reports_total);
+            #[cfg(test)]
+            if let Some(probe) = &callback_probe {
+                Probe::bump(&probe.callback_returned);
+            }
         }))
     });
+    #[cfg(test)]
+    if let (Some(probe), Some(admitted)) = (probe, accepted) {
+        Probe::bump(if admitted {
+            &probe.admitted
+        } else {
+            &probe.not_admitted
+        });
+    }
     if accepted == Some(false) {
         *rejected_reports = rejected_reports.saturating_add(1);
     }

@@ -54,7 +54,7 @@ async fn rpc_flood_does_not_hold_canonical_output_behind_redaction_work() {
 
 async fn rpc_flood_fixture() {
     let (root, service) = service_fixture().await;
-    rpc_flood_on_service(root, service).await;
+    rpc_flood_on_service(root, service, None).await;
 }
 
 async fn service_fixture() -> (tempfile::TempDir, Arc<Service>) {
@@ -84,7 +84,11 @@ async fn service_with_codex(codex: &str) -> (tempfile::TempDir, Arc<Service>) {
     (root, service)
 }
 
-async fn rpc_flood_on_service(root: tempfile::TempDir, service: Arc<Service>) {
+async fn rpc_flood_on_service(
+    root: tempfile::TempDir,
+    service: Arc<Service>,
+    report_probe: Option<Arc<output::Probe>>,
+) {
     let id = crate::config::id();
     let row = json!({ "id": id, "taskId": id, "status": "running" });
     service
@@ -133,7 +137,10 @@ async fn rpc_flood_on_service(root: tempfile::TempDir, service: Arc<Service>) {
         "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":4,\"output_tokens\":2}}\n",
     );
     let (sender, mut events) = mpsc::channel(32);
-    let (telemetry, reports) = output::Publisher::channel(&id, &crate::config::id());
+    let (telemetry, reports) = match report_probe {
+        Some(probe) => output::Publisher::channel_fixture(&id, &crate::config::id(), probe),
+        None => output::Publisher::channel(&id, &crate::config::id()),
+    };
     let diagnostics_sender = sender.clone();
     let diagnostics = tokio::spawn(async move {
         output::read_agent_diagnostics(stderr.as_bytes(), diagnostics_sender, telemetry).await;
@@ -175,6 +182,10 @@ async fn rpc_flood_on_service(root: tempfile::TempDir, service: Arc<Service>) {
         .unwrap();
     let kinds: Vec<_> = stored.iter().map(|event| text(event, "type")).collect();
     assert_eq!(kinds, ["turn.started", "item.completed", "turn.completed"]);
+    assert_eq!(
+        stored[2]["payload"]["usage"],
+        json!({ "input_tokens": 4, "output_tokens": 2 })
+    );
     assert!(
         stored[1]["text"]
             .as_str()
@@ -386,4 +397,42 @@ async fn output_reader_failure_and_cancelled_join_leave_no_detached_reader() {
         // from ownership cleanup, not a lucky EOF or a timeout.
         drop((stdout, stderr));
     }
+}
+
+#[test]
+fn v2_worker_reports_final_cumulative_flood_coverage() {
+    crate::test_process::run_ignored("worker::launch::stream_tests::v2_worker_reporting_child");
+}
+
+#[tokio::test]
+#[ignore = "process-global summary capture, invoked by its isolated wrapper"]
+async fn v2_worker_reporting_child() {
+    use tracing::instrument::WithSubscriber;
+    let probe = Arc::new(output::Probe::default());
+    let (capture, dispatch) = output::SummaryCapture::with_dispatch(Some(probe.clone()));
+    let (root, service) = service_fixture().await;
+    rpc_flood_on_service(root, service, Some(probe.clone()))
+        .with_subscriber(dispatch)
+        .await;
+    assert!(
+        crate::performance::flush(Duration::from_secs(5)),
+        "fixed_reporting_stages={}",
+        probe.snapshot()
+    );
+    let reports = capture.records();
+    // Intermediate windows may coalesce. Require the final cumulative result,
+    // not an exact global report count or a fortunate scheduling interleave.
+    let final_coverage = reports.iter().any(|report| {
+        let snapshot = &report["snapshot"];
+        snapshot["recognized_records"] == 12180
+            && snapshot["items"]["started_records"] == 6090
+            && snapshot["items"]["completed_records"] == 6090
+            && snapshot["reader_closed"] == true
+            && snapshot["eof"] == true
+    });
+    assert!(
+        final_coverage,
+        "fixed_reporting_stages={}",
+        probe.snapshot()
+    );
 }
