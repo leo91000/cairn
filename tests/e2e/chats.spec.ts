@@ -10,6 +10,19 @@ import {
   workspacePath,
 } from './fixtures'
 
+interface ResumeDiagnosticRecord {
+  stage: 'handler-entered' | 'guard-no-detail' | 'guard-busy' | 'run-state' | 'selection-start' | 'catalog-state' | 'selection-ready' | 'resume-attempt' | 'resume-returned' | 'pause-attempt' | 'pause-returned' | 'caught'
+  runStatus?: 'missing' | 'other' | 'queued' | 'running' | 'failed' | 'interrupted' | 'cancelled' | 'succeeded' | 'idle'
+  resumeAvailable?: boolean
+  provider?: 'codex' | 'claude' | 'opencode' | 'other'
+  catalogPresent?: boolean
+}
+
+type ResumeDiagnosticWindow = Window & {
+  __cairnTestResumeDiagnostic?: (record: ResumeDiagnosticRecord) => void
+  __cairnTestResumeDiagnosticRecords?: ResumeDiagnosticRecord[]
+}
+
 test('expired environments retain the conversation and explain fresh resumption and cleanup retries', async ({ page, workspace }) => {
   const chat = await workspace.api('/api/chats', 'POST', {})
   workspace.service.store.put('chats', { ...chat, environmentState: 'expired', environmentExpiredAt: Date.now() })
@@ -1337,6 +1350,15 @@ test('same-provider quota resume submits the saved turn with the picker-applied 
     },
   }))
   const resumeRequests: Record<string, unknown>[] = []
+  await page.addInitScript(() => {
+    const records: ResumeDiagnosticRecord[] = []
+    const diagnosticWindow = window as ResumeDiagnosticWindow
+    diagnosticWindow.__cairnTestResumeDiagnosticRecords = records
+    diagnosticWindow.__cairnTestResumeDiagnostic = (record) => {
+      if (records.length < 16)
+        records.push({ ...record })
+    }
+  })
   await page.route(`**/chats/${chat.id}/resume`, async (route) => {
     expect(route.request().method()).toBe('POST')
     resumeRequests.push(route.request().postDataJSON())
@@ -1361,7 +1383,10 @@ test('same-provider quota resume submits the saved turn with the picker-applied 
   await menu.getByRole('button', { name: 'Close', exact: true }).click()
   await expect(picker).toHaveAccessibleName(/Deep thinker · Ultra reasoning/)
   await card.getByRole('button', { name: 'Resume conversation', exact: true }).click()
-  await expect.poll(() => resumeRequests.length).toBe(1)
+  await expect.poll(async () => ({
+    requests: resumeRequests.length,
+    stages: await page.evaluate(() => (window as ResumeDiagnosticWindow).__cairnTestResumeDiagnosticRecords ?? []),
+  })).toMatchObject({ requests: 1 })
 
   expect(resumeRequests[0]).toMatchObject({
     chatId: chat.id,

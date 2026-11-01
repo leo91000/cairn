@@ -5334,9 +5334,10 @@ async fn chat_resume_selection_resolves_opencode_catalog_default_before_adapter_
     let session = common::relay_fixture::context(&s).await;
     let client = reqwest::Client::new();
     let relay_token = text(&session, "value").to_owned();
+    let fixture_url = fixture.url.clone();
     let resume = |selection: Value| {
         client
-            .post(format!("{}/api/chats/{chat_id}/resume", fixture.url))
+            .post(format!("{fixture_url}/api/chats/{chat_id}/resume"))
             .header("x-test-relay-token", &relay_token)
             .json(&json!({
                 "runId": run_id,

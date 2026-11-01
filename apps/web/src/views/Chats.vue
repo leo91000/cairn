@@ -118,6 +118,70 @@ import { useLiveRun } from '../use-live-run'
 import { workspaceActionsKey } from '../workspace-actions'
 import { chatPath } from '../workspace-links'
 
+type ResumeDiagnosticStage
+  = | 'handler-entered'
+    | 'guard-no-detail'
+    | 'guard-busy'
+    | 'run-state'
+    | 'selection-start'
+    | 'catalog-state'
+    | 'selection-ready'
+    | 'resume-attempt'
+    | 'resume-returned'
+    | 'pause-attempt'
+    | 'pause-returned'
+    | 'caught'
+
+type ResumeDiagnosticRunStatus = 'missing' | 'other' | 'queued' | 'running' | 'failed' | 'interrupted' | 'cancelled' | 'succeeded' | 'idle'
+
+interface ResumeDiagnosticRecord {
+  stage: ResumeDiagnosticStage
+  runStatus?: ResumeDiagnosticRunStatus
+  resumeAvailable?: boolean
+  provider?: Provider | 'other'
+  catalogPresent?: boolean
+}
+
+type ResumeDiagnosticWindow = Window & {
+  __cairnTestResumeDiagnostic?: (record: ResumeDiagnosticRecord) => void
+}
+
+const resumeDiagnosticEnabled = import.meta.env.VITE_CAIRN_TEST_RESUME_DIAGNOSTICS === 'true'
+let resumeDiagnosticCount = 0
+
+function reportResumeDiagnostic(record: ResumeDiagnosticRecord) {
+  if (!resumeDiagnosticEnabled || resumeDiagnosticCount >= 16)
+    return
+  resumeDiagnosticCount++
+  try {
+    (window as ResumeDiagnosticWindow).__cairnTestResumeDiagnostic?.(record)
+  }
+  catch {
+    // The optional test probe must never affect the resume action.
+  }
+}
+
+function resumeDiagnosticRunStatus(status?: string): ResumeDiagnosticRunStatus {
+  switch (status) {
+    case 'queued':
+    case 'running':
+    case 'failed':
+    case 'interrupted':
+    case 'cancelled':
+    case 'succeeded':
+    case 'idle':
+      return status
+    default:
+      return status ? 'other' : 'missing'
+  }
+}
+
+function resumeDiagnosticProvider(provider: string): Provider | 'other' {
+  if (provider === 'codex' || provider === 'claude' || provider === 'opencode')
+    return provider
+  return 'other'
+}
+
 const router = useRouter()
 const route = useRoute()
 const detail = ref<ChatDetail | null>(null)
@@ -701,16 +765,37 @@ async function action(name: 'pause' | 'stop' | 'restore' | 'new-session' | 'comp
 }
 
 async function resumeQuota() {
+  reportResumeDiagnostic({ stage: 'handler-entered' })
   const chat = detail.value
-  if (!chat || busy.value)
+  if (!chat) {
+    reportResumeDiagnostic({ stage: 'guard-no-detail' })
     return
+  }
+
+  if (busy.value) {
+    reportResumeDiagnostic({ stage: 'guard-busy' })
+    return
+  }
+
   busy.value = true
   error.value = ''
   try {
     const run = chat.run
+    const diagnosticProvider = chosenProvider.value
+    reportResumeDiagnostic({
+      stage: 'run-state',
+      runStatus: resumeDiagnosticRunStatus(run?.status),
+      resumeAvailable: run?.resumeAvailable === true,
+      provider: resumeDiagnosticProvider(diagnosticProvider),
+    })
     if (run && run.resumeAvailable && ['failed', 'interrupted', 'cancelled'].includes(run.status)) {
+      reportResumeDiagnostic({ stage: 'selection-start' })
       const savedAgent = run.snapshot?.agent
       const catalog = modelCatalogs[chosenProvider.value].catalog.models
+      reportResumeDiagnostic({
+        stage: 'catalog-state',
+        catalogPresent: catalog.length > 0,
+      })
       const selectedModel = model.value || savedAgent?.model || catalog.find(item => item.isDefault)?.model || ''
       const selectedReasoning = reasoning.value || (!model.value ? savedAgent?.reasoning : '') || ''
       const modelRow = (name: string) => catalog.find(item => item.model === name || item.routes?.some(route => route.model === name))
@@ -735,17 +820,23 @@ async function resumeQuota() {
         )
         ? { model: selectedModel, reasoning: selectedReasoning, speed: selectedSpeed }
         : undefined
+      reportResumeDiagnostic({ stage: 'selection-ready' })
+      reportResumeDiagnostic({ stage: 'resume-attempt' })
       await resumeChat(api, {
         chatId: chat.id,
         runId: run.id,
         turnId,
         selection,
       })
+      reportResumeDiagnostic({ stage: 'resume-returned' })
     }
 
+    reportResumeDiagnostic({ stage: 'pause-attempt' })
     await setChatPaused(api, { chatId: chat.id, paused: false })
+    reportResumeDiagnostic({ stage: 'pause-returned' })
   }
   catch (e) {
+    reportResumeDiagnostic({ stage: 'caught' })
     error.value = (e as Error).message
   }
   finally { busy.value = false }

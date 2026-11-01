@@ -134,7 +134,7 @@ jobs:
         run: |
           cargo build --locked -p cairn-installation --bin cairn --example worker_fixture --example browser_fixture
           cargo build --locked -p cairn-beacon --bin cairn-beacon --example beacon_sql_fixture
-          pnpm exec vite build --config apps/web/vite.config.ts
+          VITE_CAIRN_TEST_RESUME_DIAGNOSTICS=true pnpm exec vite build --config apps/web/vite.config.ts
       - name: Qualify the isolated Postgres fixture
         run: pnpm exec tsx scripts/qualify-beacon-sql-fixture.ts
       - name: Run the saved-chat resume journey

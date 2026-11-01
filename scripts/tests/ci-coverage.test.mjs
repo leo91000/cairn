@@ -68,7 +68,7 @@ describe('parallel CI coverage', () => {
     expect(build.run.trim().split('\n').map(line => line.trim())).toEqual([
       'cargo build --locked -p cairn-installation --bin cairn --example worker_fixture --example browser_fixture',
       'cargo build --locked -p cairn-beacon --bin cairn-beacon --example beacon_sql_fixture',
-      'pnpm exec vite build --config apps/web/vite.config.ts',
+      'VITE_CAIRN_TEST_RESUME_DIAGNOSTICS=true pnpm exec vite build --config apps/web/vite.config.ts',
     ])
     const journey = browser.steps.find(step => step.name === 'Run the saved-chat resume journey')
     expect(journey['timeout-minutes']).toBe(10)
