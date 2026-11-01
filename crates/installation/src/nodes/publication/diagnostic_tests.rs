@@ -118,6 +118,7 @@ async fn transfer_diagnostics_isolate_concurrent_attempts_and_conserve_volumes()
         },
     ];
     let publication = Publication {
+        authorize: crate::authorization::Authorization::default(),
         s: &s,
         run: &run,
         run_id: &run_id,
@@ -287,6 +288,7 @@ async fn transfer_diagnostics_measure_base_get_decode_and_failed_put_without_los
     let snapshot_id = id();
     let attempt = id();
     let publication = Publication {
+        authorize: crate::authorization::Authorization::default(),
         s: &s,
         run: &run,
         run_id: &run_id,
@@ -430,9 +432,14 @@ async fn default_logging_filter_child() {
         .finish();
     async {
         assert!(
-            capture_owned(&s, &json!({ "id": id() }), CaptureProtocol::Direct)
-                .await
-                .is_err()
+            capture_owned(
+                &s,
+                &json!({ "id": id() }),
+                CaptureProtocol::Direct,
+                crate::authorization::Authorization::default()
+            )
+            .await
+            .is_err()
         );
         let metrics =
             diagnostic::Metrics::new(&id(), "credential-not-a-uuid", "path-not-a-uuid", "manager");

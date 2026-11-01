@@ -231,7 +231,7 @@ impl Authorization {
 mod tests {
     use super::*;
     use crate::plugin_grant_fixture::Fixture;
-    use crate::{agent_fixture::AgentFixture, mission_fixture::MissionFixture, validation::text};
+    use crate::{mission_fixture::MissionFixture, validation::text};
     use serde_json::json;
     use std::sync::atomic::Ordering;
 
