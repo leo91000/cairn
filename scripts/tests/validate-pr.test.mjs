@@ -1,3 +1,6 @@
+import { spawnSync } from 'node:child_process'
+import process from 'node:process'
+import { fileURLToPath } from 'node:url'
 import {
   describe,
   expect,
@@ -7,6 +10,15 @@ import {
 import { validationFailures } from '../pr-validation-required.mjs'
 import { validationScope } from '../pr-validation-scope.mjs'
 import { runPlan, validationPlan } from '../validate-pr.mjs'
+
+const requiredValidationCli = fileURLToPath(new URL('../pr-validation-required.mjs', import.meta.url))
+
+function runRequiredValidationCli(results) {
+  return spawnSync(process.execPath, [requiredValidationCli], {
+    encoding: 'utf8',
+    env: { RESULTS: JSON.stringify(results) },
+  })
+}
 
 describe('pR validation', () => {
   it('includes platform and contract checks for indirect shared inputs', () => {
@@ -23,27 +35,89 @@ describe('pR validation', () => {
     expect(validationScope(['docs/README.md'])).toEqual({ android: false, contracts: false, browser: false })
   })
 
-  it('requires the selected browser job and permits only a genuinely unselected skip', () => {
-    const required = {
-      scope: { result: 'success', outputs: { contracts: 'false', android: 'false', browser: 'true' } },
+  it('accepts only literal scope booleans and matches every selected job result', () => {
+    const allSelected = {
+      scope: { result: 'success', outputs: { contracts: 'true', android: 'true', browser: 'true' } },
+      quality: { result: 'success' },
+      contracts: { result: 'success' },
+      android: { result: 'success' },
+      browser: { result: 'success' },
+    }
+    const noneSelected = {
+      scope: { result: 'success', outputs: { contracts: 'false', android: 'false', browser: 'false' } },
       quality: { result: 'success' },
       contracts: { result: 'skipped' },
       android: { result: 'skipped' },
+      browser: { result: 'skipped' },
+    }
+
+    expect(validationFailures(allSelected)).toEqual([])
+    expect(validationFailures(noneSelected)).toEqual([])
+    expect(validationFailures({ ...allSelected, browser: { result: 'failure' } }))
+      .toContain('browser: expected success, got failure')
+    expect(validationFailures({ ...noneSelected, android: { result: 'failure' } }))
+      .toContain('android: expected skipped, got failure')
+    expect(validationFailures({ ...allSelected, scope: { ...allSelected.scope, result: 'failure' } }))
+      .toContain('scope did not pass')
+    expect(validationFailures({ ...allSelected, quality: { result: 'failure' } }))
+      .toContain('quality did not pass')
+
+    const invalidSelections = [
+      ['missing', undefined],
+      ['null', null],
+      ['boolean false', false],
+      ['boolean true', true],
+      ['case mismatch', 'True'],
+      ['unknown string', 'unselected'],
+    ]
+    for (const name of ['contracts', 'android', 'browser']) {
+      for (const [label, value] of invalidSelections) {
+        const outputs = { ...allSelected.scope.outputs }
+        if (value === undefined)
+          delete outputs[name]
+        else
+          outputs[name] = value
+        const needs = {
+          ...allSelected,
+          scope: { ...allSelected.scope, outputs },
+          [name]: { result: 'skipped' },
+        }
+        expect(validationFailures(needs), `${name}: ${label}`)
+          .toContain(`${name}: scope output must be exactly "true" or "false"`)
+      }
+    }
+  })
+
+  it('validates fixed job results through the actual JSON environment CLI entrypoint', () => {
+    const allSelected = {
+      scope: { result: 'success', outputs: { contracts: 'true', android: 'true', browser: 'true' } },
+      quality: { result: 'success' },
+      contracts: { result: 'success' },
+      android: { result: 'success' },
       browser: { result: 'success' },
     }
-    expect(validationFailures(required)).toEqual([])
-    expect(validationFailures({ ...required, browser: { result: 'failure' } }))
-      .toContain('browser: expected success, got failure')
-    expect(validationFailures({
-      ...required,
-      scope: { ...required.scope, outputs: { ...required.scope.outputs, browser: 'false' } },
+    const noneSelected = {
+      scope: { result: 'success', outputs: { contracts: 'false', android: 'false', browser: 'false' } },
+      quality: { result: 'success' },
+      contracts: { result: 'skipped' },
+      android: { result: 'skipped' },
       browser: { result: 'skipped' },
-    })).toEqual([])
-    expect(validationFailures({
-      ...required,
-      scope: { ...required.scope, outputs: { ...required.scope.outputs, browser: 'false' } },
-      browser: { result: 'failure' },
-    })).toContain('browser: expected skipped, got failure')
+    }
+    expect(runRequiredValidationCli(allSelected).status).toBe(0)
+    expect(runRequiredValidationCli(noneSelected).status).toBe(0)
+
+    const malformed = {
+      ...noneSelected,
+      scope: { ...noneSelected.scope, outputs: { ...noneSelected.scope.outputs, browser: 'False' } },
+    }
+    const malformedResult = runRequiredValidationCli(malformed)
+    expect(malformedResult.status).toBe(1)
+    expect(malformedResult.stderr).toContain('browser: scope output must be exactly "true" or "false"')
+
+    const missing = { ...noneSelected, scope: { result: 'success', outputs: {} } }
+    expect(runRequiredValidationCli(missing).status).toBe(1)
+    const failedScope = { ...allSelected, scope: { ...allSelected.scope, result: 'failure' } }
+    expect(runRequiredValidationCli(failedScope).status).toBe(1)
   })
 
   it('defaults to the full core and validates all suite names before running anything', () => {

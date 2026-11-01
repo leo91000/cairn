@@ -8,7 +8,13 @@ export function validationFailures(needs) {
   }
 
   for (const name of ['contracts', 'android', 'browser']) {
-    const expected = needs.scope?.outputs?.[name] === 'true' ? 'success' : 'skipped'
+    const selected = needs.scope?.outputs?.[name]
+    let expected = 'success'
+    if (selected === 'false')
+      expected = 'skipped'
+    else if (selected !== 'true')
+      failures.push(`${name}: scope output must be exactly "true" or "false"`)
+
     if (needs[name]?.result !== expected)
       failures.push(`${name}: expected ${expected}, got ${needs[name]?.result}`)
   }
