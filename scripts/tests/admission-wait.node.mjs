@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict'
 import { Buffer } from 'node:buffer'
 import test from 'node:test'
-import { admissionWaitLimits, observeAdmissionWaits, readAdmissionOccurrence } from '../admission-wait.mjs'
+import {
+  admissionWaitLimits,
+  observeAdmissionWaits,
+  readAdmissionOccurrence,
+  readAdmissionTransition,
+} from '../admission-wait.mjs'
 
 const origin = 1700000000000
 
@@ -140,7 +145,10 @@ test('clock rollback, future state and unsupported state never age a new observa
     assert.equal(observation(result).observedSince, origin)
   }
 
-  assert.deepEqual(observeAdmissionWaits({ at: Number.NaN }, old.state).observations, [])
+  const invalid = observeAdmissionWaits({ at: Number.NaN }, old.state)
+  assert.equal(observation(invalid).status, 'unknown')
+  assert.equal(invalid.state.waits[0].since, null)
+  assert.equal(invalid.state.waits[0].episodeId, old.state.waits[0].episodeId)
 })
 
 test('malformed/duplicate identities and unsupported queued reasons stay unknown', () => {
@@ -303,4 +311,67 @@ test('unavailable or malformed fresh nonce never emits an invented episode', () 
     assert.equal(observation(result).occurrence, undefined)
     assert(!JSON.stringify(result).includes('entropy unavailable'))
   }
+})
+
+test('valid scope transition survives allocation failure and cannot revive the ended scope', () => {
+  for (const invalid of ['throw', 'invalid']) {
+    let count = 0
+    const create = () => `00000000-0000-4000-8000-${(++count).toString(16).padStart(12, '0')}`
+    const first = observeAdmissionWaits(sample(origin, [capacity()]), undefined, undefined, create)
+    const fail = () => {
+      if (invalid === 'throw')
+        throw new Error('fixture allocation failure')
+      return 'invalid'
+    }
+
+    const changed = observeAdmissionWaits(sample(origin + 60000, [capacity('run-one', { activeMessageId: 'input-two' })]), first.state, undefined, fail)
+    assert.equal(changed.state.waits[0].scope, JSON.stringify(['attempt-one', 'input-two', null]))
+    assert.equal(observation(changed).occurrence, undefined)
+    const returned = observeAdmissionWaits(sample(origin + 120000, [capacity()]), JSON.parse(JSON.stringify(changed.state)), undefined, create)
+    assert.notEqual(observation(returned).occurrence, observation(first).occurrence)
+  }
+})
+
+test('invalid sample clock preserves unresolved identity without a retained callback', () => {
+  let count = 0
+  const create = () => `00000000-0000-4000-8000-${(++count).toString(16).padStart(12, '0')}`
+  const first = observeAdmissionWaits(sample(origin, [capacity()]), undefined, undefined, create)
+  const invalid = observeAdmissionWaits(sample(Number.NaN, [capacity()]), first.state, undefined, create)
+  const resumed = observeAdmissionWaits(sample(origin + 60000, [capacity()]), JSON.parse(JSON.stringify(invalid.state)), undefined, create)
+  assert.equal(observation(resumed).occurrence, observation(first).occurrence)
+  assert.equal(observation(resumed).observedSince, origin + 60000)
+  assert.equal(count, 1)
+})
+
+test('unallocated transition retries on the current scope and is not an occurrence', () => {
+  const first = observeAdmissionWaits(sample(origin, [capacity()]))
+  const changed = capacity('run-one', { activeMessageId: 'input-two' })
+  const unallocated = observeAdmissionWaits(sample(origin + 60000, [changed]), first.state, undefined, () => null)
+  const marker = observation(unallocated).transition
+  assert.deepEqual(readAdmissionTransition(marker), { runId: 'run-one', scope: JSON.stringify(['attempt-one', 'input-two', null]) })
+  assert.equal(readAdmissionOccurrence(marker), null)
+  assert.equal(readAdmissionTransition(observation(first).occurrence), null)
+  for (const value of [null, '[]', `${marker} `, JSON.stringify(['run-one', 'unsupported', null]), JSON.stringify(['run-one', JSON.stringify(['attempt-one', null, null]), 1])])
+    assert.equal(readAdmissionTransition(value), null)
+  const retry = observeAdmissionWaits(sample(origin + 120000, [changed]), JSON.parse(JSON.stringify(unallocated.state)))
+  assert.equal(observation(retry).status, 'unknown')
+  assert.equal(observation(retry).observedSince, origin + 120000)
+  assert.equal(readAdmissionOccurrence(observation(retry).occurrence).scope, readAdmissionTransition(marker).scope)
+  assert.notEqual(observation(retry).occurrence, observation(first).occurrence)
+})
+
+test('invalid clock preserves positive scope and known-end facts without measuring time', () => {
+  const first = observeAdmissionWaits(sample(origin, [capacity()]))
+  const changed = capacity('run-one', { activeMessageId: 'input-two' })
+  const invalid = observeAdmissionWaits(sample(Number.NaN, [changed]), first.state)
+  assert.equal(invalid.state.waits[0].scope, JSON.stringify(['attempt-one', 'input-two', null]))
+  assert.equal(invalid.state.waits[0].since, null)
+  assert(readAdmissionTransition(observation(invalid).transition))
+  const returned = observeAdmissionWaits(sample(origin + 60000, [capacity()]), JSON.parse(JSON.stringify(invalid.state)))
+  assert.notEqual(observation(returned).occurrence, observation(first).occurrence)
+  const ended = observeAdmissionWaits(sample(Number.NaN, [capacity('run-one', { waitClass: 'account' })]), first.state)
+  assert.equal(observation(ended).status, 'good')
+  assert.equal(ended.state.waits.length, 0)
+  const afterEnd = observeAdmissionWaits(sample(origin, [capacity()]), JSON.parse(JSON.stringify(ended.state)))
+  assert.notEqual(observation(afterEnd).occurrence, observation(first).occurrence)
 })

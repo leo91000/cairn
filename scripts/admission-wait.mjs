@@ -65,8 +65,25 @@ export function readAdmissionOccurrence(value) {
   }
 }
 
+export function readAdmissionTransition(value) {
+  if (typeof value !== 'string' || value.length > 1200)
+    return null
+  try {
+    const parts = JSON.parse(value)
+    if (!Array.isArray(parts) || parts.length !== 3 || !identity(parts[0])
+      || !validScope(parts[1]) || parts[2] !== null || JSON.stringify(parts) !== value) {
+      return null
+    }
+
+    return { runId: parts[0], scope: parts[1] }
+  }
+  catch {
+    return null
+  }
+}
+
 function previousWaits(previous) {
-  if (!record(previous) || previous.version !== 1 || !timestamp(previous.observedAt)
+  if (!record(previous) || previous.version !== 1 || (previous.observedAt !== null && !timestamp(previous.observedAt))
     || !Array.isArray(previous.waits)
     || previous.waits.length > admissionWaitLimits.entries) {
     return new Map()
@@ -75,10 +92,14 @@ function previousWaits(previous) {
   const waits = new Map()
   for (const wait of previous.waits) {
     if (!record(wait) || !identity(wait.runId) || !validScope(wait.scope)
-      || (wait.firstObservedAt !== null && !timestamp(wait.firstObservedAt)) || !timestamp(wait.lastObservedAt)
+      || (wait.firstObservedAt !== null && !timestamp(wait.firstObservedAt))
+      || (wait.lastObservedAt !== null && !timestamp(wait.lastObservedAt))
       || (wait.episodeId != null && (!episodeIdentity(wait.episodeId) || wait.firstObservedAt === null))
+      || (wait.transition !== undefined && typeof wait.transition !== 'boolean')
+      || (wait.transition === true && (wait.firstObservedAt !== null || wait.episodeId != null || wait.since !== null))
       || (wait.since !== null && (!timestamp(wait.since)
-        || wait.firstObservedAt === null || wait.since > wait.lastObservedAt))
+        || wait.firstObservedAt === null || !timestamp(wait.lastObservedAt) || previous.observedAt === null
+        || wait.since > wait.lastObservedAt))
       || waits.has(wait.runId)) {
       return new Map()
     }
@@ -88,6 +109,7 @@ function previousWaits(previous) {
       scope: wait.scope,
       firstObservedAt: wait.firstObservedAt,
       episodeId: wait.episodeId ?? null,
+      transition: wait.transition === true,
       lastObservedAt: wait.lastObservedAt,
       since: wait.since,
     })
@@ -100,24 +122,11 @@ function previousWaits(previous) {
 // unavailable probe, omitted row or excessive sampling gap cannot age a wait.
 // Unknown retains an episode's identity for deduplication, never certifies recovery.
 export function observeAdmissionWaits(sample, previous, retainedEpisode, createEpisodeId = randomUUID) {
-  const now = sample?.at
+  const now = timestamp(sample?.at) ? sample.at : null
   const observations = new Map()
   const next = new Map()
-  if (!timestamp(now)) {
-    return {
-      state: {
-        version: 1,
-        observedAt: null,
-        waits: [],
-        limited: false,
-      },
-      observations: [],
-      complete: false,
-    }
-  }
-
   const prior = previousWaits(previous)
-  const manager = sample.manager?.ok === true ? sample.manager.data : null
+  const manager = sample?.manager?.ok === true ? sample.manager.data : null
   const rows = record(manager) && Array.isArray(manager.runs) ? manager.runs : []
   let complete = record(manager) && Array.isArray(manager.runs)
     && manager.runsComplete === true && rows.length <= admissionWaitLimits.entries
@@ -180,10 +189,12 @@ export function observeAdmissionWaits(sample, previous, retainedEpisode, createE
       continue
     }
 
-    let firstObservedAt = retained?.fresh === true ? now : recovered?.firstObservedAt ?? (sameEpisode ? old.firstObservedAt : null)
-    if (firstObservedAt === null && (retained?.fresh === true || (!sameEpisode && !previous?.limited)))
+    const fresh = retained?.fresh === true || (sameEpisode && old.transition)
+    const positiveTransition = fresh || (!sameEpisode && !previous?.limited)
+    let firstObservedAt = fresh ? now : recovered?.firstObservedAt ?? (sameEpisode ? old.firstObservedAt : null)
+    if (firstObservedAt === null && positiveTransition)
       firstObservedAt = now
-    let episodeId = retained?.fresh === true ? undefined : recovered ? recovered.episodeId ?? null : sameEpisode ? old.episodeId : undefined
+    let episodeId = fresh ? undefined : recovered ? recovered.episodeId ?? null : sameEpisode ? old.episodeId : undefined
     if (firstObservedAt !== null && episodeId === undefined) {
       try {
         episodeId = createEpisodeId()
@@ -193,23 +204,27 @@ export function observeAdmissionWaits(sample, previous, retainedEpisode, createE
       }
 
       if (!episodeIdentity(episodeId)) {
-        observations.set(run.id, { id, runId: run.id, status: 'unknown' })
+        // The scope was positively observed even when allocating its episode
+        // failed. Keep that transition instead of reinstalling an ended scope.
+        firstObservedAt = null
+        episodeId = null
         limited = true
-        continue
       }
     }
 
-    const continuous = retained?.fresh !== true && firstObservedAt !== null && sameEpisode && old.since !== null
+    const transition = firstObservedAt === null && positiveTransition
+    const continuous = !fresh && now !== null && firstObservedAt !== null && sameEpisode && old.since !== null
       && episodeId === old.episodeId && firstObservedAt === old.firstObservedAt
-      && now >= old.lastObservedAt && now - old.lastObservedAt <= admissionWaitLimits.gapMs
-      && previous.observedAt <= now
+      && timestamp(old.lastObservedAt) && now >= old.lastObservedAt && now - old.lastObservedAt <= admissionWaitLimits.gapMs
+      && timestamp(previous.observedAt) && previous.observedAt <= now
     const wait = {
       runId: run.id,
       scope: currentScope,
       firstObservedAt,
       episodeId: episodeId ?? null,
-      lastObservedAt: now,
-      since: firstObservedAt === null ? null : continuous ? old.since : now,
+      transition,
+      lastObservedAt: now ?? (sameEpisode ? old.lastObservedAt : null),
+      since: firstObservedAt === null || now === null ? null : continuous ? old.since : now,
     }
     next.set(run.id, wait)
     if (firstObservedAt === null)
@@ -219,6 +234,7 @@ export function observeAdmissionWaits(sample, previous, retainedEpisode, createE
       runId: run.id,
       status: wait.since !== null && now - wait.since > admissionWaitLimits.quietMs ? 'bad' : 'unknown',
       ...(firstObservedAt !== null ? { occurrence: JSON.stringify([run.id, currentScope, firstObservedAt, ...(episodeId !== null ? [episodeId] : [])]) } : {}),
+      ...(transition ? { transition: JSON.stringify([run.id, currentScope, null]) } : {}),
       observedSince: wait.since,
       firstObservedAt: wait.firstObservedAt,
     })
@@ -248,7 +264,7 @@ export function observeAdmissionWaits(sample, previous, retainedEpisode, createE
   return {
     state: {
       version: 1,
-      observedAt: now,
+      observedAt: now ?? (timestamp(previous?.observedAt) ? previous.observedAt : null),
       waits: [...next.values()],
       limited,
     },

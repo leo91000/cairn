@@ -51,7 +51,15 @@ unresolved gaps/restarts. A positively known-ended recurrence therefore cannot
 recreate the previous occurrence even if run, scope and clock timestamp repeat.
 The helper uses `crypto.randomUUID()` by default; a fourth `createEpisodeId`
 argument can supply deterministic UUIDs in tests. Failed or invalid allocation
-stays unknown. Legacy three-part occurrences remain exact for unresolved history;
+stays unknown but preserves the positively observed current scope. Its bounded
+`transition` marker records that the previous scope ended even before the new
+identity can be allocated. Persist that marker in the same caller occurrence map;
+`readAdmissionTransition` validates it separately from a real incident occurrence.
+A later valid allocation starts a fresh measured interval; a transition marker
+never carries old ownership into that episode. An invalid sample clock likewise
+breaks measured duration while retaining validated unresolved identity and known
+scope/end facts. No optional caller callback is needed for that preservation.
+Legacy three-part occurrences remain exact for unresolved history;
 only a positively fresh observation receives a new discriminator.
 
 Persist a valid current capacity episode's identity in the existing bounded caller
