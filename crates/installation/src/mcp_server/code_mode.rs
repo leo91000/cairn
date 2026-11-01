@@ -3,7 +3,7 @@ mod worker;
 
 pub use worker::run as worker;
 
-use super::{ToolResult, catalog, operations, resource_metadata};
+use super::{ToolResult, catalog, model_result, operations, resource_metadata};
 use crate::{
     error::{Error, Result},
     service::Service,
@@ -24,9 +24,13 @@ use tokio::{
 };
 
 const MAX_FRAME: usize = 8 * 1024 * 1024;
-const MAX_RESULT: usize = 1024 * 1024;
 const MAX_CALLS: usize = 64;
 const DEADLINE: Duration = Duration::from_secs(30);
+
+enum Completed {
+    Value(Value),
+    Truncated { value_bytes: usize },
+}
 
 /// Execution identity stays in the manager and never enters the JavaScript worker.
 #[derive(Clone)]
@@ -84,7 +88,7 @@ impl CodeMode {
         code: &str,
         data: Value,
         denied_scope: &mut Option<String>,
-    ) -> Result<Value> {
+    ) -> Result<Completed> {
         let _slot = self
             .slots
             .try_acquire()
@@ -172,12 +176,10 @@ impl CodeMode {
                         write(&mut input, &reply).await?;
                     }
                     Frame::Done { value } => {
-                        if serde_json::to_vec(&value)?.len() > MAX_RESULT {
-                            return Err(Error::too_large(
-                                "Code result exceeds 1 MiB. Filter results or read bounded pages.",
-                            ));
-                        }
-                        return Ok(value);
+                        return Ok(Completed::Value(value));
+                    }
+                    Frame::Truncated { value_bytes } => {
+                        return Ok(Completed::Truncated { value_bytes });
                     }
                     Frame::Failure { message } => return Err(Error::bad(message)),
                     _ => return Err(Error::bad_gateway("Invalid code worker response.")),
@@ -216,6 +218,9 @@ enum Frame {
     },
     Done {
         value: Value,
+    },
+    Truncated {
+        value_bytes: usize,
     },
     Failure {
         message: String,
@@ -311,7 +316,7 @@ pub(crate) async fn call(
     let operation = async {
         let args = parse(&format!("mcp:{name}"), args)?;
         match name {
-            "search" => Ok(search(auth.operations(s).await?, &args)),
+            "search" => Ok(Completed::Value(search(auth.operations(s).await?, &args))),
             "execute" => {
                 s.code_mode
                     .execute(
@@ -328,7 +333,12 @@ pub(crate) async fn call(
     }
     .await;
     let mut result = match operation {
-        Ok(value) => ToolResult::success(value.to_string(), json!({ "result": value })),
+        Ok(Completed::Value(value)) => {
+            ToolResult::success(value.to_string(), json!({ "result": value }))
+        }
+        Ok(Completed::Truncated { value_bytes }) => {
+            return Ok(model_result::omitted_value(value_bytes));
+        }
         Err(error) => ToolResult::failure(&error.message),
     };
     if result.is_error
