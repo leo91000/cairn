@@ -55,6 +55,23 @@ async fn root(f: &Fixture) -> Actor {
     running(f, chat).await
 }
 
+async fn on_backend(f: &Fixture, actor: Actor, backend: &str) -> Actor {
+    let mut snapshot = actor.run["snapshot"].clone();
+    snapshot["agent"]["access"]["backend"] = backend.into();
+    f.service
+        .store
+        .change_run(
+            text(&actor.run, "id"),
+            cairn_installation::runs::RunChanges {
+                snapshot: Some(serde_json::from_value(snapshot).unwrap()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    running(f, actor.chat).await
+}
+
 async fn delegated(f: &Fixture, parent: &Actor) -> Actor {
     let task = cairn_installation::delegation::delegate(
         &f.service,
@@ -255,21 +272,7 @@ async fn migrating_an_expired_vm_requester_cannot_adopt_its_native_child() {
         .put_node_fixture(f.node.clone())
         .await
         .unwrap();
-    let parent = root(&f).await;
-    let mut snapshot = parent.run["snapshot"].clone();
-    snapshot["agent"]["access"]["backend"] = "firecracker".into();
-    f.service
-        .store
-        .change_run(
-            text(&parent.run, "id"),
-            cairn_installation::runs::RunChanges {
-                snapshot: Some(serde_json::from_value(snapshot).unwrap()),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    let parent = running(&f, parent.chat).await;
+    let parent = on_backend(&f, root(&f).await, "firecracker").await;
     let native_agent = f
         .service
         .agent_fixture(
@@ -396,6 +399,201 @@ async fn migrating_an_expired_vm_requester_cannot_adopt_its_native_child() {
     assert_eq!(adopted["nativePrincipals"], json!([OTHER]));
     assert_eq!(adopted["snapshot"]["agent"]["access"]["backend"], "native");
     assert!(allowed(&f, &child).await);
+}
+
+#[tokio::test]
+async fn pending_migration_cannot_reserve_materialize_or_read_after_a_back_edge() {
+    use cairn_installation::nodes::disk_grants;
+
+    for destination_backend in ["firecracker", "native"] {
+        let mut f = fixture("auto").await;
+        let vm = f.vm_node().await;
+        f.agent["access"]["nodes"] = json!([f.node["id"], vm["id"]]);
+        f.service
+            .store
+            .put_agent_fixture(f.agent.clone())
+            .await
+            .unwrap();
+        let source_backend = if destination_backend == "native" {
+            "firecracker"
+        } else {
+            "native"
+        };
+        let source = on_backend(&f, root(&f).await, source_backend).await;
+        let director = on_backend(&f, root(&f).await, "firecracker").await;
+        let descendant = on_backend(&f, managed(&f, &source).await, "firecracker").await;
+        assert_eq!(descendant.run["nativeParentRunId"], source.run["id"]);
+        let (origin, destination) = if destination_backend == "native" {
+            (&vm, &f.node)
+        } else {
+            (&f.node, &vm)
+        };
+        let point = json!({ "id": id(), "runId": source.run["id"], "destination": "s3" });
+        let mut snapshot = source.run["snapshot"].clone();
+        snapshot["agent"]["access"]["backend"] = destination_backend.into();
+        let grant = json!({
+            "nativePrincipals": director.run["nativePrincipals"],
+            "nativeAuthorityNodes": director.run["nativeAuthorityNodes"],
+            "nativeParentRunId": director.run["id"],
+            "nativeParentAccess": "installation",
+            "nativeProvenanceUnknown": false,
+        });
+        let prepared = json!({
+            "id": id(),
+            "process": null,
+            "sourceReadReady": false,
+            "nodeId": destination["id"],
+            "runtimeId": destination["runtimeId"],
+            "snapshot": snapshot,
+            "grant": grant,
+            "convertedBackup": point["id"],
+        });
+        f.service
+            .store
+            .change_run(
+                text(&source.run, "id"),
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Succeeded),
+                    boundary: Some(json!({ "nodeId": origin["id"], "backendMigration": prepared })),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let mut candidate = f.service.store.run(text(&source.run, "id")).await.unwrap();
+        candidate["snapshot"] = snapshot;
+        for (field, value) in grant.as_object().unwrap() {
+            candidate[field] = value.clone();
+        }
+        candidate["nodeId"] = destination["id"].clone();
+        candidate["targetNodeId"] = destination["id"].clone();
+        candidate["pinnedNodeId"] = Value::Null;
+        candidate["preferredNodeId"] = Value::Null;
+        candidate["placementTransition"] = true.into();
+        candidate["requiredRuntime"] = destination["runtimeId"].clone();
+
+        // Exercise the actual consumers using a retained converted point;
+        // no converter, controller or disk is started by these metadata calls.
+        let held = id();
+        placement::reserve(&f.service, &candidate, &held)
+            .await
+            .unwrap();
+        let credential =
+            disk_grants::issue(&f.service, &candidate, text(destination, "id"), &point)
+                .await
+                .unwrap();
+        assert!(
+            disk_grants::authorize(&f.service, &credential)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let mut revoked = destination.clone();
+        revoked["revoked"] = true.into();
+        f.service.store.put_node_fixture(revoked).await.unwrap();
+        assert!(
+            disk_grants::authorize(&f.service, &credential)
+                .await
+                .is_err()
+        );
+        f.service
+            .store
+            .put_node_fixture(destination.clone())
+            .await
+            .unwrap();
+        assert!(
+            disk_grants::authorize(&f.service, &credential)
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        let response = send(&f, &descendant, &director, &id()).await;
+        assert_ne!(response["result"]["isError"], true, "{response}");
+        let changed = f
+            .service
+            .store
+            .run(text(&director.run, "id"))
+            .await
+            .unwrap();
+        assert_eq!(changed["nativeParentRunId"], descendant.run["id"]);
+        let attempts_before = f.service.store.list("node-attempts").await.unwrap();
+        let volumes_before = f.service.store.list("node-volumes").await.unwrap();
+        let grants_before = f.service.store.list("node-disk-grants").await.unwrap();
+        let rejected = id();
+        let reserve_error = placement::reserve(&f.service, &candidate, &rejected)
+            .await
+            .unwrap_err();
+        assert!(
+            reserve_error
+                .message
+                .contains("cyclic native authority lineage")
+        );
+        let materialize_error = placement::materialize(&f.service, &held).await.unwrap_err();
+        assert!(
+            materialize_error
+                .message
+                .contains("cyclic native authority lineage")
+        );
+        let issue_error =
+            disk_grants::issue(&f.service, &candidate, text(destination, "id"), &point)
+                .await
+                .err()
+                .expect("A cyclic lineage must not issue a disk credential");
+        assert!(
+            issue_error
+                .message
+                .contains("cyclic native authority lineage")
+        );
+        let read_error = disk_grants::authorize(&f.service, &credential)
+            .await
+            .unwrap_err();
+        assert!(
+            read_error
+                .message
+                .contains("cyclic native authority lineage")
+        );
+        let request = common::request("GET", &format!("/internal/node-restore/{}", "0".repeat(64)))
+            .header("authorization", format!("Bearer {credential}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = common::send(&f.router, request).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = read_json(response).await;
+        assert!(
+            body.to_string().contains("cyclic native authority lineage"),
+            "{body}"
+        );
+        assert_eq!(
+            f.service.store.list("node-attempts").await.unwrap(),
+            attempts_before
+        );
+        assert_eq!(
+            f.service.store.list("node-volumes").await.unwrap(),
+            volumes_before
+        );
+        assert_eq!(
+            f.service.store.list("node-disk-grants").await.unwrap(),
+            grants_before
+        );
+        let held_state = f
+            .service
+            .store
+            .get("node-attempts", &held)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(held_state["diskMaterialized"], false);
+        assert!(
+            f.service
+                .store
+                .get("node-attempts", &rejected)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        placement::release(&f.service, &held).await.unwrap();
+    }
 }
 
 #[tokio::test]

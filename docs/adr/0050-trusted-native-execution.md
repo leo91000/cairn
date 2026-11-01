@@ -32,7 +32,11 @@ that retain native provenance too. Backend migration validates its destination
 grant at both the initial and final writer transaction; a stored pending
 migration is rechecked before source reads and destination admission. Admission
 of a prospective run includes that run's identity instead of following its old
-stored authority. A cyclic directing effect is refused without
+stored authority. Reservation claims, materialization, preparation renewal,
+disk-read credential issuance and disk-read authorization check the effective
+pending grant in their own database decision, for both backends. An explicit
+owner's pending adoption uses its new grant without rewriting retained old
+provenance before the migration commits. A cyclic directing effect is refused without
 discarding a saved revocation edge or rewriting existing authority. Delegated
 reports remain readable through `task_status`; they do not require the requester
 to acquire its child's authority as a parent. Existing malformed lineages remain

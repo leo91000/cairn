@@ -83,6 +83,21 @@ pub(crate) fn candidate(run: &Value) -> Value {
     candidate
 }
 
+/// Capacity/materialization and disk reads use the pending destination grant
+/// during a migration, including an explicit owner's adoption of old authority.
+/// This is only a structural check; principal, node and revocation decisions
+/// remain with each caller's existing transaction-local authorization.
+pub(crate) fn require_lineage(db: &Db<'_>, run: &Value) -> Result<()> {
+    policy::require_acyclic_parent(db, text(run, "id"), lineage(run))
+}
+
+/// The authority that preparation will actually use, without cloning a frozen
+/// execution snapshot merely to inspect its parent edge.
+pub(crate) fn lineage(run: &Value) -> &Value {
+    let pending = &run["backendMigration"]["grant"];
+    if pending.is_object() { pending } else { run }
+}
+
 fn chat_run(db: &Db<'_>, chat_id: &str) -> Result<(Value, Value, Value, bool)> {
     let chat = required(db.conversation_boundary(chat_id)?, "Chat not found")?;
     require_active(&chat)?;
@@ -990,6 +1005,15 @@ mod tests {
             let adopted = prospective(db, &plugin_bound, &agent, &Origin::Human("owner".into()))?;
             assert!(allowed(db, &adopted, &db.node_boundary(&node)?.unwrap())?,
                 "The explicit owner can still adopt existing work");
+            let mut historical_cycle = plugin_bound.clone();
+            historical_cycle["id"] = id().into();
+            historical_cycle["nativeParentRunId"] = historical_cycle["id"].clone();
+            assert!(policy::require_acyclic_parent(db, text(&historical_cycle, "id"), &historical_cycle).is_err());
+            let adopted_grant = migration_grant(db, &historical_cycle, &agent, &Origin::Human("owner".into()))?;
+            historical_cycle["backendMigration"] = json!({ "grant": adopted_grant });
+            require_lineage(db, &historical_cycle)?;
+            assert_eq!(historical_cycle["nativeParentRunId"], historical_cycle["id"],
+                "Checking the explicit pending adoption never rewrites retained old provenance");
             let mut revoked = db.node_boundary(&node)?.unwrap();
             revoked["nativeAccounts"] = json!(["owner"]); db.put_node_fixture(&revoked)?;
             assert!(!allowed(db, &candidate, &revoked)?);
