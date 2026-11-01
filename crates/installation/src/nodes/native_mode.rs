@@ -79,22 +79,30 @@ pub(crate) fn acknowledge_plan(
         .node_boundary(text(placement, "nodeId"))?
         .unwrap_or_default();
     let run = db.run(run_id)?.unwrap_or_default();
-    let attempt = db.get("node-attempts", attempt_id)?.unwrap_or_default();
+    let attempt = db
+        .attempt(attempt_id)?
+        .ok_or_else(|| Error::conflict("Attempt removed."))?;
     if !applied(&node)
         || requested(&node) != placement["nativeMode"]
-        || attempt["nativeMode"] != placement["nativeMode"]
-        || attempt["runId"] != run_id
-        || attempt["nodeId"] != placement["nodeId"]
-        || attempt["released"] == true
+        || serde_json::to_value(&attempt.native_mode)? != placement["nativeMode"]
+        || attempt.run_id != run_id
+        || attempt.node_id != placement["nodeId"]
+        || attempt.released
         || !crate::native::policy::allows(db, &run, &node)?
     {
         return Err(Error::unavailable(
             "No authorized node privilege generation is confirmed. The existing environment is preserved.",
         ));
     }
-    db.update_run_boundary(
+    db.update_run_placement(
         run_id,
-        &json!({ "nativeMode": placement["nativeMode"], "nativeModeInterruption": null }),
+        crate::nodes::run_placement::PlacementChanges {
+            native_mode: Some(serde_json::from_value(serde_json::json!(
+                placement["nativeMode"]
+            ))?),
+            native_mode_interruption: Some(None),
+            ..Default::default()
+        },
     )?;
     Ok(node["storage"].clone())
 }
@@ -239,10 +247,10 @@ fn snapshot(db: &Db<'_>, node: &ExecutionNode, mode: Mode) -> Result<ReviewSnaps
         .collect::<Vec<_>>();
     let mut conversations = Vec::new();
     let mut reservations = db
-        .list("node-attempts")?
+        .attempts()?
         .into_iter()
-        .filter(|attempt| attempt["nodeId"] == node_id && attempt["released"] != true)
-        .map(|attempt| json!({ "id": attempt["id"], "runId": attempt["runId"] }))
+        .filter(|attempt| attempt.node_id == node_id && !attempt.released)
+        .map(|attempt| json!({ "id": attempt.id, "runId": attempt.run_id }))
         .collect::<Vec<_>>();
     reservations.sort_by(|left, right| text(left, "id").cmp(text(right, "id")));
     for run in db.runs(None, None, i64::MAX, 0, true)? {
@@ -383,13 +391,11 @@ pub(crate) async fn change_live(
         // The owner's confirmation reviews precisely the agents shown, including
         // existing wildcard grants. Future agents and future nodes gain nothing.
         node.native_reviewed_agents = view.agents.iter().map(|agent| agent.id.clone()).collect();
-        for attempt in db.list("node-attempts")? {
-            if attempt["nodeId"] == node_id && super::is_active_attempt(&attempt)
-                && db.run(text(&attempt, "runId"))?.is_some()
+        for attempt in db.attempts()? {
+            if attempt.node_id == node_id && super::is_active_attempt(&attempt)
+                && db.run(&attempt.run_id)?.is_some()
             {
-                db.update_run_boundary(text(&attempt, "runId"), &json!({
-                    "nativeModeInterruption": generation, "nodeState": "updating",
-                }))?;
+                db.update_run_placement(&attempt.run_id, crate::nodes::run_placement::PlacementChanges {native_mode_interruption: Some(serde_json::from_value(serde_json::json!(generation))?), node_state: Some(serde_json::from_value(serde_json::json!("updating"))?), ..Default::default() })?;
             }
         }
         db.set(&key, &Value::Null, Some(now()))?;
@@ -399,6 +405,9 @@ pub(crate) async fn change_live(
         super::public(node)
     }).await
 }
+
+#[cfg(test)]
+use crate::attempt_fixture::*;
 
 #[cfg(test)]
 use crate::node_fixture::*;
@@ -447,7 +456,7 @@ mod tests {
         });
         store.put_node_fixture(node.clone()).await.unwrap();
         store.put_agent_fixture(agent).await.unwrap();
-        store.put("node-attempts", json!({ "id": attempt_id, "runId": run_id, "nodeId": node_id, "nativeMode": mode, "released": false })).await.unwrap();
+
         store
             .set(
                 "native-authority",
@@ -461,6 +470,7 @@ mod tests {
             .transaction(move |db| db.add_run_fixture(&saved, None).map(|_| ()))
             .await
             .unwrap();
+        store.put_attempt_fixture(json!({ "id": attempt_id, "runId": run_id, "nodeId": node_id, "nativeMode": mode, "released": false })).await.unwrap();
         let placement = json!({ "nodeId": node_id, "nativeMode": mode });
         let run_key = run_id.clone();
         let attempt_key = attempt_id.clone();
@@ -476,7 +486,13 @@ mod tests {
         changed["nativeModeRequest"]["generation"] = newer.clone().into();
         store.put_node_fixture(changed).await.unwrap();
         store
-            .update_run_boundary(&run_id, json!({ "nativeModeInterruption": newer }))
+            .update_run_placement(
+                &run_id,
+                crate::nodes::run_placement::PlacementChanges {
+                    native_mode_interruption: Some(Some(newer.clone())),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         let placement = json!({ "nodeId": node_id, "nativeMode": mode });

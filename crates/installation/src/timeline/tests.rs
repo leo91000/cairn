@@ -34,19 +34,30 @@ fn previous(root: &std::path::Path) -> Connection {
     db
 }
 
-/// Every row of every table, except the projection this version adds.
+/// Retained rows outside timeline/A10 layouts, plus exact retained run columns
+/// and both complete wire projections. A10's own migration tests qualify the
+/// converted attempt/reservation rows and counters.
 fn tables(db: &Connection) -> BTreeMap<String, Vec<String>> {
     let names = db
-        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'timeline_%' ORDER BY name")
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'timeline_%' AND name NOT IN ('runs','placements','attempts','exclusive_reservations','exclusive_members','exclusive_paused_runs','exclusive_sequence') ORDER BY name")
         .unwrap()
         .query_map([], |row| row.get::<_, String>(0))
         .unwrap()
         .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap();
-    names
+    let mut snapshot: BTreeMap<String, Vec<String>> = names
         .into_iter()
         .map(|name| {
-            let mut statement = db.prepare(&format!("SELECT * FROM \"{name}\"")).unwrap();
+            let query = if name == "nodes" {
+                let columns: Vec<String> = db.prepare("SELECT name FROM pragma_table_info('nodes') WHERE name!='exclusive_reservation' ORDER BY cid")
+                    .unwrap().query_map([], |row| row.get(0)).unwrap()
+                    .collect::<rusqlite::Result<_>>().unwrap();
+                let fields = columns.iter().map(|column| format!("\"{column}\"")).collect::<Vec<_>>().join(",");
+                format!("SELECT {fields} FROM nodes")
+            } else {
+                format!("SELECT * FROM \"{name}\"")
+            };
+            let mut statement = db.prepare(&query).unwrap();
             let columns = statement.column_count();
             let mut rows = statement
                 .query_map([], |row| {
@@ -66,7 +77,22 @@ fn tables(db: &Connection) -> BTreeMap<String, Vec<String>> {
             rows.sort();
             (name, rows)
         })
-        .collect()
+        .collect();
+    snapshot.insert(
+        "retained run columns".into(),
+        vec![format!(
+            "{:?}",
+            crate::placement_migration_fixture::retained_run_columns(db)
+        )],
+    );
+    snapshot.insert(
+        "complete run projections".into(),
+        crate::placement_migration_fixture::run_views(db)
+            .into_iter()
+            .map(|value| value.to_string())
+            .collect(),
+    );
+    snapshot
 }
 
 fn version(db: &Connection) -> i64 {

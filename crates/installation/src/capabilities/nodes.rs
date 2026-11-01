@@ -16,6 +16,36 @@ pub(crate) struct NodeOperation {
 
 pub(crate) const NODE_OPERATIONS: &[NodeOperation] = &[
     NodeOperation {
+        name: "get_conversation_placement",
+        scope: "read",
+        description: "Read the conversation's placement and its agent's currently authorized nodes.",
+    },
+    NodeOperation {
+        name: "configure_conversation_placement",
+        scope: "manage",
+        description: "Replace pinned/preferred node selection within the conversation agent's current grants. This does not grant node access or exclusivity.",
+    },
+    NodeOperation {
+        name: "move_to_node",
+        scope: "run",
+        description: "Start a move to an authorized node, preserving backend, capacity waits and fencing. Returns an operation id; poll get_node_move_operation in separate tool calls. Failure preserves the current environment.",
+    },
+    NodeOperation {
+        name: "get_node_move_operation",
+        scope: "run",
+        description: "Read this caller's pending move or its final result. Poll in separate tool calls; waiting for capacity does not extend the code worker deadline.",
+    },
+    NodeOperation {
+        name: "cancel_node_move_operation",
+        scope: "run",
+        description: "Cancel this caller's capacity wait before admission, then poll its result. An admitted move keeps its durable fencing and recovery protocol.",
+    },
+    NodeOperation {
+        name: "release_node_reservation",
+        scope: "manage",
+        description: "Release a node's exclusive reservation. Other work resumes only after the controller confirms release.",
+    },
+    NodeOperation {
         name: "list_nodes",
         scope: "read",
         description: "List node inventory, detected capacity, availability and current agent grants. Tags and hardware do not grant authority.",
@@ -59,6 +89,26 @@ pub(crate) fn node_operation(name: &str) -> Option<&'static NodeOperation> {
 impl NodeOperation {
     pub(crate) fn descriptor(&self) -> Value {
         let (input, output) = match self.name {
+            "get_conversation_placement" => (
+                schema_for::<GetPlacementInput>(Contract::Deserialize),
+                schema_for::<ConversationPlacement>(Contract::Serialize),
+            ),
+            "configure_conversation_placement" => (
+                schema_for::<ConfigurePlacementInput>(Contract::Deserialize),
+                schema_for::<ConversationPlacement>(Contract::Serialize),
+            ),
+            "move_to_node" => (
+                schema_for::<MoveToNodeInput>(Contract::Deserialize),
+                schema_for::<NodeMoveStarted>(Contract::Serialize),
+            ),
+            "get_node_move_operation" | "cancel_node_move_operation" => (
+                schema_for::<NodeMoveOperationInput>(Contract::Deserialize),
+                schema_for::<NodeMoveOperation>(Contract::Serialize),
+            ),
+            "release_node_reservation" => (
+                schema_for::<ReleaseExclusiveInput>(Contract::Deserialize),
+                schema_for::<ExclusiveReservation>(Contract::Serialize),
+            ),
             "list_nodes" => (
                 schema_for::<ListNodesInput>(Contract::Deserialize),
                 schema_for::<Vec<ExecutionNode>>(Contract::Serialize),
@@ -88,6 +138,7 @@ impl NodeOperation {
                 schema_for::<NodeRevocation>(Contract::Serialize),
             ),
         };
+        let read_only = self.scope == "read" || self.name == "get_node_move_operation";
         json!({
             "name": self.name,
             "description": self.description,
@@ -100,9 +151,9 @@ impl NodeOperation {
                 }]
             },
             "annotations": {
-                "readOnlyHint": self.scope == "read",
-                "destructiveHint": self.scope != "read",
-                "openWorldHint": self.scope != "read"
+                "readOnlyHint": read_only,
+                "destructiveHint": !read_only,
+                "openWorldHint": !read_only
             }
         })
     }
@@ -113,20 +164,32 @@ impl NodeOperation {
         input: Value,
         context: ResumeContext,
     ) -> Result<Value> {
-        let bearer = match context {
+        let audience = match &context {
             ResumeContext::Human(_) => None,
-            ResumeContext::Public(scopes, _) => {
+            ResumeContext::Public(_, credential) => credential
+                .as_ref()
+                .map(|credential| nodes::move_operations::Audience::Public(credential.clone())),
+            ResumeContext::Installation(bearer) => Some(
+                nodes::move_operations::Audience::Installation(crate::auth::hex_digest(bearer)),
+            ),
+        };
+        let (bearer, public_credential) = match context {
+            ResumeContext::Human(_) => (None, None),
+            ResumeContext::Public(scopes, credential) => {
                 if !scopes.iter().any(|scope| scope == self.scope) {
                     return Err(Error::forbidden(format!(
                         "The {} scope is required.",
                         self.scope
                     )));
                 }
-                None
+                let credential = credential.ok_or_else(|| {
+                    Error::unauthorized("A verified public credential is required.")
+                })?;
+                (None, Some(credential))
             }
             ResumeContext::Installation(bearer) => {
                 crate::installation_mcp::authorize(s, &bearer).await?;
-                Some(bearer)
+                (Some(bearer), None)
             }
         };
         let authorize =
@@ -134,6 +197,77 @@ impl NodeOperation {
         let before = authorize.clone();
         s.store.read(move |db| before.authorize(db)).await?;
         match self.name {
+            "get_conversation_placement" => {
+                let input: GetPlacementInput = decode(input)?;
+                let placement_authorization = authorize.clone();
+                nodes::placement::configure_authorized(
+                    s,
+                    &input.run_id.to_string(),
+                    None,
+                    move |db| placement_authorization.authorize(db),
+                )
+                .await
+            }
+            "configure_conversation_placement" => {
+                let input: ConfigurePlacementInput = decode(input)?;
+                let run = input.run_id.to_string();
+                let target = run.clone();
+                let native = crate::native::policy::run_authorization(&run);
+                nodes::placement::configure_authorized(
+                    s,
+                    &target,
+                    Some(serde_json::to_value(input.selection)?),
+                    move |db| {
+                        authorize.authorize(db)?;
+                        native(db)
+                    },
+                )
+                .await
+            }
+            "move_to_node" => {
+                let input: MoveToNodeInput = decode(input)?;
+                input.validate().map_err(Error::bad)?;
+                let run = s.store.run(&input.run_id.to_string()).await?;
+                let authorization = nodes::moves::Authorization::new(|_| Ok(()), public_credential)
+                    .with_management_authorization(authorize);
+                if let Some(audience) = audience {
+                    return s.node_move_operations.start(
+                        s.clone(),
+                        run,
+                        serde_json::to_value(input)?,
+                        authorization,
+                        audience,
+                    );
+                }
+                nodes::moves::request_authorized(
+                    s,
+                    &run,
+                    &serde_json::to_value(input)?,
+                    authorization,
+                )
+                .await
+            }
+            "get_node_move_operation" | "cancel_node_move_operation" => {
+                let input: NodeMoveOperationInput = decode(input)?;
+                let audience = audience.ok_or_else(|| {
+                    Error::forbidden(
+                        "Move operation results belong to their initiating tool caller.",
+                    )
+                })?;
+                let id = input.operation_id.to_string();
+                if self.name == "cancel_node_move_operation" {
+                    s.node_move_operations.cancel(s, &id, &audience).await
+                } else {
+                    s.node_move_operations.get(s, &id, &audience).await
+                }
+            }
+            "release_node_reservation" => {
+                let input: ReleaseExclusiveInput = decode(input)?;
+                nodes::exclusive::release_authorized(s, &input.reservation_id, None, move |db| {
+                    authorize.authorize(db)
+                })
+                .await
+            }
             "list_nodes" => {
                 let _: ListNodesInput = decode(input)?;
                 let _ = nodes::refresh_local(s).await;

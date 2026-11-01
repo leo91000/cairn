@@ -349,11 +349,15 @@ impl Execution<'_> {
         let state_home = self.prepare_state_home(&prepared).await?;
         let patch = crate::runs::RunChanges {
             workspace: Some(serde_json::from_value(prepared["cwd"].clone())?),
-            boundary: Some(serde_json::json!({
-                "workspaces": prepared["workspaces"],
-                "isolated": prepared["isolated"],
-                "executionBackend": prepared["backend"],
+            placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {
+                execution_backend: Some(serde_json::from_value(serde_json::json!(
+                    prepared["backend"]
+                ))?),
+                ..Default::default()
             })),
+            boundary: Some(
+                serde_json::json!({"workspaces": prepared["workspaces"],"isolated": prepared["isolated"]}),
+            ),
             ..Default::default()
         };
         s.store.change_run(&self.id, patch).await?;
@@ -884,18 +888,19 @@ impl Execution<'_> {
         }
         workspace.authorization.recheck().await?;
         timing.next("placement_commit");
-        let patch = json!({
-            "nodeId": placement["nodeId"],
-            "resources": placement["resources"],
-            "nodeState": null,
-            "movementError": null,
-        });
         let publication = workspace.authorization.clone();
         let run_id = self.id.clone();
+        let changes = crate::nodes::run_placement::PlacementChanges {
+            node_id: Some(serde_json::from_value(placement["nodeId"].clone())?),
+            resources: Some(serde_json::from_value(placement["resources"].clone())?),
+            node_state: Some(None),
+            movement_error: Some(None),
+            ..Default::default()
+        };
         s.store
             .transaction(move |db| {
                 publication.authorize_in(db)?;
-                db.update_run_boundary(&run_id, &patch)
+                db.update_run_placement(&run_id, changes)
             })
             .await?;
         let runner_token = execution::secret(&s.config.data_dir, "runner-secret").await?;

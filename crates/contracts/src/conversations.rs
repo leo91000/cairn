@@ -1,4 +1,4 @@
-//! Conversation commands and public views. Questions/waits retain their A8 boundary.
+//! Conversation commands and public views.
 use crate::*;
 use std::collections::BTreeMap;
 
@@ -410,9 +410,7 @@ pub struct Chat {
     pub status: ConversationStatus,
     #[serde(default)]
     #[ts(optional = nullable)]
-    #[schemars(with = "Option<BTreeMap<String, serde_json::Value>>", extend("x-kotlin-type" = "ExclusiveReservation"))]
-    #[ts(type = "import('../../nodes').ExclusiveReservation | null")]
-    pub suspended_by_exclusive: Option<serde_json::Value>,
+    pub suspended_by_exclusive: Option<crate::ExclusiveReservation>,
     #[serde(default)]
     #[ts(optional = nullable)]
     pub wakeup: Option<ChatWakeup>,

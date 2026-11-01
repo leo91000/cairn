@@ -15,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 #[derive(Clone)]
 pub struct Service {
     pub(crate) accepted_jobs: Arc<crate::authorization::Jobs>,
+    pub(crate) node_move_operations: Arc<crate::nodes::move_operations::Operations>,
     pub missions: Arc<crate::missions::Missions>,
     pub node_maintenance_tasks: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
     pub node_lease_deadlines:
@@ -63,6 +64,7 @@ impl Service {
         crate::nodes::connector::record_manager_origin(&config).await?;
         let service = Arc::new(Self {
             accepted_jobs: Arc::default(),
+            node_move_operations: Arc::default(),
             missions: Arc::default(),
             node_maintenance_tasks: Arc::default(),
             node_lease_deadlines: Arc::default(),

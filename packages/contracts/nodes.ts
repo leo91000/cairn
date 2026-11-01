@@ -1,6 +1,7 @@
 import type { ExecutionNode } from './generated/typescript/ExecutionNode'
 import type { NativeMode } from './generated/typescript/NativeMode'
 
+export type { ExclusiveReservation } from './generated/typescript/ExclusiveReservation'
 export type { ExecutionNode } from './generated/typescript/ExecutionNode'
 export type { NativeCaller } from './generated/typescript/NativeCaller'
 export type { NativeMode } from './generated/typescript/NativeMode'
@@ -11,7 +12,6 @@ export type { NodeAgent } from './generated/typescript/NodeAgent'
 export type { NodeDiskAccounting } from './generated/typescript/NodeDiskAccounting'
 export type { NodeEnrollment } from './generated/typescript/NodeEnrollment'
 export type { NodeResources } from './generated/typescript/NodeResources'
-export type { NodeStoragePolicy } from './generated/typescript/NodeStoragePolicy'
 export const LOCAL_NODE_ID = '00000000-0000-4000-8000-000000000002'
 
 export function diskCapacity(node: ExecutionNode): number {
@@ -80,20 +80,7 @@ export function usedPercent(used: number, limit: number) {
   return limit > 0 ? Math.min(100, Math.max(0, used / limit * 100)) : 0
 }
 
-export interface ExclusiveReservation {
-  id: string
-  nodeId: string
-  ownerRunId: string
-  reason: string
-  state: 'queued' | 'acquiring' | 'acquired' | 'releasing' | 'released' | 'failed' | 'expired'
-  createdAt: number
-  expiresAt: number | null
-  renewalPending?: boolean
-  waitUntil: number
-  pausedRunIds: string[]
-  minimumAvailableMemoryMiB: number
-  error?: string | null
-}
+export type { NodeStoragePolicy } from './generated/typescript/NodeStoragePolicy'
 
 export interface NodeSyncSettings {
   intervalSeconds: number
@@ -287,7 +274,7 @@ export function nodeHealth(node: ExecutionNode, now = Date.now(), clock: number 
   const running = node.occupiedSlots ?? 0
   const free = freeSlots(node)
   if (free <= 0)
-    return { state: 'full', label: 'Full', detail: slots ? `All ${slots} slots in use` : 'The runtime offers no slot' }
+    return { state: 'full', label: 'Full', detail: !slots ? 'The runtime offers no slot' : running >= slots ? `All ${slots} slots in use` : 'No slots available' }
   return { state: 'ready', label: 'Ready', detail: running ? `${running} running · ${free} of ${slots} slots free` : `${free} of ${slots} slots free` }
 }
 

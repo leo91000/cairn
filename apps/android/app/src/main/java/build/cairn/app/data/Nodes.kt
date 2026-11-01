@@ -75,7 +75,7 @@ suspend fun grantNodeAgents(
     )
 }
 
-typealias ExclusiveReservation = build.cairn.boundary.ExclusiveReservation
+typealias ExclusiveReservation = build.cairn.contracts.ExclusiveReservation
 
 fun exclusiveReservationState(state: String): String =
     when (state) {
@@ -427,7 +427,11 @@ fun nodeHealth(
         return NodeHealth(
             NodeHealthState.FULL,
             "Pleine",
-            if (slots > 0) "Les $slots slots sont occupés" else "Le runtime n’offre aucun slot",
+            when {
+                slots <= 0 -> "Le runtime n’offre aucun slot"
+                node.occupiedSlots >= slots -> "Les $slots slots sont occupés"
+                else -> "Aucun slot disponible"
+            },
         )
     val running = node.occupiedSlots
     return NodeHealth(

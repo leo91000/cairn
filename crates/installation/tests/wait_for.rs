@@ -1414,7 +1414,7 @@ async fn missions_share_dependency_cycle_detection_with_conversations() {
     let f = Fixture::mission().await;
     let target = f.target().await;
     f.s.store
-        .change_run_fixture(
+        .update_run_boundary_fixture(
             text(&target, "id"),
             json!({
                 "wakeup": { "condition": { "type": "run_finished", "runId": f.run } },

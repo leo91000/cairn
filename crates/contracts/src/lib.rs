@@ -220,3 +220,7 @@ pub use personal::*;
 mod installation_settings;
 
 pub use installation_settings::*;
+
+mod placement;
+
+pub use placement::*;

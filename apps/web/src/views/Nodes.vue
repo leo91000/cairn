@@ -16,6 +16,7 @@ import {
   watch,
 } from 'vue'
 import { createNodeEnrollment } from '../../../../packages/contracts/generated/createNodeEnrollment'
+import { releaseNodeReservation } from '../../../../packages/contracts/generated/releaseNodeReservation'
 import { revokeNode } from '../../../../packages/contracts/generated/revokeNode'
 import {
   diskCapacity,
@@ -368,7 +369,7 @@ function releaseExclusive(node: ExecutionNode) {
   if (!reservation)
     return
   return action(async () => {
-    await api(`/nodes/${node.id}/exclusive/${reservation.id}/release`, { method: 'POST', body: '{}' })
+    await releaseNodeReservation(api, { reservationId: reservation.id })
     notify('Exclusive release requested; suspended work resumes after confirmation')
   }, node.id)
 }

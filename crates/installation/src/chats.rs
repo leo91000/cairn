@@ -2260,7 +2260,7 @@ provider,model,reasoning,speed,mode,status,created_at,question_id FROM retained_
     #[test]
     fn provider_changes_must_wait_for_the_next_turn_and_model_aliases_are_valid() {
         let root = tempfile::tempdir().unwrap();
-        let _store = crate::store::Store::open(root.path()).unwrap();
+        drop(crate::store::Store::open(root.path()).unwrap());
         let connection = rusqlite::Connection::open(root.path().join("manager.db")).unwrap();
         let run = json!({
             "status": "running",

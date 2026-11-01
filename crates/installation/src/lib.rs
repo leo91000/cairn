@@ -89,10 +89,14 @@ pub(crate) mod test_process;
 pub(crate) mod common;
 
 #[cfg(test)]
+#[path = "../tests/fixtures/plugin_grants.rs"]
+pub(crate) mod plugin_grant_fixture;
+
+#[cfg(test)]
 pub(crate) use common::{
-    account_fixture, agent_fixture, mission_fixture, node_fixture, run_fixture,
+    account_fixture, agent_fixture, attempt_fixture, mission_fixture, node_fixture, run_fixture,
 };
 
 #[cfg(test)]
-#[path = "../tests/fixtures/plugin_grants.rs"]
-pub(crate) mod plugin_grant_fixture;
+#[path = "../tests/common/placement_migration_fixture.rs"]
+pub(crate) mod placement_migration_fixture;

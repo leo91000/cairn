@@ -1242,7 +1242,7 @@ mod migration_tests {
     }
 
     #[tokio::test]
-    async fn version_22_upgrade_preserves_instance_grants_and_the_legacy_supplier() {
+    async fn version_23_upgrade_preserves_instance_grants_and_the_legacy_supplier() {
         let root = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(root.path()).unwrap();
         let agent = "00000000-0000-4000-8000-000000000031";
@@ -1271,7 +1271,7 @@ mod migration_tests {
             .unwrap();
         drop(store);
         let db = rusqlite::Connection::open(root.path().join("manager.db")).unwrap();
-        db.execute_batch("DROP TABLE plugin_grant_resources; DROP TABLE plugin_contribution_grants; DROP TABLE plugin_credential_suppliers; PRAGMA user_version=22;").unwrap();
+        db.execute_batch("DROP TABLE plugin_grant_resources; DROP TABLE plugin_contribution_grants; DROP TABLE plugin_credential_suppliers; PRAGMA user_version=23;").unwrap();
         let timeline = db
             .query_row::<String, _, _>(
                 "SELECT sql FROM sqlite_master WHERE name='timeline_entries'",
