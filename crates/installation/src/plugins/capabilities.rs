@@ -831,9 +831,6 @@ mod authorization_tests {
         let first = transfer_context(&f, MAIN_AGENT_ID, true).await;
         let mut second = transfer_context(&f, MAIN_AGENT_ID, false).await;
         let snapshot = second.management.as_ref().unwrap().snapshot().unwrap();
-        let package = super::super::registry::active(&f.s, "grant-probe")
-            .await
-            .unwrap();
         let invocation = super::super::grant_authorization::Invocation::prepare(
             &f.s,
             snapshot.clone(),
