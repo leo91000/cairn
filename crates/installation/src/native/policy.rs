@@ -490,12 +490,9 @@ fn require_acyclic_parent(db: &Db<'_>, destination: &str, grant: &Value) -> Resu
                 "This directing action would create a cyclic native authority lineage.",
             ));
         }
-        let Some(run) = db.run(&id)? else {
-            // A missing parent cannot introduce a cycle. Native authority still
-            // rejects it through the separate live admission checks.
-            return Ok(());
-        };
-        parent = run["nativeParentRunId"].as_str().map(str::to_owned);
+        // A missing parent cannot introduce a cycle. Native authority still
+        // rejects it through the separate live admission checks.
+        parent = db.native_parent_run(&id)?;
     }
     Err(Error::forbidden(
         "Native authority lineage is too deep to extend safely.",

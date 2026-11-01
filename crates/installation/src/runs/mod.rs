@@ -322,6 +322,21 @@ impl Db<'_> {
         )?.pop())
     }
 
+    /// Structural authority checks need only this edge, not the frozen prompt,
+    /// execution output or snapshot of each ancestor in a bounded lineage.
+    pub(crate) fn native_parent_run(&self, id: &str) -> Result<Option<String>> {
+        Ok(self
+            .0
+            .prepare_cached(
+                "SELECT CASE WHEN json_type(boundary,'$.nativeParentRunId')='text'
+                THEN json_extract(boundary,'$.nativeParentRunId') END
+                FROM runs WHERE id=?",
+            )?
+            .query_row([id], |row| row.get::<_, Option<String>>(0))
+            .optional()?
+            .flatten())
+    }
+
     /// Node storage eligibility uses lifecycle flags and the unconverted storage
     /// boundary, never frozen prompts or display summaries. Keep this projection
     /// on the run owner so inventory and eviction use the same current fields.
