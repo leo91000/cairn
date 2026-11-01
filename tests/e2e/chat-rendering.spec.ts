@@ -36,6 +36,16 @@ async function diagramLabelCenter(viewer: Locator) {
   })
 }
 
+const largeSubgraphSource = `flowchart TB\nsubgraph S\n${Array.from({ length: 20 }, (_, index) => `A${index}-->A${index + 1}\n`).join('')}end\nsubgraph T\n${Array.from({ length: 21 }, (_, index) => `B${index}\n`).join('')}end\nS-->|group edge|T`
+
+function subgraphFramesOrdered(root: SVGElement | HTMLElement) {
+  // Resolve #app first: fonts can replace an SVG before Locator.evaluate runs.
+  // Query both current frames inside the same synchronous browser callback.
+  const svg = root.querySelector('figure.diagram svg')!
+  const frames = [...svg.querySelectorAll('path')].filter(path => path.style.fill === 'var(--dg-cluster)' && path.style.stroke === 'var(--dg-cluster-line)')
+  return frames.length === 2 && frames[0]!.getBoundingClientRect().bottom < frames[1]!.getBoundingClientRect().top
+}
+
 test.beforeEach(async ({ page }) => {
   await page.goto(`${address}scripts/fixtures/chat-rendering.html`)
   await page.waitForFunction(() => window.chatRendering)
@@ -514,13 +524,60 @@ test('centering subgraphs preserves separation from unrelated nodes', async ({ p
 })
 
 test('links between larger subgraphs preserve their whole-group ordering', async ({ page }) => {
-  const source = `flowchart TB\nsubgraph S\n${Array.from({ length: 20 }, (_, index) => `A${index}-->A${index + 1}\n`).join('')}end\nsubgraph T\n${Array.from({ length: 21 }, (_, index) => `B${index}\n`).join('')}end\nS-->|group edge|T`
-  await page.evaluate(text => window.chatRendering.markdown(text), `\`\`\`mermaid\n${source}\n\`\`\``)
-  const ordered = await page.locator('#app figure.diagram svg').evaluate((svg) => {
-    const frames = [...svg.querySelectorAll('path')].filter(path => path.style.fill === 'var(--dg-cluster)' && path.style.stroke === 'var(--dg-cluster-line)')
-    return frames.length === 2 && frames[0]!.getBoundingClientRect().bottom < frames[1]!.getBoundingClientRect().top
-  })
+  await page.evaluate(text => window.chatRendering.markdown(text), `\`\`\`mermaid\n${largeSubgraphSource}\n\`\`\``)
+  const ordered = await page.locator('#app').evaluate(subgraphFramesOrdered)
   expect(ordered).toBe(true)
+})
+
+test('subgraph ordering measurements survive a font redraw after target acquisition', async ({ browser, browserName }) => {
+  // Long labels force different fallback/loaded metrics even on the CI image.
+  const label = 'l'.repeat(100)
+  const simple = `flowchart TB\nsubgraph S\nA0["${label}"]\nend\nsubgraph T\nB0["${label}"]\nend\nS-->T`
+  for (const source of [simple, largeSubgraphSource]) {
+    const page = await browser.newPage()
+    const held: Array<import('@playwright/test').Route> = []
+    let released = false
+    const requested = Promise.withResolvers<void>()
+    await page.route('**/*dm-sans*.woff2*', (route) => {
+      if (released)
+        return route.continue()
+      held.push(route)
+      requested.resolve()
+    })
+    try {
+      await page.goto(`${address}scripts/fixtures/chat-rendering.html`, { waitUntil: 'domcontentloaded' })
+      await page.waitForFunction(() => window.chatRendering)
+      await page.evaluate(text => window.chatRendering.markdown(text), `\`\`\`mermaid\n${source}\n\`\`\``)
+      await requested.promise
+      expect(await page.evaluate(() => document.fonts.status)).toBe('loading')
+
+      // Explicitly acquire the measurement target before permitting production
+      // font invalidation. No private Playwright scheduler hooks are needed.
+      const app = await page.locator('#app').elementHandle()
+      const original = await page.locator('#app figure.diagram svg').elementHandle()
+      expect(await app!.evaluate(subgraphFramesOrdered)).toBe(true)
+      released = true
+      await Promise.all(held.map(route => route.continue()))
+      await page.evaluate(async () => {
+        await document.fonts.ready
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+      })
+      expect(await page.evaluate(() => [...document.fonts].some(face => face.family.includes('DM Sans') && face.status === 'loaded'))).toBe(true)
+      if (browserName === 'chromium')
+        expect(await original!.evaluate(element => element.isConnected)).toBe(false)
+
+      expect(await app!.evaluate(element => element.isConnected)).toBe(true)
+      expect(await app!.evaluate(subgraphFramesOrdered)).toBe(true)
+    }
+    finally {
+      if (!released) {
+        released = true
+        await Promise.allSettled(held.map(route => route.continue()))
+      }
+
+      await page.close()
+    }
+  }
 })
 
 test('state notes retain their sides and unsupported local directions retain source', async ({ page }) => {
