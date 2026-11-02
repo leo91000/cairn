@@ -3,7 +3,11 @@ import { describe, expect, it } from 'vitest'
 import { speedLabel } from '../../../packages/contracts/models'
 import {
   effectiveSpeed,
+  needsResumeSelection,
   offersSpeed,
+  pickerAppliedSpeed,
+  resumeSelectionReasoning,
+  resumeSelectionSpeed,
   showsSpeed,
   speedNote,
   speedTier,
@@ -91,6 +95,39 @@ describe('codex speeds', () => {
     expect(showsSpeed('codex', model({}), 'priority')).toBe(true)
     expect(showsSpeed('claude', astra, 'priority')).toBe(false)
     expect(showsSpeed('opencode', astra, '')).toBe(false)
+  })
+
+  it('uses the speed shown for the selected model when resuming', () => {
+    const deep = model({ model: 'deep', serviceTiers: [] })
+    const savedSpeed = pickerAppliedSpeed('codex', astra, '', 'priority')
+    const unavailableInheritedSpeed = pickerAppliedSpeed('codex', deep, '', 'priority')
+    expect(savedSpeed).toBe('priority')
+    expect(unavailableInheritedSpeed).toBe('standard')
+    expect(unavailableInheritedSpeed).not.toBe(savedSpeed)
+    expect(pickerAppliedSpeed('codex', deep, 'standard', 'priority')).toBe('standard')
+    expect(pickerAppliedSpeed('codex', model({ model: 'unknown' }), '', 'priority')).toBe('priority')
+    expect(resumeSelectionSpeed('codex', deep, '', 'priority')).toBe('standard')
+    expect(resumeSelectionSpeed('codex', astra, '', 'priority')).toBe('priority')
+    expect(resumeSelectionSpeed('claude', astra, '', 'priority')).toBe('')
+  })
+
+  it('sends a selection when Standard differs from the saved request', () => {
+    expect(needsResumeSelection('deep', 'high', 'standard', 'deep', 'high', 'priority')).toBe(true)
+    expect(needsResumeSelection('fast', 'high', 'priority', 'fast', 'high', 'priority')).toBe(false)
+    expect(needsResumeSelection('fast', 'high', 'standard', 'fast', 'high', '')).toBe(false)
+    expect(needsResumeSelection('fast', '', 'priority', 'fast', '', 'priority')).toBe(false)
+    expect(needsResumeSelection('fast', '', 'standard', 'fast', '', 'priority')).toBe(true)
+    expect(needsResumeSelection('new', 'high', 'priority', 'fast', 'high', 'priority')).toBe(true)
+  })
+
+  it('keeps reasoning intent separate from the blank picker value', () => {
+    const untouched = { kind: 'untouched' } as const
+    expect(resumeSelectionReasoning(untouched, '', '', false, 'low')).toBe('')
+    expect(resumeSelectionReasoning(untouched, '', 'high', false, 'low')).toBe('high')
+    expect(resumeSelectionReasoning(untouched, '', 'high', true, 'low')).toBe('low')
+    expect(resumeSelectionReasoning({ kind: 'model-default' }, '', 'high', false, 'low')).toBe('low')
+    expect(resumeSelectionReasoning({ kind: 'effort', value: 'xhigh' }, '', 'high', true, 'low')).toBe('xhigh')
+    expect(resumeSelectionReasoning(untouched, 'medium', 'high', true, 'low')).toBe('medium')
   })
 
   it('names speeds with Codex\'s own words', () => {

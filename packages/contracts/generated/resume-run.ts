@@ -5,5 +5,5 @@ import type { ResumeRunOutput } from './typescript/ResumeRunOutput'
 export const resumeRunId = 'resume_run' as const
 
 export function resumeRun(request: <T>(path: string, options: RequestInit) => Promise<T>, input: ResumeRunInput): Promise<ResumeRunOutput> {
-  return request<ResumeRunOutput>(`/runs/${encodeURIComponent(input.runId)}/resume`, { method: 'POST' })
+  return request<ResumeRunOutput>(`/runs/${encodeURIComponent(input.runId)}/resume`, { method: 'POST', body: JSON.stringify(input) })
 }

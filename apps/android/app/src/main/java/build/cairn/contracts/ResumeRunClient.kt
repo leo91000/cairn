@@ -3,8 +3,9 @@ package build.cairn.contracts
 
 import build.cairn.app.data.CairnApi
 import build.cairn.app.data.segment
+import kotlinx.serialization.json.encodeToJsonElement
 
 const val resumeRunId = "resume_run"
 
 suspend fun CairnApi.resumeRun(input: ResumeRunInput): ResumeRunOutput =
-    send("POST", "/runs/${segment(input.runId)}/resume")
+    send("POST", "/runs/${segment(input.runId)}/resume", contractJson.encodeToJsonElement(input))

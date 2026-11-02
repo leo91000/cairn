@@ -1275,9 +1275,20 @@ impl Fixture {
     }
 
     async fn with_workspace(workspace: bool) -> Self {
+        Self::with_workspace_and_codex(workspace, false).await
+    }
+
+    async fn with_codex_fixture() -> Self {
+        Self::with_workspace_and_codex(false, true).await
+    }
+
+    async fn with_workspace_and_codex(workspace: bool, fixture_codex: bool) -> Self {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir(root.path().join("home")).unwrap();
         let mut config = common::config(root.path());
+        if fixture_codex {
+            config.codex_bin = common::fixture("codex.mjs");
+        }
         if workspace {
             config.runner_url = "http://unused-runner:4311".into();
         }
@@ -3873,6 +3884,112 @@ async fn saved_native_mission(f: &Fixture) -> Value {
     )
     .await;
     f.service.store.run(text(&run, "id")).await.unwrap()
+}
+
+#[tokio::test]
+async fn run_resume_selection_authorizes_before_catalog_discovery_over_http_and_public_mcp() {
+    let f = Fixture::with_codex_fixture().await;
+    let (chat, queued_run) = f.conversation().await;
+    let (chat_id, run_id) = (
+        text(&chat, "id").to_owned(),
+        text(&queued_run, "id").to_owned(),
+    );
+    let turn_id = text(&queued_run["chatExecution"], "messageId").to_owned();
+    let discovery_log = f.service.config.home.join(".codex/fixture-lifecycle.jsonl");
+    std::fs::create_dir_all(discovery_log.parent().unwrap()).unwrap();
+    std::fs::write(&discovery_log, "").unwrap();
+    assert!(f.service.store.kv("codex-models:").await.unwrap().is_none());
+    f.service
+        .store
+        .change_run(
+            &run_id,
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Cancelled),
+                resume_available: Some(true),
+                session_id: Some(Some("retained-session".into())),
+                workspace: Some(Some("/saved/native/workspace".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    common::set_checkpoint(
+        &f.service.store,
+        &run_id,
+        json!({
+            "launched": true,
+            "prepared": { "cwd": "/saved/native/workspace" },
+            "generation": "retained-generation",
+        }),
+    )
+    .await;
+    let before = f.service.store.run(&run_id).await.unwrap();
+    let path = format!("/api/runs/{run_id}/resume");
+    let body = json!({
+        "turnId": turn_id,
+        "selection": {
+            "model": "fixture-fast",
+            "reasoning": "high",
+            "speed": "priority",
+        },
+    });
+
+    let missing_turn = f
+        .call(
+            &f.trusted,
+            "POST",
+            &path,
+            json!({ "selection": body["selection"] }),
+        )
+        .await;
+    assert_eq!(
+        missing_turn.0,
+        StatusCode::BAD_REQUEST,
+        "{}",
+        missing_turn.1
+    );
+    assert_eq!(f.service.store.run(&run_id).await.unwrap(), before);
+    assert!(std::fs::read_to_string(&discovery_log).unwrap().is_empty());
+    assert!(f.service.store.kv("codex-models:").await.unwrap().is_none());
+
+    let (status, denied) = f.call(&f.other, "POST", &path, body.clone()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+    assert_eq!(f.service.store.run(&run_id).await.unwrap(), before);
+    assert!(std::fs::read_to_string(&discovery_log).unwrap().is_empty());
+    assert!(f.service.store.kv("codex-models:").await.unwrap().is_none());
+
+    let denied_public = public_mcp_call(
+        &f,
+        OTHER,
+        &["run"],
+        "resume_run",
+        json!({
+            "runId": run_id,
+            "turnId": turn_id,
+            "selection": body["selection"],
+        }),
+    )
+    .await;
+    assert_eq!(denied_public["result"]["isError"], true, "{denied_public}");
+    assert_eq!(f.service.store.run(&run_id).await.unwrap(), before);
+    assert!(std::fs::read_to_string(&discovery_log).unwrap().is_empty());
+    assert!(f.service.store.kv("codex-models:").await.unwrap().is_none());
+
+    let (status, resumed) = f.call(&f.trusted, "POST", &path, body).await;
+    assert_eq!(status, StatusCode::OK, "{resumed}");
+    let after = f.service.store.run(&run_id).await.unwrap();
+    assert_eq!(after["status"], "queued");
+    assert_eq!(after["snapshot"]["agent"]["model"], "fixture-fast");
+    assert_eq!(after["snapshot"]["agent"]["reasoning"], "high");
+    assert_eq!(after["snapshot"]["agent"]["speed"], "priority");
+    assert_eq!(after["id"], before["id"]);
+    assert_eq!(after["chatExecution"]["messageId"], turn_id);
+    assert!(
+        std::fs::read_to_string(&discovery_log)
+            .unwrap()
+            .contains("model/list")
+    );
+    assert!(f.service.conversation_boundary(&chat_id).await.is_ok());
 }
 
 #[tokio::test]

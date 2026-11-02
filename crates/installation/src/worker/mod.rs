@@ -28,6 +28,15 @@ use std::{
 use tokio::sync::{Mutex, Notify, OnceCell, OwnedMutexGuard};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
+/// Optional selection evidence that must stay tied to this resume through its commit.
+#[derive(Default)]
+pub(crate) struct ResumeSelectionContext {
+    pub(crate) expected_turn_id: Option<String>,
+    pub(crate) selection: Option<cairn_contracts::ResumeExecutionSelection>,
+    pub(crate) selected_provider: Option<crate::provider::Provider>,
+    pub(crate) saved_auto_catalog: Option<Value>,
+}
+
 #[derive(Default)]
 pub struct Worker {
     pub active: Mutex<HashMap<String, CancellationToken>>,
