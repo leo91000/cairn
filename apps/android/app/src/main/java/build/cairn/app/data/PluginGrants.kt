@@ -1,6 +1,7 @@
 package build.cairn.app.data
 
 import build.cairn.contracts.AgentPluginGrants
+import build.cairn.contracts.PluginCatalog
 import build.cairn.contracts.PluginContributionGrant
 import build.cairn.contracts.PluginGrantAccess
 import build.cairn.contracts.PluginInstanceGrant
@@ -410,12 +411,12 @@ fun pluginGrantReview(
         .distinct()
         .forEach { id ->
             if (before.description(id) != after.description(id)) {
-                val name = catalog?.connections?.find { it.id == id }?.name ?: id
+                val name = catalog?.connectionLabel(id) ?: id
                 add(
                     ReviewLine(
                         if (after.grants.none { it.instanceId == id }) ReviewKind.Reduction
                         else ReviewKind.Access,
-                        "$name : ${after.description(id)}. Effectif immédiatement, y compris dans les conversations en cours.",
+                        "$name : ${after.description(id)}. Les contrôles d’accès du plugin s’appliquent immédiatement, y compris aux runs en cours. Les identifiants déjà chargés restent utilisables jusqu’à la fin de chaque run.",
                         requiresReview = after.grants.none { it.instanceId == id },
                     )
                 )
@@ -424,13 +425,30 @@ fun pluginGrantReview(
     if (before.runCredentialInstances.toSet() != after.runCredentialInstances.toSet()) {
         val names =
             after.runCredentialInstances.map { id ->
-                catalog?.connections?.find { it.id == id }?.name ?: id
+                catalog?.connectionLabel(id) ?: id
             }
+        val removedSuppliers =
+            before.runCredentialInstances.toSet() - after.runCredentialInstances.toSet()
+        val activeRunNotice =
+            if (removedSuppliers.isNotEmpty())
+                " Les runs déjà en cours conservent les identifiants chargés jusqu’à leur fin."
+            else ""
         add(
             ReviewLine(
                 ReviewKind.Access,
-                "Fournisseurs d’identifiants de run : ${names.joinToString().ifBlank { "Aucun" }}. Les identifiants rendent vaines les restrictions de ressource des outils.",
+                "Fournisseurs d’identifiants de run : ${names.joinToString().ifBlank { "Aucun" }}. Les identifiants rendent vaines les restrictions de ressource des outils.$activeRunNotice",
             )
         )
     }
+}
+
+private fun PluginCatalog.connectionLabel(instanceId: String): String {
+    val connection = connections.firstOrNull { it.id == instanceId } ?: return instanceId
+    val packageName =
+        packages
+            .firstOrNull { it.id == connection.pluginId }
+            ?.manifest
+            ?.name
+            ?.takeIf { it.isNotBlank() } ?: connection.pluginId.ifBlank { "Plugin" }
+    return "$packageName “${connection.name}”"
 }

@@ -513,7 +513,7 @@ function grantReviewLines(): ReviewLine[] {
         return {
           kind: 'secret' as const,
           section: 'plugins' as const,
-          text: `Added: ${connectionName(instance)} — effective immediately, including in running conversations. Access: ${description}.`,
+          text: `Added: ${connectionName(instance)} — plugin permission checks apply immediately, including in running conversations. Credentials already loaded into those runs remain available until they finish. Access: ${description}.`,
         }
       }
 
@@ -522,17 +522,23 @@ function grantReviewLines(): ReviewLine[] {
           kind: 'reduction' as const,
           requiresReview: true,
           section: 'plugins' as const,
-          text: `Removed: ${connectionName(instance)} access. Effective immediately, including running conversations.`,
+          text: `Removed: ${connectionName(instance)} access. Plugin permission checks update immediately, including for running conversations. Credentials already loaded into active runs remain available until those runs finish.`,
         }
       }
 
       return {
         kind: 'secret' as const,
         section: 'plugins' as const,
-        text: `${connectionName(instance)}: ${description}. Effective immediately, including running conversations.`,
+        text: `${connectionName(instance)}: ${description}. Plugin permission checks update immediately, including for running conversations. Credentials already loaded into active runs remain available until those runs finish.`,
       }
     }),
-    ...(JSON.stringify(savedGrants.value.runCredentialInstances) !== JSON.stringify(grants.value.runCredentialInstances) ? [{ kind: 'secret' as const, section: 'plugins' as const, text: `Run credential suppliers: ${grants.value.runCredentialInstances.map(connectionName).join(', ') || 'None'}. Credentials void tool resource restrictions.` }] : []),
+    ...(JSON.stringify(savedGrants.value.runCredentialInstances) !== JSON.stringify(grants.value.runCredentialInstances)
+      ? [{
+          kind: 'secret' as const,
+          section: 'plugins' as const,
+          text: `Run credential suppliers: ${grants.value.runCredentialInstances.map(connectionName).join(', ') || 'None'}. Credentials void tool resource restrictions.${savedGrants.value.runCredentialInstances.some(instance => !grants.value.runCredentialInstances.includes(instance)) ? ' Active runs keep credentials already loaded until they finish.' : ''}`,
+        }]
+      : []),
   ]
 }
 

@@ -1,8 +1,11 @@
 package build.cairn.app.data
 
 import build.cairn.contracts.PluginArgument
+import build.cairn.contracts.PluginCatalog
 import build.cairn.contracts.PluginCommand
+import build.cairn.contracts.PluginConnection
 import build.cairn.contracts.PluginContributionGrant
+import build.cairn.contracts.PluginEntry
 import build.cairn.contracts.PluginGrantAccess
 import build.cairn.contracts.PluginHook
 import build.cairn.contracts.PluginInstanceGrant
@@ -10,7 +13,10 @@ import build.cairn.contracts.PluginManifest
 import build.cairn.contracts.PluginResourceField
 import build.cairn.contracts.PluginResourceRef
 import build.cairn.contracts.PluginResourceType
+import build.cairn.contracts.PluginStatus
 import build.cairn.contracts.PluginTool
+import build.cairn.contracts.PluginUsage
+import kotlinx.serialization.json.buildJsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -518,6 +524,85 @@ class PluginGrantsTest {
     }
 
     @Test
+    fun grantReviewDistinguishesSameNamedInstancesFromDifferentPackages() {
+        val catalog =
+            PluginCatalog(
+                capabilities = emptyList(),
+                connections =
+                    listOf(
+                        PluginConnection(
+                            id = support,
+                            name = "Main",
+                            pluginId = "tickets",
+                            settings = buildJsonObject {},
+                            status = PluginStatus(),
+                            usage = PluginUsage(),
+                        ),
+                        PluginConnection(
+                            id = automation,
+                            name = "Main",
+                            pluginId = "deployments",
+                            settings = buildJsonObject {},
+                            status = PluginStatus(),
+                            usage = PluginUsage(),
+                        ),
+                    ),
+                packages =
+                    listOf(
+                        PluginEntry(
+                            active = null,
+                            builtin = false,
+                            id = "tickets",
+                            manifest =
+                                PluginManifest(
+                                    apiVersion = 2,
+                                    capabilities = emptyList(),
+                                    id = "tickets",
+                                    name = "Tickets",
+                                    version = "1",
+                                ),
+                            setup = null,
+                            status = "active",
+                            versions = emptyList(),
+                        ),
+                        PluginEntry(
+                            active = null,
+                            builtin = false,
+                            id = "deployments",
+                            manifest =
+                                PluginManifest(
+                                    apiVersion = 2,
+                                    capabilities = emptyList(),
+                                    id = "deployments",
+                                    name = "Deployments",
+                                    version = "1",
+                                ),
+                            setup = null,
+                            status = "active",
+                            versions = emptyList(),
+                        ),
+                    ),
+            )
+        val after =
+            PluginGrantDraft(
+                grants =
+                    listOf(
+                        PluginInstanceGrant(PluginGrantAccess.A(), support),
+                        PluginInstanceGrant(PluginGrantAccess.A(), automation),
+                    ),
+                runCredentialInstances = listOf(support, automation),
+            )
+
+        val lines = pluginGrantReview(PluginGrantDraft(), after, catalog)
+
+        assertEquals(3, lines.size)
+        assertTrue(lines[0].text.contains("Tickets “Main”"))
+        assertTrue(lines[1].text.contains("Deployments “Main”"))
+        assertTrue(lines[2].text.contains("Tickets “Main”"))
+        assertTrue(lines[2].text.contains("Deployments “Main”"))
+    }
+
+    @Test
     fun revokingPluginGrantRequiresAccessReview() {
         val before =
             PluginGrantDraft(grants = listOf(PluginInstanceGrant(PluginGrantAccess.A(), support)))
@@ -527,7 +612,23 @@ class PluginGrantsTest {
         assertEquals(1, lines.size)
         assertEquals(ReviewKind.Reduction, lines.single().kind)
         assertTrue(lines.single().requiresReview)
+        assertTrue(lines.single().text.contains("identifiants déjà chargés restent utilisables"))
         assertTrue(needsReview(lines, preview = null))
+    }
+
+    @Test
+    fun removingRunCredentialSupplierExplainsActiveRunRetention() {
+        val before =
+            PluginGrantDraft(
+                grants = listOf(PluginInstanceGrant(PluginGrantAccess.A(), support)),
+                runCredentialInstances = listOf(support),
+            )
+
+        val after = before.copy(runCredentialInstances = emptyList())
+
+        val line = pluginGrantReview(before, after, catalog = null).single()
+
+        assertTrue(line.text.contains("Les runs déjà en cours conservent les identifiants chargés"))
     }
 
     @Test

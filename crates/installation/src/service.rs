@@ -362,7 +362,16 @@ impl Service {
         let owner = crate::relay::task_author_policy(self)
             .await?
             .map(|policy| policy.owner.access_id);
-        let accounts = self.agent_preview_accounts().await?;
+        let accounts = match self.agent_preview_accounts().await {
+            Ok(accounts) => accounts,
+            Err(error) if error.is_unavailable() => {
+                tracing::warn!(
+                    "Installation account audience is unavailable for agent preview; reviews will fail closed when required"
+                );
+                None
+            }
+            Err(error) => return Err(error),
+        };
         authorize.recheck().await?;
         self.store
             .read(move |db| {

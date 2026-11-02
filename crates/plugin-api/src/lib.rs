@@ -808,17 +808,17 @@ path = "/usr/bin/probe"
     #[test]
     fn only_nonblank_instructions_require_agent_access() {
         let base = json!({
-            "id": "probe", "name": "Probe", "version": "1", "apiVersion": 2,
+            "id": "probe",
+            "name": "Probe",
+            "version": "1",
+            "apiVersion": 2,
             "capabilities": ["exec"],
-            "programs": [{"name":"probe", "path":"/usr/bin/probe"}],
+            "programs": [{
+                "name": "probe",
+                "path": "/usr/bin/probe",
+            }],
         });
 
-        assert!(manifest(base).is_ok());
-        let base = json!({
-            "id": "probe", "name": "Probe", "version": "1", "apiVersion": 2,
-            "capabilities": ["exec"],
-            "programs": [{"name":"probe", "path":"/usr/bin/probe"}],
-        });
         let mut blank_instructions = base.clone();
         blank_instructions["instructions"] = " \n ".into();
         assert!(manifest(blank_instructions).is_ok());

@@ -639,7 +639,7 @@ fun agentAccountReviewLine(accounts: List<AgentPreviewAccount>): ReviewLine {
 fun newAgentAccountReviewLine(): ReviewLine =
     ReviewLine(
         ReviewKind.Access,
-        "Seul le propriétaire de l’installation a accès à un nouvel agent ; les membres n’y ont pas accès par défaut. Cette revue couvre les droits des plugins ; l’éditeur de règles de hooks sans code n’est pas inclus dans ce changement.",
+        "Toute personne ayant accès à cette installation peut utiliser un agent nouvellement créé. Cette revue couvre les droits des plugins ; les règles de hooks sans code ont leur propre éditeur.",
     )
 
 private val sandboxStrictness = mapOf("yolo" to 0, "workspace-write" to 1, "read-only" to 2)

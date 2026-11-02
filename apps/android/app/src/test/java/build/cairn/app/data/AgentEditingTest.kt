@@ -56,15 +56,16 @@ class AgentEditingTest {
     }
 
     @Test
-    fun newAgentReviewStatesThatOnlyTheOwnerCanAccessIt() {
+    fun newAgentReviewStatesThatInstallationMembersCanAccessIt() {
         val line = newAgentAccountReviewLine()
 
         assertEquals(ReviewKind.Access, line.kind)
         assertTrue(
-            line.text.contains("Seul le propriétaire de l’installation a accès à un nouvel agent")
+            line.text.contains(
+                "Toute personne ayant accès à cette installation peut utiliser un agent nouvellement créé"
+            )
         )
-        assertTrue(line.text.contains("les membres n’y ont pas accès par défaut"))
-        assertTrue(line.text.contains("l’éditeur de règles de hooks sans code n’est pas inclus"))
+        assertTrue(line.text.contains("les règles de hooks sans code ont leur propre éditeur"))
     }
 
     private val mac =

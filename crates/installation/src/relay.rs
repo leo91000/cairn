@@ -176,6 +176,11 @@ pub(crate) async fn native_authority(
         .send()
         .await
         .map_err(|_| Error::unavailable("Native caller authority is unavailable."))?;
+    if response.status().is_server_error() {
+        return Err(Error::unavailable(
+            "Native caller authority is unavailable.",
+        ));
+    }
     if !response.status().is_success() {
         return Err(Error::forbidden(
             "Native caller authority rejected this installation.",

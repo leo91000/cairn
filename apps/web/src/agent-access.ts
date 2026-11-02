@@ -652,7 +652,7 @@ export function newAgentAccountReviewLine(): ReviewLine {
   return {
     kind: 'secret',
     section: 'plugins',
-    text: 'Only the installation owner can access a newly created agent; members do not have access by default. Plugin grant review only; the no-code hook rule editor is not included in this change.',
+    text: 'Everyone who can access this installation can use a newly created agent. This review covers plugin grants; no-code hook rules have a separate editor.',
   }
 }
 
