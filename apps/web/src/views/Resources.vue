@@ -89,7 +89,7 @@ async function loadPluginGrantSummaries() {
 }
 
 watch(
-  [isAgent, () => state.installationRole, () => state.agents.map(agent => agent.id).join('\0')],
+  [isAgent, () => state.installationRole, () => JSON.stringify(state.agents.map(agent => [agent.id, agent.revision]))],
   () => void loadPluginGrantSummaries(),
   { immediate: true },
 )

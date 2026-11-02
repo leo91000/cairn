@@ -244,6 +244,7 @@ test('contribution grants use resource ancestry, review, conflicts and explicit 
     instanceId: remote,
     access: { type: 'full' },
   })
+  const summaryRefreshTrigger = await workspace.api('/api/agents', 'POST', { name: 'Summary refresh trigger' })
   await page.reload()
   await expect(support).toHaveValue('selected')
   await automation.selectOption('none')
@@ -308,6 +309,20 @@ test('contribution grants use resource ancestry, review, conflicts and explicit 
     { kind: 'hook', name: 'message', resources: [{ resourceType: 'channel', id: 'support' }] },
   ]))
   expect(remainingSupport.access.contributions).not.toContainEqual(expect.objectContaining({ kind: 'tool', name: 'grant_ui_read' }))
+
+  await page.goto(workspacePath('/agents'))
+  const agentCard = page.locator('article').filter({ has: page.locator(`a[href$="${agent.id}"]`) })
+  await expect(agentCard).toContainText('Selected plugin access')
+  const latestAgent = await workspace.api(`/api/agents/${agent.id}`)
+  await workspace.api(`/api/agents/${agent.id}/plugin-grants`, 'PUT', {
+    agentId: agent.id,
+    revision: latestAgent.revision,
+    grants: [],
+    runCredentialInstances: [],
+  })
+  await page.getByRole('button', { name: `Delete ${summaryRefreshTrigger.name}` }).click()
+  await page.getByRole('dialog', { name: 'Remove this item?' }).getByRole('button', { name: 'Remove' }).click()
+  await expect(agentCard).not.toContainText('Selected plugin access')
 })
 
 test('agent overview shows plugin access as unavailable when the grant read fails', async ({ page, workspace }) => {
