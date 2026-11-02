@@ -1104,6 +1104,58 @@ async fn performance_names_inside_diagnostics_are_retained_and_manager_logs_are_
     assert!(!logs.contains("invalid record"), "{logs}");
 }
 
+#[test]
+fn observed_reader_keeps_unknown_performance_on_the_current_redacted_path() {
+    crate::test_process::run_ignored("worker::output::tests::observed_reader_redaction_child");
+}
+
+#[tokio::test]
+#[ignore = "process-global diagnostic capture, invoked by its wrapper"]
+async fn observed_reader_redaction_child() {
+    use tracing::instrument::WithSubscriber;
+
+    let _registration = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let mut fixture = Fixture::new().await;
+    let log_path = fixture._root.path().join("manager.log");
+    let file = std::fs::File::create(&log_path).unwrap();
+    let dispatch = tracing::Dispatch::new(
+        tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(Arc::new(file))
+            .finish(),
+    );
+    let publisher = Publisher::new(&fixture.id, &crate::config::id());
+    let input = concat!(
+        "2026-11-01T00:19:49Z INFO cairn_performance: operation=\"codex_rpc\" method=\"thread/items/list\" request_id=1 event=\"started\" timeout_ms=20000\r\n",
+        "2026-11-01T00:19:49Z INFO cairn_performance: operation=\"codex_rpc\" method=\"sensitive-tool-credential\" request_id=1 event=\"started\" timeout_ms=20000\n",
+        "2026-11-01T00:19:49Z INFO cairn_performance: operation=\"codex_rpc\" method=\"thread/items/list\" request_id=1 event=\"started\" timeout_ms=20000 secret=sensitive-tool-credential\n",
+        "WARN native: cairn_performance: sensitive-tool-credential\r\n",
+        "2026-11-01T00:19:49Z INFO cairn_performance: operation=\"codex_rpc\" method=\"thread/items/list\" request_id=1 event=\"started\" timeout_ms=20000",
+    );
+    let (sender, mut events) = mpsc::channel(32);
+    read_agent_diagnostics(input.as_bytes(), sender, publisher).await;
+    let mut count = 0;
+    while let Some(output) = events.recv().await {
+        count += 1;
+        fixture
+            .output(output)
+            .with_subscriber(dispatch.clone())
+            .await;
+    }
+    assert_eq!(count, 4);
+    let logs = std::fs::read_to_string(&log_path).unwrap();
+    assert!(!logs.contains("sensitive-tool-credential"));
+    assert!(logs.contains("method=\\\"[redacted]\\\"") || logs.contains("method=\"[redacted]\""));
+    assert!(logs.contains("secret=[redacted]"));
+    let stored = fixture.events().await;
+    assert_eq!(stored.len(), 1);
+    assert_eq!(
+        stored[0]["text"],
+        "WARN native: cairn_performance: [redacted]\r\n"
+    );
+}
+
 #[tokio::test]
 async fn terminal_styling_and_utf8_survive_long_diagnostic_fragments() {
     let prefix = "x".repeat(8190);

@@ -1,0 +1,31 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "model": {
+      "maxLength": 120,
+      "type": "string"
+    },
+    "preserveModel": {
+      "default": false,
+      "type": "boolean"
+    },
+    "reasoning": {
+      "maxLength": 40,
+      "pattern": "^(?:[a-z][a-z0-9_-]*)?$",
+      "type": "string"
+    },
+    "speed": {
+      "maxLength": 40,
+      "pattern": "^(?:[a-z][a-z0-9_-]*)?$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "model",
+    "reasoning",
+    "speed"
+  ],
+  "title": "ResumeExecutionSelection",
+  "type": "object"
+}

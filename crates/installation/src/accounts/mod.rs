@@ -10,6 +10,7 @@ pub mod codex;
 pub(crate) mod lenient;
 pub(crate) mod migration;
 pub mod opencode;
+pub(crate) mod output_redactions;
 mod record;
 mod sign_in;
 pub mod sql;
@@ -157,6 +158,13 @@ impl Provider {
 
 #[derive(Default)]
 pub struct Accounts {
+    output_credentials: output_redactions::Registry,
+    #[cfg(test)]
+    pub(crate) claude_rotation_probes:
+        std::sync::Mutex<HashMap<String, Arc<claude::RotationProbe>>>,
+    #[cfg(test)]
+    pub(crate) codex_materialize_probes:
+        std::sync::Mutex<HashMap<String, Arc<codex::MaterializeProbe>>>,
     locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     initialized: OnceCell<()>,
     attempted: Mutex<HashMap<String, i64>>,

@@ -656,16 +656,17 @@ test('a cached run restores the reading offset while its stream is still connect
 })
 
 test('following the latest output resumes a long backlog on the recent window, while a reader keeps its place', async ({ page, workspace }) => {
-  // Each of the 560 durable fixture appends starts the real Rust helper. Keep
-  // that setup time separate from the unchanged per-assertion response limits.
-  test.setTimeout(120_000)
   await useRelayForHttpMocks(page)
   const run = workspace.service.store.runs()[0]
   const write = (from: number, to: number) => {
-    for (let i = from; i < to; i++) {
+    // The native fixture starts a Rust helper for each call, so append each
+    // disconnected batch in one transaction instead of one process per event.
+    const events = Array.from({ length: to - from }, (_, offset) => {
+      const i = from + offset
       const text = `Resume line ${String(i).padStart(3, '0')}. A paragraph to retain a stable reading position.`
-      workspace.service.store.event(run.id, 'item.completed', text, { item: { id: `resume-${i}`, type: 'agent_message', text } })
-    }
+      return { type: 'item.completed', text, payload: { item: { id: `resume-${i}`, type: 'agent_message', text } } }
+    })
+    workspace.service.store.seedEvents(run.id, events)
   }
 
   const line = (i: number) => page.locator('.activity-message').filter({ hasText: `Resume line ${String(i).padStart(3, '0')}.` })

@@ -397,9 +397,10 @@ pub(crate) async fn tick(s: &Arc<Service>, active: &HashSet<String>) -> Result<(
                 let _ = s
                     .store
                     .transaction(move |db| {
-                        let Some(mut current) = db.engine_switch(&id)?.filter(|value| {
-                            value.request_id == pending.request_id && value.pending
-                        }) else {
+                        let Some(mut current) = db
+                            .engine_switch(&id)?
+                            .filter(|value| same_pending_request(value, &pending))
+                        else {
                             return Ok(());
                         };
                         current.error = Some(message);
@@ -420,15 +421,23 @@ async fn advance(
     id: &str,
     pending: &super::engine_switch::EngineSwitch,
 ) -> Result<()> {
-    let run = s.store.run(&pending.run_id).await?;
+    let Some(run) = pending_run(s, id, pending).await? else {
+        return Ok(());
+    };
     crate::recovery::fence(s, &run).await?;
+    if pending_run(s, id, pending).await?.is_none() {
+        return Ok(());
+    }
     s.accounts.recover_run(s, &run).await?;
+    if pending_run(s, id, pending).await?.is_none() {
+        return Ok(());
+    }
     let (id, pending) = (id.to_owned(), pending.clone());
     s.store
         .transaction(move |db| {
             let Some(mut current) = db
                 .engine_switch(&id)?
-                .filter(|p| p.pending && p.request_id == pending.request_id)
+                .filter(|p| same_pending_request(p, &pending))
             else {
                 return Ok(());
             };
@@ -520,4 +529,45 @@ pub(crate) fn cancel_in(db: &Db<'_>, run: &str) -> Result<()> {
         db.save_engine_switch(&state)?;
     }
     Ok(())
+}
+
+async fn pending_run(
+    s: &Service,
+    id: &str,
+    pending: &super::engine_switch::EngineSwitch,
+) -> Result<Option<Value>> {
+    let (id, pending) = (id.to_owned(), pending.clone());
+    s.store
+        .read(move |db| {
+            let Some(current) = db
+                .engine_switch(&id)?
+                .filter(|current| same_pending_request(current, &pending))
+            else {
+                return Ok(None);
+            };
+            let chat = chat(db, &id)?;
+            super::require_active(&chat)?;
+            if chat["runId"].as_str() != Some(current.run_id.as_str())
+                || chat["cancelledByDeletion"] == true
+            {
+                return Err(Error::conflict("The conversation changed while switching."));
+            }
+            let run = required(db.run(&current.run_id)?, "Run not found")?;
+            if run["chatExecution"]["messageId"].as_str() != Some(current.turn_id.as_str()) {
+                return Err(Error::conflict("The pending turn changed."));
+            }
+            Ok(Some(run))
+        })
+        .await
+}
+
+fn same_pending_request(
+    current: &super::engine_switch::EngineSwitch,
+    expected: &super::engine_switch::EngineSwitch,
+) -> bool {
+    current.pending
+        && current.request_id == expected.request_id
+        && current.run_id == expected.run_id
+        && current.turn_id == expected.turn_id
+        && current.provider == expected.provider
 }

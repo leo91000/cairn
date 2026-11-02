@@ -300,6 +300,26 @@ async fn chat_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resul
             )
             .await?
         }
+        ("POST", ["chats", id, "resume"]) => {
+            let mut args = if input.body.is_null() {
+                json!({})
+            } else {
+                input.body.clone()
+            };
+            let Some(fields) = args.as_object_mut() else {
+                return Err(Error::bad("Resume input must be an object."));
+            };
+            if fields
+                .get("chatId")
+                .is_some_and(|requested| requested.as_str() != Some(id))
+            {
+                return Err(Error::conflict(
+                    "Resume chatId must match the conversation in the request path.",
+                ));
+            }
+            fields.insert("chatId".into(), (*id).into());
+            chat_command(s, input, "resume_chat", args).await?
+        }
         ("POST", ["chats", id, "compact"]) => {
             chat_command(s, input, "compact_chat", json!({ "chatId": id })).await?
         }

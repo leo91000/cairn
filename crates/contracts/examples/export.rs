@@ -289,6 +289,7 @@ fn main() {
     export::<ConversationId>(root, &mut generator, Contract::Deserialize);
     export::<CreateChatInput>(root, &mut generator, Contract::Deserialize);
     export::<ChatInput>(root, &mut generator, Contract::Deserialize);
+    export::<ResumeChatInput>(root, &mut generator, Contract::Deserialize);
     export::<ChatMessageInput>(root, &mut generator, Contract::Deserialize);
     export::<SendChatMessageInput>(root, &mut generator, Contract::Deserialize);
     export::<RenameChatInput>(root, &mut generator, Contract::Deserialize);
@@ -421,6 +422,13 @@ fn main() {
                 "path": "/chats/{chatId}/restore"
             },
             {
+                "name": "resumeChat",
+                "input": "ResumeChatInput",
+                "output": "Run",
+                "method": "POST",
+                "path": "/chats/{chatId}/resume"
+            },
+            {
                 "name": "deleteChat",
                 "input": "ConfirmChatInput",
                 "output": "Chat",
@@ -532,6 +540,7 @@ fn main() {
     export::<RunMissionInput>(root, &mut generator, Contract::Deserialize);
     export::<CancelRunOutput>(root, &mut generator, Contract::Serialize);
     export::<CleanupRunOutput>(root, &mut generator, Contract::Serialize);
+    export::<ResumeExecutionSelection>(root, &mut generator, Contract::Deserialize);
     export::<ResumeRunInput>(root, &mut generator, Contract::Deserialize);
     export::<ResumeRunOutput>(root, &mut generator, Contract::Serialize);
     export::<QualificationFixture>(root, &mut generator, Contract::Serialize);

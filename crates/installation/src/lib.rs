@@ -55,6 +55,7 @@ pub mod provider;
 pub mod reads;
 pub mod recovery;
 pub mod relay;
+mod resume_selection;
 pub mod rpc;
 mod run_limits;
 pub mod run_output;
