@@ -558,11 +558,12 @@ it('opens the review only for what this edit does', () => {
   expect(needsReview([{ ...reduction[0]!, kind: 'secret' }], null)).toBe(true)
 })
 
-it('states that installation members can use a newly created agent', () => {
+it('states that new agents are owner-only by default', () => {
   const line = newAgentAccountReviewLine()
   expect(line.kind).toBe('secret')
-  expect(line.text).toContain('Everyone who can access this installation can use a newly created agent')
-  expect(line.text).toContain('no-code hook rules have a separate editor')
+  expect(line.text).toContain('Only the installation owner can access a newly created agent')
+  expect(line.text).toContain('members have no access by default')
+  expect(line.text).toContain('the no-code hook rule editor is not part of this change')
 })
 
 it('raises no node issue while the nodes are not loaded', () => {
