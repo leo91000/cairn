@@ -38,24 +38,20 @@ pub(super) async fn task_authors(
             "Invalid installation identity",
         ));
     };
-    let members: Vec<(String, String, i64)> = query_as(
-        "SELECT account_id, access_id, ceil(extract(epoch FROM joined_at) * 1000)::bigint FROM installation_members WHERE installation_id = $1 ORDER BY account_id",
+    let members: Vec<(String, String)> = query_as(
+        "SELECT account_id, access_id FROM installation_members WHERE installation_id = $1 ORDER BY account_id",
     ).bind(&installation).fetch_all(&mut *transaction).await?;
     let policy = cairn_protocol::TaskAuthorPolicy {
         owner: cairn_protocol::TaskAuthorGrant {
             access_id: format!("owner:{installation}:{owner}"),
             account_id: owner,
-            joined_at: None,
         },
         members: members
             .into_iter()
-            .map(
-                |(account_id, access_id, joined_at)| cairn_protocol::TaskAuthorGrant {
-                    account_id,
-                    access_id,
-                    joined_at: Some(joined_at),
-                },
-            )
+            .map(|(account_id, access_id)| cairn_protocol::TaskAuthorGrant {
+                account_id,
+                access_id,
+            })
             .collect(),
     };
     transaction.commit().await?;

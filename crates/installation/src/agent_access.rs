@@ -37,8 +37,7 @@ CREATE TABLE agent_account_access(
 CREATE INDEX agent_account_access_account ON agent_account_access(account_id);
 ";
 
-/// Existing agents and the upgrade boundary: only memberships that began before this
-/// boundary retain access, even if a Beacon outage delays the first observation.
+/// Existing agents awaiting their one-time first authoritative membership snapshot.
 const ROLLOUT: &str = "agent-access-rollout";
 
 /// Shown on a scheduled task whose author cannot use its agent; it runs again once they can.
@@ -67,11 +66,7 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
         .prepare("SELECT id FROM agents ORDER BY id")?
         .query_map([], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Db(&tx).set(
-        ROLLOUT,
-        &json!({ "agentIds": agents, "upgradedAt": crate::config::now() }),
-        None,
-    )?;
+    Db(&tx).set(ROLLOUT, &json!({ "agentIds": agents }), None)?;
     tx.pragma_update(None, "user_version", 19)?;
     tx.commit()?;
     Ok(())
@@ -525,20 +520,6 @@ pub(crate) fn reconcile(db: &Db<'_>, policy: Option<&TaskAuthorPolicy>) -> Resul
     }
 
     if let Some(rollout) = db.kv(ROLLOUT)? {
-        // A legacy pending rollout without its original boundary cannot prove which
-        // memberships existed then. Never replace it with the time of observation.
-        let Some(upgraded_at) = rollout["upgradedAt"]
-            .as_i64()
-            .filter(|time| (0..=9_007_199_254_740_991).contains(time))
-        else {
-            db.delete(ROLLOUT)?;
-            return mark_suspensions(db, None, Some(policy));
-        };
-        let known_joined_at = |member: &cairn_protocol::TaskAuthorGrant| {
-            member
-                .joined_at
-                .filter(|time| (0..=9_007_199_254_740_991).contains(time))
-        };
         for agent in rollout["agentIds"].as_array().into_iter().flatten() {
             let Some(agent) = agent.as_str() else {
                 continue;
@@ -547,9 +528,6 @@ pub(crate) fn reconcile(db: &Db<'_>, policy: Option<&TaskAuthorPolicy>) -> Resul
                 continue;
             }
             for member in &policy.members {
-                if !known_joined_at(member).is_some_and(|joined| joined < upgraded_at) {
-                    continue;
-                }
                 let excluded = rollout["excluded"].as_array().is_some_and(|entries| {
                     entries.iter().any(|entry| {
                         entry["agentId"] == agent && entry["accountId"] == member.account_id
@@ -569,16 +547,11 @@ pub(crate) fn reconcile(db: &Db<'_>, policy: Option<&TaskAuthorPolicy>) -> Resul
                 )?;
             }
         }
-        // A mixed-version Beacon can confirm scheduling eligibility without this
-        // evidence. Keep the original boundary until it can supply every membership.
-        if policy
-            .members
-            .iter()
-            .all(|member| known_joined_at(member).is_some())
-        {
-            db.delete(ROLLOUT)?;
-            db.audit("agent.account_access_rollout", &json!({}))?;
-        }
+        // The first successful authoritative snapshot defines the one-time rollout.
+        // Members who joined or were re-invited during an offline upgrade gap are
+        // included if present in this snapshot; later memberships receive no access.
+        db.delete(ROLLOUT)?;
+        db.audit("agent.account_access_rollout", &json!({}))?;
     }
     mark_suspensions(db, None, Some(policy))
 }
@@ -698,8 +671,8 @@ impl Service {
                 let id = agent.to_string();
                 required(db.agent(&id)?, "Agent not found")?;
                 if let Some(mut rollout) = db.kv(ROLLOUT)? {
-                    // An explicit owner decision wins over automatic retention, even
-                    // when an older Beacon has not yet supplied membership times.
+                    // An explicit owner decision wins over automatic access, even before
+                    // the first authoritative membership snapshot.
                     let mut excluded = rollout["excluded"].as_array().cloned().unwrap_or_default();
                     let entry = json!({ "agentId": id, "accountId": account });
                     if !excluded.contains(&entry) {
@@ -732,8 +705,8 @@ mod tests {
 
     const MEMBER: &str = "member-account";
 
-    #[tokio::test]
-    async fn reopening_an_upgraded_database_preserves_its_original_rollout_boundary() {
+    #[test]
+    fn reopening_an_upgraded_database_preserves_its_rollout_agent_list() {
         let mut connection = Connection::open_in_memory().unwrap();
         connection
             .execute_batch(
@@ -743,21 +716,12 @@ mod tests {
              PRAGMA user_version=18;",
             )
             .unwrap();
-        let time = Arc::new(std::sync::atomic::AtomicI64::new(1000));
-        crate::config::TEST_NOW
-            .scope(time.clone(), async {
-                upgrade(&mut connection).unwrap();
-                let initial = Db(&connection).kv(ROLLOUT).unwrap().unwrap();
-                assert_eq!(
-                    initial,
-                    json!({ "agentIds": ["existing"], "upgradedAt": 1000 })
-                );
+        upgrade(&mut connection).unwrap();
+        let initial = Db(&connection).kv(ROLLOUT).unwrap().unwrap();
+        assert_eq!(initial, json!({ "agentIds": ["existing"] }));
 
-                time.store(2000, std::sync::atomic::Ordering::SeqCst);
-                upgrade(&mut connection).unwrap();
-                assert_eq!(Db(&connection).kv(ROLLOUT).unwrap(), Some(initial));
-            })
-            .await;
+        upgrade(&mut connection).unwrap();
+        assert_eq!(Db(&connection).kv(ROLLOUT).unwrap(), Some(initial));
     }
 
     /// A member's request straight to the installation API, without the fixture relay's

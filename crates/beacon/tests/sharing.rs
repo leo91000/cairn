@@ -2361,7 +2361,7 @@ async fn temporary_authority_outage_defers_schedules_without_disabling_them() {
 }
 
 #[tokio::test]
-async fn membership_evidence_uses_insertion_time_after_a_blocked_acceptance() {
+async fn member_order_uses_insertion_time_after_a_blocked_acceptance() {
     use sqlx_core::{query::query, query_as::query_as};
     use std::time::Duration;
 
@@ -2406,7 +2406,7 @@ async fn membership_evidence_uses_insertion_time_after_a_blocked_acceptance() {
     );
     let accepting = tokio::spawn(async move { acceptance.send().await.unwrap() });
 
-    // Observe the real wait, and a cutoff strictly later than its transaction start.
+    // Observe the real wait, and a time strictly later than its transaction start.
     // This avoids scheduling assumptions or a fixed sleep between request and release.
     let cutoff = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -2429,7 +2429,7 @@ async fn membership_evidence_uses_insertion_time_after_a_blocked_acceptance() {
     .bind(id).bind(account).fetch_one(&relay.app.pool).await.unwrap();
     assert!(
         joined_at >= cutoff,
-        "a membership accepted after the cutoff must not predate it"
+        "a membership accepted after the wait must not predate its insertion"
     );
     relay.close().await;
 }
@@ -2492,18 +2492,8 @@ async fn author_policy_requires_the_current_machine_identity_and_never_browser_c
     );
     assert_eq!(policy["members"], json!([]));
 
-    let (_, session) = member(&relay, "rollout-evidence@example.test").await;
+    let (_, session) = member(&relay, "rollout@example.test").await;
     let account = session["account"]["id"].as_str().unwrap();
-    // Round upward so precision lost at the millisecond boundary cannot admit a
-    // membership that began after the installation's cutoff within that millisecond.
-    sqlx_core::query::query(
-        "UPDATE installation_members SET joined_at='1970-01-01T00:00:01.000001Z' WHERE installation_id=$1 AND account_id=$2",
-    )
-    .bind(id)
-    .bind(account)
-    .execute(&relay.app.pool)
-    .await
-    .unwrap();
     let policy: Value = relay
         .app
         .client
@@ -2516,7 +2506,7 @@ async fn author_policy_requires_the_current_machine_identity_and_never_browser_c
         .await
         .unwrap();
     assert_eq!(policy["members"][0]["account_id"], account);
-    assert_eq!(policy["members"][0]["joined_at"], 1001);
+    assert!(policy["members"][0].get("joined_at").is_none());
     assert!(
         !policy["members"][0]["access_id"]
             .as_str()

@@ -6,47 +6,40 @@ comptes aux agents »).
 
 One immediate transaction creates `agent_account_access`, keyed by agent and member
 account, records each entry's membership and grant time, then stores the ids of the
-existing agents and the upgrade's UTC Unix millisecond cutoff (`upgradedAt`) under
-the `agent-access-rollout` KV key and advances `user_version`.
+existing agents under the `agent-access-rollout` KV key and advances `user_version`.
 No agent, conversation, task or other KV entry changes.
 
-Membership checks retain access only for current memberships whose Beacon
-`joined_at` is strictly earlier than that stored cutoff. Beacon supplies the
-current membership's timestamp, rounded up to milliseconds. Invitation acceptance
-records insertion time after taking the installation lock, so a lock wait cannot
-backdate a new membership to its transaction's start. A removed and
-re-invited account has a new membership and timestamp. New memberships, including
-re-invitations during a Beacon outage after the upgrade, receive no automatic
-access. Equal timestamps also receive no automatic access. The owner never needs
-an entry, and agents created afterwards start without member access.
+The rollout remains pending until the first successful authoritative membership
+snapshot. That snapshot grants each current member access to every agent recorded at
+upgrade, except for explicit owner revocations recorded while rollout is pending.
+The owner does not need an entry, and agents created after the upgrade are not in the
+candidate list. If a Beacon outage delays the first snapshot, members present when it
+finally succeeds are included, including people who joined or were re-invited during
+the gap. Memberships added after that snapshot receive no automatic access; a
+re-invitation never restores access.
 
-Beacon and installation must use comparable UTC clocks for this timestamp
-boundary. This cannot reconstruct an exact historical membership set under
-arbitrary clock skew: the installation previously kept no membership list.
-There is no clock tolerance or later-observation exception that widens the cutoff.
+An unavailable, unclaimed or otherwise missing membership policy is not a snapshot
+and leaves rollout pending. A successful empty membership list completes rollout
+without granting any member access. No Beacon/installation clock comparison is
+needed. Owner revocations made before the first snapshot are recorded by agent and
+account even when no access row exists yet, so the snapshot cannot undo them.
 
-An older Beacon may omit `joined_at`: scheduling continues to use its unchanged
-account and membership ids, but an unknown, negative or out-of-range timestamp
-never grants automatic access. The rollout keeps its original cutoff while any
-current membership lacks usable evidence and completes when all current
-memberships have evidence (including an empty member list). Owner grants remain
-available, and revocations record exclusions while the rollout is pending, even
-when there is no entry yet, so later evidence cannot reverse an owner decision.
-Older installations ignore the additional membership timestamp.
+Older pending rollout records with a timestamp cutoff are read using the same
+first-snapshot rule; the obsolete cutoff is ignored. A record without a usable agent
+list cannot grant access. Older Beacons remain compatible because scheduling uses
+only account and membership ids.
 
-Reopening an upgraded database does not replace its cutoff or agent list. A
-pending rollout written by an older build without a usable cutoff is discarded
-without granting access; the owner can grant access explicitly. A cutoff is never
-invented at first observation.
+Reopening an upgraded database does not replace its agent list. Repeated membership
+observations after the first one cannot repeat the rollout or restore a revoked
+grant.
 
 A failure leaves the schema, KV and version intact at 18. A successful upgrade
 has no downgrade path. Intermediate 11 → 18 migrations remain supported and retain
 their own transaction boundaries.
 
-`agent_access` covers existing members retaining access, later and re-invited
-members being excluded before the first observation, equal and missing timestamp
-evidence, pending owner decisions, an unknown legacy cutoff, and a member's
-scheduled task surviving the upgrade. Its unit tests check upgrade idempotence;
-protocol tests check mixed-version compatibility, and Beacon sharing tests check
-the authoritative timestamp and rounding. Earlier migration suites assert the
-final version with the rollout key excluded from their unchanged-KV comparisons.
+`agent_access` covers the first snapshot after a delayed observation, joins and
+re-invitations during the gap, later memberships being excluded, pending owner
+revocations, legacy pending rollout records, and a member's scheduled task surviving
+the upgrade. Its unit tests check upgrade idempotence; protocol tests check
+mixed-version compatibility. Earlier migration suites assert the final version with
+the rollout key excluded from their unchanged-KV comparisons.

@@ -129,8 +129,12 @@ Android ; l’interface le prévient quand l’agent a l’accès à l’instal
 gestion des membres, les donner ou les retirer est exclu du MCP public et de
 `cairn_installation`, pour qu’aucun agent ni client externe ne puisse le faire ; les
 lire reste possible. Le propriétaire a accès à tous les agents ; un nouvel agent n’est
-accessible qu’à lui. À la mise en place, les membres gardent l’accès aux agents
-existants. Ces accès appartiennent à une adhésion : réinviter un membre ne les rend
+accessible qu’à lui. À la mise en place, le premier instantané autoritaire des
+adhésions choisit les membres qui gardent l’accès aux agents existants. Si le premier
+instantané est retardé par une panne du Beacon, tous les membres présents à sa reprise
+sont inclus, y compris ceux invités ou réinvités pendant l’interruption. Les membres
+arrivés après cet instantané et les réinvités suivants ne reçoivent aucun accès
+automatique. Ces accès appartiennent à une adhésion : réinviter un membre ne les rend
 pas.
 
 L’accès est vérifié à l’acceptation d’un message : retirer l’accès à un agent
