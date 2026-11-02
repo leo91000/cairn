@@ -2004,8 +2004,13 @@ async fn explicit_setup_grant_can_choose_after_removal_without_profile_or_settin
     let current = f.api("GET", json!({})).await.unwrap();
     f.api(
         "PUT",
-        json!({ "agentId": MAIN_AGENT_ID, "revision": current["revision"],
-            "grants": [{ "instanceId": retained["id"], "access": { "type": "full" } }],
+        json!({
+            "agentId": MAIN_AGENT_ID,
+            "revision": current["revision"],
+            "grants": [{
+                "instanceId": retained["id"],
+                "access": { "type": "full" },
+            }],
             "runCredentialInstances": [],
         }),
     )
@@ -2065,9 +2070,20 @@ async fn explicit_setup_grant_can_choose_after_removal_without_profile_or_settin
     .unwrap();
     let current = f.api("GET", json!({})).await.unwrap();
     assert_eq!(current["runCredentialInstances"], json!([second["id"]]));
-    f.api("PUT", json!({ "agentId": MAIN_AGENT_ID, "revision": current["revision"],
-        "grants": [{ "instanceId": third["id"], "access": { "type": "full" } }], "runCredentialInstances": [],
-    })).await.unwrap();
+    f.api(
+        "PUT",
+        json!({
+            "agentId": MAIN_AGENT_ID,
+            "revision": current["revision"],
+            "grants": [{
+                "instanceId": third["id"],
+                "access": { "type": "full" },
+            }],
+            "runCredentialInstances": [],
+        }),
+    )
+    .await
+    .unwrap();
     common::save_plugin(
         &f.s,
         "grant-probe",

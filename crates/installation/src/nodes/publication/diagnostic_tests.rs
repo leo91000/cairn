@@ -895,9 +895,15 @@ async fn snapshot_fallback_rechecks_after_the_completed_capture_response() {
             Err(Error::forbidden("Revoked"))
         }
     });
-    let run = json!({ "id": id(), "status": "succeeded", "backup": {
-        "requestedRevision": 2, "acknowledgedRevision": 1, "blockEnvelope": 3,
-    } });
+    let run = json!({
+        "id": id(),
+        "status": "succeeded",
+        "backup": {
+            "requestedRevision": 2,
+            "acknowledgedRevision": 1,
+            "blockEnvelope": 3,
+        },
+    });
     let error = request_snapshot(
         &s,
         &run,

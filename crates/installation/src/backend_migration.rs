@@ -558,8 +558,10 @@ impl Service {
                 break;
             }
             tokio::select! {
-                () = authorize.cancelled() => return Err(Error::forbidden("The accepted migration was cancelled.")),
-                () = tokio::time::sleep(Duration::from_millis(100)) => {},
+                () = authorize.cancelled() => {
+                    return Err(Error::forbidden("The accepted migration was cancelled."));
+                }
+                () = tokio::time::sleep(Duration::from_millis(100)) => {}
             }
         }
         if self.worker.active.lock().await.contains_key(&run_id) {
