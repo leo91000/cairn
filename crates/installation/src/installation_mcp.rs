@@ -13,8 +13,28 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 pub(crate) async fn authorize(s: &Service, bearer: &str) -> Result<Value> {
-    let bearer = bearer.to_owned();
-    s.store.read(move |db| authorize_in(db, &bearer)).await
+    authorize_with_authority(s, bearer)
+        .await
+        .map(|(run, _)| run)
+}
+
+/// Retain both the execution token and semantic delegation proof across effects.
+pub(crate) async fn authorize_with_authority(
+    s: &Service,
+    bearer: &str,
+) -> Result<(Value, crate::capabilities::plugin_packages::Authority)> {
+    let caller = bearer.to_owned();
+    let token = caller.clone();
+    let read_token = caller.clone();
+    let run = s
+        .store
+        .read(move |db| authorize_in(db, &read_token))
+        .await?;
+    let authority = crate::capabilities::plugin_packages::Authority::for_execution(&run)
+        .with_guard(move |db| authorize_in(db, &token).map(|_| ()));
+    let mut authority = crate::delegation::authorize_async_with(s, &run, authority).await?;
+    authority.bearer = Some(caller);
+    Ok((run, authority))
 }
 
 pub(crate) fn authorize_in(db: &Db<'_>, bearer: &str) -> Result<Value> {
@@ -33,6 +53,7 @@ pub(crate) fn authorize_in(db: &Db<'_>, bearer: &str) -> Result<Value> {
     if policy(agent)["installation"] != true || !agent_allowed(&current, agent) {
         return Err(Error::forbidden("Agent permissions were reduced."));
     }
+    crate::delegation::authorize_run(db, &run)?;
     Ok(run)
 }
 
@@ -53,15 +74,16 @@ pub(crate) fn agent_allowed(caller: &Value, target: &Value) -> bool {
 }
 
 /// Authorization for management effects after asynchronous preparation.
-pub(crate) fn management_authorization(
+pub(crate) async fn management_authorization(
+    s: &Service,
     bearer: Option<&str>,
-) -> impl Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static {
-    let bearer = bearer.map(str::to_owned);
-    move |db| {
-        if let Some(bearer) = &bearer {
-            authorize_in(db, bearer)?;
+) -> Result<crate::authorization::Authorization> {
+    match bearer {
+        Some(bearer) => {
+            let (_, authority) = authorize_with_authority(s, bearer).await?;
+            Ok(crate::authorization::Authorization::installation_management(s, authority, bearer))
         }
-        Ok(())
+        None => Ok(crate::authorization::Authorization::default()),
     }
 }
 

@@ -543,6 +543,8 @@ fn main() {
     export::<Project>(root, &mut generator, Contract::Serialize);
     export::<DeleteProjectOutput>(root, &mut generator, Contract::Serialize);
     export::<CreateAgentInput>(root, &mut generator, Contract::Deserialize);
+    export::<AgentPluginGrants>(root, &mut generator, Contract::Serialize);
+    export::<ReplaceAgentPluginGrantsInput>(root, &mut generator, Contract::Deserialize);
     export::<ReplaceAgentInput>(root, &mut generator, Contract::Deserialize);
     export::<SetAgentAvatarInput>(root, &mut generator, Contract::Deserialize);
     export::<AgentInput>(root, &mut generator, Contract::Deserialize);
@@ -909,6 +911,8 @@ fn main() {
         { "name": "managePlugin", "input": "ManagePluginInput", "output": "ManagePluginOutput", "method": "POST", "path": "/plugins/manage", "deferred": true }
     ])).unwrap() + "\n").unwrap();
     let clients = serde_json::json!([
+        { "name": "getAgentPluginGrants", "input": "AgentInput", "output": "AgentPluginGrants", "method": "GET", "path": "/agents/{agentId}/plugin-grants" },
+        { "name": "replaceAgentPluginGrants", "input": "ReplaceAgentPluginGrantsInput", "output": "AgentPluginGrants", "method": "PUT", "path": "/agents/{agentId}/plugin-grants" },
         {
             "name": "setAgentAvatar",
             "input": "SetAgentAvatarInput",

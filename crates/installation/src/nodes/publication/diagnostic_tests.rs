@@ -118,6 +118,7 @@ async fn transfer_diagnostics_isolate_concurrent_attempts_and_conserve_volumes()
         },
     ];
     let publication = Publication {
+        authorize: crate::authorization::Authorization::default(),
         s: &s,
         run: &run,
         run_id: &run_id,
@@ -287,6 +288,7 @@ async fn transfer_diagnostics_measure_base_get_decode_and_failed_put_without_los
     let snapshot_id = id();
     let attempt = id();
     let publication = Publication {
+        authorize: crate::authorization::Authorization::default(),
         s: &s,
         run: &run,
         run_id: &run_id,
@@ -430,9 +432,14 @@ async fn default_logging_filter_child() {
         .finish();
     async {
         assert!(
-            capture_owned(&s, &json!({ "id": id() }), CaptureProtocol::Direct)
-                .await
-                .is_err()
+            capture_owned(
+                &s,
+                &json!({ "id": id() }),
+                CaptureProtocol::Direct,
+                crate::authorization::Authorization::default()
+            )
+            .await
+            .is_err()
         );
         let metrics =
             diagnostic::Metrics::new(&id(), "credential-not-a-uuid", "path-not-a-uuid", "manager");
@@ -855,4 +862,105 @@ async fn old_controller_drain_retries_lost_put_and_ack_across_restart_without_di
     assert_eq!(legacy_reads.load(Ordering::Relaxed), reads);
     controller_task.abort();
     provider_task.abort();
+}
+
+#[tokio::test]
+async fn snapshot_fallback_rechecks_after_the_completed_capture_response() {
+    let root = tempfile::tempdir().unwrap();
+    let s = service(root.path()).await;
+    let allowed = Arc::new(AtomicBool::new(true));
+    let fallback = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (origin, server) = peer(Router::new().fallback({
+        let allowed = allowed.clone();
+        let fallback = fallback.clone();
+        move |request: Request| {
+            let allowed = allowed.clone();
+            let fallback = fallback.clone();
+            async move {
+                if request.uri().path().ends_with("snapshot-completed") {
+                    allowed.store(false, Ordering::SeqCst);
+                    StatusCode::PRECONDITION_FAILED
+                } else {
+                    fallback.fetch_add(1, Ordering::SeqCst);
+                    StatusCode::OK
+                }
+            }
+        }
+    }))
+    .await;
+    let authority = crate::authorization::Authorization::new(&s, move |_| {
+        if allowed.load(Ordering::SeqCst) {
+            Ok(())
+        } else {
+            Err(Error::forbidden("Revoked"))
+        }
+    });
+    let run = json!({ "id": id(), "status": "succeeded", "backup": {
+        "requestedRevision": 2, "acknowledgedRevision": 1, "blockEnvelope": 3,
+    } });
+    let error = request_snapshot(
+        &s,
+        &run,
+        &origin,
+        "attempt",
+        "synthetic",
+        CaptureProtocol::Direct,
+        &authority,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, 403);
+    assert_eq!(fallback.load(Ordering::SeqCst), 0);
+    server.abort();
+    s.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn direct_storage_probe_rechecks_before_its_second_write_and_cleans_its_own_key() {
+    let root = tempfile::tempdir().unwrap();
+    let s = service(root.path()).await;
+    let allowed = Arc::new(AtomicBool::new(true));
+    let puts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let deletes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (origin, server) = peer(Router::new().fallback({
+        let allowed = allowed.clone();
+        let puts = puts.clone();
+        let deletes = deletes.clone();
+        move |request: Request| {
+            let allowed = allowed.clone();
+            let puts = puts.clone();
+            let deletes = deletes.clone();
+            async move {
+                assert!(request.uri().path().contains("/direct-probes/"));
+                if request.method() == axum::http::Method::PUT {
+                    puts.fetch_add(1, Ordering::SeqCst);
+                    allowed.store(false, Ordering::SeqCst);
+                } else if request.method() == axum::http::Method::DELETE {
+                    deletes.fetch_add(1, Ordering::SeqCst);
+                }
+                StatusCode::OK
+            }
+        }
+    }))
+    .await;
+    let storage = fixture_storage(&origin, "private", s.hot_s3.clone()).await;
+    let authority = crate::authorization::Authorization::new(&s, move |_| {
+        if allowed.load(Ordering::SeqCst) {
+            Ok(())
+        } else {
+            Err(Error::forbidden("Revoked"))
+        }
+    });
+    assert_eq!(
+        storage
+            .require_direct_authorized(&authority)
+            .await
+            .unwrap_err()
+            .status,
+        403
+    );
+    assert_eq!(puts.load(Ordering::SeqCst), 1);
+    assert_eq!(deletes.load(Ordering::SeqCst), 1);
+    server.abort();
+    s.shutdown.cancel();
 }

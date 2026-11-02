@@ -8496,6 +8496,13 @@ async fn workspace_move_rechecks_grant_turn_and_live_permissions_after_capacity_
         run["trigger"] = "chat".into();
         run["snapshot"] = json!({"agent":agent});
         owner.add_run_fixture(&run).await;
+        owner
+            .save_conversation_boundary(json!({
+                "id": id(),
+                "runId": run_id,
+                "title": "Fixture",
+            }))
+            .await;
         let configuration = owner
             .service
             .mcps

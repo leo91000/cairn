@@ -319,7 +319,17 @@ fn read_error(
 impl Storage {
     /// Qualify direct request destinations and writes for the actual S3 driver.
     /// These tiny control objects never contain a conversation's disk data.
+    #[cfg(test)]
     pub(crate) async fn require_direct(&self) -> Result<()> {
+        self.require_direct_authorized(&crate::authorization::Authorization::default())
+            .await
+    }
+
+    pub(crate) async fn require_direct_authorized(
+        &self,
+        authorize: &crate::authorization::Authorization,
+    ) -> Result<()> {
+        authorize.recheck().await?;
         let cache_key = (self.endpoint.clone(), self.bucket.clone());
         let probe = self
             .hot
@@ -369,9 +379,11 @@ impl Storage {
                         ))
                 };
                 let result = async {
+                    authorize.recheck().await?;
                     request().send().await.map_err(|_| {
                         Error::unavailable("Direct storage capability probe failed.")
                     })?;
+                    authorize.recheck().await?;
                     match request().send().await {
                         Err(error)
                             if error
@@ -392,6 +404,8 @@ impl Storage {
                     }
                 }
                 .await;
+                // Cleanup is confined to this probe's random control key;
+                // it removes no caller data and remains necessary on revocation.
                 let cleanup = client
                     .delete_object()
                     .bucket(&self.bucket)
@@ -540,6 +554,34 @@ impl Storage {
         cleanup
     }
 
+    pub(crate) async fn probe_live(
+        &self,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<()> {
+        authorize.recheck().await?;
+        let key = format!("installation-check/{}", uuid::Uuid::new_v4());
+        let checked = async {
+            let bytes = b"Cairn storage check";
+            self.upload_bytes_checked(bytes.to_vec(), &key, Some(&authorize))
+                .await?;
+            // The fresh probe key cannot be shared with an unrelated reader.
+            let remote = self
+                .fetch_bytes_checked(&key, bytes.len() as u64, Some(&authorize))
+                .await?;
+            if remote != bytes {
+                return Err(Error::bad("Remote backup checksum mismatch."));
+            }
+            authorize.recheck().await
+        }
+        .await;
+        // The host owns this probe key from admission. Always clean it up,
+        // including after the initiating execution loses authority.
+        let cleanup = self.purge_key(&key).await;
+        checked?;
+        cleanup?;
+        authorize.recheck().await
+    }
+
     pub fn configured(s: &Service) -> Result<Self> {
         Self::from_config(s, &read_config(s)?)
     }
@@ -674,9 +716,36 @@ impl Storage {
     }
 
     pub async fn validate(&self) -> Result<()> {
+        self.validate_checked(None).await
+    }
+
+    pub(crate) async fn validate_live(
+        &self,
+        authorize: &crate::authorization::Authorization,
+    ) -> Result<()> {
+        self.validate_checked(Some(authorize)).await
+    }
+
+    async fn validation_call(
+        &self,
+        args: Vec<String>,
+        missing: Option<&str>,
+        authorize: Option<&crate::authorization::Authorization>,
+    ) -> Result<Value> {
+        if let Some(authorize) = authorize {
+            authorize.recheck().await?;
+        }
+        self.optional(args, missing).await
+    }
+
+    async fn validate_checked(
+        &self,
+        authorize: Option<&crate::authorization::Authorization>,
+    ) -> Result<()> {
         // Garage has neither public ACLs nor bucket policies, and is private on the Compose network.
         if self.integrated {
-            self.call(self.s3api("head-bucket", &[])).await?;
+            self.validation_call(self.s3api("head-bucket", &[]), None, authorize)
+                .await?;
             return Ok(());
         }
         let privacy = async {
@@ -685,13 +754,14 @@ impl Storage {
                 return Ok(());
             }
             let block = self
-                .optional(
+                .validation_call(
                     self.s3api("get-public-access-block", &[]),
                     Some("NotImplemented"),
+                    authorize,
                 )
                 .await?;
             if block.is_null() {
-                self.validate_private().await?;
+                self.validate_private(authorize).await?;
             } else if [
                 "BlockPublicAcls",
                 "IgnorePublicAcls",
@@ -709,9 +779,10 @@ impl Storage {
         };
         let lifecycle = async {
             let lifecycle = self
-                .optional(
+                .validation_call(
                     self.s3api("get-bucket-lifecycle-configuration", &[]),
                     Some("NoSuchLifecycleConfiguration"),
+                    authorize,
                 )
                 .await?;
             if lifecycle["Rules"]
@@ -731,9 +802,10 @@ impl Storage {
                 return Ok(());
             }
             let lock = self
-                .optional(
+                .validation_call(
                     self.s3api("get-object-lock-configuration", &[]),
                     Some("ObjectLockConfigurationNotFoundError"),
+                    authorize,
                 )
                 .await?;
             if lock["ObjectLockConfiguration"]["ObjectLockEnabled"] == "Enabled" {
@@ -749,14 +821,19 @@ impl Storage {
             privacy,
             lifecycle,
             object_lock,
-            self.call(self.s3api("head-bucket", &[]))
+            self.validation_call(self.s3api("head-bucket", &[]), None, authorize)
         )?;
         Ok(())
     }
 
     /// Providers without public access blocks (OVHcloud) must show a private ACL and no bucket policy.
-    async fn validate_private(&self) -> Result<()> {
-        let acl = self.call(self.s3api("get-bucket-acl", &[])).await?;
+    async fn validate_private(
+        &self,
+        authorize: Option<&crate::authorization::Authorization>,
+    ) -> Result<()> {
+        let acl = self
+            .validation_call(self.s3api("get-bucket-acl", &[]), None, authorize)
+            .await?;
         if acl["Grants"].as_array().into_iter().flatten().any(|grant| {
             let uri = grant["Grantee"]["URI"].as_str().unwrap_or("");
             uri.ends_with("/AllUsers") || uri.ends_with("/AuthenticatedUsers")
@@ -764,6 +841,9 @@ impl Storage {
             return Err(Error::bad(
                 "The storage bucket must not grant public access.",
             ));
+        }
+        if let Some(authorize) = authorize {
+            authorize.recheck().await?;
         }
         let policy = self
             .optional(
@@ -788,6 +868,51 @@ impl Storage {
     }
 
     pub async fn upload_bytes(&self, bytes: Vec<u8>, key: &str) -> Result<()> {
+        self.upload_bytes_checked(bytes, key, None).await
+    }
+
+    pub(crate) async fn upload_bytes_authorized(
+        &self,
+        bytes: Vec<u8>,
+        key: &str,
+        authorize: &crate::authorization::Authorization,
+    ) -> Result<()> {
+        self.upload_bytes_checked(bytes, key, Some(authorize)).await
+    }
+
+    pub(crate) async fn upload_file_verified_authorized(
+        &self,
+        path: &Path,
+        key: &str,
+        authorize: &crate::authorization::Authorization,
+    ) -> Result<()> {
+        authorize.recheck().await?;
+        let bytes = tokio::fs::read(path).await?;
+        self.upload_bytes_checked(bytes, key, Some(authorize)).await
+    }
+
+    pub(crate) async fn download_bytes_authorized(
+        &self,
+        key: &str,
+        limit: u64,
+        authorize: &crate::authorization::Authorization,
+    ) -> Result<Vec<u8>> {
+        if !authorize.has_async_checks() {
+            return self.download_bytes(key, limit).await;
+        }
+        let bytes = self
+            .fetch_bytes_checked(key, limit, Some(authorize))
+            .await?;
+        authorize.recheck().await?;
+        Ok(bytes)
+    }
+
+    async fn upload_bytes_checked(
+        &self,
+        bytes: Vec<u8>,
+        key: &str,
+        authorize: Option<&crate::authorization::Authorization>,
+    ) -> Result<()> {
         let sample = self.hot.put_metrics.start();
         let slot = diagnostic::start(Stage::PutSlot);
         let _permit = self.hot.writes.acquire().await.map_err(Error::internal)?;
@@ -808,6 +933,9 @@ impl Storage {
         let checksum_sample = diagnostic::start(Stage::PutChecksum);
         let checksum = base64::engine::general_purpose::STANDARD.encode(Md5::digest(&bytes));
         checksum_sample.finish(bytes.len());
+        if let Some(authorize) = authorize {
+            authorize.recheck().await?;
+        }
         let request_sample = diagnostic::start(Stage::PutRequest);
         client
             .put_object()
@@ -874,6 +1002,15 @@ impl Storage {
     }
 
     async fn fetch_bytes(&self, key: &str, limit: u64) -> Result<Vec<u8>> {
+        self.fetch_bytes_checked(key, limit, None).await
+    }
+
+    async fn fetch_bytes_checked(
+        &self,
+        key: &str,
+        limit: u64,
+        authorize: Option<&crate::authorization::Authorization>,
+    ) -> Result<Vec<u8>> {
         let sample = self.hot.get_metrics.start();
         let slot = diagnostic::start(Stage::GetSlot);
         let _permit = self.hot.reads.acquire().await.map_err(Error::internal)?;
@@ -888,6 +1025,9 @@ impl Storage {
             )
             .await;
         client_sample.finish(0);
+        if let Some(authorize) = authorize {
+            authorize.recheck().await?;
+        }
         let bytes = tokio::time::timeout(Duration::from_secs(60), async {
             let headers = diagnostic::start(Stage::GetHeaders);
             let output = client
@@ -1442,6 +1582,103 @@ pub(crate) mod tests {
             "a store without conditional writes still receives only the authorized plaintext"
         );
         server.abort();
+    }
+
+    async fn check_probe_revocation(wait_for_write_slot: bool) {
+        use axum::{body::Body, extract::Request, response::IntoResponse};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let root = tempfile::tempdir().unwrap();
+        let service = Service::new(crate::common::config(root.path()))
+            .await
+            .unwrap();
+        let allowed = Arc::new(AtomicBool::new(true));
+        let requests = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let (permission, observed) = (allowed.clone(), requests.clone());
+        let app = axum::Router::new().fallback(move |request: Request<Body>| {
+            let (permission, observed) = (permission.clone(), observed.clone());
+            async move {
+                let method = request.method().as_str().to_owned();
+                observed.lock().await.push(method.clone());
+                if method == "PUT" && !wait_for_write_slot {
+                    permission.store(false, Ordering::SeqCst);
+                }
+                if method == "GET" {
+                    (axum::http::StatusCode::OK, "Cairn storage check").into_response()
+                } else {
+                    axum::http::StatusCode::OK.into_response()
+                }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let hot = Arc::new(HotS3::new());
+        let mut storage = fixture_storage(&origin, "fixture", hot.clone()).await;
+        storage.integrated = true;
+        let permission = allowed.clone();
+        let authorize = crate::authorization::Authorization::new(&service, move |_| {
+            if permission.load(Ordering::SeqCst) {
+                Ok(())
+            } else {
+                Err(Error::forbidden("Revoked"))
+            }
+        });
+        let held = if wait_for_write_slot {
+            Some(
+                hot.writes
+                    .acquire_many(HOT_WRITE_CONCURRENCY as u32)
+                    .await
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+        let probe = tokio::spawn(async move { storage.probe_live(authorize).await });
+        if wait_for_write_slot {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while hot.put_metrics.snapshot()["inFlight"] != 1 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            allowed.store(false, Ordering::SeqCst);
+        }
+        drop(held);
+        let error = tokio::time::timeout(Duration::from_secs(10), probe)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.status, 403);
+        let requests = requests.lock().await;
+        assert!(
+            !requests.iter().any(|method| method == "GET"),
+            "read after revocation: {requests:?}"
+        );
+        if wait_for_write_slot {
+            assert!(
+                !requests.iter().any(|method| method == "PUT"),
+                "write after revocation: {requests:?}"
+            );
+        }
+        assert_eq!(
+            requests.last().map(String::as_str),
+            Some("DELETE"),
+            "the owned probe object must be cleaned up"
+        );
+        service.shutdown.cancel();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn probe_authority_is_rechecked_after_put_before_read() {
+        check_probe_revocation(false).await;
+    }
+
+    #[tokio::test]
+    async fn probe_authority_is_rechecked_after_write_slot_wait() {
+        check_probe_revocation(true).await;
     }
 
     #[tokio::test]

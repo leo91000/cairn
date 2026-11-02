@@ -152,10 +152,14 @@ fn read_limited(path: &Path, limit: u64) -> Result<String> {
 
 /// Reads one installed version. Its directory names must match the manifest.
 fn read_version(s: &Service, id: &str, version: &str) -> Result<Package> {
+    read_version_at(&root(s), id, version)
+}
+
+fn read_version_at(root: &Path, id: &str, version: &str) -> Result<Package> {
     if !segment(id) || !segment(version) {
         return Err(Error::not_found("Plugin version not found."));
     }
-    let directory = root(s).join(id).join(version);
+    let directory = root.join(id).join(version);
     if !std::fs::symlink_metadata(&directory).is_ok_and(|metadata| metadata.is_dir()) {
         return Err(Error::not_found("Plugin version not found."));
     }
@@ -181,6 +185,27 @@ fn read_version(s: &Service, id: &str, version: &str) -> Result<Package> {
         return Err(Error::bad(
             "Plugin folder names must match the manifest ID and version.",
         ));
+    }
+    Ok(package)
+}
+
+/// The same active-package loader used by the one-time grant migration.
+pub(crate) fn upgrade_package(
+    db: &crate::store::Db<'_>,
+    directory: &Path,
+    id: &str,
+) -> Result<Package> {
+    if let Some(package) = builtin(id) {
+        return Ok(package);
+    }
+    let record = db.plugin_package(id)?;
+    let version = record
+        .active
+        .as_deref()
+        .ok_or_else(|| Error::forbidden("Plugin inactive."))?;
+    let package = read_version_at(&directory.join("plugins"), id, version)?;
+    if record.approvals.get(version) != Some(&package.digest) {
+        return Err(Error::forbidden("Plugin unapproved."));
     }
     Ok(package)
 }
@@ -543,6 +568,7 @@ async fn set_active(
         package.digest.clone(),
         reviewed_digest.is_some(),
     );
+    let has_run_credentials = package.manifest.run_credentials.is_some();
     s.store
         .transaction(move |db| {
             authority.authorize(db)?;
@@ -556,6 +582,9 @@ async fn set_active(
                 return Err(Error::forbidden("This version is no longer approved."));
             }
             db.activate_plugin_version(&plugin, &version, &digest, approve)?;
+            if !has_run_credentials {
+                db.clear_plugin_credential_suppliers(&plugin)?;
+            }
             db.invalidate_plugin_hooks(&plugin, &digest)?;
             db.audit(
                 if approve {

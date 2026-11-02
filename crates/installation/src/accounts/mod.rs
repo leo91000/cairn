@@ -1022,6 +1022,27 @@ impl Accounts {
         public_credential: Option<&str>,
         authorize: impl Fn(&Db<'_>) -> Result<()> + Send + 'static,
     ) -> Result<CodingAgentAccount> {
+        self.update_live(
+            s,
+            id,
+            revision,
+            input,
+            public_credential,
+            crate::authorization::Authorization::local(authorize),
+        )
+        .await
+    }
+
+    pub(crate) async fn update_live(
+        &self,
+        s: &Service,
+        id: &str,
+        revision: &str,
+        input: &AccountSettings,
+        public_credential: Option<&str>,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<CodingAgentAccount> {
+        authorize.recheck().await?;
         let _guard = self.lock(id).await;
         if self.connecting.lock().await.as_deref() == Some(id) {
             return Err(Error::conflict(
@@ -1044,9 +1065,10 @@ impl Accounts {
         }
         account.enabled = input.enabled;
         account.max_concurrent_runs = Some(input.max_concurrent_runs);
+        authorize.recheck().await?;
         s.store
             .transaction(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 db.save_coding_account(&account)
             })
             .await?;
@@ -1076,6 +1098,25 @@ impl Accounts {
         public_credential: Option<&str>,
         authorize: impl Fn(&Db<'_>) -> Result<()> + Send + 'static,
     ) -> Result<CodingAgentAccounts> {
+        self.reorder_live(
+            s,
+            provider,
+            ids,
+            public_credential,
+            crate::authorization::Authorization::local(authorize),
+        )
+        .await
+    }
+
+    pub(crate) async fn reorder_live(
+        &self,
+        s: &Service,
+        provider: Provider,
+        ids: &[String],
+        public_credential: Option<&str>,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<CodingAgentAccounts> {
+        authorize.recheck().await?;
         if !provider.driver().ordered() {
             return Err(Error::bad("This coding agent does not order its accounts."));
         }
@@ -1099,9 +1140,10 @@ impl Accounts {
             crate::relay::authorize_plugin_mcp(s, credential).await?;
         }
         let ids = ids.to_vec();
+        authorize.recheck().await?;
         s.store
             .transaction(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 let mut accounts = stored(db)?;
                 accounts.retain(|a| a.provider == provider);
                 let mut expected = accounts.iter().map(|a| a.id.as_str()).collect::<Vec<_>>();

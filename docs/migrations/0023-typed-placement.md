@@ -62,7 +62,9 @@ synthetic database produced by the real previous manager Store/domain writers at
 account fixture upgraded by that manager, plus placements, attempts, ordered
 reservation membership and high-water counters. The actual version-15 → 16 questionnaire and version-16 → 17 attachment and version-17 → 18 personal read state
 and version-18 → 19 read-side run projection, version-19 → 20 plugin hooks and version-20 → 21 writer-owned progress and version-21 → 22 timeline projection
-migrations from main are applied first,
+migrations from main are applied first. The version-22 → 23 placement migration
+and the following [version-23 → 24 contribution-grant migration](0024-plugin-contribution-grants.md)
+then run before the upgraded database is compared,
 then a `VACUUM INTO` copy of that previous-version database is upgraded;
 all previous run values and attempt/reservation fields are compared, along with
 every unchanged table/column, including account/conversation relations, encrypted

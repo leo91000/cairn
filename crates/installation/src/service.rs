@@ -14,6 +14,7 @@ use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
 pub struct Service {
+    pub(crate) accepted_jobs: Arc<crate::authorization::Jobs>,
     pub(crate) node_move_operations: Arc<crate::nodes::move_operations::Operations>,
     pub missions: Arc<crate::missions::Missions>,
     pub node_maintenance_tasks: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
@@ -62,6 +63,7 @@ impl Service {
         let vault = Vault::new(store.clone(), &config.data_dir)?;
         crate::nodes::connector::record_manager_origin(&config).await?;
         let service = Arc::new(Self {
+            accepted_jobs: Arc::default(),
             node_move_operations: Arc::default(),
             missions: Arc::default(),
             node_maintenance_tasks: Arc::default(),
@@ -155,6 +157,7 @@ impl Service {
         required(self.store.get(kind, id).await?, "Record not found")
     }
 
+    #[cfg(test)]
     pub(crate) async fn save_profile<F>(
         self: &Arc<Self>,
         command: crate::agents::SaveProfile,
@@ -164,6 +167,21 @@ impl Service {
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        self.save_profile_live(
+            command,
+            editor,
+            crate::authorization::Authorization::once(authorize),
+        )
+        .await
+    }
+
+    pub(crate) async fn save_profile_live(
+        self: &Arc<Self>,
+        command: crate::agents::SaveProfile,
+        editor: AgentEditor,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<cairn_contracts::Agent> {
+        authorize.recheck().await?;
         let (mut agent, expected, creation_id, review) = match command {
             crate::agents::SaveProfile::Create(input) => (
                 crate::agents::new_agent(input.settings, input.creation_id),
@@ -210,8 +228,14 @@ impl Service {
         if reapproved {
             crate::native::policy::refresh_for(self, &snapshot).await?;
         }
+        authorize.recheck().await?;
+        let portrait_authorization = if creating {
+            Some(authorize.clone().accepted().await?)
+        } else {
+            None
+        };
         let (agent, created) = self.store.transaction(move |db| {
-            authorize(db)?;
+            authorize.authorize(db)?;
             let current = db.agent(&agent.id.to_string())?;
             if creating {
                 if let Some(current) = &current {
@@ -271,7 +295,7 @@ impl Service {
         if created && self.avatars.configured(self).await? {
             return Ok(self
                 .avatars
-                .generate(self, &agent.id.to_string())
+                .generate_live(self, &agent.id.to_string(), portrait_authorization.unwrap())
                 .await
                 .unwrap_or(agent));
         }
@@ -283,7 +307,6 @@ impl Service {
     async fn instances_accepting_agents(&self, agent: &Value) -> Result<Vec<String>> {
         let requested = crate::agent_grants::plugins(agent);
         let mut accepting = Vec::new();
-        let mut run_credentials = Vec::new();
         for instance in self.store.plugin_instances().await? {
             let id = instance.id.as_str();
             if !requested.iter().any(|requested| requested == id) {
@@ -296,15 +319,6 @@ impl Service {
             if package.manifest.agent_access.is_none() {
                 continue;
             }
-            if crate::plugins::run_credentials::one_per_package(&package.manifest) {
-                if run_credentials.contains(&plugin.to_owned()) {
-                    return Err(Error::bad(format!(
-                        "Grant one {} instance per agent: its runs use that instance's credentials.",
-                        package.manifest.name
-                    )));
-                }
-                run_credentials.push(plugin.to_owned());
-            }
             accepting.push(id.to_owned());
         }
         Ok(accepting)
@@ -312,14 +326,12 @@ impl Service {
 
     /// What saving an edited agent would interrupt: its queued or running work that
     /// the new access no longer covers, and plugin delegations it would suspend.
-    pub(crate) async fn agent_preview<F>(
+    pub(crate) async fn agent_preview_live(
         &self,
         mut input: cairn_contracts::ReplaceAgentInput,
-        authorize: F,
-    ) -> Result<cairn_contracts::AgentPreview>
-    where
-        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
-    {
+        authorize: crate::authorization::Authorization,
+    ) -> Result<cairn_contracts::AgentPreview> {
+        authorize.recheck().await?;
         input.settings.validate().map_err(Error::bad)?;
         input.review.validate().map_err(Error::bad)?;
         let current = required(
@@ -343,6 +355,7 @@ impl Service {
         let owner = crate::relay::task_author_policy(self)
             .await?
             .map(|policy| policy.owner.access_id);
+        authorize.recheck().await?;
         self.store
             .read(move |db| {
                 let tx = rusqlite::Transaction::new_unchecked(
@@ -350,7 +363,7 @@ impl Service {
                     rusqlite::TransactionBehavior::Deferred,
                 )?;
                 let db = &Db(&tx);
-                authorize(db)?;
+                authorize.authorize(db)?;
                 let current = required(db.agent(&id)?, "Agent not found")?;
                 if current.revision != input.revision {
                     return Err(Error::conflict(
@@ -548,6 +561,19 @@ impl Service {
         dedupe: Option<String>,
         bearer: Option<String>,
     ) -> Result<Value> {
+        let authorize =
+            crate::installation_mcp::management_authorization(self, bearer.as_deref()).await?;
+        self.queue_run_live(run, dedupe, bearer, authorize).await
+    }
+
+    pub(crate) async fn queue_run_live(
+        &self,
+        run: Value,
+        dedupe: Option<String>,
+        bearer: Option<String>,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<Value> {
+        authorize.recheck().await?;
         let mut run = run;
         let origin = if run["trigger"] == "schedule" {
             crate::native::policy::Origin::Stored(run["snapshot"]["task"].clone())
@@ -555,9 +581,11 @@ impl Service {
             crate::native::policy::origin()
         };
         crate::native::policy::refresh_for(self, &run["snapshot"]["agent"]).await?;
+        authorize.recheck().await?;
         let result = self
             .store
             .transaction(move |db| {
+                authorize.authorize(db)?;
                 required(
                     db.agent_snapshot(text(&run["snapshot"]["agent"], "id"))?,
                     "Agent no longer exists",

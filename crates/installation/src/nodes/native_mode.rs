@@ -330,13 +330,29 @@ pub async fn change(
     body: Value,
     authorize: impl FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
 ) -> Result<Value> {
+    change_live(
+        s,
+        node,
+        body,
+        crate::authorization::Authorization::once(authorize),
+    )
+    .await
+}
+
+pub(crate) async fn change_live(
+    s: &Service,
+    node: &str,
+    body: Value,
+    authorize: crate::authorization::Authorization,
+) -> Result<Value> {
+    authorize.recheck().await?;
     let change: cairn_contracts::NativeModeChange = serde_json::from_value(body).map_err(|_| {
         Error::bad("Choose protected or administrator and preview before confirming.")
     })?;
     let node_id = node.to_owned();
     let owner = owner();
     s.store.transaction(move |db| {
-        authorize(db)?;
+        authorize.authorize(db)?;
         let mut node = db.node(&node_id)?.ok_or_else(|| Error::not_found("Node not found."))?;
         if node.revoked || node.capabilities.backend != cairn_contracts::NodeBackend::Native {
             return Err(Error::conflict("Choose an enrolled native node."));

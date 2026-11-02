@@ -18,6 +18,19 @@ fn path(path: &Path) -> Result<&str> {
 /// Runs Git with only the given credentials, from a private credential-store file
 /// removed afterwards. Credentials configured on the server are never used.
 async fn git(config: &Config, credentials: &[GitAccess], args: &[&str]) -> Result<String> {
+    git_authorized(config, credentials, args, || std::future::ready(Ok(()))).await
+}
+
+async fn git_authorized<F, Fut>(
+    config: &Config,
+    credentials: &[GitAccess],
+    args: &[&str],
+    authorize: F,
+) -> Result<String>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
     let mut env = codex_environment(config, &config.home.join(".codex"));
     env.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
     env.insert("GIT_NO_LAZY_FETCH".into(), "0".into());
@@ -40,6 +53,7 @@ async fn git(config: &Config, credentials: &[GitAccess], args: &[&str]) -> Resul
         helper,
     ];
     arguments.extend(args.iter().map(|s| (*s).to_owned()));
+    authorize().await?;
     let output = bounded_output(
         command("git", &arguments, &env, None),
         Duration::from_secs(180),
@@ -127,16 +141,48 @@ pub(crate) async fn remote_revision(
     config: &Config,
     credentials: &[GitAccess],
 ) -> Result<Option<(String, String)>> {
-    let Some(origin) = origin(source, config).await else {
+    remote_revision_authorized(source, project, config, credentials, || {
+        std::future::ready(Ok(()))
+    })
+    .await
+}
+
+pub(crate) async fn remote_revision_authorized<F, Fut>(
+    source: &Path,
+    project: &Value,
+    config: &Config,
+    credentials: &[GitAccess],
+    authorize: F,
+) -> Result<Option<(String, String)>>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    let origin = git_authorized(
+        config,
+        &[],
+        &["-C", path(source)?, "config", "--get", "remote.origin.url"],
+        &authorize,
+    )
+    .await;
+    let Ok(origin) = origin else {
+        authorize().await?;
         return Ok(None);
     };
     let remote = remote(&origin, credentials)?;
     let branch = format!("refs/heads/{}", text(project, "baseBranch"));
-    git(config, credentials, &["check-ref-format", &branch]).await?;
-    let result = git(
+    git_authorized(
+        config,
+        credentials,
+        &["check-ref-format", &branch],
+        &authorize,
+    )
+    .await?;
+    let result = git_authorized(
         config,
         credentials,
         &["ls-remote", "--exit-code", "--", &remote, &branch],
+        &authorize,
     )
     .await?;
     let revision = result
@@ -153,19 +199,39 @@ pub async fn clone(
     config: &Config,
     credentials: &[GitAccess],
 ) -> Result<()> {
+    clone_authorized(source, target, project, config, credentials, || {
+        std::future::ready(Ok(()))
+    })
+    .await
+}
+
+pub(crate) async fn clone_authorized<F, Fut>(
+    source: &Path,
+    target: &Path,
+    project: &Value,
+    config: &Config,
+    credentials: &[GitAccess],
+    authorize: F,
+) -> Result<()>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
     let source = path(source)?;
     let target = path(target)?;
     let branch = text(project, "baseBranch");
-    git(
+    git_authorized(
         config,
         credentials,
         &["check-ref-format", &format!("refs/heads/{branch}")],
+        &authorize,
     )
     .await?;
-    let origin = git(
+    let origin = git_authorized(
         config,
         &[],
         &["-C", source, "config", "--get", "remote.origin.url"],
+        &authorize,
     )
     .await
     .ok()
@@ -176,7 +242,7 @@ pub async fn clone(
     if project["sourceMode"] != "local"
         && let Some(origin) = origin.as_deref().filter(|s| !s.is_empty())
     {
-        return git(
+        return git_authorized(
             config,
             credentials,
             &[
@@ -189,13 +255,14 @@ pub async fn clone(
                 origin,
                 target,
             ],
+            &authorize,
         )
         .await
         .map(|_| ());
     }
     // Copy the object store first, then check out after restoring the real
     // promisor remote. upload-pack on a partial local clone cannot lazy-fetch.
-    git(
+    git_authorized(
         config,
         credentials,
         &[
@@ -207,24 +274,27 @@ pub async fn clone(
             source,
             target,
         ],
+        &authorize,
     )
     .await?;
     if let Some(origin) = origin {
-        if git(
+        if git_authorized(
             config,
             credentials,
             &["-C", source, "config", "--get", "remote.origin.promisor"],
+            &authorize,
         )
         .await
         .is_ok_and(|value| value == "true")
         {
-            git(
+            git_authorized(
                 config,
                 credentials,
                 &["-C", target, "config", "remote.origin.promisor", "true"],
+                &authorize,
             )
             .await?;
-            git(
+            git_authorized(
                 config,
                 credentials,
                 &[
@@ -234,20 +304,23 @@ pub async fn clone(
                     "remote.origin.partialclonefilter",
                     "blob:none",
                 ],
+                &authorize,
             )
             .await?;
         }
-        git(
+        git_authorized(
             config,
             credentials,
             &["-C", target, "remote", "set-url", "origin", &origin],
+            &authorize,
         )
         .await?;
     }
-    git(
+    git_authorized(
         config,
         credentials,
         &["-C", target, "checkout", "--force", branch],
+        &authorize,
     )
     .await?;
     Ok(())
@@ -261,13 +334,32 @@ pub async fn import(
     target: &Path,
     branch: &str,
 ) -> Result<()> {
-    git(
+    import_authorized(config, credentials, origin, target, branch, || {
+        std::future::ready(Ok(()))
+    })
+    .await
+}
+
+pub(crate) async fn import_authorized<F, Fut>(
+    config: &Config,
+    credentials: &[GitAccess],
+    origin: &str,
+    target: &Path,
+    branch: &str,
+    authorize: F,
+) -> Result<()>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    git_authorized(
         config,
         credentials,
         &["check-ref-format", &format!("refs/heads/{branch}")],
+        &authorize,
     )
     .await?;
-    git(
+    git_authorized(
         config,
         credentials,
         &[
@@ -279,6 +371,7 @@ pub async fn import(
             origin,
             path(target)?,
         ],
+        &authorize,
     )
     .await
     .map(|_| ())
@@ -287,6 +380,64 @@ pub async fn import(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn clone_rechecks_authority_after_reading_the_remote() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        std::fs::create_dir(&source).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["remote", "add", "origin", "https://127.0.0.1:1/revoked.git"],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&source)
+                    .env("HOME", root.path())
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "dataDir": root.path().join("data"),
+            "home": root.path(),
+            "workspaceRoots": [root.path()],
+            "publicUrl": "http://localhost:4310",
+            "host": "127.0.0.1",
+            "port": 0,
+            "codexBin": "false",
+            "concurrency": 1,
+            "logger": false,
+            "workerEnabled": false,
+            "runnerUrl": "",
+        }))
+        .unwrap();
+        let calls = AtomicUsize::new(0);
+        let result = clone_authorized(
+            &source,
+            &target,
+            &serde_json::json!({
+                "sourceMode": "remote", "baseBranch": "main",
+            }),
+            &config,
+            &[],
+            || {
+                std::future::ready(if calls.fetch_add(1, Ordering::SeqCst) < 2 {
+                    Ok(())
+                } else {
+                    Err(Error::forbidden("Execution revoked before clone."))
+                })
+            },
+        )
+        .await;
+        assert_eq!(result.unwrap_err().status, 403);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert!(!target.exists());
+    }
 
     #[test]
     fn ssh_remotes_have_an_https_form() {

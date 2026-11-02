@@ -296,13 +296,31 @@ impl Mcps {
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        self.update_secrets_live(
+            s,
+            id,
+            change,
+            crate::authorization::Authorization::once(authorize),
+        )
+        .await
+    }
+
+    pub(crate) async fn update_secrets_live(
+        &self,
+        s: &Service,
+        id: &str,
+        change: impl FnOnce(&mut McpSecrets),
+        authorize: crate::authorization::Authorization,
+    ) -> Result<()> {
+        authorize.recheck().await?;
         let mut secrets = self.server_secrets(s, id).await?;
         change(&mut secrets);
         let secrets = s.vault.encrypt_bytes(id, &serde_json::to_vec(&secrets)?)?;
         let id = id.to_owned();
+        authorize.recheck().await?;
         s.store
             .transaction(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 db.save_mcp_credentials(&id, &secrets)
             })
             .await
@@ -379,7 +397,7 @@ impl Mcps {
     pub(crate) async fn save_authorized<F>(
         &self,
         s: &Service,
-        mut input: McpInput,
+        input: McpInput,
         existing: Option<&str>,
         expected: Option<u64>,
         authorize: F,
@@ -387,6 +405,25 @@ impl Mcps {
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        self.save_live(
+            s,
+            input,
+            existing,
+            expected,
+            crate::authorization::Authorization::once(authorize),
+        )
+        .await
+    }
+
+    pub(crate) async fn save_live(
+        &self,
+        s: &Service,
+        mut input: McpInput,
+        existing: Option<&str>,
+        expected: Option<u64>,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<McpView> {
+        authorize.recheck().await?;
         validate_input(&mut input)?;
         if existing.is_some() && expected.is_none() {
             return Err(Error::bad("The current connection revision is required."));
@@ -407,6 +444,7 @@ impl Mcps {
         };
         let id = existing.map_or_else(id, str::to_owned);
         let _guard = self.lock(&id).await;
+        authorize.recheck().await?;
         let previous = s.store.mcp_server(&id).await?;
         if existing.is_some() && previous.is_none() {
             return Err(Error::not_found(NOT_FOUND));
@@ -450,9 +488,10 @@ impl Mcps {
         server.reset_state(ConnectionState::Untested);
         let record = server.clone();
         let secrets = s.vault.encrypt_bytes(&id, &serde_json::to_vec(&secrets)?)?;
+        authorize.recheck().await?;
         s.store
             .transaction(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 db.save_mcp_server(&record)?;
                 db.save_mcp_credentials(&id, &secrets)?;
                 cancel_pending(db, &id)?;
@@ -476,11 +515,29 @@ impl Mcps {
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        self.disconnect_live(
+            s,
+            id,
+            remove,
+            crate::authorization::Authorization::once(authorize),
+        )
+        .await
+    }
+
+    pub(crate) async fn disconnect_live(
+        &self,
+        s: &Service,
+        id: &str,
+        remove: bool,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<()> {
+        authorize.recheck().await?;
         let _guard = self.lock(id).await;
+        authorize.recheck().await?;
         let id = id.to_owned();
         s.store
             .transaction(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 let mut server = required(db.mcp_server(&id)?, NOT_FOUND)?;
                 cancel_pending(db, &id)?;
                 db.delete_mcp_credentials(&id)?;
@@ -521,13 +578,30 @@ impl Mcps {
     pub(crate) async fn record_discovery_authorized<F>(
         &self,
         s: &Service,
-        mut server: McpServer,
+        server: McpServer,
         result: &Result<Vec<Value>>,
         authorize: F,
     ) -> Result<()>
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        self.record_discovery_live(
+            s,
+            server,
+            result,
+            crate::authorization::Authorization::once(authorize),
+        )
+        .await
+    }
+
+    pub(crate) async fn record_discovery_live(
+        &self,
+        s: &Service,
+        mut server: McpServer,
+        result: &Result<Vec<Value>>,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<()> {
+        authorize.recheck().await?;
         match result {
             Ok(tools) => server.record_success(tools.clone(), now()),
             Err(error) => record_failure(&mut server, error),
@@ -535,7 +609,7 @@ impl Mcps {
         let record = server;
         s.store
             .transaction(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 db.save_mcp_server(&record)?;
                 Ok(())
             })
@@ -555,17 +629,28 @@ impl Mcps {
     where
         F: Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static,
     {
+        self.test_live(s, id, crate::authorization::Authorization::local(authorize))
+            .await
+    }
+
+    pub(crate) async fn test_live(
+        &self,
+        s: &Service,
+        id: &str,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<McpView> {
+        authorize.recheck().await?;
         let _guard = self.lock(id).await;
+        authorize.recheck().await?;
         let server = self.server(s, id).await?;
         s.store
             .read({
                 let authorize = authorize.clone();
-                move |db| authorize(db)
+                move |db| authorize.authorize(db)
             })
             .await?;
-        let tools =
-            crate::mcp_client::Client::list_tools_authorized(s, &server, authorize.clone()).await;
-        self.record_discovery_authorized(s, server, &tools, authorize)
+        let tools = crate::mcp_client::Client::list_tools_live(s, &server, authorize.clone()).await;
+        self.record_discovery_live(s, server, &tools, authorize)
             .await?;
         self.view(s, &self.server(s, id).await?).await
     }
@@ -637,8 +722,38 @@ impl Mcps {
         id: &str,
         bearer: &str,
     ) -> Result<(McpServer, GrantScope)> {
+        let (server, scope, _) = self.grant_authorized(s, id, bearer).await?;
+        Ok((server, scope))
+    }
+
+    pub(crate) async fn grant_authorized(
+        &self,
+        s: &Service,
+        id: &str,
+        bearer: &str,
+    ) -> Result<(
+        McpServer,
+        GrantScope,
+        crate::capabilities::plugin_packages::Authority,
+    )> {
         let (id, bearer) = (id.to_owned(), bearer.to_owned());
-        s.store.read(move |db| grant_in(db, &id, &bearer)).await
+        let (key, token) = (id.clone(), bearer.clone());
+        let (server, scope, run) = s
+            .store
+            .read(move |db| {
+                let (server, scope) = grant_in(db, &key, &token)?;
+                let grant = crate::error::required(
+                    db.mcp_run_grant(&grant_key(&token))?,
+                    "MCP grant not found",
+                )?;
+                let run = crate::error::required(db.run(&grant.run_id)?, "Run not found")?;
+                Ok((server, scope, run))
+            })
+            .await?;
+        let authority = crate::capabilities::plugin_packages::Authority::for_execution(&run)
+            .with_guard(move |db| grant_in(db, &id, &bearer).map(|_| ()));
+        let authority = crate::delegation::authorize_async_with(s, &run, authority).await?;
+        Ok((server, scope, authority))
     }
 
     pub async fn revoke_run(&self, s: &Service, id: &str) -> Result<()> {
@@ -734,5 +849,91 @@ pub(crate) fn grant_in(db: &Db<'_>, id: &str, bearer: &str) -> Result<(McpServer
     if !covers(&current, agent) {
         return Err(Error::forbidden("Agent permissions were reduced."));
     }
+    crate::delegation::authorize_run(db, &run)?;
     Ok((server, scope.clone()))
+}
+
+#[cfg(test)]
+mod management_authorization_tests {
+    use super::*;
+    use crate::{
+        agent_fixture::AgentFixture,
+        plugin_grant_fixture::{Fixture, contribution, support},
+    };
+    use std::sync::{Arc, atomic::Ordering};
+
+    #[tokio::test]
+    async fn connection_updates_recheck_delegation_after_waiting_for_the_lock() {
+        let f = Fixture::new().await;
+        f.marker("live-parent").await;
+        f.set(json!([contribution("tool", "grant_probe_post", support())]))
+            .await;
+        let child =
+            f.s.agent_fixture(
+                json!({
+                    "name": "Child",
+                    "access": { "installation": true },
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        let child_id = text(&child, "id");
+        f.set_for(
+            child_id,
+            json!([contribution(
+                "tool",
+                "grant_probe_post",
+                json!([{ "resourceType": "thread", "id": "support-thread" }])
+            )]),
+        )
+        .await;
+        let (_, bearer) = f.delegated(crate::config::MAIN_AGENT_ID, child_id).await;
+        let initial = f
+            .s
+            .mcps
+            .save(
+                &f.s,
+                serde_json::from_value(json!({
+                    "name": "Original", "url": "https://service.example.test/mcp", "auth": "none",
+                }))
+                .unwrap(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let checked = Arc::new(tokio::sync::Notify::new());
+        let completed = checked.clone();
+        let (_, authority) = crate::installation_mcp::authorize_with_authority(&f.s, &bearer)
+            .await
+            .unwrap();
+        let authority = authority.with_recheck_guard(move |_| {
+            let completed = completed.clone();
+            Box::pin(async move {
+                completed.notify_one();
+                Ok(())
+            })
+        });
+        let authorization = crate::authorization::Authorization::live(&f.s, authority);
+        let server_id = initial.server.id.clone();
+        let lock = f.s.mcps.lock(&server_id).await;
+        let service = f.s.clone();
+        let id = server_id.clone();
+        let update = tokio::spawn(async move {
+            service.mcps.save_live(&service, serde_json::from_value(json!({
+                "name": "Forbidden change", "url": "https://service.example.test/mcp", "auth": "none",
+            })).unwrap(), Some(&id), Some(initial.server.revision), authorization).await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), checked.notified())
+            .await
+            .unwrap();
+        f.moved_parent.store(true, Ordering::SeqCst);
+        drop(lock);
+        let error = update.await.unwrap().unwrap_err();
+        assert_eq!(error.status, 403);
+        let after = f.s.mcps.server(&f.s, &server_id).await.unwrap();
+        assert_eq!(after.name, "Original");
+        f.s.shutdown.cancel();
+    }
 }

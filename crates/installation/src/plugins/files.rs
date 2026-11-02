@@ -29,6 +29,28 @@ struct File {
     media_type: String,
     size: usize,
     expires: i64,
+    origin: Option<Arc<super::grant_authorization::TransferOrigin>>,
+    uploaded_by: Option<String>,
+    // Appending scoped bytes must preserve the original raw upload's boundary.
+    unscoped_bytes: bool,
+    revision: u64,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Access {
+    id: String,
+    revision: u64,
+}
+
+impl Access {
+    fn check(&self, id: &str, current: &File) -> Result<()> {
+        if self.id != id || self.revision != current.revision {
+            return Err(Error::conflict(
+                "The transfer changed during authorization. Retry the operation.",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -199,6 +221,86 @@ impl Files {
         Ok(file.clone())
     }
 
+    pub(crate) fn bind_new(
+        &self,
+        context: &super::capabilities::Context,
+        value: &Value,
+    ) -> Result<()> {
+        let file = self.get(&context.connection, text(value, "id"))?;
+        let mut file = file.lock().unwrap();
+        let revision = file.revision.checked_add(1).ok_or_else(|| {
+            Error::conflict("The transfer changed too many times. Create a new one.")
+        })?;
+        Self::bind_file(&mut file, context, true)?;
+        file.revision = revision;
+        Ok(())
+    }
+
+    fn bind_file(
+        file: &mut File,
+        context: &super::capabilities::Context,
+        created: bool,
+    ) -> Result<()> {
+        if let Some(authority) = &context.management {
+            if !created && let Some(origin) = &file.origin {
+                authority.remember_transfer(origin.clone())?;
+            }
+            if let Some(origin) = authority.transfer_origin() {
+                file.origin = Some(origin);
+            }
+            if created && file.origin.is_none() {
+                file.uploaded_by = authority.snapshot().map(|snapshot| snapshot.agent);
+            }
+        }
+        if created {
+            file.unscoped_bytes = file.origin.is_none();
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn authorize(
+        &self,
+        s: &crate::service::Service,
+        context: &super::capabilities::Context,
+        id: &str,
+    ) -> Result<Access> {
+        let file = self.get(&context.connection, id)?;
+        let (origin, uploaded_by, unscoped_bytes, revision) = {
+            let file = file.lock().unwrap();
+            (
+                file.origin.clone(),
+                file.uploaded_by.clone(),
+                file.unscoped_bytes,
+                file.revision,
+            )
+        };
+        let snapshot = context
+            .management
+            .as_ref()
+            .and_then(super::management::Authority::snapshot);
+        if let Some(origin) = origin {
+            origin
+                .authorize(s, &context.connection, snapshot.clone())
+                .await?;
+            if let Some(authority) = &context.management {
+                authority.remember_transfer(origin)?;
+            }
+        }
+        if unscoped_bytes
+            && let Some(snapshot) = snapshot
+            && uploaded_by.as_deref() != Some(snapshot.agent.as_str())
+            && !context.connection.grants(&snapshot.agent)
+        {
+            return Err(Error::forbidden(
+                "This transfer has no contribution authorized for this agent.",
+            ));
+        }
+        Ok(Access {
+            id: id.to_owned(),
+            revision,
+        })
+    }
+
     pub fn create(
         &self,
         connection: &Connection,
@@ -255,6 +357,10 @@ impl Files {
                 media_type: media_type.to_owned(),
                 size: bytes.len(),
                 expires,
+                origin: None,
+                uploaded_by: None,
+                unscoped_bytes: true,
+                revision: 0,
             })),
         );
         Ok(
@@ -263,8 +369,29 @@ impl Files {
     }
 
     pub fn bytes(&self, connection: &Connection, id: &str) -> Result<Vec<u8>> {
+        self.read_bytes(connection, id, None)
+    }
+
+    pub(crate) fn bytes_authorized(
+        &self,
+        connection: &Connection,
+        id: &str,
+        access: &Access,
+    ) -> Result<Vec<u8>> {
+        self.read_bytes(connection, id, Some(access))
+    }
+
+    fn read_bytes(
+        &self,
+        connection: &Connection,
+        id: &str,
+        access: Option<&Access>,
+    ) -> Result<Vec<u8>> {
         let file = self.get(connection, id)?;
         let mut file = file.lock().unwrap();
+        if let Some(access) = access {
+            access.check(id, &file)?;
+        }
         file.file.seek(SeekFrom::Start(0))?;
         let mut bytes = Vec::with_capacity(file.size);
         file.file.read_to_end(&mut bytes)?;
@@ -272,6 +399,27 @@ impl Files {
     }
 
     pub fn call(&self, connection: &Connection, method: &str, args: &Value) -> Result<Value> {
+        self.call_with(connection, method, args, None, None)
+    }
+
+    pub(crate) fn call_authorized(
+        &self,
+        context: &super::capabilities::Context,
+        method: &str,
+        args: &Value,
+        access: Option<&Access>,
+    ) -> Result<Value> {
+        self.call_with(&context.connection, method, args, Some(context), access)
+    }
+
+    fn call_with(
+        &self,
+        connection: &Connection,
+        method: &str,
+        args: &Value,
+        context: Option<&super::capabilities::Context>,
+        access: Option<&Access>,
+    ) -> Result<Value> {
         if method == "files.composeMime" {
             return super::mime::compose(self, connection, args);
         }
@@ -289,13 +437,17 @@ impl Files {
         }
         let key = text(args, "id");
         let file = self.get(connection, key)?;
+        let mut files = self.files.lock().unwrap();
         if method == "files.delete" {
-            self.files.lock().unwrap().remove(key);
+            let file = file.lock().unwrap();
+            if let Some(access) = access {
+                access.check(key, &file)?;
+            }
+            files.remove(key);
             return Ok(json!({ "deleted": true }));
         }
         // Quotas and appends share the map lock; concurrent files cannot exceed a
         // connection's quota by each observing its former size.
-        let files = self.files.lock().unwrap();
         if method == "files.append" {
             let bytes = encoding(text(args, "data").as_bytes(), text(args, "encoding"))?;
             if bytes.len() > CHUNK {
@@ -311,6 +463,9 @@ impl Files {
                 }
             }
             let mut file = file.lock().unwrap();
+            if let Some(access) = access {
+                access.check(key, &file)?;
+            }
             if args["offset"].as_u64() != Some(file.size as u64) {
                 return Err(Error::bad(
                     "Append at the current file size; do not repeat a confirmed chunk.",
@@ -322,6 +477,13 @@ impl Files {
             {
                 return Err(Error::too_large("Transfer file quota exceeded."));
             }
+            let revision = file.revision.checked_add(1).ok_or_else(|| {
+                Error::conflict("The transfer changed too many times. Create a new one.")
+            })?;
+            if let Some(context) = context {
+                Self::bind_file(&mut file, context, false)?;
+            }
+            file.revision = revision;
             file.file.seek(SeekFrom::End(0))?;
             if let Err(error) = file.file.write_all(&bytes) {
                 // A partial local write must never become a readable attachment.
@@ -332,6 +494,9 @@ impl Files {
             return Ok(json!({ "id": key, "size": file.size, "expiresAt": file.expires }));
         }
         let mut file = file.lock().unwrap();
+        if let Some(access) = access {
+            access.check(key, &file)?;
+        }
         let offset = args["offset"].as_u64().unwrap_or(0);
         let limit = args["limit"].as_u64().unwrap_or(CHUNK as u64);
         if offset > file.size as u64 || limit == 0 || limit > CHUNK as u64 {

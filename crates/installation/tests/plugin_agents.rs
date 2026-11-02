@@ -1006,7 +1006,10 @@ async fn granted_agents_get_tools_and_instructions_others_do_not() {
     };
     let listing = mcp(&f, "tools/list", json!({})).await;
     assert!(!names(&listing).contains(&"onepassword".to_owned()));
-    let instructions = agents::instructions(s, MAIN_AGENT_ID).await.unwrap();
+    let run = cairn_installation::project_workspaces::authorize(s, &f.bearer)
+        .await
+        .unwrap();
+    let instructions = agents::instructions(s, &run).await.unwrap();
     assert!(instructions.is_empty());
 
     let saved = save(
@@ -1461,10 +1464,15 @@ async fn third_party_packages_contribute_forms_commands_tools_and_views() {
             .is_err()
     );
     assert!(
-        agents::instructions(s, MAIN_AGENT_ID)
-            .await
-            .unwrap()
-            .contains("cairn plugin statusboard status")
+        agents::instructions(
+            s,
+            &cairn_installation::project_workspaces::authorize(s, &f.bearer)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .contains("cairn plugin statusboard status")
     );
 
     let id = text(&board, "id");

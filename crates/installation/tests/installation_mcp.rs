@@ -1232,6 +1232,8 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "set_agent_avatar",
         "list_agents",
         "get_agent",
+        "get_agent_plugin_grants",
+        "replace_agent_plugin_grants",
         "save_agent",
         "replace_agent",
         "preview_agent",
@@ -5890,6 +5892,126 @@ async fn resource_sources_require_the_calling_agents_existing_instance_grant() {
     assert!(s.store.projects().await.unwrap().is_empty());
 }
 
+#[tokio::test]
+async fn skill_source_without_instance_uses_an_instance_granted_for_that_source() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use common::github::{self, Github};
+
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let github = Github::start(root.path()).await;
+    github.attach(&s);
+    let main = enabled_main(&s).await;
+    let unused = github::instance(
+        &s,
+        "A enabled but ungranted account",
+        "synthetic-unused-secret",
+        &[],
+    )
+    .await;
+    let granted = github::instance(
+        &s,
+        "Z source account",
+        "synthetic-source-secret",
+        &[MAIN_AGENT_ID],
+    )
+    .await;
+    assert_ne!(unused, granted);
+
+    let grant_path = format!("/api/agents/{MAIN_AGENT_ID}/plugin-grants");
+    let current =
+        common::owner_api_route(&s, "GET", &grant_path, json!({ "agentId": MAIN_AGENT_ID }))
+            .await
+            .unwrap();
+    common::owner_api_route(
+        &s,
+        "PUT",
+        &grant_path,
+        json!({
+            "agentId": MAIN_AGENT_ID,
+            "revision": current["revision"],
+            "grants": [{
+                "instanceId": granted,
+                "access": {
+                    "type": "selected",
+                    "contributions": [{
+                        "kind": "skillSource",
+                        "name": "repository",
+                        "resources": [],
+                    }],
+                },
+            }],
+            "runCredentialInstances": [],
+        }),
+    )
+    .await
+    .unwrap();
+
+    let version = "1".repeat(40);
+    let tree = "2".repeat(40);
+    let blob = "a".repeat(40);
+    let manifest = b"---\nname: review\ndescription: Review source\n---\nReview.";
+    github.respond(
+        "repos/fixture/skills/commits/main",
+        &json!({
+            "sha": version,
+            "commit": {
+                "tree": { "sha": tree },
+                "message": "Release",
+                "committer": { "date": "2026-10-01" },
+            },
+        }),
+    );
+    github.respond(
+        &format!("repos/fixture/skills/commits/{version}"),
+        &json!({
+            "sha": version,
+            "commit": {
+                "tree": { "sha": tree },
+            },
+        }),
+    );
+    github.respond(
+        &format!("repos/fixture/skills/git/trees/{tree}?recursive=1"),
+        &json!({
+            "tree": [{
+                "path": "SKILL.md",
+                "type": "blob",
+                "mode": "100644",
+                "sha": blob,
+                "size": manifest.len(),
+            }],
+            "truncated": false,
+        }),
+    );
+    github.respond(
+        &format!("repos/fixture/skills/git/blobs/{blob}"),
+        &json!({
+            "content": STANDARD.encode(manifest),
+            "encoding": "base64",
+        }),
+    );
+
+    let (_, configuration) = active_run(&s, &main).await;
+    let imported = call(
+        &s,
+        &configuration,
+        "import_skill",
+        json!({
+            "source": "plugin",
+            "scope": "global",
+            "pluginId": "github",
+            "skillSource": "repository",
+            "location": { "repository": "fixture/skills", "ref": "main" },
+        }),
+    )
+    .await;
+
+    assert_ne!(imported["result"]["isError"], true, "{imported}");
+    assert_eq!(result(&imported)["imported"]["name"], "review");
+    assert!(!imported.to_string().contains("synthetic-source-secret"));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_tools_share_status_updates_and_fence_instance_revocation_during_download() {
     use base64::{Engine, engine::general_purpose::STANDARD};
@@ -6813,13 +6935,18 @@ async fn resource_handlers_do_not_send_after_grant_revocation_during_oauth_refre
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Notify;
 
-    for operation in ["list_plugin_resources", "resolve_plugin_resource"] {
+    for operation in [
+        "list_plugin_resources",
+        "resolve_plugin_resource",
+        "import_project",
+        "run_credentials_fetch",
+    ] {
         let root = TempDir::new().unwrap();
         let s = service(&root).await;
         s.plugins
             .use_worker(std::path::PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
         let main = enabled_main(&s).await;
-        let (_, configuration) = active_run(&s, &main).await;
+        let (run, configuration) = active_run(&s, &main).await;
         let started = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
         let service_calls = Arc::new(AtomicUsize::new(0));
@@ -6887,9 +7014,14 @@ async fn resource_handlers_do_not_send_after_grant_revocation_during_oauth_refre
                             "clientIdSetting": "clientId",
                         },
                     },
+                    "instructions": "Fixture instructions",
+                    "projectSources": [{ "name": "repositories", "title": "Repositories" }],
+                    "runCredentials": { "git": [{ "url": "https://api.example.test", "username": "fixture", "password": "{{credential}}" }] },
                     "resources": [{ "name": "repository", "description": "Repository" }],
                 },
-                "source": r#"return {resources = function(input)
+                "source": r#"return {
+                    projects = function(input) return {id=input.id, name="Repository", origin="https://api.example.test/repo.git", defaultBranch="main"} end,
+                    resources = function(input)
                 cairn.http.request({url = "https://api.example.test/resources", auth = true})
                 if input.op == "list" then return {items = cairn.array({})} end
                 return {resourceType = "repository", id = input.id, name = "Repository"}
@@ -6912,17 +7044,37 @@ async fn resource_handlers_do_not_send_after_grant_revocation_during_oauth_refre
             }))
             .await
             .unwrap();
-        s.agent_fixture(json!({ "plugins": [instance] }), Some(MAIN_AGENT_ID))
-            .await
-            .unwrap();
-        assert!(
+        if operation != "run_credentials_fetch" {
+            s.agent_fixture(json!({ "plugins": [instance] }), Some(MAIN_AGENT_ID))
+                .await
+                .unwrap();
+        }
+        assert_eq!(
             s.store
                 .plugin_instance(&instance)
                 .await
                 .unwrap()
                 .unwrap()
-                .grants(MAIN_AGENT_ID)
+                .grants(MAIN_AGENT_ID),
+            operation != "run_credentials_fetch",
         );
+        if operation == "import_project" {
+            let current = common::owner_api_route(
+                &s,
+                "GET",
+                &format!("/api/agents/{MAIN_AGENT_ID}/plugin-grants"),
+                Value::Null,
+            )
+            .await
+            .unwrap();
+            common::owner_api_route(&s, "PUT", &format!("/api/agents/{MAIN_AGENT_ID}/plugin-grants"), json!({
+                "agentId": MAIN_AGENT_ID, "revision": current["revision"],
+                "grants": [{"instanceId": instance, "access": {"type": "selected", "contributions": [
+                    {"kind":"projectSource","name":"repositories","resources":[]},
+                    {"kind":"instructions","name":"","resources":[]}
+                ]}}], "runCredentialInstances": [],
+            })).await.unwrap();
+        }
         let key = cairn_installation::plugins::connections::credential_key(&instance);
         let credential = json!({
             "token": "fixture-expired",
@@ -6943,15 +7095,45 @@ async fn resource_handlers_do_not_send_after_grant_revocation_during_oauth_refre
         if operation == "resolve_plugin_resource" {
             args["id"] = json!("repo");
         }
+        if operation == "import_project" {
+            args = json!({
+                "pluginId": "resource-refresh",
+                "source": "repositories",
+                "instance": instance,
+                "id": "repo",
+            });
+        }
         let invoke = async {
+            if operation == "run_credentials_fetch" {
+                let empty =
+                    cairn_installation::plugins::run_credentials::for_execution(&s, &run, &[])
+                        .await
+                        .unwrap();
+                assert!(empty.git.is_empty());
+                assert_eq!(refresh_calls.load(Ordering::SeqCst), 0);
+                let result = cairn_installation::plugins::run_credentials::for_execution(
+                    &s,
+                    &run,
+                    &[json!({
+                        "id": uuid::Uuid::new_v4().to_string(),
+                        "origin": "https://api.example.test/repo.git",
+                    })],
+                )
+                .await;
+                return json!({ "result": { "isError": result.is_err() } });
+            }
             let started = call(&s, &configuration, operation, args).await;
-            let response = finish_plugin_resource_call(
-                &s,
-                "/mcp-installation",
-                text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN"),
-                started,
-            )
-            .await;
+            let response = if operation == "import_project" {
+                started
+            } else {
+                finish_plugin_resource_call(
+                    &s,
+                    "/mcp-installation",
+                    text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN"),
+                    started,
+                )
+                .await
+            };
             assert!(
                 refresh_calls.load(Ordering::SeqCst) > 0,
                 "Refresh was not reached: {response}"
@@ -6960,17 +7142,42 @@ async fn resource_handlers_do_not_send_after_grant_revocation_during_oauth_refre
         };
         let revoke = async {
             started.notified().await;
-            s.agent_fixture(json!({ "plugins": [] }), Some(MAIN_AGENT_ID))
+            if operation == "run_credentials_fetch" {
+                s.worker.cancel(&s, text(&run, "id")).await.unwrap();
+            } else if operation == "import_project" {
+                let mut current = common::owner_api_route(
+                    &s,
+                    "GET",
+                    &format!("/api/agents/{MAIN_AGENT_ID}/plugin-grants"),
+                    Value::Null,
+                )
                 .await
                 .unwrap();
+                current["grants"][0]["access"]["contributions"] =
+                    json!([{"kind":"instructions","name":"","resources":[]}]);
+                common::owner_api_route(
+                    &s,
+                    "PUT",
+                    &format!("/api/agents/{MAIN_AGENT_ID}/plugin-grants"),
+                    current,
+                )
+                .await
+                .unwrap();
+            } else {
+                s.agent_fixture(json!({ "plugins": [] }), Some(MAIN_AGENT_ID))
+                    .await
+                    .unwrap();
+            }
             let current = s.store.plugin_instance(&instance).await.unwrap().unwrap();
             assert_eq!(current.revision, saved["revision"].as_str().unwrap());
             // Plugin grants are independent of the run's installation access.
-            let still_authorized = call(&s, &configuration, "list_plugins", json!({})).await;
-            assert_ne!(
-                still_authorized["result"]["isError"], true,
-                "{still_authorized}"
-            );
+            if operation != "run_credentials_fetch" {
+                let still_authorized = call(&s, &configuration, "list_plugins", json!({})).await;
+                assert_ne!(
+                    still_authorized["result"]["isError"], true,
+                    "{still_authorized}"
+                );
+            }
             release.notify_one();
         };
         let (response, ()) = tokio::time::timeout(std::time::Duration::from_secs(15), async {

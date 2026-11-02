@@ -184,9 +184,10 @@ impl AccountOperation {
                 (false, Some(bearer), None)
             }
         };
-        let authorize = crate::installation_mcp::management_authorization(bearer.as_deref());
+        let authorize =
+            crate::installation_mcp::management_authorization(s, bearer.as_deref()).await?;
         let before = authorize.clone();
-        s.store.read(move |db| before(db)).await?;
+        s.store.read(move |db| before.authorize(db)).await?;
         // A manual poll may refresh credentials and redeem a banked reset.
         // Preserve the human owner policy before entering any Driver or lock wait.
         if !human && self.name == "refresh_coding_agent_accounts" {
@@ -197,6 +198,7 @@ impl AccountOperation {
             })?);
         }
         s.accounts.initialize(s).await?;
+        authorize.recheck().await?;
         let result = match self.name {
             "list_models" => {
                 let input: ListModelsInput = decode(input)?;
@@ -259,7 +261,7 @@ impl AccountOperation {
                 uuid(&input.account_id)?;
                 serde_json::to_value(
                     s.accounts
-                        .update_authorized(
+                        .update_live(
                             s,
                             &input.account_id,
                             &input.revision,
@@ -285,7 +287,7 @@ impl AccountOperation {
                 }
                 let mut result = s
                     .accounts
-                    .reorder_authorized(
+                    .reorder_live(
                         s,
                         input.provider.into(),
                         &input.ids,
@@ -443,9 +445,10 @@ impl AccountOperation {
                 serde_json::to_value(AccountMutationOutput::Completed { done: true })?
             }
         };
+        authorize.recheck().await?;
         s.store
             .read(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 Ok(result)
             })
             .await

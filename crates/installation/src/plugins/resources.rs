@@ -104,11 +104,33 @@ async fn instance(
 
     // Refresh publication and HTTP pre-send checks also need the expected
     // instance: revoking a plugin grant does not change its settings revision.
-    let authority = authority
-        .map(|authority| management::Authority::resource_read(authority, connection.clone()));
+    let authority = match authority {
+        Some(authority) => {
+            let snapshot = match (agent, authority.bearer.as_deref()) {
+                (Some(agent), Some(bearer)) => Some(
+                    super::grant_authorization::Snapshot::capture_installation(
+                        s, agent, bearer, &package,
+                    )
+                    .await?,
+                ),
+                _ => None,
+            };
+            let managed = management::Authority::resource_read(authority, connection.clone());
+            Some(match snapshot {
+                Some(snapshot) => managed.bind_snapshot(snapshot),
+                None => managed,
+            })
+        }
+        None => None,
+    };
 
     let scope = if let Some(agent) = agent {
-        if !connection.grants(agent) {
+        let (agent_id, instance_id) = (agent.to_owned(), connection.id.clone());
+        let permitted = s
+            .store
+            .read(move |db| db.has_plugin_grant(&agent_id, &instance_id))
+            .await?;
+        if !permitted {
             return Err(Error::forbidden(
                 "This agent is not granted that plugin instance.",
             ));
@@ -195,6 +217,20 @@ pub(crate) async fn prepare_resolve(
 }
 
 impl Read {
+    pub(crate) fn with_snapshot(
+        mut self,
+        snapshot: super::grant_authorization::Snapshot,
+        instance: connections::Connection,
+        preparation: Option<Authority>,
+    ) -> Self {
+        self.scope = Scope::Managed(
+            Box::new(self.scope),
+            management::Authority::agent_action(instance, snapshot, None)
+                .with_preparation(preparation),
+        );
+        self
+    }
+
     pub(crate) async fn list(
         &self,
         s: &Service,

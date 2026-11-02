@@ -54,6 +54,24 @@ pub async fn run<T>(
     stop: &CancellationToken,
     operation: impl for<'a> FnOnce(&'a mut Session, &'a Path) -> BoxFuture<'a, Result<T>>,
 ) -> Result<T> {
+    run_authorized(
+        s,
+        model,
+        stop,
+        crate::authorization::Authorization::default(),
+        operation,
+    )
+    .await
+}
+
+pub(crate) async fn run_authorized<T>(
+    s: &Service,
+    model: &str,
+    stop: &CancellationToken,
+    authorize: crate::authorization::Authorization,
+    operation: impl for<'a> FnOnce(&'a mut Session, &'a Path) -> BoxFuture<'a, Result<T>>,
+) -> Result<T> {
+    authorize.recheck().await?;
     if model.is_empty() {
         return Err(Error::bad(
             "Background Codex work requires an explicit model.",
@@ -75,6 +93,7 @@ pub async fn run<T>(
         .map_err(|_| Error::unavailable(UNAVAILABLE))?
         .ok_or_else(|| Error::unavailable(UNAVAILABLE))?;
     let result = async {
+        authorize.recheck().await?;
         if stop.is_cancelled() || s.shutdown.is_cancelled() {
             return Err(Error::unavailable(STOPPED));
         }
@@ -84,22 +103,28 @@ pub async fn run<T>(
         let home = directory.path().join("codex");
         let cwd = directory.path().join("work");
         crate::skills::private_dir(&cwd).await?;
+        authorize.recheck().await?;
         s.accounts.relocate(s, &mut lease, &home).await?;
+        authorize.recheck().await?;
         let _broker = broker::serve(s, &lease).await?;
         let mut config = s.config.clone();
         config.home = directory.path().to_owned();
+        authorize.recheck().await?;
         let mut session = Session::codex(&config, &home, &[], Some(&cwd)).await?;
         let authenticated = async {
+            authorize.recheck().await?;
             let mut auth = Client::from_socket(home.join(broker::SOCKET))
                 .ok_or_else(|| Error::unavailable("Missing background authentication."))?;
             auth.login(&mut session).await?;
             session.auth = Some(auth);
+            authorize.recheck().await?;
             operation(&mut session, &cwd).await
         };
         let result = tokio::select! {
             biased;
             () = stop.cancelled() => Err(Error::unavailable(STOPPED)),
             () = s.shutdown.cancelled() => Err(Error::unavailable(STOPPED)),
+            () = authorize.cancelled() => Err(Error::forbidden("The accepted job was cancelled.")),
             _ = yield_requested(s) => Err(Error::unavailable(YIELDED)),
             result = authenticated => result,
         };

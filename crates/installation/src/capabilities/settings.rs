@@ -117,7 +117,8 @@ impl SettingsOperation {
                 (false, Some(bearer))
             }
         };
-        let authorize = crate::installation_mcp::management_authorization(bearer.as_deref());
+        let authorize =
+            crate::installation_mcp::management_authorization(s, bearer.as_deref()).await?;
         match self.name {
             "get_installation_settings" => {
                 let _: GetInstallationSettingsInput = decode(input)?;
@@ -143,7 +144,7 @@ impl SettingsOperation {
                 let _: CheckStorageInput = decode(input)?;
                 // Network I/O never runs inside a database transaction.
                 let storage = crate::object_storage::Storage::configured(s)?;
-                Box::pin(storage.probe()).await?;
+                Box::pin(storage.probe_live(authorize)).await?;
                 Ok(serde_json::to_value(StorageCheck { ok: true })?)
             }
             name => {
@@ -161,7 +162,7 @@ impl SettingsOperation {
                             rusqlite::TransactionBehavior::Deferred,
                         )?;
                         let db = Db(&tx);
-                        authorize(&db)?;
+                        authorize.authorize(&db)?;
                         let result = if audit {
                             serde_json::to_value(ListAuditOutput {
                                 entries: db.audit_entries(100)?,

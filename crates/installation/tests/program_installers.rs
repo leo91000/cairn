@@ -61,6 +61,7 @@ struct Publisher {
     files: Mutex<HashMap<String, Vec<u8>>>,
     requests: AtomicUsize,
     download_gate: Mutex<Option<Arc<tokio::sync::Notify>>>,
+    metadata_gate: Mutex<Option<Arc<tokio::sync::Notify>>>,
 }
 
 async fn serve(
@@ -76,6 +77,9 @@ async fn serve(
         return Json(json!({ "available": "1", "version": "2.43.0-beta.02" })).into_response();
     }
     if path == "/latest" || path.starts_with("/check/") {
+        if let Some(gate) = publisher.metadata_gate.lock().await.clone() {
+            gate.notified().await;
+        }
         return Json(publisher.release.lock().await.clone()).into_response();
     }
     if path == "/redirect" {
@@ -1297,4 +1301,156 @@ async fn revoked_public_mcp_cannot_activate_an_approved_package_after_preparatio
         .await
         .unwrap();
     assert!(programs["programs"][0]["installed"].is_null(), "{programs}");
+}
+
+#[tokio::test]
+async fn revoked_agent_first_use_cannot_download_or_publish_a_program() {
+    use cairn_installation::{config::MAIN_AGENT_ID, plugins::agents, validation::text};
+    use common::{AgentFixture, MissionFixture};
+    for metadata in [true, false] {
+        let mut f = Fixture::new().await;
+        common::reconfigure(&mut f.service, |config| {
+            config.runner_url = "http://runner.invalid".into();
+        })
+        .await;
+        *f.publisher.release.lock().await = json!({ "version": "2.41.0" });
+        let arch = if std::env::consts::ARCH == "aarch64" {
+            "arm64"
+        } else {
+            "amd64"
+        };
+        f.publisher.files.lock().await.insert(
+            format!("/dist/1P/op2/pkg/v2.41.0/op_linux_{arch}_v2.41.0.zip"),
+            archive_program("op", "#!/bin/sh\nprintf '[]'\n"),
+        );
+        let account = common::save_plugin(
+            &f.service,
+            "onepassword",
+            &json!({
+                "name": "Fixture", "secrets": { "token": "ops_fixture" }, "enabled": true,
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+        let instance = text(&account, "id").to_owned();
+        f.service
+            .agent_fixture(json!({ "plugins": [instance] }), Some(MAIN_AGENT_ID))
+            .await
+            .unwrap();
+        let task = f
+            .service
+            .task_fixture(
+                json!({
+                    "name": "Probe",
+                    "agentId": MAIN_AGENT_ID,
+                    "prompt": "Probe",
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        let run = f
+            .service
+            .enqueue(text(&task, "id"), "manual", None)
+            .await
+            .unwrap();
+        let run_id = text(&run, "id").to_owned();
+        f.service
+            .store
+            .change_run(
+                &run_id,
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Running),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let run = f.service.store.run(&run_id).await.unwrap();
+        let configuration = f
+            .service
+            .mcps
+            .run_configuration(&f.service, &run)
+            .await
+            .unwrap();
+        let bearer = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN").to_owned();
+        let gate = Arc::new(tokio::sync::Notify::new());
+        if metadata {
+            *f.publisher.metadata_gate.lock().await = Some(gate.clone());
+        } else {
+            *f.publisher.download_gate.lock().await = Some(gate.clone());
+        }
+        let s = f.service.clone();
+        let mut call = tokio::spawn(async move {
+            if metadata {
+                agents::call_tool(
+                    &s,
+                    &bearer,
+                    "onepassword",
+                    &json!({
+                        "operation": "vaults",
+                        "accountId": instance,
+                    }),
+                )
+                .await
+                .map(|_| ())
+            } else {
+                agents::command(
+                    &s,
+                    &bearer,
+                    &json!({
+                        "plugin": "onepassword",
+                        "command": "vaults",
+                        "args": ["--account", instance],
+                    }),
+                )
+                .await
+                .map(|_| ())
+            }
+        });
+        let requests = if metadata { 1 } else { 2 };
+        tokio::select! {
+            result = &mut call => panic!("First-use call ended before the installer gate: {result:?}"),
+            () = common::eventually(std::time::Duration::from_secs(15), std::time::Duration::from_millis(10), async || {
+                (f.publisher.requests.load(Ordering::SeqCst) == requests).then_some(())
+            }) => {},
+        }
+        if metadata {
+            f.service
+                .agent_fixture(json!({ "plugins": [] }), Some(MAIN_AGENT_ID))
+                .await
+                .unwrap();
+        } else {
+            f.service
+                .mcps
+                .revoke_run(&f.service, &run_id)
+                .await
+                .unwrap();
+        }
+        gate.notify_one();
+        assert!(call.await.unwrap().is_err());
+        assert_eq!(
+            f.publisher.requests.load(Ordering::SeqCst),
+            requests,
+            "revocation must prevent the next installer HTTP effect"
+        );
+        let package = registry::active(&f.service, "onepassword").await.unwrap();
+        let directory = f
+            .service
+            .config
+            .data_dir
+            .join("plugin-programs/onepassword")
+            .join(package.digest)
+            .join("op")
+            .join(format!(
+                "{}-{}",
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            ));
+        assert!(
+            !directory.join("lock.json").exists(),
+            "revoked execution published an installed release"
+        );
+    }
 }

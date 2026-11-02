@@ -155,13 +155,28 @@ impl Service {
 
     pub async fn create_project<F>(
         &self,
-        mut input: CreateProjectInput,
+        input: CreateProjectInput,
         source: Option<ProjectSource>,
         authorize: F,
     ) -> Result<Project>
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        self.create_project_live(
+            input,
+            source,
+            crate::authorization::Authorization::once(authorize),
+        )
+        .await
+    }
+
+    pub(crate) async fn create_project_live(
+        &self,
+        mut input: CreateProjectInput,
+        source: Option<ProjectSource>,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<Project> {
+        authorize.recheck().await?;
         if input
             .creation_id
             .is_some_and(|id| id.0.get_version() != Some(uuid::Version::Random))
@@ -185,9 +200,10 @@ impl Service {
             revision: id(),
             created_at: now(),
         };
+        authorize.recheck().await?;
         self.store
             .transaction(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 if let Some(creation_id) = input.creation_id {
                     if let Some(project) = db.project(&creation_id.to_string())? {
                         return Ok(project);
@@ -216,12 +232,22 @@ impl Service {
 
     pub async fn replace_project<F>(
         &self,
-        mut input: ReplaceProjectInput,
+        input: ReplaceProjectInput,
         authorize: F,
     ) -> Result<Project>
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        self.replace_project_live(input, crate::authorization::Authorization::once(authorize))
+            .await
+    }
+
+    pub(crate) async fn replace_project_live(
+        &self,
+        mut input: ReplaceProjectInput,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<Project> {
+        authorize.recheck().await?;
         input.settings.validate().map_err(Error::bad)?;
         let path = crate::skills::workspace(
             std::path::Path::new(&input.settings.path),
@@ -230,9 +256,10 @@ impl Service {
         .await?;
         input.settings.path = path.to_string_lossy().into_owned();
         let origin = crate::service::normalize_origin(&crate::service::git_origin(&path).await);
+        authorize.recheck().await?;
         self.store
             .transaction(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 let current = required(
                     db.project(&input.project_id.to_string())?,
                     "Project no longer exists.",
@@ -255,9 +282,22 @@ impl Service {
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        self.delete_project_live(
+            project_id,
+            crate::authorization::Authorization::once(authorize),
+        )
+        .await
+    }
+
+    pub(crate) async fn delete_project_live(
+        &self,
+        project_id: ProjectId,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<()> {
+        authorize.recheck().await?;
         self.store
             .transaction(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 db.delete_project(&project_id.to_string())
             })
             .await

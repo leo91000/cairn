@@ -181,11 +181,6 @@ pub(crate) fn check_revision(db: &Db<'_>, expected: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// The connection's secret, for host-side injection only. Never sent to plugin code.
-pub(crate) async fn credential(s: &Service, connection: &Connection) -> Result<Option<String>> {
-    super::oauth::access_token(s, connection).await
-}
-
 pub(crate) async fn status(
     s: &Service,
     connection: &Connection,
@@ -888,8 +883,6 @@ where
         updated_at: now(),
     };
     let updating = existing.is_some();
-    let one_per_agent = super::run_credentials::one_per_package(&manifest);
-    let package_name = manifest.name.clone();
     if let Some(authority) = &management {
         authority.recheck(s).await?;
     }
@@ -897,10 +890,17 @@ where
         .store
         .transaction(move |db| {
             authorize_management(db)?;
-            for expected in &prepared { check_revision(db,expected)?; }
+            for expected in &prepared {
+                check_revision(db, expected)?;
+            }
             if let Some(current) = db.plugin_instance(&connection.id)? {
-                if expected_revision.as_ref().is_some_and(|revision| current.revision != *revision) {
-                    return Err(Error::conflict("This instance changed while it was being checked. Reload it and retry."));
+                if expected_revision
+                    .as_ref()
+                    .is_some_and(|revision| current.revision != *revision)
+                {
+                    return Err(Error::conflict(
+                        "This instance changed while it was being checked. Reload it and retry.",
+                    ));
                 }
                 if current.plugin_id != connection.plugin_id {
                     return Err(Error::not_found("Plugin connection not found."));
@@ -918,19 +918,6 @@ where
                     return Err(Error::bad("A selected agent no longer exists."));
                 }
             }
-            // Runs receive the credentials of one instance per package.
-            if one_per_agent && !keep_agents {
-                let held = db.plugin_instances()?.into_iter().any(|other| {
-                    other.plugin_id == connection.plugin_id
-                        && other.id != connection.id
-                        && other.agent_ids.iter().any(|id| connection.agent_ids.contains(id))
-                });
-                if held {
-                    return Err(Error::bad(format!(
-                        "Grant one {package_name} instance per agent: its runs use that instance's credentials."
-                    )));
-                }
-            }
             if !connection.agent_id.is_empty() {
                 let agent = db
                     .agent(&connection.agent_id)?
@@ -938,11 +925,14 @@ where
                 let access = agent.settings.access.clone();
                 delegation_rules(db, &connection, &access)?;
                 connection.granted_access = Some(access);
-                connection.native_authority = native_authority(db, &connection, &serde_json::to_value(&agent)?, &origin)?;
+                connection.native_authority =
+                    native_authority(db, &connection, &serde_json::to_value(&agent)?, &origin)?;
             }
             if connection.access_mode != AccessMode::Requests {
                 for request in db.plugin_requests()? {
-                    if request.instance_id == connection.id && request.status == super::state::RequestStatus::Pending {
+                    if request.instance_id == connection.id
+                        && request.status == super::state::RequestStatus::Pending
+                    {
                         db.remove_plugin_request(&request.id)?;
                     }
                 }
@@ -1162,7 +1152,7 @@ pub async fn get(s: &Service, plugin_id: &str, connection_id: &str) -> Result<Co
 }
 
 pub async fn remove(s: &Service, plugin_id: &str, connection_id: &str) -> Result<Value> {
-    remove_authorized(s, plugin_id, connection_id, |_| Ok(())).await
+    remove_authorized(s, plugin_id, connection_id, |_| Ok(()), None).await
 }
 
 pub(crate) async fn remove_authorized<F>(
@@ -1170,6 +1160,7 @@ pub(crate) async fn remove_authorized<F>(
     plugin_id: &str,
     connection_id: &str,
     authorize_management: F,
+    management: Option<super::management::Authority>,
 ) -> Result<Value>
 where
     F: Fn(&Db<'_>) -> Result<()> + Send + Sync + 'static,
@@ -1177,6 +1168,9 @@ where
     get(s, plugin_id, connection_id).await?;
     let forgotten_instance = connection_id.to_owned();
     let connection_id = connection_id.to_owned();
+    if let Some(authority) = &management {
+        authority.recheck(s).await?;
+    }
     s.store
         .transaction(move |db| {
             authorize_management(db)?;
@@ -1256,7 +1250,7 @@ pub async fn set_enabled(
     id: &str,
     input: &cairn_contracts::PluginEnabledInput,
 ) -> Result<cairn_contracts::PluginConnection> {
-    set_enabled_authorized(s, plugin_id, id, input, |_| Ok(())).await
+    set_enabled_authorized(s, plugin_id, id, input, |_| Ok(()), None).await
 }
 
 pub(crate) async fn set_enabled_authorized<F>(
@@ -1265,6 +1259,7 @@ pub(crate) async fn set_enabled_authorized<F>(
     id: &str,
     input: &cairn_contracts::PluginEnabledInput,
     authorize_management: F,
+    management: Option<super::management::Authority>,
 ) -> Result<cairn_contracts::PluginConnection>
 where
     F: Fn(&Db<'_>) -> Result<()> + Send + Sync + 'static,
@@ -1282,6 +1277,9 @@ where
         false
     };
     let id = id.to_owned();
+    if let Some(authority) = &management {
+        authority.recheck(s).await?;
+    }
     let value = s
         .store
         .transaction(move |db| {

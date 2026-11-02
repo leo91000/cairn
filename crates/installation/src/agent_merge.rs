@@ -13,18 +13,65 @@ impl Service {
         &self,
         input: cairn_contracts::MergeAgentsInput,
     ) -> Result<cairn_contracts::MergeAgentsOutput> {
-        self.merge_agents_authorized(input, |_| Ok(())).await
+        self.merge_agents_authorized(input, |_| Ok(()), None).await
     }
 
     pub(crate) async fn merge_agents_authorized<F>(
         &self,
         input: cairn_contracts::MergeAgentsInput,
         authorize: F,
+        resource_authority: Option<crate::capabilities::plugin_packages::Authority>,
     ) -> Result<cairn_contracts::MergeAgentsOutput>
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
-        self.missions.merge_agents(self, input, authorize).await
+        self.merge_agents_live(
+            input,
+            crate::authorization::Authorization::once(authorize),
+            resource_authority,
+        )
+        .await
+    }
+
+    pub(crate) async fn merge_agents_live(
+        &self,
+        input: cairn_contracts::MergeAgentsInput,
+        authorize: crate::authorization::Authorization,
+        resource_authority: Option<crate::capabilities::plugin_packages::Authority>,
+    ) -> Result<cairn_contracts::MergeAgentsOutput> {
+        authorize.recheck().await?;
+        let (target, source) = (input.target_id.to_string(), input.source_id.to_string());
+        let coverage = crate::plugins::grants::check_coverage_authorized(
+            self,
+            &target,
+            &source,
+            resource_authority.clone(),
+        )
+        .await;
+        let coverage = match coverage {
+            Ok(coverage) => coverage,
+            Err(error) if error.status == 403 => {
+                if let Some(authority) = &resource_authority {
+                    authority.recheck(self).await?;
+                }
+                return Err(Error::conflict(error.message));
+            }
+            Err(error) => return Err(error),
+        };
+        let held_resource_authority = resource_authority.clone();
+        self.missions
+            .merge_agents_live(
+                self,
+                input,
+                authorize.with_guard(move |db| {
+                    if let Some(authority) = &held_resource_authority {
+                        authority.authorize(db)?;
+                    }
+                    coverage.authorize(db)
+                }),
+                resource_authority.clone(),
+            )
+            .await
     }
 }
 
@@ -78,6 +125,11 @@ pub(crate) fn merge(
         }
     }
 
+    if !crate::plugins::grants::contribution_ceiling_in(db, target_id, source_id)? {
+        return Err(Error::conflict(
+            "The destination must cover all source plugin contributions and resource restrictions.",
+        ));
+    }
     for instance in db.plugin_instances()? {
         if instance.agent_id == source_id {
             return Err(Error::conflict(
@@ -161,6 +213,65 @@ fn nodes_covered(target: &Value, source: &Value) -> bool {
 mod tests {
     use super::*;
     use crate::agent_fixture::AgentFixture;
+
+    #[tokio::test]
+    async fn merge_reresolves_coverage_after_the_worker_admission_lock() {
+        use crate::plugin_grant_fixture::{Fixture, contribution, support};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let f = Fixture::new().await;
+        f.marker("live-parent").await;
+        let source =
+            f.s.agent_fixture(json!({ "name": "Source" }), None)
+                .await
+                .unwrap();
+        let source_id = text(&source, "id").to_owned();
+        f.set(json!([contribution("tool", "grant_probe_post", support())]))
+            .await;
+        f.set_for(
+            &source_id,
+            json!([contribution(
+                "tool",
+                "grant_probe_post",
+                json!([{ "resourceType": "thread", "id": "support-thread" }])
+            )]),
+        )
+        .await;
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let signal = reached.clone();
+        let authorize = crate::authorization::Authorization::new(&f.s, move |_| {
+            // Both entry checks completed, including the initial coverage proof;
+            // the merge now waits for the worker admission lock.
+            if calls.fetch_add(1, Ordering::SeqCst) == 3 {
+                signal.notify_one();
+            }
+            Ok(())
+        });
+        let lock = f.s.worker.active.lock().await;
+        let service = f.s.clone();
+        let source_id_for_merge = source_id.clone();
+        let merge = tokio::spawn(async move {
+            let input = serde_json::from_value(json!({
+                "sourceId": source_id_for_merge,
+                "targetId": MAIN_AGENT_ID,
+                "confirm": true,
+            }))
+            .unwrap();
+            service.merge_agents_live(input, authorize, None).await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), reached.notified())
+            .await
+            .unwrap();
+        f.moved_parent.store(true, Ordering::SeqCst);
+        drop(lock);
+        let error = merge.await.unwrap().unwrap_err();
+        assert_eq!(error.status, 409);
+        assert!(f.s.store.agent(&source_id).await.unwrap().is_some());
+        f.s.shutdown.cancel();
+    }
 
     #[tokio::test]
     async fn a_prepared_edit_cannot_recreate_an_agent_removed_before_its_commit() {

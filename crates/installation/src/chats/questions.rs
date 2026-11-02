@@ -418,11 +418,26 @@ impl Service {
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        self.question_cancel_live(
+            chat_id,
+            id,
+            crate::authorization::Authorization::once(authorize),
+        )
+        .await
+    }
+
+    pub(crate) async fn question_cancel_live(
+        &self,
+        chat_id: &str,
+        id: &str,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<Value> {
+        authorize.recheck().await?;
         let (chat_id, id) = (chat_id.to_owned(), id.to_owned());
         let question = self
             .store
             .transaction(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 cancel(db, &chat_id, &id)
             })
             .await?;
@@ -445,6 +460,23 @@ impl Service {
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        self.question_answer_live(
+            chat_id,
+            id,
+            input,
+            crate::authorization::Authorization::once(authorize),
+        )
+        .await
+    }
+
+    pub(crate) async fn question_answer_live(
+        &self,
+        chat_id: &str,
+        id: &str,
+        input: Value,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<Value> {
+        authorize.recheck().await?;
         let origin = crate::native::policy::origin();
         if origin.known() {
             crate::native::policy::refresh_chat(self, chat_id).await?;
@@ -453,10 +485,11 @@ impl Service {
             .map_err(|_| Error::bad("Provide an answer message id and answers."))?;
         input.validate().map_err(Error::bad)?;
         let (chat_id, id) = (chat_id.to_owned(), id.to_owned());
+        authorize.recheck().await?;
         let question = self
             .store
             .transaction(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 answer(db, &chat_id, &id, &input, &origin)
             })
             .await?;
