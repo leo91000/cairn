@@ -1076,6 +1076,8 @@ abstract class AgentPageCases {
                 .onNodeWithContentDescription("Rechercher des ressources")
                 .performTextInput("support")
             waitForText("Team › #support")
+            compose.onNodeWithContentDescription("Team › #support").performScrollTo()
+            capture("agent-plugin-grants-resource-picker")
             compose.onNodeWithContentDescription("Team › #support").performClick()
             val resourceSearch = compose.onNodeWithContentDescription("Rechercher des ressources")
             resourceSearch.performTextClearance()
@@ -1100,6 +1102,7 @@ abstract class AgentPageCases {
             compose.mainClock.autoAdvance = true
             compose.onNodeWithText("Team › #support et descendants").assertExists()
             compose.onNodeWithText("Team › #support et descendants").performScrollTo()
+            compose.onNodeWithText("Choisir les ressources").performScrollTo()
             capture("agent-plugin-grants-editor")
 
             compose

@@ -324,6 +324,57 @@ class PluginGrantsTest {
     }
 
     @Test
+    fun rebasingRemovesCredentialsFromSamePackageInstancesThatLoseSupplierChoice() {
+        val credentials = PluginContributionGrant("runCredentials", "", emptyList())
+        val messageHook = PluginContributionGrant("hook", "message", emptyList())
+        val readTool = PluginContributionGrant("tool", "read", emptyList())
+        val base = PluginGrantDraft()
+        val mine =
+            PluginGrantDraft(
+                grants =
+                    listOf(
+                        PluginInstanceGrant(
+                            PluginGrantAccess.B(listOf(credentials, messageHook)),
+                            support,
+                        )
+                    ),
+                runCredentialInstances = listOf(support),
+            )
+        val theirs =
+            PluginGrantDraft(
+                grants =
+                    listOf(
+                        PluginInstanceGrant(
+                            PluginGrantAccess.B(listOf(credentials, readTool)),
+                            automation,
+                        )
+                    ),
+                runCredentialInstances = listOf(automation),
+            )
+
+        val merged =
+            mergePluginGrantDrafts(
+                base,
+                mine,
+                theirs,
+                mapOf(support to "grant-ui", automation to "grant-ui"),
+            )
+
+        assertEquals(listOf(support), merged.runCredentialInstances)
+        assertEquals(
+            setOf(credentials, messageHook),
+            (merged.grants.single { it.instanceId == support }.access as PluginGrantAccess.B)
+                .contributions
+                .toSet(),
+        )
+        assertEquals(
+            listOf(readTool),
+            (merged.grants.single { it.instanceId == automation }.access as PluginGrantAccess.B)
+                .contributions,
+        )
+    }
+
+    @Test
     fun rebasingDropsSupplierWhenConcurrentEditRevokesItsGrant() {
         val base =
             PluginGrantDraft(

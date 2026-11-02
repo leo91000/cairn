@@ -235,6 +235,27 @@ private fun mergeCredentialSuppliers(
     }
 }
 
+private fun keepOnlySelectedCredentialContributions(
+    grants: List<PluginInstanceGrant>,
+    runCredentialInstances: List<String>,
+    packageByInstance: Map<String, String>,
+): List<PluginInstanceGrant> {
+    fun packageKey(instance: String) = packageByInstance[instance] ?: "unknown:$instance"
+
+    val supplierByPackage = runCredentialInstances.associateBy(::packageKey)
+    return grants.mapNotNull { grant ->
+        val access = grant.access as? PluginGrantAccess.B ?: return@mapNotNull grant
+        if (access.contributions.none { it.kind == "runCredentials" }) return@mapNotNull grant
+        if (supplierByPackage[packageKey(grant.instanceId)] == grant.instanceId) {
+            return@mapNotNull grant
+        }
+
+        val contributions = access.contributions.filter { it.kind != "runCredentials" }
+        if (contributions.isEmpty()) null
+        else grant.copy(access = PluginGrantAccess.B(contributions))
+    }
+}
+
 /** Rebase local grant edits on the latest owner-authored snapshot after a conflict. */
 fun mergePluginGrantDrafts(
     base: PluginGrantDraft,
@@ -271,8 +292,10 @@ fun mergePluginGrantDrafts(
             null -> false
         }
     }
+    val grantsWithSelectedCredentialContributions =
+        keepOnlySelectedCredentialContributions(grants, runCredentialInstances, packageByInstance)
 
-    return PluginGrantDraft(grants, runCredentialInstances)
+    return PluginGrantDraft(grantsWithSelectedCredentialContributions, runCredentialInstances)
 }
 
 data class GrantContribution(

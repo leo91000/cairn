@@ -143,6 +143,29 @@ function mergeCredentialSuppliers(
   })
 }
 
+function keepOnlySelectedCredentialContributions(
+  grants: PluginInstanceGrant[],
+  runCredentialInstances: string[],
+  packageByInstance: ReadonlyMap<string, string>,
+): PluginInstanceGrant[] {
+  const packageKey = (instance: string) => packageByInstance.get(instance) ?? `unknown:${instance}`
+  const supplierByPackage = new Map(runCredentialInstances.map(instance => [packageKey(instance), instance]))
+
+  return grants.flatMap((grant) => {
+    if (grant.access.type !== 'selected')
+      return [grant]
+    if (!grant.access.contributions.some(contribution => contribution.kind === 'runCredentials'))
+      return [grant]
+    if (supplierByPackage.get(packageKey(grant.instanceId)) === grant.instanceId)
+      return [grant]
+
+    const contributions = grant.access.contributions.filter(contribution => contribution.kind !== 'runCredentials')
+    return contributions.length
+      ? [{ ...grant, access: { type: 'selected', contributions } }]
+      : []
+  })
+}
+
 /** Rebase local grant edits on the latest owner-authored grant snapshot after a conflict. */
 export function mergeGrantDrafts(
   base: GrantDraft,
@@ -172,9 +195,14 @@ export function mergeGrantDrafts(
       || (grant?.access.type === 'selected'
         && grant.access.contributions.some(contribution => contribution.kind === 'runCredentials'))
   })
+  const grantsWithSelectedCredentialContributions = keepOnlySelectedCredentialContributions(
+    grants,
+    runCredentialInstances,
+    packageByInstance,
+  )
 
   return {
-    grants,
+    grants: grantsWithSelectedCredentialContributions,
     runCredentialInstances,
   }
 }

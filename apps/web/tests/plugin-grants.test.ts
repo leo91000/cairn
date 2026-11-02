@@ -180,6 +180,40 @@ it('rebases same-package suppliers to the local choice when a new instance is in
   expect(merged.runCredentialInstances).toEqual(['automation'])
 })
 
+it('keeps only the chosen run-credential contribution when same-package grants merge', () => {
+  const credentials = { kind: 'runCredentials' as const, name: '', resources: [] }
+  const messageHook = { kind: 'hook' as const, name: 'message', resources: [] }
+  const readTool = { kind: 'tool' as const, name: 'read', resources: [] }
+  const base: GrantDraft = { grants: [], runCredentialInstances: [] }
+  const mine: GrantDraft = {
+    grants: [{
+      instanceId: 'automation',
+      access: { type: 'selected', contributions: [credentials, messageHook] },
+    }],
+    runCredentialInstances: ['automation'],
+  }
+  const theirs: GrantDraft = {
+    grants: [{
+      instanceId: 'review',
+      access: { type: 'selected', contributions: [credentials, readTool] },
+    }],
+    runCredentialInstances: ['review'],
+  }
+
+  const merged = mergeGrantDrafts(
+    base,
+    mine,
+    theirs,
+    new Map([['automation', 'grant-ui'], ['review', 'grant-ui']]),
+  )
+
+  expect(merged.runCredentialInstances).toEqual(['automation'])
+  expect(merged.grants).toEqual([
+    { instanceId: 'automation', access: { type: 'selected', contributions: [credentials, messageHook] } },
+    { instanceId: 'review', access: { type: 'selected', contributions: [readTool] } },
+  ])
+})
+
 it('drops a locally selected supplier when a concurrent edit revokes its grant', () => {
   const base: GrantDraft = {
     grants: [{ instanceId: 'automation', access: { type: 'full' } }],
