@@ -5,6 +5,7 @@ import BeaconApp from './BeaconApp.vue'
 import { prepareDraftTransfer } from './draft-transfer'
 import { workspaceRouter } from './router'
 import DraftTransfer from './views/DraftTransfer.vue'
+import { startWebUpdates } from './web-update'
 import '@fontsource-variable/dm-sans/wght.css'
 import '@fontsource-variable/manrope/wght.css'
 import './styles/index.css'
@@ -24,6 +25,12 @@ if (window.location.pathname === '/browser/drafts' && installationHost) {
   createApp(DraftTransfer).mount('#app')
 }
 else {
+  startWebUpdates(router)
   const app = createApp(BeaconApp).use(router)
-  void router.isReady().then(() => app.mount('#app'))
+  // A failed initial lazy import still needs the shell and its recovery notice.
+  const mount = () => {
+    app.mount('#app')
+  }
+
+  void router.isReady().then(mount, mount)
 }
