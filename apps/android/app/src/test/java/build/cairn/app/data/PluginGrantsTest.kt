@@ -78,6 +78,101 @@ class PluginGrantsTest {
     }
 
     @Test
+    fun rebasingConcurrentGrantChangesKeepsIndependentContributionsAndResources() {
+        val readAtSupport =
+            PluginContributionGrant(
+                "tool",
+                "read",
+                listOf(PluginResourceRef("support", "channel")),
+            )
+        val base =
+            PluginGrantDraft(
+                listOf(PluginInstanceGrant(PluginGrantAccess.B(listOf(readAtSupport)), support))
+            )
+        val mine =
+            PluginGrantDraft(
+                listOf(
+                    PluginInstanceGrant(
+                        PluginGrantAccess.B(
+                            listOf(
+                                readAtSupport.copy(
+                                    resources =
+                                        readAtSupport.resources +
+                                            PluginResourceRef("general", "channel")
+                                )
+                            )
+                        ),
+                        support,
+                    ),
+                    PluginInstanceGrant(PluginGrantAccess.A(), automation),
+                ),
+                runCredentialInstances = listOf(automation),
+            )
+        val theirs =
+            PluginGrantDraft(
+                listOf(
+                    PluginInstanceGrant(
+                        PluginGrantAccess.B(
+                            listOf(
+                                readAtSupport.copy(
+                                    resources =
+                                        readAtSupport.resources +
+                                            PluginResourceRef("team", "server")
+                                )
+                            )
+                        ),
+                        support,
+                    ),
+                    PluginInstanceGrant(
+                        PluginGrantAccess.B(
+                            listOf(PluginContributionGrant("hook", "message", emptyList()))
+                        ),
+                        otherPackage,
+                    ),
+                ),
+                runCredentialInstances = listOf(otherPackage),
+            )
+
+        val merged =
+            mergePluginGrantDrafts(
+                base,
+                mine,
+                theirs,
+                mapOf(automation to "automation-package", otherPackage to "other-package"),
+            )
+
+        val mergedRead =
+            (merged.grants.single { it.instanceId == support }.access as PluginGrantAccess.B)
+                .contributions
+                .single()
+        assertEquals(
+            listOf(
+                PluginResourceRef("general", "channel"),
+                PluginResourceRef("support", "channel"),
+                PluginResourceRef("team", "server"),
+            ),
+            mergedRead.resources,
+        )
+        assertEquals(
+            setOf(support, automation, otherPackage),
+            merged.grants.map { it.instanceId }.toSet(),
+        )
+        assertEquals(setOf(automation, otherPackage), merged.runCredentialInstances.toSet())
+    }
+
+    @Test
+    fun rebasingKeepsSuppliersForUnknownInstancesDistinct() {
+        val merged =
+            mergePluginGrantDrafts(
+                PluginGrantDraft(),
+                PluginGrantDraft(runCredentialInstances = listOf(support)),
+                PluginGrantDraft(runCredentialInstances = listOf(automation)),
+            )
+
+        assertEquals(setOf(automation, support), merged.runCredentialInstances.toSet())
+    }
+
+    @Test
     fun grantReviewNamesDescendantCoverageAndCredentialSupplierEffects() {
         val before = PluginGrantDraft()
         val after =

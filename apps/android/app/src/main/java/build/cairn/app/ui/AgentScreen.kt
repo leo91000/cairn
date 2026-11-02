@@ -452,12 +452,29 @@ private fun AgentPage(
                 // Do not rebase onto a profile revision until its matching grants are known too.
                 val rebasedDraft = draft.rebased(base, theirs, freshMcps)
                 val keepGrantEdits = grantChanges
+                val baseGrants = savedGrants
+                val localGrants = grants
                 val refreshedGrantsJson =
                     wireJson.encodeToString(PluginGrantDraft.serializer(), freshGrants.draft())
                 baseline = theirs
                 draft = rebasedDraft
                 savedGrantsJson = refreshedGrantsJson
-                if (!keepGrantEdits) grantsJson = refreshedGrantsJson
+                grantsJson =
+                    if (keepGrantEdits) {
+                        val packageByInstance =
+                            catalog?.connections.orEmpty().associate { it.id to it.pluginId }
+                        wireJson.encodeToString(
+                            PluginGrantDraft.serializer(),
+                            mergePluginGrantDrafts(
+                                baseGrants,
+                                localGrants,
+                                freshGrants.draft(),
+                                packageByInstance,
+                            ),
+                        )
+                    } else {
+                        refreshedGrantsJson
+                    }
                 grantsLoaded = true
                 grantsError = null
                 // Machines and plugin instances may have changed elsewhere too; until read again

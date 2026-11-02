@@ -8,6 +8,7 @@ import {
   grantDescription,
   grantKey,
   MAX_PLUGIN_RESOURCE_ROOTS_PER_CONTRIBUTION,
+  mergeGrantDrafts,
   removeGrant,
   selectableResourceTypes,
 } from '../src/plugin-grants'
@@ -17,6 +18,72 @@ it('caps resource roots per contribution at the backend limit while allowing rem
   expect(canSelectPluginResourceRoot(99, false)).toBe(true)
   expect(canSelectPluginResourceRoot(100, false)).toBe(false)
   expect(canSelectPluginResourceRoot(100, true)).toBe(true)
+})
+
+it('rebases concurrent grant additions and independent resource roots', () => {
+  const base: GrantDraft = {
+    grants: [{
+      instanceId: 'support',
+      access: {
+        type: 'selected',
+        contributions: [{ kind: 'tool', name: 'read', resources: [{ resourceType: 'channel', id: 'support' }] }],
+      },
+    }],
+    runCredentialInstances: [],
+  }
+  const mine: GrantDraft = {
+    grants: [
+      {
+        instanceId: 'support',
+        access: {
+          type: 'selected',
+          contributions: [{ kind: 'tool', name: 'read', resources: [{ resourceType: 'channel', id: 'support' }, { resourceType: 'channel', id: 'general' }] }],
+        },
+      },
+      { instanceId: 'automation', access: { type: 'full' } },
+    ],
+    runCredentialInstances: ['automation'],
+  }
+  const theirs: GrantDraft = {
+    grants: [
+      {
+        instanceId: 'support',
+        access: {
+          type: 'selected',
+          contributions: [{ kind: 'tool', name: 'read', resources: [{ resourceType: 'channel', id: 'support' }, { resourceType: 'server', id: 'team' }] }],
+        },
+      },
+      { instanceId: 'review', access: { type: 'selected', contributions: [{ kind: 'hook', name: 'message', resources: [] }] } },
+    ],
+    runCredentialInstances: ['review'],
+  }
+
+  const merged = mergeGrantDrafts(base, mine, theirs, new Map([['automation', 'automation-package'], ['review', 'review-package']]))
+
+  expect(merged.grants.find(grant => grant.instanceId === 'support')?.access).toEqual({
+    type: 'selected',
+    contributions: [{
+      kind: 'tool',
+      name: 'read',
+      resources: [
+        { resourceType: 'channel', id: 'general' },
+        { resourceType: 'channel', id: 'support' },
+        { resourceType: 'server', id: 'team' },
+      ],
+    }],
+  })
+  expect(merged.grants.map(grant => grant.instanceId)).toEqual(['automation', 'review', 'support'])
+  expect(merged.runCredentialInstances).toEqual(['automation', 'review'])
+})
+
+it('keeps credential suppliers for unknown instances distinct while rebasing', () => {
+  const merged = mergeGrantDrafts(
+    { grants: [], runCredentialInstances: [] },
+    { grants: [], runCredentialInstances: ['support'] },
+    { grants: [], runCredentialInstances: ['automation'] },
+  )
+
+  expect(merged.runCredentialInstances).toEqual(['automation', 'support'])
 })
 
 const before: GrantDraft = {

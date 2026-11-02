@@ -88,6 +88,7 @@ test('contribution grants use resource ancestry, review, conflicts and explicit 
   })
   const first = (await instance('Support')).instance.id
   const second = (await instance('Automation')).instance.id
+  const remote = (await instance('Review')).instance.id
   const agent = await workspace.api('/api/agents', 'POST', { name: 'Resource reviewer' })
   await page.goto(workspacePath(`/agents/${agent.id}?section=plugins`))
   await authenticateWorkspace(page)
@@ -125,11 +126,23 @@ test('contribution grants use resource ancestry, review, conflicts and explicit 
   await expect(review).toContainText('Run credential suppliers: Automation')
   await page.screenshot({ path: testInfo.outputPath('agent-plugin-grants-review.png'), fullPage: true })
   await review.getByRole('button', { name: 'Back to editing' }).click()
-  expect((await workspace.api(`/api/agents/${agent.id}/plugin-grants`)).grants).toEqual([])
+  await workspace.api(`/api/agents/${agent.id}/plugin-grants`, 'PUT', {
+    agentId: agent.id,
+    revision: original.revision,
+    grants: [{ instanceId: remote, access: { type: 'selected', contributions: [{ kind: 'tool', name: 'grant_ui_read', resources: [] }] } }],
+    runCredentialInstances: [],
+  })
+  const concurrentGrant = await workspace.api(`/api/agents/${agent.id}/plugin-grants`)
+  expect(concurrentGrant.grants).toHaveLength(1)
+  expect(concurrentGrant.grants[0]).toMatchObject({ instanceId: remote })
   // A concurrent profile edit shares the grant revision. Reload preserves this grant draft.
   await workspace.api(`/api/agents/${agent.id}`, 'PUT', { description: 'Changed elsewhere' })
+  const afterProfileEdit = await workspace.api(`/api/agents/${agent.id}/plugin-grants`)
+  expect(afterProfileEdit.grants).toContainEqual(concurrentGrant.grants[0])
   await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
   await page.getByRole('button', { name: 'Reload', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Reload', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('combobox', { name: 'Access to Review' })).toHaveValue('selected')
   await saveAgent(page, true)
   const saved = await workspace.api(`/api/agents/${agent.id}/plugin-grants`)
   expect(saved.grants).toEqual(expect.arrayContaining([
@@ -137,9 +150,15 @@ test('contribution grants use resource ancestry, review, conflicts and explicit 
     { instanceId: second, access: { type: 'full' } },
   ]))
   expect(saved.runCredentialInstances).toEqual([second])
+  expect(saved.grants).toContainEqual({
+    instanceId: remote,
+    access: { type: 'selected', contributions: [{ kind: 'tool', name: 'grant_ui_read', resources: [] }] },
+  })
   await page.reload()
   await expect(support).toHaveValue('selected')
   await automation.selectOption('none')
   await saveAgent(page, true)
   expect((await workspace.api(`/api/agents/${agent.id}/plugin-grants`)).runCredentialInstances).toEqual([])
+  await page.goto(workspacePath('/agents'))
+  await expect(page.getByText('Selected plugin access', { exact: false })).toBeVisible()
 })

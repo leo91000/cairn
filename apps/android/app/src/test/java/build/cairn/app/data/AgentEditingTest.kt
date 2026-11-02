@@ -703,6 +703,10 @@ class AgentEditingTest {
         )
         // With them: package names, and exclusivity only where it applies (mac cannot run it).
         assertEquals("2 projets · 2 nodes · 1Password", agentAccessSummary(granted, catalog, nodes))
+        assertEquals(
+            "2 projets · 2 nodes · 1Password · Accès plugin sélectionné",
+            agentAccessSummary(granted, catalog, nodes, selectedPluginAccess = true),
+        )
     }
 
     @Test

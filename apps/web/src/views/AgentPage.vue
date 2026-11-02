@@ -90,7 +90,7 @@ import {
   Trash2,
   TriangleAlert,
 } from '../icons'
-import { grantDescription, grantKey } from '../plugin-grants'
+import { grantDescription, grantKey, mergeGrantDrafts } from '../plugin-grants'
 import { useResourceSave } from '../resourceSave'
 import { buttonBase, buttonSizes, buttonVariants } from '../ui'
 
@@ -756,13 +756,22 @@ async function reloadAgent() {
     const mine = draft.value
     agent.value = found
     saved.value = draftOf(found)
+    const baseGrants = structuredClone(JSON.parse(JSON.stringify(savedGrants.value)))
     const mineGrants = structuredClone(JSON.parse(JSON.stringify(grants.value)))
     const keepGrantEdits = grantsChanged.value
     const grantsReloaded = await loadGrants()
     if (!grantsReloaded)
       return
-    if (keepGrantEdits)
-      grants.value = mineGrants
+    if (keepGrantEdits) {
+      const mergedGrants = mergeGrantDrafts(
+        baseGrants,
+        mineGrants,
+        savedGrants.value,
+        new Map(catalog.value.connections.map(connection => [connection.id, connection.pluginId])),
+      )
+      grants.value = mergedGrants
+    }
+
     const rebased = rebaseDraft(base, mine, saved.value)
     // Tool choices of deleted MCP connections are dropped.
     if (state.workspaceLoaded && state.installationRole === 'owner')

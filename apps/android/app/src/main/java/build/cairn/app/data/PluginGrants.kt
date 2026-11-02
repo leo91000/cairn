@@ -95,6 +95,165 @@ data class PluginGrantDraft(
 
 fun AgentPluginGrants.draft() = PluginGrantDraft(grants, runCredentialInstances)
 
+private fun grantValueKey(grant: PluginInstanceGrant?): String? = grant?.let {
+    PluginGrantDraft(listOf(it)).key()
+}
+
+private fun <T> mergeSet(
+    base: List<T>,
+    mine: List<T>,
+    theirs: List<T>,
+    identity: (T) -> String,
+): List<T> {
+    val items = (base + mine + theirs).associateBy(identity)
+    val baseIds = base.map(identity).toSet()
+    val mineIds = mine.map(identity).toSet()
+    val theirsIds = theirs.map(identity).toSet()
+    val identities = (base + mine + theirs).map(identity).distinct().sorted()
+
+    return identities.mapNotNull { id ->
+        val keep = if ((id in mineIds) == (id in baseIds)) id in theirsIds else id in mineIds
+        if (keep) items[id] else null
+    }
+}
+
+private fun contributionKey(contribution: PluginContributionGrant) =
+    "${contribution.kind}:${contribution.name}"
+
+private fun contributionValueKey(contribution: PluginContributionGrant) =
+    wireJson.encodeToString(
+        PluginContributionGrant.serializer(),
+        contribution.copy(
+            resources = contribution.resources.sortedWith(compareBy({ it.resourceType }, { it.id }))
+        ),
+    )
+
+private fun mergeContributions(
+    base: List<PluginContributionGrant>,
+    mine: List<PluginContributionGrant>,
+    theirs: List<PluginContributionGrant>,
+): List<PluginContributionGrant> {
+    val baseByKey = base.associateBy(::contributionKey)
+    val mineByKey = mine.associateBy(::contributionKey)
+    val theirsByKey = theirs.associateBy(::contributionKey)
+    val keys = (base + mine + theirs).map(::contributionKey).distinct().sorted()
+
+    return keys.mapNotNull { key ->
+        val baseItem = baseByKey[key]
+        val mineItem = mineByKey[key]
+        val theirsItem = theirsByKey[key]
+        val baseValue = baseItem?.let(::contributionValueKey)
+        val mineValue = mineItem?.let(::contributionValueKey)
+        val theirsValue = theirsItem?.let(::contributionValueKey)
+
+        when {
+            mineValue == baseValue -> theirsItem
+            theirsValue == baseValue || mineValue == theirsValue -> mineItem
+            else -> {
+                val template = mineItem ?: theirsItem ?: baseItem ?: return@mapNotNull null
+                val resources =
+                    mergeSet(
+                        baseItem?.resources.orEmpty(),
+                        mineItem?.resources.orEmpty(),
+                        theirsItem?.resources.orEmpty(),
+                    ) { resource ->
+                        "${resource.resourceType}:${resource.id}"
+                    }
+                if (resources.size > 100) mineItem ?: theirsItem
+                else template.copy(resources = resources)
+            }
+        }
+    }
+}
+
+private fun mergeGrant(
+    base: PluginInstanceGrant?,
+    mine: PluginInstanceGrant?,
+    theirs: PluginInstanceGrant?,
+    instanceId: String,
+): PluginInstanceGrant? {
+    val baseValue = grantValueKey(base)
+    val mineValue = grantValueKey(mine)
+    val theirsValue = grantValueKey(theirs)
+    if (mineValue == baseValue) return theirs
+    if (theirsValue == baseValue || mineValue == theirsValue) return mine
+
+    // Independent selected contributions merge; mode changes remain the local choice and
+    // appear in the sensitive review against the latest server snapshot.
+    if (listOf(base, mine, theirs).all { it == null || it.access is PluginGrantAccess.B }) {
+        val contributions =
+            mergeContributions(
+                (base?.access as? PluginGrantAccess.B)?.contributions.orEmpty(),
+                (mine?.access as? PluginGrantAccess.B)?.contributions.orEmpty(),
+                (theirs?.access as? PluginGrantAccess.B)?.contributions.orEmpty(),
+            )
+        if (contributions.size > 500) return mine
+        return contributions
+            .takeIf { it.isNotEmpty() }
+            ?.let { PluginInstanceGrant(PluginGrantAccess.B(it), instanceId) }
+    }
+
+    return mine
+}
+
+private fun mergeCredentialSuppliers(
+    base: List<String>,
+    mine: List<String>,
+    theirs: List<String>,
+    packageByInstance: Map<String, String>,
+): List<String> {
+    fun packageKey(instance: String) = packageByInstance[instance] ?: "unknown:$instance"
+    fun supplierFor(instances: List<String>, packageId: String) = instances.find {
+        packageKey(it) == packageId
+    }
+
+    val packages = (base + mine + theirs).map(::packageKey).distinct().sorted()
+    return packages.mapNotNull { packageId ->
+        val baseSupplier = supplierFor(base, packageId)
+        val mineSupplier = supplierFor(mine, packageId)
+        val theirsSupplier = supplierFor(theirs, packageId)
+        val supplier =
+            when {
+                mineSupplier == baseSupplier -> theirsSupplier
+                theirsSupplier == baseSupplier || mineSupplier == theirsSupplier -> mineSupplier
+                else -> mineSupplier
+            }
+        supplier
+    }
+}
+
+/** Rebase local grant edits on the latest owner-authored snapshot after a conflict. */
+fun mergePluginGrantDrafts(
+    base: PluginGrantDraft,
+    mine: PluginGrantDraft,
+    theirs: PluginGrantDraft,
+    packageByInstance: Map<String, String> = emptyMap(),
+): PluginGrantDraft {
+    val baseByInstance = base.grants.associateBy { it.instanceId }
+    val mineByInstance = mine.grants.associateBy { it.instanceId }
+    val theirsByInstance = theirs.grants.associateBy { it.instanceId }
+    val instances =
+        (base.grants + mine.grants + theirs.grants).map { it.instanceId }.distinct().sorted()
+    val grants = instances.mapNotNull { instanceId ->
+        mergeGrant(
+            baseByInstance[instanceId],
+            mineByInstance[instanceId],
+            theirsByInstance[instanceId],
+            instanceId,
+        )
+    }
+
+    return PluginGrantDraft(
+        grants,
+        mergeCredentialSuppliers(
+            base.runCredentialInstances,
+            mine.runCredentialInstances,
+            theirs.runCredentialInstances,
+            packageByInstance,
+        ),
+    )
+}
+
 data class GrantContribution(
     val grant: PluginContributionGrant,
     val description: String,

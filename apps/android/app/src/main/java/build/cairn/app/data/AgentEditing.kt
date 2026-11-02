@@ -465,6 +465,7 @@ fun agentAccessSummary(
     catalog: PluginCatalog? = null,
     /** Known machines, to show exclusivity only where it takes effect; null (unknown) omits it. */
     nodes: List<ExecutionNode>? = null,
+    selectedPluginAccess: Boolean? = false,
 ): String {
     val access = agent.access
     return buildList {
@@ -483,6 +484,8 @@ fun agentAccessSummary(
                             }
                             .distinct()
                     )
+            if (selectedPluginAccess == true) add("Accès plugin sélectionné")
+            if (selectedPluginAccess == null) add("Droits des plugins inconnus")
             if (
                 // Only where it takes effect, so never while the machines are unknown.
                 nodes != null && agent.effectiveExclusive(nodes).isNotEmpty()
