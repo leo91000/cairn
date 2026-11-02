@@ -1,5 +1,9 @@
 # Native close with independent backend namespaces
 
+The post-fence mutation-drain scope below is superseded by
+[ADR-0079](0079-native-attempt-access-drain.md). The independent namespaces and
+physical ownership contracts remain in force.
+
 A fenced native conversation can wait in flush, unmount, journal sealing or
 ublk retirement. Holding the node's storage gate during those waits blocks
 unrelated conversations. Removing that gate alone would break

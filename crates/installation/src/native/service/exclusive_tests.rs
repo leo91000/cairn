@@ -24,6 +24,7 @@ async fn attempt(controller: &Controller, ready: bool) -> (String, Arc<TestCpu>,
     controller.active.lock().await.insert(
         id.clone(),
         Attempt {
+            live_access: Arc::default(),
             run: crate::config::id(),
             expires: None,
             stop: CancellationToken::new(),
