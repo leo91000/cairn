@@ -61,6 +61,7 @@ fn row(
         plugins,
     } = permissions;
     Ok(Agent {
+        coding_agent_defaults: None,
         id: AgentId(identifier),
         settings: AgentSettings {
             name: row.get(1)?,
@@ -100,7 +101,7 @@ impl Db<'_> {
             return Db(&tx).agents();
         }
         let mut permissions = self.agent_permission_sets()?;
-        Ok(self
+        let mut agents: Vec<Agent> = self
             .0
             .prepare_cached(&format!(
                 "SELECT {COLUMNS} FROM agents ORDER BY updated_at DESC,id"
@@ -112,7 +113,9 @@ impl Db<'_> {
                     .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
                 row(value, grants)
             })?
-            .collect::<rusqlite::Result<_>>()?)
+            .collect::<rusqlite::Result<_>>()?;
+        crate::coding_agent_configuration::attach_defaults(self, &mut agents)?;
+        Ok(agents)
     }
 
     pub fn agent(&self, id: &str) -> Result<Option<Agent>> {
@@ -123,11 +126,15 @@ impl Db<'_> {
             )?;
             return Db(&tx).agent(id);
         }
-        Ok(self
+        let mut agent = self
             .0
             .prepare_cached(&format!("SELECT {COLUMNS} FROM agents WHERE id=?"))?
             .query_row([id], |value| row(value, self.agent_permissions(id)?))
-            .optional()?)
+            .optional()?;
+        if let Some(agent) = &mut agent {
+            crate::coding_agent_configuration::attach_defaults(self, std::slice::from_mut(agent))?;
+        }
+        Ok(agent)
     }
 
     pub fn save_agent(&self, agent: &Agent) -> Result<Agent> {
@@ -198,6 +205,7 @@ impl Store {
 
 pub fn new_agent(settings: AgentSettings, agent_id: Option<AgentId>) -> Agent {
     Agent {
+        coding_agent_defaults: None,
         id: agent_id.unwrap_or_else(|| AgentId(uuid::Uuid::new_v4())),
         settings,
         revision: id(),

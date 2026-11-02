@@ -1011,6 +1011,7 @@ fn main() {
         .iter()
         .enumerate()
         .map(|(index, input)| Agent {
+            coding_agent_defaults: None,
             id: AgentId(uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000001").unwrap()),
             settings: input.settings.clone(),
             revision: "profile-revision".into(),
@@ -1135,6 +1136,14 @@ fn main() {
     export::<OutcomeDismissal>(root, &mut generator, Contract::Serialize);
     export::<SetOutcomeAsideOutput>(root, &mut generator, Contract::Serialize);
     export::<GetInstallationSettingsInput>(root, &mut generator, Contract::Deserialize);
+    export::<CodingAgentConfigurationInput>(root, &mut generator, Contract::Deserialize);
+    export::<EditCodingAgentConfigurationInput>(root, &mut generator, Contract::Deserialize);
+    export::<CodingAgentSettingChange>(root, &mut generator, Contract::Deserialize);
+    export::<CodingAgentSetting>(root, &mut generator, Contract::Serialize);
+    export::<ManagedCodingAgentSetting>(root, &mut generator, Contract::Serialize);
+    export::<CodingAgentConfiguration>(root, &mut generator, Contract::Serialize);
+    export::<CodingAgentPreferences>(root, &mut generator, Contract::Serialize);
+    export::<NativeConfigurationSnapshot>(root, &mut generator, Contract::Serialize);
     export::<InstallationSettings>(root, &mut generator, Contract::Serialize);
     export::<GetInstallationOverviewInput>(root, &mut generator, Contract::Deserialize);
     export::<InstallationOverview>(root, &mut generator, Contract::Serialize);
@@ -1147,6 +1156,9 @@ fn main() {
     export::<CheckStorageInput>(root, &mut generator, Contract::Deserialize);
     export::<StorageCheck>(root, &mut generator, Contract::Serialize);
     let settings_clients = serde_json::json!([
+        { "name": "getCodingAgentConfiguration", "input": "CodingAgentConfigurationInput", "output": "CodingAgentConfiguration", "method": "POST", "path": "/settings/coding-agents/read" },
+        { "name": "previewCodingAgentConfiguration", "input": "EditCodingAgentConfigurationInput", "output": "CodingAgentConfiguration", "method": "POST", "path": "/settings/coding-agents/preview" },
+        { "name": "saveCodingAgentConfiguration", "input": "EditCodingAgentConfigurationInput", "output": "CodingAgentConfiguration", "method": "PUT", "path": "/settings/coding-agents" },
         { "name": "markRead", "input": "MarkReadInput", "output": "MarkReadOutput", "method": "POST", "path": "/reads" },
         { "name": "setOutcomeAside", "input": "SetOutcomeAsideInput", "output": "SetOutcomeAsideOutput", "method": "POST", "path": "/dismissals" },
         { "name": "getInstallationSettings", "input": "GetInstallationSettingsInput", "output": "InstallationSettings", "method": "GET", "path": "/settings" },

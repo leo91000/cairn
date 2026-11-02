@@ -59,6 +59,9 @@ pub struct CodingAgentModel {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ModelCatalog {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub native_defaults: Option<crate::CodingAgentPreferences>,
     pub models: Vec<CodingAgentModel>,
     #[ts(type = "number | null")]
     pub checked_at: Option<i64>,

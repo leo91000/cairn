@@ -292,6 +292,10 @@ pub struct CodingAgentSwitch {
 #[serde(rename_all = "camelCase")]
 pub struct Chat {
     pub id: String,
+    /// Resolved selection for the next implicit message, including changed defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub next_selection: Option<crate::CodingAgentPreferences>,
     #[serde(default)]
     pub slug: String,
     #[serde(default)]

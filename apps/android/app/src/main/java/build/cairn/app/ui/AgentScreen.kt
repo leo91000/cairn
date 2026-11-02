@@ -486,7 +486,12 @@ private fun AgentPage(
                         )
                     AgentSection.Identity ->
                         IdentitySection(vm, state, baseline, draft.agent, creating, ::update)
-                    AgentSection.Engine -> EngineSection(vm, state, draft.agent, ::update)
+                    AgentSection.Engine ->
+                        EngineSection(vm, state, draft.agent, ::update, !creating && !dirty) {
+                            navigate(
+                                "agents/${draft.agent.id}/configuration/${draft.agent.provider}"
+                            )
+                        }
                     AgentSection.Advanced ->
                         AdvancedSection(draft.timeout) {
                             draft = draft.copy(timeout = it)
@@ -2059,11 +2064,17 @@ private fun EngineSection(
     state: Workspace,
     agent: Agent,
     update: ((Agent) -> Agent) -> Unit,
+    configurationEnabled: Boolean,
+    configuration: () -> Unit,
 ) {
     ModelPicker(
         state.modelCatalog(agent.provider),
         agent.model,
         agent.reasoning,
+        defaultModel = agent.codingAgentDefaults?.get(agent.provider)?.model.orEmpty(),
+        defaultReasoning = agent.codingAgentDefaults?.get(agent.provider)?.reasoning.orEmpty(),
+        defaultSpeed = agent.codingAgentDefaults?.get(agent.provider)?.speed.orEmpty(),
+        inherit = agent.revision.isNotEmpty(),
         enabled = !state.busy,
         refresh = { vm.refreshModels(agent.provider) },
         provider = agent.provider,
@@ -2078,6 +2089,13 @@ private fun EngineSection(
     }
     InfoBox(
         "Utilise le pool partagé de comptes ${providerLabel(agent.provider)} de l’installation. Ce n’est pas une permission."
+    )
+    OutlinedButton(onClick = configuration, enabled = configurationEnabled) {
+        Text("Configuration native")
+    }
+    Note(
+        if (configurationEnabled) "Contexte, fonctionnalités natives et options avancées."
+        else "Enregistrez l’agent avant d’ouvrir sa configuration native."
     )
 }
 

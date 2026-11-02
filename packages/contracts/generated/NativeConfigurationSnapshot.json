@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "description": "Frozen per message. Contains editable settings only, never credentials.",
+  "properties": {
+    "configuredPaths": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "document": {
+      "type": "string"
+    },
+    "provider": {
+      "pattern": "^(codex|claude|opencode)$",
+      "type": "string"
+    },
+    "revision": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "provider",
+    "document",
+    "revision"
+  ],
+  "title": "NativeConfigurationSnapshot",
+  "type": "object"
+}

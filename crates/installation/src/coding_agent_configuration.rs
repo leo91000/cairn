@@ -1,0 +1,1113 @@
+//! One native document, installation inheritance, and revision-guarded editing.
+//! Engine credentials and generated run permissions never enter these documents.
+use crate::{
+    config::id,
+    error::{Error, Result, required},
+    provider::Provider,
+    store::Db,
+    validation::text,
+};
+use cairn_contracts::*;
+use rusqlite::{OptionalExtension, params};
+use serde_json::{Value, json};
+use std::collections::{BTreeMap, BTreeSet};
+
+mod document;
+#[cfg(test)]
+mod tests;
+
+pub(crate) const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS coding_agent_configurations(
+ scope TEXT NOT NULL,
+ provider TEXT NOT NULL CHECK(provider IN ('codex','claude','opencode')),
+ agent_id TEXT REFERENCES agents(id) ON DELETE CASCADE,
+ document TEXT NOT NULL,
+ presentation TEXT NOT NULL,
+ removed TEXT NOT NULL CHECK(json_valid(removed) AND json_type(removed)='array'),
+ revision TEXT NOT NULL,
+ PRIMARY KEY(scope,provider),
+ CHECK(scope=coalesce(agent_id,''))
+);";
+
+struct Record {
+    value: Value,
+    removed: Vec<String>,
+    revision: String,
+    document: String,
+    presentation: String,
+}
+
+pub(crate) fn parse(provider: Provider, document: &str) -> Result<Value> {
+    if document.len() > 200_000 {
+        return Err(Error::bad("Native configuration exceeds 200 KB."));
+    }
+    let value = match provider {
+        Provider::Codex => {
+            let value: toml::Value = toml::from_str(document)
+                .map_err(|error| Error::bad(format!("Invalid TOML: {}", error.message())))?;
+            serde_json::to_value(value)?
+        }
+        Provider::Claude if document.trim().is_empty() => json!({}),
+        Provider::Claude => serde_json::from_str(document).map_err(|error| {
+            Error::bad(format!(
+                "Invalid JSON at line {}, column {}.",
+                error.line(),
+                error.column()
+            ))
+        })?,
+        Provider::Opencode if document.trim().is_empty() => json!({}),
+        Provider::Opencode => {
+            jsonc_parser::parse_to_serde_value(document, &document::options(provider)).map_err(
+                |error| {
+                    Error::bad(format!(
+                        "Invalid JSONC at line {}, column {}.",
+                        error.line_display(),
+                        error.column_display()
+                    ))
+                },
+            )?
+        }
+    };
+    if !value.is_object() {
+        return Err(Error::bad("Native configuration must be an object."));
+    }
+    Ok(value)
+}
+
+pub(crate) fn render(provider: Provider, value: &Value) -> Result<String> {
+    match provider {
+        Provider::Codex => toml::to_string_pretty(value)
+            .map_err(|_| Error::bad("This value cannot be represented in native TOML.")),
+        _ => Ok(serde_json::to_string_pretty(value)? + "\n"),
+    }
+}
+
+fn pointer(key: &str) -> String {
+    key.replace('~', "~0").replace('/', "~1")
+}
+
+fn leaves(value: &Value, prefix: &str, paths: &mut BTreeSet<String>) {
+    if let Some(object) = value.as_object()
+        && !object.is_empty()
+    {
+        for (key, value) in object {
+            leaves(value, &format!("{prefix}/{}", pointer(key)), paths);
+        }
+        return;
+    }
+    if !prefix.is_empty() {
+        paths.insert(prefix.to_owned());
+    }
+}
+
+fn paths(value: &Value) -> BTreeSet<String> {
+    let mut paths = BTreeSet::new();
+    leaves(value, "", &mut paths);
+    paths
+}
+
+fn set(value: &mut Value, path: &str, replacement: Option<Value>) -> Result<()> {
+    if !path.starts_with('/') {
+        return Err(Error::bad("Choose a valid setting path."));
+    }
+    let keys: Vec<_> = path[1..]
+        .split('/')
+        .map(|key| key.replace("~1", "/").replace("~0", "~"))
+        .collect();
+    set_keys(value, &keys, replacement);
+    Ok(())
+}
+
+fn set_keys(current: &mut Value, keys: &[String], replacement: Option<Value>) {
+    if !current.is_object() {
+        if replacement.is_none() {
+            return;
+        }
+        *current = json!({});
+    }
+    let object = current.as_object_mut().unwrap();
+    let key = &keys[0];
+    if keys.len() == 1 {
+        if let Some(value) = replacement {
+            object.insert(key.clone(), value);
+        } else {
+            object.remove(key);
+        }
+        return;
+    }
+    if replacement.is_none() {
+        if let Some(child) = object.get_mut(key) {
+            set_keys(child, &keys[1..], None);
+            if child.as_object().is_some_and(serde_json::Map::is_empty) {
+                object.remove(key);
+            }
+        }
+        return;
+    }
+    let child = object.entry(key.clone()).or_insert_with(|| json!({}));
+    set_keys(child, &keys[1..], replacement);
+}
+
+fn record(db: &Db<'_>, provider: Provider, agent: Option<AgentId>) -> Result<Record> {
+    let scope = agent.map_or_else(String::new, |id| id.to_string());
+    let row: Option<(String, String, String, String)> = db.0.query_row(
+        "SELECT document,removed,revision,presentation FROM coding_agent_configurations WHERE scope=? AND provider=?",
+        params![scope, provider.as_str()],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    ).optional()?;
+    let (document, removed, revision, presentation) = row.unwrap_or_else(|| {
+        (
+            if provider == Provider::Codex {
+                ""
+            } else {
+                "{}\n"
+            }
+            .into(),
+            "[]".into(),
+            "initial".into(),
+            if provider == Provider::Codex {
+                ""
+            } else {
+                "{}\n"
+            }
+            .into(),
+        )
+    });
+    Ok(Record {
+        value: parse(provider, &document)?,
+        removed: serde_json::from_str(&removed)?,
+        revision,
+        document,
+        presentation,
+    })
+}
+
+fn merge(base: &mut Value, overrides: &Value) {
+    for path in paths(overrides) {
+        // Every path came from the parsed object.
+        set(base, &path, overrides.pointer(&path).cloned()).unwrap();
+    }
+}
+
+fn mappings(provider: Provider) -> &'static [(&'static str, &'static str)] {
+    match provider {
+        Provider::Codex => &[
+            ("/model", "model"),
+            ("/model_reasoning_effort", "reasoning"),
+            ("/developer_instructions", "instructions"),
+            ("/service_tier", "speed"),
+        ],
+        Provider::Claude => &[("/model", "model"), ("/effortLevel", "reasoning")],
+        Provider::Opencode => &[("/model", "model")],
+    }
+}
+
+pub(crate) fn preferences(value: &Value, provider: Provider) -> CodingAgentPreferences {
+    let mut result = CodingAgentPreferences::default();
+    for (path, field) in mappings(provider) {
+        let value = value.pointer(path).and_then(Value::as_str).unwrap_or("");
+        match *field {
+            "model" => result.model = value.into(),
+            "reasoning" => result.reasoning = value.into(),
+            "speed" => {
+                result.speed = if value == crate::models::CODEX_STANDARD_TIER {
+                    crate::models::STANDARD_SPEED.into()
+                } else {
+                    value.into()
+                }
+            }
+            _ => {}
+        }
+    }
+    result
+}
+
+pub(crate) fn installation_preferences(
+    db: &Db<'_>,
+    provider: Provider,
+) -> Result<CodingAgentPreferences> {
+    Ok(preferences(&record(db, provider, None)?.value, provider))
+}
+
+/// Read once for an agent list; do not issue a configuration query per profile.
+pub(crate) fn attach_defaults(db: &Db<'_>, agents: &mut [Agent]) -> Result<()> {
+    let statement = db
+        .0
+        .prepare_cached("SELECT scope,provider,document,removed FROM coding_agent_configurations");
+    let mut statement = match statement {
+        Ok(statement) => statement,
+        // Earlier migrations read agent grants before this additive table exists.
+        Err(_)
+            if db
+                .0
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))?
+                < 25 =>
+        {
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let records = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut documents = BTreeMap::new();
+    for (scope, provider, document, removed) in records {
+        let value = parse(Provider::parse(&provider)?, &document)?;
+        let removed: Vec<String> = serde_json::from_str(&removed)?;
+        documents.insert((scope, provider), (value, removed));
+    }
+    for agent in agents {
+        for provider in [Provider::Codex, Provider::Claude, Provider::Opencode] {
+            let name = provider.as_str().to_owned();
+            let mut value = documents
+                .get(&(String::new(), name.clone()))
+                .map_or_else(|| json!({}), |(value, _)| value.clone());
+            if let Some((own, removed)) = documents.get(&(agent.id.to_string(), name.clone())) {
+                merge(&mut value, own);
+                for path in removed {
+                    set(&mut value, path, None)?;
+                }
+            }
+            let defaults = preferences(&value, provider);
+            if defaults != CodingAgentPreferences::default() {
+                agent
+                    .coding_agent_defaults
+                    .get_or_insert_with(BTreeMap::new)
+                    .insert(name, defaults);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate resolved preferences while preserving empty, inheriting profile fields.
+pub(crate) fn validate_profile(db: &Db<'_>, agent: &Agent) -> Result<()> {
+    let provider = Provider::from(agent.settings.provider);
+    let mut value = record(db, provider, None)?.value;
+    let own = record(db, provider, Some(agent.id))?;
+    merge(&mut value, &own.value);
+    for path in own.removed {
+        set(&mut value, &path, None)?;
+    }
+    let mut resolved = serde_json::to_value(agent)?;
+    for (path, field) in mappings(provider) {
+        if text(&resolved, field).is_empty()
+            && let Some(value) = value.pointer(path)
+        {
+            resolved[*field] = value.clone();
+        }
+    }
+    provider.adapter().validate_agent(&resolved)
+}
+
+pub(crate) fn next_selection(
+    db: &Db<'_>,
+    agent_id: &str,
+    run: Option<&Value>,
+) -> Result<Option<CodingAgentPreferences>> {
+    let Some(agent) = db.agent_snapshot(agent_id)? else {
+        return Ok(None);
+    };
+    let mut snapshot = json!({ "snapshot": { "agent": agent } });
+    crate::chats::select_agent(&mut snapshot, run, &json!({}))?;
+    freeze_message(db, &mut snapshot, run, &json!({}))?;
+    let agent = &snapshot["snapshot"]["agent"];
+    Ok(Some(CodingAgentPreferences {
+        model: text(agent, "model").into(),
+        reasoning: text(agent, "reasoning").into(),
+        speed: text(agent, "speed").into(),
+    }))
+}
+
+fn effective(
+    db: &Db<'_>,
+    provider: Provider,
+    agent: Option<AgentId>,
+) -> Result<(Value, Value, Record, Option<Agent>, String)> {
+    let defaults = record(db, provider, None)?;
+    let Some(agent_id) = agent else {
+        return Ok((
+            defaults.value.clone(),
+            json!({}),
+            defaults,
+            None,
+            String::new(),
+        ));
+    };
+    let saved = required(db.agent(&agent_id.to_string())?, "Agent not found")?;
+    let own = record(db, provider, agent)?;
+    let mut value = defaults.value.clone();
+    merge(&mut value, &own.value);
+    for path in &own.removed {
+        set(&mut value, path, None)?;
+    }
+    if Provider::from(saved.settings.provider) == provider {
+        let settings = serde_json::to_value(&saved.settings)?;
+        for (path, field) in mappings(provider) {
+            if !text(&settings, field).is_empty() {
+                let configured = if *field == "speed" {
+                    json!(crate::models::service_tier(text(&settings, field)))
+                } else {
+                    settings[field].clone()
+                };
+                set(&mut value, path, Some(configured))?;
+            }
+        }
+    }
+    let source_revision = format!("{}:{}", defaults.revision, saved.revision);
+    Ok((value, defaults.value, own, Some(saved), source_revision))
+}
+
+fn managed(provider: Provider) -> Vec<ManagedCodingAgentSetting> {
+    let mut entries = vec![
+        (
+            "credentials",
+            "Accounts and credentials are managed in Connections and never appear in this document.",
+        ),
+        (
+            "permissions",
+            "Cairn resource grants remain the limit. Change execution access on the agent page.",
+        ),
+        (
+            "mcp",
+            "Cairn generates authorized MCP tools and private run credentials.",
+        ),
+    ];
+    match provider {
+        Provider::Codex => entries.push((
+            "features.plugins",
+            "Native Codex plugins are disabled; use Cairn skills and plugins.",
+        )),
+        Provider::Claude => entries.push((
+            "enabledPlugins",
+            "Native plugin loading is not supported by the managed execution adapter.",
+        )),
+        Provider::Opencode => {
+            entries.push((
+                "plugin",
+                "Native OpenCode plugins are not supported by the managed execution adapter.",
+            ));
+            entries.push((
+                "compaction.auto",
+                "Automatic OpenCode compaction is not supported by Cairn session recovery.",
+            ));
+            entries.push((
+                "autoupdate / share",
+                "Cairn runs validated engine versions with native sharing disabled.",
+            ));
+        }
+    }
+    entries
+        .into_iter()
+        .map(|(path, reason)| ManagedCodingAgentSetting {
+            path: path.into(),
+            reason: reason.into(),
+        })
+        .collect()
+}
+
+pub(crate) fn validate(provider: Provider, value: &Value) -> Result<()> {
+    if provider == Provider::Codex
+        && value.as_object().is_some_and(|object| {
+            object
+                .keys()
+                .any(|key| !key.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_'))
+        })
+    {
+        return Err(Error::bad(
+            "Native Codex configuration keys must use letters, digits and underscores.",
+        ));
+    }
+    let mut profile = json!({
+        "name": "Native configuration",
+        "provider": provider,
+        "access": { "mcpTools": {} },
+        "exclusiveNodes": [],
+        "plugins": [],
+    });
+    for (path, _) in mappings(provider) {
+        if value.pointer(path).is_some_and(|value| !value.is_string()) {
+            return Err(Error::bad(format!("{path} must be text.")));
+        }
+    }
+    for (path, field) in mappings(provider) {
+        if let Some(value) = value.pointer(path) {
+            profile[*field] = if *field == "speed" && value == crate::models::CODEX_STANDARD_TIER {
+                json!(crate::models::STANDARD_SPEED)
+            } else {
+                value.clone()
+            };
+        }
+    }
+    let mut profile: AgentSettings = serde_json::from_value(profile)?;
+    profile.validate().map_err(Error::bad)?;
+    crate::models::validate_speed(&profile.speed)?;
+    if provider == Provider::Claude {
+        crate::claude::validate_agent(&serde_json::to_value(&profile)?)?;
+        if let Some(env) = value.get("env") {
+            let env = env.as_object().ok_or_else(|| {
+                Error::bad("Claude environment settings must be an object of text values.")
+            })?;
+            if env.values().any(|value| !value.is_string()) {
+                return Err(Error::bad("Claude environment values must be text."));
+            }
+        }
+    }
+    if provider == Provider::Opencode && !profile.model.is_empty() {
+        crate::opencode::model_id(&profile.model)?;
+    }
+    let blocked: &[&str] = match provider {
+        Provider::Codex => &[
+            "/model_provider",
+            "/model_providers",
+            "/forced_login_method",
+            "/cli_auth_credentials_store",
+            "/mcp_servers",
+            "/sandbox_mode",
+            "/sandbox_workspace_write",
+            "/approval_policy",
+            "/shell_environment_policy",
+            "/model_instructions_file",
+            "/experimental_instructions_file",
+            "/profile",
+            "/profiles",
+        ],
+        Provider::Claude => &[
+            "/permissions",
+            "/sandbox",
+            "/apiKeyHelper",
+            "/forceLoginMethod",
+            "/forceLoginOrgUUID",
+            "/enabledMcpjsonServers",
+            "/disabledMcpjsonServers",
+            "/enableAllProjectMcpServers",
+            "/enabledPlugins",
+            "/extraKnownMarketplaces",
+            "/disableAllHooks",
+            "/attribution/commit",
+            "/env/HOME",
+            "/env/USERPROFILE",
+            "/env/CLAUDE_CONFIG_DIR",
+            "/env/XDG_CONFIG_HOME",
+            "/env/XDG_DATA_HOME",
+            "/env/XDG_STATE_HOME",
+            "/env/XDG_CACHE_HOME",
+            "/env/PATH",
+        ],
+        Provider::Opencode => &[
+            "/provider",
+            "/enabled_providers",
+            "/disabled_providers",
+            "/mcp",
+            "/server",
+            "/permission",
+            "/small_model",
+        ],
+    };
+    for path in blocked {
+        if value.pointer(path).is_some() {
+            return Err(Error::bad(format!(
+                "{} is managed by Cairn. Use the account, access or tools settings instead.",
+                &path[1..]
+            )));
+        }
+    }
+    for path in paths(value) {
+        let lower = path.to_ascii_lowercase();
+        if lower.contains("api_key")
+            || lower.contains("apikey")
+            || lower.contains("auth_token")
+            || lower.contains("password")
+            || lower.contains("/cairn_")
+            || lower.contains("/codex_home")
+            || lower.contains("/opencode_")
+            || lower.contains("base_url")
+            || lower.contains("baseurl")
+            || lower.ends_with("_secret")
+            || lower.ends_with("_token")
+            || lower.contains("claude_code_use_")
+        {
+            return Err(Error::bad(format!(
+                "{path} cannot contain credentials or replace Cairn's managed environment. Use Connections for credentials."
+            )));
+        }
+    }
+    if value
+        .pointer("/features/plugins")
+        .is_some_and(|v| v != false)
+    {
+        return Err(Error::bad(
+            "Native Codex plugins are not supported. Use Cairn skills and plugins.",
+        ));
+    }
+    if provider == Provider::Opencode {
+        if value
+            .get("compaction")
+            .is_some_and(|value| !value.is_object())
+        {
+            return Err(Error::bad(
+                "OpenCode compaction settings must be an object.",
+            ));
+        }
+        for (path, expected) in [
+            ("/autoupdate", json!(false)),
+            ("/share", json!("disabled")),
+            ("/plugin", json!([])),
+            ("/compaction/auto", json!(false)),
+            ("/compaction/prune", json!(false)),
+        ] {
+            if value.pointer(path).is_some_and(|v| v != &expected) {
+                return Err(Error::bad(format!(
+                    "{path} is not supported by Cairn's OpenCode execution and recovery. It cannot be enabled."
+                )));
+            }
+        }
+    }
+    for setting in settings(provider, value, &BTreeSet::new()) {
+        let Some(value) = value.pointer(&setting.path) else {
+            continue;
+        };
+        let valid = match setting.kind.as_str() {
+            "integer" => value
+                .as_u64()
+                .is_some_and(|n| n > 0 && n <= 9_007_199_254_740_991),
+            "boolean" => value.is_boolean(),
+            "select" => value
+                .as_str()
+                .is_some_and(|v| setting.choices.iter().any(|c| c == v)),
+            _ => value.is_string(),
+        };
+        if !valid {
+            return Err(Error::bad(format!(
+                "Enter a valid value for {} ({}).",
+                setting.label, setting.path
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn settings(
+    provider: Provider,
+    value: &Value,
+    customized: &BTreeSet<String>,
+) -> Vec<CodingAgentSetting> {
+    type SettingDefinition = (
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static [&'static str],
+    );
+    let definitions: &[SettingDefinition] = match provider {
+        Provider::Codex => &[
+            (
+                "/model_context_window",
+                "Context window",
+                "Tokens available to the model. This does not increase the model's actual capacity.",
+                "Context",
+                "integer",
+                &[],
+            ),
+            (
+                "/model_auto_compact_token_limit",
+                "Automatic compaction threshold",
+                "Compact history after this many tokens. Leave automatic to use the model default.",
+                "Context",
+                "integer",
+                &[],
+            ),
+            (
+                "/tool_output_token_limit",
+                "Tool output limit",
+                "Maximum tokens retained from a tool response.",
+                "Context",
+                "integer",
+                &[],
+            ),
+            (
+                "/model_verbosity",
+                "Response detail",
+                "Preferred detail for models that support verbosity.",
+                "Responses",
+                "select",
+                &["low", "medium", "high"],
+            ),
+            (
+                "/web_search",
+                "Web search",
+                "Use live results, cached results, or disable native search.",
+                "Tools",
+                "select",
+                &["disabled", "cached", "live"],
+            ),
+            (
+                "/features/multi_agent",
+                "Native subagents",
+                "Let Codex use its native subagents within the execution's permissions.",
+                "Tools",
+                "boolean",
+                &[],
+            ),
+        ],
+        Provider::Claude => &[
+            (
+                "/alwaysThinkingEnabled",
+                "Extended thinking",
+                "Enable extended thinking by default.",
+                "Responses",
+                "boolean",
+                &[],
+            ),
+            (
+                "/language",
+                "Response language",
+                "Preferred language for Claude's responses.",
+                "Responses",
+                "text",
+                &[],
+            ),
+            (
+                "/outputStyle",
+                "Output style",
+                "Name of an output style available in the execution environment.",
+                "Responses",
+                "text",
+                &[],
+            ),
+            (
+                "/env/CLAUDE_AUTOCOMPACT_PCT_OVERRIDE",
+                "Automatic compaction percentage",
+                "Native percentage override, written as a string; for example 80.",
+                "Context",
+                "text",
+                &[],
+            ),
+            (
+                "/env/CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+                "Maximum response tokens",
+                "Native output budget, written as a string.",
+                "Context",
+                "text",
+                &[],
+            ),
+        ],
+        Provider::Opencode => &[
+            (
+                "/snapshot",
+                "Workspace snapshots",
+                "Enable OpenCode's native workspace snapshots.",
+                "Workspace",
+                "boolean",
+                &[],
+            ),
+            (
+                "/logLevel",
+                "Native log level",
+                "Verbosity of the native engine logs.",
+                "Diagnostics",
+                "select",
+                &["DEBUG", "INFO", "WARN", "ERROR"],
+            ),
+            (
+                "/default_agent",
+                "Native agent",
+                "Name of an OpenCode agent available in the execution.",
+                "Responses",
+                "text",
+                &[],
+            ),
+        ],
+    };
+    let mut output: Vec<_> = definitions
+        .iter()
+        .map(
+            |(path, label, description, group, kind, choices)| CodingAgentSetting {
+                path: (*path).into(),
+                label: (*label).into(),
+                description: (*description).into(),
+                group: (*group).into(),
+                kind: (*kind).into(),
+                choices: choices.iter().map(|v| (*v).into()).collect(),
+                value: value.pointer(path).map(Value::to_string),
+                inherited: !customized.contains(*path),
+            },
+        )
+        .collect();
+    for (path, field) in mappings(provider) {
+        let label = match *field {
+            "model" => "Model",
+            "reasoning" => "Reasoning effort",
+            "instructions" => "Additional instructions",
+            "speed" => "Speed",
+            _ => unreachable!(),
+        };
+        output.push(CodingAgentSetting {
+            path: (*path).into(), label: label.into(), description: "Shared with the corresponding Cairn agent setting. Editing either updates the same value.".into(), group: "Agent defaults".into(), kind: "text".into(), choices: vec![], value: value.pointer(path).map(Value::to_string), inherited: !customized.contains(*path),
+        });
+    }
+    output
+}
+
+pub(crate) fn view(
+    db: &Db<'_>,
+    input: CodingAgentConfigurationInput,
+) -> Result<CodingAgentConfiguration> {
+    let provider = Provider::from(input.provider);
+    let (value, inherited, record, agent, sources) = effective(db, provider, input.agent_id)?;
+    let mut customized = paths(&record.value);
+    customized.extend(record.removed);
+    if let Some(agent) = &agent
+        && Provider::from(agent.settings.provider) == provider
+    {
+        let settings = serde_json::to_value(&agent.settings)?;
+        for (path, field) in mappings(provider) {
+            if !text(&settings, field).is_empty() {
+                customized.insert((*path).into());
+            }
+        }
+    }
+    let document = if input.agent_id.is_none() {
+        record.document
+    } else {
+        document::rewrite(provider, &record.presentation, &value)?
+    };
+    Ok(CodingAgentConfiguration {
+        provider: input.provider, agent_id: input.agent_id, agent_name: agent.map(|a| a.settings.name),
+        revision: format!("{}:{sources}", record.revision),
+        filename: match provider { Provider::Codex => "config.toml", Provider::Claude => "settings.json", Provider::Opencode => "opencode.jsonc" }.into(),
+        document, inherited_document: render(provider, &inherited)?, customized_paths: customized.iter().cloned().collect(),
+        settings: settings(provider, &value, &customized), managed: managed(provider),
+        notices: vec!["Changes apply to the next message, including existing conversations. An active turn keeps its current configuration.".into(), "The native process may restart between messages to load the new settings. The saved conversation and workspace are preserved.".into()],
+    })
+}
+
+pub(crate) fn edit(
+    db: &Db<'_>,
+    input: &EditCodingAgentConfigurationInput,
+    save: bool,
+) -> Result<CodingAgentConfiguration> {
+    if input.changes.len() > 200
+        || input.inherit_paths.len() > 1000
+        || input.changes.iter().any(|change| change.path.len() > 500)
+        || input.inherit_paths.iter().any(|path| path.len() > 500)
+    {
+        return Err(Error::bad("Too many settings or an invalid setting path."));
+    }
+    let provider = Provider::from(input.provider);
+    let target = CodingAgentConfigurationInput {
+        provider: input.provider,
+        agent_id: input.agent_id,
+    };
+    let current = view(db, target)?;
+    if current.revision != input.revision {
+        return Err(Error::conflict(
+            "Configuration or inherited settings changed. Reload to review the latest values before saving.",
+        ));
+    }
+    let (before, inherited, own, agent, _) = effective(db, provider, input.agent_id)?;
+    let mapped_profile = agent
+        .as_ref()
+        .is_some_and(|agent| Provider::from(agent.settings.provider) == provider);
+    let mut value = if input.reset {
+        inherited.clone()
+    } else {
+        parse(provider, &input.document)?
+    };
+    for change in &input.changes {
+        let replacement: Value = serde_json::from_str(&change.value)
+            .map_err(|_| Error::bad("Enter a valid JSON setting value."))?;
+        let replacement = if replacement.is_null() {
+            inherited.pointer(&change.path).cloned()
+        } else {
+            Some(replacement)
+        };
+        set(&mut value, &change.path, replacement)?;
+    }
+    validate(provider, &value)?;
+    let mut inherited_paths: BTreeSet<String> = input
+        .inherit_paths
+        .iter()
+        .filter(|path| value.pointer(path) == inherited.pointer(path))
+        .cloned()
+        .collect();
+    for change in &input.changes {
+        if change.value.trim() == "null" {
+            inherited_paths.insert(change.path.clone());
+        } else {
+            inherited_paths.remove(&change.path);
+        }
+    }
+    let mut overrides = if input.reset { json!({}) } else { own.value };
+    let mut removed: BTreeSet<_> = if input.reset {
+        BTreeSet::new()
+    } else {
+        own.removed.into_iter().collect()
+    };
+    if input.agent_id.is_some() {
+        let mut all = BTreeSet::new();
+        document::changed(Some(&before), Some(&value), "", &mut all);
+        all.extend(inherited_paths.iter().cloned());
+        for path in all {
+            if before.pointer(&path) == value.pointer(&path)
+                && !input.reset
+                && !inherited_paths.contains(&path)
+            {
+                continue;
+            }
+            removed.remove(&path);
+            if value.pointer(&path) == inherited.pointer(&path) {
+                set(&mut overrides, &path, None)?;
+            } else if let Some(value) = value.pointer(&path) {
+                set(&mut overrides, &path, Some(value.clone()))?;
+            } else {
+                set(&mut overrides, &path, None)?;
+                removed.insert(path);
+            }
+        }
+    } else {
+        overrides = value.clone();
+    }
+    let document = if input.reset && parse(provider, &input.document).is_err() {
+        render(provider, &value)?
+    } else {
+        document::rewrite(provider, &input.document, &value)?
+    };
+    let mut output = current;
+    output.document = document.clone();
+    let mut customized = paths(&overrides);
+    customized.extend(removed.iter().cloned());
+    for (path, _) in mappings(provider) {
+        if before.pointer(path) == value.pointer(path)
+            && output.customized_paths.iter().any(|custom| custom == path)
+            && !input.reset
+            && !inherited_paths.contains(*path)
+        {
+            customized.insert((*path).into());
+        }
+    }
+    output.settings = settings(provider, &value, &customized);
+    output.customized_paths = customized.into_iter().collect();
+    let mut changed_agent = None;
+    if let Some(mut agent) = agent
+        && Provider::from(agent.settings.provider) == provider
+    {
+        let before_settings = agent.settings.clone();
+        for (path, field) in mappings(provider) {
+            if before.pointer(path) == value.pointer(path)
+                && !input.reset
+                && overrides.pointer(path).is_none()
+                && !inherited_paths.contains(*path)
+            {
+                continue;
+            }
+            let selected = if value.pointer(path) == inherited.pointer(path) {
+                ""
+            } else {
+                value
+                    .pointer(path)
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+            };
+            let selected = if *field == "speed" && selected == crate::models::CODEX_STANDARD_TIER {
+                crate::models::STANDARD_SPEED
+            } else {
+                selected
+            }
+            .to_owned();
+            match *field {
+                "model" => agent.settings.model = selected,
+                "reasoning" => agent.settings.reasoning = selected,
+                "instructions" => agent.settings.instructions = selected,
+                "speed" => agent.settings.speed = selected,
+                _ => unreachable!(),
+            }
+        }
+        agent.settings.validate().map_err(Error::bad)?;
+        crate::models::validate_speed(&agent.settings.speed)?;
+        let mut resolved = serde_json::to_value(&agent)?;
+        for (path, field) in mappings(provider) {
+            if let Some(value) = value.pointer(path) {
+                resolved[*field] = value.clone();
+            }
+        }
+        provider.adapter().validate_agent(&resolved)?;
+        if agent.settings != before_settings {
+            changed_agent = Some(agent);
+        }
+    }
+    if !save {
+        return Ok(output);
+    }
+    if let Some(agent) = changed_agent {
+        crate::agent_grants::save_profile(db, agent, false, &[])?;
+    }
+    let scope = input.agent_id.map(|id| id.to_string());
+    if mapped_profile {
+        for (path, _) in mappings(provider) {
+            set(&mut overrides, path, None)?;
+        }
+    }
+    let stored_document = if scope.is_some() {
+        render(provider, &overrides)?
+    } else {
+        document.clone()
+    };
+    db.0.execute(
+        "INSERT INTO coding_agent_configurations(scope,provider,agent_id,document,presentation,removed,revision) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(scope,provider) DO UPDATE SET document=excluded.document,presentation=excluded.presentation,removed=excluded.removed,revision=excluded.revision",
+        params![scope.as_deref().unwrap_or(""), provider.as_str(), scope, stored_document, document, serde_json::to_string(&removed)?, id()],
+    )?;
+    db.audit(
+        "coding-agent.configuration.saved",
+        &json!({ "provider": provider, "agentId": input.agent_id }),
+    )?;
+    view(db, target)
+}
+
+pub(crate) fn snapshot(
+    db: &Db<'_>,
+    provider: Provider,
+    agent_id: &str,
+) -> Result<NativeConfigurationSnapshot> {
+    let agent_id =
+        AgentId(uuid::Uuid::parse_str(agent_id).map_err(|_| Error::bad("Invalid agent ID."))?);
+    let result = view(
+        db,
+        CodingAgentConfigurationInput {
+            provider: provider.into(),
+            agent_id: Some(agent_id),
+        },
+    )?;
+    let defaults = record(db, provider, None)?;
+    let own = record(db, provider, Some(agent_id))?;
+    let mut configured_paths = paths(&defaults.value);
+    configured_paths.extend(result.customized_paths);
+    configured_paths.extend(paths(&own.value));
+    configured_paths.extend(own.removed);
+    if own.revision != "initial" {
+        configured_paths.extend(
+            mappings(provider)
+                .iter()
+                .map(|(path, _)| (*path).to_owned()),
+        );
+    }
+    Ok(NativeConfigurationSnapshot {
+        provider: result.provider,
+        document: result.document,
+        revision: result.revision,
+        configured_paths: configured_paths.into_iter().collect(),
+    })
+}
+
+pub(crate) fn freeze_message(
+    db: &Db<'_>,
+    snapshot: &mut Value,
+    previous: Option<&Value>,
+    message: &Value,
+) -> Result<()> {
+    let provider = Provider::of_run(snapshot)?;
+    let agent_id = text(&snapshot["snapshot"]["agent"], "id");
+    let frozen = self::snapshot(db, provider, agent_id)?;
+    let native = parse(provider, &frozen.document)?;
+    let old = previous
+        .filter(|run| run["snapshot"]["nativeConfiguration"]["provider"] == provider.as_str())
+        .and_then(|run| run["snapshot"]["nativeConfiguration"]["document"].as_str())
+        .map(|document| parse(provider, document))
+        .transpose()?
+        .unwrap_or_else(|| json!({}));
+    let previous_paths = previous
+        .filter(|run| run["snapshot"]["nativeConfiguration"]["provider"] == provider.as_str())
+        .and_then(|run| run["snapshot"]["nativeConfiguration"]["configuredPaths"].as_array());
+    let model_changed = text(message, "model").is_empty()
+        && native.get("model") != old.get("model")
+        && (frozen.configured_paths.iter().any(|path| path == "/model")
+            || previous_paths.is_some_and(|paths| paths.iter().any(|path| path == "/model")));
+    for (path, field) in mappings(provider) {
+        if !text(message, field).is_empty()
+            || *field == "reasoning" && !text(message, "model").is_empty()
+        {
+            continue;
+        }
+        let configured = frozen
+            .configured_paths
+            .iter()
+            .any(|configured| configured == path)
+            || previous_paths
+                .is_some_and(|paths| paths.iter().any(|configured| configured == path));
+        let reset_reasoning = *field == "reasoning" && model_changed;
+        if (configured || reset_reasoning)
+            && (reset_reasoning
+                || *field == "instructions"
+                || previous.is_none()
+                || native.pointer(path) != old.pointer(path))
+        {
+            let value = native.pointer(path).cloned().unwrap_or_else(|| json!(""));
+            snapshot["snapshot"]["agent"][*field] =
+                if *field == "speed" && value == crate::models::CODEX_STANDARD_TIER {
+                    json!(crate::models::STANDARD_SPEED)
+                } else {
+                    value.clone()
+                };
+        }
+    }
+    snapshot["snapshot"]["nativeConfiguration"] = serde_json::to_value(frozen)?;
+    Ok(())
+}
+
+/// Merge native preferences before the lease's generated tools and permissions.
+pub(crate) fn apply(plan: &mut Value, frozen: &Value) -> Result<()> {
+    let Some(document) = frozen["document"].as_str() else {
+        return Ok(());
+    };
+    let provider = Provider::parse(text(plan, "provider"))?;
+    if frozen["provider"] != provider.as_str() {
+        return Err(Error::bad(
+            "Saved native configuration does not match the selected coding agent.",
+        ));
+    }
+    let mut native = parse(provider, document)?;
+    validate(provider, &native)?;
+    for (path, _) in mappings(provider) {
+        set(&mut native, path, None)?;
+    }
+    plan["nativeSettings"] = native.clone();
+    plan["nativeConfigurationRevision"] = frozen["revision"].clone();
+    let key = match provider {
+        Provider::Codex => "codexConfig",
+        Provider::Claude => "claudeSettings",
+        Provider::Opencode => "opencodeConfig",
+    };
+    let managed = plan[key].clone();
+    if managed.is_object() {
+        merge(&mut native, &managed);
+    }
+    plan[key] = native;
+    Ok(())
+}
+
+pub(crate) fn codex_arguments(plan: &Value) -> Result<Vec<String>> {
+    let mut args = Vec::new();
+    let Some(native) = plan["nativeSettings"].as_object() else {
+        return Ok(args);
+    };
+    validate(Provider::Codex, &plan["nativeSettings"])?;
+    for (key, value) in native {
+        if !key.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_') {
+            return Err(Error::bad(
+                "Native Codex configuration keys must use letters, digits and underscores.",
+            ));
+        }
+        let value = toml::Value::try_from(value)
+            .map_err(|_| Error::bad("Unsupported native Codex value."))?;
+        args.extend(["-c".into(), format!("{key}={value}")]);
+    }
+    Ok(args)
+}

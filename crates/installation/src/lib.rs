@@ -19,6 +19,7 @@ pub mod claude_process;
 mod codex_background;
 mod codex_login;
 pub mod coding_agent;
+pub(crate) mod coding_agent_configuration;
 pub mod config;
 pub mod context_usage;
 pub mod conversation_deletion;

@@ -603,6 +603,15 @@
             }
           ]
         },
+        "codingAgentDefaults": {
+          "additionalProperties": {
+            "$ref": "#/definitions/CodingAgentPreferences"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
         "createdAt": {
           "format": "int64",
           "maximum": 9007199254740991,
@@ -1366,6 +1375,17 @@
             "$ref": "#/definitions/ChatMessage"
           },
           "type": "array"
+        },
+        "nextSelection": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CodingAgentPreferences"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Resolved selection for the next implicit message, including changed defaults."
         },
         "paused": {
           "default": false,
@@ -2360,6 +2380,100 @@
       ],
       "type": "object"
     },
+    "CodingAgentConfiguration": {
+      "additionalProperties": false,
+      "properties": {
+        "agentId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "agentName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "customizedPaths": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "document": {
+          "type": "string"
+        },
+        "filename": {
+          "type": "string"
+        },
+        "inheritedDocument": {
+          "type": "string"
+        },
+        "managed": {
+          "items": {
+            "$ref": "#/definitions/ManagedCodingAgentSetting"
+          },
+          "type": "array"
+        },
+        "notices": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "provider": {
+          "pattern": "^(codex|claude|opencode)$",
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "settings": {
+          "items": {
+            "$ref": "#/definitions/CodingAgentSetting"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "provider",
+        "agentId",
+        "agentName",
+        "revision",
+        "filename",
+        "document",
+        "inheritedDocument",
+        "customizedPaths",
+        "settings",
+        "managed",
+        "notices"
+      ],
+      "type": "object"
+    },
+    "CodingAgentConfigurationInput": {
+      "additionalProperties": false,
+      "properties": {
+        "agentId": {
+          "default": null,
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "pattern": "^(codex|claude|opencode)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider",
+        "agentId"
+      ],
+      "type": "object"
+    },
     "CodingAgentModel": {
       "properties": {
         "defaultReasoningEffort": {
@@ -2478,6 +2592,95 @@
         "provider",
         "choices",
         "switching"
+      ],
+      "type": "object"
+    },
+    "CodingAgentPreferences": {
+      "description": "Safe display defaults. These are inherited preferences, never profile overrides.",
+      "properties": {
+        "model": {
+          "type": "string"
+        },
+        "reasoning": {
+          "type": "string"
+        },
+        "speed": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "model",
+        "reasoning",
+        "speed"
+      ],
+      "type": "object"
+    },
+    "CodingAgentSetting": {
+      "additionalProperties": false,
+      "properties": {
+        "choices": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "description": {
+          "type": "string"
+        },
+        "group": {
+          "type": "string"
+        },
+        "inherited": {
+          "type": "boolean"
+        },
+        "kind": {
+          "description": "text, integer, boolean or select.",
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "value": {
+          "description": "Serialized JSON, or null when the engine chooses its own default.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "label",
+        "description",
+        "group",
+        "kind",
+        "choices",
+        "value",
+        "inherited"
+      ],
+      "type": "object"
+    },
+    "CodingAgentSettingChange": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "description": "JSON pointer, including for TOML documents.",
+          "maxLength": 500,
+          "minLength": 1,
+          "type": "string"
+        },
+        "value": {
+          "description": "A JSON value; null removes the setting and restores the inherited value.",
+          "maxLength": 200000,
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "value"
       ],
       "type": "object"
     },
@@ -3261,6 +3464,63 @@
         "chatId",
         "messageId",
         "message"
+      ],
+      "type": "object"
+    },
+    "EditCodingAgentConfigurationInput": {
+      "additionalProperties": false,
+      "properties": {
+        "agentId": {
+          "default": null,
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "changes": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/CodingAgentSettingChange"
+          },
+          "maxItems": 200,
+          "type": "array"
+        },
+        "document": {
+          "maxLength": 200000,
+          "type": "string"
+        },
+        "inheritPaths": {
+          "default": [],
+          "description": "Explicitly restore inheritance even when its value equals a customization.",
+          "items": {
+            "maxLength": 500,
+            "type": "string"
+          },
+          "maxItems": 1000,
+          "type": "array"
+        },
+        "provider": {
+          "pattern": "^(codex|claude|opencode)$",
+          "type": "string"
+        },
+        "reset": {
+          "default": false,
+          "type": "boolean"
+        },
+        "revision": {
+          "maxLength": 200,
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider",
+        "agentId",
+        "revision",
+        "document",
+        "changes",
+        "inheritPaths",
+        "reset"
       ],
       "type": "object"
     },
@@ -5274,6 +5534,22 @@
         }
       ]
     },
+    "ManagedCodingAgentSetting": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "reason"
+      ],
+      "type": "object"
+    },
     "MarkReadInput": {
       "additionalProperties": false,
       "properties": {
@@ -6170,6 +6446,16 @@
           },
           "type": "array"
         },
+        "nativeDefaults": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CodingAgentPreferences"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "stale": {
           "default": false,
           "type": "boolean"
@@ -6317,6 +6603,34 @@
       "required": [
         "id",
         "email"
+      ],
+      "type": "object"
+    },
+    "NativeConfigurationSnapshot": {
+      "additionalProperties": false,
+      "description": "Frozen per message. Contains editable settings only, never credentials.",
+      "properties": {
+        "configuredPaths": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "document": {
+          "type": "string"
+        },
+        "provider": {
+          "pattern": "^(codex|claude|opencode)$",
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider",
+        "document",
+        "revision"
       ],
       "type": "object"
     },
@@ -11562,6 +11876,16 @@
           "type": [
             "string",
             "null"
+          ]
+        },
+        "nativeConfiguration": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NativeConfigurationSnapshot"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "project": {

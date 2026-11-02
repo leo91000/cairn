@@ -159,6 +159,99 @@ fn result(response: &Value) -> &Value {
     &response["result"]["structuredContent"]["result"]
 }
 
+#[tokio::test]
+async fn native_configuration_has_http_and_both_mcp_parity_with_live_scopes() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let agent_token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
+        .as_str()
+        .unwrap();
+    let owner_token = common::relay_fixture::grant(&s, &["read", "manage"]).await;
+    let read_token = common::relay_fixture::grant(&s, &["read"]).await;
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
+    let target = json!({ "provider": "codex", "agentId": null });
+    for (endpoint, token) in [
+        ("/mcp", owner_token.as_str()),
+        ("/mcp-installation", agent_token),
+    ] {
+        let (_, current) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "get_coding_agent_configuration",
+            target.clone(),
+        )
+        .await;
+        let revision = result(&current)["revision"].clone();
+        let command = json!({ "provider": "codex", "agentId": null, "revision": revision, "document": "model_context_window = 1000000\n", "changes": [], "reset": false });
+        let (_, preview) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "preview_coding_agent_configuration",
+            command.clone(),
+        )
+        .await;
+        assert!(
+            result(&preview)["document"]
+                .as_str()
+                .unwrap()
+                .contains("1000000")
+        );
+        let (_, saved) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "save_coding_agent_configuration",
+            command,
+        )
+        .await;
+        assert!(
+            result(&saved)["document"]
+                .as_str()
+                .unwrap()
+                .contains("1000000")
+        );
+        let request = common::request("POST", "/api/settings/coding-agents/read")
+            .header("x-test-relay-token", &owner_token)
+            .body(Body::from(target.to_string()))
+            .unwrap();
+        let response = common::send(&app, request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(common::read_json(response).await, *result(&saved));
+    }
+    let (_, current) = node_management_call(
+        &app,
+        "/mcp",
+        &owner_token,
+        "get_coding_agent_configuration",
+        target,
+    )
+    .await;
+    let revision = result(&current)["revision"].clone();
+    let command = json!({ "provider": "codex", "agentId": null, "revision": revision, "document": "model_context_window = 500000\n", "changes": [], "reset": false });
+    let (_, refused) = node_management_call(
+        &app,
+        "/mcp",
+        &read_token,
+        "save_coding_agent_configuration",
+        command,
+    )
+    .await;
+    assert_eq!(refused["result"]["isError"], true);
+    let (_, unchanged) = node_management_call(
+        &app,
+        "/mcp-installation",
+        agent_token,
+        "get_coding_agent_configuration",
+        json!({ "provider": "codex", "agentId": null }),
+    )
+    .await;
+    assert_eq!(result(&unchanged)["revision"], revision);
+}
+
 async fn node_management_call(
     app: &axum::Router,
     endpoint: &str,

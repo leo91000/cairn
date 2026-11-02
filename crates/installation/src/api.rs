@@ -510,6 +510,15 @@ async fn settings_routes(
     route: Route<'_>,
 ) -> Result<Option<Value>> {
     let (name, body) = match route {
+        ("POST", ["settings", "coding-agents", "read"]) => {
+            ("get_coding_agent_configuration", input.body.clone())
+        }
+        ("POST", ["settings", "coding-agents", "preview"]) => {
+            ("preview_coding_agent_configuration", input.body.clone())
+        }
+        ("PUT", ["settings", "coding-agents"]) => {
+            ("save_coding_agent_configuration", input.body.clone())
+        }
         ("GET", ["settings"]) => ("get_installation_settings", json!({})),
         ("GET", ["overview"]) => ("get_installation_overview", json!({})),
         ("GET", ["audit"]) => ("list_audit", json!({})),

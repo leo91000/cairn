@@ -1,5 +1,26 @@
 [
   {
+    "input": "CodingAgentConfigurationInput",
+    "method": "POST",
+    "name": "getCodingAgentConfiguration",
+    "output": "CodingAgentConfiguration",
+    "path": "/settings/coding-agents/read"
+  },
+  {
+    "input": "EditCodingAgentConfigurationInput",
+    "method": "POST",
+    "name": "previewCodingAgentConfiguration",
+    "output": "CodingAgentConfiguration",
+    "path": "/settings/coding-agents/preview"
+  },
+  {
+    "input": "EditCodingAgentConfigurationInput",
+    "method": "PUT",
+    "name": "saveCodingAgentConfiguration",
+    "output": "CodingAgentConfiguration",
+    "path": "/settings/coding-agents"
+  },
+  {
     "input": "MarkReadInput",
     "method": "POST",
     "name": "markRead",

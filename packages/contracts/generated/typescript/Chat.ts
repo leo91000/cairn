@@ -5,6 +5,7 @@ import type { ChatMessage } from './ChatMessage'
 import type { ChatQuestion } from './ChatQuestion'
 import type { ChatRequester } from './ChatRequester'
 import type { ChatWakeup } from './ChatWakeup'
+import type { CodingAgentPreferences } from './CodingAgentPreferences'
 import type { CodingAgentSwitch } from './CodingAgentSwitch'
 import type { ContextUsage } from './ContextUsage'
 import type { ConversationEnvironmentState } from './ConversationEnvironmentState'
@@ -15,6 +16,10 @@ import type { ExclusiveReservation } from './ExclusiveReservation'
 
 export interface Chat {
   id: string
+  /**
+   * Resolved selection for the next implicit message, including changed defaults.
+   */
+  nextSelection?: CodingAgentPreferences
   slug: string
   revision: string
   title: string

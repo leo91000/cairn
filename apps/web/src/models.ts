@@ -33,6 +33,8 @@ function createCatalog(provider: Provider) {
     stale: false,
     error: '',
     loading: false,
+    loaded: false,
+    nativeDefaults: undefined as ModelCatalog['nativeDefaults'],
   })
   let pending: Promise<void> | undefined
 
@@ -48,6 +50,7 @@ function createCatalog(provider: Provider) {
       .catch((error: Error) => { catalog.error = error.message })
       .finally(() => {
         catalog.loading = false
+        catalog.loaded = true
         pending = undefined
       })
       .then(() => {})

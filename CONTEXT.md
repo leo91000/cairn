@@ -131,6 +131,13 @@ Retour d’une conversation à l’état actif, sans relancer l’agent, les env
 Le moteur qui exécute le travail d’un agent : Codex (OpenAI), Claude Code (Anthropic) ou OpenCode. Chaque agent en choisit un, et une conversation peut en changer d’un message à l’autre. Quand un quota bloque la demande en cours, l’utilisateur peut choisir un autre agent de code disposant d’un compte disponible pour reprendre cette même demande avec son historique et ses fichiers.
 _À éviter_ : fournisseur, driver, assistant de code.
 
+**Configuration d’un agent de code** :
+Les réglages propres à un moteur de code, communs par défaut à l’installation et personnalisables pour chaque agent Cairn.
+_À éviter_ : profil (qui suggère une configuration réutilisable indépendante), compte d’agent de code.
+
+**Personnalisation d’un agent de code** :
+Un réglage propre à un agent Cairn qui remplace la valeur de l’installation. Retirer cette personnalisation fait suivre à nouveau les changements du défaut de l’installation, même lorsque les deux valeurs étaient identiques.
+
 **Compte d’agent de code** :
 Un abonnement connecté à un agent de code (un compte ChatGPT pour Codex, un compte Claude pour Claude Code) ou une clé API liée à un fournisseur de modèles pour OpenCode (par exemple OpenCode Zen). Les exécutions consomment son usage. Un agent de code peut avoir plusieurs comptes ; un compte en pause n’est plus choisi pour les nouvelles exécutions.
 _À éviter_ : connexion Claude, compte Codex (sauf pour désigner un compte de cet agent de code).

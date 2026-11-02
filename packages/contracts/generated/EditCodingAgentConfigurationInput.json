@@ -1,0 +1,78 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "CodingAgentSettingChange": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "description": "JSON pointer, including for TOML documents.",
+          "maxLength": 500,
+          "minLength": 1,
+          "type": "string"
+        },
+        "value": {
+          "description": "A JSON value; null removes the setting and restores the inherited value.",
+          "maxLength": 200000,
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "value"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "agentId": {
+      "default": null,
+      "format": "uuid",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "changes": {
+      "default": [],
+      "items": {
+        "$ref": "#/definitions/CodingAgentSettingChange"
+      },
+      "maxItems": 200,
+      "type": "array"
+    },
+    "document": {
+      "maxLength": 200000,
+      "type": "string"
+    },
+    "inheritPaths": {
+      "default": [],
+      "description": "Explicitly restore inheritance even when its value equals a customization.",
+      "items": {
+        "maxLength": 500,
+        "type": "string"
+      },
+      "maxItems": 1000,
+      "type": "array"
+    },
+    "provider": {
+      "pattern": "^(codex|claude|opencode)$",
+      "type": "string"
+    },
+    "reset": {
+      "default": false,
+      "type": "boolean"
+    },
+    "revision": {
+      "maxLength": 200,
+      "type": "string"
+    }
+  },
+  "required": [
+    "provider",
+    "revision",
+    "document"
+  ],
+  "title": "EditCodingAgentConfigurationInput",
+  "type": "object"
+}

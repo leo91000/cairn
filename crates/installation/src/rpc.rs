@@ -366,6 +366,10 @@ impl Session {
     }
 
     pub async fn close(mut self) {
+        self.shutdown().await;
+    }
+
+    pub(crate) async fn shutdown(&mut self) {
         self.stop.cancel();
         if let Some(finished) = self.finished.take() {
             let _ = finished.await;

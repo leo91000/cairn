@@ -459,6 +459,12 @@ async fn advance(
             let mut snapshot = run.clone();
             snapshot["snapshot"]["agent"] =
                 selection(&run["snapshot"]["agent"], target, &pending.model);
+            crate::coding_agent_configuration::freeze_message(
+                db,
+                &mut snapshot,
+                Some(&run),
+                &json!({ "model": pending.model }),
+            )?;
             target
                 .adapter()
                 .validate_agent(&snapshot["snapshot"]["agent"])?;

@@ -194,6 +194,13 @@ internal fun ModelPicker(
     onReasoningIntent: (ResumeReasoningIntent) -> Unit = {},
     change: (String, String) -> Unit,
 ) {
+    val inheritedModel =
+        if (inherit) defaultModel else catalog.nativeDefaults?.model ?: defaultModel
+    val inheritedReasoning =
+        if (inherit) defaultReasoning else catalog.nativeDefaults?.reasoning ?: defaultReasoning
+    val inheritedSpeedValue =
+        if (inherit) defaultSpeed else catalog.nativeDefaults?.speed ?: defaultSpeed
+    val inheriting = inherit || catalog.nativeDefaults != null
     var open by rememberSaveable { mutableStateOf(false) }
     var refreshing by remember { mutableStateOf(false) }
     var refreshError by remember { mutableStateOf("") }
@@ -211,14 +218,14 @@ internal fun ModelPicker(
             refreshing = false
         }
     }
-    val chosen = selectedModel(catalog, model, defaultModel)
+    val chosen = selectedModel(catalog, model, inheritedModel)
     // A pinned route offers its own reasoning levels; Auto offers those all routes share.
-    val route = chosen?.route(model.ifBlank { defaultModel })
+    val route = chosen?.route(model.ifBlank { inheritedModel })
     val selected =
         route?.let { chosen.copy(supportedReasoningEfforts = it.supportedReasoningEfforts) }
             ?: chosen
-    LaunchedEffect(provider, catalog.models, model, defaultModel, inherit) {
-        if (codingAgent(provider).requiresModel && model.isBlank() && !inherit) {
+    LaunchedEffect(provider, catalog.models, model, inheritedModel, inheriting) {
+        if (codingAgent(provider).requiresModel && model.isBlank() && !inheriting) {
             onReasoningIntent(ResumeReasoningIntent.Untouched)
             val next =
                 catalog.models.find { it.isDefault && !it.hidden }
@@ -227,13 +234,13 @@ internal fun ModelPicker(
         }
     }
     val inheritedEffort =
-        if (inherit && model.isBlank())
-            defaultReasoning.ifBlank { selected?.defaultReasoningEffort.orEmpty() }
+        if (inheriting && model.isBlank())
+            inheritedReasoning.ifBlank { selected?.defaultReasoningEffort.orEmpty() }
         else selected?.defaultReasoningEffort.orEmpty()
     val effectiveEffort = pickerAppliedReasoning(selected, reasoning, inheritedEffort)
     // Speeds Codex names in this catalog, to label a saved speed the selected model lacks.
     val knownTiers = catalog.models.flatMap { it.serviceTiers.orEmpty() }
-    val inheritedSpeed = if (inherit) defaultSpeed else ""
+    val inheritedSpeed = if (inheriting) inheritedSpeedValue else ""
     val currentSpeed = effectiveSpeed(speed, inheritedSpeed)
     val speedShown =
         changeSpeed != null && showsSpeed(provider, selected, speed.ifBlank { inheritedSpeed })
@@ -250,7 +257,7 @@ internal fun ModelPicker(
     val modelLabel =
         listOfNotNull(
                 selected?.displayName?.ifBlank { selected.model }
-                    ?: model.ifBlank { defaultModel }.ifBlank { "Modèle par défaut" },
+                    ?: model.ifBlank { inheritedModel }.ifBlank { "Modèle par défaut" },
                 route?.providerName?.ifBlank { null },
             )
             .joinToString(" · ")
@@ -287,7 +294,7 @@ internal fun ModelPicker(
             val alias =
                 catalog.models
                     .find { it.model == "default" }
-                    ?.takeIf { !inherit || defaultModel.isBlank() }
+                    ?.takeIf { !inheriting || inheritedModel.isBlank() }
             val defaultName =
                 alias?.displayName?.takeIf {
                     provider == "claude" && it.isNotBlank() && !it.startsWith("Default")
@@ -345,7 +352,7 @@ internal fun ModelPicker(
                             if (changeProvider != null) "Assistant et modèle" else "Modèle",
                             style = MaterialTheme.typography.titleLarge,
                         )
-                        if (inherit)
+                        if (inheriting)
                             Text(
                                 "Ces réglages s’appliquent au prochain message.",
                                 style = MaterialTheme.typography.bodySmall,
@@ -444,16 +451,21 @@ internal fun ModelPicker(
                     )
                 if (visible.size > 6) SearchField("Rechercher un modèle", query) { query = it }
                 val fallback =
-                    selectedModel(catalog, "", defaultModel)?.let {
+                    selectedModel(catalog, "", inheritedModel)?.let {
                         it.displayName.ifBlank { it.model }
-                    } ?: defaultModel
-                if (!codingAgent(provider).requiresModel || (inherit && defaultModel.isNotBlank()))
+                    } ?: inheritedModel
+                if (
+                    !codingAgent(provider).requiresModel ||
+                        (inheriting && inheritedModel.isNotBlank())
+                )
                     ModelCard(
-                        if (inherit) {
-                            if (conversationDefault) "Modèle de la conversation"
+                        if (inheriting) {
+                            if (!inherit && catalog.nativeDefaults != null)
+                                "Modèle de l’installation"
+                            else if (conversationDefault) "Modèle de la conversation"
                             else "Modèle de l’agent"
                         } else listOfNotNull("Modèle par défaut", defaultName).joinToString(" · "),
-                        if (inherit)
+                        if (inheriting)
                             fallback
                                 .ifBlank { null }
                                 ?.let {
@@ -467,13 +479,13 @@ internal fun ModelPicker(
                                 ?: "Suivre le réglage par défaut de ${providerLabel(provider)}",
                         model.isBlank(),
                         enabled,
-                        badge = if (alias != null && !inherit) "Recommandé" else "",
+                        badge = if (alias != null && !inheriting) "Recommandé" else "",
                         reasoning = {
-                            if (inherit && chosen != null)
+                            if (inheriting && chosen != null)
                                 RouteControl(
                                     chosen,
                                     chosen.routes.filter {
-                                        !it.hidden || it.model == defaultModel
+                                        !it.hidden || it.model == inheritedModel
                                     },
                                     route,
                                     enabled,

@@ -716,7 +716,11 @@ async fn execute(
     native["share"] = "disabled".into();
     native["autoupdate"] = false.into();
     native["plugin"] = json!([]);
-    native["compaction"] = json!({ "auto": false, "prune": false });
+    if !native["compaction"].is_object() {
+        native["compaction"] = json!({});
+    }
+    native["compaction"]["auto"] = false.into();
+    native["compaction"]["prune"] = false.into();
     if native["permission"].is_null() {
         native["permission"] = json!({ "*": "allow" });
     }

@@ -78,7 +78,11 @@ const position = ref<CSSProperties>({})
 const catalog = computed(() => modelCatalogs[provider.value].catalog)
 const reload = () => modelCatalogs[provider.value].load()
 const current = computed(() => providers.find(item => item.value === provider.value) ?? providers[0])
-const effectiveModel = computed(() => model.value || props.defaultModel || catalog.value.models.find(item => item.isDefault)?.model || '')
+const inheritedModel = computed(() => props.inherit ? props.defaultModel : catalog.value.nativeDefaults?.model || props.defaultModel)
+const inheritedReasoning = computed(() => props.inherit ? props.defaultReasoning : catalog.value.nativeDefaults?.reasoning || props.defaultReasoning)
+const inheritedSpeedValue = computed(() => props.inherit ? props.defaultSpeed : catalog.value.nativeDefaults?.speed || props.defaultSpeed)
+const inheriting = computed(() => props.inherit || !!catalog.value.nativeDefaults)
+const effectiveModel = computed(() => model.value || inheritedModel.value || catalog.value.models.find(item => item.isDefault)?.model || '')
 // A model offered by several providers is one entry. Its own id runs on the first available
 // route; a route's id pins that provider.
 const routeOf = (item: CodingAgentModel, value: string) => item.routes?.find(route => route.model === value)
@@ -86,17 +90,17 @@ const matches = (item: CodingAgentModel, value: string) => item.model === value 
 const selected = computed(() => catalog.value.models.find(item => matches(item, effectiveModel.value)))
 const route = computed(() => selected.value && routeOf(selected.value, effectiveModel.value))
 const fallback = computed(() => {
-  const value = props.defaultModel || catalog.value.models.find(model => model.isDefault)?.model || ''
+  const value = inheritedModel.value || catalog.value.models.find(model => model.isDefault)?.model || ''
   const item = catalog.value.models.find(item => matches(item, value))
-  return item?.displayName || item?.model || props.defaultModel
+  return item?.displayName || item?.model || inheritedModel.value
 })
 const modelLabel = computed(() => [selected.value?.displayName || selected.value?.model || effectiveModel.value || 'Default model', route.value?.providerName].filter(Boolean).join(' · '))
-const defaultEffort = computed(() => (props.inherit && !model.value ? props.defaultReasoning || selected.value?.defaultReasoningEffort : selected.value?.defaultReasoningEffort) || '')
+const defaultEffort = computed(() => (inheriting.value && !model.value ? inheritedReasoning.value || selected.value?.defaultReasoningEffort : selected.value?.defaultReasoningEffort) || '')
 const effectiveEffort = computed(() => reasoning.value || defaultEffort.value)
 // Speeds Codex names in this catalog, to label a saved speed the selected model lacks.
 const knownTiers = computed(() => catalog.value.models.flatMap(item => item.serviceTiers ?? []))
 const tiers = computed(() => selected.value?.serviceTiers ?? [])
-const inheritedSpeed = computed(() => props.inherit ? props.defaultSpeed : '')
+const inheritedSpeed = computed(() => inheriting.value ? inheritedSpeedValue.value : '')
 const currentSpeed = computed(() => effectiveSpeed(speed.value, inheritedSpeed.value))
 const speedShown = computed(() => showsSpeed(provider.value, selected.value, speed.value || inheritedSpeed.value))
 const speedOffered = computed(() => offersSpeed(selected.value, currentSpeed.value))
@@ -113,7 +117,7 @@ const unsupportedSpeed = computed(() => !!speed.value && speed.value !== STANDAR
 const summary = computed(() => [current.value.label, modelLabel.value, effectiveEffort.value && `${effortLabel(effectiveEffort.value)} reasoning`, speedTag.value && `${speedTag.value.replace(/( requested)?$/, ' speed$1')}`].filter(Boolean).join(' · '))
 // Claude lists its own "default" alias. When the default row already resolves to it,
 // show one row instead of two equivalent choices.
-const alias = computed(() => !props.inherit || !props.defaultModel ? catalog.value.models.find(item => item.model === 'default') : undefined)
+const alias = computed(() => !inheriting.value || !inheritedModel.value ? catalog.value.models.find(item => item.model === 'default') : undefined)
 const defaultName = computed(() => provider.value === 'claude' && alias.value?.displayName && !alias.value.displayName.startsWith('Default') ? alias.value.displayName : '')
 const visible = computed(() => catalog.value.models.filter(item => (!item.hidden || matches(item, model.value)) && (item !== alias.value || model.value === item.model)))
 const models = computed(() => {
@@ -121,21 +125,21 @@ const models = computed(() => {
   return words ? visible.value.filter(item => `${item.displayName} ${item.model}`.toLowerCase().includes(words)) : visible.value
 })
 const missing = computed(() => !!model.value && !catalog.value.models.some(item => matches(item, model.value)))
-const inheritedLabel = computed(() => props.defaultSource === 'conversation' ? 'Conversation model' : 'Agent default')
-const inheritedDescription = computed(() => props.defaultSource === 'conversation' ? 'keep this conversation’s setting' : 'the agent’s setting')
-const defaultOwner = computed(() => props.inherit && !model.value ? props.defaultSource === 'conversation' ? 'Conversation' : 'Agent' : 'Model')
+const inheritedLabel = computed(() => !props.inherit && catalog.value.nativeDefaults ? 'Installation default' : props.defaultSource === 'conversation' ? 'Conversation model' : 'Agent default')
+const inheritedDescription = computed(() => !props.inherit && catalog.value.nativeDefaults ? 'the installation’s setting' : props.defaultSource === 'conversation' ? 'keep this conversation’s setting' : 'the agent’s setting')
+const defaultOwner = computed(() => inheriting.value && !model.value ? props.defaultSource === 'conversation' ? 'Conversation' : 'Agent' : 'Model')
 const choices = computed(() => [
-  ...(!current.value.requiresModel || (props.inherit && props.defaultModel)
+  ...(!current.value.requiresModel || (inheriting.value && inheritedModel.value)
     ? [
         {
           value: '',
-          label: props.inherit ? inheritedLabel.value : [`${current.value.label} default`, defaultName.value].filter(Boolean).join(' · '),
-          description: (!props.inherit && alias.value?.description) || (fallback.value
-            ? `${fallback.value} · ${props.inherit ? inheritedDescription.value : `chosen by ${current.value.label}`}`
-            : props.inherit ? 'Follow the agent’s model' : 'Follow provider settings'),
-          recommended: !props.inherit && !!alias.value,
+          label: inheriting.value ? inheritedLabel.value : [`${current.value.label} default`, defaultName.value].filter(Boolean).join(' · '),
+          description: (!inheriting.value && alias.value?.description) || (fallback.value
+            ? `${fallback.value} · ${inheriting.value ? inheritedDescription.value : `chosen by ${current.value.label}`}`
+            : inheriting.value ? 'Follow the agent’s model' : 'Follow provider settings'),
+          recommended: !inheriting.value && !!alias.value,
           chosen: !model.value,
-          routes: props.inherit ? catalog.value.models.find(item => matches(item, props.defaultModel))?.routes?.filter(route => !route.hidden || route.model === props.defaultModel) ?? [] : [],
+          routes: inheriting.value ? catalog.value.models.find(item => matches(item, inheritedModel.value))?.routes?.filter(route => !route.hidden || route.model === inheritedModel.value) ?? [] : [],
         },
       ]
     : []),
@@ -159,8 +163,8 @@ const choices = computed(() => [
     : []),
 ])
 
-watch([provider, () => catalog.value.models, () => props.defaultModel], () => {
-  if (current.value.requiresModel && !model.value && !props.inherit) {
+watch([provider, () => catalog.value.models, () => inheritedModel.value, () => catalog.value.loaded], () => {
+  if (catalog.value.loaded && current.value.requiresModel && !model.value && !inheriting.value) {
     model.value = catalog.value.models.find(item => item.isDefault && !item.hidden)?.model
       || catalog.value.models.find(item => !item.hidden)?.model || ''
   }

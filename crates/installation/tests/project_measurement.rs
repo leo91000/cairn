@@ -273,6 +273,7 @@ impl StorageEntity for PluginInstance {
         for n in 0..1000 {
             Db(&tx)
                 .save_agent(&Agent {
+                    coding_agent_defaults: None,
                     id: AgentId(uuid::Uuid::from_u128(
                         (4_u128 << 76) | (2_u128 << 62) | (n + 10000),
                     )),
@@ -629,6 +630,7 @@ async fn project_storage_layouts() {
 #[ignore = "local measurement; run alone with --ignored --nocapture --test-threads=1"]
 async fn agent_storage_layouts() {
     let agents: Vec<Agent> = (0..1000).map(|n| Agent {
+        coding_agent_defaults: None,
         id: AgentId(uuid::Uuid::from_u128((4_u128 << 76) | (2_u128 << 62) | n)),
         settings: serde_json::from_value(json!({
             "name": format!("Agent {n:04}"),
