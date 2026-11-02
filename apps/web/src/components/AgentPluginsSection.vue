@@ -24,6 +24,7 @@ const props = defineProps<{
   connections: PluginConnection[]
   // Delegations currently stopped until their new access is reapproved.
   suspended: string[]
+  disabled: boolean
 }>()
 // Granted plugin instance ids.
 const grants = defineModel<GrantDraft>('grants', { required: true })
@@ -52,7 +53,7 @@ function packageName(pluginId: string) {
   return props.packages.find(entry => entry.id === pluginId)?.manifest?.name ?? pluginId
 }
 
-function set(id: string, _on: boolean) {
+function remove(id: string) {
   grants.value = removeGrant(grants.value, id)
 }
 
@@ -86,7 +87,15 @@ function supplierName(pluginId: string) {
 </script>
 
 <template>
-  <div class="grid min-w-0 gap-5">
+  <fieldset
+    :disabled="disabled"
+    :inert="disabled"
+    :aria-busy="disabled"
+    class="grid min-w-0 gap-5 border-0 p-0 m-0"
+  >
+    <legend class="sr-only">
+      Agent plugin permissions
+    </legend>
     <label v-if="searchable" class="search-field flex min-w-0 flex-row items-center gap-[7px] rounded-[7px] border border-line bg-raised px-2.5 py-0 text-subtle"><Icon :name="Search" :size="16" /><input
       v-model="query"
       type="search"
@@ -192,7 +201,7 @@ function supplierName(pluginId: string) {
           <UiButton
             size="small"
             :aria-label="`Remove access to ${packageName(connection.pluginId)} ${connection.name}`"
-            @click="set(connection.id, false)"
+            @click="remove(connection.id)"
           >
             <Icon :name="X" :size="13" />Remove
           </UiButton>
@@ -208,7 +217,7 @@ function supplierName(pluginId: string) {
       <UiButton
         size="small"
         aria-label="Remove deleted plugin instances"
-        @click="missing.forEach(id => set(id, false))"
+        @click="missing.forEach(remove)"
       >
         <Icon :name="X" :size="13" />Remove
       </UiButton>
@@ -245,5 +254,5 @@ function supplierName(pluginId: string) {
         </li>
       </ul>
     </section>
-  </div>
+  </fieldset>
 </template>

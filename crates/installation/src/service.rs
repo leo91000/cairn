@@ -362,6 +362,7 @@ impl Service {
         let owner = crate::relay::task_author_policy(self)
             .await?
             .map(|policy| policy.owner.access_id);
+        let accounts = self.agent_preview_accounts().await?;
         authorize.recheck().await?;
         self.store
             .read(move |db| {
@@ -399,9 +400,45 @@ impl Service {
                 Ok(cairn_contracts::AgentPreview {
                     runs: cairn_contracts::AgentPreviewRuns { queued, running },
                     delegations: serde_json::from_value(serde_json::to_value(delegations)?)?,
+                    accounts,
                 })
             })
             .await
+    }
+
+    async fn agent_preview_accounts(
+        &self,
+    ) -> Result<Option<Vec<cairn_contracts::AgentPreviewAccount>>> {
+        if crate::native::policy::caller().is_none() {
+            return Ok(None);
+        }
+
+        let identity = self
+            .config
+            .data_dir
+            .join("installation-relay")
+            .join("identity.json");
+        if !tokio::fs::try_exists(identity).await? {
+            return Ok(None);
+        }
+
+        let authority = crate::relay::native_authority(self).await?;
+        let accounts = authority
+            .as_object()
+            .ok_or_else(|| Error::bad("Invalid native account evidence."))?;
+        let mut accounts = accounts
+            .values()
+            .map(|account| {
+                account["email"]
+                    .as_str()
+                    .map(|email| cairn_contracts::AgentPreviewAccount {
+                        email: email.to_owned(),
+                    })
+                    .ok_or_else(|| Error::bad("Invalid native account evidence."))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        accounts.sort_by(|left, right| left.email.cmp(&right.email));
+        Ok(Some(accounts))
     }
 
     /// Every project, MCP connection and tool permission must reference an existing record.

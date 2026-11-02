@@ -88,6 +88,7 @@ fun PluginGrantEditor(
     change: (PluginGrantDraft) -> Unit,
     agentId: String,
     navigate: (String) -> Unit,
+    enabled: Boolean = true,
 ) {
     var query by rememberSaveable { mutableStateOf("") }
     OutlinedTextField(
@@ -95,6 +96,7 @@ fun PluginGrantEditor(
         { query = it },
         label = { Text("Rechercher une instance ou un plugin") },
         modifier = Modifier.fillMaxWidth(),
+        enabled = enabled,
     )
     val groups = catalog.agentGrantable()
     val delegations = catalog.connections.filter { agentId.isNotBlank() && it.agentId == agentId }
@@ -153,6 +155,7 @@ fun PluginGrantEditor(
                                         Modifier.semantics {
                                             contentDescription = "Accès à ${connection.name}"
                                         },
+                                    enabled = enabled,
                                 )
                                 Text(connection.name, Modifier.weight(1f))
                             }
@@ -168,7 +171,10 @@ fun PluginGrantEditor(
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 ToneChip(connection.state())
                                 Spacer(Modifier.weight(1f))
-                                TextButton(onClick = { navigate("plugins/${segment(entry.id)}") }) {
+                                TextButton(
+                                    onClick = { navigate("plugins/${segment(entry.id)}") },
+                                    enabled = enabled,
+                                ) {
                                     Text(
                                         if (entry.id == "onepassword") "Configurer le compte ↗"
                                         else "Configurer ↗"
@@ -211,6 +217,7 @@ fun PluginGrantEditor(
                                                     contentDescription =
                                                         "Accès à ${connection.name} : $value"
                                                 },
+                                            enabled = enabled,
                                         )
                                         Text(label)
                                     }
@@ -282,6 +289,7 @@ fun PluginGrantEditor(
                                                         contentDescription =
                                                             "${item.kind} ${item.name}"
                                                     },
+                                                enabled = enabled,
                                             )
                                             Column(Modifier.weight(1f)) {
                                                 Text(
@@ -292,6 +300,61 @@ fun PluginGrantEditor(
                                                     contribution.description,
                                                     style = MaterialTheme.typography.bodySmall,
                                                 )
+                                            }
+                                        }
+                                        val staleResources =
+                                            held
+                                                ?.let {
+                                                    staleResourceRestrictions(
+                                                        it.resources,
+                                                        contribution.resourceTypes,
+                                                    )
+                                                }
+                                                .orEmpty()
+                                        if (staleResources.isNotEmpty()) {
+                                            OutlinedCard(
+                                                Modifier.fillMaxWidth()
+                                                    .testTag("stale-plugin-resource-roots")
+                                            ) {
+                                                Column(
+                                                    Modifier.padding(12.dp),
+                                                    verticalArrangement =
+                                                        Arrangement.spacedBy(8.dp),
+                                                ) {
+                                                    Text(
+                                                        "Certaines restrictions enregistrées ne correspondent plus aux ressources proposées. Les requêtes échouent de façon restrictive. Retirer la dernière restriction rendra cette contribution sans restriction.",
+                                                        color = MaterialTheme.colorScheme.error,
+                                                        style = MaterialTheme.typography.bodySmall,
+                                                    )
+                                                    staleResources.forEach { resource ->
+                                                        Column(Modifier.fillMaxWidth()) {
+                                                            Text(
+                                                                "${resource.resourceType} · ${resource.id}",
+                                                                Modifier.fillMaxWidth(),
+                                                                style =
+                                                                    MaterialTheme.typography
+                                                                        .bodySmall,
+                                                            )
+                                                            TextButton(
+                                                                onClick = {
+                                                                    update(
+                                                                        true,
+                                                                        held!!.resources - resource,
+                                                                    )
+                                                                },
+                                                                enabled = enabled,
+                                                                modifier =
+                                                                    Modifier.align(Alignment.End)
+                                                                        .semantics {
+                                                                            contentDescription =
+                                                                                "Retirer la restriction obsolète ${item.kind} ${item.name} ${resource.resourceType} ${resource.id}"
+                                                                        },
+                                                            ) {
+                                                                Text("Retirer")
+                                                            }
+                                                        }
+                                                    }
+                                                }
                                             }
                                         }
                                         if (
@@ -305,10 +368,11 @@ fun PluginGrantEditor(
                                                 connection.id,
                                                 contribution.resourceTypes,
                                                 held.resources,
+                                                enabled,
                                             ) {
                                                 update(true, it)
                                             }
-                                        } else if (held != null)
+                                        } else if (held != null && staleResources.isEmpty())
                                             Text(
                                                 if (item.kind == "condition")
                                                     "Sans restriction de ressource. L’attente reste limitée par l’accès aux projets."
@@ -365,6 +429,7 @@ fun PluginGrantEditor(
                                                                 )
                                                             )
                                                         },
+                                                        enabled = enabled,
                                                         modifier =
                                                             Modifier.semantics {
                                                                 contentDescription =
@@ -411,6 +476,7 @@ fun PluginGrantEditor(
                                                     contentDescription =
                                                         "Fournir les identifiants depuis ${connection.name}"
                                                 },
+                                            enabled = enabled,
                                         )
                                         Text(
                                             "Fournir les identifiants depuis ${connection.name}",
@@ -443,6 +509,7 @@ fun PluginGrantEditor(
                 ToneChip(PluginBadge("Indisponible", PluginTone.ATTENTION))
                 TextButton(
                     { change(draft.without(connection.id)) },
+                    enabled = enabled,
                     modifier =
                         Modifier.semantics { contentDescription = "Retirer ${connection.name}" },
                 ) {
@@ -460,6 +527,7 @@ fun PluginGrantEditor(
             ToneChip(PluginBadge("Introuvable", PluginTone.ATTENTION))
             TextButton(
                 { change(draft.without(id)) },
+                enabled = enabled,
                 modifier = Modifier.semantics { contentDescription = "Retirer l’instance $id" },
             ) {
                 Text("Retirer")
@@ -479,7 +547,10 @@ fun PluginGrantEditor(
                     )
                     ToneChip(PluginBadge("Réglé sur l’instance", PluginTone.MUTED))
                 }
-                TextButton(onClick = { navigate("plugins/${segment(connection.pluginId)}") }) {
+                TextButton(
+                    onClick = { navigate("plugins/${segment(connection.pluginId)}") },
+                    enabled = enabled,
+                ) {
                     Text("Ouvrir ↗")
                 }
             }
@@ -503,6 +574,7 @@ private fun ResourceGrantPicker(
     instance: String,
     types: List<PluginResourceType>,
     selected: List<PluginResourceRef>,
+    enabled: Boolean,
     change: (List<PluginResourceRef>) -> Unit,
 ) {
     var open by rememberSaveable { mutableStateOf(false) }
@@ -554,10 +626,10 @@ private fun ResourceGrantPicker(
                 Modifier.weight(1f),
                 style = MaterialTheme.typography.bodySmall,
             )
-            TextButton({ change(selected - item) }) { Text("Retirer") }
+            TextButton({ change(selected - item) }, enabled = enabled) { Text("Retirer") }
         }
     }
-    OutlinedButton({ open = true }) { Text("Choisir les ressources") }
+    OutlinedButton({ open = true }, enabled = enabled) { Text("Choisir les ressources") }
     if (!open) return
     LaunchedEffect(type, query) {
         page = 1
@@ -599,7 +671,7 @@ private fun ResourceGrantPicker(
         }
     }
     AlertDialog(
-        onDismissRequest = { open = false },
+        onDismissRequest = { if (enabled) open = false },
         title = { Text("Ressources autorisées") },
         text = {
             Column(
@@ -621,6 +693,7 @@ private fun ResourceGrantPicker(
                                 Modifier.semantics {
                                     contentDescription = "Type de ressource ${resourceType.name}"
                                 },
+                            enabled = enabled,
                         )
                         Text(names.joinToString(" › "))
                     }
@@ -633,10 +706,11 @@ private fun ResourceGrantPicker(
                         Modifier.semantics {
                             contentDescription = "Rechercher des ressources"
                         },
+                    enabled = enabled,
                 )
                 error?.let {
                     Text(it, color = MaterialTheme.colorScheme.error)
-                    TextButton({ attempt++ }) { Text("Réessayer") }
+                    TextButton({ attempt++ }, enabled = enabled) { Text("Réessayer") }
                 }
                 items.forEach { (item, path) ->
                     val ref = PluginResourceRef(item.id, item.resourceType)
@@ -648,7 +722,9 @@ private fun ResourceGrantPicker(
                                     change(if (checked) selected + ref else selected - ref)
                             },
                             modifier = Modifier.semantics { contentDescription = path },
-                            enabled = canSelectPluginResourceRoot(selected.size, ref in selected),
+                            enabled =
+                                enabled &&
+                                    canSelectPluginResourceRoot(selected.size, ref in selected),
                         )
                         Text(path, Modifier.weight(1f))
                     }
@@ -658,12 +734,14 @@ private fun ResourceGrantPicker(
                 nextPage
                     ?.takeIf { error == null }
                     ?.let { availablePage ->
-                        TextButton({ page = availablePage }, enabled = !loading) {
+                        TextButton({ page = availablePage }, enabled = enabled && !loading) {
                             Text("Charger plus de ressources")
                         }
                     }
             }
         },
-        confirmButton = { TextButton({ open = false }) { Text("Terminé") } },
+        confirmButton = {
+            TextButton({ open = false }, enabled = enabled) { Text("Terminé") }
+        },
     )
 }

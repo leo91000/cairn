@@ -213,8 +213,14 @@ private fun AgentPage(
     // concurrent save is detected by the server.
     LaunchedEffect(loaded.revision, loaded) {
         if (!creating && !dirty && loaded != baseline) {
+            val agentRevisionChanged = loaded.revision != baseline.revision
             baseline = loaded
             draft = AgentDraft(loaded)
+            if (agentRevisionChanged) {
+                grantsLoaded = false
+                grantsError = null
+                grantsAttempt++
+            }
         }
     }
 
@@ -417,11 +423,23 @@ private fun AgentPage(
                         resources,
                         preview,
                     ) + pluginGrantReview(savedGrants, grants, catalog)
-                if (needsReview(lines, preview)) {
+                val reviewRequired = needsReview(lines, preview)
+                if (reviewRequired && !creating && preview?.accounts == null) {
+                    throw IllegalStateException(
+                        "Impossible de vérifier les comptes qui ont accès à cet agent. Reconnectez l’installation puis réessayez."
+                    )
+                }
+                if (reviewRequired) {
                     val suspended = preview?.suspendedDelegations().orEmpty()
                     reapprove = preview?.preselectedReapprovals().orEmpty()
                     review =
-                        PendingReview(edited, lines, suspended, edited.nativeReviewNodes(resources))
+                        PendingReview(
+                            edited,
+                            if (creating) lines + newAgentAccountReviewLine()
+                            else lines + agentAccountReviewLine(preview!!.accounts!!),
+                            suspended,
+                            edited.nativeReviewNodes(resources),
+                        )
                 } else commit(edited, emptyList())
             } catch (e: Exception) {
                 fail(e)
@@ -603,6 +621,7 @@ private fun AgentPage(
                                 ::editGrants,
                                 agentId,
                                 navigate,
+                                enabled = !saving,
                             )
                         }
                     AgentSection.Nodes ->

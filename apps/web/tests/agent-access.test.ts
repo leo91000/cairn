@@ -17,6 +17,7 @@ import {
   mergeList,
   nativeReviewNodes,
   needsReview,
+  newAgentAccountReviewLine,
   newAgentDraft,
   nodesFor,
   rebaseDraft,
@@ -553,7 +554,16 @@ it('opens the review only for what this edit does', () => {
   expect(needsReview(reduction, { ...preview, delegations: [{ ...delegation, blocked: 'Too broad' }] })).toBe(false)
   expect(needsReview(reduction, { ...preview, delegations: [{ ...delegation, blocked: 'Too broad', alreadySuspended: false }] })).toBe(true)
   expect(needsReview(reduction, { ...preview, runs: { queued: 1, running: 0 } })).toBe(true)
+  expect(needsReview([{ ...reduction[0]!, requiresReview: true }], null)).toBe(true)
   expect(needsReview([{ ...reduction[0]!, kind: 'secret' }], null)).toBe(true)
+})
+
+it('states who can access a newly created agent in its grant review', () => {
+  const line = newAgentAccountReviewLine()
+  expect(line.kind).toBe('secret')
+  expect(line.text).toContain('Only the installation owner can access a newly created agent')
+  expect(line.text).toContain('members do not have access by default')
+  expect(line.text).toContain('no-code hook rule editor is not included')
 })
 
 it('raises no node issue while the nodes are not loaded', () => {

@@ -1,6 +1,7 @@
 import {
   signIn as authenticateWorkspace,
   expect,
+  openAgentSection,
   saveAgent,
   test,
   workspacePath,
@@ -88,6 +89,21 @@ test('contribution grants use resource ancestry, review, conflicts and explicit 
   })
   const first = (await instance('Support')).instance.id
   const second = (await instance('Automation')).instance.id
+  await page.goto(workspacePath('/agents/new'))
+  await authenticateWorkspace(page)
+  await page.getByLabel('Name', { exact: true }).fill('New grant reviewer')
+  await openAgentSection(page, 'Secrets & plugins')
+  await page.getByRole('region', { name: 'Grant UI' }).getByRole('combobox', { name: 'Access to Support' }).selectOption('full')
+  const newAgentSaveBar = page.getByRole('region', { name: 'Unsaved changes' })
+  await newAgentSaveBar.getByRole('button', { name: 'Create agent', exact: true }).click()
+  const newAgentReview = page.getByRole('dialog', { name: 'Review before saving' })
+  await expect(newAgentReview).toContainText('Only the installation owner can access a newly created agent')
+  await expect(newAgentReview).toContainText('members do not have access by default')
+  await expect(newAgentReview).toContainText('the no-code hook rule editor is not included in this change')
+  await page.screenshot({ path: testInfo.outputPath('agent-plugin-grants-new-agent-review.png'), fullPage: true })
+  await newAgentReview.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(page).toHaveURL(/\/agents\/[0-9a-f-]{36}$/)
+
   const agent = await workspace.api('/api/agents', 'POST', { name: 'Resource reviewer' })
   await workspace.api(`/api/agents/${agent.id}/plugin-grants`, 'PUT', {
     agentId: agent.id,
@@ -177,18 +193,26 @@ test('contribution grants use resource ancestry, review, conflicts and explicit 
   await expect(page.getByText('Current supplier: Automation.', { exact: false }).first()).toBeVisible()
   await page.setViewportSize({ width: 1440, height: 1000 })
   await page.screenshot({ path: testInfo.outputPath('agent-plugin-grants-editor.png'), fullPage: true })
+  const hookContribution = page.getByRole('checkbox', { name: 'hook message', exact: true })
+  await hookContribution.scrollIntoViewIfNeeded()
+  await expect(hookContribution).toBeInViewport()
+  const hookResources = hookContribution.locator('xpath=../..').getByRole('group', { name: 'Resource restrictions' })
+  await expect(hookResources.getByText('Team › #support', { exact: true })).toBeVisible()
+  await page.screenshot({ path: testInfo.outputPath('agent-plugin-grants-hook.png') })
   const resourceSearch = page.getByLabel('Search resources').first()
   await resourceSearch.evaluate(element => element.scrollIntoView({ block: 'center', inline: 'nearest' }))
   await expect(resourceSearch).toBeInViewport()
   await page.screenshot({ path: testInfo.outputPath('agent-plugin-grants-resource-picker.png') })
   const original = await workspace.api(`/api/agents/${agent.id}/plugin-grants`)
   expect(original.grants).toEqual([{ instanceId: first, access: { type: 'full' } }])
-  await page.setViewportSize({ width: 320, height: 844 })
+  await page.setViewportSize({ width: 390, height: 844 })
   await page.emulateMedia({ colorScheme: 'dark' })
   await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
   const review = page.getByRole('dialog', { name: 'Review before saving' })
   await expect(review).toContainText('channel support and descendants')
   await expect(review).toContainText('Run credential suppliers: Grant UI “Automation”')
+  await expect(review).toContainText('Accounts with access to this agent:')
+  await expect(review).toContainText('the no-code hook rule editor is not included in this change')
   await page.screenshot({ path: testInfo.outputPath('agent-plugin-grants-review.png'), fullPage: true })
   await review.getByRole('button', { name: 'Back to editing' }).click()
   // This instance is created after the page's initial catalog read, so only a fresh catalog can
@@ -249,7 +273,11 @@ test('contribution grants use resource ancestry, review, conflicts and explicit 
   await expect(support).toHaveValue('selected')
   await automation.selectOption('none')
   await saveAgent(page, true)
-  expect((await workspace.api(`/api/agents/${agent.id}/plugin-grants`)).runCredentialInstances).toEqual([])
+  const afterRemovingSupplier = await workspace.api(`/api/agents/${agent.id}/plugin-grants`)
+  expect(afterRemovingSupplier.runCredentialInstances).toEqual([])
+  expect(afterRemovingSupplier.grants.map((grant: any) => grant.instanceId)).toEqual(
+    expect.arrayContaining([first, remote]),
+  )
   await page.goto(workspacePath('/agents'))
   await expect(page.getByText('Selected plugin access', { exact: false })).toBeVisible()
 
@@ -285,27 +313,90 @@ test('contribution grants use resource ancestry, review, conflicts and explicit 
   const savedAgent = await workspace.api(`/api/agents/${agent.id}`)
   expect(savedAgent).toMatchObject({ name: 'Local name after retry', description: 'Remote description survives retry' })
 
+  await page.getByLabel('Name', { exact: true }).fill('Local name during grant reload')
+  await workspace.api(`/api/agents/${agent.id}`, 'PUT', { description: 'Second remote description' })
+  await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Reload', exact: true })).toBeVisible()
+  await page.getByRole('link', { name: 'All settings', exact: true }).click()
+  await page.getByRole('link', { name: /Secrets & plugins/ }).click()
+  let releaseGrantRead!: () => void
+  let grantReadStarted!: () => void
+  const grantReadGate = new Promise<void>((resolve) => {
+    releaseGrantRead = resolve
+  })
+  const grantReadRequest = new Promise<void>((resolve) => {
+    grantReadStarted = resolve
+  })
+  const grantReadPattern = `**/api/agents/${agent.id}/plugin-grants`
+  await page.route(grantReadPattern, async (route) => {
+    if (route.request().method() !== 'GET') {
+      await route.continue()
+      return
+    }
+
+    const response = await route.fetch()
+    grantReadStarted()
+    await grantReadGate
+    await route.fulfill({ response })
+  })
+  await page.getByRole('button', { name: 'Reload', exact: true }).click()
+  await grantReadRequest
+  await expect(page.getByRole('combobox', { name: 'Access to Support' })).toBeDisabled()
+  releaseGrantRead()
+  await expect(page.getByRole('button', { name: 'Reload', exact: true })).toHaveCount(0)
+  await page.unroute(grantReadPattern)
+
+  await workspace.restart()
+  const persistedGrants = await workspace.api(`/api/agents/${agent.id}/plugin-grants`)
+  expect(persistedGrants.grants.map((grant: any) => grant.instanceId)).toEqual(
+    expect.arrayContaining([first, remote]),
+  )
+  await page.route('**/api/plugins', route => route.fulfill({
+    status: 503,
+    contentType: 'application/json',
+    body: JSON.stringify({ error: 'Plugins could not be loaded' }),
+  }))
+  await page.goto(workspacePath(`/agents/${agent.id}?section=plugins`))
+  await authenticateWorkspace(page)
+  await expect(page.getByRole('list', { name: 'Held plugin access' }))
+    .toContainText(`Granted instance ${first.slice(0, 8)}…`)
+  await page.unroute('**/api/plugins')
+
   await page.route('**/api/plugins', async (route) => {
     const response = await route.fetch()
     const catalog = await response.json()
     const grantUi = catalog.packages.find((item: any) => item.id === 'grant-ui')
     grantUi.manifest.tools = grantUi.manifest.tools.filter((item: any) => item.name !== 'grant_ui_read')
+    grantUi.manifest.commands[0].arguments = []
     await route.fulfill({ response, json: catalog })
   })
   await page.goto(workspacePath(`/agents/${agent.id}?section=plugins`))
   await authenticateWorkspace(page)
   const staleGrant = page.getByRole('button', { name: 'Remove stale grant tool grant_ui_read', exact: true })
-  await expect(page.getByRole('alert')).toContainText('contributions this plugin no longer provides')
+  const staleGrantAlert = page.getByRole('alert').filter({ hasText: 'Some saved grants refer to' })
+  await expect(staleGrantAlert).toContainText('contributions this plugin no longer provides')
   await expect(staleGrant).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('agent-plugin-grants-stale.png'), fullPage: true })
   await staleGrant.click()
   await expect(staleGrant).toHaveCount(0)
   await expect(page.getByRole('checkbox', { name: 'command post', exact: true })).toBeChecked()
+  const staleRoot = page.getByRole('button', {
+    name: 'Remove stale resource restriction command post channel support',
+    exact: true,
+  })
+  const staleResourceAlert = page.getByRole('alert').filter({ hasText: 'Saved resource roots include' })
+  await expect(staleResourceAlert).toContainText('Requests fail closed until corrected')
+  await expect(staleRoot).toBeVisible()
+  await expect(page.getByText('No resource restriction.', { exact: true })).toHaveCount(0)
+  await page.screenshot({ path: testInfo.outputPath('agent-plugin-grants-stale-resource.png'), fullPage: true })
+  await staleRoot.click()
+  await expect(staleRoot).toHaveCount(0)
+  await expect(page.getByText('No resource restriction.', { exact: true })).toBeVisible()
   await saveAgent(page, true)
   const afterStaleRemoval = await workspace.api(`/api/agents/${agent.id}/plugin-grants`)
   const remainingSupport = afterStaleRemoval.grants.find((grant: any) => grant.instanceId === first)
   expect(remainingSupport.access.contributions).toEqual(expect.arrayContaining([
-    { kind: 'command', name: 'post', resources: [{ resourceType: 'channel', id: 'support' }] },
+    { kind: 'command', name: 'post', resources: [] },
     { kind: 'hook', name: 'message', resources: [{ resourceType: 'channel', id: 'support' }] },
   ]))
   expect(remainingSupport.access.contributions).not.toContainEqual(expect.objectContaining({ kind: 'tool', name: 'grant_ui_read' }))
@@ -313,6 +404,20 @@ test('contribution grants use resource ancestry, review, conflicts and explicit 
   await page.goto(workspacePath('/agents'))
   const agentCard = page.locator('article').filter({ has: page.locator(`a[href$="${agent.id}"]`) })
   await expect(agentCard).toContainText('Selected plugin access')
+  await workspace.restart()
+  await page.goto(workspacePath(`/agents/${agent.id}?section=plugins`))
+  const supportAccess = page.getByRole('switch', { name: 'Access to Grant UI Support', exact: true })
+  await expect(supportAccess).toBeChecked()
+  await supportAccess.uncheck()
+  await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
+  const revocationReview = page.getByRole('dialog', { name: 'Review before saving' })
+  await expect(revocationReview).toContainText('Removed: Grant UI “Support” access. Effective immediately, including running conversations.')
+  await page.screenshot({ path: testInfo.outputPath('agent-plugin-grants-revocation-review.png'), fullPage: true })
+  expect((await workspace.api(`/api/agents/${agent.id}/plugin-grants`)).grants).toContainEqual(expect.objectContaining({ instanceId: first }))
+  await revocationReview.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect.poll(async () => (await workspace.api(`/api/agents/${agent.id}/plugin-grants`)).grants.some((grant: any) => grant.instanceId === first)).toBe(false)
+  await page.goto(workspacePath('/agents'))
+  await expect(agentCard).not.toContainText('Selected plugin access')
   const latestAgent = await workspace.api(`/api/agents/${agent.id}`)
   await workspace.api(`/api/agents/${agent.id}/plugin-grants`, 'PUT', {
     agentId: agent.id,
@@ -327,6 +432,7 @@ test('contribution grants use resource ancestry, review, conflicts and explicit 
 
 test('agent overview shows plugin access as unavailable when the grant read fails', async ({ page, workspace }) => {
   const agent = await workspace.api('/api/agents', 'POST', { name: 'Grant summary reader' })
+  await workspace.restart()
   await page.route(`**/api/agents/${agent.id}/plugin-grants`, route => route.fulfill({
     status: 503,
     contentType: 'application/json',

@@ -834,6 +834,15 @@
     "AgentPreview": {
       "additionalProperties": false,
       "properties": {
+        "accounts": {
+          "items": {
+            "$ref": "#/definitions/AgentPreviewAccount"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "delegations": {
           "items": {
             "$ref": "#/definitions/AgentDelegationEffect"
@@ -847,6 +856,18 @@
       "required": [
         "runs",
         "delegations"
+      ],
+      "type": "object"
+    },
+    "AgentPreviewAccount": {
+      "additionalProperties": false,
+      "properties": {
+        "email": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "email"
       ],
       "type": "object"
     },

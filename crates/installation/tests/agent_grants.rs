@@ -473,6 +473,13 @@ async fn preview_counts_work_that_reduced_access_would_stop() {
         .await;
     assert_eq!(status, StatusCode::OK, "{preview}");
     assert_eq!(preview["runs"], json!({ "queued": 0, "running": 0 }));
+    assert_eq!(
+        preview["accounts"],
+        json!([
+            { "email": "member@example.test" },
+            { "email": "owner@example.test" },
+        ])
+    );
 
     let mut narrower = agent.clone();
     narrower["access"]["sandbox"] = "read-only".into();

@@ -12,6 +12,7 @@ import build.cairn.contracts.PluginResourceRef
 import build.cairn.contracts.PluginResourceType
 import build.cairn.contracts.PluginTool
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -19,6 +20,36 @@ class PluginGrantsTest {
     private val support = "11111111-1111-4111-8111-111111111111"
     private val automation = "22222222-2222-4222-8222-222222222222"
     private val otherPackage = "33333333-3333-4333-8333-333333333333"
+
+    @Test
+    fun whitespaceOnlyInstructionsAreNotGrantable() {
+        val manifest =
+            PluginManifest(
+                apiVersion = 2,
+                capabilities = emptyList(),
+                id = "example",
+                instructions = " \n\t",
+                name = "Example",
+                version = "1.0.0",
+            )
+
+        assertFalse(manifest.grantContributions().any { it.grant.kind == "instructions" })
+        assertFalse(
+            manifest.copy(instructions = "\u0085").grantContributions().any {
+                it.grant.kind == "instructions"
+            }
+        )
+        assertTrue(
+            manifest.copy(instructions = "\u001c").grantContributions().any {
+                it.grant.kind == "instructions"
+            }
+        )
+        assertTrue(
+            manifest.copy(instructions = "Guide").grantContributions().any {
+                it.grant.kind == "instructions"
+            }
+        )
+    }
 
     @Test
     fun movingSupplierRemovesOnlyThePreviousSelectedCredentialContribution() {
@@ -487,6 +518,19 @@ class PluginGrantsTest {
     }
 
     @Test
+    fun revokingPluginGrantRequiresAccessReview() {
+        val before =
+            PluginGrantDraft(grants = listOf(PluginInstanceGrant(PluginGrantAccess.A(), support)))
+
+        val lines = pluginGrantReview(before, PluginGrantDraft(), catalog = null)
+
+        assertEquals(1, lines.size)
+        assertEquals(ReviewKind.Reduction, lines.single().kind)
+        assertTrue(lines.single().requiresReview)
+        assertTrue(needsReview(lines, preview = null))
+    }
+
+    @Test
     fun onlyResourceTypesMatchingDeclaredContributionFieldsAreSelectable() {
         val manifest =
             PluginManifest(
@@ -551,5 +595,21 @@ class PluginGrantsTest {
             contributions.first { it.grant.kind == "hook" }.resourceTypes.map { it.name },
         )
         assertTrue(contributions.first { it.grant.name == "unrestricted" }.resourceTypes.isEmpty())
+    }
+
+    @Test
+    fun savedResourceRootsForRemovedContributionTypesAreStale() {
+        val resources =
+            listOf(
+                PluginResourceRef("support", "channel"),
+                PluginResourceRef("engineering", "team"),
+            )
+        val currentTypes = listOf(PluginResourceType("Channels", "channel"))
+
+        assertEquals(
+            listOf(PluginResourceRef("engineering", "team")),
+            staleResourceRestrictions(resources, currentTypes),
+        )
+        assertEquals(resources, staleResourceRestrictions(resources, emptyList()))
     }
 }

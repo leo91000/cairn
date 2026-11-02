@@ -266,7 +266,7 @@ fn declared(manifest: &cairn_plugin_api::Manifest, grant: &PluginContributionGra
         Kind::ProjectSource => manifest.project_source(&grant.name).is_some(),
         Kind::SkillSource => manifest.skill_source(&grant.name).is_some(),
         Kind::RunCredentials => grant.name.is_empty() && manifest.run_credentials.is_some(),
-        Kind::Instructions => grant.name.is_empty() && !manifest.instructions.is_empty(),
+        Kind::Instructions => grant.name.is_empty() && !manifest.instructions.trim().is_empty(),
     }
 }
 
@@ -690,6 +690,33 @@ pub(crate) async fn replace(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn instruction_grants_require_nonblank_declared_content() {
+        let manifest: cairn_plugin_api::Manifest = serde_json::from_value(json!({
+            "id": "example",
+            "name": "Example",
+            "version": "1",
+            "apiVersion": 2,
+            "capabilities": [],
+            "instructions": " \n\t"
+        }))
+        .unwrap();
+        let grant = PluginContributionGrant {
+            kind: Kind::Instructions,
+            name: String::new(),
+            resources: Vec::new(),
+        };
+
+        assert!(!declared(&manifest, &grant));
+        assert!(declared(
+            &cairn_plugin_api::Manifest {
+                instructions: "Guide".into(),
+                ..manifest
+            },
+            &grant,
+        ));
+    }
 
     #[tokio::test]
     async fn legacy_full_access_is_per_instance_and_supplier_removal_never_falls_back() {

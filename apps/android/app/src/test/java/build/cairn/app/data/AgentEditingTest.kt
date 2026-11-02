@@ -38,6 +38,35 @@ class AgentEditingTest {
             storage = NodeStoragePolicy(),
             staleDisks = StaleDisks(count = 0, diskMiB = 0),
         )
+
+    @Test
+    fun accountReviewNamesWhoGetsPluginAccessAndClarifiesNoCodeRulesAreSeparate() {
+        val line =
+            agentAccountReviewLine(
+                listOf(
+                    AgentPreviewAccount(email = "owner@example.test"),
+                    AgentPreviewAccount(email = "member@example.test"),
+                )
+            )
+
+        assertEquals(ReviewKind.Access, line.kind)
+        assertTrue(line.text.contains("owner@example.test"))
+        assertTrue(line.text.contains("member@example.test"))
+        assertTrue(line.text.contains("l’éditeur de règles de hooks sans code n’est pas inclus"))
+    }
+
+    @Test
+    fun newAgentReviewStatesThatOnlyTheOwnerCanAccessIt() {
+        val line = newAgentAccountReviewLine()
+
+        assertEquals(ReviewKind.Access, line.kind)
+        assertTrue(
+            line.text.contains("Seul le propriétaire de l’installation a accès à un nouvel agent")
+        )
+        assertTrue(line.text.contains("les membres n’y ont pas accès par défaut"))
+        assertTrue(line.text.contains("l’éditeur de règles de hooks sans code n’est pas inclus"))
+    }
+
     private val mac =
         ExecutionNode(
             id = "17ce976c-733b-5e32-9840-7888af8907c0",

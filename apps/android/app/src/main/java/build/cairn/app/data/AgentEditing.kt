@@ -12,6 +12,8 @@ import kotlinx.serialization.json.jsonObject
 
 typealias AgentPreviewRuns = build.cairn.contracts.AgentPreviewRuns
 
+typealias AgentPreviewAccount = build.cairn.contracts.AgentPreviewAccount
+
 typealias AgentDelegationEffect = build.cairn.contracts.AgentDelegationEffect
 
 typealias AgentPreview = build.cairn.contracts.AgentPreview
@@ -620,7 +622,25 @@ enum class ReviewKind(val label: String) {
     Reduction("Réduction"),
 }
 
-data class ReviewLine(val kind: ReviewKind, val text: String)
+data class ReviewLine(
+    val kind: ReviewKind,
+    val text: String,
+    val requiresReview: Boolean = false,
+)
+
+fun agentAccountReviewLine(accounts: List<AgentPreviewAccount>): ReviewLine {
+    val emails = accounts.map { it.email }.joinToString().ifBlank { "Aucun compte retourné" }
+    return ReviewLine(
+        ReviewKind.Access,
+        "Comptes ayant accès à cet agent : $emails. Cette revue couvre les droits des plugins ; l’éditeur de règles de hooks sans code n’est pas inclus dans ce changement.",
+    )
+}
+
+fun newAgentAccountReviewLine(): ReviewLine =
+    ReviewLine(
+        ReviewKind.Access,
+        "Seul le propriétaire de l’installation a accès à un nouvel agent ; les membres n’y ont pas accès par défaut. Cette revue couvre les droits des plugins ; l’éditeur de règles de hooks sans code n’est pas inclus dans ce changement.",
+    )
 
 private val sandboxStrictness = mapOf("yolo" to 0, "workspace-write" to 1, "read-only" to 2)
 
@@ -843,7 +863,7 @@ fun AgentPreview.preselectedReapprovals(): Set<String> =
  * its own. Otherwise the page saves directly.
  */
 fun needsReview(lines: List<ReviewLine>, preview: AgentPreview?): Boolean =
-    lines.any { it.kind != ReviewKind.Reduction } ||
+    lines.any { it.kind != ReviewKind.Reduction || it.requiresReview } ||
         (preview != null &&
             (preview.runs.queued + preview.runs.running > 0 ||
                 preview.suspendedDelegations().any { !it.alreadySuspended }))

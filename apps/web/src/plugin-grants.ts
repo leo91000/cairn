@@ -224,6 +224,28 @@ export function selectableResourceTypes(types: PluginResourceType[], fieldTypes:
   return types.filter(type => fieldTypes.some(fieldType => isAncestorOrSelf(types, type.name, fieldType)))
 }
 
+export function staleResourceRestrictions(resources: PluginResourceRef[], selectableTypes: string[]): PluginResourceRef[] {
+  const selectable = new Set(selectableTypes)
+  return resources.filter(resource => !selectable.has(resource.resourceType))
+}
+
+function hasNonRustWhitespace(value: string): boolean {
+  return [...value].some((character) => {
+    const codePoint = character.codePointAt(0)!
+    return !(codePoint >= 0x09 && codePoint <= 0x0D)
+      && codePoint !== 0x20
+      && codePoint !== 0x85
+      && codePoint !== 0xA0
+      && codePoint !== 0x1680
+      && !(codePoint >= 0x2000 && codePoint <= 0x200A)
+      && codePoint !== 0x2028
+      && codePoint !== 0x2029
+      && codePoint !== 0x202F
+      && codePoint !== 0x205F
+      && codePoint !== 0x3000
+  })
+}
+
 export function contributions(manifest: PluginManifest): Contribution[] {
   const named = (kind: PluginContributionGrant['kind'], items: {
     name: string
@@ -256,7 +278,7 @@ export function contributions(manifest: PluginManifest): Contribution[] {
           resourceTypes: [],
         }]
       : []),
-    ...(manifest.instructions
+    ...(manifest.instructions && hasNonRustWhitespace(manifest.instructions)
       ? [{
           kind: 'instructions' as const,
           name: '',

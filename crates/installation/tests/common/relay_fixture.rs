@@ -153,6 +153,27 @@ async fn fixture_task_authors(headers: HeaderMap) -> Result<Json<TaskAuthorPolic
     }))
 }
 
+async fn fixture_native_authority(headers: HeaderMap) -> Result<Json<Value>> {
+    if headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        != Some("Bearer fixture-only")
+    {
+        return Err(Error::unauthorized("Incorrect fixture installation token."));
+    }
+
+    Ok(Json(json!({
+        "00000000-0000-4000-8000-000000000010": {
+            "email": "owner@example.test",
+            "accessId": "owner:fixture",
+        },
+        "00000000-0000-4000-8000-000000000011": {
+            "email": "member@example.test",
+            "accessId": "member:fixture",
+        },
+    })))
+}
+
 async fn fixture_plugin_authorization(
     State(service): State<Arc<Service>>,
     headers: HeaderMap,
@@ -213,6 +234,10 @@ pub async fn claimed(service: &Service) -> Result<()> {
         .route(
             "/api/relay/00000000-0000-4000-8000-000000000055/task-authors",
             get(fixture_task_authors),
+        )
+        .route(
+            "/api/relay/00000000-0000-4000-8000-000000000055/native-authority",
+            get(fixture_native_authority),
         )
         .route(
             "/api/relay/00000000-0000-4000-8000-000000000055/plugin-mcp-authorization",

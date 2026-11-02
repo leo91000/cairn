@@ -4,6 +4,7 @@ import build.cairn.contracts.AgentPluginGrants
 import build.cairn.contracts.PluginContributionGrant
 import build.cairn.contracts.PluginGrantAccess
 import build.cairn.contracts.PluginInstanceGrant
+import build.cairn.contracts.PluginResourceRef
 import build.cairn.contracts.PluginResourceType
 import kotlinx.serialization.Serializable
 
@@ -323,6 +324,29 @@ data class GrantContribution(
     val resourceTypes: List<PluginResourceType>,
 )
 
+fun staleResourceRestrictions(
+    resources: List<PluginResourceRef>,
+    selectableTypes: List<PluginResourceType>,
+): List<PluginResourceRef> {
+    val selectable = selectableTypes.mapTo(mutableSetOf()) { it.name }
+    return resources.filterNot { it.resourceType in selectable }
+}
+
+private fun Char.isRustWhitespace(): Boolean =
+    this in '\u0009'..'\u000D' ||
+        this == '\u0020' ||
+        this == '\u0085' ||
+        this == '\u00A0' ||
+        this == '\u1680' ||
+        this in '\u2000'..'\u200A' ||
+        this == '\u2028' ||
+        this == '\u2029' ||
+        this == '\u202F' ||
+        this == '\u205F' ||
+        this == '\u3000'
+
+private fun String.hasNonRustWhitespace(): Boolean = any { !it.isRustWhitespace() }
+
 fun PluginManifest.grantContributions(): List<GrantContribution> = buildList {
     fun add(
         kind: String,
@@ -368,7 +392,7 @@ fun PluginManifest.grantContributions(): List<GrantContribution> = buildList {
             "runCredentials",
             description = "Identifiants de run : accès direct avec ce compte de service",
         )
-    if (instructions.isNotBlank())
+    if (instructions.hasNonRustWhitespace())
         add("instructions", description = "Instructions ajoutées au prompt")
     conditions.forEach { add("condition", it.name, it.description) }
     projectSources.forEach { add("projectSource", it.name, it.title) }
@@ -389,8 +413,10 @@ fun pluginGrantReview(
                 val name = catalog?.connections?.find { it.id == id }?.name ?: id
                 add(
                     ReviewLine(
-                        ReviewKind.Access,
+                        if (after.grants.none { it.instanceId == id }) ReviewKind.Reduction
+                        else ReviewKind.Access,
                         "$name : ${after.description(id)}. Effectif immédiatement, y compris dans les conversations en cours.",
+                        requiresReview = after.grants.none { it.instanceId == id },
                     )
                 )
             }

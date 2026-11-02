@@ -48,6 +48,7 @@ import {
   mainLockedSections,
   nativeReviewNodes,
   needsReview,
+  newAgentAccountReviewLine,
   newAgentDraft,
   nodeName,
   nodesFor,
@@ -170,6 +171,9 @@ const context = computed<Context>(() => ({
 }))
 const access = computed(() => draft.value.access)
 const backend = computed(() => backendOf(access.value))
+const heldPluginAccess = computed(() => grantsError.value
+  ? draft.value.plugins
+  : grants.value.grants.map(grant => grant.instanceId))
 // Nodes of the agent's execution backend, the only ones it can be granted.
 const availableNodes = computed(() => nodesFor(nodes.value, backend.value))
 const changed = computed(() => [...new Set([...changes(saved.value, draft.value), ...(grantsChanged.value ? ['plugins' as const] : [])])])
@@ -516,6 +520,7 @@ function grantReviewLines(): ReviewLine[] {
       if (previous && !current) {
         return {
           kind: 'reduction' as const,
+          requiresReview: true,
           section: 'plugins' as const,
           text: `Removed: ${connectionName(instance)} access. Effective immediately, including running conversations.`,
         }
@@ -529,6 +534,15 @@ function grantReviewLines(): ReviewLine[] {
     }),
     ...(JSON.stringify(savedGrants.value.runCredentialInstances) !== JSON.stringify(grants.value.runCredentialInstances) ? [{ kind: 'secret' as const, section: 'plugins' as const, text: `Run credential suppliers: ${grants.value.runCredentialInstances.map(connectionName).join(', ') || 'None'}. Credentials void tool resource restrictions.` }] : []),
   ]
+}
+
+function agentAccountReviewLine(preview: Preview): ReviewLine {
+  const names = preview.accounts?.map(account => account.email).join(', ') || 'No accounts'
+  return {
+    kind: 'secret',
+    section: 'plugins',
+    text: `Accounts with access to this agent: ${names}. Plugin grant review only; the no-code hook rule editor is not included in this change.`,
+  }
 }
 
 async function load() {
@@ -637,6 +651,15 @@ async function requestSave() {
   // Powers, secrets, interrupted work and delegations this edit suspends deserve a look; anything
   // else saves directly.
   if (needsReview(lines, current)) {
+    if (!isNew.value && current && !current.accounts) {
+      failed(new Error('Could not verify which accounts can use this agent. Reconnect the installation and try again.'))
+      return
+    }
+
+    if (!isNew.value && current)
+      lines = [...lines, agentAccountReviewLine(current)]
+    else if (isNew.value)
+      lines = [...lines, newAgentAccountReviewLine()]
     reviewError.value = ''
     review.value = { lines, delegations: effects, nativeNodes: nativeReviewNodes(draft.value, context.value) }
     return
@@ -1199,8 +1222,8 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
               <p class="text-sm">
                 Plugins could not be loaded, so this agent’s plugin access cannot be shown or changed. {{ catalogError || grantsError }}
               </p>
-              <ul v-if="draft.plugins.length" class="grid gap-1 text-sm text-muted" aria-label="Held plugin access">
-                <li v-for="grant in draft.plugins" :key="grant">
+              <ul v-if="heldPluginAccess.length" class="grid gap-1 text-sm text-muted" aria-label="Held plugin access">
+                <li v-for="grant in heldPluginAccess" :key="grant">
                   Granted instance {{ grant.slice(0, 8) }}…
                 </li>
               </ul>
@@ -1217,6 +1240,7 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
               :packages="catalog.packages"
               :connections="catalog.connections"
               :suspended="suspended"
+              :disabled="busy"
             />
             <p v-if="!catalogError && !grantablePackages(catalog.packages).length && !catalog.packages.length" class="text-xs text-muted">
               Plugins add secrets and tools that you grant per agent.

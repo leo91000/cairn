@@ -7,6 +7,7 @@ import {
   removeGrant,
   removeGrantContribution,
   selectableResourceTypes,
+  staleResourceRestrictions,
 } from '../plugin-grants'
 import PluginResourcePicker from './PluginResourcePicker.vue'
 
@@ -55,8 +56,21 @@ function held(item: typeof available.value[number]) {
   return grant.value?.access.type === 'selected' ? grant.value.access.contributions.find(value => value.kind === item.kind && value.name === item.name) : undefined
 }
 
+function staleResources(item: typeof available.value[number]) {
+  if (!['tool', 'command', 'hook'].includes(item.kind))
+    return []
+  return staleResourceRestrictions(held(item)?.resources ?? [], item.resourceTypes)
+}
+
 function removeStale(item: typeof stale.value[number]) {
   draft.value = removeGrantContribution(draft.value, props.instanceId, item)
+}
+
+function removeStaleResource(item: typeof available.value[number], resource: typeof item.resources[number]) {
+  const current = held(item)
+  if (!current)
+    return
+  update(item, true, current.resources.filter(value => value.resourceType !== resource.resourceType || value.id !== resource.id))
 }
 
 function supplier(on: boolean) {
@@ -103,6 +117,22 @@ function supplier(on: boolean) {
           >
           <span><strong>{{ item.kind }} {{ item.name }}</strong><small class="block text-xs text-muted">{{ item.description }}</small></span>
         </label>
+        <div v-if="staleResources(item).length" role="alert" class="grid gap-2 rounded-lg border border-warning p-3">
+          <p class="text-sm text-warning">
+            Saved resource roots include types this contribution no longer accepts. Requests fail closed until corrected. Removing the last root makes this contribution unrestricted; uncheck the contribution to revoke it instead.
+          </p>
+          <div v-for="resource in staleResources(item)" :key="`${resource.resourceType}:${resource.id}`" class="flex min-w-0 flex-col items-start gap-2 sm:flex-row sm:justify-between">
+            <span class="min-w-0 break-words text-sm">{{ resource.resourceType }} {{ resource.id }}</span>
+            <button
+              type="button"
+              class="max-w-full whitespace-normal rounded-md border border-line px-3 py-1 text-left text-sm sm:shrink-0"
+              :aria-label="`Remove stale resource restriction ${item.kind} ${item.name} ${resource.resourceType} ${resource.id}`"
+              @click="removeStaleResource(item, resource)"
+            >
+              Remove restriction
+            </button>
+          </div>
+        </div>
         <PluginResourcePicker
           v-if="held(item) && ['tool', 'command', 'hook'].includes(item.kind) && item.resourceTypes.length"
           :model-value="held(item)!.resources"
@@ -111,6 +141,9 @@ function supplier(on: boolean) {
           :types="selectableResourceTypes(manifest.resources ?? [], item.resourceTypes)"
           @update:model-value="update(item, true, $event)"
         />
+        <p v-else-if="held(item) && staleResources(item).length" class="text-xs text-warning">
+          This grant has stale resource restrictions and fails closed. Remove the contribution to revoke its access.
+        </p>
         <p v-else-if="held(item)" class="text-xs text-muted">
           {{ item.kind === 'condition' ? 'No resource restriction. Waiting remains limited by project access.' : 'No resource restriction.' }}
         </p>

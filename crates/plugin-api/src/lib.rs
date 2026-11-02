@@ -564,7 +564,7 @@ impl Manifest {
     fn validate_agent_interface(&self) -> Result<(), &'static str> {
         let interface = !self.commands.is_empty()
             || !self.tools.is_empty()
-            || !self.instructions.is_empty()
+            || !self.instructions.trim().is_empty()
             || !self.conditions.is_empty()
             || !self.hooks.is_empty();
         if interface && self.agent_access.is_none() {
@@ -803,6 +803,28 @@ path = "/usr/bin/probe"
         value["programs"][0]["installer"] = json!("programs/probe.luau");
         value["programs"][0]["path"] = json!("/usr/bin/probe");
         assert!(manifest(value).is_err());
+    }
+
+    #[test]
+    fn only_nonblank_instructions_require_agent_access() {
+        let base = json!({
+            "id": "probe", "name": "Probe", "version": "1", "apiVersion": 2,
+            "capabilities": ["exec"],
+            "programs": [{"name":"probe", "path":"/usr/bin/probe"}],
+        });
+
+        assert!(manifest(base).is_ok());
+        let base = json!({
+            "id": "probe", "name": "Probe", "version": "1", "apiVersion": 2,
+            "capabilities": ["exec"],
+            "programs": [{"name":"probe", "path":"/usr/bin/probe"}],
+        });
+        let mut blank_instructions = base.clone();
+        blank_instructions["instructions"] = " \n ".into();
+        assert!(manifest(blank_instructions).is_ok());
+        let mut nonblank_instructions = base;
+        nonblank_instructions["instructions"] = "Guide".into();
+        assert!(manifest(nonblank_instructions).is_err());
     }
 
     #[test]

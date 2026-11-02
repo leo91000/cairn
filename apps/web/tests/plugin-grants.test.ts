@@ -12,6 +12,7 @@ import {
   removeGrant,
   removeGrantContribution,
   selectableResourceTypes,
+  staleResourceRestrictions,
 } from '../src/plugin-grants'
 
 it('caps resource roots per contribution at the backend limit while allowing removal', () => {
@@ -308,6 +309,9 @@ it('offers every declared contribution and no credentials for packages without t
   } as PluginManifest
   expect(contributions(manifest).map(item => item.kind)).toEqual(['tool', 'command', 'hook', 'runCredentials', 'instructions', 'condition', 'projectSource', 'skillSource'])
   expect(contributions({ ...manifest, runCredentials: null }).some(item => item.kind === 'runCredentials')).toBe(false)
+  expect(contributions({ ...manifest, instructions: ' \n\t' }).some(item => item.kind === 'instructions')).toBe(false)
+  expect(contributions({ ...manifest, instructions: '\u0085' }).some(item => item.kind === 'instructions')).toBe(false)
+  expect(contributions({ ...manifest, instructions: '\u001C' }).some(item => item.kind === 'instructions')).toBe(true)
 })
 it('offers only resource types that can restrict a declared tool, command or hook field', () => {
   const types = [
@@ -330,4 +334,16 @@ it('offers only resource types that can restrict a declared tool, command or hoo
   ])
   expect(selectableResourceTypes(types, ['thread']).map(type => type.name)).toEqual(['server', 'channel', 'thread'])
   expect(selectableResourceTypes(types, []).map(type => type.name)).toEqual([])
+})
+
+it('identifies saved resource roots no longer supported by a contribution', () => {
+  const resources = [
+    { resourceType: 'channel', id: 'support' },
+    { resourceType: 'team', id: 'engineering' },
+  ]
+
+  expect(staleResourceRestrictions(resources, ['server', 'channel'])).toEqual([
+    { resourceType: 'team', id: 'engineering' },
+  ])
+  expect(staleResourceRestrictions(resources, [])).toEqual(resources)
 })

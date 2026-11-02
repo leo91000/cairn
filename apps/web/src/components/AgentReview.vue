@@ -28,11 +28,11 @@ const kinds: Record<ReviewLine['kind'], [ChipTone, string]> = {
   <Modal title="Review before saving" @close="!busy && emit('close')">
     <div class="grid gap-4 px-6.5 py-6 phone:p-5">
       <ul class="grid gap-3">
-        <li v-for="line in lines" :key="line.text" class="flex items-start gap-2.5 text-sm leading-relaxed">
+        <li v-for="line in lines" :key="line.text" class="flex min-w-0 items-start gap-2.5 text-sm leading-relaxed">
           <AccessChip :tone="kinds[line.kind][0]" class="mt-0.5">
             {{ kinds[line.kind][1] }}
           </AccessChip>
-          <span class="min-w-0">{{ line.text }}</span>
+          <span class="min-w-0 flex-1 [overflow-wrap:anywhere]">{{ line.text }}</span>
         </li>
       </ul>
       <fieldset v-if="delegations.length" class="grid gap-2.5 border-t border-line pt-4">
