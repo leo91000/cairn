@@ -537,10 +537,7 @@ internal fun ChatPage(
     val readOnly = chat != null && !canDirectChat(state.usableAgents, chat, chats.orEmpty())
     // A member the owner has not yet given any agent cannot start a conversation.
     val noAgent = id == null && state.usableAgents?.isEmpty() == true
-    val timeline =
-        remember(history, live.events, chats) {
-            quotaTimeline(history, live.events).followingDelegations(chats)
-        }
+    val timeline = remember(history, chats) { history.followingDelegations(chats) }
     var asking by remember { mutableStateOf<ChatQuestion?>(null) }
     var stopping by remember { mutableStateOf(false) }
     var removing by remember { mutableStateOf<ChatMessage?>(null) }
