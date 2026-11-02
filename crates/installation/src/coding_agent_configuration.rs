@@ -231,9 +231,13 @@ pub(crate) fn installation_preferences(
 
 /// Read once for an agent list; do not issue a configuration query per profile.
 pub(crate) fn attach_defaults(db: &Db<'_>, agents: &mut [Agent]) -> Result<()> {
+    if agents.is_empty() {
+        return Ok(());
+    }
+    let scope = (agents.len() == 1).then(|| agents[0].id.to_string());
     let statement = db
         .0
-        .prepare_cached("SELECT scope,provider,document,removed FROM coding_agent_configurations");
+        .prepare_cached("SELECT scope,provider,document,removed FROM coding_agent_configurations WHERE ?1 IS NULL OR scope='' OR scope=?1");
     let mut statement = match statement {
         Ok(statement) => statement,
         // Earlier migrations read agent grants before this additive table exists.
@@ -248,7 +252,7 @@ pub(crate) fn attach_defaults(db: &Db<'_>, agents: &mut [Agent]) -> Result<()> {
         Err(error) => return Err(error.into()),
     };
     let records = statement
-        .query_map([], |row| {
+        .query_map([scope], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,

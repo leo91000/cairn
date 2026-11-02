@@ -17,6 +17,8 @@ import org.junit.Test
 abstract class CodingAgentConfigurationCases {
     @get:Rule val compose = createComposeRule()
 
+    protected open fun capture(name: String) = Unit
+
     private val initial =
         CodingAgentConfiguration(
             agentId = null,
@@ -102,6 +104,7 @@ abstract class CodingAgentConfigurationCases {
         )
         release.complete(Unit)
         compose.waitForIdle()
+        capture("form")
         compose.onNodeWithText("Enregistrer", substring = false).assertIsEnabled().performClick()
         compose.waitUntil { saves.isNotEmpty() }
         assertTrue(saves.single().document.contains("model_context_window = 1000000"))
@@ -138,6 +141,7 @@ abstract class CodingAgentConfigurationCases {
         compose.onNodeWithText("Continuer à modifier").performClick()
         compose.onNodeWithText("Configuration native").assertTextContains(draft)
         assertEquals(0, backs)
+        capture("text")
     }
 
     @Test
