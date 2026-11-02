@@ -363,7 +363,7 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun savedCodexQuotaResumeSubmitsChangedModelDefaultEffort() =
-        conversation("failed", quota = true, resumeChangedModel = true) { server ->
+        conversation("failed", quota = true, resumeChangedModel = true) { server, _ ->
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
             compose.waitUntil(10000) {
                 compose.onAllNodesWithText("GPT-6 Sol").fetchSemanticsNodes().isNotEmpty()
@@ -409,7 +409,7 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun savedOpenCodeGroupedRouteResumeSubmitsTheExplicitRouteId() =
-        conversation("failed", quota = true, resumeRouteSelection = true) { server ->
+        conversation("failed", quota = true, resumeRouteSelection = true) { server, _ ->
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
             compose.waitUntil(10000) {
                 compose.onAllNodesWithText("Sonnet").fetchSemanticsNodes().isNotEmpty()
@@ -447,7 +447,7 @@ abstract class BackgroundWaitCases {
             quota = true,
             resumeRouteSelection = true,
             resumePinnedRouteSelection = true,
-        ) { server ->
+        ) { server, _ ->
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
             compose.waitUntil(10000) {
                 compose
@@ -490,7 +490,7 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun savedCodexQuotaResumeKeepsEmptyInheritedEffortWithoutPickerChanges() =
-        conversation("failed", quota = true, resumeInheritedEffort = true) { server ->
+        conversation("failed", quota = true, resumeInheritedEffort = true) { server, _ ->
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
             compose.waitUntil(10000) {
                 compose
@@ -528,7 +528,7 @@ abstract class BackgroundWaitCases {
             quota = true,
             resumeInheritedEffort = true,
             resumeInheritedSpeed = true,
-        ) { server ->
+        ) { server, _ ->
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
             compose.waitUntil(10000) {
                 compose
@@ -576,7 +576,7 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun savedCodexQuotaResumeUsesExplicitSameModelDefaultEffort() =
-        conversation("failed", quota = true, resumeSameModelDefault = true) { server ->
+        conversation("failed", quota = true, resumeSameModelDefault = true) { server, _ ->
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
             compose.waitUntil(10000) {
                 compose
@@ -629,7 +629,7 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun savedCodexQuotaResumeKeepsExplicitEffortOverModelDefault() =
-        conversation("failed", quota = true, resumeExplicitEffort = true) { server ->
+        conversation("failed", quota = true, resumeExplicitEffort = true) { server, _ ->
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
             compose.waitUntil(10000) {
                 compose
@@ -685,7 +685,7 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun savedCodexQuotaResumeClearsDefaultIntentWhenReturningToConversationModel() =
-        conversation("failed", quota = true, resumeResetIntent = true) { server ->
+        conversation("failed", quota = true, resumeResetIntent = true) { server, _ ->
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
             compose.waitUntil(10000) {
                 compose
@@ -733,7 +733,7 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun prelaunchQuotaFailureUsesOrdinaryResumeWithoutSavedSelection() =
-        conversation("failed", quota = true, resumePrelaunch = true) { server ->
+        conversation("failed", quota = true, resumePrelaunch = true) { server, _ ->
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
             compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
 
@@ -757,7 +757,7 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun savedCodexResumeKeepsUntouchedBlankModelWhenNothingChanges() =
-        conversation("failed", quota = true, resumeBlankModelNoChange = true) { server ->
+        conversation("failed", quota = true, resumeBlankModelNoChange = true) { server, _ ->
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
             compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
 
@@ -777,7 +777,7 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun savedCodexResumePreservesBlankModelForSpeedOnlyChange() =
-        conversation("failed", quota = true, resumeBlankModelSpeedOnly = true) { server ->
+        conversation("failed", quota = true, resumeBlankModelSpeedOnly = true) { server, _ ->
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
             compose.onNodeWithTag("model-picker").performClick()
             compose
@@ -807,7 +807,7 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun savedCodexResumePreservesBlankModelForReasoningOnlyChange() =
-        conversation("failed", quota = true, resumeBlankModelReasoning = true) { server ->
+        conversation("failed", quota = true, resumeBlankModelReasoning = true) { server, _ ->
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
             compose.onNodeWithTag("model-picker").performClick()
             compose
