@@ -119,7 +119,9 @@ pub(super) async fn refresh_with_status(
     status: impl Future<Output = Result<Value>>,
 ) -> Result<()> {
     let id = text(run, "id");
+    let _refresh = s.node_backup_operation.storage_refresh(id).await;
     let status = status.await?;
+    let observed_at = crate::config::now();
     if status["mode"] == "native" {
         if status["availability"] == "unavailable" {
             if status["reason"] != crate::native::MISSING_NATIVE_JOURNAL_CODE {
@@ -134,7 +136,9 @@ pub(super) async fn refresh_with_status(
             );
             return s
                 .store
-                .transaction(move |db| record_missing_native_journal(db, &id, &node, &status))
+                .transaction(move |db| {
+                    record_missing_native_journal(db, &id, &node, &status, observed_at)
+                })
                 .await;
         }
         let (id, node, status) = (
@@ -165,7 +169,13 @@ pub(super) async fn refresh_with_status(
 }
 
 /// Record that the node could not inspect the journal without replacing its last known metrics.
-fn record_missing_native_journal(db: &Db<'_>, id: &str, node: &str, status: &Value) -> Result<()> {
+fn record_missing_native_journal(
+    db: &Db<'_>,
+    id: &str,
+    node: &str,
+    status: &Value,
+    observed_at: i64,
+) -> Result<()> {
     let Some(current) = db.run(id)? else {
         return Ok(());
     };
@@ -173,18 +183,18 @@ fn record_missing_native_journal(db: &Db<'_>, id: &str, node: &str, status: &Val
         return Ok(());
     }
 
-    let storage = storage_with_missing_native_journal(&current["storage"], status);
+    let storage = storage_with_missing_native_journal(&current["storage"], status, observed_at);
     db.update_run_boundary(id, &json!({ "storage": storage }))?;
     Ok(())
 }
 
-fn storage_with_missing_native_journal(current: &Value, status: &Value) -> Value {
+fn storage_with_missing_native_journal(current: &Value, status: &Value, observed_at: i64) -> Value {
     let mut storage = current.as_object().cloned().unwrap_or_default();
     storage.insert("mode".into(), "native".into());
     storage.insert("availability".into(), "unavailable".into());
     storage.insert("availabilityReason".into(), status["reason"].clone());
     storage.insert("metricsAvailability".into(), "stale".into());
-    storage.insert("availabilityObservedAt".into(), crate::config::now().into());
+    storage.insert("availabilityObservedAt".into(), observed_at.into());
     Value::Object(storage)
 }
 
@@ -276,7 +286,7 @@ mod tests {
             "reason": crate::native::MISSING_NATIVE_JOURNAL_CODE
         });
 
-        let recorded = storage_with_missing_native_journal(&previous, &response);
+        let recorded = storage_with_missing_native_journal(&previous, &response, 123);
 
         assert_eq!(recorded["dirtyBytes"], 4096);
         assert_eq!(recorded["localBytes"], 8192);
@@ -285,6 +295,6 @@ mod tests {
         assert_eq!(recorded["availability"], "unavailable");
         assert_eq!(recorded["availabilityReason"], "missing_native_journal");
         assert_eq!(recorded["metricsAvailability"], "stale");
-        assert!(recorded["availabilityObservedAt"].as_i64().unwrap() > 0);
+        assert_eq!(recorded["availabilityObservedAt"], 123);
     }
 }
