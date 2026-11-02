@@ -122,11 +122,21 @@ pub(crate) async fn run_authorized<T>(
         };
         let result = tokio::select! {
             biased;
-            () = stop.cancelled() => Err(Error::unavailable(STOPPED)),
-            () = s.shutdown.cancelled() => Err(Error::unavailable(STOPPED)),
-            () = authorize.cancelled() => Err(Error::forbidden("The accepted job was cancelled.")),
-            _ = yield_requested(s) => Err(Error::unavailable(YIELDED)),
-            result = authenticated => result,
+            () = stop.cancelled() => {
+                Err(Error::unavailable(STOPPED))
+            }
+            () = s.shutdown.cancelled() => {
+                Err(Error::unavailable(STOPPED))
+            }
+            () = authorize.cancelled() => {
+                Err(Error::forbidden("The accepted job was cancelled."))
+            }
+            _ = yield_requested(s) => {
+                Err(Error::unavailable(YIELDED))
+            }
+            result = authenticated => {
+                result
+            }
         };
         session.close().await;
         result

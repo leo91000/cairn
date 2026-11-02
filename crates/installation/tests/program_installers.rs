@@ -1411,10 +1411,16 @@ async fn revoked_agent_first_use_cannot_download_or_publish_a_program() {
         });
         let requests = if metadata { 1 } else { 2 };
         tokio::select! {
-            result = &mut call => panic!("First-use call ended before the installer gate: {result:?}"),
-            () = common::eventually(std::time::Duration::from_secs(15), std::time::Duration::from_millis(10), async || {
-                (f.publisher.requests.load(Ordering::SeqCst) == requests).then_some(())
-            }) => {},
+            result = &mut call => {
+                panic!("First-use call ended before the installer gate: {result:?}");
+            }
+            () = common::eventually(
+                std::time::Duration::from_secs(15),
+                std::time::Duration::from_millis(10),
+                async || {
+                    (f.publisher.requests.load(Ordering::SeqCst) == requests).then_some(())
+                },
+            ) => {}
         }
         if metadata {
             f.service
