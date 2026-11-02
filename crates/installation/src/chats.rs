@@ -1374,6 +1374,16 @@ impl Service {
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        self.chat_from_run_live(run_id, crate::authorization::Authorization::once(authorize))
+            .await
+    }
+
+    pub(crate) async fn chat_from_run_live(
+        &self,
+        run_id: &str,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<Value> {
+        authorize.recheck().await?;
         let origin = crate::native::policy::origin();
         if origin.known() {
             let run = self.store.run(run_id).await?;
@@ -1381,6 +1391,7 @@ impl Service {
         }
 
         let active = self.worker.active.lock().await;
+        authorize.recheck().await?;
         if active.contains_key(run_id) {
             return Err(Error::conflict(
                 "Wait for this run to finish stopping before continuing in chat.",
@@ -1389,7 +1400,7 @@ impl Service {
         let run_id = run_id.to_owned();
         self.store
             .transaction(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 from_run(db, &run_id, &origin)
             })
             .await
@@ -1456,10 +1467,12 @@ impl Service {
     }
 
     /// Compacts the conversation's native context while it is idle.
-    pub(crate) async fn chat_compact_authorized<F>(&self, id: &str, authorize: F) -> Result<Value>
-    where
-        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
-    {
+    pub(crate) async fn chat_compact_live(
+        &self,
+        id: &str,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<Value> {
+        authorize.recheck().await?;
         let origin = crate::native::policy::origin();
         if origin.known() {
             crate::native::policy::refresh_chat(self, id).await?;
@@ -1469,6 +1482,7 @@ impl Service {
         // A succeeded run's worker may still be saving its checkpoint: the compaction resets
         // it, so it waits for that worker to release the run, like resuming does.
         let active = self.worker.active.lock().await;
+        authorize.recheck().await?;
         let run_id = self
             .store
             .read({
@@ -1481,10 +1495,11 @@ impl Service {
                 "Wait for the current turn to finish before compacting.",
             ));
         }
+        authorize.recheck().await?;
         let result = self
             .store
             .transaction(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 compact(db, &id, &origin)
             })
             .await?;

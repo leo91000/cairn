@@ -151,6 +151,7 @@ type LocalAuthorization = std::sync::Arc<dyn Fn(&Db<'_>) -> Result<()> + Send + 
 pub(crate) struct Authorization {
     local: LocalAuthorization,
     public_credential: Option<String>,
+    management_authorization: Option<crate::authorization::Authorization>,
     cancellation: CancellationToken,
     admitted: Arc<AtomicBool>,
 }
@@ -169,9 +170,18 @@ impl Authorization {
         Self {
             local: std::sync::Arc::new(local),
             public_credential,
+            management_authorization: None,
             cancellation: CancellationToken::new(),
             admitted: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    pub(crate) fn with_management_authorization(
+        mut self,
+        authorization: crate::authorization::Authorization,
+    ) -> Self {
+        self.management_authorization = Some(authorization);
+        self
     }
 
     pub(crate) fn workspace(bearer: &str, run: &Value) -> Self {
@@ -198,11 +208,17 @@ impl Authorization {
     }
 
     pub(crate) fn check_access(&self, db: &Db<'_>) -> Result<()> {
+        if let Some(authorization) = &self.management_authorization {
+            authorization.check_local(db)?;
+        }
         (self.local)(db)
     }
 
     pub(crate) async fn recheck(&self, s: &Service) -> Result<()> {
         self.check_cancellation()?;
+        if let Some(authorization) = &self.management_authorization {
+            authorization.recheck().await?;
+        }
         self.recheck_access(s).await
     }
 

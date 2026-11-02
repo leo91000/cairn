@@ -12,6 +12,7 @@ use crate::{
     service::Service,
     validation::text,
 };
+use cairn_contracts::PluginContributionKind as Kind;
 use cairn_plugin_api::{Output, parse_arguments, usage};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -21,11 +22,25 @@ async fn granted(
     s: &Service,
     agent_id: &str,
     plugin: Option<&str>,
+    contribution: Option<(Kind, &str)>,
 ) -> Result<Vec<(Package, Vec<Connection>)>> {
     let mut by_plugin = BTreeMap::<String, Vec<Connection>>::new();
     for connection in s.store.plugin_instances().await? {
-        if connection.grants(agent_id) && plugin.is_none_or(|plugin| plugin == connection.plugin_id)
-        {
+        if !connection.enabled || plugin.is_some_and(|plugin| plugin != connection.plugin_id) {
+            continue;
+        }
+        let (agent, id) = (agent_id.to_owned(), connection.id.clone());
+        let contribution = contribution.map(|(kind, name)| (kind, name.to_owned()));
+        let allowed = s
+            .store
+            .read(move |db| match contribution {
+                Some((kind, name)) => {
+                    Ok(db.plugin_contribution(&agent, &id, kind, &name)?.is_some())
+                }
+                None => db.has_plugin_grant(&agent, &id),
+            })
+            .await?;
+        if allowed {
             by_plugin
                 .entry(connection.plugin_id.clone())
                 .or_default()
@@ -52,23 +67,49 @@ fn agent(run: &Value) -> (String, Value) {
     (id.clone(), json!({ "id": id, "name": text(agent, "name") }))
 }
 
-/// Prompt instructions from every package granting this agent, one paragraph each.
-pub async fn instructions(s: &Service, agent_id: &str) -> Result<String> {
-    Ok(granted(s, agent_id, None)
-        .await?
-        .iter()
-        .map(|(package, _)| package.manifest.instructions.trim())
-        .filter(|text| !text.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n"))
+/// Prompt instructions from every package granting this run's agent, one paragraph each.
+pub async fn instructions(s: &Service, run: &Value) -> Result<String> {
+    let agent_id = text(&run["snapshot"]["agent"], "id");
+    let packages = granted(s, agent_id, None, Some((Kind::Instructions, ""))).await?;
+    let mut paragraphs = Vec::new();
+    for (package, instances) in packages {
+        let snapshot = super::grant_authorization::Snapshot::for_run(s, run, &package).await?;
+        snapshot.recheck(s).await?;
+        let expected = snapshot.clone();
+        let agent_id = agent_id.to_owned();
+        let still_granted = s
+            .store
+            .read(move |db| {
+                expected.authorize(db)?;
+                for instance in instances {
+                    let current = super::connections::authorize(db, &instance)?;
+                    if db
+                        .plugin_contribution(&agent_id, &current.id, Kind::Instructions, "")?
+                        .is_some()
+                    {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            })
+            .await?;
+        if !still_granted {
+            continue;
+        }
+
+        let instructions = package.manifest.instructions.trim();
+        if !instructions.is_empty() {
+            paragraphs.push(instructions.to_owned());
+        }
+    }
+    Ok(paragraphs.join("\n"))
 }
 
 /// The run with `pluginInstructions` for its agent, for the launch prompt. A lookup
 /// failure only leaves the instructions out.
 pub async fn with_instructions(s: &Service, run: &Value) -> Value {
     let mut run = run.clone();
-    let agent_id = text(&run["snapshot"]["agent"], "id").to_owned();
-    run["pluginInstructions"] = json!(instructions(s, &agent_id).await.unwrap_or_default());
+    run["pluginInstructions"] = json!(instructions(s, &run).await.unwrap_or_default());
     run
 }
 
@@ -93,7 +134,7 @@ pub async fn command(s: &Service, bearer: &str, input: &Value) -> Result<Value> 
         .await
         .map_err(|_| unavailable())?;
     if let Some(file) = input.get("file").filter(|value| value.is_object()) {
-        let instances = granted(s, &agent_id, Some(plugin))
+        let instances = granted(s, &agent_id, Some(plugin), None)
             .await?
             .into_iter()
             .flat_map(|(_, instances)| instances)
@@ -110,11 +151,37 @@ pub async fn command(s: &Service, bearer: &str, input: &Value) -> Result<Value> 
             "delete" => "files.delete",
             _ => return Err(Error::bad("Unknown file transfer operation.")),
         };
-        let scope = Scope::Agent {
-            agent_id,
-            instances,
-        };
-        let result = scope::call(s, &package, &scope, method, file).await?;
+        let snapshot =
+            super::grant_authorization::Snapshot::capture(s, &agent_id, Some(bearer), &package)
+                .await?;
+        let authorities = instances
+            .iter()
+            .map(|instance| {
+                (
+                    instance.id.clone(),
+                    super::management::Authority::agent_action(
+                        instance.clone(),
+                        snapshot.clone(),
+                        None,
+                    ),
+                )
+            })
+            .collect();
+        let scope = Scope::Contributions(
+            Box::new(Scope::Agent {
+                agent_id,
+                instances,
+            }),
+            authorities,
+        );
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(40),
+            Box::pin(scope::call(s, &package, &scope, method, file)),
+        )
+        .await
+        .map_err(|_| {
+            Error::unavailable("Transfer authorization could not be resolved in time.")
+        })??;
         return Ok(json!({ "output": "json", "value": result }));
     }
     let name = text(input, "command");
@@ -134,7 +201,7 @@ pub async fn command(s: &Service, bearer: &str, input: &Value) -> Result<Value> 
         )));
     };
     let values = parse_arguments(command, &words(input)?).map_err(Error::bad)?;
-    let instances = granted(s, &agent_id, Some(plugin))
+    let instances = granted(s, &agent_id, Some(plugin), Some((Kind::Command, name)))
         .await?
         .into_iter()
         .flat_map(|(_, instances)| instances)
@@ -145,10 +212,17 @@ pub async fn command(s: &Service, bearer: &str, input: &Value) -> Result<Value> 
             package.manifest.name
         )));
     }
-    let scope = Scope::Agent {
-        agent_id,
+    let snapshot =
+        super::grant_authorization::Snapshot::capture(s, &agent_id, Some(bearer), &package).await?;
+    let scope = super::grant_authorization::contribution_scope(
+        s,
+        snapshot,
         instances,
-    };
+        Kind::Command,
+        name,
+        &Value::Object(values.clone()),
+    )
+    .await?;
     let payload = json!({
         "command": name,
         "arguments": values,
@@ -177,18 +251,27 @@ pub async fn command(s: &Service, bearer: &str, input: &Value) -> Result<Value> 
 pub async fn tools(s: &Service, bearer: &str) -> Result<Vec<Value>> {
     let run = authorize(s, bearer).await?;
     let (agent_id, _) = agent(&run);
-    Ok(granted(s, &agent_id, None)
-        .await?
-        .iter()
-        .flat_map(|(package, _)| package.manifest.tools.iter())
-        .map(|tool| {
-            json!({
-                "name": tool.name,
-                "description": tool.description,
-                "inputSchema": tool.input_schema,
-            })
-        })
-        .collect())
+    let mut output = Vec::new();
+    for (package, _) in granted(s, &agent_id, None, None).await? {
+        for tool in &package.manifest.tools {
+            if !granted(
+                s,
+                &agent_id,
+                Some(&package.manifest.id),
+                Some((Kind::Tool, &tool.name)),
+            )
+            .await?
+            .is_empty()
+            {
+                output.push(json!({
+                    "name": tool.name,
+                    "description": tool.description,
+                    "inputSchema": tool.input_schema,
+                }));
+            }
+        }
+    }
+    Ok(output)
 }
 
 /// Calls a package tool, or returns `None` when no granted package declares `name`.
@@ -200,21 +283,37 @@ pub async fn call_tool(
 ) -> Result<Option<Value>> {
     let run = authorize(s, bearer).await?;
     let (agent_id, agent) = agent(&run);
-    let Some((package, instances)) = granted(s, &agent_id, None)
+    let Some((package, instances)) = granted(s, &agent_id, None, Some((Kind::Tool, name)))
         .await?
         .into_iter()
         .find(|(package, _)| package.manifest.tool(name).is_some())
     else {
+        if granted(s, &agent_id, None, None)
+            .await?
+            .iter()
+            .any(|(package, _)| package.manifest.tool(name).is_some())
+        {
+            return Err(Error::forbidden(
+                "This plugin tool is not granted to the agent.",
+            ));
+        }
         return Ok(None);
     };
     let tool = package.manifest.tool(name).expect("found above");
     if !jsonschema::is_valid(&tool.input_schema, input) {
         return Err(Error::bad(format!("Invalid input for {name}.")));
     }
-    let scope = Scope::Agent {
-        agent_id,
+    let snapshot =
+        super::grant_authorization::Snapshot::capture(s, &agent_id, Some(bearer), &package).await?;
+    let scope = super::grant_authorization::contribution_scope(
+        s,
+        snapshot,
         instances,
-    };
+        Kind::Tool,
+        name,
+        input,
+    )
+    .await?;
     let payload = json!({
         "tool": name,
         "input": input,

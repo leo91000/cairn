@@ -416,7 +416,7 @@ async fn merge_http_is_owner_only_and_both_mcp_interfaces_have_the_same_effect()
                     "POST",
                     &format!("/api/agents/{}/merge", source["id"].as_str().unwrap()),
                 )
-                .extension(InstallationIdentity::trusted(role, "fixture-account"))
+                .extension(InstallationIdentity::trusted(role, "fixture-owner"))
                 .body(Body::from(args.to_string()))
                 .unwrap();
                 let response = common::send(&app, request).await;

@@ -1123,12 +1123,12 @@ pub(crate) async fn invoke(
     args: Value,
     bearer: Option<&str>,
 ) -> Result<Value> {
-    let authorize = crate::installation_mcp::management_authorization(bearer);
+    let authorize = crate::installation_mcp::management_authorization(s, bearer).await?;
     match name {
         "get_chat_backend_migration" => {
-            crate::backend_migration::preview(s, text(&args, "chatId"), authorize).await
+            crate::backend_migration::preview_live(s, text(&args, "chatId"), authorize).await
         }
-        "migrate_chat_backend" => s.migrate_chat_backend(args, authorize).await,
+        "migrate_chat_backend" => s.migrate_chat_backend_live(args, authorize).await,
 
         "list_chat_artifacts"
         | "read_chat_artifact"
@@ -1149,22 +1149,14 @@ async fn proxy(
     params: Value,
 ) -> Result<Value> {
     let _guard = s.mcps.lock(id).await;
-    let (server, scope) = s.mcps.grant(s, id, bearer).await?;
-    let authorize = {
-        let id = id.to_owned();
-        let bearer = bearer.to_owned();
-        move |db: &crate::store::Db<'_>| {
-            crate::mcps::grant_in(db, &id, &bearer)?;
-            Ok(())
-        }
-    };
+    let (server, scope, authority) = s.mcps.grant_authorized(s, id, bearer).await?;
+    let authorize = crate::authorization::Authorization::live(s, authority.clone());
     if method == "tools/call" && !scope.allows(text(&params, "name")) {
         return Err(Error::forbidden("This tool is unavailable to this agent."));
     }
     let result = async {
         let mut client =
-            crate::mcp_client::Client::connect_server_authorized(s, &server, authorize.clone())
-                .await?;
+            crate::mcp_client::Client::connect_server_live(s, &server, authority.clone()).await?;
         let unsupported = match method {
             "resources/list" | "resources/templates/list" => {
                 client.capabilities.get("resources").is_none()
@@ -1196,10 +1188,17 @@ async fn proxy(
         result
     }
     .await;
+    authority.recheck(s).await?;
+    s.store
+        .read({
+            let authorize = authorize.clone();
+            move |db| authorize.authorize(db)
+        })
+        .await?;
     if let Err(error) = &result {
         // Recheck the same gateway grant before publishing a failure after network work.
         s.mcps
-            .record_discovery_authorized(s, server, &Err(error.clone()), authorize)
+            .record_discovery_live(s, server, &Err(error.clone()), authorize)
             .await?;
     }
     result

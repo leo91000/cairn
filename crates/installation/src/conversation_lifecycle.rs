@@ -169,24 +169,61 @@ fn revoke_chat_access(db: &Db<'_>, chat: &Value, id: &str) -> Result<()> {
     Ok(())
 }
 
-fn trash(db: &Db<'_>, id: &str, confirmed: bool) -> Result<Value> {
+fn trash(db: &Db<'_>, id: &str, confirmed: bool) -> Result<(Value, Vec<String>)> {
     let mut chat = required(db.conversation(id)?, "Chat not found")?;
     if chat.lifecycle != cairn_contracts::ConversationLifecycle::Active {
-        return Ok(serde_json::to_value(chat)?);
+        return Ok((serde_json::to_value(chat)?, Vec::new()));
     }
     let run = db.run(chat.run_id.as_deref().unwrap_or(""))?;
     let messages = db.conversation_messages(id)?;
     let questions = db.questions(id)?;
+    let mut delegated_turns = Vec::new();
+    let mut delegated_busy = false;
+    let mut delegated_chats = Vec::new();
+    for mut child in db.delegated_conversations(id)? {
+        let run = child
+            .run_id
+            .as_deref()
+            .map(|id| db.run(id))
+            .transpose()?
+            .flatten();
+        let has_turn = run_is_active(run.as_ref()) || child.wakeup.is_some();
+        if has_turn || crate::chats::continuation::has_pending_input(db, &child)? {
+            delegated_busy = true;
+            child.paused = true;
+            child.cancelled_by_deletion = true;
+            if has_turn && let Some(run_id) = &child.run_id {
+                delegated_turns.push(run_id.clone());
+            }
+            delegated_chats.push(child);
+        }
+    }
     let busy = run_is_active(run.as_ref())
         || chat.wakeup.is_some()
         || messages.iter().any(message_is_pending)
-        || questions.iter().any(Question::is_open);
+        || questions.iter().any(Question::is_open)
+        || delegated_busy;
     if busy && !confirmed {
         return Err(Error::conflict(
             "Confirm deletion to stop the agent and cancel pending messages and questions.",
         ));
     }
     cancel_pending_input(db, messages, questions)?;
+    for child in delegated_chats {
+        db.save_conversation(&child)?;
+    }
+    // Revoke child executions atomically with deletion, before dropping the
+    // requester ceiling. Engine cancellation follows the committed transaction.
+    for run_id in &delegated_turns {
+        db.change_run(
+            run_id,
+            crate::runs::RunChanges {
+                cancel_requested_at: Some(Some(now())),
+                ..Default::default()
+            },
+        )?;
+        db.revoke_mcp_run(run_id)?;
+    }
     unshare_artifacts(db, chat.run_id.as_deref().unwrap_or(""))?;
     db.delete(&format!("chat-title-pending:{id}"))?;
     if let Some(run) = run.filter(|run| run_is_active(Some(run))) {
@@ -213,7 +250,10 @@ fn trash(db: &Db<'_>, id: &str, confirmed: bool) -> Result<Value> {
         None,
     )?;
     db.audit("chat.trashed", &json!({ "id": id }))?;
-    Ok(serde_json::to_value(db.save_conversation(&chat)?)?)
+    Ok((
+        serde_json::to_value(db.save_conversation(&chat)?)?,
+        delegated_turns,
+    ))
 }
 
 fn restore(db: &Db<'_>, id: &str) -> Result<Value> {
@@ -246,9 +286,18 @@ impl Service {
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        self.conversation_retention_live(crate::authorization::Authorization::once(authorize))
+            .await
+    }
+
+    pub(crate) async fn conversation_retention_live(
+        &self,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<Value> {
+        authorize.recheck().await?;
         self.store
             .read(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 Ok(serde_json::to_value(retention(db)?)?)
             })
             .await
@@ -267,6 +316,19 @@ impl Service {
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        self.save_conversation_retention_live(
+            input,
+            crate::authorization::Authorization::once(authorize),
+        )
+        .await
+    }
+
+    pub(crate) async fn save_conversation_retention_live(
+        &self,
+        input: Value,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<Value> {
+        authorize.recheck().await?;
         let policy: Retention = serde_json::from_value(input)
             .map_err(|_| Error::bad("Choose a whole number of days from 0 to 36500."))?;
         if policy.inactivity_days > 36500 {
@@ -276,7 +338,7 @@ impl Service {
             .store
             .transaction(move |db| {
                 let value = serde_json::to_value(&policy)?;
-                authorize(db)?;
+                authorize.authorize(db)?;
                 db.save_conversation_retention(&policy)?;
                 db.audit("conversation.retention.updated", &value)?;
                 Ok(value)
@@ -318,17 +380,36 @@ impl Service {
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        self.chat_trash_live(
+            id,
+            confirmed,
+            crate::authorization::Authorization::once(authorize),
+        )
+        .await
+    }
+
+    pub(crate) async fn chat_trash_live(
+        &self,
+        id: &str,
+        confirmed: bool,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<Value> {
+        authorize.recheck().await?;
         crate::validation::uuid(id)?;
         let id = id.to_owned();
-        let result = self
+        let (result, mut cancel) = self
             .store
             .transaction(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 trash(db, &id, confirmed)
             })
             .await?;
+        self.accepted_jobs.revoke_chat(text(&result, "id"));
         if let Some(run) = result["runId"].as_str() {
-            match self.worker.cancel(self, run).await {
+            cancel.push(run.to_owned());
+        }
+        for run in cancel {
+            match self.worker.cancel(self, &run).await {
                 // Cleanup may have already removed a finished run after deletion committed.
                 Err(error) if error.status != 404 && !error.is_conflict() => return Err(error),
                 _ => {}
@@ -346,6 +427,16 @@ impl Service {
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        self.chat_restore_live(id, crate::authorization::Authorization::once(authorize))
+            .await
+    }
+
+    pub(crate) async fn chat_restore_live(
+        &self,
+        id: &str,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<Value> {
+        authorize.recheck().await?;
         let _process_lock = storage_lock(&self.config.data_dir)?;
         crate::validation::uuid(id)?;
         let _guard = self
@@ -355,7 +446,7 @@ impl Service {
         let id = id.to_owned();
         self.store
             .transaction(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 restore(db, &id)
             })
             .await
@@ -578,6 +669,21 @@ impl Service {
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        self.chat_new_session_live(
+            id,
+            confirmed,
+            crate::authorization::Authorization::once(authorize),
+        )
+        .await
+    }
+
+    pub(crate) async fn chat_new_session_live(
+        &self,
+        id: &str,
+        confirmed: bool,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<Value> {
+        authorize.recheck().await?;
         if !confirmed {
             return Err(Error::conflict(
                 "Confirm starting a fresh agent session using the preserved history and files.",
@@ -586,7 +692,7 @@ impl Service {
         let id = id.to_owned();
         self.store
             .transaction(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 request_new_session(db, &id)
             })
             .await

@@ -13,12 +13,52 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct Authority {
     bearer: Option<String>,
-    pub(crate) preparation: Option<crate::capabilities::plugin_packages::Authority>,
+    preparation: Option<crate::capabilities::plugin_packages::Authority>,
     instance: Option<Box<connections::Connection>>,
     shared: Option<Box<connections::Connection>>,
+    snapshot: Option<Arc<super::grant_authorization::Snapshot>>,
+    invocation: Option<Arc<super::grant_authorization::Invocation>>,
+    partial: bool,
 }
 
 impl Authority {
+    /// The host's fetch of a run-authorized project does not grant credentials
+    /// to the agent. Retain execution, package and instance revocation checks.
+    pub(crate) fn host_fetch(
+        preparation: crate::capabilities::plugin_packages::Authority,
+        instance: connections::Connection,
+        package: &registry::Package,
+    ) -> Self {
+        let expected = instance.clone();
+        let package = package.clone();
+        let preparation = preparation.with_guard(move |db| {
+            connections::check_revision(db, &expected)?;
+            if !expected.enabled {
+                return Err(Error::forbidden(
+                    "The fetch credential instance is disabled.",
+                ));
+            }
+            if !package.builtin {
+                let current = db.plugin_package(&package.manifest.id)?;
+                if current.active.as_deref() != Some(&package.manifest.version)
+                    || current.approvals.get(&package.manifest.version) != Some(&package.digest)
+                {
+                    return Err(Error::forbidden("The fetch credential package changed."));
+                }
+            }
+            Ok(())
+        });
+        Self {
+            bearer: None,
+            preparation: Some(preparation),
+            instance: Some(Box::new(instance)),
+            shared: None,
+            snapshot: None,
+            invocation: None,
+            partial: false,
+        }
+    }
+
     pub(crate) fn resource_read(
         preparation: crate::capabilities::plugin_packages::Authority,
         instance: connections::Connection,
@@ -28,20 +68,74 @@ impl Authority {
             preparation: Some(preparation),
             instance: Some(Box::new(instance)),
             shared: None,
+            snapshot: None,
+            invocation: None,
+            partial: true,
         }
     }
 
+    pub(crate) fn snapshot(&self) -> Option<super::grant_authorization::Snapshot> {
+        self.snapshot.as_deref().cloned()
+    }
+
+    pub(crate) fn transfer_origin(
+        &self,
+    ) -> Option<Arc<super::grant_authorization::TransferOrigin>> {
+        self.invocation
+            .as_ref()
+            .map(|invocation| invocation.transfer_origin())
+    }
+
+    pub(crate) fn remember_transfer(
+        &self,
+        origin: Arc<super::grant_authorization::TransferOrigin>,
+    ) -> Result<()> {
+        if let Some(invocation) = &self.invocation {
+            invocation.remember_transfer(origin)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn bind_snapshot(mut self, snapshot: super::grant_authorization::Snapshot) -> Self {
+        self.snapshot = Some(Arc::new(snapshot));
+        self
+    }
+
+    pub(crate) fn with_preparation(
+        mut self,
+        preparation: Option<crate::capabilities::plugin_packages::Authority>,
+    ) -> Self {
+        self.preparation = preparation;
+        self
+    }
+
     pub(crate) fn authorize(&self, db: &crate::store::Db<'_>) -> Result<()> {
-        let Some(bearer) = &self.bearer else {
-            return Ok(());
+        if let Some(preparation) = &self.preparation {
+            preparation.authorize(db)?;
+        }
+        if let Some(snapshot) = &self.snapshot {
+            snapshot.authorize(db)?;
+        }
+        let run = self
+            .bearer
+            .as_ref()
+            .map(|bearer| crate::installation_mcp::authorize_in(db, bearer))
+            .transpose()?;
+        let agent = match (&self.snapshot, &run) {
+            (Some(snapshot), _) => snapshot.agent.as_str(),
+            (_, Some(run)) => text(&run["snapshot"]["agent"], "id"),
+            _ => return Ok(()),
         };
-        let run = crate::installation_mcp::authorize_in(db, bearer)?;
-        let agent = text(&run["snapshot"]["agent"], "id");
         for expected in [&self.instance, &self.shared].into_iter().flatten() {
             let current = db
                 .plugin_instance(&expected.id)?
                 .ok_or_else(|| Error::forbidden("This plugin instance was removed."))?;
-            if current.revision != expected.revision || !current.grants(agent) {
+            let granted = if self.partial {
+                current.enabled && db.has_plugin_grant(agent, &current.id)?
+            } else {
+                current.grants(agent)
+            };
+            if current.revision != expected.revision || !granted {
                 return Err(Error::forbidden(
                     "Installation management does not grant access to this plugin account. Ask the owner to grant it on the agent's page.",
                 ));
@@ -50,7 +144,42 @@ impl Authority {
         Ok(())
     }
 
+    pub(crate) fn agent_action(
+        instance: connections::Connection,
+        snapshot: super::grant_authorization::Snapshot,
+        invocation: Option<Arc<super::grant_authorization::Invocation>>,
+    ) -> Self {
+        Self {
+            bearer: None,
+            preparation: None,
+            instance: Some(Box::new(instance)),
+            shared: None,
+            snapshot: Some(Arc::new(snapshot)),
+            invocation,
+            partial: true,
+        }
+    }
+
+    /// Nested host preparations retain the complete invocation, including live
+    /// resource resolution, rather than just its optional transport authority.
+    pub(crate) fn effect_authority(&self) -> crate::capabilities::plugin_packages::Authority {
+        let local = self.clone();
+        let asynchronous = self.clone();
+        crate::capabilities::plugin_packages::Authority::default()
+            .with_guard(move |db| local.authorize(db))
+            .with_recheck_guard(move |s| {
+                let authority = asynchronous.clone();
+                Box::pin(async move { authority.recheck(s).await })
+            })
+    }
+
     pub(crate) async fn recheck(&self, s: &Service) -> Result<()> {
+        if let Some(snapshot) = &self.snapshot {
+            Box::pin(snapshot.recheck(s)).await?;
+        }
+        if let Some(invocation) = &self.invocation {
+            Box::pin(invocation.recheck(s)).await?;
+        }
         if let Some(preparation) = &self.preparation {
             preparation.recheck(s).await?;
         }
@@ -76,7 +205,8 @@ pub(crate) async fn invoke(
         crate::installation_mcp::authorize(s, bearer).await?;
     }
     // Even an empty submitted selection is forbidden to an agent.
-    if matches!(&input, Command::Save { data, .. } if data.agent_ids.is_some()) && !owner {
+    if matches!(&input, Command::Save { data, .. } if data.agent_ids.is_some()) && bearer.is_some()
+    {
         return Err(Error::forbidden(
             "Grant plugin instances from the owner's agent editor.",
         ));
@@ -171,6 +301,9 @@ pub(crate) async fn invoke(
         preparation,
         instance: saved_instance,
         shared: shared_instance,
+        snapshot: None,
+        invocation: None,
+        partial: false,
     });
     if let Some(preparation) = authority
         .as_ref()
@@ -212,6 +345,7 @@ pub(crate) async fn invoke(
                 instance.as_deref().unwrap(),
                 &data,
                 authorize.clone(),
+                authority.clone(),
             )
             .await?;
             Output::Enabled { instance: value }
@@ -222,6 +356,7 @@ pub(crate) async fn invoke(
                 &plugin,
                 instance.as_deref().unwrap(),
                 authorize.clone(),
+                authority.clone(),
             )
             .await?;
             Output::Deleted { deleted: true }
@@ -310,8 +445,9 @@ pub(crate) async fn invoke(
                     Output::Form { form: value }
                 }
                 Command::Save { data, .. } => {
-                    // Public MCP also lacks owner authority to grant agents or native execution.
-                    if data.agent_ids.is_some() && !owner {
+                    // Public manage can grant full access on new instances;
+                    // installation agents can never grant it.
+                    if data.agent_ids.is_some() && bearer.is_some() {
                         return Err(Error::forbidden(
                             "Grant plugin instances from the owner's agent editor.",
                         ));
@@ -333,6 +469,7 @@ pub(crate) async fn invoke(
                         &plugin,
                         instance.as_deref().unwrap(),
                         authorize.clone(),
+                        authority.clone(),
                     )
                     .await?;
                     Output::Disconnected {
@@ -393,7 +530,16 @@ pub(crate) async fn invoke(
     ) {
         s.store.read(move |db| authorize(db)).await?;
     }
-    if let Some(preparation) = authority
+    // Lifecycle writers already check the complete proof in their final effect
+    // transaction. Their intentional instance revision change cannot be checked
+    // against the pre-mutation proof afterward. Read results still recheck.
+    if !matches!(
+        &result,
+        Output::Saved { .. }
+            | Output::Enabled { .. }
+            | Output::Deleted { .. }
+            | Output::Disconnected { .. }
+    ) && let Some(preparation) = authority
         .as_ref()
         .and_then(|authority| authority.preparation.as_ref())
     {

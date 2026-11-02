@@ -820,9 +820,19 @@ pub(crate) fn release_in(db: &Db<'_>, attempt: &str) -> Result<()> {
 
 /// Once a controller may have created a disk, keep its allocation until explicit disk deletion.
 pub async fn materialize(s: &Service, attempt: &str) -> Result<()> {
+    materialize_authorized(s, attempt, crate::authorization::Authorization::default()).await
+}
+
+pub(crate) async fn materialize_authorized(
+    s: &Service,
+    attempt: &str,
+    authorize: crate::authorization::Authorization,
+) -> Result<()> {
+    authorize.recheck().await?;
     let attempt = attempt.to_owned();
     s.store
         .transaction(move |db| {
+            authorize.check_local(db)?;
             let mut record = db
                 .attempt(&attempt)?
                 .ok_or_else(|| Error::conflict("Missing disk allocation."))?;
