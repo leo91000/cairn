@@ -243,6 +243,23 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     publication::capture(&owner.service, &owner.run(&run).await)
         .await
         .unwrap();
+    let last_failure_context = json!({
+        "observedAtMs": now() - 1,
+        "phase": "publication",
+        "category": "unknown",
+        "managerStatus": 503,
+        "inputRequestedRevision": 4
+    });
+    let mut backup = owner.run(&run).await["backup"].clone();
+    backup["lastFailureContext"] = last_failure_context.clone();
+    backup["requestedRevision"] = 4.into();
+    backup["acknowledgedRevision"] = 4.into();
+    owner
+        .service
+        .store
+        .update_run_boundary(&run, json!({ "backup": backup }))
+        .await
+        .unwrap();
     let sending = json!({
         "id": id(),
         "chatId": chat,
@@ -278,6 +295,7 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     // Compare complete stored records, including defaults and generated revisions.
     let mut expected_messages = vec![message, sending, queued];
     for (backend, destination) in [("native", &native_node), ("firecracker", &vm_node)] {
+        let previous_backup_id = owner.run(&run).await["backup"]["id"].clone();
         let source_node = if backend == "native" {
             &vm_node
         } else {
@@ -361,6 +379,14 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
         let settled = wait_migration(&owner, &run).await;
         assert!(settled["backendMigrationError"].is_null(), "{settled}");
         assert_eq!(settled["nodeId"], *destination, "{settled}");
+        assert_ne!(settled["backup"]["id"], previous_backup_id);
+        assert_eq!(settled["backup"]["status"], "ready");
+        assert_eq!(
+            settled["backup"]["lastFailureContext"],
+            last_failure_context
+        );
+        assert!(settled["backup"].get("requestedRevision").is_none());
+        assert!(settled["backup"].get("acknowledgedRevision").is_none());
         assert!(settled["sessionId"].is_null());
         assert_eq!(settled["snapshot"]["agent"]["access"]["backend"], backend);
         let saved_chat = owner.stored("chats", &chat).await.unwrap();
@@ -410,6 +436,7 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     assert!(failed["backendMigrationError"].is_string(), "{failed}");
     assert_eq!(failed["nodeId"], before["nodeId"]);
     assert_eq!(failed["backup"]["id"], before["backup"]["id"]);
+    assert_eq!(failed["backup"]["lastFailureContext"], last_failure_context);
     let source_context = LazyDisk::context(
         &owner
             .root()
@@ -452,6 +479,10 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     let retried = wait_migration(&owner, &run).await;
     assert!(retried["backendMigrationError"].is_null(), "{retried}");
     assert_eq!(retried["nodeId"], native_node);
+    assert_eq!(
+        retried["backup"]["lastFailureContext"],
+        last_failure_context
+    );
     assert_eq!(owner.stored("chats", &chat).await.unwrap()["paused"], false);
     let checkpoint_before = owner
         .service
@@ -521,6 +552,10 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     let recovered = wait_migration(&owner, &run).await;
     assert!(recovered["backendMigrationError"].is_null(), "{recovered}");
     assert_eq!(recovered["backup"]["id"], saved_point);
+    assert_eq!(
+        recovered["backup"]["lastFailureContext"],
+        last_failure_context
+    );
     assert_eq!(
         owner.stored("node-attempts", &reservation).await.unwrap()["released"],
         true
