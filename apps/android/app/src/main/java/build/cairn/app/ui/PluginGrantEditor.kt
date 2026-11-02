@@ -223,7 +223,8 @@ fun PluginGrantEditor(
                                 Text(
                                     "Seules les contributions cochées sont accordées. Les nouveautés restent désactivées. Rien ne change avant l’enregistrement."
                                 )
-                                manifest.grantContributions().forEach { contribution ->
+                                val availableContributions = manifest.grantContributions()
+                                availableContributions.forEach { contribution ->
                                     val item = contribution.grant
                                     val held =
                                         (grant?.access as? PluginGrantAccess.B)
@@ -314,6 +315,67 @@ fun PluginGrantEditor(
                                                 else "Sans restriction de ressource.",
                                                 style = MaterialTheme.typography.bodySmall,
                                             )
+                                    }
+                                }
+                                val availableKeys =
+                                    availableContributions
+                                        .map { "${it.grant.kind}:${it.grant.name}" }
+                                        .toSet()
+                                val staleContributions =
+                                    (grant?.access as? PluginGrantAccess.B)
+                                        ?.contributions
+                                        .orEmpty()
+                                        .filterNot { "${it.kind}:${it.name}" in availableKeys }
+                                if (staleContributions.isNotEmpty()) {
+                                    OutlinedCard {
+                                        Column(
+                                            Modifier.padding(12.dp),
+                                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                                        ) {
+                                            Text(
+                                                "Certains accès enregistrés concernent des contributions que ce plugin ne fournit plus. Retirez chaque accès obsolète avant d’enregistrer.",
+                                                color = MaterialTheme.colorScheme.error,
+                                                style = MaterialTheme.typography.bodySmall,
+                                            )
+                                            staleContributions.forEach { stale ->
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Column(Modifier.weight(1f)) {
+                                                        Text("${stale.kind} ${stale.name}")
+                                                        Text(
+                                                            "Restrictions enregistrées : " +
+                                                                if (stale.resources.isEmpty())
+                                                                    "sans restriction"
+                                                                else
+                                                                    stale.resources.joinToString {
+                                                                        "${it.resourceType} ${it.id}"
+                                                                    },
+                                                            style =
+                                                                MaterialTheme.typography.bodySmall,
+                                                        )
+                                                    }
+                                                    TextButton(
+                                                        onClick = {
+                                                            change(
+                                                                draft.withoutContribution(
+                                                                    connection.id,
+                                                                    stale.kind,
+                                                                    stale.name,
+                                                                )
+                                                            )
+                                                        },
+                                                        modifier =
+                                                            Modifier.semantics {
+                                                                contentDescription =
+                                                                    "Retirer l’accès obsolète ${stale.kind} ${stale.name}"
+                                                            },
+                                                    ) {
+                                                        Text("Retirer")
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }

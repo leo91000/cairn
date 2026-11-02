@@ -284,12 +284,30 @@ test('contribution grants use resource ancestry, review, conflicts and explicit 
   const savedAgent = await workspace.api(`/api/agents/${agent.id}`)
   expect(savedAgent).toMatchObject({ name: 'Local name after retry', description: 'Remote description survives retry' })
 
+  await page.route('**/api/plugins', async (route) => {
+    const response = await route.fetch()
+    const catalog = await response.json()
+    const grantUi = catalog.packages.find((item: any) => item.id === 'grant-ui')
+    grantUi.manifest.tools = grantUi.manifest.tools.filter((item: any) => item.name !== 'grant_ui_read')
+    await route.fulfill({ response, json: catalog })
+  })
   await page.goto(workspacePath(`/agents/${agent.id}?section=plugins`))
   await authenticateWorkspace(page)
-  const supportSwitch = page.getByRole('switch', { name: 'Access to Grant UI Support' })
-  await supportSwitch.uncheck()
-  await expect(page.getByRole('combobox', { name: 'Access to Support' })).toHaveValue('none')
-  await expect(page.getByText('Only checked contributions are granted.', { exact: false })).toHaveCount(0)
+  const staleGrant = page.getByRole('button', { name: 'Remove stale grant tool grant_ui_read', exact: true })
+  await expect(page.getByRole('alert')).toContainText('contributions this plugin no longer provides')
+  await expect(staleGrant).toBeVisible()
+  await page.screenshot({ path: testInfo.outputPath('agent-plugin-grants-stale.png'), fullPage: true })
+  await staleGrant.click()
+  await expect(staleGrant).toHaveCount(0)
+  await expect(page.getByRole('checkbox', { name: 'command post', exact: true })).toBeChecked()
+  await saveAgent(page, true)
+  const afterStaleRemoval = await workspace.api(`/api/agents/${agent.id}/plugin-grants`)
+  const remainingSupport = afterStaleRemoval.grants.find((grant: any) => grant.instanceId === first)
+  expect(remainingSupport.access.contributions).toEqual(expect.arrayContaining([
+    { kind: 'command', name: 'post', resources: [{ resourceType: 'channel', id: 'support' }] },
+    { kind: 'hook', name: 'message', resources: [{ resourceType: 'channel', id: 'support' }] },
+  ]))
+  expect(remainingSupport.access.contributions).not.toContainEqual(expect.objectContaining({ kind: 'tool', name: 'grant_ui_read' }))
 })
 
 test('agent overview shows plugin access as unavailable when the grant read fails', async ({ page, workspace }) => {

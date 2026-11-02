@@ -497,7 +497,7 @@ private fun AgentPage(
                 // A failed refresh leaves both the draft's base and the current grant state
                 // unknown. A catalog failure leaves the local grant draft intact and retryable.
                 conflict = true
-                if (attemptedFreshGrantRead) grantsLoaded = false
+                if (attemptedFreshGrantRead || keepGrantEdits) grantsLoaded = false
                 grantsError = e.message
                 errorSection = null
                 saveError = e.message ?: "Impossible de confirmer les droits actuels. Réessayez."

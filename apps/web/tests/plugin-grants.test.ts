@@ -10,6 +10,7 @@ import {
   MAX_PLUGIN_RESOURCE_ROOTS_PER_CONTRIBUTION,
   mergeGrantDrafts,
   removeGrant,
+  removeGrantContribution,
   selectableResourceTypes,
 } from '../src/plugin-grants'
 
@@ -260,6 +261,30 @@ it('moving credentials withdraws only the old selected credential contribution',
 it('removing a supplier never chooses another full instance', () => {
   expect(removeGrant(before, 'one')).toEqual({ grants: [before.grants[1]], runCredentialInstances: [] })
   expect(chooseCredentialSupplier(before, ['one', 'two'], null).runCredentialInstances).toEqual([])
+})
+it('removes one stale contribution and preserves other selected permissions and suppliers', () => {
+  const after = removeGrantContribution(before, 'one', { kind: 'tool', name: 'read' })
+
+  expect(after.grants[0]?.access).toEqual({
+    type: 'selected',
+    contributions: before.grants[0]!.access.type === 'selected'
+      ? before.grants[0]!.access.contributions.filter(item => item.kind !== 'tool' || item.name !== 'read')
+      : [],
+  })
+  expect(after.runCredentialInstances).toEqual(['one'])
+  expect(removeGrantContribution(after, 'one', { kind: 'runCredentials', name: '' })).toEqual({
+    grants: [
+      {
+        instanceId: 'one',
+        access: {
+          type: 'selected',
+          contributions: [{ kind: 'tool', name: 'post', resources: [{ resourceType: 'channel', id: 'support' }] }],
+        },
+      },
+      { instanceId: 'two', access: { type: 'full' } },
+    ],
+    runCredentialInstances: [],
+  })
 })
 it('does not keep an empty selected grant after moving its only contribution', () => {
   const draft: GrantDraft = { grants: [{ instanceId: 'one', access: { type: 'selected', contributions: [{ kind: 'runCredentials', name: '', resources: [] }] } }, before.grants[1]!], runCredentialInstances: ['one'] }

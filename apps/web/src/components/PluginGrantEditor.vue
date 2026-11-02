@@ -2,7 +2,12 @@
 import type { PluginManifest } from '../../../../packages/contracts/generated/typescript/PluginManifest'
 import type { GrantDraft } from '../plugin-grants'
 import { computed, ref } from 'vue'
-import { contributions, removeGrant, selectableResourceTypes } from '../plugin-grants'
+import {
+  contributions,
+  removeGrant,
+  removeGrantContribution,
+  selectableResourceTypes,
+} from '../plugin-grants'
 import PluginResourcePicker from './PluginResourcePicker.vue'
 
 const props = defineProps<{
@@ -16,6 +21,14 @@ const grant = computed(() => draft.value.grants.find(item => item.instanceId ===
 const selectedMode = ref(grant.value?.access.type === 'selected')
 const mode = computed(() => grant.value?.access.type ?? (selectedMode.value ? 'selected' : 'none'))
 const available = computed(() => contributions(props.manifest))
+const stale = computed(() => {
+  const access = grant.value?.access
+  if (access?.type !== 'selected')
+    return []
+
+  const availableKeys = new Set(available.value.map(item => `${item.kind}:${item.name}`))
+  return access.contributions.filter(item => !availableKeys.has(`${item.kind}:${item.name}`))
+})
 
 function setMode(value: string) {
   selectedMode.value = value === 'selected'
@@ -42,6 +55,10 @@ function held(item: typeof available.value[number]) {
   return grant.value?.access.type === 'selected' ? grant.value.access.contributions.find(value => value.kind === item.kind && value.name === item.name) : undefined
 }
 
+function removeStale(item: typeof stale.value[number]) {
+  draft.value = removeGrantContribution(draft.value, props.instanceId, item)
+}
+
 function supplier(on: boolean) {
   const ids = draft.value.runCredentialInstances.filter(id => id !== props.instanceId)
   // The parent removes the previous supplying instance of this package.
@@ -59,6 +76,22 @@ function supplier(on: boolean) {
       <p class="text-xs text-muted">
         Only checked contributions are granted. New contributions stay off. Nothing is granted until you save.
       </p>
+      <div v-if="stale.length" role="alert" class="grid gap-2 rounded-lg border border-warning p-3">
+        <p class="text-sm text-warning">
+          Some saved grants refer to contributions this plugin no longer provides. Remove each stale grant before saving.
+        </p>
+        <div v-for="item in stale" :key="`${item.kind}:${item.name}`" class="flex items-start justify-between gap-3">
+          <span class="text-sm"><strong>{{ item.kind }} {{ item.name }}</strong><small class="block text-xs text-muted">Saved restrictions: {{ item.resources.length ? item.resources.map(resource => `${resource.resourceType} ${resource.id}`).join(', ') : 'unrestricted' }}</small></span>
+          <button
+            type="button"
+            class="shrink-0 rounded-md border border-line px-3 py-1 text-sm"
+            :aria-label="`Remove stale grant ${item.kind} ${item.name}`"
+            @click="removeStale(item)"
+          >
+            Remove grant
+          </button>
+        </div>
+      </div>
       <div v-for="item in available" :key="`${item.kind}:${item.name}`" class="grid gap-2 rounded-lg border border-line p-3">
         <label class="flex flex-row! items-start gap-2! text-sm font-normal!">
           <input

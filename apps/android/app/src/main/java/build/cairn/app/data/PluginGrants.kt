@@ -18,6 +18,25 @@ data class PluginGrantDraft(
             runCredentialInstances = runCredentialInstances - instance,
         )
 
+    fun withoutContribution(instance: String, kind: String, name: String): PluginGrantDraft =
+        copy(
+            grants =
+                grants.mapNotNull { grant ->
+                    if (grant.instanceId != instance || grant.access !is PluginGrantAccess.B)
+                        return@mapNotNull grant
+
+                    val contributions =
+                        grant.access.contributions.filterNot {
+                            it.kind == kind && it.name == name
+                        }
+                    if (contributions.isEmpty()) null
+                    else grant.copy(access = PluginGrantAccess.B(contributions))
+                },
+            runCredentialInstances =
+                if (kind == "runCredentials") runCredentialInstances - instance
+                else runCredentialInstances,
+        )
+
     fun description(instance: String): String =
         when (val access = grants.find { it.instanceId == instance }?.access) {
             is PluginGrantAccess.A -> "Accès complet, y compris les contributions futures"

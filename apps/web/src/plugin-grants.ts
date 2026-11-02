@@ -299,6 +299,26 @@ export function removeGrant(draft: GrantDraft, instance: string): GrantDraft {
   return { grants: draft.grants.filter(item => item.instanceId !== instance), runCredentialInstances: draft.runCredentialInstances.filter(id => id !== instance) }
 }
 
+/** Remove one selected contribution while preserving the instance's other grants. */
+export function removeGrantContribution(
+  draft: GrantDraft,
+  instance: string,
+  contribution: Pick<PluginContributionGrant, 'kind' | 'name'>,
+): GrantDraft {
+  const grants = draft.grants.flatMap((grant) => {
+    if (grant.instanceId !== instance || grant.access.type !== 'selected')
+      return [grant]
+
+    const contributions = grant.access.contributions.filter(item => item.kind !== contribution.kind || item.name !== contribution.name)
+    return contributions.length ? [{ ...grant, access: { type: 'selected' as const, contributions } }] : []
+  })
+  const runCredentialInstances = contribution.kind === 'runCredentials'
+    ? draft.runCredentialInstances.filter(id => id !== instance)
+    : draft.runCredentialInstances
+
+  return { grants, runCredentialInstances }
+}
+
 /** Moving the supplier also withdraws a selected credentials contribution on the previous instance. */
 export function chooseCredentialSupplier(draft: GrantDraft, instances: string[], supplier: string | null): GrantDraft {
   return {

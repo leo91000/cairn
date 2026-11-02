@@ -16,6 +16,8 @@ import build.cairn.app.data.*
 import build.cairn.contracts.ListPluginResourcesOutput
 import build.cairn.contracts.PluginArgument
 import build.cairn.contracts.PluginCommand
+import build.cairn.contracts.PluginContributionGrant
+import build.cairn.contracts.PluginGrantAccess
 import build.cairn.contracts.PluginHook
 import build.cairn.contracts.PluginManifest
 import build.cairn.contracts.PluginResource
@@ -1472,7 +1474,8 @@ abstract class AgentPageCases {
             compose.onNodeWithText("Recharger").assertIsEnabled()
             compose
                 .onNodeWithContentDescription("Fournir les identifiants depuis Automation")
-                .assertIsOn()
+                .assertDoesNotExist()
+            compose.onNodeWithContentDescription("Accès à Support : full").assertDoesNotExist()
 
             fixture.failPlugins.set(false)
             compose.onNodeWithText("Recharger").performClick()
@@ -1495,6 +1498,76 @@ abstract class AgentPageCases {
                 fixture.grantSaves.last()["runCredentialInstances"]!!.jsonArray.map {
                     it.jsonPrimitive.content
                 },
+            )
+        }
+    }
+
+    @Test
+    fun removedContributionCanBeRevokedWithoutDroppingOtherPluginGrants() {
+        val support = "66666666-6666-4666-8666-666666666666"
+        val staleTool = PluginContributionGrant("tool", "read", emptyList())
+        val command = PluginContributionGrant("command", "post", emptyList())
+        val credentials = PluginContributionGrant("runCredentials", "", emptyList())
+        journey(
+            release.id,
+            prepare = { fixture ->
+                fixture.pluginCatalog.set(
+                    catalog.copy(
+                        packages =
+                            catalog.packages.map { entry ->
+                                if (entry.id == "grant-ui")
+                                    entry.copy(
+                                        manifest = entry.manifest!!.copy(tools = emptyList())
+                                    )
+                                else entry
+                            }
+                    )
+                )
+                fixture.grantState[release.id] =
+                    build.cairn.contracts.AgentPluginGrants(
+                        release.id,
+                        listOf(
+                            build.cairn.contracts.PluginInstanceGrant(
+                                PluginGrantAccess.B(listOf(staleTool, command, credentials)),
+                                support,
+                            )
+                        ),
+                        release.revision,
+                        listOf(support),
+                    )
+            },
+        ) { fixture ->
+            open(AgentSection.Plugins)
+            waitForDescription("Accès à Support : selected")
+            compose
+                .onNodeWithContentDescription("Retirer l’accès obsolète tool read")
+                .performScrollTo()
+                .assertExists()
+            compose
+                .onNodeWithText("contributions que ce plugin ne fournit plus", substring = true)
+                .assertExists()
+            compose
+                .onNodeWithContentDescription("Retirer l’accès obsolète tool read")
+                .performClick()
+            compose
+                .onNodeWithContentDescription("Retirer l’accès obsolète tool read")
+                .assertDoesNotExist()
+            compose.onNodeWithText("command post").assertExists()
+
+            back()
+            compose.onNodeWithText("Enregistrer").performClick()
+            confirmReview()
+            compose.waitUntil(15000) { fixture.grantSaves.size == 1 }
+            val saved = fixture.grantSaves.single()
+            val grant = saved["grants"]!!.jsonArray.single().jsonObject
+            val contributions = grant["access"]!!.jsonObject["contributions"]!!.jsonArray
+            assertEquals(
+                listOf("command", "runCredentials"),
+                contributions.map { it.jsonObject["kind"]!!.jsonPrimitive.content },
+            )
+            assertEquals(
+                listOf(support),
+                saved["runCredentialInstances"]!!.jsonArray.map { it.jsonPrimitive.content },
             )
         }
     }
