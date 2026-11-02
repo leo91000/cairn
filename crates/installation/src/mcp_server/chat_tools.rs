@@ -375,7 +375,29 @@ pub(crate) async fn invoke(
             .await;
     }
     if name == "resume_chat" {
-        let chat_id = text(&args, "chatId").to_owned();
+        let input: cairn_contracts::ResumeChatInput =
+            serde_json::from_value(args).map_err(|error| Error::bad(error.to_string()))?;
+        let chat_id = input.chat_id.to_string();
+        let commit_chat_id = chat_id.clone();
+        let expected_run_id = input.run_id.map(|expected| expected.to_string());
+        let expected_turn_id = input.turn_id;
+        let mut selection = input.selection;
+        if expected_turn_id
+            .as_ref()
+            .is_some_and(|turn| turn.is_empty() || turn.chars().count() > 200)
+        {
+            return Err(Error::bad("Invalid turn identifier."));
+        }
+        if selection.is_some() && expected_run_id.is_none() {
+            return Err(Error::bad(
+                "A run identifier is required when selecting a model for resume.",
+            ));
+        }
+        if selection.is_some() && expected_turn_id.is_none() {
+            return Err(Error::bad(
+                "A turn identifier is required when selecting a model for resume.",
+            ));
+        }
         let check = authorize.clone();
         let run_id = s
             .store
@@ -383,12 +405,67 @@ pub(crate) async fn invoke(
                 check(db)?;
                 let chat = required(db.conversation_boundary(&chat_id)?, "Chat not found")?;
                 require_active(&chat)?;
-                required(chat["runId"].as_str().map(str::to_owned), "Run not found")
+                let run_id = required(chat["runId"].as_str().map(str::to_owned), "Run not found")?;
+                if expected_run_id.as_ref().is_some_and(|expected| expected != &run_id) {
+                    return Err(Error::conflict(
+                        "This conversation's run changed before it could be resumed. Refresh the conversation.",
+                    ));
+                }
+                Ok(run_id)
             })
             .await?;
+        let selected_resume = selection.is_some();
+        let mut run = s.store.run(&run_id).await?;
+        let saved_auto_catalog =
+            if !selected_resume && crate::resume_selection::has_saved_opencode_auto(&run) {
+                let preflight_id = run_id.clone();
+                let preflight_authority = authorize.clone();
+                run = s
+                    .store
+                    .read(move |db| {
+                        preflight_authority(db)?;
+                        required(db.run(&preflight_id)?, "Run not found")
+                    })
+                    .await?;
+                crate::resume_selection::saved_opencode_auto_catalog(s, &run).await
+            } else {
+                None
+            };
+        let selected_provider = if let Some(selection) = selection.as_mut() {
+            let expected_turn_id = expected_turn_id.as_deref().ok_or_else(|| {
+                Error::bad("A turn identifier is required when selecting a model for resume.")
+            })?;
+            Some(crate::resume_selection::validate(s, &run, selection, expected_turn_id).await?)
+        } else {
+            None
+        };
+        let committed_run_id = run_id.clone();
         return s
             .worker
-            .resume_authorized(s, &run_id, commit_authority)
+            .resume_selected_authorized(
+                s,
+                &run_id,
+                crate::worker::ResumeSelectionContext {
+                    expected_turn_id,
+                    selection,
+                    selected_provider,
+                    saved_auto_catalog,
+                },
+                move |db: &Db<'_>| {
+                    commit_authority(db)?;
+                    let chat = required(
+                        db.conversation_boundary(&commit_chat_id)?,
+                        "Chat not found",
+                    )?;
+                    require_active(&chat)?;
+                    if chat["runId"] != committed_run_id {
+                        return Err(Error::conflict(
+                            "This conversation's run changed before it could be resumed. Refresh the conversation.",
+                        ));
+                    }
+                    Ok(())
+                },
+            )
             .await;
     }
     if name == "cancel_chat_question" {
