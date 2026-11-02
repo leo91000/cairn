@@ -299,7 +299,18 @@ async fn long_engine_item_ids_survive_migration_and_live_updates() {
     let before = tables(&db);
     let store = Store::open(root.path()).unwrap();
     assert_eq!(version(&db), crate::store::DATABASE_VERSION);
-    assert_eq!(tables(&db), before);
+    let mut after = tables(&db);
+    for table in [
+        "plugin_contribution_grants",
+        "plugin_grant_resources",
+        "plugin_credential_suppliers",
+    ] {
+        assert!(
+            after.remove(table).is_some(),
+            "missing grant migration table {table}"
+        );
+    }
+    assert_eq!(after, before);
     let old = cards(&store, CODEX).await;
     let first_card = old.iter().find(|card| matches!(&card.content, TimelineContent::AgentMessage { item_id, .. } if item_id == &first)).unwrap();
     let second_card = old.iter().find(|card| matches!(&card.content, TimelineContent::AgentMessage { item_id, .. } if item_id == &second)).unwrap();
@@ -435,7 +446,18 @@ async fn upgrade_builds_the_timeline_from_retained_events_and_changes_nothing_el
 
     let store = Store::open(root.path()).unwrap();
     assert_eq!(version(&db), crate::store::DATABASE_VERSION);
-    assert_eq!(tables(&db), before);
+    let mut after = tables(&db);
+    for table in [
+        "plugin_contribution_grants",
+        "plugin_grant_resources",
+        "plugin_credential_suppliers",
+    ] {
+        assert!(
+            after.remove(table).is_some(),
+            "missing grant migration table {table}"
+        );
+    }
+    assert_eq!(after, before);
     assert_eq!(
         db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
             .unwrap(),

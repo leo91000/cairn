@@ -534,14 +534,16 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
     }
 }
 
-pub(crate) async fn native_callers(
+pub(crate) async fn native_callers_live(
     s: &Service,
-    authorize: impl FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+    authorize: crate::authorization::Authorization,
 ) -> Result<Value> {
+    authorize.recheck().await?;
     crate::native::policy::refresh(s).await?;
+    authorize.recheck().await?;
     s.store
         .read(move |db| {
-            authorize(db)?;
+            authorize.authorize(db)?;
             let authority = db.kv("native-authority")?.unwrap_or_default();
             Ok(authority["accounts"]
                 .as_object()
@@ -566,12 +568,13 @@ async fn backups(s: &Service, run: &str) -> Result<Value> {
         .into())
 }
 
-pub(crate) async fn configure_storage(
+pub(crate) async fn configure_storage_live(
     s: &Service,
     node: &str,
     body: &Value,
-    authorize: impl FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+    authorize: crate::authorization::Authorization,
 ) -> Result<Value> {
+    authorize.recheck().await?;
     crate::validation::uuid(node)?;
     let request: cairn_contracts::UpdateNodeStorageInput = decode(body.clone())?;
     if request.node_id.to_string() != node {
@@ -589,12 +592,14 @@ pub(crate) async fn configure_storage(
         ));
     }
     crate::object_storage::Storage::configured(s)?
-        .validate()
+        .validate_live(&authorize)
         .await?;
+    let secret = runner_secret(s).await?;
+    authorize.recheck().await?;
     let response = s
         .http
         .post(format!("{}/storage-policy/probe", controller_url(s, node)))
-        .bearer_auth(runner_secret(s).await?)
+        .bearer_auth(secret)
         .json(&policy)
         .timeout(std::time::Duration::from_secs(30))
         .send()
@@ -603,11 +608,12 @@ pub(crate) async fn configure_storage(
     if !response.status().is_success() {
         return Err(Error::conflict("Node did not pass its storage probe."));
     }
+    authorize.recheck().await?;
     let node = node.to_owned();
     let (value, configuration) = s
         .store
         .transaction(move |db| {
-            authorize(db)?;
+            authorize.authorize(db)?;
             let mut record = db
                 .node(&node)?
                 .ok_or_else(|| Error::not_found("Node missing."))?;
@@ -679,12 +685,13 @@ async fn reconcile_local_storage(s: &Service, observed: &Value) -> Result<()> {
     Ok(())
 }
 
-pub(crate) async fn configure_node(
+pub(crate) async fn configure_node_live(
     s: &Service,
     node: &str,
     body: Value,
-    authorize: impl FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+    authorize: crate::authorization::Authorization,
 ) -> Result<Value> {
+    authorize.recheck().await?;
     let request: NodeConfiguration = decode(body)?;
     let owner_review = native_mode::owner().is_some();
     if let Some(accounts) = &request.native_accounts {
@@ -715,9 +722,10 @@ pub(crate) async fn configure_node(
         ));
     }
     let node = node.to_owned();
+    authorize.recheck().await?;
     s.store
         .transaction(move |db| {
-            authorize(db)?;
+            authorize.authorize(db)?;
             let mut record = db.node(&node)?.ok_or_else(|| Error::not_found("Node not found."))?;
             if record.revoked { return Err(Error::conflict("This node is revoked.")); }
             if record.revision != request.revision { return Err(Error::conflict("This node was changed elsewhere. Reload it before saving.")); }
@@ -767,11 +775,12 @@ struct EnrollmentChallenge {
     node_id: NodeId,
 }
 
-pub(crate) async fn invite(
+pub(crate) async fn invite_live(
     s: &Service,
     body: Value,
-    authorize: impl FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+    authorize: crate::authorization::Authorization,
 ) -> Result<Value> {
+    authorize.recheck().await?;
     let request: CreateNodeEnrollmentInput = decode(body)?;
     let name = name(&request.name)?;
     let backend = if request.backend == NodeBackend::Native {
@@ -816,9 +825,10 @@ pub(crate) async fn invite(
         node_id: NodeId(uuid::Uuid::parse_str(&node_id).map_err(Error::internal)?),
     };
     let key = format!("node-enrollment:{}", digest(&code));
+    authorize.recheck().await?;
     s.store
         .transaction(move |db| {
-            authorize(db)?;
+            authorize.authorize(db)?;
             db.set(&key, &serde_json::to_value(&invitation)?, Some(expires))
         })
         .await?;
@@ -1014,12 +1024,13 @@ struct Revocation {
     release_placements: bool,
 }
 
-pub(crate) async fn revoke(
+pub(crate) async fn revoke_live(
     s: &Service,
     node: &str,
     body: Value,
-    authorize: impl FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+    authorize: crate::authorization::Authorization,
 ) -> Result<Value> {
+    authorize.recheck().await?;
     let request: Revocation = if body.is_null() {
         Revocation::default()
     } else {
@@ -1028,7 +1039,7 @@ pub(crate) async fn revoke(
     let node = node.to_owned();
     s.store
         .transaction(move |db| {
-            authorize(db)?;
+            authorize.authorize(db)?;
             let mut record = db
                 .node(&node)?
                 .ok_or_else(|| Error::not_found("Node not found."))?;

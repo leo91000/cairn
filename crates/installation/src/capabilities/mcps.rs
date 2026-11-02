@@ -130,26 +130,26 @@ impl McpOperation {
                 Some(bearer)
             }
         };
-        let authorize = crate::installation_mcp::management_authorization(bearer.as_deref());
+        let authorize =
+            crate::installation_mcp::management_authorization(s, bearer.as_deref()).await?;
         match self.name {
             "list_mcps" => {
                 let _: ListMcpsInput = decode(input)?;
                 s.store
                     .read({
                         let authorize = authorize.clone();
-                        move |db| authorize(db)
+                        move |db| authorize.authorize(db)
                     })
                     .await?;
                 let mcps = s.mcps.list(s).await?;
-                s.store.read(move |db| authorize(db)).await?;
+                authorize.recheck().await?;
+                s.store.read(move |db| authorize.authorize(db)).await?;
                 Ok(json!({"mcps":mcps}))
             }
             "create_mcp" => {
                 let input: McpInput = decode(input)?;
                 Ok(serde_json::to_value(
-                    s.mcps
-                        .save_authorized(s, input, None, None, authorize)
-                        .await?,
+                    s.mcps.save_live(s, input, None, None, authorize).await?,
                 )?)
             }
             "update_mcp" => {
@@ -157,7 +157,7 @@ impl McpOperation {
                 s.mcps.assert_management(s, &input.id).await?;
                 Ok(serde_json::to_value(
                     s.mcps
-                        .save_authorized(
+                        .save_live(
                             s,
                             input.connection.into(),
                             Some(&input.id),
@@ -181,7 +181,7 @@ impl McpOperation {
                 if !server.uses_oauth() || !server.is_http() {
                     return Err(Error::bad("This connection does not use OAuth."));
                 }
-                s.store.read(move |db| authorize(db)).await?;
+                s.store.read(move |db| authorize.authorize(db)).await?;
                 let url = crate::mcps::callback_url(s)
                     .await?
                     .trim_end_matches("/callback")
@@ -193,13 +193,34 @@ impl McpOperation {
                 s.mcps.assert_management(s, &input.id).await?;
                 match self.name {
                     "test_mcp" => Ok(serde_json::to_value(
-                        s.mcps.test_authorized(s, &input.id, authorize).await?,
+                        s.mcps.test_live(s, &input.id, authorize).await?,
                     )?),
                     "mcp_connection_status" => {
                         if let Some(binding) = binding {
                             return s.mcps.finish_native_callback(s, &input.id, &binding).await;
                         }
-                        let status=s.store.read(move |db|{authorize(db)?;let server=crate::error::required(db.mcp_server(&input.id)?,"MCP connection not found.")?;let pending:bool=db.0.query_row("SELECT EXISTS(SELECT 1 FROM mcp_pending_oauth WHERE server_id=? AND expires_at>?)",rusqlite::params![input.id,crate::config::now()],|row|row.get(0))?;Ok(McpConnectionStatus{pending,result:Some(serde_json::to_value(server.state)?.as_str().unwrap().to_owned())})}).await?;
+                        let status = s
+                            .store
+                            .read(move |db| {
+                                authorize.authorize(db)?;
+                                let server = crate::error::required(
+                                    db.mcp_server(&input.id)?,
+                                    "MCP connection not found.",
+                                )?;
+                                let pending: bool = db.0.query_row(
+                                    "SELECT EXISTS(SELECT 1 FROM mcp_pending_oauth WHERE server_id=? AND expires_at>?)",
+                                    rusqlite::params![input.id, crate::config::now()],
+                                    |row| row.get(0),
+                                )?;
+                                let state_value = serde_json::to_value(server.state)?;
+                                let result = state_value.as_str().unwrap().to_owned();
+
+                                Ok(McpConnectionStatus {
+                                    pending,
+                                    result: Some(result),
+                                })
+                            })
+                            .await?;
                         Ok(serde_json::to_value(status)?)
                     }
                     "cancel_mcp_connection" => {
@@ -211,7 +232,7 @@ impl McpOperation {
                             .encrypt_bytes(&input.id, &serde_json::to_vec(&secrets)?)?;
                         s.store
                             .transaction(move |db| {
-                                authorize(db)?;
+                                authorize.authorize(db)?;
                                 crate::error::required(
                                     db.mcp_server(&input.id)?,
                                     "MCP connection not found.",
@@ -224,12 +245,7 @@ impl McpOperation {
                     }
                     _ => {
                         s.mcps
-                            .disconnect_authorized(
-                                s,
-                                &input.id,
-                                self.name == "delete_mcp",
-                                authorize,
-                            )
+                            .disconnect_live(s, &input.id, self.name == "delete_mcp", authorize)
                             .await?;
                         Ok(serde_json::to_value(McpMutationOutput { completed: true })?)
                     }

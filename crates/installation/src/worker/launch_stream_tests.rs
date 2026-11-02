@@ -502,6 +502,11 @@ async fn actual_attempt_cleanup_precedes_same_account_refresh_and_real_account_s
         state_home: old.home.clone(),
         env: Environment::new(),
         mcp: json!({}),
+        authorization: crate::plugins::run_credentials::Authorization::new(
+            s,
+            crate::capabilities::plugin_packages::Authority::default(),
+            &crate::plugins::run_credentials::RunCredentials::default(),
+        ),
     };
     // The real switch releases the old lease, refreshes its codex-monitor home,
     // acquires another eligible account and runs the actual adapter transition.

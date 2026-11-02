@@ -25,7 +25,14 @@ struct Pending<'a> {
 }
 
 /// Stores a grant readable with the returned credential.
-async fn grant(s: &Service, run: &Value, node: &str, backups: Vec<&Value>) -> Result<String> {
+async fn grant(
+    s: &Service,
+    run: &Value,
+    node: &str,
+    backups: Vec<&Value>,
+    authorize: crate::authorization::Authorization,
+) -> Result<String> {
+    authorize.recheck().await?;
     let token = crate::auth::token();
     let grant = NewGrant {
         id: crate::auth::digest(&token),
@@ -40,28 +47,52 @@ async fn grant(s: &Service, run: &Value, node: &str, backups: Vec<&Value>) -> Re
     });
     s.store
         .transaction(move |db| {
+            authorize.check_local(db)?;
             crate::native::policy::require_acyclic_parent(db, &run_id, &requested)?;
             if let Some(current) = db.run(&run_id)? {
                 crate::backend_migration::require_lineage(db, &current)?;
             }
-            db.put("node-disk-grants", &grant)?;
-            Ok(())
+            db.put("node-disk-grants", &grant).map(|_| ())
         })
         .await?;
     Ok(token)
 }
 
 pub async fn new_disk(s: &Service, run: &Value, node: &str) -> Result<String> {
-    grant(s, run, node, Vec::new()).await
+    grant(
+        s,
+        run,
+        node,
+        Vec::new(),
+        crate::authorization::Authorization::default(),
+    )
+    .await
 }
 
 pub async fn issue(s: &Service, run: &Value, node: &str, backup: &Value) -> Result<String> {
+    issue_authorized(
+        s,
+        run,
+        node,
+        backup,
+        crate::authorization::Authorization::default(),
+    )
+    .await
+}
+
+pub(crate) async fn issue_authorized(
+    s: &Service,
+    run: &Value,
+    node: &str,
+    backup: &Value,
+    authorize: crate::authorization::Authorization,
+) -> Result<String> {
     if !super::publication::in_s3(backup) {
         return Err(Error::conflict(
             "On-demand disks require a verified S3 recovery point.",
         ));
     }
-    grant(s, run, node, vec![&backup["id"]]).await
+    grant(s, run, node, vec![&backup["id"]], authorize).await
 }
 
 pub async fn authorize(s: &Service, credential: &str) -> Result<Option<Value>> {
