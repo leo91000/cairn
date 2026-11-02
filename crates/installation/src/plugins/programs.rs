@@ -159,8 +159,18 @@ pub async fn run(s: &Service, context: &Context, args: &Value) -> Result<Value> 
         }
         Some(tokio::select! {
             biased;
-            () = s.shutdown.cancelled() => return Err(Error::unavailable("The installation is shutting down.")),
-            result = s.plugins.program_caches.acquire_authorized(identity, config, reusable, generation, ||Box::pin(capabilities::authorize_management(s,context))) => result?,
+            () = s.shutdown.cancelled() => {
+                return Err(Error::unavailable("The installation is shutting down."))
+            }
+            result = s.plugins.program_caches.acquire_authorized(
+                identity,
+                config,
+                reusable,
+                generation,
+                || Box::pin(capabilities::authorize_management(s, context)),
+            ) => {
+                result?
+            }
         })
     } else {
         None

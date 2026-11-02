@@ -7141,7 +7141,13 @@ async fn resource_handlers_do_not_send_after_grant_revocation_during_oauth_refre
                     },
                     "instructions": "Fixture instructions",
                     "projectSources": [{ "name": "repositories", "title": "Repositories" }],
-                    "runCredentials": { "git": [{ "url": "https://api.example.test", "username": "fixture", "password": "{{credential}}" }] },
+                    "runCredentials": {
+                        "git": [{
+                            "url": "https://api.example.test",
+                            "username": "fixture",
+                            "password": "{{credential}}",
+                        }],
+                    },
                     "resources": [{ "name": "repository", "description": "Repository" }],
                 },
                 "source": r#"return {
@@ -7192,13 +7198,36 @@ async fn resource_handlers_do_not_send_after_grant_revocation_during_oauth_refre
             )
             .await
             .unwrap();
-            common::owner_api_route(&s, "PUT", &format!("/api/agents/{MAIN_AGENT_ID}/plugin-grants"), json!({
-                "agentId": MAIN_AGENT_ID, "revision": current["revision"],
-                "grants": [{"instanceId": instance, "access": {"type": "selected", "contributions": [
-                    {"kind":"projectSource","name":"repositories","resources":[]},
-                    {"kind":"instructions","name":"","resources":[]}
-                ]}}], "runCredentialInstances": [],
-            })).await.unwrap();
+            common::owner_api_route(
+                &s,
+                "PUT",
+                &format!("/api/agents/{MAIN_AGENT_ID}/plugin-grants"),
+                json!({
+                    "agentId": MAIN_AGENT_ID,
+                    "revision": current["revision"],
+                    "grants": [{
+                        "instanceId": instance,
+                        "access": {
+                            "type": "selected",
+                            "contributions": [
+                                {
+                                    "kind": "projectSource",
+                                    "name": "repositories",
+                                    "resources": [],
+                                },
+                                {
+                                    "kind": "instructions",
+                                    "name": "",
+                                    "resources": [],
+                                },
+                            ],
+                        },
+                    }],
+                    "runCredentialInstances": [],
+                }),
+            )
+            .await
+            .unwrap();
         }
         let key = cairn_installation::plugins::connections::credential_key(&instance);
         let credential = json!({
